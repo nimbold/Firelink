@@ -1,5 +1,6 @@
 <div align="center">
-  <h1><img src="Resources/AppIcon.png" alt="Firelink Icon" width="40" height="40" style="vertical-align: middle; margin-right: 10px;" />Firelink</h1>
+  <img src="Resources/AppIcon.png" alt="Firelink Icon" width="128" height="128" />
+  <h1>Firelink</h1>
   <p><strong>A clean, native SwiftUI download manager for Apple Silicon macOS</strong></p>
 
   [![Swift Version](https://img.shields.io/badge/Swift-6.0-orange?logo=swift&logoColor=white)](https://swift.org)
