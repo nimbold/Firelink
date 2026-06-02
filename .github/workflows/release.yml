@@ -17,7 +17,7 @@ permissions:
 jobs:
   macos-arm64-dmg:
     name: Build macOS ARM64 DMG
-    runs-on: macos-latest
+    runs-on: macos-26
 
     steps:
       - name: Check out repository
