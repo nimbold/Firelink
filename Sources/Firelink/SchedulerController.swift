@@ -200,7 +200,36 @@ final class SchedulerController: ObservableObject {
 
     func requestAutomationPermission() {
         let target = NSAppleEventDescriptor(bundleIdentifier: "com.apple.finder")
-        _ = AEDeterminePermissionToAutomateTarget(target.aeDesc, typeWildCard, typeWildCard, true)
+        let status = AEDeterminePermissionToAutomateTarget(target.aeDesc, typeWildCard, typeWildCard, true)
+
+        if status != noErr {
+            triggerAutomationConsentPrompt()
+        }
+
         checkAutomationPermission()
+
+        if !hasAutomationPermission {
+            openAutomationPermissionSettings()
+        }
+    }
+
+    func openAutomationPermissionSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") else {
+            return
+        }
+
+        NSWorkspace.shared.open(url)
+    }
+
+    private func triggerAutomationConsentPrompt() {
+        let scriptCode = "tell application \"Finder\" to get name"
+
+        var error: NSDictionary?
+        if let script = NSAppleScript(source: scriptCode) {
+            script.executeAndReturnError(&error)
+            if let error {
+                print("Failed to trigger Automation permission prompt: \(error)")
+            }
+        }
     }
 }

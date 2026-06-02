@@ -20,9 +20,13 @@ struct SchedulerView: View {
             
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    timeSelectionSection
-                    queueSelectionSection
-                    postActionSection
+                    VStack(alignment: .leading, spacing: 24) {
+                        timeSelectionSection
+                        queueSelectionSection
+                        postActionSection
+                    }
+                    .opacity(isEnabled ? 1.0 : 0.5)
+                    .disabled(!isEnabled)
                     
                     Divider()
                     permissionsSection
@@ -30,8 +34,6 @@ struct SchedulerView: View {
                 .padding(24)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .opacity(isEnabled ? 1.0 : 0.5)
-            .disabled(!isEnabled)
         }
         .onAppear {
             loadState()
@@ -153,16 +155,14 @@ struct SchedulerView: View {
             Text("System Permissions")
                 .font(.headline)
             
-            Text("Firelink needs permission to control System Events in order to automatically sleep, restart, or shut down your Mac after downloads finish.")
+            Text("Firelink needs Automation permission to control Finder in order to automatically sleep, restart, or shut down your Mac after downloads finish.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             
             if schedulerController.hasAutomationPermission {
-                Button("Revoke Permission") {
-                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") {
-                        NSWorkspace.shared.open(url)
-                    }
+                Button("Revoke Permissions") {
+                    schedulerController.openAutomationPermissionSettings()
                 }
                 .buttonStyle(.bordered)
             } else {

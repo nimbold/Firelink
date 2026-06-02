@@ -65,6 +65,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <string>public.app-category.utilities</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Firelink needs permission to control Finder so it can sleep, restart, or shut down your Mac after scheduled downloads finish.</string>
 </dict>
 </plist>
 PLIST
