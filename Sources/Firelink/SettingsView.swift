@@ -712,7 +712,7 @@ private struct IntegrationSettingsPane: View {
             }
             
             Section("Permissions & Privacy") {
-                Text("The Firelink extension requests minimal permissions. It only reads your current tab when you explicitly click 'Download with Firelink' from the right-click menu, keeping your browsing history completely private.")
+                Text("The Firelink extension uses download, context menu, storage, active tab, scripting, and local Firelink endpoint permissions. It reads the active tab URL for per-site settings and explicit right-click actions, and forwards download URLs only when you use a Firelink action or enable global capture.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

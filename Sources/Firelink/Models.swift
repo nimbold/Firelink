@@ -206,6 +206,25 @@ struct DownloadItem: Identifiable, Codable, Equatable, Sendable {
         }
         return "\(speedLimitKiBPerSecond) KiB/s"
     }
+
+    var redactedForPersistence: DownloadItem {
+        var item = self
+        item.credentials = nil
+        item.cookieHeader = nil
+        item.requestHeaders = item.requestHeaders?.filter { !$0.containsSensitiveValue }
+        return item
+    }
+}
+
+private extension DownloadRequestHeader {
+    var containsSensitiveValue: Bool {
+        switch normalized.name.lowercased() {
+        case "authorization", "cookie", "set-cookie", "x-api-key", "x-auth-token":
+            true
+        default:
+            false
+        }
+    }
 }
 
 struct DownloadProgress: Equatable, Sendable {

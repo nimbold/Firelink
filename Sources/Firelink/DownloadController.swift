@@ -676,7 +676,7 @@ final class DownloadController: ObservableObject {
 
     private func saveDownloads() {
         let queuesCopy = queues
-        let downloadsCopy = downloads
+        let downloadsCopy = downloads.map(\.redactedForPersistence)
         let storageURL = self.storageURL
 
         saveTask?.cancel()
@@ -713,9 +713,15 @@ final class DownloadController: ObservableObject {
             }
 
             var shouldResumeRecoveredDownloads = false
+            var shouldRewriteStoredDownloads = isLegacyDownloadList
             self.queues = normalizedQueues(state.queues)
             self.downloads = state.downloads.map { item in
                 var adjusted = item
+                let redacted = adjusted.redactedForPersistence
+                if redacted != adjusted {
+                    adjusted = redacted
+                    shouldRewriteStoredDownloads = true
+                }
                 adjusted.queueID = validQueueID(adjusted.queueID)
                 if isLegacyDownloadList, item.queueID == nil {
                     adjusted.queueID = DownloadQueue.mainQueueID
@@ -735,7 +741,7 @@ final class DownloadController: ObservableObject {
                 return adjusted
             }
 
-            if shouldResumeRecoveredDownloads {
+            if shouldResumeRecoveredDownloads || shouldRewriteStoredDownloads {
                 saveDownloads()
             }
             return shouldResumeRecoveredDownloads
