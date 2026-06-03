@@ -104,7 +104,7 @@ git push origin v0.1.0
 - [x] **Zero-Config Setup:** Automatically bundle and configure `aria2c` inside the `.app` bundle.
 - [ ] **Bandwidth Limits:** Add global and per-download speed caps and calendar schedules.
 - [ ] **Browser Extensions:** Capture links directly from Safari, Chrome, and Firefox.
-- [ ] **Advanced Transfer Features:** Checksum validation, cookie/header ingestion, and smart mirror failovers.
+- [x] **Advanced Transfer Features:** Checksum validation, cookie/header ingestion, and smart mirror failovers.
 - [x] **Updates & Releases:** GitHub Actions DMG release pipeline and built-in update checker.
 - [ ] **Distribution:** Notarized `.app` releases and Homebrew formulae.
 

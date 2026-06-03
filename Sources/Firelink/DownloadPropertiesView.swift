@@ -37,6 +37,12 @@ struct DownloadPropertiesView: View {
     @State private var loginMode: LoginMode
     @State private var username: String
     @State private var password: String
+    @State private var checksumEnabled: Bool
+    @State private var checksumAlgorithm: ChecksumAlgorithm
+    @State private var checksumValue: String
+    @State private var headerText: String
+    @State private var cookieText: String
+    @State private var mirrorText: String
     @State private var errorMessage = ""
 
     init(item: DownloadItem) {
@@ -54,6 +60,18 @@ struct DownloadPropertiesView: View {
             _username = State(initialValue: "")
             _password = State(initialValue: "")
         }
+        if let checksum = item.checksum {
+            _checksumEnabled = State(initialValue: true)
+            _checksumAlgorithm = State(initialValue: checksum.algorithm)
+            _checksumValue = State(initialValue: checksum.value)
+        } else {
+            _checksumEnabled = State(initialValue: false)
+            _checksumAlgorithm = State(initialValue: .sha256)
+            _checksumValue = State(initialValue: "")
+        }
+        _headerText = State(initialValue: (item.requestHeaders ?? []).map(\.headerLine).joined(separator: "\n"))
+        _cookieText = State(initialValue: item.cookieHeader ?? "")
+        _mirrorText = State(initialValue: (item.mirrorURLs ?? []).map(\.absoluteString).joined(separator: "\n"))
     }
 
     var body: some View {
@@ -93,6 +111,36 @@ struct DownloadPropertiesView: View {
                     }
                 }
 
+                Section("Advanced Transfer") {
+                    Toggle("Checksum", isOn: $checksumEnabled)
+                    if checksumEnabled {
+                        Picker("Algorithm", selection: $checksumAlgorithm) {
+                            ForEach(ChecksumAlgorithm.allCases) { algorithm in
+                                Text(algorithm.title).tag(algorithm)
+                            }
+                        }
+                        TextField("Expected digest", text: $checksumValue)
+                            .font(.system(.body, design: .monospaced))
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Headers")
+                        TextEditor(text: $headerText)
+                            .font(.system(.body, design: .monospaced))
+                            .frame(minHeight: 70)
+                    }
+
+                    TextField("Cookies", text: $cookieText)
+                        .font(.system(.body, design: .monospaced))
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Mirrors")
+                        TextEditor(text: $mirrorText)
+                            .font(.system(.body, design: .monospaced))
+                            .frame(minHeight: 70)
+                    }
+                }
+
                 Section("Progress") {
                     ProgressView(value: item.progress)
                     InfoGrid(item: item)
@@ -120,7 +168,7 @@ struct DownloadPropertiesView: View {
             .padding(14)
             .background(.bar)
         }
-        .frame(width: 620, height: 560)
+        .frame(width: 620, height: 760)
     }
 
     private var matchingLoginText: String {
@@ -175,15 +223,44 @@ struct DownloadPropertiesView: View {
             credentials = nil
         }
 
+        guard let transferOptions = validatedTransferOptions else {
+            return
+        }
+
         controller.updateDownload(
             id: item.id,
             url: url,
             fileName: cleanFileName,
             destinationDirectory: destination,
             connectionsPerServer: connections,
-            credentials: credentials
+            credentials: credentials,
+            transferOptions: transferOptions
         )
         dismiss()
+    }
+
+    private var validatedTransferOptions: DownloadTransferOptions? {
+        if checksumEnabled && checksumValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            errorMessage = "Add the expected checksum digest, or turn checksum off."
+            return nil
+        }
+
+        if DownloadTransferOptionParser.invalidHeaderLines(headerText).isEmpty == false {
+            errorMessage = "Headers must use Name: Value lines."
+            return nil
+        }
+
+        if DownloadTransferOptionParser.invalidMirrorLines(mirrorText).isEmpty == false {
+            errorMessage = "Mirrors must be valid HTTP, HTTPS, FTP, or SFTP URLs."
+            return nil
+        }
+
+        return DownloadTransferOptions(
+            checksum: checksumEnabled ? DownloadChecksum(algorithm: checksumAlgorithm, value: checksumValue).normalized : nil,
+            requestHeaders: DownloadTransferOptionParser.parseHeaders(headerText),
+            cookieHeader: DownloadTransferOptionParser.cleanCookieHeader(cookieText),
+            mirrorURLs: DownloadTransferOptionParser.parseMirrorURLs(mirrorText)
+        )
     }
 }
 

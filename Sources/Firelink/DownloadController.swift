@@ -113,7 +113,8 @@ final class DownloadController: ObservableObject {
         connectionsPerServer: Int,
         overrideDirectory: URL?,
         startImmediately: Bool,
-        queueID: UUID = DownloadQueue.mainQueueID
+        queueID: UUID = DownloadQueue.mainQueueID,
+        transferOptions: DownloadTransferOptions = DownloadTransferOptions()
     ) {
         let clampedConnections = min(max(connectionsPerServer, 1), 16)
         let targetQueueID = normalizedQueueID(queueID)
@@ -126,6 +127,10 @@ final class DownloadController: ObservableObject {
                 destinationDirectory: overrideDirectory ?? pending.defaultDirectory,
                 connectionsPerServer: clampedConnections,
                 credentials: settings.credentials(for: pending.url),
+                checksum: transferOptions.checksum,
+                requestHeaders: transferOptions.requestHeaders,
+                cookieHeader: transferOptions.cookieHeader,
+                mirrorURLs: transferOptions.mirrorURLs,
                 sizeBytes: pending.sizeBytes,
                 bytesText: ByteFormatter.string(pending.sizeBytes),
                 message: startImmediately ? "Queued to start" : "Added to queue",
@@ -427,7 +432,8 @@ final class DownloadController: ObservableObject {
         fileName: String,
         destinationDirectory: URL,
         connectionsPerServer: Int,
-        credentials: DownloadCredentials?
+        credentials: DownloadCredentials?,
+        transferOptions: DownloadTransferOptions
     ) {
         update(id) {
             $0.url = url
@@ -436,6 +442,10 @@ final class DownloadController: ObservableObject {
             $0.destinationDirectory = destinationDirectory
             $0.connectionsPerServer = min(max(connectionsPerServer, 1), 16)
             $0.credentials = credentials
+            $0.checksum = transferOptions.checksum
+            $0.requestHeaders = transferOptions.requestHeaders
+            $0.cookieHeader = transferOptions.cookieHeader
+            $0.mirrorURLs = transferOptions.mirrorURLs
             $0.message = "Properties updated"
         }
         saveDownloads()

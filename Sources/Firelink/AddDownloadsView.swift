@@ -12,6 +12,13 @@ struct AddDownloadsView: View {
     @State private var destinationPath = ""
     @State private var metadataTask: Task<Void, Never>?
     @State private var targetQueueID = DownloadQueue.mainQueueID
+    @State private var showsAdvancedTransfer = false
+    @State private var checksumEnabled = false
+    @State private var checksumAlgorithm: ChecksumAlgorithm = .sha256
+    @State private var checksumValue = ""
+    @State private var headerText = ""
+    @State private var cookieText = ""
+    @State private var mirrorText = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -19,6 +26,7 @@ struct AddDownloadsView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     linkSection
                     optionsSection
+                    advancedTransferSection
                     summarySection
                     previewSection
                 }
@@ -186,7 +194,7 @@ struct AddDownloadsView: View {
             } label: {
                 Label("Add to Queue", systemImage: "list.bullet")
             }
-            .disabled(pendingDownloads.isEmpty)
+            .disabled(!canAddDownloads)
 
             Button {
                 addDownloads(start: true)
@@ -194,10 +202,69 @@ struct AddDownloadsView: View {
                 Label("Start Downloads", systemImage: "play.fill")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(pendingDownloads.isEmpty)
+            .disabled(!canAddDownloads)
         }
         .padding(14)
         .background(.bar)
+    }
+
+    private var advancedTransferSection: some View {
+        DisclosureGroup(isExpanded: $showsAdvancedTransfer) {
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
+                GridRow(alignment: .firstTextBaseline) {
+                    Toggle("Checksum", isOn: $checksumEnabled)
+                        .font(.headline)
+                    HStack(spacing: 10) {
+                        Picker("Algorithm", selection: $checksumAlgorithm) {
+                            ForEach(ChecksumAlgorithm.allCases) { algorithm in
+                                Text(algorithm.title).tag(algorithm)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 130)
+
+                        TextField("Expected digest", text: $checksumValue)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.body, design: .monospaced))
+                    }
+                    .disabled(!checksumEnabled)
+                }
+
+                GridRow(alignment: .top) {
+                    Label("Headers", systemImage: "text.quote")
+                        .font(.headline)
+                    TextEditor(text: $headerText)
+                        .font(.system(.body, design: .monospaced))
+                        .scrollContentBackground(.hidden)
+                        .background(.quaternary.opacity(0.35))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .frame(minHeight: 74)
+                }
+
+                GridRow(alignment: .firstTextBaseline) {
+                    Label("Cookies", systemImage: "circle.hexagongrid.circle")
+                        .font(.headline)
+                    TextField("name=value; other=value", text: $cookieText)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                }
+
+                GridRow(alignment: .top) {
+                    Label("Mirrors", systemImage: "point.3.filled.connected.trianglepath.dotted")
+                        .font(.headline)
+                    TextEditor(text: $mirrorText)
+                        .font(.system(.body, design: .monospaced))
+                        .scrollContentBackground(.hidden)
+                        .background(.quaternary.opacity(0.35))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .frame(minHeight: 74)
+                }
+            }
+            .padding(.top, 10)
+        } label: {
+            Label("Advanced Transfer", systemImage: "slider.horizontal.3")
+                .font(.headline)
+        }
     }
 
     private var requiredSpaceText: String {
@@ -220,11 +287,44 @@ struct AddDownloadsView: View {
             return "Paste one or more HTTP, HTTPS, FTP, or SFTP links."
         }
 
+        if let validationMessage {
+            return validationMessage
+        }
+
         if unknownSizeCount > 0 {
             return "Some servers did not report file size before download."
         }
 
         return "Ready to add \(pendingDownloads.count) download\(pendingDownloads.count == 1 ? "" : "s")."
+    }
+
+    private var canAddDownloads: Bool {
+        !pendingDownloads.isEmpty && validationMessage == nil
+    }
+
+    private var validationMessage: String? {
+        if checksumEnabled && checksumValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Add the expected checksum digest, or turn checksum off."
+        }
+
+        if DownloadTransferOptionParser.invalidHeaderLines(headerText).isEmpty == false {
+            return "Headers must use Name: Value lines."
+        }
+
+        if DownloadTransferOptionParser.invalidMirrorLines(mirrorText).isEmpty == false {
+            return "Mirrors must be valid HTTP, HTTPS, FTP, or SFTP URLs."
+        }
+
+        return nil
+    }
+
+    private var transferOptions: DownloadTransferOptions {
+        DownloadTransferOptions(
+            checksum: checksumEnabled ? DownloadChecksum(algorithm: checksumAlgorithm, value: checksumValue).normalized : nil,
+            requestHeaders: DownloadTransferOptionParser.parseHeaders(headerText),
+            cookieHeader: DownloadTransferOptionParser.cleanCookieHeader(cookieText),
+            mirrorURLs: DownloadTransferOptionParser.parseMirrorURLs(mirrorText)
+        )
     }
 
     private func scheduleMetadataRefresh(for text: String) {
@@ -258,7 +358,7 @@ struct AddDownloadsView: View {
             var loaded: [PendingDownload] = []
             for url in urls {
                 guard !Task.isCancelled else { return }
-                let item = await DownloadMetadataFetcher.fetch(for: url, settings: settings)
+                let item = await DownloadMetadataFetcher.fetch(for: url, settings: settings, transferOptions: transferOptions)
                 loaded.append(item)
                 await MainActor.run {
                     for loadedItem in loaded {
@@ -294,7 +394,8 @@ struct AddDownloadsView: View {
             connectionsPerServer: Int(connectionsPerServer),
             overrideDirectory: overrideDirectory,
             startImmediately: start,
-            queueID: targetQueueID
+            queueID: targetQueueID,
+            transferOptions: transferOptions
         )
         dismiss()
     }

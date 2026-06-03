@@ -181,6 +181,7 @@ final class Aria2DownloadEngine {
             "--retry-wait=5",
             "--connect-timeout=30",
             "--timeout=60",
+            "--uri-selector=adaptive",
             "--input-file=-"
         ]
 
@@ -281,13 +282,28 @@ final class Aria2DownloadEngine {
 
     private func inputFileContent(for item: DownloadItem) -> String {
         let connections = min(max(item.connectionsPerServer, 1), 16)
+        let urls = ([item.url] + (item.mirrorURLs ?? []))
+            .map { sanitizedOptionValue($0.absoluteString) }
+            .joined(separator: "\t")
         var lines = [
-            sanitizedOptionValue(item.url.absoluteString),
+            urls,
             "  dir=\(sanitizedOptionValue(item.destinationDirectory.path))",
             "  out=\(sanitizedOptionValue(item.fileName))",
             "  split=\(connections)",
             "  max-connection-per-server=\(connections)"
         ]
+
+        if let checksum = item.checksum?.normalized, !checksum.isEmpty {
+            lines.append("  checksum=\(checksum.algorithm.rawValue)=\(sanitizedOptionValue(checksum.value))")
+        }
+
+        for header in (item.requestHeaders ?? []).map(\.normalized) where !header.isEmpty {
+            lines.append("  header=\(sanitizedOptionValue(header.headerLine))")
+        }
+
+        if let cookieHeader = item.cookieHeader?.trimmingCharacters(in: .whitespacesAndNewlines), !cookieHeader.isEmpty {
+            lines.append("  header=Cookie: \(sanitizedOptionValue(cookieHeader))")
+        }
 
         if let credentials = item.credentials, !credentials.isEmpty {
             let scheme = item.url.scheme?.lowercased()

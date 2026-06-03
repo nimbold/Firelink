@@ -30,7 +30,11 @@ enum DownloadURLParser {
 }
 
 enum DownloadMetadataFetcher {
-    static func fetch(for url: URL, settings: AppSettings) async -> PendingDownload {
+    static func fetch(
+        for url: URL,
+        settings: AppSettings,
+        transferOptions: DownloadTransferOptions = DownloadTransferOptions()
+    ) async -> PendingDownload {
         let initialName = FileClassifier.fileName(from: url)
         let initialCategory = FileClassifier.category(forFileName: initialName)
         let initialDirectory = await settings.destinationDirectory(for: initialCategory)
@@ -51,6 +55,12 @@ enum DownloadMetadataFetcher {
         request.httpMethod = "HEAD"
         request.timeoutInterval = 12
         request.setValue("Firelink/0.1", forHTTPHeaderField: "User-Agent")
+        for header in transferOptions.requestHeaders.map(\.normalized) where !header.isEmpty {
+            request.setValue(header.value, forHTTPHeaderField: header.name)
+        }
+        if let cookieHeader = transferOptions.cookieHeader?.trimmingCharacters(in: .whitespacesAndNewlines), !cookieHeader.isEmpty {
+            request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+        }
 
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
