@@ -244,6 +244,24 @@ final class DownloadController: ObservableObject {
         pumpQueue()
     }
 
+    func redownload(_ item: DownloadItem) {
+        trashFiles(for: item)
+        restrictQueueToAutoResume = false
+        update(item.id) {
+            $0.status = .queued
+            $0.progress = 0
+            $0.speedText = "-"
+            $0.etaText = "-"
+            $0.connectionCount = 0
+            $0.message = "Redownloading"
+            $0.autoResumeOnLaunch = true
+        }
+        queuePumpScope = queuePumpScope.includingItem(item.id)
+        automaticRetryCounts[item.id] = nil
+        saveDownloads()
+        pumpQueue()
+    }
+
     func cancel(_ item: DownloadItem) {
         activeHandles[item.id]?.cancel()
         activeHandles[item.id] = nil

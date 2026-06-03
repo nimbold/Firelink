@@ -19,6 +19,7 @@ rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp ".build/$CONFIGURATION/$APP_NAME" "$MACOS_DIR/$APP_NAME"
 cp "$ROOT_DIR/Resources/$ICON_NAME.icns" "$RESOURCES_DIR/$ICON_NAME.icns"
+cp "$ROOT_DIR/Sources/Firelink/Assets.xcassets/MenuBarIcon.imageset/MenuBarIconTemplate.png" "$RESOURCES_DIR/MenuBarIconTemplate.png"
 
 ARIA2C_PATH=$(which aria2c || true)
 if [[ -n "$ARIA2C_PATH" && -x "$ARIA2C_PATH" ]]; then

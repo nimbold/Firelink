@@ -60,9 +60,21 @@ struct FirelinkApp: App {
             }
         }
 
-        MenuBarExtra("Firelink", systemImage: "arrow.down.circle", isInserted: $showMenuBarIcon) {
+        MenuBarExtra(isInserted: $showMenuBarIcon) {
             TrayMenuView()
                 .environmentObject(controller)
+        } label: {
+            if let nsImage = { () -> NSImage? in
+                guard let url = Bundle.main.url(forResource: "MenuBarIconTemplate", withExtension: "png"),
+                      let img = NSImage(contentsOf: url) else { return nil }
+                img.size = NSSize(width: 21, height: 21)
+                img.isTemplate = true
+                return img
+            }() {
+                Image(nsImage: nsImage)
+            } else {
+                Image(systemName: "arrow.down.circle")
+            }
         }
     }
 }

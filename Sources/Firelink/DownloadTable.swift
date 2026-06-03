@@ -218,6 +218,13 @@ struct DownloadTable: View {
         .frame(width: tableWidth, alignment: .leading)
         .background(selection.contains(item.id) ? Color.accentColor.opacity(0.12) : Color.clear)
         .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            if item.status == .completed {
+                openFile(item)
+            } else {
+                openWindow(value: item.id)
+            }
+        }
         .onTapGesture {
             let index = sortedItems.firstIndex(where: { $0.id == item.id })
             
@@ -326,12 +333,14 @@ struct DownloadTable: View {
     private func rowContextMenu(for item: DownloadItem) -> some View {
         let targetItems = selection.contains(item.id) ? controller.downloads.filter { selection.contains($0.id) } : [item]
 
-        Button {
-            for target in targetItems {
-                openWindow(value: target.id)
+        if targetItems.allSatisfy({ $0.status == .completed }) {
+            Button {
+                for target in targetItems {
+                    openFile(target)
+                }
+            } label: {
+                Label(targetItems.count > 1 ? "Open (\(targetItems.count))" : "Open", systemImage: "doc")
             }
-        } label: {
-            Label(targetItems.count > 1 ? "Properties (\(targetItems.count))" : "Properties", systemImage: "info.circle")
         }
 
         Button {
@@ -354,15 +363,27 @@ struct DownloadTable: View {
             }
         }
 
-        if targetItems.contains(where: { $0.status == .downloading }) {
+        if targetItems.contains(where: { $0.status == .downloading || $0.status == .queued }) {
             Button {
-                for target in targetItems where target.status == .downloading {
+                for target in targetItems where target.status == .downloading || target.status == .queued {
                     controller.pause(target)
                 }
             } label: {
                 Label("Stop", systemImage: "stop.fill")
             }
         }
+
+        if targetItems.contains(where: { $0.status == .completed || $0.status == .failed || $0.status == .canceled }) {
+            Button {
+                for target in targetItems where target.status == .completed || target.status == .failed || target.status == .canceled {
+                    controller.redownload(target)
+                }
+            } label: {
+                Label("Redownload", systemImage: "arrow.clockwise")
+            }
+        }
+
+        Divider()
 
         if targetItems.contains(where: { $0.status != .completed && $0.status != .downloading }) {
             Menu {
@@ -375,8 +396,25 @@ struct DownloadTable: View {
                     }
                 }
             } label: {
-                Label("Add to Queue", systemImage: "list.bullet")
+                Label("Move to Queue", systemImage: "list.bullet")
             }
+            Divider()
+        }
+
+        Button {
+            NSPasteboard.general.clearContents()
+            let urls = targetItems.map { $0.url.absoluteString }.joined(separator: "\n")
+            NSPasteboard.general.setString(urls, forType: .string)
+        } label: {
+            Label(targetItems.count > 1 ? "Copy Addresses" : "Copy Address", systemImage: "link")
+        }
+
+        Button {
+            for target in targetItems {
+                openWindow(value: target.id)
+            }
+        } label: {
+            Label(targetItems.count > 1 ? "Properties (\(targetItems.count))" : "Properties", systemImage: "info.circle")
         }
 
         Divider()
@@ -384,7 +422,7 @@ struct DownloadTable: View {
         Button(role: .destructive) {
             pendingDeleteItems = Set(targetItems.map(\.id))
         } label: {
-            Label("Delete", systemImage: "trash")
+            Label("Remove", systemImage: "trash")
         }
     }
 
@@ -522,6 +560,15 @@ struct DownloadTable: View {
             candidate = parent
         }
         return candidate
+    }
+
+    private func openFile(_ item: DownloadItem) {
+        let fileURL = item.destinationDirectory.appendingPathComponent(item.fileName)
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            NSWorkspace.shared.open(fileURL)
+        } else {
+            NSWorkspace.shared.open(existingFolder(for: item.destinationDirectory))
+        }
     }
 }
 
