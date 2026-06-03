@@ -37,6 +37,8 @@ struct DownloadPropertiesView: View {
     @State private var loginMode: LoginMode
     @State private var username: String
     @State private var password: String
+    @State private var speedLimitEnabled: Bool
+    @State private var speedLimitKiBPerSecond: Int
     @State private var checksumEnabled: Bool
     @State private var checksumAlgorithm: ChecksumAlgorithm
     @State private var checksumValue: String
@@ -51,6 +53,8 @@ struct DownloadPropertiesView: View {
         _fileName = State(initialValue: item.fileName)
         _destinationPath = State(initialValue: item.destinationDirectory.path)
         _connections = State(initialValue: item.connectionsPerServer)
+        _speedLimitEnabled = State(initialValue: (item.speedLimitKiBPerSecond ?? 0) > 0)
+        _speedLimitKiBPerSecond = State(initialValue: max(item.speedLimitKiBPerSecond ?? 1024, 1))
         if let credentials = item.credentials {
             _loginMode = State(initialValue: .custom)
             _username = State(initialValue: credentials.username)
@@ -91,6 +95,15 @@ struct DownloadPropertiesView: View {
                         }
                     }
                     Stepper("Connections per file: \(connections)", value: $connections, in: 1...16)
+                    Toggle("Limit speed", isOn: $speedLimitEnabled)
+                    if speedLimitEnabled {
+                        Stepper(
+                            "Speed cap: \(speedLimitKiBPerSecond) KiB/s",
+                            value: $speedLimitKiBPerSecond,
+                            in: 1...10_485_760,
+                            step: 128
+                        )
+                    }
                 }
 
                 Section("Site Login") {
@@ -234,7 +247,8 @@ struct DownloadPropertiesView: View {
             destinationDirectory: destination,
             connectionsPerServer: connections,
             credentials: credentials,
-            transferOptions: transferOptions
+            transferOptions: transferOptions,
+            speedLimitKiBPerSecond: speedLimitEnabled ? speedLimitKiBPerSecond : nil
         )
         dismiss()
     }
@@ -275,6 +289,7 @@ private struct InfoGrid: View {
             info("Speed", item.speedText)
             info("ETA", item.etaText)
             info("Live connections", "\(item.connectionCount)")
+            info("Speed cap", item.speedLimitText)
             info("Date added", item.createdAt.formatted(date: .abbreviated, time: .shortened))
             info("Last try", item.lastTryAt?.formatted(date: .abbreviated, time: .shortened) ?? "-")
             info("Category", item.category.rawValue)

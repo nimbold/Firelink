@@ -173,6 +173,7 @@ struct DownloadItem: Identifiable, Codable, Equatable, Sendable {
     var requestHeaders: [DownloadRequestHeader]?
     var cookieHeader: String?
     var mirrorURLs: [URL]?
+    var speedLimitKiBPerSecond: Int?
     var status: DownloadStatus = .queued
     var progress: Double = 0
     var speedText: String = "-"
@@ -197,6 +198,13 @@ struct DownloadItem: Identifiable, Codable, Equatable, Sendable {
             cookieHeader: cookieHeader,
             mirrorURLs: mirrorURLs ?? []
         )
+    }
+
+    var speedLimitText: String {
+        guard let speedLimitKiBPerSecond, speedLimitKiBPerSecond > 0 else {
+            return "No limit"
+        }
+        return "\(speedLimitKiBPerSecond) KiB/s"
     }
 }
 

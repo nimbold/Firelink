@@ -66,14 +66,17 @@ final class TableSettings: ObservableObject {
     private let storageKey = "Firelink.TableSettings.v1"
 
     init() {
+        let defaultVisibleColumns: Set<DownloadColumn> = [.fileName, .size, .progress, .speed, .eta, .dateAdded]
+        let legacyDefaultVisibleColumns: Set<DownloadColumn> = [.fileName, .size, .progress, .eta, .lastTry, .dateAdded]
+
         if let data = defaults.data(forKey: storageKey),
            let stored = try? JSONDecoder().decode(StoredTableSettings.self, from: data) {
-            visibleColumns = stored.visibleColumns
+            visibleColumns = stored.visibleColumns == legacyDefaultVisibleColumns ? defaultVisibleColumns : stored.visibleColumns
             columnWidths = stored.columnWidths
             sortColumn = stored.sortColumn
             sortDirection = stored.sortDirection
         } else {
-            visibleColumns = [.fileName, .size, .progress, .eta, .lastTry, .dateAdded]
+            visibleColumns = defaultVisibleColumns
             columnWidths = Dictionary(uniqueKeysWithValues: DownloadColumn.allCases.map { ($0, $0.width) })
             sortColumn = .dateAdded
             sortDirection = .descending
@@ -158,7 +161,7 @@ struct DownloadTable: View {
                         ContentUnavailableView(
                             "No Downloads",
                             systemImage: "arrow.down.circle",
-                            description: Text("Use Add to paste one or more links.")
+                            description: Text("Use Add or press Command-V to paste one or more links.")
                         )
                     }
                 }
@@ -563,11 +566,6 @@ private struct DownloadRow: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(item.fileName)
                         .font(.headline)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    Text(item.url.absoluteString)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }

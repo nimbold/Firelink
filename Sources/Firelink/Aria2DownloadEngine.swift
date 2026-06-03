@@ -86,6 +86,7 @@ final class Aria2DownloadEngine {
     func start(
         item: DownloadItem,
         proxyConfiguration: DownloadProxyConfiguration,
+        speedLimitKiBPerSecond: Int?,
         progress: @escaping @Sendable (DownloadProgress) -> Void,
         completion: @escaping @Sendable (Result<Void, Error>) -> Void
     ) throws -> Handle {
@@ -100,7 +101,11 @@ final class Aria2DownloadEngine {
 
         let process = Process()
         process.executableURL = executableURL
-        process.arguments = try arguments(for: item, proxyConfiguration: proxyConfiguration)
+        process.arguments = try arguments(
+            for: item,
+            proxyConfiguration: proxyConfiguration,
+            speedLimitKiBPerSecond: speedLimitKiBPerSecond
+        )
 
         let inputPipe = Pipe()
         let outputPipe = Pipe()
@@ -167,7 +172,11 @@ final class Aria2DownloadEngine {
         }
     }
 
-    private func arguments(for item: DownloadItem, proxyConfiguration: DownloadProxyConfiguration) throws -> [String] {
+    private func arguments(
+        for item: DownloadItem,
+        proxyConfiguration: DownloadProxyConfiguration,
+        speedLimitKiBPerSecond: Int?
+    ) throws -> [String] {
         var arguments = [
             "--continue=true",
             "--allow-overwrite=false",
@@ -184,6 +193,10 @@ final class Aria2DownloadEngine {
             "--uri-selector=adaptive",
             "--input-file=-"
         ]
+
+        if let speedLimitKiBPerSecond, speedLimitKiBPerSecond > 0 {
+            arguments.append("--max-download-limit=\(speedLimitKiBPerSecond)K")
+        }
 
         arguments.append(contentsOf: try proxyArguments(for: item, configuration: proxyConfiguration))
         return arguments

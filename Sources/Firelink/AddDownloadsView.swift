@@ -12,6 +12,8 @@ struct AddDownloadsView: View {
     @State private var destinationPath = ""
     @State private var metadataTask: Task<Void, Never>?
     @State private var targetQueueID = DownloadQueue.mainQueueID
+    @State private var speedLimitEnabled = false
+    @State private var speedLimitKiBPerSecond = 1024
     @State private var showsAdvancedTransfer = false
     @State private var checksumEnabled = false
     @State private var checksumAlgorithm: ChecksumAlgorithm = .sha256
@@ -30,13 +32,13 @@ struct AddDownloadsView: View {
                     summarySection
                     previewSection
                 }
-                .padding(20)
+                .padding(16)
             }
 
             Divider()
             actionBar
         }
-        .frame(minWidth: 820, idealWidth: 900, minHeight: 680, idealHeight: 740)
+        .frame(minWidth: 720, idealWidth: 780, minHeight: 560, idealHeight: 620)
         .onChange(of: linkText) { _, newValue in
             scheduleMetadataRefresh(for: newValue)
         }
@@ -64,7 +66,7 @@ struct AddDownloadsView: View {
                 .scrollContentBackground(.hidden)
                 .background(.quaternary.opacity(0.35))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-                .frame(minHeight: 140)
+                .frame(minHeight: 96)
 
             HStack {
                 Text("\(pendingDownloads.count) valid link\(pendingDownloads.count == 1 ? "" : "s") detected")
@@ -112,27 +114,40 @@ struct AddDownloadsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Slider(value: $connectionsPerServer, in: 1...16, step: 1)
-                            .frame(width: 220)
+                            .frame(width: 170)
                         Text("\(Int(connectionsPerServer)) segments")
                             .monospacedDigit()
-                            .frame(width: 130, alignment: .leading)
+                            .frame(width: 110, alignment: .leading)
                     }
-                    Text("Firelink splits each file into this many parallel segments. This also sets the number of concurrent connections to the server.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                }
+            }
+
+            GridRow(alignment: .firstTextBaseline) {
+                Label("Speed Limit", systemImage: "speedometer")
+                    .font(.headline)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 10) {
+                        Toggle("Limit this batch", isOn: $speedLimitEnabled)
+                            .toggleStyle(.switch)
+                        Stepper(
+                            "\(speedLimitKiBPerSecond) KiB/s",
+                            value: $speedLimitKiBPerSecond,
+                            in: 1...10_485_760,
+                            step: 128
+                        )
+                        .disabled(!speedLimitEnabled)
+                    }
                 }
             }
         }
     }
 
     private var summarySection: some View {
-        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
-            GridRow {
-                SummaryTile(title: "Files", value: "\(pendingDownloads.count)", symbolName: "doc.on.doc")
-                SummaryTile(title: "Required", value: requiredSpaceText, symbolName: "externaldrive")
-                SummaryTile(title: "Free", value: freeSpaceText, symbolName: "internaldrive")
-                SummaryTile(title: "Unknown Sizes", value: "\(unknownSizeCount)", symbolName: "questionmark.circle")
-            }
+        HStack(spacing: 10) {
+            SummaryTile(title: "Files", value: "\(pendingDownloads.count)", symbolName: "doc.on.doc")
+            SummaryTile(title: "Required", value: requiredSpaceText, symbolName: "externaldrive")
+            SummaryTile(title: "Free", value: freeSpaceText, symbolName: "internaldrive")
+            SummaryTile(title: "Unknown Sizes", value: "\(unknownSizeCount)", symbolName: "questionmark.circle")
         }
     }
 
@@ -148,10 +163,6 @@ struct AddDownloadsView: View {
                             .foregroundStyle(categoryColor(item.category))
                         VStack(alignment: .leading, spacing: 2) {
                             Text(item.fileName)
-                                .lineLimit(1)
-                            Text(item.url.absoluteString)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
                     }
@@ -175,7 +186,7 @@ struct AddDownloadsView: View {
                 }
                 .width(130)
             }
-            .frame(minHeight: 230)
+            .frame(minHeight: 170)
         }
     }
 
@@ -238,7 +249,7 @@ struct AddDownloadsView: View {
                         .scrollContentBackground(.hidden)
                         .background(.quaternary.opacity(0.35))
                         .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .frame(minHeight: 74)
+                        .frame(minHeight: 60)
                 }
 
                 GridRow(alignment: .firstTextBaseline) {
@@ -257,7 +268,7 @@ struct AddDownloadsView: View {
                         .scrollContentBackground(.hidden)
                         .background(.quaternary.opacity(0.35))
                         .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .frame(minHeight: 74)
+                        .frame(minHeight: 60)
                 }
             }
             .padding(.top, 10)
@@ -395,7 +406,8 @@ struct AddDownloadsView: View {
             overrideDirectory: overrideDirectory,
             startImmediately: start,
             queueID: targetQueueID,
-            transferOptions: transferOptions
+            transferOptions: transferOptions,
+            speedLimitKiBPerSecond: speedLimitEnabled ? speedLimitKiBPerSecond : nil
         )
         dismiss()
     }
@@ -478,7 +490,7 @@ private struct SummaryTile: View {
             Spacer(minLength: 0)
         }
         .padding(12)
-        .frame(width: 190)
+        .frame(maxWidth: .infinity)
         .frame(minHeight: 64)
         .background(.quaternary.opacity(0.35))
         .clipShape(RoundedRectangle(cornerRadius: 8))

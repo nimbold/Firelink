@@ -85,6 +85,17 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    @Published var globalSpeedLimitKiBPerSecond: Int {
+        didSet {
+            let clamped = min(max(globalSpeedLimitKiBPerSecond, 0), 10_485_760)
+            if globalSpeedLimitKiBPerSecond != clamped {
+                globalSpeedLimitKiBPerSecond = clamped
+                return
+            }
+            save()
+        }
+    }
+
     @Published var preventsSleepWhileDownloading: Bool {
         didSet { save() }
     }
@@ -120,6 +131,7 @@ final class AppSettings: ObservableObject {
            let stored = try? JSONDecoder().decode(StoredSettings.self, from: data) {
             perServerConnections = min(max(stored.perServerConnections, 1), 16)
             maxConcurrentDownloads = min(max(stored.maxConcurrentDownloads ?? 3, 1), 12)
+            globalSpeedLimitKiBPerSecond = min(max(stored.globalSpeedLimitKiBPerSecond ?? 0, 0), 10_485_760)
             preventsSleepWhileDownloading = stored.preventsSleepWhileDownloading
             proxySettings = stored.proxySettings?.normalized ?? ProxySettings()
             siteLogins = stored.siteLogins
@@ -127,6 +139,7 @@ final class AppSettings: ObservableObject {
         } else {
             perServerConnections = 16
             maxConcurrentDownloads = 3
+            globalSpeedLimitKiBPerSecond = 0
             preventsSleepWhileDownloading = true
             proxySettings = ProxySettings()
             siteLogins = []
@@ -207,6 +220,7 @@ final class AppSettings: ObservableObject {
         let stored = StoredSettings(
             perServerConnections: perServerConnections,
             maxConcurrentDownloads: maxConcurrentDownloads,
+            globalSpeedLimitKiBPerSecond: globalSpeedLimitKiBPerSecond,
             preventsSleepWhileDownloading: preventsSleepWhileDownloading,
             proxySettings: proxySettings.normalized,
             downloadDirectories: Dictionary(uniqueKeysWithValues: downloadDirectories.map { ($0.key.rawValue, $0.value) }),
@@ -265,6 +279,7 @@ final class AppSettings: ObservableObject {
 private struct StoredSettings: Codable {
     var perServerConnections: Int
     var maxConcurrentDownloads: Int?
+    var globalSpeedLimitKiBPerSecond: Int?
     var preventsSleepWhileDownloading: Bool
     var proxySettings: ProxySettings?
     var downloadDirectories: [String: String]

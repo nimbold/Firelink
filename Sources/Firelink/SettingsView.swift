@@ -423,8 +423,41 @@ private struct DownloadSettingsPane: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Section("Bandwidth") {
+                Toggle("Limit total download speed", isOn: globalSpeedLimitEnabled)
+                    .toggleStyle(.switch)
+
+                Stepper(
+                    "Global cap: \(settings.globalSpeedLimitKiBPerSecond) KiB/s",
+                    value: globalSpeedLimitValue,
+                    in: 1...10_485_760,
+                    step: 128
+                )
+                .disabled(settings.globalSpeedLimitKiBPerSecond == 0)
+
+                Text("Firelink splits this cap across the configured parallel download slots. Per-download limits can still be set lower in Add Downloads or Properties.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
+    }
+
+    private var globalSpeedLimitEnabled: Binding<Bool> {
+        Binding {
+            settings.globalSpeedLimitKiBPerSecond > 0
+        } set: { isEnabled in
+            settings.globalSpeedLimitKiBPerSecond = isEnabled ? max(settings.globalSpeedLimitKiBPerSecond, 1024) : 0
+        }
+    }
+
+    private var globalSpeedLimitValue: Binding<Int> {
+        Binding {
+            max(settings.globalSpeedLimitKiBPerSecond, 1)
+        } set: { newValue in
+            settings.globalSpeedLimitKiBPerSecond = newValue
+        }
     }
 }
 

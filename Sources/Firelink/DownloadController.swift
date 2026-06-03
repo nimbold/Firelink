@@ -114,10 +114,12 @@ final class DownloadController: ObservableObject {
         overrideDirectory: URL?,
         startImmediately: Bool,
         queueID: UUID = DownloadQueue.mainQueueID,
-        transferOptions: DownloadTransferOptions = DownloadTransferOptions()
+        transferOptions: DownloadTransferOptions = DownloadTransferOptions(),
+        speedLimitKiBPerSecond: Int? = nil
     ) {
         let clampedConnections = min(max(connectionsPerServer, 1), 16)
         let targetQueueID = normalizedQueueID(queueID)
+        let speedLimitKiBPerSecond = normalizedSpeedLimit(speedLimitKiBPerSecond)
 
         let items = pendingDownloads.map { pending in
             DownloadItem(
@@ -131,6 +133,7 @@ final class DownloadController: ObservableObject {
                 requestHeaders: transferOptions.requestHeaders,
                 cookieHeader: transferOptions.cookieHeader,
                 mirrorURLs: transferOptions.mirrorURLs,
+                speedLimitKiBPerSecond: speedLimitKiBPerSecond,
                 sizeBytes: pending.sizeBytes,
                 bytesText: ByteFormatter.string(pending.sizeBytes),
                 message: startImmediately ? "Queued to start" : "Added to queue",
@@ -366,6 +369,7 @@ final class DownloadController: ObservableObject {
             let handle = try engine.start(
                 item: item,
                 proxyConfiguration: settings.downloadProxyConfiguration,
+                speedLimitKiBPerSecond: effectiveSpeedLimitKiBPerSecond(for: item),
                 progress: { [weak self] progress in
                     Task { @MainActor in
                         self?.update(item.id) {
@@ -433,7 +437,8 @@ final class DownloadController: ObservableObject {
         destinationDirectory: URL,
         connectionsPerServer: Int,
         credentials: DownloadCredentials?,
-        transferOptions: DownloadTransferOptions
+        transferOptions: DownloadTransferOptions,
+        speedLimitKiBPerSecond: Int?
     ) {
         update(id) {
             $0.url = url
@@ -446,9 +451,32 @@ final class DownloadController: ObservableObject {
             $0.requestHeaders = transferOptions.requestHeaders
             $0.cookieHeader = transferOptions.cookieHeader
             $0.mirrorURLs = transferOptions.mirrorURLs
+            $0.speedLimitKiBPerSecond = normalizedSpeedLimit(speedLimitKiBPerSecond)
             $0.message = "Properties updated"
         }
         saveDownloads()
+    }
+
+    private func normalizedSpeedLimit(_ value: Int?) -> Int? {
+        guard let value, value > 0 else { return nil }
+        return min(value, 10_485_760)
+    }
+
+    private func effectiveSpeedLimitKiBPerSecond(for item: DownloadItem) -> Int? {
+        let itemLimit = normalizedSpeedLimit(item.speedLimitKiBPerSecond)
+        let globalLimit = normalizedSpeedLimit(settings.globalSpeedLimitKiBPerSecond)
+            .map { max(1, $0 / max(settings.maxConcurrentDownloads, 1)) }
+
+        switch (itemLimit, globalLimit) {
+        case let (.some(itemLimit), .some(globalLimit)):
+            return min(itemLimit, globalLimit)
+        case let (.some(itemLimit), .none):
+            return itemLimit
+        case let (.none, .some(globalLimit)):
+            return globalLimit
+        case (.none, .none):
+            return nil
+        }
     }
 
     private func markQueuedDownloadsForAutoResume(queueID: UUID?) {
