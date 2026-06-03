@@ -194,7 +194,7 @@ private struct AboutSettingsPane: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Firelink")
                             .font(.title2.weight(.semibold))
-                        Text("Version \(appVersion) (\(buildNumber))")
+                        Text("Version \(appVersion)")
                             .foregroundStyle(.secondary)
                         Text("A native macOS download manager for fast, organized, segmented transfers.")
                             .font(.caption)
@@ -202,30 +202,6 @@ private struct AboutSettingsPane: View {
                     }
                 }
                 .padding(.vertical, 4)
-            }
-
-            Section("Developer") {
-                LabeledContent("Created by") {
-                    Text("NimBold")
-                }
-
-                LabeledContent("GitHub") {
-                    Link("@nimbold", destination: developerProfileURL)
-                }
-
-                LabeledContent("Source") {
-                    Link("nimbold/Firelink", destination: projectURL)
-                }
-            }
-
-            Section("Credits") {
-                LabeledContent("Download engine") {
-                    Link("aria2", destination: aria2URL)
-                }
-
-                Text("Firelink uses aria2c for segmented HTTP, HTTPS, FTP, and SFTP downloads.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             Section("Updates") {
@@ -268,6 +244,26 @@ private struct AboutSettingsPane: View {
                     }
                     .buttonStyle(.borderedProminent)
                 }
+            }
+
+            Section("Developer") {
+                LabeledContent("Created by") {
+                    Text("NimBold")
+                }
+
+                LabeledContent("Source") {
+                    Link("nimbold/Firelink", destination: projectURL)
+                }
+            }
+
+            Section("Credits") {
+                LabeledContent("Download engine") {
+                    Link("aria2", destination: aria2URL)
+                }
+
+                Text("Firelink uses aria2c for segmented HTTP, HTTPS, FTP, and SFTP downloads.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Legal") {

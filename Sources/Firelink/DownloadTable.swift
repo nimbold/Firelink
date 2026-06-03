@@ -186,7 +186,7 @@ struct DownloadTable: View {
                 pendingDeleteItems = nil
             }
 
-            Button("Move File and Cache to Trash", role: .destructive) {
+            Button("Move to Trash", role: .destructive) {
                 let items = controller.downloads.filter { ids.contains($0.id) }
                 for item in items { controller.delete(item, deleteFiles: true) }
                 selection.subtract(ids)
