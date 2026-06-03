@@ -64,6 +64,7 @@ final class TableSettings: ObservableObject {
 
     private let defaults = UserDefaults.standard
     private let storageKey = "Firelink.TableSettings.v1"
+    private var saveTask: Task<Void, Never>?
 
     init() {
         let defaultVisibleColumns: Set<DownloadColumn> = [.fileName, .size, .progress, .speed, .eta, .dateAdded]
@@ -90,8 +91,16 @@ final class TableSettings: ObservableObject {
             sortColumn: sortColumn,
             sortDirection: sortDirection
         )
-        if let data = try? JSONEncoder().encode(stored) {
-            defaults.set(data, forKey: storageKey)
+        let storageKey = self.storageKey
+        
+        saveTask?.cancel()
+        saveTask = Task { @MainActor in
+            let data = await Task.detached(priority: .background) {
+                try? JSONEncoder().encode(stored)
+            }.value
+            
+            guard !Task.isCancelled, let encoded = data else { return }
+            UserDefaults.standard.set(encoded, forKey: storageKey)
         }
     }
 }
@@ -114,7 +123,7 @@ struct DownloadTable: View {
 
     @StateObject private var tableSettings = TableSettings()
     @State private var pendingDeleteItems: Set<DownloadItem.ID>?
-    @State private var resizeBaseWidths: [DownloadColumn: CGFloat] = [:]
+    @State private var dragOffsets: [DownloadColumn: CGFloat] = [:]
     @State private var lastSelectedIndex: Int?
     @State private var draggedItemID: DownloadItem.ID?
 
@@ -283,12 +292,12 @@ struct DownloadTable: View {
                         .gesture(
                             DragGesture(minimumDistance: 1)
                                 .onChanged { value in
-                                    let baseWidth = resizeBaseWidths[column] ?? width(for: column)
-                                    resizeBaseWidths[column] = baseWidth
-                                    tableSettings.columnWidths[column] = max(70, baseWidth + value.translation.width)
+                                    dragOffsets[column] = value.translation.width
                                 }
-                                .onEnded { _ in
-                                    resizeBaseWidths[column] = nil
+                                .onEnded { value in
+                                    let baseWidth = tableSettings.columnWidths[column] ?? column.width
+                                    tableSettings.columnWidths[column] = max(70, baseWidth + value.translation.width)
+                                    dragOffsets[column] = nil
                                 }
                         )
                 }
@@ -445,7 +454,9 @@ struct DownloadTable: View {
     }
 
     private func width(for column: DownloadColumn) -> CGFloat {
-        max(70, tableSettings.columnWidths[column] ?? column.width)
+        let baseWidth = tableSettings.columnWidths[column] ?? column.width
+        let offset = dragOffsets[column] ?? 0
+        return max(70, baseWidth + offset)
     }
 
     private var sortedItems: [DownloadItem] {

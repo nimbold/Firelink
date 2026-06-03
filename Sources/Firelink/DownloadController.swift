@@ -23,6 +23,7 @@ final class DownloadController: ObservableObject {
         let supportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: NSHomeDirectory())
         return supportDir.appendingPathComponent("Firelink").appendingPathComponent("downloads.json")
     }()
+    private var saveTask: Task<Void, Never>?
 
     init(settings: AppSettings) {
         self.settings = settings
@@ -674,14 +675,23 @@ final class DownloadController: ObservableObject {
     }
 
     private func saveDownloads() {
-        do {
-            let directory = storageURL.deletingLastPathComponent()
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
-            let state = StoredDownloadState(queues: queues, downloads: downloads)
-            let data = try JSONEncoder().encode(state)
-            try data.write(to: storageURL, options: .atomic)
-        } catch {
-            print("Failed to save downloads: \(error)")
+        let queuesCopy = queues
+        let downloadsCopy = downloads
+        let storageURL = self.storageURL
+
+        saveTask?.cancel()
+        saveTask = Task.detached(priority: .background) {
+            do {
+                let directory = storageURL.deletingLastPathComponent()
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
+                let state = StoredDownloadState(queues: queuesCopy, downloads: downloadsCopy)
+                let data = try JSONEncoder().encode(state)
+                
+                guard !Task.isCancelled else { return }
+                try data.write(to: storageURL, options: .atomic)
+            } catch {
+                print("Failed to save downloads: \(error)")
+            }
         }
     }
 

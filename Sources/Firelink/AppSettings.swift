@@ -135,6 +135,7 @@ final class AppSettings: ObservableObject {
 
     private let defaults: UserDefaults
     private let storageKey = "Firelink.AppSettings.v1"
+    private var saveTask: Task<Void, Never>?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -247,9 +248,17 @@ final class AppSettings: ObservableObject {
             downloadDirectories: Dictionary(uniqueKeysWithValues: downloadDirectories.map { ($0.key.rawValue, $0.value) }),
             siteLogins: siteLogins
         )
+        let defaults = self.defaults
+        let storageKey = self.storageKey
 
-        if let data = try? JSONEncoder().encode(stored) {
-            defaults.set(data, forKey: storageKey)
+        saveTask?.cancel()
+        saveTask = Task { @MainActor [defaults, storageKey] in
+            let data = await Task.detached(priority: .background) {
+                try? JSONEncoder().encode(stored)
+            }.value
+            
+            guard !Task.isCancelled, let encoded = data else { return }
+            defaults.set(encoded, forKey: storageKey)
         }
     }
 
