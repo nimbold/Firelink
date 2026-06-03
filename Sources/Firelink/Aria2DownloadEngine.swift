@@ -31,6 +31,11 @@ final class Aria2DownloadEngine {
     }
 
     static func findExecutable() -> URL? {
+        if let bundled = Bundle.main.url(forResource: "aria2c", withExtension: nil),
+           FileManager.default.isExecutableFile(atPath: bundled.path) {
+            return bundled
+        }
+
         let candidates = [
             "/opt/homebrew/bin/aria2c",
             "/usr/local/bin/aria2c",
@@ -47,11 +52,6 @@ final class Aria2DownloadEngine {
             if FileManager.default.isExecutableFile(atPath: candidate.path) {
                 return candidate
             }
-        }
-
-        if let bundled = Bundle.main.url(forResource: "aria2c", withExtension: nil),
-           FileManager.default.isExecutableFile(atPath: bundled.path) {
-            return bundled
         }
 
         return nil

@@ -15,6 +15,7 @@ final class DownloadController: ObservableObject {
     private var activeHandles: [UUID: Aria2DownloadEngine.Handle] = [:]
     private var automaticRetryCounts: [UUID: Int] = [:]
     private var restrictQueueToAutoResume = false
+    private var queuePumpScope: QueuePumpScope = .idle
     private var sleepActivity: SleepActivityHandle?
     private var cancellables = Set<AnyCancellable>()
     private let maxAutomaticRetries = 3
@@ -54,6 +55,7 @@ final class DownloadController: ObservableObject {
             Task { @MainActor in
                 self.engineMessage = "Recovered downloads from the previous session."
                 self.restrictQueueToAutoResume = true
+                self.queuePumpScope = .all
                 self.pumpQueue()
             }
         }
@@ -153,6 +155,20 @@ final class DownloadController: ObservableObject {
     func startQueue(queueID: UUID? = nil) {
         engineMessage = ""
         restrictQueueToAutoResume = false
+        if let queueID {
+            let queueID = normalizedQueueID(queueID)
+            switch queuePumpScope {
+            case .all:
+                break
+            case .idle:
+                queuePumpScope = .scoped(queueIDs: [queueID], itemIDs: [])
+            case .scoped(var queueIDs, let itemIDs):
+                queueIDs.insert(queueID)
+                queuePumpScope = .scoped(queueIDs: queueIDs, itemIDs: itemIDs)
+            }
+        } else {
+            queuePumpScope = .all
+        }
         markQueuedDownloadsForAutoResume(queueID: queueID)
         pumpQueue()
     }
@@ -221,6 +237,7 @@ final class DownloadController: ObservableObject {
             $0.message = ""
             $0.autoResumeOnLaunch = true
         }
+        queuePumpScope = queuePumpScope.includingItem(item.id)
         automaticRetryCounts[item.id] = nil
         saveDownloads()
         pumpQueue()
@@ -330,7 +347,8 @@ final class DownloadController: ObservableObject {
         }
 
         let item = downloads.remove(at: source)
-        downloads.insert(item, at: target)
+        let insertionIndex = source < target ? target - 1 : target
+        downloads.insert(item, at: insertionIndex)
         saveDownloads()
     }
 
@@ -340,9 +358,13 @@ final class DownloadController: ObservableObject {
             return
         }
 
+        pruneActiveQueueScopes()
+
         while activeCount < settings.maxConcurrentDownloads,
               let next = downloads.first(where: { item in
-                  item.status == .queued && (!restrictQueueToAutoResume || item.autoResumeOnLaunch == true)
+                  item.status == .queued &&
+                      (!restrictQueueToAutoResume || item.autoResumeOnLaunch == true) &&
+                      isAllowedToStart(item)
               }) {
             start(next)
         }
@@ -352,6 +374,8 @@ final class DownloadController: ObservableObject {
             !downloads.contains(where: { $0.status == .queued && $0.autoResumeOnLaunch == true }) {
             restrictQueueToAutoResume = false
         }
+
+        pruneActiveQueueScopes()
     }
 
     private func start(_ item: DownloadItem) {
@@ -480,10 +504,16 @@ final class DownloadController: ObservableObject {
     }
 
     private func markQueuedDownloadsForAutoResume(queueID: UUID?) {
-        let normalizedID = queueID.map(normalizedQueueID)
-        for index in downloads.indices where downloads[index].status == .queued &&
-            (normalizedID == nil || normalizedQueueID(downloads[index].queueID) == normalizedID) {
-            downloads[index].autoResumeOnLaunch = true
+        if let queueID {
+            let normalizedID = normalizedQueueID(queueID)
+            for index in downloads.indices where downloads[index].status == .queued &&
+                validQueueID(downloads[index].queueID) == normalizedID {
+                downloads[index].autoResumeOnLaunch = true
+            }
+        } else {
+            for index in downloads.indices where downloads[index].status == .queued {
+                downloads[index].autoResumeOnLaunch = true
+            }
         }
         saveDownloads()
     }
@@ -527,6 +557,65 @@ final class DownloadController: ObservableObject {
             return false
         case .launchFailed:
             return true
+        }
+    }
+
+    private func isAllowedToStart(_ item: DownloadItem) -> Bool {
+        switch queuePumpScope {
+        case .idle:
+            return false
+        case .all:
+            return true
+        case .scoped(let queueIDs, let itemIDs):
+            if itemIDs.contains(item.id) {
+                return true
+            }
+            guard let queueID = validQueueID(item.queueID) else { return false }
+            return queueIDs.contains(queueID)
+        }
+    }
+
+    private func pruneActiveQueueScopes() {
+        switch queuePumpScope {
+        case .idle:
+            return
+        case .all:
+            if !downloads.contains(where: { $0.status == .queued || $0.status == .downloading }) {
+                queuePumpScope = .idle
+            }
+        case .scoped(let queueIDs, let itemIDs):
+            let activeQueueIDs = queueIDs.filter { queueID in
+                downloads.contains { item in
+                    validQueueID(item.queueID) == queueID &&
+                        (item.status == .queued || item.status == .downloading)
+                }
+            }
+            let activeItemIDs = itemIDs.filter { itemID in
+                downloads.contains { item in
+                    item.id == itemID && (item.status == .queued || item.status == .downloading)
+                }
+            }
+            queuePumpScope = activeQueueIDs.isEmpty && activeItemIDs.isEmpty
+                ? .idle
+                : .scoped(queueIDs: activeQueueIDs, itemIDs: activeItemIDs)
+        }
+    }
+
+    private enum QueuePumpScope {
+        case idle
+        case all
+        case scoped(queueIDs: Set<UUID>, itemIDs: Set<UUID>)
+
+        func includingItem(_ itemID: UUID) -> QueuePumpScope {
+            switch self {
+            case .idle:
+                return .scoped(queueIDs: [], itemIDs: [itemID])
+            case .all:
+                return .all
+            case .scoped(let queueIDs, var itemIDs):
+                itemIDs.insert(itemID)
+                return .scoped(queueIDs: queueIDs, itemIDs: itemIDs)
+            }
         }
     }
 

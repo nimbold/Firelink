@@ -71,4 +71,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 </plist>
 PLIST
 
+if command -v codesign &> /dev/null; then
+  codesign --force --deep --sign - "$APP_DIR"
+fi
+
 echo "Created $APP_DIR"

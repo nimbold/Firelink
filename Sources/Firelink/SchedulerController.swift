@@ -131,15 +131,17 @@ final class SchedulerController: ObservableObject {
     }
 
     private func triggerQueues() {
-        guard !settings.targetQueueIDs.isEmpty else { return }
+        let runnableQueueIDs = settings.targetQueueIDs.filter { queueID in
+            downloadController.queues.contains(where: { $0.id == queueID }) &&
+                downloadController.queueItems(for: queueID).contains(where: { $0.status == .queued })
+        }
+
+        guard !runnableQueueIDs.isEmpty else { return }
         
         isRunning = true
         
-        for queueID in settings.targetQueueIDs {
-            // Check if queue still exists
-            if downloadController.queues.contains(where: { $0.id == queueID }) {
-                downloadController.startQueue(queueID: queueID)
-            }
+        for queueID in runnableQueueIDs {
+            downloadController.startQueue(queueID: queueID)
         }
         
         checkIfRunningFinished()
@@ -148,15 +150,9 @@ final class SchedulerController: ObservableObject {
     private func checkIfRunningFinished() {
         guard isRunning else { return }
         
-        // A queue is finished if there are no items in .queued or .downloading state for that queue.
-        // Wait, what if the queue is empty? We don't trigger anything.
-        var hasActiveItems = false
-        for item in downloadController.downloads {
-            if let qid = item.queueID, settings.targetQueueIDs.contains(qid) {
-                if item.status == .queued || item.status == .downloading {
-                    hasActiveItems = true
-                    break
-                }
+        let hasActiveItems = settings.targetQueueIDs.contains { queueID in
+            downloadController.queueItems(for: queueID).contains {
+                $0.status == .queued || $0.status == .downloading
             }
         }
         
