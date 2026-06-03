@@ -3,12 +3,22 @@ import SwiftUI
 
 private enum SettingsSection: String, CaseIterable, Hashable {
     case downloads = "Downloads"
-    case network = "Network"
     case locations = "Locations"
+    case network = "Network"
     case siteLogins = "Site Logins"
     case power = "Power"
     case engine = "Engine"
     case about = "About"
+
+    static let orderedCases: [SettingsSection] = [
+        .downloads,
+        .locations,
+        .network,
+        .siteLogins,
+        .power,
+        .engine,
+        .about
+    ]
 
     var symbolName: String {
         switch self {
@@ -24,7 +34,7 @@ private enum SettingsSection: String, CaseIterable, Hashable {
 
     var groupTitle: String {
         switch self {
-        case .about:
+        case .engine, .about:
             "App"
         default:
             "Preferences"
@@ -64,14 +74,14 @@ struct SettingsView: View {
     private var settingsSidebar: some View {
         List(selection: $selection) {
             Section("Preferences") {
-                ForEach(SettingsSection.allCases.filter { $0.groupTitle == "Preferences" }, id: \.self) { section in
+                ForEach(SettingsSection.orderedCases.filter { $0.groupTitle == "Preferences" }, id: \.self) { section in
                     Label(section.rawValue, systemImage: section.symbolName)
                         .tag(section)
                 }
             }
 
             Section("App") {
-                ForEach(SettingsSection.allCases.filter { $0.groupTitle == "App" }, id: \.self) { section in
+                ForEach(SettingsSection.orderedCases.filter { $0.groupTitle == "App" }, id: \.self) { section in
                     Label(section.rawValue, systemImage: section.symbolName)
                         .tag(section)
                 }
