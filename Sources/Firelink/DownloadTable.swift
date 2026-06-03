@@ -161,7 +161,7 @@ struct DownloadTable: View {
                         ContentUnavailableView(
                             "No Downloads",
                             systemImage: "arrow.down.circle",
-                            description: Text("Use Add or press Command-V to paste one or more links.")
+                            description: Text("Use Add or press \(Image(systemName: "command"))V to paste one or more links.")
                         )
                     }
                 }
