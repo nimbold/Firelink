@@ -46,6 +46,7 @@ struct DownloadPropertiesView: View {
     @State private var cookieText: String
     @State private var mirrorText: String
     @State private var errorMessage = ""
+    @State private var showsAdvancedTransfer = false
 
     init(item: DownloadItem) {
         self.item = item
@@ -83,11 +84,11 @@ struct DownloadPropertiesView: View {
             Form {
                 Section("Download") {
                     TextField("URL", text: $urlText)
-                        .font(.system(.body, design: .monospaced))
+                        .font(.system(.callout, design: .monospaced))
                     TextField("File name", text: $fileName)
                     HStack {
                         TextField("Save location", text: $destinationPath)
-                            .font(.system(.body, design: .monospaced))
+                            .font(.system(.callout, design: .monospaced))
                         Button {
                             selectDestination()
                         } label: {
@@ -124,7 +125,7 @@ struct DownloadPropertiesView: View {
                     }
                 }
 
-                Section("Advanced Transfer") {
+                DisclosureGroup("Advanced Transfer", isExpanded: $showsAdvancedTransfer) {
                     Toggle("Checksum", isOn: $checksumEnabled)
                     if checksumEnabled {
                         Picker("Algorithm", selection: $checksumAlgorithm) {
@@ -133,24 +134,24 @@ struct DownloadPropertiesView: View {
                             }
                         }
                         TextField("Expected digest", text: $checksumValue)
-                            .font(.system(.body, design: .monospaced))
+                            .font(.system(.callout, design: .monospaced))
                     }
 
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Headers")
                         TextEditor(text: $headerText)
-                            .font(.system(.body, design: .monospaced))
-                            .frame(minHeight: 70)
+                            .font(.system(.callout, design: .monospaced))
+                            .frame(minHeight: 60)
                     }
 
                     TextField("Cookies", text: $cookieText)
-                        .font(.system(.body, design: .monospaced))
+                        .font(.system(.callout, design: .monospaced))
 
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Mirrors")
                         TextEditor(text: $mirrorText)
-                            .font(.system(.body, design: .monospaced))
-                            .frame(minHeight: 70)
+                            .font(.system(.callout, design: .monospaced))
+                            .frame(minHeight: 60)
                     }
                 }
 
@@ -187,7 +188,7 @@ struct DownloadPropertiesView: View {
             .padding(14)
             .background(.bar)
         }
-        .frame(width: 620, height: 760)
+        .frame(width: 720, height: 720)
     }
 
     private var matchingLoginText: String {

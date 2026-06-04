@@ -114,8 +114,9 @@ struct ChunkGrid: View {
     var body: some View {
         let itemPieces = pieces
         Canvas { context, size in
-            let boxSize: CGFloat = 6
-            let spacing: CGFloat = 1
+            let boxSize: CGFloat = 10
+            let spacing: CGFloat = 2
+            let cornerSize = CGSize(width: 2, height: 2)
             let width = size.width
             
             let x: CGFloat = 0
@@ -126,10 +127,10 @@ struct ChunkGrid: View {
                 var cy = y
                 for piece in itemPieces {
                     if piece {
-                        p.addRect(CGRect(x: cx, y: cy, width: boxSize - spacing, height: boxSize - spacing))
+                        p.addRoundedRect(in: CGRect(x: cx, y: cy, width: boxSize - spacing, height: boxSize - spacing), cornerSize: cornerSize)
                     }
                     cx += boxSize
-                    if cx >= width {
+                    if cx + boxSize > width {
                         cx = 0
                         cy += boxSize
                     }
@@ -141,19 +142,19 @@ struct ChunkGrid: View {
                 var cy: CGFloat = 0
                 for piece in itemPieces {
                     if !piece {
-                        p.addRect(CGRect(x: cx, y: cy, width: boxSize - spacing, height: boxSize - spacing))
+                        p.addRoundedRect(in: CGRect(x: cx, y: cy, width: boxSize - spacing, height: boxSize - spacing), cornerSize: cornerSize)
                     }
                     cx += boxSize
-                    if cx >= width {
+                    if cx + boxSize > width {
                         cx = 0
                         cy += boxSize
                     }
                 }
             }
             
-            context.fill(pendingPath, with: .color(Color.gray.opacity(0.3)))
-            context.fill(completedPath, with: .color(Color.green))
+            context.fill(pendingPath, with: .color(Color.primary.opacity(0.08)))
+            context.fill(completedPath, with: .color(Color.accentColor))
         }
-        .frame(minHeight: 80)
+        .frame(minHeight: 140)
     }
 }

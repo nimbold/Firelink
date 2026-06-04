@@ -102,45 +102,34 @@ struct ContentView: View {
                 }
             }
 
-            ToolbarItem {
-                Button {
-                    controller.startQueue(queueID: queueID)
-                } label: {
-                    Label("Start Queue", systemImage: "play.fill")
-                }
-            }
-
-            ToolbarItem {
-                Button {
-                    controller.pauseActiveDownloads(queueID: queueID)
-                } label: {
-                    Label("Stop Downloads", systemImage: "stop.fill")
-                }
-                .disabled(!hasActiveDownloads(in: queueID))
-            }
-
             ToolbarItemGroup {
-                if !selectedItems.isEmpty {
-                    if selectedItems.contains(where: { $0.status == .downloading }) {
-                        Button {
-                            for item in selectedItems where item.status == .downloading {
-                                controller.pause(item)
-                            }
-                        } label: {
-                            Label("Stop", systemImage: "stop.fill")
+                let canStop = selectedItems.isEmpty ? hasActiveDownloads(in: queueID) : selectedItems.contains(where: { $0.status == .downloading })
+                Button {
+                    if selectedItems.isEmpty {
+                        controller.pauseActiveDownloads(queueID: queueID)
+                    } else {
+                        for item in selectedItems where item.status == .downloading {
+                            controller.pause(item)
                         }
                     }
-
-                    if selectedItems.contains(where: { $0.status == .paused || $0.status == .failed || $0.status == .canceled }) {
-                        Button {
-                            for item in selectedItems where item.status == .paused || item.status == .failed || item.status == .canceled {
-                                controller.resume(item)
-                            }
-                        } label: {
-                            Label("Start", systemImage: "play.fill")
-                        }
-                    }
+                } label: {
+                    Label(selectedItems.isEmpty ? "Stop All" : "Stop", systemImage: "stop.fill")
                 }
+                .disabled(!canStop)
+
+                let canStart = selectedItems.isEmpty ? true : selectedItems.contains(where: { $0.status == .paused || $0.status == .failed || $0.status == .canceled })
+                Button {
+                    if selectedItems.isEmpty {
+                        controller.startQueue(queueID: queueID)
+                    } else {
+                        for item in selectedItems where item.status == .paused || item.status == .failed || item.status == .canceled {
+                            controller.resume(item)
+                        }
+                    }
+                } label: {
+                    Label(selectedItems.isEmpty ? "Start Queue" : "Start", systemImage: "play.fill")
+                }
+                .disabled(!canStart)
             }
         }
         .background {

@@ -38,9 +38,10 @@ struct AddDownloadsView: View {
                 }
                 .padding(12)
             }
-        }
-        .toolbar {
+            Divider()
             actionBar
+                .padding(16)
+                .background(.background)
         }
         .frame(minWidth: 640, idealWidth: 680, minHeight: 500, idealHeight: 540)
         .onChange(of: linkText) { _, newValue in
@@ -218,49 +219,42 @@ struct AddDownloadsView: View {
         }
     }
 
-    @ToolbarContentBuilder
-    private var actionBar: some ToolbarContent {
-        ToolbarItem(placement: .status) {
-            HStack {
-                Text(actionMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                
-                if metadataTask != nil {
-                    Button {
-                        metadataTask?.cancel()
-                        metadataTask = nil
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
+    private var actionBar: some View {
+        HStack {
+            Text(actionMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            
+            if metadataTask != nil {
+                Button {
+                    metadataTask?.cancel()
+                    metadataTask = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
                 }
+                .buttonStyle(.plain)
             }
-        }
 
-        ToolbarItem(placement: .cancellationAction) {
+            Spacer()
+
             Button("Cancel") {
                 dismiss()
             }
-        }
+            .keyboardShortcut(.cancelAction)
 
-        ToolbarItemGroup(placement: .primaryAction) {
-            Button {
+            Button("Add to Queue") {
                 addDownloads(start: false)
-            } label: {
-                Label("Add to Queue", systemImage: "list.bullet")
             }
             .disabled(!canAddDownloads)
 
-            Button {
+            Button("Start Downloads") {
                 addDownloads(start: true)
-            } label: {
-                Label("Start Downloads", systemImage: "play.fill")
             }
             .buttonStyle(.borderedProminent)
             .disabled(!canAddDownloads)
+            .keyboardShortcut(.defaultAction)
         }
     }
 
