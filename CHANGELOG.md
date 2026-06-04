@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - 2026-06-04
+
+### New features
+- Added direct double-click access to Download Properties for unfinished downloads.
+- Added a `make verify` command for local build and Firefox extension manifest checks.
+
+### Changes
+- Updated Firefox integration to probe the same local fallback ports used by the app.
+- Updated global speed limiting so changes apply to active downloads through `aria2` RPC.
+- Declared SwiftPM resources and added development fallbacks for app icons and Firefox extension copying.
+- Narrowed saved site-login matching so plain host patterns match exact hosts unless a wildcard is used.
+
+### Fixes
+- Fixed browser handoff failures when the default local extension port is unavailable.
+- Fixed dropped `Referer` headers from browser extension requests.
+- Fixed scheduler configurations that could be enabled without any runnable queue target.
+- Fixed unsafe file names from URLs, metadata responses, and manual property edits.
+- Fixed a possible duplicate-open glitch when double-clicking unfinished downloads.
+
 ## [0.5.3] - 2026-06-04
 
 ### New features

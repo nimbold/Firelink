@@ -47,10 +47,10 @@ Dark mode is shown by default with privacy-safe example downloads. Light mode is
 - 🎨 **Native SwiftUI:** Responsive Apple Silicon native UI.
 - 🎯 **Chunk Map Inspector:** Visually monitor active segment connections in real time.
 - 🗂️ **Smart Categories:** Automatic file organization (`Musics`, `Movies`, `Compressed`, etc.).
-- 🖱️ **Drag-and-Drop:** Seamlessly import URLs or text files directly into the app or Dock icon.
+- 🖱️ **Drag-and-Drop:** Import URLs, text files, and move queued downloads between queues.
 - 🛡️ **Reliability:** Automatic download recovery and retry handling.
 - 🔒 **Keychain Security:** Local macOS Keychain integration for site credentials.
-- ⚙️ **Power & Settings:** Cross-platform styled Settings UI, Speed Limiter, and system sleep prevention during active downloads.
+- ⚙️ **Power & Settings:** Cross-platform styled Settings UI, live Speed Limiter, and system sleep prevention during active downloads.
 
 ---
 
