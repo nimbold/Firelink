@@ -301,7 +301,7 @@ final class Aria2DownloadEngine {
         var lines = [
             urls,
             "  dir=\(sanitizedOptionValue(item.destinationDirectory.path))",
-            "  out=\(sanitizedOptionValue(item.fileName))",
+            "  out=\(sanitizedOptionValue(item.fileName.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "\\", with: "_")))",
             "  split=\(connections)",
             "  max-connection-per-server=\(connections)"
         ]

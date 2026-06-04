@@ -191,6 +191,10 @@ struct DownloadItem: Identifiable, Codable, Equatable, Sendable {
         destinationDirectory.appendingPathComponent(fileName).path
     }
 
+    var sortableSize: Int64 {
+        sizeBytes ?? 0
+    }
+
     var transferOptions: DownloadTransferOptions {
         DownloadTransferOptions(
             checksum: checksum,
@@ -209,7 +213,9 @@ struct DownloadItem: Identifiable, Codable, Equatable, Sendable {
 
     var redactedForPersistence: DownloadItem {
         var item = self
-        item.credentials = nil
+        if item.credentials != nil {
+            item.credentials?.password = ""
+        }
         item.cookieHeader = nil
         item.requestHeaders = item.requestHeaders?.filter { !$0.containsSensitiveValue }
         return item

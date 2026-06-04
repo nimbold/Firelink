@@ -59,6 +59,13 @@ struct FirelinkApp: App {
 
         .commands {
             CommandGroup(after: .newItem) {
+                Button("Add Downloads...") {
+                    NotificationCenter.default.post(name: NSNotification.Name("OpenAddDownloadsWindow"), object: nil)
+                }
+                .keyboardShortcut("n", modifiers: [.command])
+                
+                Divider()
+
                 Button("Start Queue") {
                     controller.startQueue()
                 }

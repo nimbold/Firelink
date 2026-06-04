@@ -1,107 +1,52 @@
 import AppKit
 import SwiftUI
 
-private enum SettingsSection: String, CaseIterable, Hashable {
-    case downloads = "Downloads"
-    case locations = "Locations"
-    case lookAndFeel = "Look and feel"
-    case network = "Network"
-    case siteLogins = "Site Logins"
-    case power = "Power"
-    case engine = "Engine"
-    case integration = "Integrations"
-    case about = "About"
-
-    static let orderedCases: [SettingsSection] = [
-        .downloads,
-        .locations,
-        .lookAndFeel,
-        .network,
-        .siteLogins,
-        .power,
-        .engine,
-        .integration,
-        .about
-    ]
-
-    var symbolName: String {
-        switch self {
-        case .downloads: "arrow.down.circle"
-        case .lookAndFeel: "paintpalette"
-        case .network: "network"
-        case .locations: "folder"
-        case .siteLogins: "key.fill"
-        case .power: "moon.zzz"
-        case .engine: "terminal"
-        case .integration: "puzzlepiece.extension"
-        case .about: "info.circle"
-        }
-    }
-
-    var groupTitle: String {
-        switch self {
-        case .engine, .integration, .about:
-            "App"
-        default:
-            "Preferences"
-        }
-    }
-}
-
-struct SettingsView: View {
-    @EnvironmentObject private var settings: AppSettings
-    @State private var selection: SettingsSection = .downloads
+struct SettingsPaneContainer: View {
+    @AppStorage("lastSettingsTab") private var activeTab: SettingsSidebarFilter = .downloads
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Settings")
-                .font(.largeTitle.weight(.semibold))
-                .padding(.horizontal, 28)
-                .padding(.top, 26)
-                .padding(.bottom, 18)
-
+        VStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(SettingsSidebarFilter.allCases, id: \.self) { filter in
+                        Button {
+                            activeTab = filter
+                        } label: {
+                            Text(filter.rawValue)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                        }
+                        .buttonStyle(.plain)
+                        .background(activeTab == filter ? Color.accentColor : Color.clear)
+                        .foregroundStyle(activeTab == filter ? Color.white : Color.primary)
+                        .clipShape(Capsule())
+                    }
+                }
+                .padding(.horizontal, 32)
+                .padding(.vertical, 16)
+            }
+            
             Divider()
 
-            HStack(spacing: 0) {
-                settingsSidebar
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(activeTab.rawValue)
+                        .font(.largeTitle.weight(.semibold))
+                        .padding(.bottom, 24)
 
-                Divider()
-
-                ScrollView {
                     selectedPane
                         .frame(maxWidth: 720, alignment: .leading)
-                        .padding(28)
-                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .padding(32)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .themeBackground(settings.appTheme.theme.background)
-    }
-
-    private var settingsSidebar: some View {
-        List(selection: $selection) {
-            Section("Preferences") {
-                ForEach(SettingsSection.orderedCases.filter { $0.groupTitle == "Preferences" }, id: \.self) { section in
-                    Label(section.rawValue, systemImage: section.symbolName)
-                        .tag(section)
-                }
-            }
-
-            Section("App") {
-                ForEach(SettingsSection.orderedCases.filter { $0.groupTitle == "App" }, id: \.self) { section in
-                    Label(section.rawValue, systemImage: section.symbolName)
-                        .tag(section)
-                }
-            }
-        }
-        .listStyle(.sidebar)
-        .frame(width: 210)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
     private var selectedPane: some View {
-        switch selection {
+        switch activeTab {
         case .downloads:
             DownloadSettingsPane()
         case .lookAndFeel:
@@ -488,40 +433,8 @@ private struct DownloadSettingsPane: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Bandwidth") {
-                Toggle("Limit total download speed", isOn: globalSpeedLimitEnabled)
-                    .toggleStyle(.switch)
-
-                Stepper(
-                    "Global cap: \(settings.globalSpeedLimitKiBPerSecond) KiB/s",
-                    value: globalSpeedLimitValue,
-                    in: 1...10_485_760,
-                    step: 128
-                )
-                .disabled(settings.globalSpeedLimitKiBPerSecond == 0)
-
-                Text("Firelink splits this cap across the configured parallel download slots. Per-download limits can still be set lower in Add Downloads or Properties.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
         }
         .formStyle(.grouped)
-    }
-
-    private var globalSpeedLimitEnabled: Binding<Bool> {
-        Binding {
-            settings.globalSpeedLimitKiBPerSecond > 0
-        } set: { isEnabled in
-            settings.globalSpeedLimitKiBPerSecond = isEnabled ? max(settings.globalSpeedLimitKiBPerSecond, 1024) : 0
-        }
-    }
-
-    private var globalSpeedLimitValue: Binding<Int> {
-        Binding {
-            max(settings.globalSpeedLimitKiBPerSecond, 1)
-        } set: { newValue in
-            settings.globalSpeedLimitKiBPerSecond = newValue
-        }
     }
 }
 

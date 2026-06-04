@@ -17,14 +17,24 @@ final class LocalExtensionServer: @unchecked Sendable {
     init?(downloadController: DownloadController) {
         self.downloadController = downloadController
         let parameters = NWParameters.tcp
-        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: Constants.port)
         
-        do {
-            listener = try NWListener(using: parameters)
-        } catch {
-            print("Failed to create listener: \(error)")
+        var createdListener: NWListener?
+        for portValue in 6412...6422 {
+            parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: NWEndpoint.Port(rawValue: UInt16(portValue))!)
+            do {
+                createdListener = try NWListener(using: parameters)
+                break
+            } catch {
+                continue
+            }
+        }
+        
+        guard let createdListener else {
+            print("Failed to create listener on ports 6412-6422")
             return nil
         }
+        
+        self.listener = createdListener
     }
 
     func start() {

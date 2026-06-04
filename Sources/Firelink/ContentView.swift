@@ -32,8 +32,10 @@ struct ContentView: View {
             queueView(queueID: queueID)
         case .scheduler:
             SchedulerView()
+        case .speedLimiter:
+            SpeedLimiterView()
         case .settings:
-            SettingsView()
+            SettingsPaneContainer()
         }
     }
 

@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import UserNotifications
 
 @MainActor
 final class DownloadController: ObservableObject {
@@ -106,6 +107,10 @@ final class DownloadController: ObservableObject {
             queueID: normalizedQueueID(queueID)
         )
 
+        if let password = item.credentials?.password, !password.isEmpty {
+            KeychainCredentialStore.setPassword(password, for: item.id)
+        }
+
         downloads.append(item)
         engineMessage = "Added \(fileName) to \(category.rawValue)."
         saveDownloads()
@@ -143,6 +148,12 @@ final class DownloadController: ObservableObject {
                 message: startImmediately ? "Queued to start" : "Added to queue",
                 queueID: targetQueueID
             )
+        }
+
+        for item in items {
+            if let password = item.credentials?.password, !password.isEmpty {
+                KeychainCredentialStore.setPassword(password, for: item.id)
+            }
         }
 
         downloads.append(contentsOf: items)
@@ -317,6 +328,7 @@ final class DownloadController: ObservableObject {
         } else if item.status != .completed {
             removeCacheFiles(for: item)
         }
+        KeychainCredentialStore.deletePassword(for: item.id)
         downloads.removeAll { $0.id == item.id }
         automaticRetryCounts[item.id] = nil
         saveDownloads()
@@ -468,6 +480,7 @@ final class DownloadController: ObservableObject {
                                 $0.autoResumeOnLaunch = false
                             }
                             self.saveDownloads()
+                            self.showNotification(title: "Download Completed", body: item.fileName)
                         case .failure(let error):
                             if self.downloads.first(where: { $0.id == item.id })?.status == .paused ||
                                 self.downloads.first(where: { $0.id == item.id })?.status == .canceled {
@@ -523,6 +536,11 @@ final class DownloadController: ObservableObject {
             $0.speedLimitKiBPerSecond = normalizedSpeedLimit(speedLimitKiBPerSecond)
             $0.message = "Properties updated"
         }
+        if let password = credentials?.password, !password.isEmpty {
+            KeychainCredentialStore.setPassword(password, for: id)
+        } else if credentials == nil {
+            KeychainCredentialStore.deletePassword(for: id)
+        }
         saveDownloads()
     }
 
@@ -577,6 +595,9 @@ final class DownloadController: ObservableObject {
                 $0.autoResumeOnLaunch = false
             }
             saveDownloads()
+            if let item = downloads.first(where: { $0.id == itemID }) {
+                showNotification(title: "Download Failed", body: item.fileName)
+            }
             return
         }
 
@@ -751,6 +772,11 @@ final class DownloadController: ObservableObject {
                 if isLegacyDownloadList, item.queueID == nil {
                     adjusted.queueID = DownloadQueue.mainQueueID
                 }
+                
+                if adjusted.credentials != nil, let storedPassword = KeychainCredentialStore.password(for: adjusted.id) {
+                    adjusted.credentials?.password = storedPassword
+                }
+
                 if adjusted.status == .downloading {
                     adjusted.status = .queued
                     adjusted.message = "Recovered after restart. Resuming from partial file."
@@ -798,6 +824,18 @@ final class DownloadController: ObservableObject {
             normalized.insert(main, at: 0)
         }
         return normalized
+    }
+
+    private func showNotification(title: String, body: String) {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
+            let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+            UNUserNotificationCenter.current().add(request)
+        }
     }
 }
 

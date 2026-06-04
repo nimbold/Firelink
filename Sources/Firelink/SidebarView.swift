@@ -21,10 +21,37 @@ enum DownloadSidebarFilter: Hashable {
     }
 }
 
+enum SettingsSidebarFilter: String, CaseIterable, Hashable {
+    case downloads = "Downloads"
+    case lookAndFeel = "Look and feel"
+    case network = "Network"
+    case locations = "Locations"
+    case siteLogins = "Site Logins"
+    case power = "Power"
+    case engine = "Engine"
+    case integration = "Integrations"
+    case about = "About"
+
+    var symbolName: String {
+        switch self {
+        case .downloads: "arrow.down.circle"
+        case .lookAndFeel: "paintpalette"
+        case .network: "network"
+        case .locations: "folder"
+        case .siteLogins: "key.fill"
+        case .power: "moon.zzz"
+        case .engine: "terminal"
+        case .integration: "puzzlepiece.extension"
+        case .about: "info.circle"
+        }
+    }
+}
+
 enum SidebarSelection: Hashable {
     case downloads(DownloadSidebarFilter)
     case queue(UUID)
     case scheduler
+    case speedLimiter
     case settings
 }
 
@@ -75,9 +102,33 @@ struct SidebarView: View {
             Section("Tools") {
                 Label("Scheduler", systemImage: "calendar.badge.clock")
                     .tag(SidebarSelection.scheduler)
+                Label("Speed Limiter", systemImage: "speedometer")
+                    .tag(SidebarSelection.speedLimiter)
             }
+
         }
         .listStyle(.sidebar)
+        .safeAreaInset(edge: .bottom) {
+            VStack(spacing: 0) {
+                Divider()
+                Button {
+                    selection = .settings
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .background(selection == .settings ? Color.accentColor : Color.clear)
+                .foregroundStyle(selection == .settings ? Color.white : Color.primary)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 8)
+            }
+            .background(.regularMaterial)
+        }
         .alert("Rename Queue", isPresented: Binding(
             get: { queueBeingRenamed != nil },
             set: { isPresented in
@@ -121,30 +172,6 @@ struct SidebarView: View {
             }
         } message: { queue in
             Text("Downloads in \(queue.name) will stay in All and Unfinished, but no longer belong to a queue.")
-        }
-        .safeAreaInset(edge: .bottom) {
-            VStack(spacing: 8) {
-                Divider()
-                Button {
-                    selection = .settings
-                } label: {
-                    Label("Settings", systemImage: "gearshape")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .contentShape(RoundedRectangle(cornerRadius: 6))
-                }
-                .buttonStyle(.plain)
-                .background {
-                    if selection == .settings {
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.accentColor.opacity(0.14))
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.bottom, 8)
-            }
-            .background(.bar)
         }
     }
 
