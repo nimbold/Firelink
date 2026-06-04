@@ -10,9 +10,31 @@ enum AppFontSize: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var dynamicTypeSize: DynamicTypeSize {
         switch self {
-        case .small: return .small
+        case .small: return .xSmall
         case .standard: return .medium
-        case .large: return .xLarge
+        case .large: return .xxLarge
+        }
+    }
+
+    var defaultFont: Font {
+        switch self {
+        case .small:
+            return .system(size: 12)
+        case .standard:
+            return .system(size: 13)
+        case .large:
+            return .system(size: 15)
+        }
+    }
+
+    var controlSize: ControlSize {
+        switch self {
+        case .small:
+            return .small
+        case .standard:
+            return .regular
+        case .large:
+            return .large
         }
     }
 }
@@ -116,6 +138,17 @@ struct AppThemeModifier: ViewModifier {
             .onChange(of: theme) { _, newTheme in
                 NSApp.appearance = newTheme.appearance
             }
+    }
+}
+
+struct AppFontSizeModifier: ViewModifier {
+    let fontSize: AppFontSize
+
+    func body(content: Content) -> some View {
+        content
+            .font(fontSize.defaultFont)
+            .controlSize(fontSize.controlSize)
+            .dynamicTypeSize(fontSize.dynamicTypeSize)
     }
 }
 

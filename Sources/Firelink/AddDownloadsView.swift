@@ -29,20 +29,20 @@ struct AddDownloadsView: View {
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 12) {
                     linkSection
                     optionsSection
                     advancedTransferSection
                     summarySection
                     previewSection
                 }
-                .padding(16)
+                .padding(12)
             }
 
             Divider()
             actionBar
         }
-        .frame(minWidth: 720, idealWidth: 780, minHeight: 560, idealHeight: 620)
+        .frame(minWidth: 640, idealWidth: 680, minHeight: 500, idealHeight: 540)
         .onChange(of: linkText) { _, newValue in
             scheduleMetadataRefresh(for: newValue)
         }
@@ -63,14 +63,14 @@ struct AddDownloadsView: View {
     private var linkSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Download Links", systemImage: "link")
-                .font(.headline)
+                .font(.subheadline.weight(.semibold))
 
             TextEditor(text: $linkText)
-                .font(.system(.body, design: .monospaced))
+                .font(.system(.callout, design: .monospaced))
                 .scrollContentBackground(.hidden)
                 .background(.quaternary.opacity(0.35))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-                .frame(minHeight: 96)
+                .frame(minHeight: 82)
 
             HStack {
                 Text("\(pendingDownloads.count) valid link\(pendingDownloads.count == 1 ? "" : "s") detected")
@@ -88,19 +88,19 @@ struct AddDownloadsView: View {
     }
 
     private var optionsSection: some View {
-        Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
+        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
             GridRow {
                 Label("Save Location", systemImage: "folder")
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                 Toggle("Use one folder for all files", isOn: $overrideDestination)
             }
 
             GridRow {
                 Text("")
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     TextField("Automatic by file type", text: $destinationPath)
                         .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced))
+                        .font(.system(.callout, design: .monospaced))
                         .disabled(!overrideDestination)
 
                     Button {
@@ -114,23 +114,23 @@ struct AddDownloadsView: View {
 
             GridRow(alignment: .firstTextBaseline) {
                 Label("Connections per File", systemImage: "point.3.connected.trianglepath.dotted")
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Slider(value: $connectionsPerServer, in: 1...16, step: 1)
-                            .frame(width: 170)
+                            .frame(width: 145)
                         Text("\(Int(connectionsPerServer)) segments")
                             .monospacedDigit()
-                            .frame(width: 110, alignment: .leading)
+                            .frame(width: 98, alignment: .leading)
                     }
                 }
             }
 
             GridRow(alignment: .firstTextBaseline) {
                 Label("Speed Limit", systemImage: "speedometer")
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 10) {
+                    HStack(spacing: 8) {
                         Toggle("Limit this batch", isOn: $speedLimitEnabled)
                             .toggleStyle(.switch)
                         Stepper(
@@ -146,20 +146,20 @@ struct AddDownloadsView: View {
 
             GridRow(alignment: .top) {
                 Label("Authorization", systemImage: "lock.shield")
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                     .padding(.top, 4)
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 8) {
                     Toggle("Use authorization", isOn: $useAuthorization)
                         .toggleStyle(.switch)
                     
                     if useAuthorization {
-                        HStack(spacing: 10) {
+                        HStack(spacing: 8) {
                             TextField("Username", text: $authUsername)
                                 .textFieldStyle(.roundedBorder)
-                                .frame(width: 160)
+                                .frame(width: 145)
                             SecureField("Password", text: $authPassword)
                                 .textFieldStyle(.roundedBorder)
-                                .frame(width: 160)
+                                .frame(width: 145)
                         }
                         Toggle("Save login for this website", isOn: $saveLogin)
                             .font(.caption)
@@ -171,7 +171,7 @@ struct AddDownloadsView: View {
     }
 
     private var summarySection: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             SummaryTile(title: "Files", value: "\(pendingDownloads.count)", symbolName: "doc.on.doc")
             SummaryTile(title: "Required", value: requiredSpaceText, symbolName: "externaldrive")
             SummaryTile(title: "Free", value: freeSpaceText, symbolName: "internaldrive")
@@ -182,7 +182,7 @@ struct AddDownloadsView: View {
     private var previewSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Preview", systemImage: "list.bullet.rectangle")
-                .font(.headline)
+                .font(.subheadline.weight(.semibold))
 
             Table(pendingDownloads) {
                 TableColumn("File") { item in
@@ -200,7 +200,7 @@ struct AddDownloadsView: View {
                     Text(ByteFormatter.string(item.sizeBytes))
                         .monospacedDigit()
                 }
-                .width(95)
+                .width(86)
 
                 TableColumn("Save To") { item in
                     Text(destinationDirectory(for: item).path)
@@ -212,9 +212,9 @@ struct AddDownloadsView: View {
                 TableColumn("Status") { item in
                     MetadataStatusView(state: item.state)
                 }
-                .width(130)
+                .width(110)
             }
-            .frame(minHeight: 170)
+            .frame(minHeight: 135)
         }
     }
 
@@ -243,17 +243,17 @@ struct AddDownloadsView: View {
             .buttonStyle(.borderedProminent)
             .disabled(!canAddDownloads)
         }
-        .padding(14)
+        .padding(10)
         .background(.bar)
     }
 
     private var advancedTransferSection: some View {
         DisclosureGroup(isExpanded: $showsAdvancedTransfer) {
-            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
                 GridRow(alignment: .firstTextBaseline) {
                     Toggle("Checksum", isOn: $checksumEnabled)
-                        .font(.headline)
-                    HStack(spacing: 10) {
+                        .font(.subheadline.weight(.semibold))
+                    HStack(spacing: 8) {
                         Picker("Algorithm", selection: $checksumAlgorithm) {
                             ForEach(ChecksumAlgorithm.allCases) { algorithm in
                                 Text(algorithm.title).tag(algorithm)
@@ -264,45 +264,45 @@ struct AddDownloadsView: View {
 
                         TextField("Expected digest", text: $checksumValue)
                             .textFieldStyle(.roundedBorder)
-                            .font(.system(.body, design: .monospaced))
+                            .font(.system(.callout, design: .monospaced))
                     }
                     .disabled(!checksumEnabled)
                 }
 
                 GridRow(alignment: .top) {
                     Label("Headers", systemImage: "text.quote")
-                        .font(.headline)
+                        .font(.subheadline.weight(.semibold))
                     TextEditor(text: $headerText)
-                        .font(.system(.body, design: .monospaced))
+                        .font(.system(.callout, design: .monospaced))
                         .scrollContentBackground(.hidden)
                         .background(.quaternary.opacity(0.35))
                         .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .frame(minHeight: 60)
+                        .frame(minHeight: 48)
                 }
 
                 GridRow(alignment: .firstTextBaseline) {
                     Label("Cookies", systemImage: "circle.hexagongrid.circle")
-                        .font(.headline)
+                        .font(.subheadline.weight(.semibold))
                     TextField("name=value; other=value", text: $cookieText)
                         .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced))
+                        .font(.system(.callout, design: .monospaced))
                 }
 
                 GridRow(alignment: .top) {
                     Label("Mirrors", systemImage: "point.3.filled.connected.trianglepath.dotted")
-                        .font(.headline)
+                        .font(.subheadline.weight(.semibold))
                     TextEditor(text: $mirrorText)
-                        .font(.system(.body, design: .monospaced))
+                        .font(.system(.callout, design: .monospaced))
                         .scrollContentBackground(.hidden)
                         .background(.quaternary.opacity(0.35))
                         .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .frame(minHeight: 60)
+                        .frame(minHeight: 48)
                 }
             }
-            .padding(.top, 10)
+            .padding(.top, 8)
         } label: {
             Label("Advanced Transfer", systemImage: "slider.horizontal.3")
-                .font(.headline)
+                .font(.subheadline.weight(.semibold))
         }
     }
 
@@ -529,22 +529,22 @@ private struct SummaryTile: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: symbolName)
-                .font(.title3)
+                .font(.body)
                 .foregroundStyle(.secondary)
-                .frame(width: 24)
+                .frame(width: 20)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text(value)
-                    .font(.headline.monospacedDigit())
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
         }
-        .padding(12)
+        .padding(9)
         .frame(maxWidth: .infinity)
-        .frame(minHeight: 64)
+        .frame(minHeight: 52)
         .background(.quaternary.opacity(0.35))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }

@@ -28,7 +28,7 @@ struct FirelinkApp: App {
                 .environmentObject(settings)
                 .environmentObject(schedulerController)
                 .modifier(AppThemeModifier(theme: settings.appTheme))
-                .dynamicTypeSize(settings.appFontSize.dynamicTypeSize)
+                .modifier(AppFontSizeModifier(fontSize: settings.appFontSize))
                 .frame(minWidth: 1180, idealWidth: 1280, minHeight: 720, idealHeight: 760)
         }
         .windowStyle(.titleBar)
@@ -38,7 +38,7 @@ struct FirelinkApp: App {
                 .environmentObject(controller)
                 .environmentObject(settings)
                 .modifier(AppThemeModifier(theme: settings.appTheme))
-                .dynamicTypeSize(settings.appFontSize.dynamicTypeSize)
+                .modifier(AppFontSizeModifier(fontSize: settings.appFontSize))
         }
         .windowResizability(.contentSize)
 
@@ -48,11 +48,11 @@ struct FirelinkApp: App {
                     .environmentObject(controller)
                     .environmentObject(settings)
                     .modifier(AppThemeModifier(theme: settings.appTheme))
-                    .dynamicTypeSize(settings.appFontSize.dynamicTypeSize)
+                    .modifier(AppFontSizeModifier(fontSize: settings.appFontSize))
             } else {
                 ContentUnavailableView("Download Not Found", systemImage: "questionmark.circle")
                     .modifier(AppThemeModifier(theme: settings.appTheme))
-                    .dynamicTypeSize(settings.appFontSize.dynamicTypeSize)
+                    .modifier(AppFontSizeModifier(fontSize: settings.appFontSize))
             }
         }
         .windowResizability(.contentSize)
