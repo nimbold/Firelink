@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-06-04
+
+### New features
+- Added `ChunkMapView` to visualize active segmented downloads using `aria2` RPC with minimal performance overhead.
+- Added seamless drag-and-drop support for URLs and text files in the main window and dock icon.
+
+### Changes
+- Refactored all Settings panes to use standard macOS HIG `Form` and `.toolbar` layouts.
+- Updated the "Add Downloads" dialog to use native macOS `.toolbar` with integrated cancel actions.
+
+### Fixes
+- Fixed a DNS rebinding vulnerability by rigorously validating the `Host` header within the local extension server.
+- Fixed a potentially unbounded memory leak in the download console buffer by introducing a strict 512KB cap.
+- Fixed an intermittent UI hang during the `aria2c` version check by fully decoupling the process execution into a detached background task.
+
 ## [0.5.2] - 2026-06-04
 
 ### Fixes
