@@ -88,8 +88,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk "/^## \\\[$VERSION\\\]/{flag=1; next} /^## \\\[/{if(flag) exit} flag" CHANGELOG.md > release_notes.md
+          
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist/*.dmg --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/*.dmg --generate-notes --verify-tag
+            gh release create "$GITHUB_REF_NAME" dist/*.dmg --notes-file release_notes.md --verify-tag
           fi

@@ -41,66 +41,22 @@ Dark mode is shown by default. Light mode is tucked away below so the README sta
 
 ---
 
-## ✨ Key Features
+## ✨ Features
 
-- ⚡ **High-Speed Downloads:** Multi-segmented download engine powered by `aria2c` for concurrent connections and optimal bandwidth utilization. Supports HTTP, HTTPS, FTP, and SFTP.
-- 🎨 **Native macOS & SwiftUI:** Responsive interface designed natively for Apple Silicon, featuring resizable tables, customizable columns, sidebar filters, and an in-app Settings page with a built-in update checker.
-- 🗂️ **Smart Queue & Categories:** Drag-and-drop priority ordering, batch link ingestion with smart parsing, and automatic file organization (`Musics`, `Movies`, `Compressed`, `Pictures`, `Documents`, `Other`) based on extension detection.
-- 🛡️ **Reliability & Recovery:** Built-in download recovery and retry handling for interrupted or unstable transfers.
-- 🔒 **Keychain Security:** Local macOS Keychain integration for secure site credential storage and matching during transfers.
-- ⚙️ **Power & System Integrity:** Optional system sleep prevention during active downloads, disk-space safety checks, and automated cleanup of partial `.aria2` metadata cache files.
-
-<details>
-<summary>🔍 View Full Feature Index (30+ features)</summary>
-
-### All native SwiftUI macOS features:
-
-- **Core Download Engine:**
-  - Segmented downloads with per-file connection/split counts.
-  - Multi-threaded, parallel downloading with configurable limits.
-  - Support for HTTP, HTTPS, FTP, and SFTP transfers via `aria2c`.
-  - Automatic download recovery and retry handling for unstable connections.
-- **Advanced Queue Control:**
-  - Drag-and-drop download reordering to manage priorities.
-  - Comprehensive download table with resizable, custom columns (Name, Size, Status, ETA, Dates).
-  - Individual download controls: pause, resume, stop, and queue actions.
-- **Smart Link Ingestion:**
-  - Batch Add window for pasting multiple links at once.
-  - Automated link parsing (whitespaces, newlines, standard separators).
-  - Disk space availability checks and total size calculation prior to adding.
-- **File Organization:**
-  - Automatic categorization of files (Music, Movies, Compressed, Documents, Images) into structured subfolders under `~/Downloads`.
-  - Smart fallback to customizable download folders per category.
-  - Automatic cleanup of unfinished `.aria2` metadata/cache files on removal.
-- **Security & System:**
-  - Local macOS Keychain integration for site logins.
-  - Prevents system sleep while active transfers are in progress, preserving display sleep.
-  - Built-in update checker inside the Settings About pane.
-  - Release `.app` bundle build scripts ready for distribution.
-
-</details>
+- ⚡ **High-Speed Downloads:** Multi-segmented engine powered by `aria2c`.
+- 🎨 **Native SwiftUI:** Responsive Apple Silicon native UI.
+- 🗂️ **Smart Categories:** Automatic file organization (`Musics`, `Movies`, `Compressed`, etc.).
+- 🛡️ **Reliability:** Automatic download recovery and retry handling.
+- 🔒 **Keychain Security:** Local macOS Keychain integration for site credentials.
+- ⚙️ **Power & Settings:** Cross-platform styled Settings UI, Speed Limiter, and system sleep prevention during active downloads.
 
 ---
 
-## ⚙️ Engine Architecture
+## 🛠️ Quick Start
 
-Firelink leverages `aria2c` under the hood as its core download engine. Unlike standard `curl`, `aria2c` allows:
-- **Segmented Downloads:** Splits files into multiple streams for maximum transfer speeds.
-- **Unified Connection Control:** A single slider regulates both the server connection count and segment split count, matching the intuitive behavior of classic managers like IDM/FDM.
-- **Built-in Resumability:** Seamlessly resumes interrupted or paused downloads without data corruption.
+**OS Support:** macOS 14.0 or newer (Apple Silicon natively).
 
----
-
-## 🛠️ Requirements & Setup
-
-### 1. Requirements
-- **OS Support:** macOS 14.0 or newer (built natively for Apple Silicon).
-- **Engine:** `aria2c` is fully packaged and bundled internally for a true Zero-Config experience. No external installations are required.
-
-*For Developers:* If you are building the project from source, you must have the **Swift 6.0 toolchain** (Xcode 15+) installed.
-
-### 2. Build & Run
-Run the application directly via the terminal:
+Run the application directly:
 ```bash
 swift run Firelink
 ```
@@ -110,39 +66,22 @@ Or build a production `.app` bundle:
 make app && open build/Firelink.app
 ```
 
-Create a local Apple Silicon DMG:
-```bash
-make dmg
-```
-
-### Release
-GitHub Actions builds and publishes the macOS ARM64 DMG when a version tag is pushed:
-```bash
-git tag v0.4.1
-git push origin v0.4.1
-```
-
 ---
 
 ## 🧩 Browser Extension
 
-The browser extension for Firelink is developed in a separate repository. You can find the extension source code, track its development, and download releases at:
-
+Find the companion browser extension (Safari, Chrome, Firefox) at:
 👉 **[nimbold/Firelink-Extension](https://github.com/nimbold/Firelink-Extension)**
-
-For local development parity, this repository tracks the extension via a Git Submodule located in the `Extensions/` directory.
 
 ---
 
 ## 🗺️ Roadmap
 
-- [x] **Data Persistence:** Store history, column layout preferences, and active queues across restarts.
-- [x] **Zero-Config Setup:** Automatically bundle and configure `aria2c` inside the `.app` bundle.
-- [x] **Bandwidth Limits:** Add global and per-download speed caps and calendar schedules.
-- [x] **Browser Extensions:** Capture links directly from Safari, Chrome, and Firefox. (See [Firelink-Extension](https://github.com/nimbold/Firelink-Extension) repository)
-- [x] **Advanced Transfer Features:** Checksum validation, cookie/header ingestion, and smart mirror failovers.
-- [x] **Updates & Releases:** GitHub Actions DMG release pipeline and built-in update checker.
-- [ ] **Distribution:** Notarized `.app` releases and Homebrew formulae.
+- [x] Zero-Config `aria2c` bundling.
+- [x] Global & per-download Speed Limiter.
+- [x] Browser Extensions support.
+- [x] In-app integrated Settings UI.
+- [ ] Notarized `.app` releases and Homebrew formulae.
 
 ---
 

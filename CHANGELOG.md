@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-04
+
+### New features
+- Added a dedicated Speed Limiter UI to the main sidebar for instant global bandwidth throttling.
+- Integrated Settings directly into the main application window instead of a separate macOS scene, paving the way for future Windows/Linux cross-platform parity.
+
+### Changes
+- Modernized Settings with a sleek horizontal tab bar layout.
+- Added persistent state retention across views (remembers the last visited settings tab and custom speed limits).
+- Compacted the README file to be more concise and user-friendly.
+
+### Fixes
+- Fixed a critical memory crash (`EXC_BAD_ACCESS`) inside the Download Table caused by ephemeral string sorting during active downloads.
+- Fixed sidebar layout glitches to prevent text overlap during scroll.
+
 ## [0.4.3] - 2026-06-03
 
 ### Changes
