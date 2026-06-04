@@ -17,7 +17,7 @@
 
 ### 📸 Screenshots
 
-Dark mode is shown by default. Light mode is tucked away below so the README stays easy to scan.
+Dark mode is shown by default with privacy-safe example downloads. Light mode is tucked away below so the README stays easy to scan.
 
 <div align="center">
   <img src="Resources/Screenshots/Dark/MainPage.png" alt="Firelink main window in dark theme with sample downloads" width="32%" />
