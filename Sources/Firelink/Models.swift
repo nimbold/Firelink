@@ -189,6 +189,14 @@ struct DownloadItem: Identifiable, Codable, Equatable, Sendable {
     var rpcPort: Int?
     var rpcSecret: String?
 
+    var displaySpeedText: String {
+        status == .downloading ? speedText : "-"
+    }
+
+    var displayETAText: String {
+        status == .downloading ? etaText : "-"
+    }
+
     var destinationPath: String {
         destinationDirectory.appendingPathComponent(fileName).path
     }

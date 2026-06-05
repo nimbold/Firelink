@@ -77,18 +77,18 @@ struct DownloadTable: View {
                 }
                 .width(min: 80, ideal: 105)
 
-                TableColumn("Speed", value: \.speedText) { item in
+                TableColumn("Speed", value: \.displaySpeedText) { item in
                     doubleClickableCell(for: item) {
-                        Text(item.speedText)
+                        Text(item.displaySpeedText)
                             .lineLimit(1)
                             .truncationMode(.tail)
                     }
                 }
                 .width(min: 70, ideal: 90)
 
-                TableColumn("ETA", value: \.etaText) { item in
+                TableColumn("ETA", value: \.displayETAText) { item in
                     doubleClickableCell(for: item) {
-                        Text(item.etaText)
+                        Text(item.displayETAText)
                             .lineLimit(1)
                             .truncationMode(.tail)
                     }

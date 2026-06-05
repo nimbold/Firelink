@@ -443,8 +443,8 @@ private struct DownloadSummaryHeader: View {
                 GridRow {
                     summary("Progress", (item.status == .completed ? 1.0 : item.progress).formatted(.percent.precision(.fractionLength(0))))
                     summary("Size", ByteFormatter.string(item.sizeBytes))
-                    summary("Speed", item.speedText)
-                    summary("ETA", item.etaText)
+                    summary("Speed", item.displaySpeedText)
+                    summary("ETA", item.displayETAText)
                 }
                 GridRow {
                     summary("Live connections", "\(item.connectionCount)")

@@ -481,6 +481,7 @@ final class DownloadController: ObservableObject {
                 progress: { [weak self] progress in
                     Task { @MainActor in
                         self?.update(item.id) {
+                            guard $0.status == .downloading else { return }
                             $0.progress = progress.fraction
                             $0.bytesText = progress.bytesText
                             $0.speedText = progress.speedText
@@ -820,6 +821,15 @@ final class DownloadController: ObservableObject {
 
                 if adjusted.status == .completed && adjusted.progress != 1 {
                     adjusted.progress = 1
+                    shouldRewriteStoredDownloads = true
+                }
+
+                if adjusted.status == .completed &&
+                    (adjusted.speedText != "-" || adjusted.etaText != "-" || adjusted.connectionCount != 0 || adjusted.autoResumeOnLaunch != false) {
+                    adjusted.speedText = "-"
+                    adjusted.etaText = "-"
+                    adjusted.connectionCount = 0
+                    adjusted.autoResumeOnLaunch = false
                     shouldRewriteStoredDownloads = true
                 }
 
