@@ -32,9 +32,7 @@ final class SparkleUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
     func updaterDidNotFindUpdate(_ updater: SPUUpdater, error: Error) {
         DispatchQueue.main.async {
             self.isChecking = false
-            let version = updater.hostBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-            let build = updater.hostBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
-            self.updateStatus = "You're up to date! (Version \(version) (\(build)))"
+            self.updateStatus = "You're up to date!"
         }
     }
     
