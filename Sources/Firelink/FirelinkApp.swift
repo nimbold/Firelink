@@ -40,13 +40,14 @@ final class SparkleUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
     
     func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
         DispatchQueue.main.async {
-            self.isChecking = false
             let nsError = error as NSError
-            if nsError.domain == "SUSparkleErrorDomain" && nsError.code == 1002 {
-                // SUNoUpdateError, handled by updaterDidNotFindUpdate
-            } else {
-                self.updateStatus = "Update check failed: \(error.localizedDescription)"
+            if nsError.domain == "SUSparkleErrorDomain" && nsError.code == 1001 {
+                // SUNoUpdateError (1001), handled by updaterDidNotFindUpdate
+                return
             }
+            
+            self.isChecking = false
+            self.updateStatus = "Update check failed: \(error.localizedDescription)"
         }
     }
 }
