@@ -41,12 +41,31 @@ struct AboutSettingsPane: View {
 
             Section("Updates") {
                 VStack(alignment: .leading, spacing: 12) {
+                    if let status = sparkleUpdater.updateStatus {
+                        HStack {
+                            if sparkleUpdater.isChecking {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else if sparkleUpdater.foundUpdateItem != nil {
+                                Image(systemName: "exclamationmark.circle.fill")
+                                    .foregroundStyle(.orange)
+                            } else {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                            }
+                            Text(status)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
                     HStack(spacing: 12) {
                         Button {
-                            sparkleUpdater.controller.checkForUpdates(nil)
+                            sparkleUpdater.checkForUpdates()
                         } label: {
                             Label("Check for Updates", systemImage: "arrow.clockwise")
                         }
+                        .disabled(sparkleUpdater.isChecking)
                         
                         Button {
                             NSWorkspace.shared.open(projectURL.appendingPathComponent("releases"))

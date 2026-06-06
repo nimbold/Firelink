@@ -1,16 +1,58 @@
 import SwiftUI
 import Sparkle
 
-final class SparkleUpdater: ObservableObject {
-    let controller: SPUStandardUpdaterController
-    init(controller: SPUStandardUpdaterController) {
-        self.controller = controller
+final class SparkleUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
+    private var _controller: SPUStandardUpdaterController?
+    var controller: SPUStandardUpdaterController { _controller! }
+    
+    @Published var isChecking = false
+    @Published var updateStatus: String?
+    @Published var foundUpdateItem: SUAppcastItem?
+
+    override init() {
+        super.init()
+        self._controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
+    }
+    
+    func checkForUpdates() {
+        isChecking = true
+        updateStatus = "Checking for updates..."
+        foundUpdateItem = nil
+        controller.updater.checkForUpdatesInBackground()
+    }
+
+    func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
+        DispatchQueue.main.async {
+            self.isChecking = false
+            self.foundUpdateItem = item
+            self.updateStatus = "Update available: Version \(item.displayVersionString)"
+        }
+    }
+
+    func updaterDidNotFindUpdate(_ updater: SPUUpdater, error: Error) {
+        DispatchQueue.main.async {
+            self.isChecking = false
+            let version = updater.hostBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+            let build = updater.hostBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+            self.updateStatus = "You're up to date! (Version \(version) (\(build)))"
+        }
+    }
+    
+    func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        DispatchQueue.main.async {
+            self.isChecking = false
+            let nsError = error as NSError
+            if nsError.domain == "SUSparkleErrorDomain" && nsError.code == 1002 {
+                // SUNoUpdateError, handled by updaterDidNotFindUpdate
+            } else {
+                self.updateStatus = "Update check failed: \(error.localizedDescription)"
+            }
+        }
     }
 }
 
 @main
 struct FirelinkApp: App {
-    private let updaterController: SPUStandardUpdaterController
     @StateObject private var sparkleUpdater: SparkleUpdater
 
     @StateObject private var settings: AppSettings
@@ -22,10 +64,7 @@ struct FirelinkApp: App {
     private let extensionServer: LocalExtensionServer?
 
     init() {
-        // Initialize Sparkle updater
-        let updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
-        self.updaterController = updaterController
-        self._sparkleUpdater = StateObject(wrappedValue: SparkleUpdater(controller: updaterController))
+        self._sparkleUpdater = StateObject(wrappedValue: SparkleUpdater())
 
         let settings = AppSettings()
         let controller = DownloadController(settings: settings)
