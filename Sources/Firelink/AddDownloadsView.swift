@@ -83,7 +83,7 @@ struct AddDownloadsView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
-                    refreshMetadata(for: linkText)
+                    refreshMetadata(for: linkText, isAutoFetch: false)
                 } label: {
                     Label("Refresh Metadata", systemImage: "arrow.clockwise")
                 }
@@ -422,7 +422,7 @@ struct AddDownloadsView: View {
             try? await Task.sleep(for: .milliseconds(350))
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                refreshMetadata(for: text)
+                refreshMetadata(for: text, isAutoFetch: true)
             }
         }
     }
@@ -445,7 +445,7 @@ struct AddDownloadsView: View {
         controller.pendingReferer = nil
     }
 
-    private func refreshMetadata(for text: String) {
+    private func refreshMetadata(for text: String, isAutoFetch: Bool) {
         let urls = DownloadURLParser.parse(text)
         metadataTask?.cancel()
 
@@ -476,7 +476,8 @@ struct AddDownloadsView: View {
                     for: url,
                     settings: settings,
                     credentials: metadataCredentials(for: url),
-                    transferOptions: transferOptions
+                    transferOptions: transferOptions,
+                    isAutoFetch: isAutoFetch
                 )
                 loaded.append(item)
                 await MainActor.run {

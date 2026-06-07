@@ -35,7 +35,8 @@ enum DownloadMetadataFetcher {
         for url: URL,
         settings: AppSettings,
         credentials: DownloadCredentials? = nil,
-        transferOptions: DownloadTransferOptions = DownloadTransferOptions()
+        transferOptions: DownloadTransferOptions = DownloadTransferOptions(),
+        isAutoFetch: Bool = false
     ) async -> PendingDownload {
         let initialName = FileClassifier.fileName(from: url)
         let initialCategory = FileClassifier.category(forFileName: initialName)
@@ -49,6 +50,11 @@ enum DownloadMetadataFetcher {
         )
 
         guard url.scheme?.lowercased().hasPrefix("http") == true else {
+            pending.state = .loaded
+            return pending
+        }
+
+        if isAutoFetch, let host = url.host, isPrivateHost(host) {
             pending.state = .loaded
             return pending
         }
@@ -121,6 +127,32 @@ enum DownloadMetadataFetcher {
             }
         }
         return nil
+    }
+
+    private static func isPrivateHost(_ host: String) -> Bool {
+        let h = host.lowercased()
+        if h == "localhost" || h.hasSuffix(".local") { return true }
+        if !h.contains(".") && !h.contains(":") { return true }
+
+        let parts = h.split(separator: ".")
+        if parts.count == 4, let first = Int(parts[0]), let second = Int(parts[1]) {
+            if first == 127 || first == 10 || (first == 192 && second == 168) {
+                return true
+            }
+            if first == 172 && (16...31).contains(second) {
+                return true
+            }
+            if first == 169 && second == 254 {
+                return true
+            }
+        }
+
+        if h.contains(":") {
+            if h == "[::1]" || h.hasPrefix("[fc") || h.hasPrefix("[fd") || h.hasPrefix("[fe8") || h.hasPrefix("[fe9") || h.hasPrefix("[fea") || h.hasPrefix("[feb") {
+                return true
+            }
+        }
+        return false
     }
 }
 
