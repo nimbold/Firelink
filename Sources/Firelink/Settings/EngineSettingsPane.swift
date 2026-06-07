@@ -15,99 +15,134 @@ struct EngineSettingsPane: View {
 
     var body: some View {
         Form {
-            Section("Aria2 (HTTP/FTP)") {
+            Section {
                 LabeledContent("Status") {
-                    Label(
-                        executableURL == nil ? "Missing" : "Ready",
-                        systemImage: executableURL == nil ? "exclamationmark.triangle.fill" : "checkmark.seal.fill"
-                    )
-                    .foregroundStyle(executableURL == nil ? .orange : .green)
+                    if executableURL != nil {
+                        Label("Ready", systemImage: "checkmark.seal.fill")
+                            .foregroundStyle(.green)
+                    } else {
+                        Label("Missing", systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
                 }
-
-                LabeledContent("Binary") {
-                    Text(executableURL?.path ?? "Not found")
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
-                }
-
+                
                 LabeledContent("Version") {
                     Text(version)
                         .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                 }
-
+                
+                LabeledContent("Binary Path") {
+                    Text(executableURL?.path ?? "Not found")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
+                .help(executableURL?.path ?? "")
+            } header: {
+                Text("Core Downloader (Aria2)")
+            } footer: {
                 if executableURL == nil {
-                    Text("Install aria2 with Homebrew or bundle aria2c inside the app resources.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text("Install aria2 with Homebrew or ensure it is bundled inside the app resources.")
+                        .foregroundStyle(.red)
+                } else {
+                    Text("Handles core HTTP/FTP and BitTorrent downloads.")
                 }
             }
 
-            Section("Media Engine (yt-dlp & ffmpeg)") {
-                addonStatusRow(title: "yt-dlp", state: engineManager.ytDlpState)
-                addonStatusRow(title: "ffmpeg", state: engineManager.ffmpegState)
+            Section {
+                LabeledContent("Updates") {
+                    HStack(spacing: 8) {
+                        Button {
+                            checkMediaEngineUpdates()
+                        } label: {
+                            Text("Check for Updates")
+                        }
+                        .disabled(isDownloadingMediaEngines || isCheckingForUpdates)
 
-                HStack(spacing: 12) {
-                    Button("Check for Updates") {
-                        Task {
-                            isCheckingForUpdates = true
-                            updateCheckResult = nil
-                            try? await Task.sleep(nanoseconds: 800_000_000)
-
-                            do {
-                                try await engineManager.ensureInstalled()
-                                updateCheckResult = "Up to date."
-                            } catch {
-                                updateCheckResult = "Update failed."
-                            }
-
-                            isCheckingForUpdates = false
-                            try? await Task.sleep(nanoseconds: 3_000_000_000)
-                            if !isCheckingForUpdates {
-                                updateCheckResult = nil
+                        if isCheckingForUpdates {
+                            ProgressView().controlSize(.small)
+                            Text("Checking...")
+                                .foregroundStyle(.secondary)
+                                .font(.subheadline)
+                        } else if let result = updateCheckResult {
+                            if result == "Up to date" || result == "Updated successfully" {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                                Text(result)
+                                    .foregroundStyle(.secondary)
+                                    .font(.subheadline)
+                            } else {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.red)
+                                Text(result)
+                                    .foregroundStyle(.red)
+                                    .font(.subheadline)
                             }
                         }
                     }
-                    .disabled(isDownloadingMediaEngines || isCheckingForUpdates)
-
-                    if isCheckingForUpdates {
-                        ProgressView().controlSize(.small)
-                        Text("Checking...")
-                            .foregroundStyle(.secondary)
-                            .font(.subheadline)
-                    } else if let result = updateCheckResult {
-                        Text(result)
-                            .foregroundStyle(.secondary)
-                            .font(.subheadline)
-                    }
-
-                    Spacer()
                 }
 
-                Picker("Browser Cookies", selection: $settings.mediaCookieSource) {
-                    ForEach(BrowserCookieSource.allCases, id: \.self) { source in
-                        Text(source.rawValue).tag(source)
+                addonStatusRow(title: "yt-dlp", state: engineManager.ytDlpState)
+                
+                LabeledContent("Browser Cookies") {
+                    Picker("", selection: $settings.mediaCookieSource) {
+                        ForEach(BrowserCookieSource.allCases, id: \.self) { source in
+                            Text(source.rawValue).tag(source)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 200)
+                }
+                
+                addonStatusRow(title: "FFmpeg", state: engineManager.ffmpegState)
+            } header: {
+                Text("Media Extractors")
+            } footer: {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Powers video and audio extraction from supported sites.")
+                    
+                    if settings.mediaCookieSource != .none {
+                        Text(settings.mediaCookieSource.statusDetail)
                     }
                 }
-
-                LabeledContent("Cookie Status") {
-                    if settings.mediaCookieSource == .none {
-                        Label(settings.mediaCookieSource.statusTitle, systemImage: "circle")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Label(settings.mediaCookieSource.statusTitle, systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                    }
-                }
-
-                Text(settings.mediaCookieSource.statusDetail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .task {
             version = await Aria2DownloadEngine.versionString() ?? "Unavailable"
+        }
+    }
+
+    private func checkMediaEngineUpdates() {
+        Task {
+            isCheckingForUpdates = true
+            updateCheckResult = nil
+            // Brief visual feedback delay
+            try? await Task.sleep(nanoseconds: 800_000_000)
+
+            do {
+                let wasDownloading = isDownloadingMediaEngines
+                try await engineManager.ensureInstalled()
+                if wasDownloading || isDownloadingMediaEngines {
+                    updateCheckResult = "Updated successfully"
+                } else {
+                    updateCheckResult = "Up to date"
+                }
+            } catch {
+                updateCheckResult = "Update failed: \(error.localizedDescription)"
+            }
+
+            isCheckingForUpdates = false
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            if !isCheckingForUpdates {
+                withAnimation {
+                    updateCheckResult = nil
+                }
+            }
         }
     }
 
@@ -136,8 +171,9 @@ struct EngineSettingsPane: View {
                     .foregroundStyle(.green)
                     .font(.system(.body, design: .monospaced))
             case .failed(let error):
-                Label("Failed: \(error)", systemImage: "exclamationmark.triangle.fill")
+                Label("Failed", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
+                    .help(error)
             }
         }
     }

@@ -2,59 +2,63 @@ import SwiftUI
 import Sparkle
 
 final class SparkleUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
-    private var _controller: SPUStandardUpdaterController?
-    var controller: SPUStandardUpdaterController { _controller! }
+    private var _updater: SPUUpdater?
+    var updater: SPUUpdater { _updater! }
 
     @Published var isChecking = false
+    @Published var isDownloading = false
+    @Published var isExtracting = false
+    @Published var isReadyToInstall = false
+    @Published var downloadProgress: Double = 0.0
+    @Published var extractionProgress: Double = 0.0
+
     @Published var updateStatus: String?
     @Published var foundUpdateItem: SUAppcastItem?
+    @Published var releaseNotes: String?
+
+    var expectedContentLength: UInt64 = 0
+    var receivedContentLength: UInt64 = 0
+    var cancellation: (() -> Void)?
+    var updateChoiceReply: ((SPUUserUpdateChoice) -> Void)?
 
     override init() {
         super.init()
-        self._controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
+        let driver = InlineUpdateUserDriver(updater: self)
+        let hostBundle = Bundle.main
+        self._updater = SPUUpdater(hostBundle: hostBundle, applicationBundle: hostBundle, userDriver: driver, delegate: self)
+        do {
+            try self._updater?.start()
+        } catch {
+            print("Failed to start Sparkle updater: \(error)")
+        }
     }
 
     func checkForUpdates() {
-        guard controller.updater.canCheckForUpdates else {
+        guard updater.canCheckForUpdates else {
             isChecking = false
             updateStatus = "Update check is already in progress."
             return
         }
+        updater.checkForUpdates()
+    }
 
-        isChecking = true
-        updateStatus = "Checking for updates..."
+    func resetState() {
+        isChecking = false
+        isDownloading = false
+        isExtracting = false
+        isReadyToInstall = false
+        downloadProgress = 0.0
+        extractionProgress = 0.0
+        updateStatus = nil
         foundUpdateItem = nil
-        controller.checkForUpdates(nil)
+        releaseNotes = nil
+        expectedContentLength = 0
+        receivedContentLength = 0
+        cancellation = nil
+        updateChoiceReply = nil
     }
 
-    func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
-        DispatchQueue.main.async {
-            self.isChecking = false
-            self.foundUpdateItem = item
-            self.updateStatus = "Update available: Version \(item.displayVersionString)"
-        }
-    }
-
-    func updaterDidNotFindUpdate(_ updater: SPUUpdater, error: Error) {
-        DispatchQueue.main.async {
-            self.isChecking = false
-            self.updateStatus = "You're up to date!"
-        }
-    }
-
-    func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
-        DispatchQueue.main.async {
-            let nsError = error as NSError
-            if nsError.domain == "SUSparkleErrorDomain" && nsError.code == 1001 {
-                // SUNoUpdateError (1001), handled by updaterDidNotFindUpdate
-                return
-            }
-
-            self.isChecking = false
-            self.updateStatus = "Update check failed: \(error.localizedDescription)"
-        }
-    }
-
+    // Delegate methods can be left mostly empty or minimal since the UserDriver handles the UI state now.
     func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor updateCheck: SPUUpdateCheck, error: Error?) {
         DispatchQueue.main.async {
             self.isChecking = false
