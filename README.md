@@ -43,7 +43,7 @@
 
 We are live! Send downloads directly from your browser to the Firelink app with zero friction.
 
-👉 **[Download Firelink Companion for Firefox](https://addons.mozilla.org/en-US/firefox/addon/firelink-companion/)**
+<a href="https://addons.mozilla.org/en-US/firefox/addon/firelink-companion/"><img src="https://img.shields.io/badge/Install%20on%20Firefox-FF7139?logo=firefox-browser&logoColor=white&style=for-the-badge" alt="Install on Firefox" /></a>
 
 *(Check out the [Firelink-Extension source code](https://github.com/nimbold/Firelink-Extension) to contribute or learn more.)*
 
