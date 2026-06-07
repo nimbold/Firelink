@@ -165,7 +165,7 @@ struct DownloadTable: View {
         if item.status == .completed {
             openFile(item)
         } else {
-            openWindow(id: "download-properties", value: item.id)
+            openWindow(id: "download-properties", value: item.id.uuidString)
         }
     }
 
