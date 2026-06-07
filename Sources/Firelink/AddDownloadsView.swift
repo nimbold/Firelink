@@ -26,7 +26,6 @@ struct AddDownloadsView: View {
     @State private var authPassword = ""
     @State private var saveLogin = false
 
-    @State private var isMediaMode = false
     @State private var detectedMediaURL: URL? = nil
 
     var body: some View {
@@ -35,36 +34,8 @@ struct AddDownloadsView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     linkSection
 
-                    if detectedMediaURL != nil, !isMediaMode {
-                        Button {
-                            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                                isMediaMode = true
-                            }
-                        } label: {
-                            HStack {
-                                Image(systemName: "sparkles")
-                                    .foregroundStyle(.yellow)
-                                Text("Media Detected: Extract Video / Audio")
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding()
-                            .background(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .fill(Color.accentColor.opacity(0.15))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .strokeBorder(Color.accentColor.opacity(0.3), lineWidth: 1)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                    }
-
-                    if isMediaMode, let mediaURL = detectedMediaURL {
-                        MediaInspectorCard(
+                    if let mediaURL = detectedMediaURL {
+                        MediaInspectorInlineView(
                             url: mediaURL,
                             cookieSource: settings.mediaCookieSource,
                             credentials: metadataCredentials(for: mediaURL),
@@ -94,43 +65,24 @@ struct AddDownloadsView: View {
                             )
 
                             controller.addMediaDownload(item, startImmediately: true)
-
                             dismiss()
                         }
                         .transition(.scale(scale: 0.95).combined(with: .opacity))
-                    } else {
-                        optionsSection
-                        advancedTransferSection
+                    }
+                    optionsSection
+                    advancedTransferSection
 
-                        if detectedMediaURL != nil {
-                            VStack(spacing: 16) {
-                                Image(systemName: "sparkles.tv")
-                                    .font(.system(size: 40))
-                                    .foregroundStyle(.secondary)
-                                Text("Media link detected. Click 'Extract Video / Audio' above to fetch available formats, or proceed to download the raw file.")
-                                    .foregroundStyle(.secondary)
-                                    .multilineTextAlignment(.center)
-                                    .padding(.horizontal)
-                            }
-                            .frame(maxWidth: .infinity, minHeight: 160)
-                            .background(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .fill(.quaternary.opacity(0.35))
-                            )
-                        } else {
-                            summarySection
-                            previewSection
-                        }
+                    if detectedMediaURL == nil {
+                        summarySection
+                        previewSection
                     }
                 }
                 .padding(12)
             }
-            if !isMediaMode {
-                Divider()
-                actionBar
-                    .padding(16)
-                    .background(.background)
-            }
+            Divider()
+            actionBar
+                .padding(16)
+                .background(.background)
         }
         .frame(minWidth: 640, idealWidth: 680, minHeight: 470, idealHeight: 500)
         .onChange(of: linkText) { _, newValue in
@@ -545,7 +497,6 @@ struct AddDownloadsView: View {
         } else {
             withAnimation {
                 detectedMediaURL = nil
-                isMediaMode = false
             }
         }
 
