@@ -19,6 +19,9 @@ final class MediaDownloadEngine: @unchecked Sendable {
     
     func start(
         item: DownloadItem,
+        cookieSource: BrowserCookieSource,
+        proxyConfiguration: DownloadProxyConfiguration,
+        speedLimitKiBPerSecond: Int?,
         progress: @escaping @Sendable (DownloadProgress) -> Void,
         messageUpdate: @escaping @Sendable (String) -> Void,
         completion: @escaping @Sendable (Result<Void, Error>) -> Void
@@ -26,10 +29,10 @@ final class MediaDownloadEngine: @unchecked Sendable {
         let ytDlpURL = await MediaEngineManager.shared.binaryPath(for: .ytDlp)
         let ffmpegURL = await MediaEngineManager.shared.binaryPath(for: .ffmpeg)
         
-        guard FileManager.default.fileExists(atPath: ytDlpURL.path) else {
+        guard FileManager.default.isExecutableFile(atPath: ytDlpURL.path) else {
             throw EngineError.missingEngine("yt-dlp is not installed. Please check Settings > Add-ons.")
         }
-        guard FileManager.default.fileExists(atPath: ffmpegURL.path) else {
+        guard FileManager.default.isExecutableFile(atPath: ffmpegURL.path) else {
             throw EngineError.missingEngine("ffmpeg is not installed. Please check Settings > Add-ons.")
         }
         
@@ -49,18 +52,26 @@ final class MediaDownloadEngine: @unchecked Sendable {
             arguments.append(format)
             
             if item.isAudioOnlyMedia == true {
-                arguments.append(contentsOf: ["-x", "--audio-format", "mp3", "--audio-quality", "0"])
+                let audioFormat = item.fileName.fileExtension(defaultValue: "mp3")
+                arguments.append(contentsOf: ["-x", "--audio-format", audioFormat, "--audio-quality", "0"])
             } else {
                 arguments.append(contentsOf: ["--merge-output-format", "mp4"])
             }
         }
-        
-        // Add cookies if configured
-        if let storedData = UserDefaults.standard.data(forKey: "Firelink.AppSettings.v1"),
-           let json = try? JSONSerialization.jsonObject(with: storedData) as? [String: Any],
-           let cookieSourceStr = json["mediaCookieSource"] as? String,
-           cookieSourceStr != "None" {
-            arguments.append(contentsOf: ["--cookies-from-browser", cookieSourceStr.lowercased()])
+
+        MediaExtractionEngine.appendCommonArguments(
+            to: &arguments,
+            cookieSource: cookieSource,
+            credentials: item.credentials,
+            transferOptions: item.transferOptions
+        )
+
+        if let proxyURI = proxyConfiguration.customProxyURI, proxyConfiguration.mode == .custom {
+            arguments.append(contentsOf: ["--proxy", proxyURI])
+        }
+
+        if let speedLimitKiBPerSecond, speedLimitKiBPerSecond > 0 {
+            arguments.append(contentsOf: ["--limit-rate", "\(speedLimitKiBPerSecond)K"])
         }
         
         arguments.append(item.url.absoluteString)
@@ -72,6 +83,7 @@ final class MediaDownloadEngine: @unchecked Sendable {
         process.standardError = errorPipe
         
         let parser = YTDLPProgressParser()
+        let errorBuffer = LockedDataBuffer()
         let completionGate = CompletionGate(completion)
         
         outputPipe.fileHandleForReading.readabilityHandler = { handle in
@@ -87,6 +99,20 @@ final class MediaDownloadEngine: @unchecked Sendable {
                 }
             }
         }
+
+        errorPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            errorBuffer.append(data)
+            if let text = String(data: data, encoding: .utf8) {
+                for line in text.split(whereSeparator: \.isNewline) {
+                    let stringLine = String(line)
+                    if stringLine.contains("[Merger]") || stringLine.contains("[ExtractAudio]") {
+                        messageUpdate("Processing Media...")
+                    }
+                }
+            }
+        }
         
         process.terminationHandler = { finishedProcess in
             outputPipe.fileHandleForReading.readabilityHandler = nil
@@ -95,19 +121,27 @@ final class MediaDownloadEngine: @unchecked Sendable {
             if finishedProcess.terminationStatus == 0 {
                 completionGate.complete(.success(()))
             } else {
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                let errorString = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Unknown Error"
+                let errorString = String(data: errorBuffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Unknown Error"
                 completionGate.complete(.failure(EngineError.launchFailed(errorString.isEmpty ? "Exit code \(finishedProcess.terminationStatus)" : errorString)))
             }
         }
         
         try process.run()
+        outputPipe.fileHandleForWriting.closeFile()
+        errorPipe.fileHandleForWriting.closeFile()
         
         return Handle(cancel: {
             if process.isRunning {
                 process.terminate()
             }
         })
+    }
+}
+
+private extension String {
+    func fileExtension(defaultValue: String) -> String {
+        let ext = (self as NSString).pathExtension.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return ext.isEmpty ? defaultValue : ext
     }
 }
 

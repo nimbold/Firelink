@@ -34,7 +34,7 @@ struct AddDownloadsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     linkSection
-                    
+
                     if detectedMediaURL != nil, !isMediaMode {
                         Button {
                             withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
@@ -62,37 +62,65 @@ struct AddDownloadsView: View {
                         .buttonStyle(.plain)
                         .transition(.move(edge: .top).combined(with: .opacity))
                     }
-                    
+
                     if isMediaMode, let mediaURL = detectedMediaURL {
-                        MediaInspectorCard(url: mediaURL) { selectedFormat, metadata in
+                        MediaInspectorCard(
+                            url: mediaURL,
+                            cookieSource: settings.mediaCookieSource,
+                            credentials: metadataCredentials(for: mediaURL),
+                            transferOptions: transferOptions
+                        ) { selectedFormat, metadata in
                             let cleanTitle = FileClassifier.sanitizedFileName(metadata.title ?? "Media")
-                            let ext = selectedFormat.isAudioOnly ? "mp3" : "mp4"
+                            let ext = selectedFormat.outputExtension
                             let fileName = "\(cleanTitle).\(ext)"
                             let category = FileClassifier.category(forFileName: fileName)
-                            
-                            var item = DownloadItem(
+
+                            let item = DownloadItem(
                                 url: mediaURL,
                                 fileName: fileName,
                                 category: category,
-                                destinationDirectory: settings.destinationDirectory(for: category),
-                                connectionsPerServer: 1
+                                destinationDirectory: overrideDirectory ?? settings.destinationDirectory(for: category),
+                                connectionsPerServer: 1,
+                                credentials: explicitCredentials(for: [mediaURL]) ?? settings.credentials(for: mediaURL),
+                                checksum: transferOptions.checksum,
+                                requestHeaders: transferOptions.requestHeaders,
+                                cookieHeader: transferOptions.cookieHeader,
+                                mirrorURLs: transferOptions.mirrorURLs,
+                                speedLimitKiBPerSecond: speedLimitEnabled ? speedLimitKiBPerSecond : nil,
+                                message: "Added to queue",
+                                queueID: targetQueueID,
+                                mediaFormatSelector: selectedFormat.formatSelector,
+                                isAudioOnlyMedia: selectedFormat.isAudioOnly
                             )
-                            item.mediaFormatSelector = selectedFormat.formatSelector
-                            item.isAudioOnlyMedia = selectedFormat.isAudioOnly
-                            item.message = "Added to queue"
-                            
-                            controller.downloads.append(item)
-                            controller.engineMessage = "Added \(fileName) to \(category.rawValue)."
-                            controller.startQueue(queueID: DownloadQueue.mainQueueID)
-                            
+
+                            controller.addMediaDownload(item, startImmediately: true)
+
                             dismiss()
                         }
                         .transition(.scale(scale: 0.95).combined(with: .opacity))
                     } else {
                         optionsSection
                         advancedTransferSection
-                        summarySection
-                        previewSection
+
+                        if detectedMediaURL != nil {
+                            VStack(spacing: 16) {
+                                Image(systemName: "sparkles.tv")
+                                    .font(.system(size: 40))
+                                    .foregroundStyle(.secondary)
+                                Text("Media link detected. Click 'Extract Video / Audio' above to fetch available formats, or proceed to download the raw file.")
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal)
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 160)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .fill(.quaternary.opacity(0.35))
+                            )
+                        } else {
+                            summarySection
+                            previewSection
+                        }
                     }
                 }
                 .padding(12)
@@ -230,7 +258,7 @@ struct AddDownloadsView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Toggle("Use authorization", isOn: $useAuthorization)
                         .toggleStyle(.switch)
-                    
+
                     if useAuthorization {
                         HStack(spacing: 8) {
                             TextField("Username", text: $authUsername)
@@ -305,7 +333,7 @@ struct AddDownloadsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            
+
             if metadataTask != nil {
                 Button {
                     metadataTask?.cancel()
@@ -509,7 +537,7 @@ struct AddDownloadsView: View {
     private func refreshMetadata(for text: String, isAutoFetch: Bool) {
         let urls = DownloadURLParser.parse(text)
         metadataTask?.cancel()
-        
+
         if let first = urls.first, MediaDetector.isSupportedMedia(url: first) {
             withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
                 detectedMediaURL = first
@@ -584,22 +612,7 @@ struct AddDownloadsView: View {
     }
 
     private func addDownloads(start: Bool) {
-        var explicitCredentials: DownloadCredentials? = nil
-        if useAuthorization {
-            let cleanUsername = authUsername.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !cleanUsername.isEmpty {
-                explicitCredentials = DownloadCredentials(username: cleanUsername, password: authPassword)
-                if saveLogin {
-                    var savedHosts = Set<String>()
-                    for item in pendingDownloads {
-                        if let host = item.url.host, !savedHosts.contains(host) {
-                            settings.addSiteLogin(urlPattern: host, username: cleanUsername, password: authPassword)
-                            savedHosts.insert(host)
-                        }
-                    }
-                }
-            }
-        }
+        let explicitCredentials = explicitCredentials(for: pendingDownloads.map(\.url))
 
         controller.addPendingDownloads(
             pendingDownloads,
@@ -612,6 +625,25 @@ struct AddDownloadsView: View {
             speedLimitKiBPerSecond: speedLimitEnabled ? speedLimitKiBPerSecond : nil
         )
         dismiss()
+    }
+
+    private func explicitCredentials(for urls: [URL]) -> DownloadCredentials? {
+        guard useAuthorization else { return nil }
+
+        let cleanUsername = authUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanUsername.isEmpty else { return nil }
+
+        if saveLogin {
+            var savedHosts = Set<String>()
+            for url in urls {
+                if let host = url.host, !savedHosts.contains(host) {
+                    settings.addSiteLogin(urlPattern: host, username: cleanUsername, password: authPassword)
+                    savedHosts.insert(host)
+                }
+            }
+        }
+
+        return DownloadCredentials(username: cleanUsername, password: authPassword)
     }
 
     private var overrideDirectory: URL? {

@@ -27,6 +27,15 @@ enum BrowserCookieSource: String, Codable, CaseIterable, Sendable {
     case firefox = "Firefox"
     case edge = "Edge"
     case brave = "Brave"
+
+    var ytDlpBrowserName: String? {
+        switch self {
+        case .none:
+            nil
+        case .safari, .chrome, .firefox, .edge, .brave:
+            rawValue.lowercased()
+        }
+    }
 }
 
 enum ProxyType: String, Codable, CaseIterable, Sendable {

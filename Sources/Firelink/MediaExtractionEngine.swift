@@ -32,81 +32,82 @@ struct CleanFormatOption: Identifiable, Equatable, Sendable {
     let formatSelector: String
     let isAudioOnly: Bool
     let symbol: String
+    let outputExtension: String
 }
 
 enum MediaExtractionEngine {
+    private static let metadataTimeoutSeconds: UInt64 = 75
+
     enum ExtractionError: Error, LocalizedError {
         case processFailed(String)
         case invalidOutput
         case parsingFailed(Error)
+        case timedOut
         
         var errorDescription: String? {
             switch self {
             case .processFailed(let msg): return "Extraction failed: \(msg)"
             case .invalidOutput: return "Invalid output from media engine."
             case .parsingFailed(let err): return "Failed to parse metadata: \(err.localizedDescription)"
+            case .timedOut: return "Fetching metadata timed out. Try again, update yt-dlp, or change the selected browser cookie source."
             }
         }
     }
     
-    static func fetchMetadata(for url: URL) async throws -> (MediaMetadata, [CleanFormatOption]) {
+    static func fetchMetadata(
+        for url: URL,
+        cookieSource: BrowserCookieSource,
+        credentials: DownloadCredentials?,
+        transferOptions: DownloadTransferOptions
+    ) async throws -> (MediaMetadata, [CleanFormatOption]) {
         let ytDlpPath = await MediaEngineManager.shared.binaryPath(for: .ytDlp).path
-        guard FileManager.default.fileExists(atPath: ytDlpPath) else {
+        guard FileManager.default.isExecutableFile(atPath: ytDlpPath) else {
             throw ExtractionError.processFailed("yt-dlp binary not found.")
         }
-        
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: ytDlpPath)
-        
-        var args = ["-J", "--no-warnings", "--ignore-no-formats-error"]
-        
-        // Add cookies if configured
-        if let storedData = UserDefaults.standard.data(forKey: "Firelink.AppSettings.v1"),
-           let json = try? JSONSerialization.jsonObject(with: storedData) as? [String: Any],
-           let cookieSourceStr = json["mediaCookieSource"] as? String,
-           cookieSourceStr != "None" {
-            args.append(contentsOf: ["--cookies-from-browser", cookieSourceStr.lowercased()])
-        }
-        
+
+        var args = ["-J", "--no-warnings", "--ignore-no-formats-error", "--no-playlist"]
+        appendCommonArguments(to: &args, cookieSource: cookieSource, credentials: credentials, transferOptions: transferOptions)
         args.append(url.absoluteString)
-        process.arguments = args
-        
-        let pipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = errorPipe
-        
-        return try await withCheckedThrowingContinuation { continuation in
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(throwing: ExtractionError.processFailed(error.localizedDescription))
-                return
-            }
-            
-            process.terminationHandler = { p in
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                
-                if p.terminationStatus != 0 {
-                    let errorString = String(data: errorData, encoding: .utf8) ?? "Unknown error"
-                    continuation.resume(throwing: ExtractionError.processFailed(errorString))
-                    return
-                }
-                
-                guard !data.isEmpty else {
-                    continuation.resume(throwing: ExtractionError.invalidOutput)
-                    return
-                }
-                
-                do {
-                    let metadata = try JSONDecoder().decode(MediaMetadata.self, from: data)
-                    let options = extractOptions(from: metadata)
-                    continuation.resume(returning: (metadata, options))
-                } catch {
-                    continuation.resume(throwing: ExtractionError.parsingFailed(error))
-                }
-            }
+
+        let data = try await YTDLPMetadataProcess(
+            executableURL: URL(fileURLWithPath: ytDlpPath),
+            arguments: args
+        ).run(timeoutSeconds: metadataTimeoutSeconds)
+
+        guard !data.isEmpty else {
+            throw ExtractionError.invalidOutput
+        }
+
+        do {
+            let metadata = try JSONDecoder().decode(MediaMetadata.self, from: data)
+            let options = extractOptions(from: metadata)
+            return (metadata, options)
+        } catch {
+            throw ExtractionError.parsingFailed(error)
+        }
+    }
+
+    static func appendCommonArguments(
+        to args: inout [String],
+        cookieSource: BrowserCookieSource,
+        credentials: DownloadCredentials?,
+        transferOptions: DownloadTransferOptions
+    ) {
+        if let browserName = cookieSource.ytDlpBrowserName {
+            args.append(contentsOf: ["--cookies-from-browser", browserName])
+        }
+
+        for header in transferOptions.requestHeaders.map(\.normalized) where !header.isEmpty {
+            args.append(contentsOf: ["--add-header", header.headerLine])
+        }
+
+        if let cookieHeader = transferOptions.cookieHeader?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !cookieHeader.isEmpty {
+            args.append(contentsOf: ["--add-header", "Cookie: \(cookieHeader)"])
+        }
+
+        if let credentials, !credentials.isEmpty {
+            args.append(contentsOf: ["--username", credentials.username, "--password", credentials.password])
         }
     }
     
@@ -134,7 +135,8 @@ enum MediaExtractionEngine {
                     name: "Video \(name)",
                     formatSelector: "bestvideo[height<=\(res)]+bestaudio/best",
                     isAudioOnly: false,
-                    symbol: "play.tv.fill"
+                    symbol: "play.tv.fill",
+                    outputExtension: "mp4"
                 ))
                 addedResolutions.insert(res)
             }
@@ -146,7 +148,8 @@ enum MediaExtractionEngine {
                 name: "Best Video",
                 formatSelector: "bestvideo+bestaudio/best",
                 isAudioOnly: false,
-                symbol: "play.tv.fill"
+                symbol: "play.tv.fill",
+                outputExtension: "mp4"
             ))
         } else if options.isEmpty {
             // If we really don't have height info, just offer best
@@ -154,7 +157,8 @@ enum MediaExtractionEngine {
                 name: "Default Video",
                 formatSelector: "best",
                 isAudioOnly: false,
-                symbol: "play.tv.fill"
+                symbol: "play.tv.fill",
+                outputExtension: "mp4"
             ))
         }
         
@@ -163,16 +167,126 @@ enum MediaExtractionEngine {
             name: "Audio MP3",
             formatSelector: "bestaudio/best", // Actual extraction to MP3 needs ffmpeg, which we have. We will handle the conversion flags later in the download engine.
             isAudioOnly: true,
-            symbol: "music.note"
+            symbol: "music.note",
+            outputExtension: "mp3"
         ))
         
         options.append(CleanFormatOption(
             name: "Audio M4A",
             formatSelector: "bestaudio[ext=m4a]/bestaudio/best",
             isAudioOnly: true,
-            symbol: "waveform"
+            symbol: "waveform",
+            outputExtension: "m4a"
         ))
         
         return options
+    }
+}
+
+private final class YTDLPMetadataProcess: @unchecked Sendable {
+    private let executableURL: URL
+    private let arguments: [String]
+    private let lock = NSLock()
+    private var process: Process?
+
+    init(executableURL: URL, arguments: [String]) {
+        self.executableURL = executableURL
+        self.arguments = arguments
+    }
+
+    func run(timeoutSeconds: UInt64) async throws -> Data {
+        try await withTaskCancellationHandler {
+            try await withThrowingTaskGroup(of: Data.self) { group in
+                group.addTask {
+                    try await self.runProcess()
+                }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(timeoutSeconds))
+                    self.terminate()
+                    throw MediaExtractionEngine.ExtractionError.timedOut
+                }
+
+                guard let result = try await group.next() else {
+                    throw MediaExtractionEngine.ExtractionError.invalidOutput
+                }
+                group.cancelAll()
+                return result
+            }
+        } onCancel: {
+            self.terminate()
+        }
+    }
+
+    private func runProcess() async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            let process = Process()
+            let outputPipe = Pipe()
+            let errorPipe = Pipe()
+            let outputBuffer = LockedDataBuffer(maxBytes: 64 * 1024 * 1024)
+            let errorBuffer = LockedDataBuffer()
+
+            process.executableURL = executableURL
+            process.arguments = arguments
+            process.standardOutput = outputPipe
+            process.standardError = errorPipe
+            process.standardInput = nil
+
+            outputPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                guard !data.isEmpty else { return }
+                outputBuffer.append(data)
+            }
+            errorPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                guard !data.isEmpty else { return }
+                errorBuffer.append(data)
+            }
+
+            lock.withLock {
+                self.process = process
+            }
+
+            process.terminationHandler = { finishedProcess in
+                outputPipe.fileHandleForReading.readabilityHandler = nil
+                errorPipe.fileHandleForReading.readabilityHandler = nil
+
+                if finishedProcess.terminationStatus == 0 {
+                    continuation.resume(returning: outputBuffer.data)
+                    return
+                }
+
+                let stderr = String(data: errorBuffer.data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let stdout = String(data: outputBuffer.data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let message = [stderr, stdout]
+                    .compactMap { $0 }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n")
+                continuation.resume(
+                    throwing: MediaExtractionEngine.ExtractionError.processFailed(
+                        message.isEmpty ? "Exit code \(finishedProcess.terminationStatus)" : message
+                    )
+                )
+            }
+
+            do {
+                try process.run()
+                outputPipe.fileHandleForWriting.closeFile()
+                errorPipe.fileHandleForWriting.closeFile()
+            } catch {
+                outputPipe.fileHandleForReading.readabilityHandler = nil
+                errorPipe.fileHandleForReading.readabilityHandler = nil
+                continuation.resume(throwing: MediaExtractionEngine.ExtractionError.processFailed(error.localizedDescription))
+            }
+        }
+    }
+
+    private func terminate() {
+        lock.withLock {
+            if let process, process.isRunning {
+                process.terminate()
+            }
+        }
     }
 }

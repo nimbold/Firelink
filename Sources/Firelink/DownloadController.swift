@@ -110,6 +110,23 @@ final class DownloadController: ObservableObject {
         Aria2DownloadEngine.findExecutable() != nil
     }
 
+    private var hasStartableQueuedDownloadIgnoringEngine: Bool {
+        downloads.contains { item in
+            item.status == .queued &&
+                (!restrictQueueToAutoResume || item.autoResumeOnLaunch == true) &&
+                isAllowedToStart(item)
+        }
+    }
+
+    private var hasRunnableQueuedDownload: Bool {
+        downloads.contains { item in
+            item.status == .queued &&
+                (item.mediaFormatSelector != nil || hasAria2) &&
+                (!restrictQueueToAutoResume || item.autoResumeOnLaunch == true) &&
+                isAllowedToStart(item)
+        }
+    }
+
     func add(urlText: String, connectionsPerServer: Int? = nil, queueID: UUID = DownloadQueue.mainQueueID) {
         guard let url = URL(string: urlText.trimmingCharacters(in: .whitespacesAndNewlines)),
               let scheme = url.scheme?.lowercased(),
@@ -186,6 +203,27 @@ final class DownloadController: ObservableObject {
 
         if startImmediately {
             startQueue(queueID: targetQueueID)
+        }
+    }
+
+    func addMediaDownload(_ item: DownloadItem, startImmediately: Bool) {
+        var item = item
+        item.fileName = FileClassifier.sanitizedFileName(item.fileName)
+        item.category = FileClassifier.category(forFileName: item.fileName)
+        item.connectionsPerServer = 1
+        item.speedLimitKiBPerSecond = normalizedSpeedLimit(item.speedLimitKiBPerSecond)
+        item.queueID = normalizedQueueID(item.queueID ?? DownloadQueue.mainQueueID)
+
+        if let password = item.credentials?.password, !password.isEmpty {
+            KeychainCredentialStore.setPassword(password, for: item.id)
+        }
+
+        downloads.append(item)
+        engineMessage = "Added \(item.fileName) to \(item.category.rawValue)."
+        saveDownloads()
+
+        if startImmediately {
+            startQueue(queueID: item.queueID ?? DownloadQueue.mainQueueID)
         }
     }
 
@@ -449,7 +487,11 @@ final class DownloadController: ObservableObject {
     }
 
     private func pumpQueue() {
-        guard hasAria2 else {
+        guard hasStartableQueuedDownloadIgnoringEngine else {
+            return
+        }
+
+        guard hasRunnableQueuedDownload else {
             engineMessage = "aria2c is not installed. Run `brew install aria2` to enable downloads."
             return
         }
@@ -459,6 +501,7 @@ final class DownloadController: ObservableObject {
         while activeCount < settings.maxConcurrentDownloads,
               let next = downloads.first(where: { item in
                   item.status == .queued &&
+                      (item.mediaFormatSelector != nil || hasAria2) &&
                       (!restrictQueueToAutoResume || item.autoResumeOnLaunch == true) &&
                       isAllowedToStart(item)
               }) {
@@ -490,6 +533,9 @@ final class DownloadController: ObservableObject {
                 do {
                     let handle = try await mediaEngine.start(
                         item: item,
+                        cookieSource: settings.mediaCookieSource,
+                        proxyConfiguration: settings.downloadProxyConfiguration,
+                        speedLimitKiBPerSecond: effectiveSpeedLimitKiBPerSecond(for: item),
                         progress: { [weak self] progress in
                             Task { @MainActor in
                                 self?.update(item.id) {
