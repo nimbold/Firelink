@@ -31,7 +31,7 @@ struct SettingsPaneContainer: View {
             }
             .padding(.horizontal, 32)
             .padding(.vertical, 16)
-            
+
             Divider()
 
             ScrollView {

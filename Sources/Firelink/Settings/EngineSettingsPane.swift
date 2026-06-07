@@ -42,25 +42,25 @@ struct EngineSettingsPane: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            
+
             Section("Media Engine (yt-dlp & ffmpeg)") {
                 addonStatusRow(title: "yt-dlp", state: engineManager.ytDlpState)
                 addonStatusRow(title: "ffmpeg", state: engineManager.ffmpegState)
-                
+
                 HStack(spacing: 12) {
                     Button("Check for Updates") {
                         Task {
                             isCheckingForUpdates = true
                             updateCheckResult = nil
                             try? await Task.sleep(nanoseconds: 800_000_000)
-                            
+
                             do {
                                 try await engineManager.ensureInstalled()
                                 updateCheckResult = "Up to date."
                             } catch {
                                 updateCheckResult = "Update failed."
                             }
-                            
+
                             isCheckingForUpdates = false
                             try? await Task.sleep(nanoseconds: 3_000_000_000)
                             if !isCheckingForUpdates {
@@ -69,7 +69,7 @@ struct EngineSettingsPane: View {
                         }
                     }
                     .disabled(isDownloadingMediaEngines || isCheckingForUpdates)
-                    
+
                     if isCheckingForUpdates {
                         ProgressView().controlSize(.small)
                         Text("Checking...")
@@ -80,10 +80,10 @@ struct EngineSettingsPane: View {
                             .foregroundStyle(.secondary)
                             .font(.subheadline)
                     }
-                    
+
                     Spacer()
                 }
-                
+
                 Picker("Browser Cookies", selection: $settings.mediaCookieSource) {
                     ForEach(BrowserCookieSource.allCases, id: \.self) { source in
                         Text(source.rawValue).tag(source)
@@ -110,13 +110,13 @@ struct EngineSettingsPane: View {
             version = await Aria2DownloadEngine.versionString() ?? "Unavailable"
         }
     }
-    
+
     private var isDownloadingMediaEngines: Bool {
         if case .downloading = engineManager.ytDlpState { return true }
         if case .downloading = engineManager.ffmpegState { return true }
         return false
     }
-    
+
     @ViewBuilder
     private func addonStatusRow(title: String, state: AddonState) -> some View {
         LabeledContent(title) {

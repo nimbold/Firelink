@@ -23,12 +23,12 @@ struct IntegrationSettingsPane: View {
                 }
                 .padding(.vertical, 4)
             }
-            
+
             Section("Installation") {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("Firelink Companion is officially available on the Mozilla Add-on store. Install it to easily intercept downloads and send media directly to Firelink.")
                         .foregroundStyle(.secondary)
-                    
+
                     Button {
                         if let url = URL(string: "https://addons.mozilla.org/en-US/firefox/addon/firelink-companion/") {
                             NSWorkspace.shared.open(url)
@@ -57,7 +57,7 @@ struct IntegrationSettingsPane: View {
                     }
                 }
             }
-            
+
             Section("Permissions & Privacy") {
                 Text("The Firelink extension uses download, context menu, storage, active tab, scripting, and local Firelink endpoint permissions. It reads the active tab URL for per-site settings and explicit right-click actions, and forwards download URLs only when you use a Firelink action or enable global capture.")
                     .font(.caption)

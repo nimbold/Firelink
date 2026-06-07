@@ -156,14 +156,6 @@ struct DownloadTable: View {
         }
     }
 
-    private func performPrimaryAction(for item: DownloadItem) {
-        if item.status == .completed {
-            openFile(item)
-        } else {
-            openWindow(id: "download-properties", value: item.id)
-        }
-    }
-
     @ViewBuilder
     private func statusCell(for item: DownloadItem) -> some View {
         let message = item.message.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -311,12 +303,12 @@ struct DownloadTable: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 4)
                         .fill(Color.secondary.opacity(0.15))
-                    
+
                     RoundedRectangle(cornerRadius: 4)
                         .fill(statusColor(for: item.status))
                         .frame(width: max(0, proxy.size.width * item.progress))
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    
+
                     Text(item.progress.formatted(.percent.precision(.fractionLength(0))))
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                         .foregroundColor(.primary)

@@ -5,4 +5,5 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 swift build
+git diff --check
 python3 -m json.tool Extensions/Firefox/manifest.json >/dev/null

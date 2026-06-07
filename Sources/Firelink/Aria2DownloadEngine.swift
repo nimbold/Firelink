@@ -91,10 +91,10 @@ final class Aria2DownloadEngine {
                 // Close the write file handle in the parent process immediately
                 // This guarantees readToEnd() won't hang waiting for the parent itself
                 outputPipe.fileHandleForWriting.closeFile()
-                
+
                 let data = try? outputPipe.fileHandleForReading.readToEnd()
                 process.waitUntilExit()
-                
+
                 guard process.terminationStatus == 0, let data = data else { return nil }
 
                 let output = String(data: data, encoding: .utf8) ?? ""
@@ -230,7 +230,7 @@ final class Aria2DownloadEngine {
         rpcPort: Int,
         rpcSecret: String,
         process: Process,
-        completionGate: CompletionGate
+        completionGate: CompletionGate<Void>
     ) -> Task<Void, Never> {
         Task.detached {
             while !Task.isCancelled && process.isRunning {
@@ -527,16 +527,16 @@ final class LockedDataBuffer: @unchecked Sendable {
     }
 }
 
-final class CompletionGate: @unchecked Sendable {
+final class CompletionGate<Success>: @unchecked Sendable {
     private let lock = NSLock()
     private var didComplete = false
-    private let completion: @Sendable (Result<Void, Error>) -> Void
+    private let completion: @Sendable (Result<Success, Error>) -> Void
 
-    init(_ completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
+    init(_ completion: @escaping @Sendable (Result<Success, Error>) -> Void) {
         self.completion = completion
     }
 
-    func complete(_ result: Result<Void, Error>) {
+    func complete(_ result: Result<Success, Error>) {
         lock.lock()
         let shouldComplete = !didComplete
         if shouldComplete {

@@ -33,7 +33,7 @@ struct MediaInspectorInlineView: View {
             if isLoading {
                 ProgressView()
                     .controlSize(.regular)
-                
+
                 let ytState = engineManager.ytDlpState
                 let ffState = engineManager.ffmpegState
 
@@ -117,6 +117,13 @@ struct MediaInspectorInlineView: View {
                             .frame(width: 90)
                         }
                     }
+
+                    if let selected = resolveSelectedOption() {
+                        Text(selected.detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
 
                 Spacer(minLength: 16)
@@ -147,6 +154,10 @@ struct MediaInspectorInlineView: View {
             loadTask?.cancel()
             loadTask = nil
         }
+        .onChange(of: url) { _, _ in loadMetadata() }
+        .onChange(of: cookieSource) { _, _ in loadMetadata() }
+        .onChange(of: credentials) { _, _ in loadMetadata() }
+        .onChange(of: transferOptions) { _, _ in loadMetadata() }
         .onChange(of: selectedType) { _, _ in ensureValidSelection() }
         .onChange(of: options) { _, _ in ensureValidSelection() }
     }
@@ -216,6 +227,8 @@ struct MediaInspectorInlineView: View {
         loadTask?.cancel()
         isLoading = true
         errorMessage = nil
+        metadata = nil
+        options = []
 
         loadTask = Task {
             do {
@@ -233,9 +246,13 @@ struct MediaInspectorInlineView: View {
                 guard !Task.isCancelled else { return }
 
                 await MainActor.run {
-                    self.metadata = fetchedMetadata
-                    self.options = fetchedOptions
-                    self.ensureValidSelection()
+                    if fetchedOptions.isEmpty {
+                        self.errorMessage = "No downloadable media formats were found."
+                    } else {
+                        self.metadata = fetchedMetadata
+                        self.options = fetchedOptions
+                        self.ensureValidSelection()
+                    }
                     self.loadTask = nil
                     withAnimation { self.isLoading = false }
                 }

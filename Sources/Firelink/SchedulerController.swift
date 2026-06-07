@@ -49,7 +49,7 @@ final class SchedulerController: ObservableObject {
 
     private let defaults = UserDefaults.standard
     private let storageKey = "Firelink.SchedulerSettings.v1"
-    
+
     // We only trigger once per minute to prevent multiple triggers in the same minute
     private var lastTriggeredMinute: Date?
 
@@ -68,14 +68,14 @@ final class SchedulerController: ObservableObject {
 
         checkAutomationPermission()
         startTimer()
-        
+
         $settings
             .dropFirst()
             .sink { _ in
                 // We do NOT save instantly here to UserDefaults because the UI will have a "Save" button
             }
             .store(in: &cancellables)
-            
+
         // Observe downloads to check if we should trigger post-action
         downloadController.$downloads
             .dropFirst()
@@ -84,7 +84,7 @@ final class SchedulerController: ObservableObject {
             }
             .store(in: &cancellables)
     }
-    
+
     func saveSettings() {
         if let data = try? JSONEncoder().encode(settings) {
             defaults.set(data, forKey: storageKey)
@@ -112,7 +112,7 @@ final class SchedulerController: ObservableObject {
 
         let startHour = calendar.component(.hour, from: settings.startTime)
         let startMinute = calendar.component(.minute, from: settings.startTime)
-        
+
         let currentHour = calendar.component(.hour, from: now)
         let currentMinute = calendar.component(.minute, from: now)
         let currentWeekday = calendar.component(.weekday, from: now)
@@ -141,26 +141,26 @@ final class SchedulerController: ObservableObject {
         }
 
         guard !runnableQueueIDs.isEmpty else { return }
-        
+
         isRunning = true
-        
+
         for queueID in runnableQueueIDs {
             downloadController.startQueue(queueID: queueID)
         }
-        
+
         checkIfRunningFinished()
     }
 
     private func checkIfRunningFinished() {
         guard isRunning else { return }
-        
+
         let targetQueueIDs = effectiveTargetQueueIDs()
         let hasActiveItems = targetQueueIDs.contains { queueID in
             downloadController.queueItems(for: queueID).contains {
                 $0.status == .queued || $0.status == .downloading
             }
         }
-        
+
         if !hasActiveItems {
             isRunning = false
             performPostAction()
@@ -173,7 +173,7 @@ final class SchedulerController: ObservableObject {
 
     private func performPostAction() {
         guard settings.postQueueAction != .doNothing else { return }
-        
+
         var scriptCode = ""
         switch settings.postQueueAction {
         case .sleep:
@@ -185,9 +185,9 @@ final class SchedulerController: ObservableObject {
         case .doNothing:
             break
         }
-        
+
         guard !scriptCode.isEmpty else { return }
-        
+
         var error: NSDictionary?
         if let script = NSAppleScript(source: scriptCode) {
             script.executeAndReturnError(&error)

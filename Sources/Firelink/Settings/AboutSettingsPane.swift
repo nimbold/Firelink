@@ -66,7 +66,7 @@ struct AboutSettingsPane: View {
                             Label("Check for Updates", systemImage: "arrow.clockwise")
                         }
                         .disabled(sparkleUpdater.isChecking)
-                        
+
                         Button {
                             NSWorkspace.shared.open(projectURL.appendingPathComponent("releases"))
                         } label: {

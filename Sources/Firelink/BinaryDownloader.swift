@@ -9,6 +9,7 @@ enum BinaryDownloaderError: LocalizedError {
     case permissionFailed(Error)
     case unzipFailed
     case unsupportedDownloadURL
+    case missingChecksum
     case checksumMismatch
 
     var errorDescription: String? {
@@ -27,6 +28,8 @@ enum BinaryDownloaderError: LocalizedError {
             "Could not extract the downloaded add-on archive."
         case .unsupportedDownloadURL:
             "The add-on URL must be HTTP or HTTPS."
+        case .missingChecksum:
+            "The add-on configuration is missing a SHA-256 checksum."
         case .checksumMismatch:
             "The downloaded add-on did not match the expected SHA-256 checksum."
         }

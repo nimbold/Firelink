@@ -4,7 +4,7 @@ struct SchedulerView: View {
     @EnvironmentObject private var downloadController: DownloadController
     @EnvironmentObject private var schedulerController: SchedulerController
     @State private var showSaveToast: Bool = false
-    
+
     // Local state to hold edits before saving
     @State private var isEnabled: Bool = false
     @State private var startTime: Date = Date()
@@ -12,12 +12,12 @@ struct SchedulerView: View {
     @State private var selectedDays: Set<SchedulerDay> = []
     @State private var postQueueAction: PostQueueAction = .doNothing
     @State private var targetQueueIDs: Set<UUID> = []
-    
+
     var body: some View {
         VStack(spacing: 0) {
             headerView
             Divider()
-            
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     VStack(alignment: .leading, spacing: 24) {
@@ -27,7 +27,7 @@ struct SchedulerView: View {
                     }
                     .opacity(isEnabled ? 1.0 : 0.5)
                     .disabled(!isEnabled)
-                    
+
                     Divider()
                     permissionsSection
                 }
@@ -49,7 +49,7 @@ struct SchedulerView: View {
             }
         }
     }
-    
+
     private var headerView: some View {
         HStack {
             Toggle(isOn: $isEnabled) {
@@ -57,15 +57,15 @@ struct SchedulerView: View {
                     .font(.title2.weight(.bold))
             }
             .toggleStyle(.switch)
-            
+
             Spacer()
-            
+
             Button("Save Settings") {
                 saveState()
                 withAnimation(.spring()) {
                     showSaveToast = true
                 }
-                
+
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
                     withAnimation {
                         showSaveToast = false
@@ -76,18 +76,18 @@ struct SchedulerView: View {
         }
         .padding(24)
     }
-    
+
     private var timeSelectionSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Start Time")
                 .font(.headline)
-            
+
             DatePicker("Time", selection: $startTime, displayedComponents: [.hourAndMinute])
                 .datePickerStyle(.stepperField)
                 .labelsHidden()
-            
+
             Toggle("Everyday", isOn: $isEveryday)
-            
+
             if !isEveryday {
                 HStack(spacing: 12) {
                     ForEach(SchedulerDay.allCases) { day in
@@ -107,12 +107,12 @@ struct SchedulerView: View {
             }
         }
     }
-    
+
     private var queueSelectionSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Queues to Start")
                 .font(.headline)
-            
+
             if downloadController.queues.isEmpty {
                 Text("No queues available")
                     .foregroundStyle(.secondary)
@@ -134,12 +134,12 @@ struct SchedulerView: View {
             }
         }
     }
-    
+
     private var postActionSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("After Completion")
                 .font(.headline)
-            
+
             Picker("Action", selection: $postQueueAction) {
                 ForEach(PostQueueAction.allCases) { action in
                     Text(action.rawValue).tag(action)
@@ -149,17 +149,17 @@ struct SchedulerView: View {
             .pickerStyle(.radioGroup)
         }
     }
-    
+
     private var permissionsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("System Permissions")
                 .font(.headline)
-            
+
             Text("Firelink needs Automation permission to control Finder in order to automatically sleep, restart, or shut down your Mac after downloads finish.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            
+
             if schedulerController.hasAutomationPermission {
                 Button("Revoke Permissions") {
                     schedulerController.openAutomationPermissionSettings()
@@ -173,7 +173,7 @@ struct SchedulerView: View {
             }
         }
     }
-    
+
     private var toastView: some View {
         VStack {
             Spacer()
@@ -192,7 +192,7 @@ struct SchedulerView: View {
         }
         .allowsHitTesting(false)
     }
-    
+
     private func loadState() {
         isEnabled = schedulerController.settings.isEnabled
         startTime = schedulerController.settings.startTime
@@ -203,7 +203,7 @@ struct SchedulerView: View {
             ? [DownloadQueue.mainQueueID]
             : schedulerController.settings.targetQueueIDs
     }
-    
+
     private func saveState() {
         schedulerController.settings.isEnabled = isEnabled
         schedulerController.settings.startTime = startTime

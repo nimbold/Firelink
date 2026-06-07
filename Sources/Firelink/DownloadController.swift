@@ -61,7 +61,7 @@ final class DownloadController: ObservableObject {
                 }
             }
             .store(in: &cancellables)
-            
+
         $downloads
             .dropFirst()
             .debounce(for: .seconds(2.0), scheduler: RunLoop.main)
@@ -69,7 +69,7 @@ final class DownloadController: ObservableObject {
                 self?.saveDownloads()
             }
             .store(in: &cancellables)
-            
+
         NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)
             .sink { [weak self] _ in
                 self?.saveDownloads()
@@ -535,15 +535,17 @@ final class DownloadController: ObservableObject {
                         $0.message = "Checking media add-ons..."
                     }
                     try await MediaEngineManager.shared.ensureAvailable(addons: [.ytDlp, .ffmpeg])
+                    guard let liveItem = activeDownloadItem(id: item.id) else { return }
+
                     update(item.id) {
                         guard $0.status == .downloading else { return }
                         $0.message = "Starting yt-dlp..."
                     }
                     let handle = try await mediaEngine.start(
-                        item: item,
+                        item: liveItem,
                         cookieSource: settings.mediaCookieSource,
                         proxyConfiguration: settings.downloadProxyConfiguration,
-                        speedLimitKiBPerSecond: effectiveSpeedLimitKiBPerSecond(for: item),
+                        speedLimitKiBPerSecond: effectiveSpeedLimitKiBPerSecond(for: liveItem),
                         progress: { [weak self] progress in
                             Task { @MainActor in
                                 self?.update(item.id) {
@@ -569,12 +571,20 @@ final class DownloadController: ObservableObject {
                         },
                         completion: { [weak self] result in
                             Task { @MainActor in
-                                self?.handleCompletion(item: item, result: result, isMedia: true)
+                                self?.handleMediaCompletion(item: item, result: result)
                             }
                         }
                     )
+                    guard activeDownloadItem(id: item.id) != nil else {
+                        handle.cancel()
+                        return
+                    }
                     activeMediaHandles[item.id] = handle
+                    saveDownloads()
+                    applySpeedLimitsToActiveDownloads()
+                    updateSleepActivity()
                 } catch {
+                    guard shouldHandleStartFailure(for: item.id) else { return }
                     handleDownloadFailure(itemID: item.id, error: error)
                     applySpeedLimitsToActiveDownloads()
                     updateSleepActivity()
@@ -602,7 +612,7 @@ final class DownloadController: ObservableObject {
                     },
                     completion: { [weak self] result in
                         Task { @MainActor in
-                            self?.handleCompletion(item: item, result: result, isMedia: false)
+                            self?.handleCompletion(item: item, result: result)
                         }
                     }
                 )
@@ -624,12 +634,20 @@ final class DownloadController: ObservableObject {
         }
     }
 
-    private func handleCompletion(item: DownloadItem, result: Result<Void, Error>, isMedia: Bool) {
-        if isMedia {
-            activeMediaHandles[item.id] = nil
-        } else {
-            activeHandles[item.id] = nil
+    private func activeDownloadItem(id: UUID) -> DownloadItem? {
+        downloads.first { $0.id == id && $0.status == .downloading }
+    }
+
+    private func shouldHandleStartFailure(for id: UUID) -> Bool {
+        guard let item = downloads.first(where: { $0.id == id }) else {
+            automaticRetryCounts[id] = nil
+            return false
         }
+        return item.status != .paused && item.status != .canceled
+    }
+
+    private func handleCompletion(item: DownloadItem, result: Result<Void, Error>) {
+        activeHandles[item.id] = nil
 
         switch result {
         case .success:
@@ -641,7 +659,7 @@ final class DownloadController: ObservableObject {
                 $0.etaText = "-"
                 $0.message = "Saved to \($0.destinationPath)"
                 $0.autoResumeOnLaunch = false
-                
+
                 if let attr = try? FileManager.default.attributesOfItem(atPath: $0.destinationPath),
                    let size = attr[.size] as? Int64 {
                     $0.sizeBytes = size
@@ -650,6 +668,45 @@ final class DownloadController: ObservableObject {
             }
             self.saveDownloads()
             self.showNotification(title: "Download Completed", body: item.fileName)
+        case .failure(let error):
+            if self.downloads.first(where: { $0.id == item.id })?.status == .paused ||
+                self.downloads.first(where: { $0.id == item.id })?.status == .canceled {
+                return
+            }
+            self.handleDownloadFailure(itemID: item.id, error: error)
+        }
+
+        self.pumpQueue()
+        self.applySpeedLimitsToActiveDownloads()
+        self.updateSleepActivity()
+    }
+
+    private func handleMediaCompletion(item: DownloadItem, result: Result<URL, Error>) {
+        activeMediaHandles[item.id] = nil
+
+        switch result {
+        case .success(let outputURL):
+            self.automaticRetryCounts[item.id] = nil
+            self.update(item.id) {
+                $0.status = .completed
+                $0.progress = 1
+                $0.speedText = "-"
+                $0.etaText = "-"
+                $0.connectionCount = 0
+                $0.destinationDirectory = outputURL.deletingLastPathComponent()
+                $0.fileName = outputURL.lastPathComponent
+                $0.category = FileClassifier.category(forFileName: $0.fileName)
+                $0.message = "Saved to \(outputURL.path)"
+                $0.autoResumeOnLaunch = false
+
+                if let attr = try? FileManager.default.attributesOfItem(atPath: outputURL.path),
+                   let size = attr[.size] as? Int64 {
+                    $0.sizeBytes = size
+                    $0.bytesText = ByteFormatter.string(size)
+                }
+            }
+            self.saveDownloads()
+            self.showNotification(title: "Download Completed", body: outputURL.lastPathComponent)
         case .failure(let error):
             if self.downloads.first(where: { $0.id == item.id })?.status == .paused ||
                 self.downloads.first(where: { $0.id == item.id })?.status == .canceled {
@@ -747,6 +804,14 @@ final class DownloadController: ObservableObject {
     }
 
     private func handleDownloadFailure(itemID: UUID, error: Error) {
+        guard let currentItem = downloads.first(where: { $0.id == itemID }) else {
+            automaticRetryCounts[itemID] = nil
+            return
+        }
+        guard currentItem.status != .paused, currentItem.status != .canceled else {
+            return
+        }
+
         let retryCount = automaticRetryCounts[itemID] ?? 0
 
         guard isAutomaticallyRecoverable(error), retryCount < maxAutomaticRetries else {
@@ -779,16 +844,51 @@ final class DownloadController: ObservableObject {
     }
 
     private func isAutomaticallyRecoverable(_ error: Error) -> Bool {
-        guard let engineError = error as? Aria2DownloadEngine.EngineError else {
-            return true
+        if let engineError = error as? Aria2DownloadEngine.EngineError {
+            switch engineError {
+            case .executableNotFound, .unsupportedProxy:
+                return false
+            case .launchFailed:
+                return true
+            }
         }
 
-        switch engineError {
-        case .executableNotFound, .unsupportedProxy:
-            return false
-        case .launchFailed:
-            return true
+        if let mediaError = error as? MediaDownloadEngine.EngineError {
+            switch mediaError {
+            case .missingEngine:
+                return false
+            case .launchFailed(let message):
+                return isRecoverableMediaFailure(message)
+            }
         }
+
+        return true
+    }
+
+    private func isRecoverableMediaFailure(_ message: String) -> Bool {
+        let lowercased = message.lowercased()
+        let permanentMarkers = [
+            "requires browser cookies",
+            "choose a browser",
+            "challenge solving failed",
+            "install deno or node",
+            "requested format is not available",
+            "unsupported url",
+            "private video",
+            "sign in",
+            "not a bot",
+            "video unavailable",
+            "no video formats found",
+            "no audio formats found",
+            "ffmpeg is not installed",
+            "yt-dlp is not installed"
+        ]
+
+        if permanentMarkers.contains(where: { lowercased.contains($0) }) {
+            return false
+        }
+
+        return true
     }
 
     private func isAllowedToStart(_ item: DownloadItem) -> Bool {
@@ -897,7 +997,7 @@ final class DownloadController: ObservableObject {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
                 let state = StoredDownloadState(queues: queuesCopy, downloads: downloadsCopy)
                 let data = try JSONEncoder().encode(state)
-                
+
                 guard !Task.isCancelled else { return }
                 try data.write(to: storageURL, options: .atomic)
             } catch {
@@ -937,7 +1037,7 @@ final class DownloadController: ObservableObject {
                 if isLegacyDownloadList, item.queueID == nil {
                     adjusted.queueID = DownloadQueue.mainQueueID
                 }
-                
+
                 if adjusted.credentials != nil, let storedPassword = KeychainCredentialStore.password(for: adjusted.id) {
                     adjusted.credentials?.password = storedPassword
                 }

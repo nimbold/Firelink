@@ -38,6 +38,7 @@ final class MediaEngineManager: ObservableObject {
         let bundleID = Bundle.main.bundleIdentifier ?? "com.firelink.app"
         return appSupport.appendingPathComponent(bundleID).appendingPathComponent("Addons", isDirectory: true)
     }
+    private var installTasks: [AddonType: Task<Void, Error>] = [:]
 
     private init() {
         checkLocalInstallation()
@@ -49,6 +50,7 @@ final class MediaEngineManager: ObservableObject {
 
     func checkLocalInstallation() {
         for addon in AddonType.allCases {
+            guard installTasks[addon] == nil else { continue }
             let path = binaryPath(for: addon)
             if FileManager.default.isExecutableFile(atPath: path.path) {
                 if let version = UserDefaults.standard.string(forKey: addon.defaultsKey) {
@@ -79,9 +81,10 @@ final class MediaEngineManager: ObservableObject {
         let config = try await fetchLatestConfig()
 
         try await withThrowingTaskGroup(of: Void.self) { group in
-            for addon in requiredAddons where shouldInstall(addon: addon, config: config) {
+            for addon in requiredAddons where shouldInstall(addon: addon, config: config) || installTasks[addon] != nil {
+                let task = installationTask(for: addon, from: config)
                 group.addTask {
-                    try await self.install(addon: addon, from: config)
+                    try await task.value
                 }
             }
 
@@ -93,9 +96,9 @@ final class MediaEngineManager: ObservableObject {
         checkLocalInstallation()
         let missingAddons = requiredAddons.filter { addon in
             switch state(for: addon) {
-            case .installed, .downloading:
+            case .installed:
                 return false
-            case .notInstalled, .failed:
+            case .downloading, .notInstalled, .failed:
                 return true
             }
         }
@@ -120,11 +123,24 @@ final class MediaEngineManager: ObservableObject {
         case .notInstalled, .failed:
             return true
         case .downloading:
-            return false
+            return true
         case .installed(let version):
             guard let configVersion else { return false }
             return version != configVersion
         }
+    }
+
+    private func installationTask(for addon: AddonType, from config: GatekeeperConfig) -> Task<Void, Error> {
+        if let task = installTasks[addon] {
+            return task
+        }
+
+        let task = Task { @MainActor in
+            defer { self.installTasks[addon] = nil }
+            try await self.install(addon: addon, from: config)
+        }
+        installTasks[addon] = task
+        return task
     }
 
     private func state(for addon: AddonType) -> AddonState {
@@ -159,6 +175,12 @@ final class MediaEngineManager: ObservableObject {
             throw URLError(.badURL)
         }
 
+        guard let expectedSHA256 = addonConfig.currentArchSHA256?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !expectedSHA256.isEmpty else {
+            setState(for: addon, to: .failed(error: "Missing SHA-256 checksum for add-on"))
+            throw BinaryDownloaderError.missingChecksum
+        }
+
         do {
             try FileManager.default.createDirectory(at: addonsDirectory, withIntermediateDirectories: true, attributes: nil)
             let destination = binaryPath(for: addon)
@@ -166,7 +188,7 @@ final class MediaEngineManager: ObservableObject {
             try await BinaryDownloader.download(
                 from: downloadURL,
                 to: destination,
-                expectedSHA256: addonConfig.currentArchSHA256
+                expectedSHA256: expectedSHA256
             ) { progress in
                 Task { @MainActor in
                     self.setState(for: addon, to: .downloading(progress: progress))

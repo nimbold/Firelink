@@ -3,16 +3,16 @@ import SwiftUI
 struct SpeedLimiterView: View {
     @EnvironmentObject private var settings: AppSettings
     @State private var showSaveToast: Bool = false
-    
+
     // Local state to hold edits before saving
     @State private var isEnabled: Bool = false
     @State private var speedLimitKiBPerSecond: Int = 1024
-    
+
     var body: some View {
         VStack(spacing: 0) {
             headerView
             Divider()
-            
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     limitSelectionSection
@@ -33,7 +33,7 @@ struct SpeedLimiterView: View {
             }
         }
     }
-    
+
     private var headerView: some View {
         HStack {
             Toggle(isOn: $isEnabled) {
@@ -41,15 +41,15 @@ struct SpeedLimiterView: View {
                     .font(.title2.weight(.bold))
             }
             .toggleStyle(.switch)
-            
+
             Spacer()
-            
+
             Button("Save Limit") {
                 saveState()
                 withAnimation(.spring()) {
                     showSaveToast = true
                 }
-                
+
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
                     withAnimation {
                         showSaveToast = false
@@ -60,29 +60,29 @@ struct SpeedLimiterView: View {
         }
         .padding(24)
     }
-    
+
     private var limitSelectionSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Global Speed Limit")
                 .font(.headline)
-            
+
             Text("This limit applies globally to all active downloads. Individual downloads can also have their own specific limits defined in their properties.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            
+
             HStack {
                 Stepper(value: $speedLimitKiBPerSecond, in: 1...10_485_760, step: 512) {
                     Text("Maximum Speed:")
                 }
-                
+
                 TextField("Speed", value: $speedLimitKiBPerSecond, format: .number)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 80)
-                
+
                 Text("KiB/s")
                     .foregroundStyle(.secondary)
             }
-            
+
             // Helpful presets
             HStack(spacing: 12) {
                 Button("1 MB/s") { speedLimitKiBPerSecond = 1024 }
@@ -93,7 +93,7 @@ struct SpeedLimiterView: View {
             .padding(.top, 8)
         }
     }
-    
+
     private var toastView: some View {
         VStack {
             Spacer()
@@ -112,20 +112,20 @@ struct SpeedLimiterView: View {
         }
         .allowsHitTesting(false)
     }
-    
+
     @AppStorage("lastCustomSpeedLimit") private var lastCustomSpeedLimit: Int = 1024
-    
+
     private func loadState() {
         let currentLimit = settings.globalSpeedLimitKiBPerSecond
         isEnabled = currentLimit > 0
         speedLimitKiBPerSecond = currentLimit > 0 ? currentLimit : lastCustomSpeedLimit
     }
-    
+
     private func saveState() {
         // Clamp to ensure it doesn't break aria2
         let clampedSpeed = max(min(speedLimitKiBPerSecond, 10_485_760), 1)
         speedLimitKiBPerSecond = clampedSpeed
-        
+
         lastCustomSpeedLimit = clampedSpeed
         settings.globalSpeedLimitKiBPerSecond = isEnabled ? clampedSpeed : 0
     }

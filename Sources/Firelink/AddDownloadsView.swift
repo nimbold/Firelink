@@ -493,9 +493,16 @@ struct AddDownloadsView: View {
         let urls = DownloadURLParser.parse(text)
         metadataTask?.cancel()
 
-        if let first = urls.first, MediaDetector.isSupportedMedia(url: first) {
+        let mediaURL: URL? = {
+            guard urls.count == 1, let first = urls.first, MediaDetector.isSupportedMedia(url: first) else {
+                return nil
+            }
+            return first
+        }()
+
+        if let mediaURL {
             withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-                detectedMediaURL = first
+                detectedMediaURL = mediaURL
             }
         } else {
             withAnimation {
@@ -520,6 +527,12 @@ struct AddDownloadsView: View {
             authUsername = creds.username
             authPassword = creds.password
             saveLogin = false
+        }
+
+        guard mediaURL == nil else {
+            pendingDownloads = []
+            metadataTask = nil
+            return
         }
 
         metadataTask = Task {

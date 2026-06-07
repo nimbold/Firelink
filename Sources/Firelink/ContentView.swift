@@ -154,6 +154,14 @@ struct ContentView: View {
             }
             .keyboardShortcut("a", modifiers: .command)
             .opacity(0)
+
+            Button("") {
+                if let item = selectedItems.first {
+                    performPrimaryAction(for: item)
+                }
+            }
+            .keyboardShortcut(.return, modifiers: [])
+            .opacity(0)
         }
         .confirmationDialog(
             "Delete \(selection.count) Download\(selection.count == 1 ? "" : "s")",
@@ -181,7 +189,7 @@ struct ContentView: View {
         }
         selection.removeAll()
     }
-    
+
     private func handlePaste(queueID: UUID?) {
         guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return }
         controller.pendingPasteboardText = text
@@ -192,6 +200,14 @@ struct ContentView: View {
 
     private func selectAll(items: [DownloadItem]) {
         selection = Set(items.map { $0.id })
+    }
+
+    private func performPrimaryAction(for item: DownloadItem) {
+        if item.status == .completed {
+            NSWorkspace.shared.open(URL(fileURLWithPath: item.destinationPath))
+        } else {
+            openWindow(id: "download-properties", value: item.id)
+        }
     }
 
     private func hasActiveDownloads(in queueID: UUID?) -> Bool {

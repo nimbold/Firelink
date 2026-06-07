@@ -20,7 +20,7 @@ final class LocalExtensionServer: @unchecked Sendable {
     init?(downloadController: DownloadController) {
         self.downloadController = downloadController
         let parameters = NWParameters.tcp
-        
+
         var createdListener: NWListener?
         var selectedPort: UInt16?
         for portValue in Constants.portRange {
@@ -33,12 +33,12 @@ final class LocalExtensionServer: @unchecked Sendable {
                 continue
             }
         }
-        
+
         guard let createdListener else {
             print("Failed to create listener on ports 6412-6422")
             return nil
         }
-        
+
         self.listener = createdListener
         self.port = selectedPort ?? 6412
     }

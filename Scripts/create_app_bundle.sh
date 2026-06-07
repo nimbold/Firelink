@@ -4,8 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="Firelink"
 CONFIGURATION="${CONFIGURATION:-release}"
-MARKETING_VERSION="${MARKETING_VERSION:-0.1.0}"
-BUILD_NUMBER="${BUILD_NUMBER:-1}"
+DEFAULT_MARKETING_VERSION="$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)"
+DEFAULT_BUILD_NUMBER="$(git rev-list --count HEAD 2>/dev/null || true)"
+MARKETING_VERSION="${MARKETING_VERSION:-${DEFAULT_MARKETING_VERSION:-0.1.0}}"
+BUILD_NUMBER="${BUILD_NUMBER:-${DEFAULT_BUILD_NUMBER:-1}}"
 APP_DIR="$ROOT_DIR/build/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
@@ -35,12 +37,12 @@ ARIA2C_PATH=$(which aria2c || true)
 if [[ -n "$ARIA2C_PATH" && -x "$ARIA2C_PATH" ]]; then
   echo "Bundling aria2c from $ARIA2C_PATH..."
   cp "$ARIA2C_PATH" "$RESOURCES_DIR/aria2c"
-  
+
   if ! command -v dylibbundler &> /dev/null; then
     echo "Installing dylibbundler..."
     brew install dylibbundler
   fi
-  
+
   FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
   mkdir -p "$FRAMEWORKS_DIR"
   dylibbundler -od -b -x "$RESOURCES_DIR/aria2c" -d "$FRAMEWORKS_DIR" -p "@executable_path/../Frameworks/"

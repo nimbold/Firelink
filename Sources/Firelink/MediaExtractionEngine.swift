@@ -20,7 +20,7 @@ struct MediaMetadata: Decodable, Sendable {
     let thumbnail: URL?
     let duration: Double?
     let formats: [RawMediaFormat]?
-    
+
     var displayUploader: String? {
         channel ?? uploader
     }
@@ -34,6 +34,7 @@ struct CleanFormatOption: Identifiable, Equatable, Sendable {
     let symbol: String
     let outputExtension: String
     let detail: String
+    let estimatedBytes: Int64?
 }
 
 enum MediaExtractionEngine {
@@ -44,7 +45,7 @@ enum MediaExtractionEngine {
         case invalidOutput
         case parsingFailed(Error)
         case timedOut
-        
+
         var errorDescription: String? {
             switch self {
             case .processFailed(let msg): return "Extraction failed: \(msg)"
@@ -54,7 +55,7 @@ enum MediaExtractionEngine {
             }
         }
     }
-    
+
     static func fetchMetadata(
         for url: URL,
         cookieSource: BrowserCookieSource,
@@ -151,9 +152,6 @@ enum MediaExtractionEngine {
         var options: [CleanFormatOption] = []
         let rawFormats = metadata.formats ?? []
 
-        let heights = rawFormats.compactMap { $0.height }.filter { $0 > 0 }
-        let maxHeight = heights.max() ?? 0
-
         let standardResolutions = [
             (2160, "4K"),
             (1440, "1440p"),
@@ -164,7 +162,9 @@ enum MediaExtractionEngine {
         ]
 
         let availableResolutions = standardResolutions.filter { resolution, _ in
-            maxHeight == 0 || maxHeight >= resolution - 100
+            rawFormats.contains { format in
+                isVideo(format) && (format.height ?? 0) > 0 && (format.height ?? 0) <= resolution && (format.height ?? 0) >= resolution - 100
+            }
         }
         let videoQualities = [(nil as Int?, "Best")] + availableResolutions.map { (Optional($0.0), $0.1) }
         let videoContainers = [
@@ -175,45 +175,137 @@ enum MediaExtractionEngine {
 
         for (height, qualityName) in videoQualities {
             for (container, containerName) in videoContainers {
+                guard hasVideoFormat(rawFormats, height: height, container: container) else { continue }
+                let estimatedBytes = estimatedVideoBytes(rawFormats, height: height, container: container)
                 options.append(CleanFormatOption(
                     name: "\(qualityName) \(containerName)",
                     formatSelector: videoSelector(height: height, container: container),
                     isAudioOnly: false,
                     symbol: "play.tv.fill",
                     outputExtension: container,
-                    detail: height == nil ? "Best available video" : "Up to \(qualityName)"
+                    detail: optionDetail(
+                        base: height == nil ? "Best available video" : "Up to \(qualityName)",
+                        estimatedBytes: estimatedBytes
+                    ),
+                    estimatedBytes: estimatedBytes
                 ))
             }
         }
 
-        options.append(CleanFormatOption(
-            name: "Audio MP3",
-            formatSelector: "bestaudio/best",
-            isAudioOnly: true,
-            symbol: "music.note",
-            outputExtension: "mp3",
-            detail: "Converted with ffmpeg"
-        ))
+        if hasAudioFormat(rawFormats, preferredExtension: nil) {
+            let estimatedBytes = estimatedAudioBytes(rawFormats, preferredExtension: nil)
+            options.append(CleanFormatOption(
+                name: "Audio MP3",
+                formatSelector: "bestaudio/best",
+                isAudioOnly: true,
+                symbol: "music.note",
+                outputExtension: "mp3",
+                detail: optionDetail(base: "Converted with ffmpeg", estimatedBytes: estimatedBytes),
+                estimatedBytes: estimatedBytes
+            ))
+        }
 
-        options.append(CleanFormatOption(
-            name: "Audio M4A",
-            formatSelector: "bestaudio[ext=m4a]/bestaudio/best",
-            isAudioOnly: true,
-            symbol: "waveform",
-            outputExtension: "m4a",
-            detail: "Prefer native M4A"
-        ))
+        if hasAudioFormat(rawFormats, preferredExtension: "m4a") {
+            let estimatedBytes = estimatedAudioBytes(rawFormats, preferredExtension: "m4a")
+            options.append(CleanFormatOption(
+                name: "Audio M4A",
+                formatSelector: "bestaudio[ext=m4a]/bestaudio/best",
+                isAudioOnly: true,
+                symbol: "waveform",
+                outputExtension: "m4a",
+                detail: optionDetail(base: "Prefer native M4A", estimatedBytes: estimatedBytes),
+                estimatedBytes: estimatedBytes
+            ))
+        }
 
-        options.append(CleanFormatOption(
-            name: "Audio Opus",
-            formatSelector: "bestaudio[ext=webm]/bestaudio/best",
-            isAudioOnly: true,
-            symbol: "waveform",
-            outputExtension: "opus",
-            detail: "Efficient audio"
-        ))
+        if hasAudioFormat(rawFormats, preferredExtension: "webm") {
+            let estimatedBytes = estimatedAudioBytes(rawFormats, preferredExtension: "webm")
+            options.append(CleanFormatOption(
+                name: "Audio Opus",
+                formatSelector: "bestaudio[ext=webm]/bestaudio/best",
+                isAudioOnly: true,
+                symbol: "waveform",
+                outputExtension: "opus",
+                detail: optionDetail(base: "Efficient audio", estimatedBytes: estimatedBytes),
+                estimatedBytes: estimatedBytes
+            ))
+        }
 
         return options
+    }
+
+    private static func hasVideoFormat(_ formats: [RawMediaFormat], height: Int?, container: String) -> Bool {
+        formats.contains { format in
+            guard isVideo(format), matchesHeight(format, height: height) else { return false }
+            return container == "mkv" || format.ext?.caseInsensitiveCompare(container) == .orderedSame
+        }
+    }
+
+    private static func hasAudioFormat(_ formats: [RawMediaFormat], preferredExtension: String?) -> Bool {
+        formats.contains { format in
+            guard isAudio(format) else { return false }
+            guard let preferredExtension else { return true }
+            return format.ext?.caseInsensitiveCompare(preferredExtension) == .orderedSame
+        }
+    }
+
+    private static func estimatedVideoBytes(_ formats: [RawMediaFormat], height: Int?, container: String) -> Int64? {
+        let videoBytes = formats
+            .filter { format in
+                guard isVideo(format), matchesHeight(format, height: height) else { return false }
+                return container == "mkv" || format.ext?.caseInsensitiveCompare(container) == .orderedSame
+            }
+            .compactMap { formatSize($0) }
+            .max()
+
+        guard let videoBytes else { return nil }
+        let audioBytes = estimatedAudioBytes(formats, preferredExtension: container == "webm" ? "webm" : "m4a") ??
+            estimatedAudioBytes(formats, preferredExtension: nil) ??
+            0
+        return videoBytes + audioBytes
+    }
+
+    private static func estimatedAudioBytes(_ formats: [RawMediaFormat], preferredExtension: String?) -> Int64? {
+        let preferred = formats
+            .filter { format in
+                guard isAudio(format) else { return false }
+                guard let preferredExtension else { return true }
+                return format.ext?.caseInsensitiveCompare(preferredExtension) == .orderedSame
+            }
+            .compactMap { formatSize($0) }
+            .max()
+
+        if preferred != nil || preferredExtension == nil {
+            return preferred
+        }
+
+        return estimatedAudioBytes(formats, preferredExtension: nil)
+    }
+
+    private static func isVideo(_ format: RawMediaFormat) -> Bool {
+        guard let vcodec = format.vcodec?.lowercased(), vcodec != "none" else { return false }
+        return true
+    }
+
+    private static func isAudio(_ format: RawMediaFormat) -> Bool {
+        let acodec = format.acodec?.lowercased()
+        let vcodec = format.vcodec?.lowercased()
+        return acodec != nil && acodec != "none" && (vcodec == nil || vcodec == "none")
+    }
+
+    private static func matchesHeight(_ format: RawMediaFormat, height: Int?) -> Bool {
+        guard let height else { return true }
+        guard let formatHeight = format.height else { return false }
+        return formatHeight <= height && formatHeight >= height - 100
+    }
+
+    private static func formatSize(_ format: RawMediaFormat) -> Int64? {
+        format.filesize ?? format.filesize_approx
+    }
+
+    private static func optionDetail(base: String, estimatedBytes: Int64?) -> String {
+        guard let estimatedBytes, estimatedBytes > 0 else { return base }
+        return "\(base) - ~\(ByteFormatter.string(estimatedBytes))"
     }
 
     private static func videoSelector(height: Int?, container: String) -> String {

@@ -4,7 +4,7 @@ import Sparkle
 final class SparkleUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
     private var _controller: SPUStandardUpdaterController?
     var controller: SPUStandardUpdaterController { _controller! }
-    
+
     @Published var isChecking = false
     @Published var updateStatus: String?
     @Published var foundUpdateItem: SUAppcastItem?
@@ -13,7 +13,7 @@ final class SparkleUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
         super.init()
         self._controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
     }
-    
+
     func checkForUpdates() {
         guard controller.updater.canCheckForUpdates else {
             isChecking = false
@@ -41,7 +41,7 @@ final class SparkleUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
             self.updateStatus = "You're up to date!"
         }
     }
-    
+
     func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
         DispatchQueue.main.async {
             let nsError = error as NSError
@@ -49,7 +49,7 @@ final class SparkleUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
                 // SUNoUpdateError (1001), handled by updaterDidNotFindUpdate
                 return
             }
-            
+
             self.isChecking = false
             self.updateStatus = "Update check failed: \(error.localizedDescription)"
         }
@@ -70,7 +70,7 @@ struct FirelinkApp: App {
     @StateObject private var controller: DownloadController
     @StateObject private var schedulerController: SchedulerController
     @AppStorage("showMenuBarIcon") private var showMenuBarIcon = true
-    
+
     // Server must be retained to keep listening
     private let extensionServer: LocalExtensionServer?
 
@@ -82,7 +82,7 @@ struct FirelinkApp: App {
         _settings = StateObject(wrappedValue: settings)
         _controller = StateObject(wrappedValue: controller)
         _schedulerController = StateObject(wrappedValue: SchedulerController(downloadController: controller))
-        
+
         extensionServer = LocalExtensionServer(downloadController: controller)
         extensionServer?.start()
         controller.extensionServerPort = extensionServer?.port
@@ -136,7 +136,7 @@ struct FirelinkApp: App {
                     NotificationCenter.default.post(name: NSNotification.Name("OpenAddDownloadsWindow"), object: nil)
                 }
                 .keyboardShortcut("n", modifiers: [.command])
-                
+
                 Divider()
 
                 Button("Start Queue") {

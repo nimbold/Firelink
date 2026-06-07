@@ -12,13 +12,13 @@ enum MediaDetector {
         "reddit.com", "v.redd.it",
         "soundcloud.com"
     ]
-    
+
     static func isSupportedMedia(url: URL) -> Bool {
         guard let host = url.host?.lowercased() else { return false }
-        
+
         for domain in supportedDomains {
             if host == domain || host.hasSuffix(".\(domain)") {
-                // Ignore raw files that happen to be hosted on these domains, if any, 
+                // Ignore raw files that happen to be hosted on these domains, if any,
                 // though usually these domains serve web pages for media.
                 return true
             }

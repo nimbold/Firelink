@@ -4,11 +4,11 @@ final class MediaDownloadEngine: @unchecked Sendable {
     struct Handle {
         let cancel: @Sendable () -> Void
     }
-    
+
     enum EngineError: LocalizedError {
         case missingEngine(String)
         case launchFailed(String)
-        
+
         var errorDescription: String? {
             switch self {
             case .missingEngine(let msg): return msg
@@ -16,7 +16,7 @@ final class MediaDownloadEngine: @unchecked Sendable {
             }
         }
     }
-    
+
     func start(
         item: DownloadItem,
         cookieSource: BrowserCookieSource,
@@ -24,34 +24,34 @@ final class MediaDownloadEngine: @unchecked Sendable {
         speedLimitKiBPerSecond: Int?,
         progress: @escaping @Sendable (DownloadProgress) -> Void,
         messageUpdate: @escaping @Sendable (String) -> Void,
-        completion: @escaping @Sendable (Result<Void, Error>) -> Void
+        completion: @escaping @Sendable (Result<URL, Error>) -> Void
     ) async throws -> Handle {
         let ytDlpURL = await MediaEngineManager.shared.binaryPath(for: .ytDlp)
         let ffmpegURL = await MediaEngineManager.shared.binaryPath(for: .ffmpeg)
-        
+
         guard FileManager.default.isExecutableFile(atPath: ytDlpURL.path) else {
             throw EngineError.missingEngine("yt-dlp is not installed. Please check Settings > Add-ons.")
         }
         guard FileManager.default.isExecutableFile(atPath: ffmpegURL.path) else {
             throw EngineError.missingEngine("ffmpeg is not installed. Please check Settings > Add-ons.")
         }
-        
+
         try FileManager.default.createDirectory(at: item.destinationDirectory, withIntermediateDirectories: true)
-        
+
         let process = Process()
         process.executableURL = ytDlpURL
-        
+
         var arguments = [
             "--newline",
             "--ffmpeg-location", ffmpegURL.path,
             "--extractor-args", "youtube:player_client=ios,tv",
             "-o", item.destinationPath
         ]
-        
+
         if let format = item.mediaFormatSelector {
             arguments.append("-f")
             arguments.append(format)
-            
+
             if item.isAudioOnlyMedia == true {
                 let audioFormat = item.fileName.fileExtension(defaultValue: "mp3")
                 arguments.append(contentsOf: ["-x", "--audio-format", audioFormat, "--audio-quality", "0"])
@@ -80,7 +80,7 @@ final class MediaDownloadEngine: @unchecked Sendable {
 
         arguments.append(item.url.absoluteString)
         process.arguments = arguments
-        
+
         let outputPipe = Pipe()
         let errorPipe = Pipe()
         process.standardOutput = outputPipe
@@ -88,9 +88,11 @@ final class MediaDownloadEngine: @unchecked Sendable {
 
         let parser = YTDLPProgressParser()
         let errorBuffer = LockedDataBuffer()
+        let outputPathTracker = YTDLPOutputPathTracker()
         let completionGate = CompletionGate(completion)
         let outputHandler = YTDLPOutputHandler(
             parser: parser,
+            outputPathTracker: outputPathTracker,
             progress: progress,
             messageUpdate: messageUpdate
         )
@@ -109,29 +111,57 @@ final class MediaDownloadEngine: @unchecked Sendable {
                 outputHandler.handle(text)
             }
         }
-        
+
         process.terminationHandler = { finishedProcess in
             outputPipe.fileHandleForReading.readabilityHandler = nil
             errorPipe.fileHandleForReading.readabilityHandler = nil
-            
+
             if finishedProcess.terminationStatus == 0 {
-                completionGate.complete(.success(()))
+                completionGate.complete(.success(Self.resolvedOutputURL(for: item, tracker: outputPathTracker)))
             } else {
                 let errorString = String(data: errorBuffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Unknown Error"
                 completionGate.complete(.failure(EngineError.launchFailed(Self.cleanErrorMessage(errorString, status: finishedProcess.terminationStatus))))
             }
         }
-        
+
         try process.run()
         messageUpdate("Fetching media data...")
         outputPipe.fileHandleForWriting.closeFile()
         errorPipe.fileHandleForWriting.closeFile()
-        
+
         return Handle(cancel: {
             if process.isRunning {
                 process.terminate()
             }
         })
+    }
+
+    private static func resolvedOutputURL(for item: DownloadItem, tracker: YTDLPOutputPathTracker) -> URL {
+        let expectedURL = URL(fileURLWithPath: item.destinationPath)
+        if FileManager.default.fileExists(atPath: expectedURL.path) {
+            return expectedURL
+        }
+
+        if let observedURL = tracker.lastExistingOutputURL {
+            return observedURL
+        }
+
+        let baseName = expectedURL.deletingPathExtension().lastPathComponent
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: item.destinationDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return expectedURL
+        }
+
+        return contents
+            .filter { $0.deletingPathExtension().lastPathComponent == baseName }
+            .max { lhs, rhs in
+                let lhsDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let rhsDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return lhsDate < rhsDate
+            } ?? expectedURL
     }
 
     private static func cleanErrorMessage(_ message: String, status: Int32) -> String {
@@ -164,15 +194,18 @@ final class MediaDownloadEngine: @unchecked Sendable {
 
 final class YTDLPOutputHandler: @unchecked Sendable {
     private let parser: YTDLPProgressParser
+    private let outputPathTracker: YTDLPOutputPathTracker
     private let progress: @Sendable (DownloadProgress) -> Void
     private let messageUpdate: @Sendable (String) -> Void
 
     init(
         parser: YTDLPProgressParser,
+        outputPathTracker: YTDLPOutputPathTracker,
         progress: @escaping @Sendable (DownloadProgress) -> Void,
         messageUpdate: @escaping @Sendable (String) -> Void
     ) {
         self.parser = parser
+        self.outputPathTracker = outputPathTracker
         self.progress = progress
         self.messageUpdate = messageUpdate
     }
@@ -180,6 +213,7 @@ final class YTDLPOutputHandler: @unchecked Sendable {
     func handle(_ text: String) {
         for line in text.split(whereSeparator: \.isNewline) {
             let stringLine = String(line)
+            outputPathTracker.observe(stringLine)
             if let update = parser.parse(stringLine) {
                 progress(update)
                 messageUpdate("Downloading Media")
@@ -215,6 +249,60 @@ final class YTDLPOutputHandler: @unchecked Sendable {
     }
 }
 
+final class YTDLPOutputPathTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var observedPaths: [String] = []
+    private let quotedPathRegex = try? NSRegularExpression(pattern: #""([^"]+)""#)
+
+    var lastExistingOutputURL: URL? {
+        lock.withLock {
+            observedPaths
+                .reversed()
+                .map { URL(fileURLWithPath: $0) }
+                .first { FileManager.default.fileExists(atPath: $0.path) }
+        }
+    }
+
+    func observe(_ line: String) {
+        let candidates = pathCandidates(from: line)
+        guard !candidates.isEmpty else { return }
+
+        lock.withLock {
+            for candidate in candidates where !observedPaths.contains(candidate) {
+                observedPaths.append(candidate)
+            }
+        }
+    }
+
+    private func pathCandidates(from line: String) -> [String] {
+        var paths: [String] = []
+
+        if line.contains("Destination:"),
+           let destination = line.components(separatedBy: "Destination:").last?.trimmingCharacters(in: .whitespacesAndNewlines),
+           destination.hasPrefix("/") {
+            paths.append(destination.trimmingCharacters(in: CharacterSet(charactersIn: "\"")))
+        }
+
+        for quoted in quotedCaptures(in: line) where quoted.hasPrefix("/") {
+            paths.append(quoted)
+        }
+
+        return paths
+    }
+
+    private func quotedCaptures(in text: String) -> [String] {
+        guard let quotedPathRegex else { return [] }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return quotedPathRegex.matches(in: text, range: range).compactMap { match in
+            guard match.numberOfRanges > 1,
+                  let captureRange = Range(match.range(at: 1), in: text) else {
+                return nil
+            }
+            return String(text[captureRange])
+        }
+    }
+}
+
 private extension String {
     func fileExtension(defaultValue: String) -> String {
         let ext = (self as NSString).pathExtension.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -227,14 +315,14 @@ final class YTDLPProgressParser: @unchecked Sendable {
     private let speedRegex = try? NSRegularExpression(pattern: #"at\s+([^\s]+)"#)
     private let etaRegex = try? NSRegularExpression(pattern: #"ETA\s+([^\s]+)"#)
     private let sizeRegex = try? NSRegularExpression(pattern: #"of\s+~?([0-9.]+[a-zA-Z]+)"#)
-    
+
     func parse(_ line: String) -> DownloadProgress? {
         if line.contains("[download]") && line.contains("%") {
             let fraction = (Double(firstCapture(in: line, regex: percentageRegex) ?? "0") ?? 0) / 100.0
             let speed = firstCapture(in: line, regex: speedRegex) ?? "-"
             let eta = firstCapture(in: line, regex: etaRegex) ?? "-"
             let size = firstCapture(in: line, regex: sizeRegex) ?? "-"
-            
+
             return DownloadProgress(
                 fraction: min(max(fraction, 0), 1),
                 bytesText: size,
@@ -248,7 +336,7 @@ final class YTDLPProgressParser: @unchecked Sendable {
             let eta = firstCapture(in: line, regex: try? NSRegularExpression(pattern: #"ETA:([^\]]+)"#)) ?? "-"
             let size = firstCapture(in: line, regex: try? NSRegularExpression(pattern: #"/([^\s\(]+)\("#)) ?? "-"
             let cn = Int(firstCapture(in: line, regex: try? NSRegularExpression(pattern: #"CN:(\d+)"#)) ?? "1") ?? 1
-            
+
             return DownloadProgress(
                 fraction: min(max(fraction, 0), 1),
                 bytesText: size,
@@ -259,7 +347,7 @@ final class YTDLPProgressParser: @unchecked Sendable {
         }
         return nil
     }
-    
+
     private func firstCapture(in text: String, regex: NSRegularExpression?) -> String? {
         guard let regex else { return nil }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)

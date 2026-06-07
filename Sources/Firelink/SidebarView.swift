@@ -98,7 +98,7 @@ struct SidebarView: View {
                 }
                 .buttonStyle(.plain)
             }
-            
+
             Section("Tools") {
                 Label("Scheduler", systemImage: "calendar.badge.clock")
                     .tag(SidebarSelection.scheduler)

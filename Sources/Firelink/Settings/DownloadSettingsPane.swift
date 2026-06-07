@@ -24,7 +24,7 @@ struct DownloadSettingsPane: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            
+
             Section {
                 LabeledContent("Global speed limit") {
                     HStack {

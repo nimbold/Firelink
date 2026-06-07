@@ -14,29 +14,29 @@ struct LookAndFeelSettingsPane: View {
                     }
                 }
                 .pickerStyle(.radioGroup)
-                
+
                 Text("Select a color palette for the app's user interface.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            
+
             Section("Display") {
                 Picker("Font Size", selection: $settings.appFontSize) {
                     ForEach(AppFontSize.allCases) { size in
                         Text(size.rawValue).tag(size)
                     }
                 }
-                
+
                 Picker("List Row Density", selection: $settings.listRowDensity) {
                     ForEach(ListRowDensity.allCases) { density in
                         Text(density.rawValue).tag(density)
                     }
                 }
             }
-            
+
             Section("Menu Bar") {
                 Toggle("Show menu bar icon", isOn: $showMenuBarIcon)
-                
+
                 Text("Provides quick access to downloads and queues from the macOS menu bar.")
                     .font(.caption)
                     .foregroundStyle(.secondary)

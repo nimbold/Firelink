@@ -116,11 +116,11 @@ final class AppSettings: ObservableObject {
     @Published var appTheme: AppTheme = .system {
         didSet { save() }
     }
-    
+
     @Published var appFontSize: AppFontSize = .standard {
         didSet { save() }
     }
-    
+
     @Published var listRowDensity: ListRowDensity = .standard {
         didSet { save() }
     }
@@ -342,7 +342,7 @@ final class AppSettings: ObservableObject {
             let data = await Task.detached(priority: .background) {
                 try? JSONEncoder().encode(stored)
             }.value
-            
+
             guard !Task.isCancelled, let encoded = data else { return }
             defaults.set(encoded, forKey: storageKey)
         }
