@@ -62,10 +62,11 @@ enum MediaExtractionEngine {
         credentials: DownloadCredentials?,
         transferOptions: DownloadTransferOptions
     ) async throws -> (MediaMetadata, [CleanFormatOption]) {
-        let ytDlpPath = await MediaEngineManager.shared.binaryPath(for: .ytDlp).path
-        guard FileManager.default.isExecutableFile(atPath: ytDlpPath) else {
+        guard let ytDlpURL = await MediaEngineManager.shared.binaryPath(for: .ytDlp),
+              FileManager.default.isExecutableFile(atPath: ytDlpURL.path) else {
             throw ExtractionError.processFailed("yt-dlp binary not found.")
         }
+        let ytDlpPath = ytDlpURL.path
 
         var args = ["-J", "--no-warnings", "--ignore-no-formats-error", "--no-playlist", "--extractor-args", "youtube:player_client=ios,tv"]
         appendCommonArguments(to: &args, cookieSource: cookieSource, credentials: credentials, transferOptions: transferOptions)

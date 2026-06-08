@@ -50,7 +50,7 @@ struct AddDownloadsView: View {
                 .padding(16)
                 .background(.background)
         }
-        .frame(minWidth: 640, idealWidth: 680, minHeight: 470, idealHeight: 500)
+        .frame(minWidth: 640, idealWidth: 680, minHeight: 620, idealHeight: 680)
         .sheet(isPresented: $showingDuplicates) {
             DuplicateResolutionView(
                 conflicts: $conflictingDownloads,

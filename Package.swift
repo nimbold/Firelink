@@ -21,7 +21,9 @@ let package = Package(
             ],
             path: "Sources/Firelink",
             resources: [
-                .process("Assets.xcassets")
+                .process("Assets.xcassets"),
+                .copy("yt-dlp"),
+                .copy("ffmpeg")
             ]
         )
     ]

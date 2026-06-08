@@ -126,7 +126,7 @@ struct FirelinkApp: App {
         }
         .windowStyle(.titleBar)
 
-        WindowGroup("Add Downloads", id: "add-downloads") {
+        Window("Add Downloads", id: "add-downloads") {
             AddDownloadsView()
                 .environmentObject(controller)
                 .environmentObject(settings)

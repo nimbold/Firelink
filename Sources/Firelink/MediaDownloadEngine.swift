@@ -29,10 +29,10 @@ final class MediaDownloadEngine: @unchecked Sendable {
         let ytDlpURL = await MediaEngineManager.shared.binaryPath(for: .ytDlp)
         let ffmpegURL = await MediaEngineManager.shared.binaryPath(for: .ffmpeg)
 
-        guard FileManager.default.isExecutableFile(atPath: ytDlpURL.path) else {
+        guard let ytDlpURL, FileManager.default.isExecutableFile(atPath: ytDlpURL.path) else {
             throw EngineError.missingEngine("yt-dlp is not installed. Please check Settings > Add-ons.")
         }
-        guard FileManager.default.isExecutableFile(atPath: ffmpegURL.path) else {
+        guard let ffmpegURL, FileManager.default.isExecutableFile(atPath: ffmpegURL.path) else {
             throw EngineError.missingEngine("ffmpeg is not installed. Please check Settings > Add-ons.")
         }
 
