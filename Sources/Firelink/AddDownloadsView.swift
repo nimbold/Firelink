@@ -56,7 +56,9 @@ struct AddDownloadsView: View {
                 conflicts: $conflictingDownloads,
                 onConfirm: {
                     showingDuplicates = false
-                    executeAddDownloads(start: pendingStartFlag, conflicts: conflictingDownloads)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        executeAddDownloads(start: pendingStartFlag, conflicts: conflictingDownloads)
+                    }
                 },
                 onCancel: {
                     showingDuplicates = false

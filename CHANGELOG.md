@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.2] - 2026-06-08
 
 ### Fixes
+- Fix a bug where confirming a duplicate resolution failed to close the Add Downloads window, misleading users into thinking the download didn't start.
 - Fix keyboard shortcut collision that caused the main window to intercept Enter/Escape keys when the duplicate resolution sheet was open.
 - Fix UI freeze when checking release notes for an update by parsing HTML asynchronously on a background thread.
 - Improve Sparkle changelog formatting by converting HTML tags to clean Markdown instead of stripping them into an unreadable block of text.
