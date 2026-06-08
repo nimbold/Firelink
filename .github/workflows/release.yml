@@ -31,11 +31,14 @@ jobs:
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
+            TAG_NAME="${GITHUB_REF_NAME}"
           else
             VERSION="${{ inputs.version }}"
+            TAG_NAME="v${VERSION}"
           fi
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
           echo "Version: $VERSION"
 
       - name: Show build environment
@@ -102,17 +105,88 @@ jobs:
           if-no-files-found: error
 
       - name: Publish GitHub release
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG_NAME="${{ steps.version.outputs.tag_name }}"
           awk '/^## \['"$VERSION"'\]/{flag=1; next} /^## \[/{if(flag) exit} flag' CHANGELOG.md > release_notes.md
           test -s release_notes.md
 
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/*.dmg --clobber
-            gh release edit "$GITHUB_REF_NAME" --notes-file release_notes.md
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" dist/*.dmg --clobber
+            gh release edit "$TAG_NAME" --notes-file release_notes.md
           else
-            gh release create "$GITHUB_REF_NAME" dist/*.dmg --title "$GITHUB_REF_NAME" --notes-file release_notes.md --verify-tag
+            gh release create "$TAG_NAME" dist/*.dmg --title "$TAG_NAME" --notes-file release_notes.md --verify-tag
+          fi
+
+      - name: Update Sparkle appcast
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          if [[ -z "${SPARKLE_ED_PRIVATE_KEY}" ]]; then
+            echo "Missing SPARKLE_ED_PRIVATE_KEY repository secret; cannot update appcast.xml" >&2
+            exit 1
+          fi
+
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG_NAME="${{ steps.version.outputs.tag_name }}"
+          BUILD_NUMBER="${{ github.run_number }}"
+          DMG_PATH="dist/Firelink-${VERSION}-mac-arm64.dmg"
+          DMG_URL="https://github.com/nimbold/Firelink/releases/download/${TAG_NAME}/Firelink-${VERSION}-mac-arm64.dmg"
+          RELEASE_NOTES_URL="https://github.com/nimbold/Firelink/releases/tag/${TAG_NAME}"
+          PUB_DATE="$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S +0000')"
+
+          SIGN_OUTPUT="$(printf '%s' "$SPARKLE_ED_PRIVATE_KEY" | .build/artifacts/sparkle/Sparkle/bin/sign_update --ed-key-file - "$DMG_PATH")"
+          ED_SIGNATURE="$(printf '%s\n' "$SIGN_OUTPUT" | sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p' | head -1)"
+          LENGTH="$(stat -f%z "$DMG_PATH" 2>/dev/null || stat -c%s "$DMG_PATH")"
+
+          if [[ -z "$ED_SIGNATURE" || -z "$LENGTH" ]]; then
+            echo "Failed to extract Sparkle signature or DMG length" >&2
+            printf '%s\n' "$SIGN_OUTPUT" >&2
+            exit 1
+          fi
+
+          git fetch origin main
+          git checkout main
+          git pull --ff-only origin main
+
+          cat > appcast.xml <<XML
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <channel>
+              <title>Firelink Updates</title>
+              <link>https://github.com/nimbold/Firelink</link>
+              <description>Most recent updates for Firelink</description>
+              <language>en</language>
+              <item>
+                <title>Version ${VERSION}</title>
+                <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+                <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+                <sparkle:releaseNotesLink>${RELEASE_NOTES_URL}</sparkle:releaseNotesLink>
+                <pubDate>${PUB_DATE}</pubDate>
+                <enclosure url="${DMG_URL}"
+                           sparkle:version="${BUILD_NUMBER}"
+                           sparkle:shortVersionString="${VERSION}"
+                           length="${LENGTH}"
+                           type="application/octet-stream"
+                           sparkle:edSignature="${ED_SIGNATURE}" />
+              </item>
+            </channel>
+          </rss>
+          XML
+
+          xmllint --noout appcast.xml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add appcast.xml
+          if git diff --cached --quiet; then
+            echo "appcast.xml already up to date"
+          else
+            git commit -m "chore(release): update appcast for ${VERSION}"
+            git push origin main
           fi
