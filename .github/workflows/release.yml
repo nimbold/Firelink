@@ -108,9 +108,11 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           awk '/^## \['"$VERSION"'\]/{flag=1; next} /^## \[/{if(flag) exit} flag' CHANGELOG.md > release_notes.md
+          test -s release_notes.md
 
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist/*.dmg --clobber
+            gh release edit "$GITHUB_REF_NAME" --notes-file release_notes.md
           else
             gh release create "$GITHUB_REF_NAME" dist/*.dmg --title "$GITHUB_REF_NAME" --notes-file release_notes.md --verify-tag
           fi

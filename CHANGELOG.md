@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-06-08
+
+### New Features
+- No new user-facing features in this patch release.
+
+### Improvements
+- Package bundled `yt-dlp` and `ffmpeg` executables into the macOS app bundle so media extraction works in release builds.
+- Resolve bundled media engines from both app resources and SwiftPM resources to support packaged apps and local development builds.
+
+### Changes
+- Fetch release-time media engine binaries in GitHub Actions instead of storing large binaries in git.
+- Use the changelog entry for GitHub release page descriptions so published release notes match the source tree.
+- Remove stale media add-on update language now that media engines are bundled with the app.
+- Update Firelink Companion to `1.0.8`.
+
+### Fixes
+- Replace the stale pinned FFmpeg download URL with Martin Riedl's latest macOS ARM64 release redirect.
+- Fail release builds early when `yt-dlp` or `ffmpeg` cannot be fetched or made executable.
+- Remove unused media inspector and media download entry-point code left behind by the removed engine update flow.
+- Prevent Firelink Companion global capture from canceling browser downloads unless the native app confirms the local API handoff.
+
 ## [0.6.0] - 2026-06-08
 
 ### New features
