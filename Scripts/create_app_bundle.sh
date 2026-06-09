@@ -197,10 +197,6 @@ if command -v codesign &> /dev/null; then
     sign_mach_o_file "$executable_path"
   done < <(find "$RESOURCES_DIR" -type f -print0)
 
-  while IFS= read -r -d '' bundle_path; do
-    sign_path "$bundle_path"
-  done < <(find "$RESOURCES_DIR" \( -name "*.xpc" -o -name "*.framework" \) -type d -depth -print0)
-
   sign_path "$MACOS_DIR/$APP_NAME"
   sign_path "$APP_DIR"
   codesign --verify --deep --verbose=2 "$APP_DIR" || true
