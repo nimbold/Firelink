@@ -45,6 +45,9 @@ final class MediaDownloadEngine: @unchecked Sendable {
             "--newline",
             "--ffmpeg-location", ffmpegURL.path,
             "--force-ipv4",
+            "--live-from-start",
+            "--extractor-args", "youtube:player_client=ios,web",
+            "--compat-options", "no-youtube-unavailable-videos",
             "-o", item.destinationPath
         ]
 

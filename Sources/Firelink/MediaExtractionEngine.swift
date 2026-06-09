@@ -69,7 +69,8 @@ enum MediaExtractionEngine {
         for url: URL,
         cookieSource: BrowserCookieSource,
         credentials: DownloadCredentials?,
-        transferOptions: DownloadTransferOptions
+        transferOptions: DownloadTransferOptions,
+        proxyConfiguration: DownloadProxyConfiguration
     ) async throws -> (MediaMetadata, [CleanFormatOption]) {
         guard let ytDlpURL = await MediaEngineManager.shared.binaryPath(for: .ytDlp),
               FileManager.default.isExecutableFile(atPath: ytDlpURL.path) else {
@@ -77,7 +78,20 @@ enum MediaExtractionEngine {
         }
         let ytDlpPath = ytDlpURL.path
 
-        var args = ["-J", "--no-warnings", "--ignore-no-formats-error", "--no-playlist", "--force-ipv4"]
+        var args = [
+            "-J", 
+            "--no-warnings", 
+            "--ignore-no-formats-error", 
+            "--no-playlist", 
+            "--force-ipv4",
+            "--extractor-args", "youtube:player_client=ios,web",
+            "--compat-options", "no-youtube-unavailable-videos"
+        ]
+
+        if let proxyURI = proxyConfiguration.customProxyURI, proxyConfiguration.mode == .custom {
+            args.append(contentsOf: ["--proxy", proxyURI])
+        }
+
         appendCommonArguments(to: &args, cookieSource: cookieSource, credentials: credentials, transferOptions: transferOptions)
         args.append(url.absoluteString)
 

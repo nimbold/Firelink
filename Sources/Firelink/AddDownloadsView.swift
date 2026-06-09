@@ -603,7 +603,8 @@ struct AddDownloadsView: View {
                                     for: item.url,
                                     cookieSource: settings.mediaCookieSource,
                                     credentials: metadataCredentials(for: item.url),
-                                    transferOptions: transferOptions
+                                    transferOptions: transferOptions,
+                                    proxyConfiguration: settings.downloadProxyConfiguration
                                 )
                                 fetchedItem.mediaMetadata = metadata
                                 fetchedItem.mediaOptions = options
