@@ -26,11 +26,10 @@ struct ToastNotification: ViewModifier {
                 }
                 .zIndex(1)
                 .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isShowing)
-                .onAppear {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        withAnimation {
-                            isShowing = false
-                        }
+                .task {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    withAnimation {
+                        isShowing = false
                     }
                 }
             }

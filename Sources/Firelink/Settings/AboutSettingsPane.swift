@@ -149,8 +149,6 @@ struct AboutSettingsPane: View {
                     subtitle: "You have Firelink \(appVersion). Download the new release from GitHub when you're ready."
                 )
 
-                releaseNotesDisclosure(for: update)
-
                 HStack(spacing: 12) {
                     Button {
                         NSWorkspace.shared.open(update.releaseURL)
@@ -243,22 +241,4 @@ struct AboutSettingsPane: View {
         }
     }
 
-    private func releaseNotesDisclosure(for update: AvailableReleaseUpdate) -> some View {
-        DisclosureGroup("What's New") {
-            ScrollView {
-                Text(releaseNotes(from: update.releaseNotes))
-                    .font(.caption)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-            .frame(maxHeight: 180)
-            .padding(8)
-            .background(Color(NSColor.controlBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-        }
-    }
-
-    private func releaseNotes(from markdown: String) -> AttributedString {
-        (try? AttributedString(markdown: markdown)) ?? AttributedString(markdown)
-    }
 }
