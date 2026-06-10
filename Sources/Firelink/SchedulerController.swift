@@ -18,13 +18,13 @@ enum SchedulerDay: Int, Codable, CaseIterable, Identifiable {
 
     var shortName: String {
         switch self {
-        case .sunday: "S"
-        case .monday: "M"
-        case .tuesday: "T"
-        case .wednesday: "W"
-        case .thursday: "T"
-        case .friday: "F"
-        case .saturday: "S"
+        case .sunday: "Su"
+        case .monday: "Mo"
+        case .tuesday: "Tu"
+        case .wednesday: "We"
+        case .thursday: "Th"
+        case .friday: "Fr"
+        case .saturday: "Sa"
         }
     }
 }

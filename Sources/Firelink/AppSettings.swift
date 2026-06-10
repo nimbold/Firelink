@@ -445,7 +445,7 @@ final class AppSettings: ObservableObject {
                 extensionPairingToken = Self.generateSecureToken()
             }
         } else {
-            isKeychainAccessGranted = false
+            revokeKeychainAccess()
         }
     }
 

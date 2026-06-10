@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import AppKit
+import Combine
 
 final class LocalExtensionServer: @unchecked Sendable {
     private enum Constants {
@@ -16,7 +17,12 @@ final class LocalExtensionServer: @unchecked Sendable {
     private let settings: AppSettings
     private let queue = DispatchQueue(label: "local.firelink.server")
     let port: UInt16
+    
+    private let tokenLock = NSLock()
+    private var _pairingToken: String = ""
+    private var cancellables = Set<AnyCancellable>()
 
+    @MainActor
     init?(downloadController: DownloadController, settings: AppSettings) {
         self.downloadController = downloadController
         self.settings = settings
@@ -42,6 +48,16 @@ final class LocalExtensionServer: @unchecked Sendable {
 
         self.listener = createdListener
         self.port = selectedPort ?? 6412
+
+        settings.$extensionPairingToken
+            .sink { [weak self] token in
+                self?.tokenLock.withLock { self?._pairingToken = token }
+            }
+            .store(in: &cancellables)
+    }
+
+    private var currentPairingToken: String {
+        tokenLock.withLock { _pairingToken }
     }
 
     func start() {
@@ -139,7 +155,7 @@ final class LocalExtensionServer: @unchecked Sendable {
             return isAllowedExtensionOrigin(request.header(named: "origin") ?? "") ? .noContent : .forbidden
         }
 
-        let expectedToken = DispatchQueue.main.sync { settings.extensionPairingToken }
+        let expectedToken = currentPairingToken
         guard let token = request.header(named: Constants.extensionRequestHeader),
               token == expectedToken else {
             return .forbidden

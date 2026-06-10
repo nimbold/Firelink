@@ -322,7 +322,7 @@ struct AddDownloadsView: View {
                         ProgressView().controlSize(.small)
                         Text("Fetching media options...")
                             .foregroundStyle(.secondary)
-                    } else if case .failed(let error) = firstMedia.state {
+                    } else if case .failed(_) = firstMedia.state {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
                         Text("Failed to load options.")
                             .foregroundStyle(.secondary)

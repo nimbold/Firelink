@@ -2,7 +2,7 @@ import Foundation
 import CFNetwork
 import Network
 
-final class Aria2DownloadEngine {
+final class Aria2DownloadEngine: Sendable {
     struct Handle {
         let processIdentifier: Int32
         let rpcPort: Int
@@ -107,7 +107,7 @@ final class Aria2DownloadEngine {
         speedLimitKiBPerSecond: Int?,
         progress: @escaping @Sendable (DownloadProgress) -> Void,
         completion: @escaping @Sendable (Result<Void, Error>) -> Void
-    ) throws -> Handle {
+    ) async throws -> Handle {
         guard let executableURL else {
             throw EngineError.executableNotFound
         }
@@ -117,30 +117,48 @@ final class Aria2DownloadEngine {
             withIntermediateDirectories: true
         )
 
-        let rpcPort = Self.findFreePort()
-        let rpcSecret = UUID().uuidString
-        let confURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("firelink-aria2-\(UUID().uuidString).conf")
-        do {
-            let confContent = "rpc-secret=\(rpcSecret)\n"
-            try confContent.write(to: confURL, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: confURL.path)
-        } catch {
-            throw EngineError.launchFailed("Could not write secure configuration file: \(error.localizedDescription)")
-        }
+        var lastError: Error?
 
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = try arguments(
-            for: item,
-            proxyConfiguration: proxyConfiguration,
-            speedLimitKiBPerSecond: speedLimitKiBPerSecond,
-            rpcPort: rpcPort,
-            confURL: confURL
-        )
+        for _ in 1...5 {
+            let rpcPort = Self.findFreePort()
+            let rpcSecret = UUID().uuidString
+            let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("firelink-aria2-\(UUID().uuidString)")
+            
+            do {
+                try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            } catch {
+                lastError = EngineError.launchFailed("Could not create secure temporary directory: \(error.localizedDescription)")
+                continue
+            }
+            
+            let confURL = tempDir.appendingPathComponent("aria2.conf")
+            do {
+                let confContent = "rpc-secret=\(rpcSecret)\n"
+                try confContent.write(to: confURL, atomically: true, encoding: .utf8)
+            } catch {
+                lastError = EngineError.launchFailed("Could not write secure configuration file: \(error.localizedDescription)")
+                continue
+            }
 
-        let inputPipe = Pipe()
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
+            let process = Process()
+            process.executableURL = executableURL
+            
+            do {
+                process.arguments = try arguments(
+                    for: item,
+                    proxyConfiguration: proxyConfiguration,
+                    speedLimitKiBPerSecond: speedLimitKiBPerSecond,
+                    rpcPort: rpcPort,
+                    confURL: confURL
+                )
+            } catch {
+                lastError = error
+                break
+            }
+
+            let inputPipe = Pipe()
+            let outputPipe = Pipe()
+            let errorPipe = Pipe()
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         process.standardError = errorPipe
@@ -169,7 +187,7 @@ final class Aria2DownloadEngine {
         }
 
         process.terminationHandler = { finishedProcess in
-            try? FileManager.default.removeItem(at: confURL)
+            try? FileManager.default.removeItem(at: tempDir)
             completionMonitor.cancel()
             outputPipe.fileHandleForReading.readabilityHandler = nil
             errorPipe.fileHandleForReading.readabilityHandler = nil
@@ -190,33 +208,54 @@ final class Aria2DownloadEngine {
             completionGate.complete(.failure(EngineError.launchFailed(message.isEmpty ? "exit code \(finishedProcess.terminationStatus)" : message)))
         }
 
-        do {
-            try process.run()
-            if let input = inputFileContent(for: item).data(using: .utf8) {
-                inputPipe.fileHandleForWriting.write(input)
+            var didThrow = false
+            do {
+                try process.run()
+                if let input = inputFileContent(for: item).data(using: .utf8) {
+                    inputPipe.fileHandleForWriting.write(input)
+                }
+                inputPipe.fileHandleForWriting.closeFile()
+            } catch {
+                didThrow = true
+                lastError = EngineError.launchFailed(error.localizedDescription)
             }
-            inputPipe.fileHandleForWriting.closeFile()
-        } catch {
-            try? FileManager.default.removeItem(at: confURL)
-            throw EngineError.launchFailed(error.localizedDescription)
-        }
+            
+            if didThrow {
+                try? FileManager.default.removeItem(at: tempDir)
+                continue
+            }
+            
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            
+            if !process.isRunning {
+                let stderr = String(data: errorBuffer.data, encoding: .utf8) ?? ""
+                if stderr.contains("Address already in use") || stderr.contains("Failed to bind") || stderr.contains("bind: Address") {
+                    try? FileManager.default.removeItem(at: tempDir)
+                    continue
+                }
+                // If it exited for another reason, we might still want to fail or let the terminationHandler process it.
+                // But the terminationHandler will hit completionGate, so we just return the handle.
+            }
 
-        completionMonitor.set(
-            Self.monitorCompletion(
-                rpcPort: rpcPort,
-                rpcSecret: rpcSecret,
-                process: process,
-                completionGate: completionGate
+            completionMonitor.set(
+                Self.monitorCompletion(
+                    rpcPort: rpcPort,
+                    rpcSecret: rpcSecret,
+                    process: process,
+                    completionGate: completionGate
+                )
             )
-        )
 
-        return Handle(processIdentifier: process.processIdentifier, rpcPort: rpcPort, rpcSecret: rpcSecret) {
-            completionMonitor.cancel()
-            if process.isRunning {
-                process.terminate()
+            return Handle(processIdentifier: process.processIdentifier, rpcPort: rpcPort, rpcSecret: rpcSecret) {
+                completionMonitor.cancel()
+                if process.isRunning {
+                    process.terminate()
+                }
+                try? FileManager.default.removeItem(at: tempDir)
             }
-            try? FileManager.default.removeItem(at: confURL)
         }
+        
+        throw lastError ?? EngineError.launchFailed("Failed to start aria2c after 5 attempts.")
     }
 
     private static func monitorCompletion(

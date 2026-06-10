@@ -74,7 +74,7 @@ final class DownloadController: ObservableObject {
 
         NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)
             .sink { [weak self] _ in
-                self?.saveDownloads()
+                self?.saveDownloadsSync()
             }
             .store(in: &cancellables)
 
@@ -371,12 +371,7 @@ final class DownloadController: ObservableObject {
         pumpQueue()
     }
 
-    func remove(at offsets: IndexSet, deleteFiles: Bool = false) {
-        for index in offsets {
-            let item = downloads[index]
-            delete(item, deleteFiles: deleteFiles)
-        }
-    }
+
 
     func delete(_ item: DownloadItem, deleteFiles: Bool = false) {
         activeHandles[item.id]?.cancel()
@@ -598,49 +593,61 @@ final class DownloadController: ObservableObject {
                 }
             }
         } else {
-            do {
-                let handle = try engine.start(
-                    item: injectedEngineItem(from: item),
-                    proxyConfiguration: settings.downloadProxyConfiguration,
-                    speedLimitKiBPerSecond: effectiveSpeedLimitKiBPerSecond(for: item),
-                    progress: { [weak self] progress in
-                        Task { @MainActor in
-                            let now = Date()
-                            if let last = self?.lastProgressUpdateTimes[item.id], now.timeIntervalSince(last) < 0.25 {
-                                return
+            Task {
+                do {
+                    let liveItem = injectedEngineItem(from: item)
+                    let handle = try await engine.start(
+                        item: liveItem,
+                        proxyConfiguration: settings.downloadProxyConfiguration,
+                        speedLimitKiBPerSecond: effectiveSpeedLimitKiBPerSecond(for: liveItem),
+                        progress: { [weak self] progress in
+                            Task { @MainActor in
+                                let now = Date()
+                                if let last = self?.lastProgressUpdateTimes[item.id], now.timeIntervalSince(last) < 0.25 {
+                                    return
+                                }
+                                self?.lastProgressUpdateTimes[item.id] = now
+                                self?.update(item.id) {
+                                    guard $0.status == .downloading else { return }
+                                    $0.progress = progress.fraction
+                                    $0.bytesText = progress.bytesText
+                                    $0.speedText = progress.speedText
+                                    $0.etaText = progress.etaText
+                                    $0.connectionCount = progress.connectionCount
+                                    $0.message = "Downloading"
+                                }
                             }
-                            self?.lastProgressUpdateTimes[item.id] = now
-                            self?.update(item.id) {
-                                guard $0.status == .downloading else { return }
-                                $0.progress = progress.fraction
-                                $0.bytesText = progress.bytesText
-                                $0.speedText = progress.speedText
-                                $0.etaText = progress.etaText
-                                $0.connectionCount = progress.connectionCount
-                                $0.message = "Downloading"
+                        },
+                        completion: { [weak self] result in
+                            Task { @MainActor in
+                                self?.handleCompletion(item: item, result: result)
                             }
                         }
-                    },
-                    completion: { [weak self] result in
-                        Task { @MainActor in
-                            self?.handleCompletion(item: item, result: result)
+                    )
+                    
+                    await MainActor.run {
+                        guard activeDownloadItem(id: item.id) != nil else {
+                            handle.cancel()
+                            return
                         }
+                        activeHandles[item.id] = handle
+                        update(item.id) {
+                            $0.rpcPort = handle.rpcPort
+                            $0.rpcSecret = handle.rpcSecret
+                            $0.message = "Starting..."
+                        }
+                        saveDownloads()
+                        applySpeedLimitsToActiveDownloads()
+                        updateSleepActivity()
                     }
-                )
-                activeHandles[item.id] = handle
-                update(item.id) {
-                    $0.rpcPort = handle.rpcPort
-                    $0.rpcSecret = handle.rpcSecret
-                    $0.message = "Starting..."
+                } catch {
+                    await MainActor.run {
+                        handleDownloadFailure(itemID: item.id, error: error)
+                        applySpeedLimitsToActiveDownloads()
+                        updateSleepActivity()
+                        pumpQueue()
+                    }
                 }
-                saveDownloads()
-                applySpeedLimitsToActiveDownloads()
-                updateSleepActivity()
-            } catch {
-                handleDownloadFailure(itemID: item.id, error: error)
-                applySpeedLimitsToActiveDownloads()
-                updateSleepActivity()
-                pumpQueue()
             }
         }
     }
@@ -993,6 +1000,22 @@ final class DownloadController: ObservableObject {
 
         for candidate in candidates where FileManager.default.fileExists(atPath: candidate.path) {
             try? FileManager.default.trashItem(at: candidate, resultingItemURL: nil)
+        }
+    }
+
+    private func saveDownloadsSync() {
+        let queuesCopy = queues
+        let downloadsCopy = downloads.map(\.redactedForPersistence)
+        let storageURL = self.storageURL
+
+        do {
+            let directory = storageURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
+            let state = StoredDownloadState(queues: queuesCopy, downloads: downloadsCopy)
+            let data = try JSONEncoder().encode(state)
+            try data.write(to: storageURL, options: .atomic)
+        } catch {
+            print("Failed to synchronously save downloads: \(error)")
         }
     }
 

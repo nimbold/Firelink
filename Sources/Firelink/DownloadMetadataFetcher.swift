@@ -54,9 +54,14 @@ enum DownloadMetadataFetcher {
             return pending
         }
 
-        if isAutoFetch, let host = url.host, isPrivateHost(host) {
-            pending.state = .loaded
-            return pending
+        if isAutoFetch, let host = url.host {
+            let isPrivate = await Task.detached {
+                isPrivateHost(host)
+            }.value
+            if isPrivate {
+                pending.state = .loaded
+                return pending
+            }
         }
 
         var request = URLRequest(url: url)

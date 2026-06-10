@@ -126,7 +126,9 @@ struct DownloadTable: View {
         }
         .onAppear { sortedItems = items.sorted(using: sortOrder) }
         .onChange(of: items) { _, newItems in
-            if newItems.count != sortedItems.count {
+            let existingIDs = Set(sortedItems.map(\.id))
+            let newIDs = Set(newItems.map(\.id))
+            if existingIDs != newIDs {
                 sortedItems = newItems.sorted(using: sortOrder)
             } else {
                 let itemsDict = Dictionary(uniqueKeysWithValues: newItems.map { ($0.id, $0) })
