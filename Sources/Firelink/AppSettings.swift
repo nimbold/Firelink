@@ -258,7 +258,7 @@ final class AppSettings: ObservableObject {
             downloadDirectories = Self.decodeDirectories(stored.downloadDirectories)
             granted = stored.isKeychainAccessGranted ?? false
             isKeychainAccessGranted = granted
-            askWhereToSaveEachFile = stored.askWhereToSaveEachFile ?? true
+            askWhereToSaveEachFile = stored.askWhereToSaveEachFile ?? false
         } else {
             appTheme = .system
             appFontSize = .standard
@@ -278,7 +278,7 @@ final class AppSettings: ObservableObject {
             downloadDirectories = Self.defaultDirectories()
             granted = false
             isKeychainAccessGranted = granted
-            askWhereToSaveEachFile = true
+            askWhereToSaveEachFile = false
         }
 
         let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"

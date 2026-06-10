@@ -6,15 +6,13 @@ struct LocationsSettingsPane: View {
 
     var body: some View {
         Form {
-            Section(footer: Text("When enabled, you can choose the download location each time you add a download.")) {
+            Section(footer: Text("When enabled, you can choose the download location each time you add a download. Otherwise, files are saved automatically.")) {
                 Toggle("Ask where to save each file before downloading", isOn: $settings.askWhereToSaveEachFile)
             }
-
-            Section(header: Text("Default Locations"), footer: Text("Automatically sets the folder for all categories within the selected base folder.")) {
+            
+            Section(footer: Text("Folders will be created automatically when saving.")) {
                 BulkDirectoryPickerRow()
-            }
-
-            Section(header: Text("Category Locations"), footer: Text("Folders will be created automatically when saving.")) {
+                
                 ForEach(DownloadCategory.allCases, id: \.self) { category in
                     DirectoryPickerRow(category: category)
                 }
@@ -39,12 +37,13 @@ struct DirectoryPickerRow: View {
     @State private var message = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            LabeledContent {
+        LabeledContent {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
-                    TextField("", text: $path)
+                    TextField("Folder path", text: $path, prompt: Text("Folder path"))
                         .labelsHidden()
                         .textFieldStyle(.roundedBorder)
+                        .multilineTextAlignment(.leading)
                         .font(.system(.body, design: .monospaced))
                         .onSubmit {
                             applyPath()
@@ -54,15 +53,15 @@ struct DirectoryPickerRow: View {
                         selectFolder()
                     }
                 }
-            } label: {
-                Label(category.rawValue, systemImage: category.symbolName)
-            }
 
-            if let displayMessage = message.isEmpty ? statusMessage(for: path) : message, !displayMessage.isEmpty {
-                Text(displayMessage)
-                    .font(.caption)
-                    .foregroundStyle(isErrorMessage(displayMessage) ? .red : .secondary)
+                if let displayMessage = message.isEmpty ? statusMessage(for: path) : message, !displayMessage.isEmpty {
+                    Text(displayMessage)
+                        .font(.caption)
+                        .foregroundStyle(isErrorMessage(displayMessage) ? .red : .secondary)
+                }
             }
+        } label: {
+            Label(category.rawValue, systemImage: category.symbolName)
         }
         .onAppear {
             syncPathFromSettings()
@@ -162,12 +161,13 @@ struct BulkDirectoryPickerRow: View {
     @State private var message = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            LabeledContent {
+        LabeledContent {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
-                    TextField("", text: $path)
+                    TextField("Base folder path", text: $path, prompt: Text("Base folder path"))
                         .labelsHidden()
                         .textFieldStyle(.roundedBorder)
+                        .multilineTextAlignment(.leading)
                         .font(.system(.body, design: .monospaced))
                         .onSubmit {
                             applyPath()
@@ -177,15 +177,15 @@ struct BulkDirectoryPickerRow: View {
                         selectFolder()
                     }
                 }
-            } label: {
-                Label("All Categories", systemImage: "folder.fill.badge.plus")
-            }
 
-            if !message.isEmpty {
-                Text(message)
-                    .font(.caption)
-                    .foregroundStyle(isErrorMessage(message) ? .red : .secondary)
+                if !message.isEmpty {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(isErrorMessage(message) ? .red : .secondary)
+                }
             }
+        } label: {
+            Label("All Categories", systemImage: "folder.fill.badge.plus")
         }
     }
 
