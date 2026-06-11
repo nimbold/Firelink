@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.7.1] - 2026-06-11
 
+### Fixes
+- Increased the `yt-dlp` metadata extraction timeout to 120 seconds to properly handle YouTube's new JavaScript Proof-of-Work bot protection challenges.
+- Improved the `AddDownloadsView` UI to display the exact underlying error message during extraction failures rather than a generic masked string.
+
 ### Security Fixes
 - Addressed multiple vulnerabilities identified in the v0.7.0 security audit.
 - Moved `yt-dlp` credential passing from CLI arguments to secure temporary configuration files to prevent process list leakage.
