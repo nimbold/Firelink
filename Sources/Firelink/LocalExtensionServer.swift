@@ -198,6 +198,7 @@ final class LocalExtensionServer: @unchecked Sendable {
             let urls: [String]
             let referer: String?
             let silent: Bool?
+            let filename: String?
         }
 
         do {
@@ -227,7 +228,7 @@ final class LocalExtensionServer: @unchecked Sendable {
                     NSApp.activate(ignoringOtherApps: true)
                 } else {
                     for validURL in validURLs {
-                        self.downloadController.add(urlText: validURL)
+                        self.downloadController.add(urlText: validURL, filename: payload.filename)
                     }
                     self.downloadController.startQueue()
                 }

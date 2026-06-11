@@ -129,7 +129,7 @@ final class DownloadController: ObservableObject {
         }
     }
 
-    func add(urlText: String, connectionsPerServer: Int? = nil, queueID: UUID = DownloadQueue.mainQueueID) {
+    func add(urlText: String, connectionsPerServer: Int? = nil, queueID: UUID = DownloadQueue.mainQueueID, filename: String? = nil) {
         guard let url = URL(string: urlText.trimmingCharacters(in: .whitespacesAndNewlines)),
               let scheme = url.scheme?.lowercased(),
               ["http", "https", "ftp", "sftp"].contains(scheme) else {
@@ -137,11 +137,12 @@ final class DownloadController: ObservableObject {
             return
         }
 
-        let fileName = FileClassifier.fileName(from: url)
-        let category = FileClassifier.category(forFileName: fileName)
+        let explicitName = filename?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedFileName = (explicitName != nil && !explicitName!.isEmpty) ? explicitName! : FileClassifier.fileName(from: url)
+        let category = FileClassifier.category(forFileName: resolvedFileName)
         let item = DownloadItem(
             url: url,
-            fileName: fileName,
+            fileName: resolvedFileName,
             category: category,
             destinationDirectory: settings.destinationDirectory(for: category),
             connectionsPerServer: min(max(connectionsPerServer ?? settings.perServerConnections, 1), 16),
@@ -154,7 +155,7 @@ final class DownloadController: ObservableObject {
         }
 
         downloads.append(item)
-        engineMessage = "Added \(fileName) to \(category.rawValue)."
+        engineMessage = "Added \(resolvedFileName) to \(category.rawValue)."
         saveDownloads()
     }
 
