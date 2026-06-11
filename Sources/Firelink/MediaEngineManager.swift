@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import Darwin
 
 enum AddonState: Equatable, Sendable {
     case notInstalled
@@ -25,23 +26,34 @@ final class MediaEngineManager: ObservableObject {
 
     @Published var ytDlpState: AddonState = .notInstalled
     @Published var ffmpegState: AddonState = .notInstalled
+    private var ytDlpPreparationTask: Task<URL?, Never>?
 
     private init() {
         checkLocalInstallation()
-        Task.detached { [weak self] in
-            await self?.prewarmYtDlp()
+        Task { [weak self] in
+            _ = await self?.preparedBinaryPath(for: .ytDlp)
         }
     }
 
-    nonisolated private func prewarmYtDlp() async {
-        guard let path = await MainActor.run(body: { binaryPath(for: .ytDlp) }) else { return }
-        let process = Process()
-        process.executableURL = path
-        process.arguments = ["--version"]
-        process.standardOutput = nil
-        process.standardError = nil
-        try? process.run()
-        process.waitUntilExit()
+    func preparedBinaryPath(for addon: AddonType) async -> URL? {
+        guard addon == .ytDlp else { return binaryPath(for: addon) }
+
+        if let ytDlpPreparationTask {
+            return await ytDlpPreparationTask.value
+        }
+
+        guard let bundledURL = binaryPath(for: .ytDlp) else { return nil }
+        let runtimeVersion = bundledRuntimeVersion(near: bundledURL)
+        let task = Task<URL?, Never>.detached(priority: .userInitiated) {
+            let executableURL = Self.installStableYtDlpRuntime(
+                bundledExecutableURL: bundledURL,
+                version: runtimeVersion
+            ) ?? bundledURL
+            Self.prewarm(executableURL)
+            return executableURL
+        }
+        ytDlpPreparationTask = task
+        return await task.value
     }
 
     func binaryPath(for addon: AddonType) -> URL? {
@@ -60,6 +72,144 @@ final class MediaEngineManager: ObservableObject {
             #endif
         }
         return nil
+    }
+
+    private func bundledRuntimeVersion(near executableURL: URL) -> String {
+        let versionURL = executableURL.deletingLastPathComponent()
+            .appendingPathComponent("yt-dlp-version.txt")
+        if let version = try? String(contentsOf: versionURL, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !version.isEmpty {
+            return version
+        }
+
+        return Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+    }
+
+    nonisolated private static func installStableYtDlpRuntime(
+        bundledExecutableURL: URL,
+        version: String
+    ) -> URL? {
+        let fileManager = FileManager.default
+        let bundledDirectory = bundledExecutableURL.deletingLastPathComponent()
+        let bundledInternalURL = bundledDirectory.appendingPathComponent("_internal", isDirectory: true)
+        let bundledDenoURL = bundledDirectory.appendingPathComponent("deno")
+        let hasBundledDeno = fileManager.isExecutableFile(atPath: bundledDenoURL.path)
+
+        guard fileManager.fileExists(atPath: bundledInternalURL.path) else {
+            return bundledExecutableURL
+        }
+
+        guard let applicationSupportURL = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else {
+            return bundledExecutableURL
+        }
+
+        let safeVersion = version.replacingOccurrences(
+            of: #"[^A-Za-z0-9._-]"#,
+            with: "_",
+            options: .regularExpression
+        )
+        let enginesURL = applicationSupportURL
+            .appendingPathComponent("Firelink", isDirectory: true)
+            .appendingPathComponent("MediaEngines", isDirectory: true)
+            .appendingPathComponent("yt-dlp", isDirectory: true)
+        let runtimeURL = enginesURL.appendingPathComponent(safeVersion, isDirectory: true)
+        let executableURL = runtimeURL.appendingPathComponent("yt-dlp")
+        let internalURL = runtimeURL.appendingPathComponent("_internal", isDirectory: true)
+        let denoURL = runtimeURL.appendingPathComponent("deno")
+
+        if fileManager.isExecutableFile(atPath: executableURL.path),
+           fileManager.fileExists(atPath: internalURL.path),
+           !hasBundledDeno || fileManager.isExecutableFile(atPath: denoURL.path) {
+            return executableURL
+        }
+
+        let temporaryURL = enginesURL.appendingPathComponent(
+            ".install-\(UUID().uuidString)",
+            isDirectory: true
+        )
+
+        do {
+            try fileManager.createDirectory(at: enginesURL, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: temporaryURL, withIntermediateDirectories: true)
+            try fileManager.copyItem(
+                at: bundledExecutableURL,
+                to: temporaryURL.appendingPathComponent("yt-dlp")
+            )
+            try fileManager.copyItem(
+                at: bundledInternalURL,
+                to: temporaryURL.appendingPathComponent("_internal", isDirectory: true)
+            )
+            if hasBundledDeno {
+                try fileManager.copyItem(
+                    at: bundledDenoURL,
+                    to: temporaryURL.appendingPathComponent("deno")
+                )
+            }
+            removeTransportAttributesRecursively(at: temporaryURL)
+
+            if fileManager.fileExists(atPath: runtimeURL.path) {
+                try fileManager.removeItem(at: runtimeURL)
+            }
+            try fileManager.moveItem(at: temporaryURL, to: runtimeURL)
+            return executableURL
+        } catch {
+            try? fileManager.removeItem(at: temporaryURL)
+            return bundledExecutableURL
+        }
+    }
+
+    nonisolated private static func removeTransportAttributesRecursively(at rootURL: URL) {
+        removeTransportAttributes(at: rootURL)
+
+        guard let enumerator = FileManager.default.enumerator(
+            at: rootURL,
+            includingPropertiesForKeys: nil,
+            options: [],
+            errorHandler: nil
+        ) else {
+            return
+        }
+
+        for case let itemURL as URL in enumerator {
+            removeTransportAttributes(at: itemURL)
+        }
+    }
+
+    nonisolated private static func removeTransportAttributes(at url: URL) {
+        url.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return }
+            removexattr(path, "com.apple.quarantine", 0)
+            removexattr(path, "com.apple.provenance", 0)
+        }
+    }
+
+    nonisolated private static func prewarm(_ executableURL: URL) {
+        runVersionCommand(executableURL)
+
+        let denoURL = executableURL.deletingLastPathComponent().appendingPathComponent("deno")
+        if FileManager.default.isExecutableFile(atPath: denoURL.path) {
+            runVersionCommand(denoURL)
+        }
+    }
+
+    nonisolated private static func runVersionCommand(_ executableURL: URL) {
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = ["--version"]
+        process.standardOutput = nil
+        process.standardError = nil
+        process.standardInput = nil
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return
+        }
     }
 
     func checkLocalInstallation() {

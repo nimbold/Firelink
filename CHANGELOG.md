@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Prevented yt-dlp and JavaScript child processes from keeping metadata fetches or canceled downloads alive indefinitely.
+- Replaced the repeatedly extracted one-file yt-dlp build with a stable prewarmed runtime cache.
+- Bundled Deno so YouTube JavaScript challenges and formats above 720p do not depend on system-installed tools.
+- Stopped masking empty-format extraction failures and removed brittle forced YouTube client selection.
+
+### Changed
+- Pinned and checksum-verified yt-dlp, Deno, FFmpeg, aria2, and aria2's libraries for matching local and GitHub Actions builds.
+- Removed aria2's runtime dependency on Homebrew and configured its bundled CA certificate for direct and yt-dlp-delegated HTTPS downloads.
+- Added bounded network retries and optional aria2c acceleration for large direct media downloads.
+
 ## [0.7.1] - 2026-06-11
 
 ### Fixes

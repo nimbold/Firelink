@@ -57,7 +57,7 @@ final class Aria2DownloadEngine: Sendable {
         var errorDescription: String? {
             switch self {
             case .executableNotFound:
-                "aria2c was not found. Install it with `brew install aria2`, or bundle aria2c inside the app resources."
+                "The bundled aria2c runtime is missing. Reinstall Firelink or rebuild its media engines."
             case .launchFailed(let details):
                 "Could not start aria2c: \(details)"
             case .unsupportedProxy(let details):
@@ -73,20 +73,30 @@ final class Aria2DownloadEngine: Sendable {
     }
 
     static func findExecutable() -> URL? {
-        if let bundled = Bundle.main.url(forResource: "aria2c", withExtension: nil),
-           FileManager.default.isExecutableFile(atPath: bundled.path) {
+        bundledResource(named: "aria2c", executable: true)
+    }
+
+    static func certificateBundleURL() -> URL? {
+        bundledResource(named: "aria2-cacert.pem", executable: false)
+    }
+
+    private static func bundledResource(named name: String, executable: Bool) -> URL? {
+        func validResource(in bundle: Bundle) -> URL? {
+            guard let url = bundle.resourceURL?.appendingPathComponent(name) else { return nil }
+            let isValid = executable
+                ? FileManager.default.isExecutableFile(atPath: url.path)
+                : FileManager.default.fileExists(atPath: url.path)
+            return isValid ? url : nil
+        }
+
+        if let bundled = validResource(in: .main) {
             return bundled
         }
 
-        let candidates = [
-            "/opt/homebrew/bin/aria2c",
-            "/usr/local/bin/aria2c",
-            "/usr/bin/aria2c",
-            "/opt/local/bin/aria2c"
-        ]
-
-        if let found = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
-            return URL(fileURLWithPath: found)
+        if Bundle.main.bundleURL.pathExtension.lowercased() != "app" {
+            #if SWIFT_PACKAGE
+            return validResource(in: .module)
+            #endif
         }
 
         return nil
@@ -303,7 +313,7 @@ final class Aria2DownloadEngine: Sendable {
             return Handle(processIdentifier: process.processIdentifier, rpcPort: rpcPort, rpcSecret: rpcSecret) {
                 completionMonitor.cancel()
                 if process.isRunning {
-                    process.terminate()
+                    ProcessTreeTerminator.terminate(process)
                 }
                 cleanupTempDir()
             }
@@ -323,7 +333,7 @@ final class Aria2DownloadEngine: Sendable {
                 if await completedDownloadStatus(rpcPort: rpcPort, rpcSecret: rpcSecret) {
                     completionGate.complete(.success(()))
                     if process.isRunning {
-                        process.terminate()
+                        ProcessTreeTerminator.terminate(process)
                     }
                     return
                 }
@@ -447,6 +457,10 @@ final class Aria2DownloadEngine: Sendable {
 
         if let speedLimitKiBPerSecond, speedLimitKiBPerSecond > 0 {
             arguments.append("--max-overall-download-limit=\(speedLimitKiBPerSecond)K")
+        }
+
+        if let certificateBundleURL = Self.certificateBundleURL() {
+            arguments.append("--ca-certificate=\(certificateBundleURL.path)")
         }
 
         arguments.append(contentsOf: try proxyArguments(for: item, configuration: proxyConfiguration))

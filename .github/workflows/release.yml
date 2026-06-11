@@ -60,24 +60,8 @@ jobs:
             exit 1
           fi
 
-      - name: Install dependencies
-        run: brew install aria2 dylibbundler
-
       - name: Fetch media engines
-        run: |
-          mkdir -p Sources/Firelink
-
-          # Download the one-file macOS build. PyInstaller on macOS now properly supports code-signing without corrupting the archive.
-          curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos -o Sources/Firelink/yt-dlp
-          chmod +x Sources/Firelink/yt-dlp
-
-          # Download latest FFmpeg release build for macOS ARM64 from Martin Riedl's build server
-          curl -fsSL "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip" -o ffmpeg.zip
-          unzip -q -o ffmpeg.zip -d Sources/Firelink
-          rm ffmpeg.zip
-          chmod +x Sources/Firelink/ffmpeg
-          test -x Sources/Firelink/yt-dlp
-          test -x Sources/Firelink/ffmpeg
+        run: Scripts/fetch_media_engines.sh
 
       - name: Build app bundle
         env:
@@ -89,7 +73,25 @@ jobs:
         run: |
           file build/Firelink.app/Contents/MacOS/Firelink
           lipo -archs build/Firelink.app/Contents/MacOS/Firelink | grep -qx arm64
-          codesign --verify --deep build/Firelink.app
+          codesign --verify --deep --strict build/Firelink.app
+
+          RESOURCES="build/Firelink.app/Contents/Resources"
+          test -d "$RESOURCES/_internal"
+          test -x "$RESOURCES/yt-dlp"
+          test -x "$RESOURCES/deno"
+          test -x "$RESOURCES/ffmpeg"
+          test -x "$RESOURCES/aria2c"
+          test -f "$RESOURCES/aria2-cacert.pem"
+          test -d "$RESOURCES/aria2-libs"
+          test "$(tr -d '[:space:]' < "$RESOURCES/aria2-version.txt")" = "1.37.0-2-arm64-sonoma"
+          test "$("$RESOURCES/yt-dlp" --version)" = "$(tr -d '[:space:]' < "$RESOURCES/yt-dlp-version.txt")"
+          "$RESOURCES/deno" --version
+          "$RESOURCES/ffmpeg" -version
+          "$RESOURCES/aria2c" --version | grep -q '^aria2 version 1.37.0$'
+          for library in "$RESOURCES"/aria2-libs/*.dylib; do
+            lipo -archs "$library" | grep -qx arm64
+          done
+          ! otool -L "$RESOURCES/aria2c" "$RESOURCES"/aria2-libs/*.dylib | grep -Eq '(@@HOMEBREW|/opt/homebrew|/usr/local)'
 
       - name: Create DMG
         env:

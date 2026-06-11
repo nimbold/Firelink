@@ -34,7 +34,7 @@ struct EngineSettingsPane: View {
                 Text("Core Downloader (Aria2)")
             } footer: {
                 if executableURL == nil {
-                    Text("Install aria2 with Homebrew or ensure it is bundled inside the app resources.")
+                    Text("The bundled aria2 runtime is missing. Reinstall Firelink or rebuild its media engines.")
                         .foregroundStyle(.red)
                 } else {
                     Text("Handles core HTTP/FTP and BitTorrent downloads.")

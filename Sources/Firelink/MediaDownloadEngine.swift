@@ -26,7 +26,7 @@ final class MediaDownloadEngine: @unchecked Sendable {
         messageUpdate: @escaping @Sendable (String) -> Void,
         completion: @escaping @Sendable (Result<URL, Error>) -> Void
     ) async throws -> Handle {
-        let ytDlpURL = await MediaEngineManager.shared.binaryPath(for: .ytDlp)
+        let ytDlpURL = await MediaEngineManager.shared.preparedBinaryPath(for: .ytDlp)
         let ffmpegURL = await MediaEngineManager.shared.binaryPath(for: .ffmpeg)
 
         guard let ytDlpURL, FileManager.default.isExecutableFile(atPath: ytDlpURL.path) else {
@@ -45,11 +45,12 @@ final class MediaDownloadEngine: @unchecked Sendable {
             "--newline",
             "--ffmpeg-location", ffmpegURL.path,
             "--no-check-formats",
+            "--socket-timeout", "20",
+            "--retries", "3",
+            "--extractor-retries", "3",
             "--fragment-retries", "10",
             "--retry-sleep", "0",
             "--skip-unavailable-fragments",
-            "--extractor-args", "youtube:player_client=tv,web",
-            "--extractor-args", "youtube:skip=webpage",
             "--compat-options", "no-youtube-unavailable-videos",
             "-o", item.destinationPath
         ]
@@ -71,7 +72,8 @@ final class MediaDownloadEngine: @unchecked Sendable {
             to: &arguments,
             cookieSource: cookieSource,
             credentials: item.credentials,
-            transferOptions: item.transferOptions
+            transferOptions: item.transferOptions,
+            preferredDenoURL: ytDlpURL.deletingLastPathComponent().appendingPathComponent("deno")
         )
 
         if let proxyURI = proxyConfiguration.customProxyURI, proxyConfiguration.mode == .custom {
@@ -82,7 +84,11 @@ final class MediaDownloadEngine: @unchecked Sendable {
             arguments.append(contentsOf: ["--limit-rate", "\(speedLimitKiBPerSecond)K"])
         }
 
-        appendParallelDownloadArguments(to: &arguments, connectionsPerServer: item.connectionsPerServer)
+        appendParallelDownloadArguments(
+            to: &arguments,
+            item: item,
+            speedLimitKiBPerSecond: speedLimitKiBPerSecond
+        )
 
         arguments.append(item.url.absoluteString)
         process.arguments = arguments
@@ -134,13 +140,19 @@ final class MediaDownloadEngine: @unchecked Sendable {
             if let tempConfigDir {
                 try? FileManager.default.removeItem(at: tempConfigDir)
             }
-            readGroup.notify(queue: .global()) {
+            let complete: @Sendable () -> Void = {
                 if finishedProcess.terminationStatus == 0 {
                     completionGate.complete(.success(Self.resolvedOutputURL(for: item, tracker: outputPathTracker)))
                 } else {
                     let errorString = String(data: errorBuffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Unknown Error"
                     completionGate.complete(.failure(EngineError.launchFailed(Self.cleanErrorMessage(errorString, status: finishedProcess.terminationStatus))))
                 }
+            }
+            readGroup.notify(queue: .global(), execute: complete)
+            DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
+                outputPipe.fileHandleForReading.readabilityHandler = nil
+                errorPipe.fileHandleForReading.readabilityHandler = nil
+                complete()
             }
         }
 
@@ -158,7 +170,7 @@ final class MediaDownloadEngine: @unchecked Sendable {
 
         return Handle(cancel: {
             if process.isRunning {
-                process.terminate()
+                ProcessTreeTerminator.terminate(process)
             }
         })
     }
@@ -212,12 +224,37 @@ final class MediaDownloadEngine: @unchecked Sendable {
         return message
     }
 
-    private func appendParallelDownloadArguments(to arguments: inout [String], connectionsPerServer: Int) {
-        let connections = min(max(connectionsPerServer, 1), 16)
+    private func appendParallelDownloadArguments(
+        to arguments: inout [String],
+        item: DownloadItem,
+        speedLimitKiBPerSecond: Int?
+    ) {
+        let connections = min(max(item.connectionsPerServer, 1), 16)
         guard connections > 1 else { return }
 
         arguments.append(contentsOf: ["--concurrent-fragments", "\(connections)"])
-        // Use yt-dlp's native concurrent downloader instead of aria2c to ensure progress parsing works via stdout
+        let largeDirectDownloadThreshold: Int64 = 128 * 1024 * 1024
+        guard item.isAudioOnlyMedia != true,
+              (item.sizeBytes ?? 0) >= largeDirectDownloadThreshold,
+              speedLimitKiBPerSecond == nil,
+              let aria2URL = Aria2DownloadEngine.findExecutable() else {
+            return
+        }
+
+        let aria2Connections = min(connections, 8)
+        let certificateArgument = Aria2DownloadEngine.certificateBundleURL().map {
+            " --ca-certificate=\(Self.shellQuoted($0.path))"
+        } ?? ""
+        arguments.append(contentsOf: [
+            "--downloader", aria2URL.path,
+            "--downloader", "dash,m3u8:native",
+            "--downloader-args",
+            "aria2c:-x\(aria2Connections) -s\(aria2Connections) -k1M --file-allocation=none --summary-interval=1\(certificateArgument)"
+        ])
+    }
+
+    private static func shellQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\"'\"'"))'"
     }
 }
 

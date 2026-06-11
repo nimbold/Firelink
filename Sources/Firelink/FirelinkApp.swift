@@ -38,6 +38,7 @@ struct FirelinkApp: App {
                 .modifier(AppFontSizeModifier(fontSize: settings.appFontSize))
                 .task {
                     updateChecker.checkAutomaticallyIfNeeded()
+                    _ = await MediaEngineManager.shared.preparedBinaryPath(for: .ytDlp)
                 }
                 .onOpenURL { url in
                     let now = Date()

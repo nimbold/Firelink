@@ -1,6 +1,9 @@
-.PHONY: build app dmg release run verify clean
+.PHONY: engines build app dmg release run verify clean
 
-build:
+engines:
+	Scripts/fetch_media_engines.sh
+
+build: engines
 	swift build -c release
 
 app:
@@ -13,7 +16,7 @@ release:
 	Scripts/create_app_bundle.sh
 	Scripts/create_dmg.sh
 
-run:
+run: engines
 	swift run Firelink
 
 verify:

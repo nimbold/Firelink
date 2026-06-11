@@ -87,20 +87,20 @@ enum MediaExtractionEngine {
         if let cached = metadataCache.object(forKey: url as NSURL), Date().timeIntervalSince(cached.date) < 300 {
             return (cached.metadata, cached.options)
         }
-        guard let ytDlpURL = await MediaEngineManager.shared.binaryPath(for: .ytDlp),
+        guard let ytDlpURL = await MediaEngineManager.shared.preparedBinaryPath(for: .ytDlp),
               FileManager.default.isExecutableFile(atPath: ytDlpURL.path) else {
             throw ExtractionError.processFailed("yt-dlp binary not found.")
         }
         let ytDlpPath = ytDlpURL.path
 
         var args = [
-            "-J", 
-            "--no-warnings", 
-            "--ignore-no-formats-error", 
-            "--no-playlist", 
+            "-J",
+            "--no-warnings",
+            "--no-playlist",
             "--no-check-formats",
-            "--extractor-args", "youtube:player_client=tv,web",
-            "--extractor-args", "youtube:skip=webpage",
+            "--socket-timeout", "20",
+            "--retries", "3",
+            "--extractor-retries", "3",
             "--compat-options", "no-youtube-unavailable-videos"
         ]
 
@@ -113,7 +113,13 @@ enum MediaExtractionEngine {
             args.append(contentsOf: ["--proxy", proxyURI])
         }
 
-        let tempConfigDir = appendCommonArguments(to: &args, cookieSource: cookieSource, credentials: credentials, transferOptions: transferOptions)
+        let tempConfigDir = appendCommonArguments(
+            to: &args,
+            cookieSource: cookieSource,
+            credentials: credentials,
+            transferOptions: transferOptions,
+            preferredDenoURL: cachedDenoURL(near: ytDlpURL)
+        )
         defer {
             if let tempConfigDir {
                 try? FileManager.default.removeItem(at: tempConfigDir)
@@ -144,13 +150,14 @@ enum MediaExtractionEngine {
         to args: inout [String],
         cookieSource: BrowserCookieSource,
         credentials: DownloadCredentials?,
-        transferOptions: DownloadTransferOptions
+        transferOptions: DownloadTransferOptions,
+        preferredDenoURL: URL? = nil
     ) -> URL? {
         if let browserName = cookieSource.ytDlpBrowserName {
             args.append(contentsOf: ["--cookies-from-browser", browserName])
         }
 
-        appendJavaScriptRuntimeArguments(to: &args)
+        appendJavaScriptRuntimeArguments(to: &args, preferredDenoURL: preferredDenoURL)
 
         for header in transferOptions.requestHeaders.map(\.normalized) where !header.isEmpty {
             args.append(contentsOf: ["--add-header", header.headerLine])
@@ -175,9 +182,14 @@ enum MediaExtractionEngine {
         return tempConfigDir
     }
 
-    private static func appendJavaScriptRuntimeArguments(to args: inout [String]) {
+    private static func appendJavaScriptRuntimeArguments(
+        to args: inout [String],
+        preferredDenoURL: URL?
+    ) {
         var runtimes: [String] = []
-        if let denoPath = executablePath(named: "deno", candidates: [
+        if let denoPath = executablePath(at: preferredDenoURL) ??
+            bundledExecutablePath(named: "deno") ??
+            executablePath(named: "deno", candidates: [
             "/opt/homebrew/bin/deno",
             "/usr/local/bin/deno"
         ]) {
@@ -195,6 +207,36 @@ enum MediaExtractionEngine {
         if !runtimes.isEmpty {
             args.append(contentsOf: ["--js-runtimes", runtimes.joined(separator: ",")])
         }
+    }
+
+    private static func cachedDenoURL(near ytDlpURL: URL) -> URL? {
+        let denoURL = ytDlpURL.deletingLastPathComponent().appendingPathComponent("deno")
+        return FileManager.default.isExecutableFile(atPath: denoURL.path) ? denoURL : nil
+    }
+
+    private static func executablePath(at url: URL?) -> String? {
+        guard let url, FileManager.default.isExecutableFile(atPath: url.path) else {
+            return nil
+        }
+        return url.path
+    }
+
+    private static func bundledExecutablePath(named name: String) -> String? {
+        if let bundled = Bundle.main.url(forResource: name, withExtension: nil),
+           FileManager.default.isExecutableFile(atPath: bundled.path) {
+            return bundled.path
+        }
+
+        if Bundle.main.bundleURL.pathExtension.lowercased() != "app" {
+            #if SWIFT_PACKAGE
+            if let bundled = Bundle.module.url(forResource: name, withExtension: nil),
+               FileManager.default.isExecutableFile(atPath: bundled.path) {
+                return bundled.path
+            }
+            #endif
+        }
+
+        return nil
     }
 
     private static func executablePath(named name: String, candidates: [String]) -> String? {
@@ -501,6 +543,9 @@ private final class YTDLPMetadataProcess: @unchecked Sendable {
 
             do {
                 try process.run()
+                if Task.isCancelled {
+                    self.terminate()
+                }
                 outputPipe.fileHandleForWriting.closeFile()
                 errorPipe.fileHandleForWriting.closeFile()
             } catch {
@@ -515,14 +560,6 @@ private final class YTDLPMetadataProcess: @unchecked Sendable {
     private func terminate() {
         let p = lock.withLock { self.process }
         guard let p, p.isRunning else { return }
-        
-        p.terminate()
-        
-        Task.detached {
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            if p.isRunning {
-                kill(p.processIdentifier, SIGKILL)
-            }
-        }
+        ProcessTreeTerminator.terminate(p)
     }
 }

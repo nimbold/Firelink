@@ -17,36 +17,7 @@ ICON_NAME="AppIcon"
 
 cd "$ROOT_DIR"
 
-is_valid_mach_o() {
-  local path="$1"
-  if ! file "$path" | grep -q 'Mach-O'; then
-    return 1
-  fi
-
-  lipo -archs "$path" >/dev/null 2>&1
-}
-
-ensure_ytdlp() {
-  local ytdlp_path="$ROOT_DIR/Sources/Firelink/yt-dlp"
-
-  if [[ -x "$ytdlp_path" ]] && is_valid_mach_o "$ytdlp_path"; then
-    return
-  fi
-
-  if ! command -v curl >/dev/null; then
-    echo "WARNING: yt-dlp is missing, and curl is not available to refresh it." >&2
-    return
-  fi
-
-  echo "Refreshing bundled yt-dlp runtime..."
-  curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos -o "$ytdlp_path"
-  chmod +x "$ytdlp_path"
-  
-  # Remove legacy _internal directory if it exists
-  rm -rf "$ROOT_DIR/Sources/Firelink/_internal"
-}
-
-ensure_ytdlp
+"$ROOT_DIR/Scripts/fetch_media_engines.sh"
 
 swift build -c "$CONFIGURATION"
 
@@ -57,7 +28,7 @@ cp "$ROOT_DIR/Resources/$ICON_NAME.icns" "$RESOURCES_DIR/$ICON_NAME.icns"
 cp "$ROOT_DIR/Sources/Firelink/Assets.xcassets/MenuBarIcon.imageset/MenuBarIconTemplate.png" "$RESOURCES_DIR/MenuBarIconTemplate.png"
 cp "$ROOT_DIR/Resources/GitHubTemplate.png" "$RESOURCES_DIR/GitHubTemplate.png"
 
-for media_engine in yt-dlp ffmpeg; do
+for media_engine in yt-dlp deno ffmpeg aria2c; do
   media_engine_path="$ROOT_DIR/Sources/Firelink/$media_engine"
   if [[ -x "$media_engine_path" ]]; then
     cp "$media_engine_path" "$RESOURCES_DIR/$media_engine"
@@ -67,9 +38,23 @@ for media_engine in yt-dlp ffmpeg; do
   fi
 done
 
-if [[ -d "$ROOT_DIR/Sources/Firelink/_internal" ]]; then
-  cp -R "$ROOT_DIR/Sources/Firelink/_internal" "$RESOURCES_DIR/_internal"
-fi
+for resource_directory in _internal aria2-libs aria2-licenses; do
+  source_path="$ROOT_DIR/Sources/Firelink/$resource_directory"
+  if [[ ! -d "$source_path" ]]; then
+    echo "Required runtime directory is missing: $source_path" >&2
+    exit 1
+  fi
+  cp -R "$source_path" "$RESOURCES_DIR/$resource_directory"
+done
+
+for resource_file in yt-dlp-version.txt aria2-version.txt aria2-cacert.pem; do
+  source_path="$ROOT_DIR/Sources/Firelink/$resource_file"
+  if [[ ! -f "$source_path" ]]; then
+    echo "Required runtime file is missing: $source_path" >&2
+    exit 1
+  fi
+  cp "$source_path" "$RESOURCES_DIR/$resource_file"
+done
 
 echo "Packaging Firefox extension..."
 mkdir -p "$RESOURCES_DIR/FirefoxExtension"
@@ -79,23 +64,6 @@ cp "$ROOT_DIR/Extensions/Firefox/manifest.json" "$RESOURCES_DIR/FirefoxExtension
 cp -R "$ROOT_DIR/Extensions/Firefox/icons" "$RESOURCES_DIR/FirefoxExtension/icons"
 cp -R "$ROOT_DIR/Extensions/Firefox/popup" "$RESOURCES_DIR/FirefoxExtension/popup"
 
-
-ARIA2C_PATH=$(which aria2c || true)
-if [[ -n "$ARIA2C_PATH" && -x "$ARIA2C_PATH" ]]; then
-  echo "Bundling aria2c from $ARIA2C_PATH..."
-  cp "$ARIA2C_PATH" "$RESOURCES_DIR/aria2c"
-
-  if ! command -v dylibbundler &> /dev/null; then
-    echo "Installing dylibbundler..."
-    brew install dylibbundler
-  fi
-
-  FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
-  mkdir -p "$FRAMEWORKS_DIR"
-  dylibbundler -od -b -x "$RESOURCES_DIR/aria2c" -d "$FRAMEWORKS_DIR" -p "@executable_path/../Frameworks/"
-else
-  echo "WARNING: aria2c not found! It will not be bundled. Please install it first."
-fi
 
 FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
 mkdir -p "$FRAMEWORKS_DIR"
@@ -165,6 +133,11 @@ if command -v codesign &> /dev/null; then
 
   sign_mach_o_file() {
     local path="$1"
+    case "$path" in
+      */Python.framework/Python|*/Python.framework/Versions/Current/*)
+        return
+        ;;
+    esac
 
     if file "$path" | grep -q 'Mach-O'; then
       if ! sign_path "$path"; then
@@ -189,7 +162,7 @@ if command -v codesign &> /dev/null; then
 
   sign_path "$MACOS_DIR/$APP_NAME"
   sign_path "$APP_DIR"
-  codesign --verify --deep --verbose=2 "$APP_DIR" || true
+  codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 fi
 
 echo "Created $APP_DIR"

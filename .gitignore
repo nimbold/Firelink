@@ -23,8 +23,14 @@ SparklePrivateKey*
 private-key*
 private_key*
 yt-dlp
+deno
 ffmpeg
+aria2c
+Sources/Firelink/*-version.txt
 Sources/Firelink/_internal/
+Sources/Firelink/aria2-libs/
+Sources/Firelink/aria2-licenses/
+Sources/Firelink/aria2-cacert.pem
 !Sources/Firelink/_internal/
 Sources/Firelink/_internal/*
 !Sources/Firelink/_internal/.gitkeep

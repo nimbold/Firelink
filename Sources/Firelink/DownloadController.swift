@@ -472,7 +472,7 @@ final class DownloadController: ObservableObject {
         }
 
         guard hasRunnableQueuedDownload else {
-            engineMessage = "aria2c is not installed. Run `brew install aria2` to enable downloads."
+            engineMessage = "The bundled aria2c runtime is missing. Reinstall Firelink or rebuild its media engines."
             return
         }
 
