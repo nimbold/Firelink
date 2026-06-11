@@ -11,11 +11,13 @@ enum AddonState: Equatable, Sendable {
 enum AddonType: String, CaseIterable, Sendable {
     case ytDlp = "yt-dlp"
     case ffmpeg
+    case deno
 
     var binaryName: String {
         switch self {
         case .ytDlp: return "yt-dlp"
         case .ffmpeg: return "ffmpeg"
+        case .deno: return "deno"
         }
     }
 }
@@ -26,6 +28,7 @@ final class MediaEngineManager: ObservableObject {
 
     @Published var ytDlpState: AddonState = .notInstalled
     @Published var ffmpegState: AddonState = .notInstalled
+    @Published var denoState: AddonState = .notInstalled
     private var ytDlpPreparationTask: Task<URL?, Never>?
 
     private init() {
@@ -246,6 +249,7 @@ final class MediaEngineManager: ObservableObject {
         switch addon {
         case .ytDlp: return ytDlpState
         case .ffmpeg: return ffmpegState
+        case .deno: return denoState
         }
     }
 
@@ -253,6 +257,7 @@ final class MediaEngineManager: ObservableObject {
         switch addon {
         case .ytDlp: ytDlpState = state
         case .ffmpeg: ffmpegState = state
+        case .deno: denoState = state
         }
     }
 }

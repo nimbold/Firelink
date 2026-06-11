@@ -9,6 +9,7 @@ struct AboutSettingsPane: View {
     private let aria2URL = URL(string: "https://aria2.github.io/")!
     private let ytDlpURL = URL(string: "https://github.com/yt-dlp/yt-dlp")!
     private let ffmpegURL = URL(string: "https://ffmpeg.org/")!
+    private let denoURL = URL(string: "https://deno.com/")!
     private let licenseURL = URL(string: "https://github.com/nimbold/Firelink/blob/main/LICENSE")!
 
     private var appVersion: String {
@@ -80,6 +81,8 @@ struct AboutSettingsPane: View {
                             Link("yt-dlp", destination: ytDlpURL)
                             Text("•").foregroundStyle(.secondary)
                             Link("ffmpeg", destination: ffmpegURL)
+                            Text("•").foregroundStyle(.secondary)
+                            Link("Deno", destination: denoURL)
                         }
                         Spacer()
                         Link("MIT License", destination: licenseURL)

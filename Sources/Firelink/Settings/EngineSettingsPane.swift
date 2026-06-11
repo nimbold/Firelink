@@ -46,6 +46,8 @@ struct EngineSettingsPane: View {
 
                 addonStatusRow(title: "FFmpeg", state: engineManager.ffmpegState, path: engineManager.binaryPath(for: .ffmpeg))
 
+                addonStatusRow(title: "Deno", state: engineManager.denoState, path: engineManager.binaryPath(for: .deno))
+
                 LabeledContent("Browser Cookies") {
                     HStack {
                         Spacer()
