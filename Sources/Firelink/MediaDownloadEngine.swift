@@ -98,7 +98,7 @@ final class MediaDownloadEngine: @unchecked Sendable {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
 
-        let parser = YTDLPProgressParser()
+        let parser = YTDLPProgressParser(totalExpectedBytes: item.sizeBytes)
         let errorBuffer = LockedDataBuffer()
         let outputPathTracker = YTDLPOutputPathTracker()
         let completionGate = CompletionGate(completion)
@@ -309,14 +309,7 @@ final class YTDLPOutputHandler: @unchecked Sendable {
             return "YouTube challenge solver unavailable"
         }
         if line.contains("Destination:") {
-            trackCount += 1
-            if trackCount == 1 {
-                return "Downloading Video Track"
-            } else if trackCount == 2 {
-                return "Downloading Audio Track"
-            } else {
-                return "Downloading Track \(trackCount)"
-            }
+            return "Downloading Media"
         }
         return nil
     }
@@ -389,6 +382,62 @@ final class YTDLPProgressParser: @unchecked Sendable {
     private let etaRegex = try? NSRegularExpression(pattern: #"ETA\s+([^\s]+)"#)
     private let sizeRegex = try? NSRegularExpression(pattern: #"of\s+~?([0-9.]+[a-zA-Z]+)"#)
 
+    private let totalExpectedBytes: Int64?
+    private var accumulatedBytes: Int64 = 0
+    private var currentFileBytes: Int64 = 0
+    private var lastFraction: Double = 0
+
+    init(totalExpectedBytes: Int64?) {
+        self.totalExpectedBytes = totalExpectedBytes
+    }
+
+    private func processCumulativeProgress(
+        fraction: Double,
+        parsedSize: Int64,
+        sizeStr: String
+    ) -> (overallFraction: Double, displaySizeStr: String) {
+        if fraction < lastFraction && lastFraction > 0.95 {
+            accumulatedBytes += currentFileBytes
+        }
+        
+        currentFileBytes = parsedSize
+        lastFraction = fraction
+        
+        let totalDownloadedBytes = accumulatedBytes + Int64(Double(parsedSize) * fraction)
+        let overallTotalBytes = max(totalExpectedBytes ?? 0, accumulatedBytes + parsedSize)
+        
+        var overallFraction = fraction
+        var displaySizeStr = sizeStr
+        
+        if overallTotalBytes > 0 {
+            overallFraction = Double(totalDownloadedBytes) / Double(overallTotalBytes)
+            displaySizeStr = ByteFormatter.string(overallTotalBytes)
+        }
+        
+        return (overallFraction, displaySizeStr)
+    }
+
+    private func parseBytes(_ sizeStr: String) -> Int64 {
+        let clean = sizeStr.replacingOccurrences(of: "~", with: "").trimmingCharacters(in: .whitespaces)
+        guard let regex = try? NSRegularExpression(pattern: #"^([0-9.]+)([a-zA-Z]+)$"#) else { return 0 }
+        let nsString = clean as NSString
+        guard let match = regex.firstMatch(in: clean, range: NSRange(location: 0, length: clean.count)),
+              match.numberOfRanges == 3 else { return 0 }
+        
+        let numStr = nsString.substring(with: match.range(at: 1))
+        let unitStr = nsString.substring(with: match.range(at: 2)).lowercased()
+        
+        guard let value = Double(numStr) else { return 0 }
+        
+        switch unitStr {
+        case "b": return Int64(value)
+        case "k", "kb", "kib": return Int64(value * 1024)
+        case "m", "mb", "mib": return Int64(value * 1024 * 1024)
+        case "g", "gb", "gib": return Int64(value * 1024 * 1024 * 1024)
+        default: return Int64(value)
+        }
+    }
+
     func parse(_ line: String) -> DownloadProgress? {
         if line.contains("[download]") && line.contains("%") {
             let fraction = (Double(firstCapture(in: line, regex: percentageRegex) ?? "0") ?? 0) / 100.0
@@ -396,9 +445,12 @@ final class YTDLPProgressParser: @unchecked Sendable {
             let eta = firstCapture(in: line, regex: etaRegex) ?? "-"
             let size = firstCapture(in: line, regex: sizeRegex) ?? "-"
 
+            let parsedSize = parseBytes(size)
+            let cumulative = processCumulativeProgress(fraction: fraction, parsedSize: parsedSize, sizeStr: size)
+
             return DownloadProgress(
-                fraction: min(max(fraction, 0), 1),
-                bytesText: size,
+                fraction: min(max(cumulative.overallFraction, 0), 1),
+                bytesText: cumulative.displaySizeStr,
                 speedText: speed,
                 etaText: eta,
                 connectionCount: 1
@@ -410,9 +462,12 @@ final class YTDLPProgressParser: @unchecked Sendable {
             let size = firstCapture(in: line, regex: try? NSRegularExpression(pattern: #"/([^\s\(]+)\("#)) ?? "-"
             let cn = Int(firstCapture(in: line, regex: try? NSRegularExpression(pattern: #"CN:(\d+)"#)) ?? "1") ?? 1
 
+            let parsedSize = parseBytes(size)
+            let cumulative = processCumulativeProgress(fraction: fraction, parsedSize: parsedSize, sizeStr: size)
+
             return DownloadProgress(
-                fraction: min(max(fraction, 0), 1),
-                bytesText: size,
+                fraction: min(max(cumulative.overallFraction, 0), 1),
+                bytesText: cumulative.displaySizeStr,
                 speedText: speed,
                 etaText: eta,
                 connectionCount: cn
