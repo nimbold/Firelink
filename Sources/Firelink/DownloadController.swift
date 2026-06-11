@@ -572,9 +572,6 @@ final class DownloadController: ObservableObject {
                                         $0.etaText = progress.etaText
                                     }
                                     $0.connectionCount = progress.connectionCount
-                                    if $0.message == "Starting" {
-                                        $0.message = "Downloading Media"
-                                    }
                                 }
                             }
                         },

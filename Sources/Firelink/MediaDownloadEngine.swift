@@ -263,6 +263,7 @@ final class YTDLPOutputHandler: @unchecked Sendable {
     private let outputPathTracker: YTDLPOutputPathTracker
     private let progress: @Sendable (DownloadProgress) -> Void
     private let messageUpdate: @Sendable (String) -> Void
+    private var trackCount = 0
 
     init(
         parser: YTDLPProgressParser,
@@ -280,18 +281,17 @@ final class YTDLPOutputHandler: @unchecked Sendable {
         for line in text.split(whereSeparator: \.isNewline) {
             let stringLine = String(line)
             outputPathTracker.observe(stringLine)
-            if let update = parser.parse(stringLine) {
-                progress(update)
-                messageUpdate("Downloading Media")
-            } else if let message = statusMessage(for: stringLine) {
+            if let message = statusMessage(for: stringLine) {
                 messageUpdate(message)
+            } else if let update = parser.parse(stringLine) {
+                progress(update)
             }
         }
     }
 
     private func statusMessage(for line: String) -> String? {
         if line.contains("[Merger]") || line.contains("[ExtractAudio]") || line.contains("[Fixup") {
-            return "Processing Media..."
+            return "Merging Media Tracks..."
         }
         if line.contains("[youtube]") && line.localizedCaseInsensitiveContains("Downloading") {
             return "Fetching YouTube data..."
@@ -309,7 +309,14 @@ final class YTDLPOutputHandler: @unchecked Sendable {
             return "YouTube challenge solver unavailable"
         }
         if line.contains("Destination:") {
-            return "Starting media download..."
+            trackCount += 1
+            if trackCount == 1 {
+                return "Downloading Video Track"
+            } else if trackCount == 2 {
+                return "Downloading Audio Track"
+            } else {
+                return "Downloading Track \(trackCount)"
+            }
         }
         return nil
     }
