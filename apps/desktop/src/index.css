@@ -1,0 +1,146 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+:root {
+  /* Default/fallback Light */
+  --main-bg: 0 0% 98%;
+  --sidebar-bg: 0 0% 93%;
+  --sidebar-glass: 0 0% 93% / 0.6;
+  --border-color: 0 0% 88%;
+  --item-hover: 0 0% 0% / 0.05;
+  --item-selected: 211 100% 50% / 0.15;
+  
+  --text-primary: 0 0% 10%;
+  --text-secondary: 0 0% 30%;
+  --text-muted: 0 0% 50%;
+  --bg-modal: 0 0% 100%;
+  --bg-input: 0 0% 100%;
+  --border-modal: 0 0% 85%;
+}
+
+.theme-light {
+  --main-bg: 0 0% 98%;
+  --sidebar-bg: 0 0% 93%;
+  --sidebar-glass: 0 0% 93% / 0.6;
+  --border-color: 0 0% 88%;
+  --item-hover: 0 0% 0% / 0.05;
+  --item-selected: 211 100% 50% / 0.15;
+  --text-primary: 0 0% 10%;
+  --text-secondary: 0 0% 30%;
+  --text-muted: 0 0% 50%;
+  --bg-modal: 0 0% 100%;
+  --bg-input: 0 0% 100%;
+  --border-modal: 0 0% 85%;
+}
+
+.theme-dark {
+  /* Modern Mac Dark - Lighter Grays matching SwiftUI */
+  --main-bg: 0 0% 16%;
+  --sidebar-bg: 0 0% 14%;
+  --sidebar-glass: 0 0% 14% / 0.6;
+  --border-color: 0 0% 10%;
+  --item-hover: 0 0% 100% / 0.08;
+  --item-selected: 211 100% 50% / 0.2;
+  --text-primary: 0 0% 98%;
+  --text-secondary: 0 0% 75%;
+  --text-muted: 0 0% 55%;
+  --bg-modal: 0 0% 18%;
+  --bg-input: 0 0% 0% / 0.3;
+  --border-modal: 0 0% 10%;
+}
+
+.theme-dracula {
+  /* Dracula Theme */
+  --main-bg: 231 15% 18%;
+  --sidebar-bg: 232 14% 14%;
+  --sidebar-glass: 232 14% 14% / 0.6;
+  --border-color: 232 14% 10%;
+  --item-hover: 0 0% 100% / 0.08;
+  --item-selected: 265 89% 78% / 0.2;
+  --text-primary: 60 30% 96%;
+  --text-secondary: 225 27% 65%;
+  --text-muted: 225 27% 55%;
+  --bg-modal: 231 15% 20%;
+  --bg-input: 232 14% 12%;
+  --border-modal: 232 14% 10%;
+}
+
+.theme-nord {
+  /* Nord Theme */
+  --main-bg: 220 16% 22%;
+  --sidebar-bg: 222 16% 19%;
+  --sidebar-glass: 222 16% 19% / 0.6;
+  --border-color: 222 16% 15%;
+  --item-hover: 0 0% 100% / 0.08;
+  --item-selected: 193 43% 67% / 0.2;
+  --text-primary: 218 27% 92%;
+  --text-secondary: 214 20% 78%;
+  --text-muted: 220 11% 54%;
+  --bg-modal: 220 16% 25%;
+  --bg-input: 222 16% 15%;
+  --border-modal: 222 16% 10%;
+}
+
+@theme {
+  --color-sidebar-bg: hsl(var(--sidebar-bg));
+  --color-sidebar-glass: hsl(var(--sidebar-glass));
+  --color-main-bg: hsl(var(--main-bg));
+  --color-accent: #0A84FF;
+  --color-border-color: hsl(var(--border-color));
+  --color-item-hover: hsl(var(--item-hover));
+  --color-item-selected: hsl(var(--item-selected));
+  
+  --color-text-primary: hsl(var(--text-primary));
+  --color-text-secondary: hsl(var(--text-secondary));
+  --color-text-muted: hsl(var(--text-muted));
+  --color-bg-modal: hsl(var(--bg-modal));
+  --color-bg-input: hsl(var(--bg-input));
+  --color-border-modal: hsl(var(--border-modal));
+
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-main-bg);
+    color: var(--color-text-primary);
+    font-family: var(--font-sans);
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: default;
+    -webkit-font-smoothing: antialiased;
+    transition: background-color 0.3s cubic-bezier(0.4, 0, 0.2, 1), color 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  input, textarea {
+    user-select: auto;
+    -webkit-user-select: auto;
+    cursor: text;
+  }
+
+  html[data-font-size="standard"] { font-size: 14px; }
+  html[data-font-size="large"] { font-size: 16px; }
+  html[data-font-size="extra-large"] { font-size: 18px; }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border-color);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-text-muted);
+  }
+}
+
+.glass-panel {
+  background: var(--color-sidebar-glass);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}

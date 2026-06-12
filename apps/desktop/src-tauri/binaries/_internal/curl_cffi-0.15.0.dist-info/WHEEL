@@ -1,0 +1,6 @@
+Wheel-Version: 1.0
+Generator: setuptools (82.0.1)
+Root-Is-Purelib: false
+Generator: delocate 0.13.0
+Tag: cp310-abi3-macosx_10_9_universal2
+
