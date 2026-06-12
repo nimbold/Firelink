@@ -5,6 +5,7 @@ import { DownloadCategory } from '../store/useDownloadStore';
 import { FolderPlus, Settings, Shield, RefreshCw, FileText, HardDrive, Database, Link, ArrowRight, Play, ChevronDown, ChevronRight, Video, Film, Music } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
+import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResolutionModal';
 
 function determineCategory(fileName: string): DownloadCategory {
   const ext = fileName.split('.').pop()?.toLowerCase() || '';
@@ -258,6 +259,11 @@ export const AddDownloadsModal = () => {
   const [selectedItemIndex, setSelectedItemIndex] = useState<number | null>(null);
   const [parsedItems, setParsedItems] = useState<ParsedDownloadItem[]>([]);
 
+  const [conflicts, setConflicts] = useState<DuplicateConflict[]>([]);
+  const [showingDuplicates, setShowingDuplicates] = useState(false);
+  const [pendingStartFlag, setPendingStartFlag] = useState(false);
+  const [resolvedLocation, setResolvedLocation] = useState('');
+
   // Right Form
   const [saveLocation, setSaveLocation] = useState(defaultDownloadPath);
   const [connections, setConnections] = useState(16);
@@ -427,42 +433,153 @@ export const AddDownloadsModal = () => {
       }
     }
 
-    for (const item of parsedItems) {
-      try {
-        const id = crypto.randomUUID();
-        let finalFile = item.file;
-        let formatSelector = undefined;
+    setResolvedLocation(finalLocation);
+    const store = useDownloadStore.getState();
+    const newConflicts: DuplicateConflict[] = [];
 
-        if (item.isMedia && item.formats && item.selectedFormat !== undefined) {
-          const selectedFormat = item.formats[item.selectedFormat];
-          formatSelector = selectedFormat.selector;
-          // Update extension if user selected a different format
-          const baseName = finalFile.substring(0, finalFile.lastIndexOf('.')) || finalFile;
-          finalFile = `${baseName}.${selectedFormat.ext}`;
-        }
+    for (let i = 0; i < parsedItems.length; i++) {
+      const item = parsedItems[i];
+      let finalFile = item.file;
+      if (item.isMedia && item.formats && item.selectedFormat !== undefined) {
+         const selectedFormat = item.formats[item.selectedFormat];
+         const baseName = finalFile.substring(0, finalFile.lastIndexOf('.')) || finalFile;
+         finalFile = `${baseName}.${selectedFormat.ext}`;
+      }
 
-        addDownload({
-          id,
-          url: item.url,
-          fileName: finalFile,
-          status: startImmediately ? 'queued' : 'paused',
-          category: determineCategory(finalFile),
-          dateAdded: new Date().toISOString(),
-          connections: Number(connections),
-          speedLimit: speedLimitEnabled ? `${speedLimit}K` : undefined,
-          username: useAuth ? username.trim() : undefined,
-          password: useAuth ? password.trim() : undefined,
-          headers: headers.trim() || undefined,
-          destination: finalLocation,
-          isMedia: item.isMedia,
-          mediaFormatSelector: formatSelector,
-          queueId: selectedQueueId
-        });
-      } catch (e) {
-        console.error("Invalid URL or failed to add:", e);
+      const isUrlDupe = store.downloads.some(d => d.url === item.url && d.status !== 'failed' && d.status !== 'completed');
+      if (isUrlDupe) {
+          newConflicts.push({ id: i.toString(), fileName: finalFile, reason: { type: 'url', msg: 'URL already in queue' }, resolution: 'rename' });
+      } else {
+         const fileExistsInStore = store.downloads.some(d => {
+             const dest = d.destination || settings.defaultDownloadPath || '~/Downloads';
+             return dest === finalLocation && d.fileName === finalFile && d.status !== 'failed';
+         });
+         
+         let fileExistsOnDisk = false;
+         try {
+             const cleanLocation = finalLocation.endsWith('/') ? finalLocation.slice(0, -1) : finalLocation;
+             fileExistsOnDisk = await invoke<boolean>('check_file_exists', { path: `${cleanLocation}/${finalFile}` });
+         } catch (e) {}
+
+         if (fileExistsInStore || fileExistsOnDisk) {
+             newConflicts.push({ id: i.toString(), fileName: finalFile, reason: { type: 'file', msg: 'File exists at destination' }, resolution: 'rename' });
+         }
       }
     }
-    toggleAddModal(false);
+
+    if (newConflicts.length > 0) {
+       setConflicts(newConflicts);
+       setPendingStartFlag(startImmediately);
+       setShowingDuplicates(true);
+       return;
+    }
+
+    await executeAddDownloads(startImmediately, finalLocation);
+  };
+
+  const executeAddDownloads = async (startImmediately: boolean, finalLocation: string, resolutions?: { id: string, resolution: 'rename' | 'replace' | 'skip' }[]) => {
+      let itemsToAdd = [...parsedItems];
+
+      if (resolutions) {
+         for (const res of resolutions) {
+             const idx = parseInt(res.id);
+             const item = itemsToAdd[idx];
+             if (!item) continue;
+
+             if (res.resolution === 'skip') {
+                 itemsToAdd[idx] = null as any; // mark for skip
+             } else if (res.resolution === 'rename') {
+                 let finalFile = item.file;
+                 if (item.isMedia && item.formats && item.selectedFormat !== undefined) {
+                    const selectedFormat = item.formats[item.selectedFormat];
+                    const baseName = finalFile.substring(0, finalFile.lastIndexOf('.')) || finalFile;
+                    finalFile = `${baseName}.${selectedFormat.ext}`;
+                 }
+                 const cleanLocation = finalLocation.endsWith('/') ? finalLocation.slice(0, -1) : finalLocation;
+                 
+                 let count = 1;
+                 const base = finalFile.substring(0, finalFile.lastIndexOf('.')) || finalFile;
+                 const ext = finalFile.includes('.') ? finalFile.substring(finalFile.lastIndexOf('.')) : '';
+                 let newName = finalFile;
+                 let exists = true;
+                 
+                 while (exists) {
+                     newName = `${base} (${count})${ext}`;
+                     const storeHas = useDownloadStore.getState().downloads.some(d => {
+                         const dest = d.destination || useSettingsStore.getState().defaultDownloadPath || '~/Downloads';
+                         return dest === finalLocation && d.fileName === newName && d.status !== 'failed';
+                     });
+                     let diskHas = false;
+                     try { diskHas = await invoke<boolean>('check_file_exists', { path: `${cleanLocation}/${newName}` }); } catch(e) {}
+                     exists = storeHas || diskHas;
+                     count++;
+                 }
+                 
+                 itemsToAdd[idx] = { ...item, file: newName };
+             } else if (res.resolution === 'replace') {
+                 let finalFile = item.file;
+                 if (item.isMedia && item.formats && item.selectedFormat !== undefined) {
+                    const selectedFormat = item.formats[item.selectedFormat];
+                    const baseName = finalFile.substring(0, finalFile.lastIndexOf('.')) || finalFile;
+                    finalFile = `${baseName}.${selectedFormat.ext}`;
+                 }
+                 const cleanLocation = finalLocation.endsWith('/') ? finalLocation.slice(0, -1) : finalLocation;
+                 const fullPath = `${cleanLocation}/${finalFile}`;
+
+                 const store = useDownloadStore.getState();
+                 const existingItem = store.downloads.find(d => {
+                     const dest = d.destination || useSettingsStore.getState().defaultDownloadPath || '~/Downloads';
+                     return (d.url === item.url || (dest === finalLocation && d.fileName === finalFile)) && d.status !== 'failed';
+                 });
+
+                 if (existingItem) {
+                     await store.removeDownload(existingItem.id);
+                 }
+                 
+                 try { await invoke('delete_file', { path: fullPath }); } catch(e) {}
+             }
+         }
+      }
+
+      itemsToAdd = itemsToAdd.filter(Boolean);
+
+      for (const item of itemsToAdd) {
+        try {
+          const id = crypto.randomUUID();
+          let finalFile = item.file;
+          let formatSelector = undefined;
+
+          if (item.isMedia && item.formats && item.selectedFormat !== undefined) {
+            const selectedFormat = item.formats[item.selectedFormat];
+            formatSelector = selectedFormat.selector;
+            if (!finalFile.endsWith(`.${selectedFormat.ext}`)) {
+                const baseName = finalFile.substring(0, finalFile.lastIndexOf('.')) || finalFile;
+                finalFile = `${baseName}.${selectedFormat.ext}`;
+            }
+          }
+
+          addDownload({
+            id,
+            url: item.url,
+            fileName: finalFile,
+            status: startImmediately ? 'queued' : 'paused',
+            category: determineCategory(finalFile),
+            dateAdded: new Date().toISOString(),
+            connections: Number(connections),
+            speedLimit: speedLimitEnabled ? `${speedLimit}K` : undefined,
+            username: useAuth ? username.trim() : undefined,
+            password: useAuth ? password.trim() : undefined,
+            headers: headers.trim() || undefined,
+            destination: finalLocation,
+            isMedia: item.isMedia,
+            mediaFormatSelector: formatSelector,
+            queueId: selectedQueueId
+          });
+        } catch (e) {
+          console.error("Invalid URL or failed to add:", e);
+        }
+      }
+      toggleAddModal(false);
   };
 
   const SummaryBox = ({ title, value, icon: Icon, color }: any) => (
@@ -483,6 +600,17 @@ export const AddDownloadsModal = () => {
     : 'Unknown';
 
   return (
+    <>
+      {showingDuplicates && (
+        <DuplicateResolutionModal 
+          conflicts={conflicts} 
+          onConfirm={(resolutions) => {
+            setShowingDuplicates(false);
+            executeAddDownloads(pendingStartFlag, resolvedLocation, resolutions);
+          }} 
+          onCancel={() => setShowingDuplicates(false)} 
+        />
+      )}
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md">
       <div className="w-[900px] h-[650px] bg-bg-modal border border-border-modal rounded-xl shadow-2xl flex flex-col overflow-hidden text-sm">
 
@@ -785,5 +913,6 @@ export const AddDownloadsModal = () => {
 
       </div>
     </div>
+    </>
   );
 };

@@ -922,6 +922,42 @@ fn delete_keychain_password(id: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn check_file_exists(app_handle: tauri::AppHandle, path: String) -> bool {
+    use tauri::Manager;
+    let mut resolved_dest = std::path::PathBuf::from(&path);
+    if path.starts_with("~/") {
+        if let Ok(home) = app_handle.path().home_dir() {
+            resolved_dest = home.join(&path[2..]);
+        }
+    } else if path == "~" {
+        if let Ok(home) = app_handle.path().home_dir() {
+            resolved_dest = home;
+        }
+    }
+    resolved_dest.exists()
+}
+
+#[tauri::command]
+fn delete_file(app_handle: tauri::AppHandle, path: String) -> Result<(), String> {
+    use tauri::Manager;
+    let mut resolved_dest = std::path::PathBuf::from(&path);
+    if path.starts_with("~/") {
+        if let Ok(home) = app_handle.path().home_dir() {
+            resolved_dest = home.join(&path[2..]);
+        }
+    } else if path == "~" {
+        if let Ok(home) = app_handle.path().home_dir() {
+            resolved_dest = home;
+        }
+    }
+    if resolved_dest.exists() {
+        std::fs::remove_file(resolved_dest).map_err(|e| e.to_string())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -936,7 +972,8 @@ pub fn run() {
             start_download, start_media_download, pause_download, fetch_metadata, fetch_media_metadata,
             update_dock_badge, set_prevent_sleep, get_free_space, perform_system_action,
             request_automation_permission, open_automation_settings,
-            set_keychain_password, get_keychain_password, delete_keychain_password
+            set_keychain_password, get_keychain_password, delete_keychain_password,
+            check_file_exists, delete_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
