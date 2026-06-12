@@ -81,6 +81,45 @@ async fn fetch_metadata(url: String, user_agent: Option<String>) -> Result<Metad
 }
 
 #[tauri::command]
+async fn fetch_media_metadata(app_handle: tauri::AppHandle, url: String, cookie_browser: Option<String>) -> Result<String, String> {
+    println!("fetch_media_metadata called for: {}", url);
+    let resource_dir = app_handle.path().resource_dir().map_err(|e| e.to_string())?;
+    let ytdlp_path = resource_dir.join("binaries").join("yt-dlp");
+    
+    let mut cmd = AsyncCommand::new(&ytdlp_path);
+    cmd.arg("-J")
+       .arg("--no-warnings")
+       .arg("--no-playlist")
+       .arg("--no-check-formats")
+       .arg("--socket-timeout").arg("20")
+       .arg("--retries").arg("3")
+       .arg("--extractor-retries").arg("3")
+       .arg("--compat-options").arg("no-youtube-unavailable-videos")
+       .arg("--js-runtimes").arg("deno,node");
+
+    if let Some(browser) = cookie_browser {
+        if !browser.is_empty() {
+            cmd.arg("--cookies-from-browser").arg(&browser);
+        }
+    }
+    
+    cmd.arg(&url);
+    
+    // We use tokio AsyncCommand so it doesn't block the async thread
+    let output = cmd.output()
+        .await
+        .map_err(|e| format!("Failed to execute yt-dlp: {}", e))?;
+        
+    if output.status.success() {
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        Ok(text)
+    } else {
+        let err = String::from_utf8_lossy(&output.stderr);
+        Err(format!("yt-dlp error: {}", err))
+    }
+}
+
+#[tauri::command]
 fn greet(name: &str) -> String {
     println!("greet called with name: {}", name);
     format!("Hello, {}! You've been greeted from Rust!", name)
@@ -423,6 +462,137 @@ async fn start_download(
 }
 
 #[tauri::command]
+async fn start_media_download(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    url: String,
+    destination: String,
+    filename: String,
+    format_selector: Option<String>,
+) -> Result<(), String> {
+    println!("start_media_download called for id: {}", id);
+    let resource_dir = app_handle.path().resource_dir().map_err(|e| e.to_string())?;
+    let ytdlp_path = resource_dir.join("binaries").join("yt-dlp");
+    let ffmpeg_path = resource_dir.join("binaries").join("ffmpeg");
+
+    let mut resolved_dest = std::path::PathBuf::from(&destination);
+    if destination.starts_with("~/") {
+        if let Ok(home) = app_handle.path().home_dir() {
+            resolved_dest = home.join(&destination[2..]);
+        }
+    } else if destination == "~" {
+        if let Ok(home) = app_handle.path().home_dir() {
+            resolved_dest = home;
+        }
+    }
+
+    if !resolved_dest.exists() {
+        let _ = std::fs::create_dir_all(&resolved_dest);
+    }
+    
+    let out_path = resolved_dest.join(&filename);
+
+    let mut cmd = AsyncCommand::new(&ytdlp_path);
+    cmd.arg("--newline")
+       .arg("--ffmpeg-location")
+       .arg(&ffmpeg_path)
+       .arg("--no-check-formats")
+       .arg("--socket-timeout").arg("20")
+       .arg("--retries").arg("3")
+       .arg("--extractor-retries").arg("3")
+       .arg("-o").arg(out_path.to_string_lossy().to_string());
+       
+    if let Some(format) = format_selector {
+        cmd.arg("-f").arg(format);
+        // If the filename implies an audio format, use it as audio output
+        if filename.ends_with(".mp3") {
+            cmd.arg("-x").arg("--audio-format").arg("mp3");
+        } else if filename.ends_with(".m4a") {
+            cmd.arg("-x").arg("--audio-format").arg("m4a");
+        } else if filename.ends_with(".opus") {
+            cmd.arg("-x").arg("--audio-format").arg("opus");
+        } else {
+            // Otherwise attempt to merge into mp4 or mkv based on filename
+            if filename.ends_with(".mp4") {
+                cmd.arg("--merge-output-format").arg("mp4");
+            } else if filename.ends_with(".webm") {
+                cmd.arg("--merge-output-format").arg("webm");
+            } else {
+                cmd.arg("--merge-output-format").arg("mkv");
+            }
+        }
+    }
+    
+    cmd.arg(&url);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped()); // Also pipe stderr for better error reporting
+
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn yt-dlp: {}", e))?;
+    let pid = child.id().unwrap_or(0);
+    state.tasks.lock().unwrap().insert(id.clone(), pid);
+
+    let stdout = child.stdout.take().unwrap();
+    let app_handle_clone = app_handle.clone();
+    let id_clone = id.clone();
+    
+    // yt-dlp parsing regex
+    let pct_re = Regex::new(r"\[download\]\s+(\d+(?:\.\d+)?)%").unwrap();
+    let spd_re = Regex::new(r"at\s+([^\s]+)").unwrap();
+    let eta_re = Regex::new(r"ETA\s+([^\s]+)").unwrap();
+    
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(stdout).lines();
+        loop {
+            tokio::select! {
+                line_result = reader.next_line() => {
+                    match line_result {
+                        Ok(Some(line)) => {
+                            if line.contains("[download]") && line.contains("%") {
+                                let fraction = pct_re.captures(&line)
+                                    .and_then(|cap| cap.get(1))
+                                    .and_then(|m| m.as_str().parse::<f64>().ok())
+                                    .unwrap_or(0.0) / 100.0;
+                                    
+                                let speed = spd_re.captures(&line)
+                                    .and_then(|cap| cap.get(1))
+                                    .map(|m| m.as_str().to_string())
+                                    .unwrap_or_else(|| "-".to_string());
+                                    
+                                let eta = eta_re.captures(&line)
+                                    .and_then(|cap| cap.get(1))
+                                    .map(|m| m.as_str().to_string())
+                                    .unwrap_or_else(|| "-".to_string());
+                                
+                                let _ = app_handle_clone.emit("download-progress", DownloadProgressEvent {
+                                    id: id_clone.clone(),
+                                    fraction,
+                                    speed,
+                                    eta,
+                                });
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+                status = child.wait() => {
+                    if let Ok(exit_status) = status {
+                        if exit_status.success() {
+                            let _ = app_handle_clone.emit("download-complete", id_clone.clone());
+                        } else {
+                            let _ = app_handle_clone.emit("download-failed", id_clone.clone());
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
 async fn pause_download(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
     println!("pause_download called for id: {}", id);
     if let Some(pid) = state.tasks.lock().unwrap().remove(&id) {
@@ -544,7 +714,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             greet, test_ytdlp, test_aria2c, test_ffmpeg, open_file, show_in_folder, 
-            start_download, pause_download, fetch_metadata, update_dock_badge, set_prevent_sleep, get_free_space
+            start_download, start_media_download, pause_download, fetch_metadata, fetch_media_metadata, update_dock_badge, set_prevent_sleep, get_free_space
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

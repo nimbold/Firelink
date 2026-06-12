@@ -60,6 +60,8 @@ export interface DownloadItem {
   password?: string | null;
   headers?: string | null;
   destination?: string;
+  isMedia?: boolean;
+  mediaFormatSelector?: string;
 }
 
 interface DownloadState {
@@ -165,20 +167,30 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
                          settings.defaultDownloadPath || 
                          '~/Downloads';
 
-        await invoke('start_download', {
-          id: item.id,
-          url: item.url,
-          destination: destPath,
-          filename: item.fileName,
-          connections: item.connections || settings.perServerConnections || null,
-          speedLimit: item.speedLimit || settings.globalSpeedLimit || null,
-          username: item.username || (login ? login.username : null),
-          password: item.password || (login ? login.password : null),
-          headers: item.headers || null,
-          userAgent: settings.customUserAgent || null,
-          maxTries: settings.maxAutomaticRetries,
-          proxy: getProxyArgs(settings)
-        });
+        if (item.isMedia) {
+          await invoke('start_media_download', {
+            id: item.id,
+            url: item.url,
+            destination: destPath,
+            filename: item.fileName,
+            formatSelector: item.mediaFormatSelector || null
+          });
+        } else {
+          await invoke('start_download', {
+            id: item.id,
+            url: item.url,
+            destination: destPath,
+            filename: item.fileName,
+            connections: item.connections || settings.perServerConnections || null,
+            speedLimit: item.speedLimit || settings.globalSpeedLimit || null,
+            username: item.username || (login ? login.username : null),
+            password: item.password || (login ? login.password : null),
+            headers: item.headers || null,
+            userAgent: settings.customUserAgent || null,
+            maxTries: settings.maxAutomaticRetries,
+            proxy: getProxyArgs(settings)
+          });
+        }
       } catch (e) {
         console.error("Failed to start queued download:", e);
         updateDownload(item.id, { status: 'failed' });

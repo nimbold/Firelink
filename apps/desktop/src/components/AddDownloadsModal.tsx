@@ -1,16 +1,236 @@
 import { useState, useEffect } from 'react';
 import { useDownloadStore } from '../store/useDownloadStore';
 import { useSettingsStore } from '../store/useSettingsStore';
-import { X, FolderPlus, Settings, Shield, Globe, RefreshCw, FileText, HardDrive, Database, Link, ArrowRight, CheckCircle2, Play, ChevronDown, ChevronRight } from 'lucide-react';
+import { X, FolderPlus, Settings, Shield, Globe, RefreshCw, FileText, HardDrive, Database, Link, ArrowRight, CheckCircle2, Play, ChevronDown, ChevronRight, Video } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
+
+interface RawMediaFormat {
+  format_id?: string;
+  ext?: string;
+  resolution?: string;
+  format_note?: string;
+  vcodec?: string;
+  acodec?: string;
+  height?: number;
+  filesize?: number;
+  filesize_approx?: number;
+}
+
+const isVideo = (f: RawMediaFormat) => {
+  const vcodec = f.vcodec?.toLowerCase();
+  return vcodec && vcodec !== 'none';
+};
+
+const isAudio = (f: RawMediaFormat) => {
+  const acodec = f.acodec?.toLowerCase();
+  const vcodec = f.vcodec?.toLowerCase();
+  return acodec && acodec !== 'none' && (!vcodec || vcodec === 'none');
+};
+
+const formatSize = (f: RawMediaFormat) => f.filesize ?? f.filesize_approx ?? 0;
+
+const matchesHeight = (f: RawMediaFormat, height: number | null) => {
+  if (height === null) return true;
+  
+  const note = f.format_note || "";
+  if (height === 2160 && (note.includes("2160p") || note.toLowerCase().includes("4k"))) return true;
+  if (height === 1440 && note.includes("1440p")) return true;
+  if (height === 1080 && note.includes("1080p")) return true;
+  if (height === 720 && note.includes("720p")) return true;
+  if (height === 480 && note.includes("480p")) return true;
+  if (height === 360 && note.includes("360p")) return true;
+
+  if (f.resolution) {
+    const parts = f.resolution.split('x').map(n => parseInt(n, 10));
+    if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+      const maxDim = Math.max(parts[0], parts[1]);
+      switch (height) {
+        case 2160: if (maxDim >= 3800) return true; break;
+        case 1440: if (maxDim >= 2500 && maxDim < 3800) return true; break;
+        case 1080: if (maxDim >= 1900 && maxDim < 2500) return true; break;
+        case 720:  if (maxDim >= 1200 && maxDim < 1900) return true; break;
+        case 480:  if (maxDim >= 800 && maxDim < 1200) return true; break;
+        case 360:  if (maxDim >= 600 && maxDim < 800) return true; break;
+      }
+    }
+  }
+
+  const formatHeight = f.height;
+  if (!formatHeight) return false;
+
+  let tolerance = 100;
+  if (height >= 2160) tolerance = 600;
+  else if (height >= 1440) tolerance = 400;
+  else if (height >= 1080) tolerance = 300;
+  else if (height >= 720) tolerance = 200;
+
+  return formatHeight <= height && formatHeight >= height - tolerance;
+};
+
+const hasVideoFormat = (formats: RawMediaFormat[], height: number | null, container: string) => {
+  return formats.some(f => {
+    if (!isVideo(f) || !matchesHeight(f, height)) return false;
+    return container === 'mkv' || f.ext?.toLowerCase() === container.toLowerCase();
+  });
+};
+
+const hasAudioFormat = (formats: RawMediaFormat[], ext: string | null) => {
+  return formats.some(f => {
+    if (!isAudio(f)) return false;
+    if (!ext) return true;
+    return f.ext?.toLowerCase() === ext.toLowerCase();
+  });
+};
+
+const estimatedVideoBytes = (formats: RawMediaFormat[], height: number | null, container: string) => {
+  let maxVideo = 0;
+  for (const f of formats) {
+    if (isVideo(f) && matchesHeight(f, height) && (container === 'mkv' || f.ext?.toLowerCase() === container.toLowerCase())) {
+      const size = formatSize(f);
+      if (size > maxVideo) maxVideo = size;
+    }
+  }
+  if (maxVideo === 0) return null;
+
+  let maxAudio = estimatedAudioBytes(formats, container === 'webm' ? 'webm' : 'm4a') || estimatedAudioBytes(formats, null) || 0;
+  return maxVideo + maxAudio;
+};
+
+const estimatedAudioBytes = (formats: RawMediaFormat[], ext: string | null): number | null => {
+  let maxPreferred = 0;
+  for (const f of formats) {
+    if (isAudio(f)) {
+      if (!ext || f.ext?.toLowerCase() === ext.toLowerCase()) {
+        const size = formatSize(f);
+        if (size > maxPreferred) maxPreferred = size;
+      }
+    }
+  }
+  if (maxPreferred > 0 || !ext) return maxPreferred > 0 ? maxPreferred : null;
+  return estimatedAudioBytes(formats, null);
+};
+
+const formatBytes = (bytes: number) => {
+  if (bytes === 0) return 'Unknown size';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+};
+
+const parseMediaFormats = (jsonStr: string) => {
+  try {
+    const data = JSON.parse(jsonStr);
+    let title = data.title || 'Media';
+    title = title.replace(/[\/\\?%*:|"<>]/g, '-');
+    const rawFormats: RawMediaFormat[] = data.formats || [];
+
+    const options = [];
+
+    const standardResolutions = [
+      { h: 2160, name: "4K" },
+      { h: 1440, name: "1440p" },
+      { h: 1080, name: "1080p" },
+      { h: 720, name: "720p" },
+      { h: 480, name: "480p" },
+      { h: 360, name: "360p" }
+    ];
+
+    const availableResolutions = standardResolutions.filter(res => 
+      rawFormats.some(f => isVideo(f) && matchesHeight(f, res.h))
+    );
+
+    const videoQualities: { h: number | null, name: string }[] = [{ h: null, name: "Best" }, ...availableResolutions];
+    const videoContainers = [
+      { ext: "mp4", name: "MP4" },
+      { ext: "mkv", name: "MKV" },
+      { ext: "webm", name: "WebM" }
+    ];
+
+    for (const q of videoQualities) {
+      for (const c of videoContainers) {
+        if (!hasVideoFormat(rawFormats, q.h, c.ext)) continue;
+        const est = estimatedVideoBytes(rawFormats, q.h, c.ext);
+        const filter = q.h ? `[height<=${q.h}]` : '';
+        
+        let selector = `bestvideo${filter}+bestaudio/best${filter}`;
+        if (c.ext === 'mp4') {
+          selector = `bestvideo${filter}[ext=mp4]+bestaudio[ext=m4a]/best${filter}[ext=mp4]/bestvideo${filter}+bestaudio/best${filter}`;
+        } else if (c.ext === 'webm') {
+          selector = `bestvideo${filter}[ext=webm]+bestaudio[ext=webm]/best${filter}[ext=webm]/bestvideo${filter}+bestaudio/best${filter}`;
+        }
+
+        options.push({
+          name: `${q.name} ${c.name}`,
+          selector,
+          ext: c.ext,
+          detail: est ? `~${formatBytes(est)}` : '',
+          type: 'Video',
+          bytes: est || 0
+        });
+      }
+    }
+
+    if (hasAudioFormat(rawFormats, null)) {
+      const est = estimatedAudioBytes(rawFormats, null);
+      options.push({
+        name: "Audio MP3",
+        selector: "bestaudio/best",
+        ext: "mp3",
+        detail: est ? `~${formatBytes(est)}` : '',
+        type: 'Audio',
+        bytes: est || 0
+      });
+    }
+
+    if (hasAudioFormat(rawFormats, "m4a")) {
+      const est = estimatedAudioBytes(rawFormats, "m4a");
+      options.push({
+        name: "Audio M4A",
+        selector: "bestaudio[ext=m4a]/bestaudio/best",
+        ext: "m4a",
+        detail: est ? `~${formatBytes(est)}` : '',
+        type: 'Audio',
+        bytes: est || 0
+      });
+    }
+
+    if (hasAudioFormat(rawFormats, "webm") || hasAudioFormat(rawFormats, "opus")) {
+      const est = estimatedAudioBytes(rawFormats, "webm") || estimatedAudioBytes(rawFormats, "opus");
+      options.push({
+        name: "Audio Opus",
+        selector: "bestaudio[ext=webm]/bestaudio/best",
+        ext: "opus",
+        detail: est ? `~${formatBytes(est)}` : '',
+        type: 'Audio',
+        bytes: est || 0
+      });
+    }
+
+    return { title, formats: options };
+  } catch (e) {
+    return null;
+  }
+};
+
 
 export const AddDownloadsModal = () => {
   const { isAddModalOpen, toggleAddModal, addDownload } = useDownloadStore();
   const { defaultDownloadPath } = useSettingsStore();
   
   const [urls, setUrls] = useState('');
-  const [parsedItems, setParsedItems] = useState<{url: string, file: string, size?: string, sizeBytes?: number, status?: string}[]>([]);
+  const [extractMedia, setExtractMedia] = useState(false);
+  const [parsedItems, setParsedItems] = useState<{
+    url: string, 
+    file: string, 
+    size?: string, 
+    sizeBytes?: number, 
+    status?: string,
+    isMedia?: boolean,
+    formats?: { name: string, selector: string, ext: string, detail: string, type: string, bytes: number }[],
+    selectedFormat?: number
+  }[]>([]);
   
   // Right Form
   const [saveLocation, setSaveLocation] = useState(defaultDownloadPath);
@@ -36,6 +256,7 @@ export const AddDownloadsModal = () => {
       setSaveLocation(defaultDownloadPath);
       setUrls('');
       setParsedItems([]);
+      setExtractMedia(false);
     }
   }, [isAddModalOpen, defaultDownloadPath]);
 
@@ -66,19 +287,40 @@ export const AddDownloadsModal = () => {
         const url = lines[i];
         try {
           new URL(url);
-          const meta = await invoke<{filename: string, size: string, size_bytes: number}>('fetch_metadata', { url });
-          updatedItems[i] = { url, file: meta.filename, size: meta.size, sizeBytes: meta.size_bytes, status: 'Ready' };
+          if (extractMedia) {
+            const { mediaCookieSource } = useSettingsStore.getState();
+            const browserArg = mediaCookieSource !== 'none' ? mediaCookieSource : null;
+
+            const jsonStr = await invoke<string>('fetch_media_metadata', { url, cookieBrowser: browserArg });
+            const mediaData = parseMediaFormats(jsonStr);
+            if (mediaData && mediaData.formats.length > 0) {
+              updatedItems[i] = { 
+                url, 
+                file: `${mediaData.title}.${mediaData.formats[0].ext}`, 
+                size: mediaData.formats[0].detail || 'Unknown (Media)', 
+                sizeBytes: mediaData.formats[0].bytes, 
+                status: 'Ready',
+                isMedia: true,
+                formats: mediaData.formats,
+                selectedFormat: 0
+              };
+            } else {
+              throw new Error("Invalid media metadata or no formats found");
+            }
+          } else {
+            const meta = await invoke<{filename: string, size: string, size_bytes: number}>('fetch_metadata', { url });
+            updatedItems[i] = { url, file: meta.filename, size: meta.size, sizeBytes: meta.size_bytes, status: 'Ready' };
+          }
         } catch (e) {
           console.error("Meta fetch failed", e);
           updatedItems[i] = { ...updatedItems[i], size: 'Unknown', sizeBytes: 0, status: 'Error' };
         }
-        // Progressively update the UI as each fetch completes
         setParsedItems([...updatedItems]);
       }
     }, 400);
 
     return () => clearTimeout(timer);
-  }, [urls]);
+  }, [urls, extractMedia]); // Re-fetch if extractMedia toggles
   
   if (!isAddModalOpen) return null;
 
@@ -120,12 +362,23 @@ export const AddDownloadsModal = () => {
     for (const item of parsedItems) {
       try {
         const id = crypto.randomUUID();
+        let finalFile = item.file;
+        let formatSelector = undefined;
+        
+        if (item.isMedia && item.formats && item.selectedFormat !== undefined) {
+          const selectedFormat = item.formats[item.selectedFormat];
+          formatSelector = selectedFormat.selector;
+          // Update extension if user selected a different format
+          const baseName = finalFile.substring(0, finalFile.lastIndexOf('.')) || finalFile;
+          finalFile = `${baseName}.${selectedFormat.ext}`;
+        }
+
         addDownload({
           id,
           url: item.url,
-          fileName: item.file,
+          fileName: finalFile,
           status: startImmediately ? 'queued' : 'paused',
-          category: 'Other',
+          category: item.isMedia ? 'Video' : 'Other',
           dateAdded: new Date().toISOString(),
           connections: Number(connections),
           speedLimit: speedLimitEnabled ? `${speedLimit}K` : undefined,
@@ -133,6 +386,8 @@ export const AddDownloadsModal = () => {
           password: useAuth ? password.trim() : undefined,
           headers: headers.trim() || undefined,
           destination: finalLocation,
+          isMedia: item.isMedia,
+          mediaFormatSelector: formatSelector
         });
       } catch (e) {
         console.error("Invalid URL or failed to add:", e);
@@ -170,9 +425,21 @@ export const AddDownloadsModal = () => {
             <div className="p-5 flex-1 flex flex-col gap-5">
               
               <div className="flex flex-col gap-2">
-                <div className="flex items-center gap-2 text-text-primary font-semibold">
-                  <Link size={16} className="text-blue-500" />
-                  Download Links
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-text-primary font-semibold">
+                    <Link size={16} className="text-blue-500" />
+                    Download Links
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-text-primary font-medium bg-item-hover px-2 py-1 rounded-md border border-border-modal cursor-pointer hover:bg-item-hover/80 transition-colors">
+                    <input 
+                      type="checkbox" 
+                      checked={extractMedia} 
+                      onChange={e => setExtractMedia(e.target.checked)} 
+                      className="rounded border-border-modal text-blue-500 focus:ring-blue-500/20" 
+                    />
+                    <Video size={14} className="text-purple-500" />
+                    Extract Media
+                  </label>
                 </div>
                 <textarea 
                   className="w-full h-32 bg-bg-input/80 border border-border-modal rounded-lg p-3 text-[13px] text-text-primary focus:outline-none focus:border-blue-500 resize-none font-mono shadow-inner transition-colors"
@@ -213,18 +480,40 @@ export const AddDownloadsModal = () => {
                       </div>
                     ) : (
                       parsedItems.map((item, i) => (
-                        <div key={i} className="flex items-center text-xs px-2 py-1.5 hover:bg-item-hover rounded-md transition-colors">
-                          <div className="flex-[2] text-text-primary font-medium truncate pr-2" title={item.file}>{item.file}</div>
-                          <div className={`flex-1 font-mono ${item.status === 'Loading' ? 'text-text-muted/50' : 'text-text-muted'}`}>{item.size || 'Unknown'}</div>
-                          <div className={`flex-[1.5] font-medium ${item.status === 'Error' ? 'text-red-500' : item.status === 'Loading' ? 'text-orange-400' : 'text-blue-500'}`}>
-                            {item.status === 'Loading' ? (
-                              <div className="flex items-center gap-1.5">
-                                <RefreshCw size={12} className="animate-spin" /> Fetching...
-                              </div>
-                            ) : (
-                              item.status || 'Ready'
-                            )}
+                        <div key={i} className="flex flex-col text-xs px-2 py-1.5 hover:bg-item-hover rounded-md transition-colors group">
+                          <div className="flex items-center w-full">
+                            <div className="flex-[2] text-text-primary font-medium truncate pr-2" title={item.file}>{item.file}</div>
+                            <div className={`flex-1 font-mono ${item.status === 'Loading' ? 'text-text-muted/50' : 'text-text-muted'}`}>{item.size || 'Unknown'}</div>
+                            <div className={`flex-[1.5] font-medium ${item.status === 'Error' ? 'text-red-500' : item.status === 'Loading' ? 'text-orange-400' : 'text-blue-500'}`}>
+                              {item.status === 'Loading' ? (
+                                <div className="flex items-center gap-1.5">
+                                  <RefreshCw size={12} className="animate-spin" /> Fetching...
+                                </div>
+                              ) : (
+                                item.status || 'Ready'
+                              )}
+                            </div>
                           </div>
+                          {item.isMedia && item.formats && (
+                            <div className="mt-2 pl-2">
+                              <select 
+                                className="w-full bg-bg-input border border-border-modal rounded px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-purple-500"
+                                value={item.selectedFormat}
+                                onChange={(e) => {
+                                  const newItems = [...parsedItems];
+                                  const selIdx = parseInt(e.target.value, 10);
+                                  newItems[i].selectedFormat = selIdx;
+                                  newItems[i].size = newItems[i].formats?.[selIdx].detail || 'Unknown';
+                                  newItems[i].sizeBytes = newItems[i].formats?.[selIdx].bytes || 0;
+                                  setParsedItems(newItems);
+                                }}
+                              >
+                                {item.formats.map((f, idx) => (
+                                  <option key={idx} value={idx}>{f.name} {f.detail ? `(${f.detail})` : ''}</option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
                         </div>
                       ))
                     )}
@@ -269,7 +558,7 @@ export const AddDownloadsModal = () => {
                   <div className="flex items-center justify-between">
                     <label className="text-xs text-text-secondary font-medium">Connections per File</label>
                     <div className="flex items-center gap-2">
-                      <input type="range" min="1" max="16" value={connections} onChange={e=>setConnections(Number(e.target.value))} className="w-24 accent-blue-500" />
+                      <input type="range" min="1" max="16" value={connections} onChange={e=>setConnections(Number(e.target.value))} className="w-24 accent-blue-500" disabled={extractMedia} />
                       <span className="text-xs text-text-primary font-mono w-4 text-right">{connections}</span>
                     </div>
                   </div>

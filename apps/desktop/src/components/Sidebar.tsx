@@ -52,6 +52,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ selectedFilter, onSelectFilter
     <div className="w-[220px] min-w-[190px] max-w-[260px] bg-sidebar-bg/80 backdrop-blur-xl border-r border-border-color flex flex-col p-3 pt-8 pb-4 overflow-y-auto relative shrink-0">
       <div 
         className="absolute top-0 left-0 right-0 h-10 z-50" 
+        data-tauri-drag-region
         onPointerDown={(e) => {
           if (e.button === 0) getCurrentWindow().startDragging();
         }}
