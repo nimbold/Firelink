@@ -64,6 +64,21 @@ We are live! Send downloads directly from your browser to the Firelink app with 
 
 ---
 
+## 🌍 Cross-Platform Evolution (Firelink v2)
+
+We are currently rewriting Firelink from the ground up using **Tauri, React, and Rust** to bring our blazing-fast native experience to Windows and Linux, while maintaining our standard of excellence on macOS.
+
+### 🚀 Development Progress
+- [x] **Core Engine Port:** `aria2c` and `yt-dlp` integration in Rust
+- [x] **UI Foundation:** Pixel-perfect React + Tailwind interface
+- [x] **Settings & State:** Fully wired frontend-to-backend communication
+- [ ] **Cross-Platform Binaries:** Automated builds for Windows (`.exe`) and Linux (`.AppImage`)
+- [ ] **Feature Parity:** Porting remaining media extraction and scheduler features
+
+*Stay tuned as we prepare our first true cross-platform beta release!*
+
+---
+
 ## 🛠️ Quick Start
 
 **OS Support:** macOS 14.0 or newer (Apple Silicon natively).
