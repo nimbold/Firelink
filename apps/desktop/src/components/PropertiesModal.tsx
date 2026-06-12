@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useDownloadStore, DownloadItem } from '../store/useDownloadStore';
 import { useSettingsStore } from '../store/useSettingsStore';
-import { ChevronDown, ChevronRight, FolderPlus, Info, CheckCircle, AlertCircle, Play, Pause, FileBox, File, Image as ImageIcon, Music, Video, Box, Archive } from 'lucide-react';
+import { ChevronDown, ChevronRight, FolderPlus, Info, CheckCircle, AlertCircle, Play, Pause } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 
 type LoginMode = 'matching' | 'custom' | 'none';
@@ -130,13 +130,6 @@ export const PropertiesModal = () => {
   else if (item.status === 'downloading') { statusColor = 'text-blue-500'; StatusIcon = Play; }
   else if (item.status === 'paused') { statusColor = 'text-orange-500'; StatusIcon = Pause; }
   else if (item.status === 'failed') { statusColor = 'text-red-500'; StatusIcon = AlertCircle; }
-
-  let CategoryIcon = File;
-  if (item.category === 'Images') CategoryIcon = ImageIcon;
-  if (item.category === 'Audio') CategoryIcon = Music;
-  if (item.category === 'Video') CategoryIcon = Video;
-  if (item.category === 'Apps') CategoryIcon = Box;
-  if (item.category === 'Archives') CategoryIcon = Archive;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">

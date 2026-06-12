@@ -51,6 +51,7 @@ export interface DownloadItem {
   fraction?: number;
   speed?: string;
   eta?: string;
+  size?: string;
   category: DownloadCategory;
   dateAdded: string;
   // Advanced Settings
@@ -146,7 +147,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
   },
   processQueue: async () => {
     const { downloads, updateDownload } = get();
-    const { maxConcurrentDownloads, globalSpeedLimit, defaultDownloadPath } = useSettingsStore.getState();
+    const { maxConcurrentDownloads } = useSettingsStore.getState();
     
     const activeCount = downloads.filter(d => d.status === 'downloading').length;
     if (activeCount >= maxConcurrentDownloads) return;

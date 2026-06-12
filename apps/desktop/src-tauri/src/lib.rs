@@ -26,7 +26,7 @@ async fn fetch_metadata(url: String, user_agent: Option<String>) -> Result<Metad
     } else {
         builder = builder.user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
     }
-    
+
     let client = builder.build().map_err(|e| e.to_string())?;
 
     let mut res = client.head(&url).send().await.map_err(|e| e.to_string())?;
@@ -44,7 +44,7 @@ async fn fetch_metadata(url: String, user_agent: Option<String>) -> Result<Metad
             }
         }
     }
-    
+
     if filename.is_empty() {
         if let Ok(parsed) = reqwest::Url::parse(&url) {
             if let Some(segments) = parsed.path_segments() {
@@ -85,7 +85,7 @@ async fn fetch_media_metadata(app_handle: tauri::AppHandle, url: String, cookie_
     println!("fetch_media_metadata called for: {}", url);
     let resource_dir = app_handle.path().resource_dir().map_err(|e| e.to_string())?;
     let ytdlp_path = resource_dir.join("binaries").join("yt-dlp");
-    
+
     let mut cmd = AsyncCommand::new(&ytdlp_path);
     cmd.arg("-J")
        .arg("--no-warnings")
@@ -102,14 +102,14 @@ async fn fetch_media_metadata(app_handle: tauri::AppHandle, url: String, cookie_
             cmd.arg("--cookies-from-browser").arg(&browser);
         }
     }
-    
+
     cmd.arg(&url);
-    
+
     // We use tokio AsyncCommand so it doesn't block the async thread
     let output = cmd.output()
         .await
         .map_err(|e| format!("Failed to execute yt-dlp: {}", e))?;
-        
+
     if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout).to_string();
         Ok(text)
@@ -131,7 +131,7 @@ async fn test_ytdlp(app_handle: tauri::AppHandle) -> Result<String, String> {
     let resource_dir = app_handle.path().resource_dir().map_err(|e| e.to_string())?;
     let ytdlp_path = resource_dir.join("binaries").join("yt-dlp");
     println!("Resolved yt-dlp path: {:?}", ytdlp_path);
-    
+
     let output = Command::new(&ytdlp_path)
         .arg("--version")
         .output()
@@ -139,7 +139,7 @@ async fn test_ytdlp(app_handle: tauri::AppHandle) -> Result<String, String> {
             println!("Failed to execute: {}", e);
             format!("Failed to execute yt-dlp: {}", e)
         })?;
-        
+
     println!("yt-dlp execution finished with status: {}", output.status);
     if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -158,7 +158,7 @@ async fn test_aria2c(app_handle: tauri::AppHandle) -> Result<String, String> {
     let resource_dir = app_handle.path().resource_dir().map_err(|e| e.to_string())?;
     let aria2c_path = resource_dir.join("binaries").join("aria2c");
     println!("Resolved aria2c path: {:?}", aria2c_path);
-    
+
     let output = Command::new(&aria2c_path)
         .arg("--version")
         .output()
@@ -166,7 +166,7 @@ async fn test_aria2c(app_handle: tauri::AppHandle) -> Result<String, String> {
             println!("Failed to execute: {}", e);
             format!("Failed to execute aria2c: {}", e)
         })?;
-        
+
     println!("aria2c execution finished with status: {}", output.status);
     if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -187,7 +187,7 @@ async fn test_ffmpeg(app_handle: tauri::AppHandle) -> Result<String, String> {
     let resource_dir = app_handle.path().resource_dir().map_err(|e| e.to_string())?;
     let ffmpeg_path = resource_dir.join("binaries").join("ffmpeg");
     println!("Resolved ffmpeg path: {:?}", ffmpeg_path);
-    
+
     let output = Command::new(&ffmpeg_path)
         .arg("-version")
         .output()
@@ -195,7 +195,7 @@ async fn test_ffmpeg(app_handle: tauri::AppHandle) -> Result<String, String> {
             println!("Failed to execute: {}", e);
             format!("Failed to execute ffmpeg: {}", e)
         })?;
-        
+
     println!("ffmpeg execution finished with status: {}", output.status);
     if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -350,7 +350,7 @@ async fn start_download(
        .arg("--check-certificate=false")
        .arg(format!("--dir={}", resolved_dest.to_string_lossy()))
        .arg(format!("--out={}", filename));
-       
+
     if let Some(conn) = connections {
         cmd.arg(format!("--split={}", conn));
         cmd.arg(format!("--max-connection-per-server={}", conn));
@@ -388,7 +388,7 @@ async fn start_download(
             cmd.arg(format!("--all-proxy={}", p));
         }
     }
-    
+
     cmd.arg(&url);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::null());
@@ -396,14 +396,14 @@ async fn start_download(
     // cmd.kill_on_drop(true);
 
     let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn aria2c: {}", e))?;
-    
+
     let pid = child.id().unwrap_or(0);
     state.tasks.lock().unwrap().insert(id.clone(), pid);
 
     let stdout = child.stdout.take().unwrap();
     let app_handle_clone = app_handle.clone();
     let id_clone = id.clone();
-    
+
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout).lines();
         let percentage_re = Regex::new(r"\((\d+)%\)").unwrap();
@@ -420,17 +420,17 @@ async fn start_download(
                                     .and_then(|cap| cap.get(1))
                                     .and_then(|m| m.as_str().parse::<f64>().ok())
                                     .unwrap_or(0.0) / 100.0;
-                                    
+
                                 let speed = speed_re.captures(&line)
                                     .and_then(|cap| cap.get(1))
                                     .map(|m| m.as_str().to_string())
                                     .unwrap_or_else(|| "-".to_string());
-                                    
+
                                 let eta = eta_re.captures(&line)
                                     .and_then(|cap| cap.get(1))
                                     .map(|m| m.as_str().to_string())
                                     .unwrap_or_else(|| "-".to_string());
-                                
+
                                 let _ = app_handle_clone.emit("download-progress", DownloadProgressEvent {
                                     id: id_clone.clone(),
                                     fraction,
@@ -490,8 +490,14 @@ async fn start_media_download(
     if !resolved_dest.exists() {
         let _ = std::fs::create_dir_all(&resolved_dest);
     }
-    
+
     let out_path = resolved_dest.join(&filename);
+
+    let total_tracks: f64 = if let Some(ref format) = format_selector {
+        if format.contains('+') { 2.0 } else { 1.0 }
+    } else {
+        1.0
+    };
 
     let mut cmd = AsyncCommand::new(&ytdlp_path);
     cmd.arg("--newline")
@@ -502,7 +508,7 @@ async fn start_media_download(
        .arg("--retries").arg("3")
        .arg("--extractor-retries").arg("3")
        .arg("-o").arg(out_path.to_string_lossy().to_string());
-       
+
     if let Some(format) = format_selector {
         cmd.arg("-f").arg(format);
         // If the filename implies an audio format, use it as audio output
@@ -523,7 +529,7 @@ async fn start_media_download(
             }
         }
     }
-    
+
     cmd.arg(&url);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped()); // Also pipe stderr for better error reporting
@@ -535,14 +541,17 @@ async fn start_media_download(
     let stdout = child.stdout.take().unwrap();
     let app_handle_clone = app_handle.clone();
     let id_clone = id.clone();
-    
+
     // yt-dlp parsing regex
     let pct_re = Regex::new(r"\[download\]\s+(\d+(?:\.\d+)?)%").unwrap();
     let spd_re = Regex::new(r"at\s+([^\s]+)").unwrap();
     let eta_re = Regex::new(r"ETA\s+([^\s]+)").unwrap();
-    
+
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout).lines();
+        let mut current_track: f64 = 0.0;
+        let mut last_fraction: f64 = 0.0;
+
         loop {
             tokio::select! {
                 line_result = reader.next_line() => {
@@ -553,20 +562,27 @@ async fn start_media_download(
                                     .and_then(|cap| cap.get(1))
                                     .and_then(|m| m.as_str().parse::<f64>().ok())
                                     .unwrap_or(0.0) / 100.0;
-                                    
+
+                                if fraction < last_fraction && (last_fraction - fraction) > 0.5 {
+                                    current_track += 1.0;
+                                }
+                                last_fraction = fraction;
+
+                                let overall_fraction = ((current_track + fraction) / total_tracks).min(1.0);
+
                                 let speed = spd_re.captures(&line)
                                     .and_then(|cap| cap.get(1))
                                     .map(|m| m.as_str().to_string())
                                     .unwrap_or_else(|| "-".to_string());
-                                    
+
                                 let eta = eta_re.captures(&line)
                                     .and_then(|cap| cap.get(1))
                                     .map(|m| m.as_str().to_string())
                                     .unwrap_or_else(|| "-".to_string());
-                                
+
                                 let _ = app_handle_clone.emit("download-progress", DownloadProgressEvent {
                                     id: id_clone.clone(),
-                                    fraction,
+                                    fraction: overall_fraction,
                                     speed,
                                     eta,
                                 });
@@ -619,7 +635,7 @@ async fn pause_download(state: tauri::State<'_, AppState>, id: String) -> Result
 }
 
 #[tauri::command]
-fn update_dock_badge(app_handle: tauri::AppHandle, count: i32) {
+fn update_dock_badge(_app_handle: tauri::AppHandle, count: i32) {
     #[cfg(target_os = "macos")]
     {
         let label = if count > 0 { count.to_string() } else { "".to_string() };
@@ -661,7 +677,7 @@ fn get_free_space(app_handle: tauri::AppHandle, path: String) -> Result<String, 
     use sysinfo::Disks;
     use tauri::Manager;
     let disks = Disks::new_with_refreshed_list();
-    
+
     let mut resolved_dest = std::path::PathBuf::from(&path);
     if path.starts_with("~/") {
         if let Ok(home) = app_handle.path().home_dir() {
@@ -672,11 +688,11 @@ fn get_free_space(app_handle: tauri::AppHandle, path: String) -> Result<String, 
             resolved_dest = home;
         }
     }
-    
+
     // Find the disk that the path is mounted on
     let mut best_match: Option<&sysinfo::Disk> = None;
     let mut max_match_len = 0;
-    
+
     for disk in disks.list() {
         let mount_point = disk.mount_point();
         if resolved_dest.starts_with(mount_point) {
@@ -687,7 +703,7 @@ fn get_free_space(app_handle: tauri::AppHandle, path: String) -> Result<String, 
             }
         }
     }
-    
+
     if let Some(disk) = best_match {
         let bytes = disk.available_space();
         let size_str = if bytes < 1024 * 1024 {
@@ -713,7 +729,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
-            greet, test_ytdlp, test_aria2c, test_ffmpeg, open_file, show_in_folder, 
+            greet, test_ytdlp, test_aria2c, test_ffmpeg, open_file, show_in_folder,
             start_download, start_media_download, pause_download, fetch_metadata, fetch_media_metadata, update_dock_badge, set_prevent_sleep, get_free_space
         ])
         .run(tauri::generate_context!())

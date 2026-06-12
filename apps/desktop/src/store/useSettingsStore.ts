@@ -13,8 +13,8 @@ export interface SettingsState {
   defaultDownloadPath: string;
   maxConcurrentDownloads: number;
   globalSpeedLimit: string;
-  isSettingsModalOpen: boolean;
   isSidebarVisible: boolean;
+  activeView: 'downloads' | 'settings';
 
   // Replicated SwiftUI App Settings
   perServerConnections: number;
@@ -38,7 +38,7 @@ export interface SettingsState {
   setDefaultDownloadPath: (path: string) => void;
   setMaxConcurrentDownloads: (count: number) => void;
   setGlobalSpeedLimit: (limit: string) => void;
-  toggleSettingsModal: (isOpen: boolean) => void;
+  setActiveView: (view: 'downloads' | 'settings') => void;
   toggleSidebar: () => void;
 
   setPerServerConnections: (count: number) => void;
@@ -67,7 +67,7 @@ const defaultDirectories = {
   Documents: '~/Downloads/Documents',
   Apps: '~/Downloads/Apps',
   Images: '~/Downloads/Images',
-  Archives: '~/Downloads/Archives',
+  Archives: '~/Downloads/Compressed',
   Other: '~/Downloads/Other'
 };
 
@@ -101,7 +101,7 @@ export const useSettingsStore = create<SettingsState>()(
       defaultDownloadPath: '~/Downloads',
       maxConcurrentDownloads: 3,
       globalSpeedLimit: '',
-      isSettingsModalOpen: false,
+      activeView: 'downloads',
       isSidebarVisible: true,
 
       // Replicated SwiftUI defaults
@@ -118,15 +118,23 @@ export const useSettingsStore = create<SettingsState>()(
       askWhereToSaveEachFile: false,
       preventsSleepWhileDownloading: true,
       mediaCookieSource: 'none',
-      downloadDirectories: { ...defaultDirectories },
+      downloadDirectories: {
+        'Video': '~/Downloads/Video',
+        'Audio': '~/Downloads/Audio',
+        'Documents': '~/Downloads/Documents',
+        'Apps': '~/Downloads/Apps',
+        'Images': '~/Downloads/Images',
+        'Archives': '~/Downloads/Compressed',
+        'Other': '~/Downloads/Other'
+      },
       siteLogins: [],
       extensionPairingToken: generateSecureToken(),
 
       setTheme: (theme) => set({ theme }),
-      setDefaultDownloadPath: (defaultDownloadPath) => set({ defaultDownloadPath }),
-      setMaxConcurrentDownloads: (maxConcurrentDownloads) => set({ maxConcurrentDownloads }),
-      setGlobalSpeedLimit: (globalSpeedLimit) => set({ globalSpeedLimit }),
-      toggleSettingsModal: (isSettingsModalOpen) => set({ isSettingsModalOpen }),
+      setDefaultDownloadPath: (path) => set({ defaultDownloadPath: path }),
+      setMaxConcurrentDownloads: (max) => set({ maxConcurrentDownloads: max }),
+      setGlobalSpeedLimit: (limit) => set({ globalSpeedLimit: limit }),
+      setActiveView: (view) => set({ activeView: view }),
       toggleSidebar: () => set((state) => ({ isSidebarVisible: !state.isSidebarVisible })),
 
       setPerServerConnections: (perServerConnections) => set({ perServerConnections }),

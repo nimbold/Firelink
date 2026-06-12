@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Sidebar, SidebarFilter } from "./components/Sidebar";
 import { DownloadTable } from "./components/DownloadTable";
 import { AddDownloadsModal } from "./components/AddDownloadsModal";
-import { SettingsModal } from "./components/SettingsModal";
+import SettingsView from "./components/SettingsView";
 import { PropertiesModal } from "./components/PropertiesModal";
 import { listen } from "@tauri-apps/api/event";
 import { useDownloadStore } from "./store/useDownloadStore";
@@ -14,6 +14,7 @@ function App() {
   const updateDownload = useDownloadStore(state => state.updateDownload);
   const theme = useSettingsStore(state => state.theme);
   const isSidebarVisible = useSettingsStore(state => state.isSidebarVisible);
+  const activeView = useSettingsStore(state => state.activeView);
   const appFontSize = useSettingsStore(state => state.appFontSize);
 
   useEffect(() => {
@@ -95,10 +96,13 @@ function App() {
 
   return (
     <div className="flex h-screen w-screen bg-main-bg text-text-primary overflow-hidden">
-      {isSidebarVisible && <Sidebar selectedFilter={filter} onSelectFilter={setFilter} />}
-      <DownloadTable filter={filter} />
+      {isSidebarVisible && <Sidebar selectedFilter={filter} onSelectFilter={(f) => { setFilter(f); useSettingsStore.getState().setActiveView('downloads'); }} />}
+      {activeView === 'downloads' ? (
+        <DownloadTable filter={filter} />
+      ) : (
+        <SettingsView />
+      )}
       <AddDownloadsModal />
-      <SettingsModal />
       <PropertiesModal />
     </div>
   );

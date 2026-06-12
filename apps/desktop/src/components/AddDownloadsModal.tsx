@@ -1,9 +1,21 @@
 import { useState, useEffect } from 'react';
 import { useDownloadStore } from '../store/useDownloadStore';
 import { useSettingsStore } from '../store/useSettingsStore';
-import { X, FolderPlus, Settings, Shield, Globe, RefreshCw, FileText, HardDrive, Database, Link, ArrowRight, CheckCircle2, Play, ChevronDown, ChevronRight, Video } from 'lucide-react';
+import { DownloadCategory } from '../store/useDownloadStore';
+import { FolderPlus, Settings, Shield, RefreshCw, FileText, HardDrive, Database, Link, ArrowRight, Play, ChevronDown, ChevronRight, Video, Film, Music } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
+
+function determineCategory(fileName: string): DownloadCategory {
+  const ext = fileName.split('.').pop()?.toLowerCase() || '';
+  if (['mp4', 'mkv', 'webm', 'avi', 'mov', 'flv'].includes(ext)) return 'Video';
+  if (['mp3', 'm4a', 'wav', 'flac', 'ogg', 'aac'].includes(ext)) return 'Audio';
+  if (['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'rtf'].includes(ext)) return 'Documents';
+  if (['exe', 'dmg', 'pkg', 'app', 'apk', 'deb', 'rpm'].includes(ext)) return 'Apps';
+  if (['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'bmp', 'tiff'].includes(ext)) return 'Images';
+  if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'].includes(ext)) return 'Archives';
+  return 'Other';
+}
 
 interface RawMediaFormat {
   format_id?: string;
@@ -15,6 +27,17 @@ interface RawMediaFormat {
   height?: number;
   filesize?: number;
   filesize_approx?: number;
+}
+
+interface ParsedDownloadItem {
+  url: string;
+  file: string;
+  size?: string;
+  sizeBytes?: number;
+  status?: string;
+  isMedia?: boolean;
+  formats?: { name: string; selector: string; ext: string; detail: string; type: string; bytes: number }[];
+  selectedFormat?: number;
 }
 
 const isVideo = (f: RawMediaFormat) => {
@@ -32,7 +55,7 @@ const formatSize = (f: RawMediaFormat) => f.filesize ?? f.filesize_approx ?? 0;
 
 const matchesHeight = (f: RawMediaFormat, height: number | null) => {
   if (height === null) return true;
-  
+
   const note = f.format_note || "";
   if (height === 2160 && (note.includes("2160p") || note.toLowerCase().includes("4k"))) return true;
   if (height === 1440 && note.includes("1440p")) return true;
@@ -137,7 +160,7 @@ const parseMediaFormats = (jsonStr: string) => {
       { h: 360, name: "360p" }
     ];
 
-    const availableResolutions = standardResolutions.filter(res => 
+    const availableResolutions = standardResolutions.filter(res =>
       rawFormats.some(f => isVideo(f) && matchesHeight(f, res.h))
     );
 
@@ -153,7 +176,7 @@ const parseMediaFormats = (jsonStr: string) => {
         if (!hasVideoFormat(rawFormats, q.h, c.ext)) continue;
         const est = estimatedVideoBytes(rawFormats, q.h, c.ext);
         const filter = q.h ? `[height<=${q.h}]` : '';
-        
+
         let selector = `bestvideo${filter}+bestaudio/best${filter}`;
         if (c.ext === 'mp4') {
           selector = `bestvideo${filter}[ext=mp4]+bestaudio[ext=m4a]/best${filter}[ext=mp4]/bestvideo${filter}+bestaudio/best${filter}`;
@@ -214,35 +237,36 @@ const parseMediaFormats = (jsonStr: string) => {
   }
 };
 
+const MEDIA_DOMAINS = ['youtube.com', 'youtu.be', 'twitter.com', 'x.com', 'twitch.tv', 'vimeo.com', 'instagram.com', 'tiktok.com', 'reddit.com', 'soundcloud.com', 'facebook.com'];
+const isMediaUrl = (url: string) => {
+  try {
+    const u = new URL(url);
+    return MEDIA_DOMAINS.some(d => u.hostname.includes(d));
+  } catch {
+    return false;
+  }
+};
+
 
 export const AddDownloadsModal = () => {
   const { isAddModalOpen, toggleAddModal, addDownload } = useDownloadStore();
   const { defaultDownloadPath } = useSettingsStore();
-  
+
   const [urls, setUrls] = useState('');
-  const [extractMedia, setExtractMedia] = useState(false);
-  const [parsedItems, setParsedItems] = useState<{
-    url: string, 
-    file: string, 
-    size?: string, 
-    sizeBytes?: number, 
-    status?: string,
-    isMedia?: boolean,
-    formats?: { name: string, selector: string, ext: string, detail: string, type: string, bytes: number }[],
-    selectedFormat?: number
-  }[]>([]);
-  
+  const [selectedItemIndex, setSelectedItemIndex] = useState<number | null>(null);
+  const [parsedItems, setParsedItems] = useState<ParsedDownloadItem[]>([]);
+
   // Right Form
   const [saveLocation, setSaveLocation] = useState(defaultDownloadPath);
   const [connections, setConnections] = useState(16);
   const [speedLimitEnabled, setSpeedLimitEnabled] = useState(false);
   const [speedLimit, setSpeedLimit] = useState('1024');
   const [freeSpace, setFreeSpace] = useState('Unknown');
-  
+
   const [useAuth, setUseAuth] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  
+
   const [advancedExpanded, setAdvancedExpanded] = useState(false);
   const [checksumEnabled, setChecksumEnabled] = useState(false);
   const [checksumAlgo, setChecksumAlgo] = useState('SHA-256');
@@ -256,7 +280,7 @@ export const AddDownloadsModal = () => {
       setSaveLocation(defaultDownloadPath);
       setUrls('');
       setParsedItems([]);
-      setExtractMedia(false);
+      setSelectedItemIndex(null);
     }
   }, [isAddModalOpen, defaultDownloadPath]);
 
@@ -270,35 +294,42 @@ export const AddDownloadsModal = () => {
   // Metadata parser
   useEffect(() => {
     const lines = urls.split('\n').map(u => u.trim()).filter(u => u.length > 0);
-    
+
     // Immediately display items in loading state
-    const initialItems = lines.map(url => {
+    const initialItems: ParsedDownloadItem[] = lines.map(url => {
       let fallbackFile = 'URL';
       try { fallbackFile = new URL(url).pathname.split('/').pop() || 'download'; } catch {}
-      return { url, file: fallbackFile, size: '-', status: 'Loading' };
+      return { url, file: fallbackFile, size: '-', status: 'Loading', isMedia: isMediaUrl(url) };
     });
     setParsedItems(initialItems);
 
-    if (lines.length === 0) return;
+    if (lines.length === 0) {
+      setSelectedItemIndex(null);
+      return;
+    } else if (selectedItemIndex === null || selectedItemIndex >= lines.length) {
+      setSelectedItemIndex(0);
+    }
 
     const timer = setTimeout(async () => {
       const updatedItems = [...initialItems];
+      let firstReadyIndex: number | null = null;
+
       for (let i = 0; i < lines.length; i++) {
         const url = lines[i];
         try {
           new URL(url);
-          if (extractMedia) {
+          if (isMediaUrl(url)) {
             const { mediaCookieSource } = useSettingsStore.getState();
             const browserArg = mediaCookieSource !== 'none' ? mediaCookieSource : null;
 
             const jsonStr = await invoke<string>('fetch_media_metadata', { url, cookieBrowser: browserArg });
             const mediaData = parseMediaFormats(jsonStr);
             if (mediaData && mediaData.formats.length > 0) {
-              updatedItems[i] = { 
-                url, 
-                file: `${mediaData.title}.${mediaData.formats[0].ext}`, 
-                size: mediaData.formats[0].detail || 'Unknown (Media)', 
-                sizeBytes: mediaData.formats[0].bytes, 
+              updatedItems[i] = {
+                url,
+                file: `${mediaData.title}.${mediaData.formats[0].ext}`,
+                size: mediaData.formats[0].detail || 'Unknown (Media)',
+                sizeBytes: mediaData.formats[0].bytes,
                 status: 'Ready',
                 isMedia: true,
                 formats: mediaData.formats,
@@ -311,17 +342,22 @@ export const AddDownloadsModal = () => {
             const meta = await invoke<{filename: string, size: string, size_bytes: number}>('fetch_metadata', { url });
             updatedItems[i] = { url, file: meta.filename, size: meta.size, sizeBytes: meta.size_bytes, status: 'Ready' };
           }
+          if (firstReadyIndex === null) firstReadyIndex = i;
         } catch (e) {
           console.error("Meta fetch failed", e);
           updatedItems[i] = { ...updatedItems[i], size: 'Unknown', sizeBytes: 0, status: 'Error' };
         }
         setParsedItems([...updatedItems]);
       }
+
+      if (firstReadyIndex !== null) {
+        setSelectedItemIndex(firstReadyIndex);
+      }
     }, 400);
 
     return () => clearTimeout(timer);
-  }, [urls, extractMedia]); // Re-fetch if extractMedia toggles
-  
+  }, [urls]); // Re-fetch only on urls change
+
   if (!isAddModalOpen) return null;
 
   const handleBrowse = async () => {
@@ -364,7 +400,7 @@ export const AddDownloadsModal = () => {
         const id = crypto.randomUUID();
         let finalFile = item.file;
         let formatSelector = undefined;
-        
+
         if (item.isMedia && item.formats && item.selectedFormat !== undefined) {
           const selectedFormat = item.formats[item.selectedFormat];
           formatSelector = selectedFormat.selector;
@@ -378,7 +414,7 @@ export const AddDownloadsModal = () => {
           url: item.url,
           fileName: finalFile,
           status: startImmediately ? 'queued' : 'paused',
-          category: item.isMedia ? 'Video' : 'Other',
+          category: determineCategory(finalFile),
           dateAdded: new Date().toISOString(),
           connections: Number(connections),
           speedLimit: speedLimitEnabled ? `${speedLimit}K` : undefined,
@@ -407,8 +443,8 @@ export const AddDownloadsModal = () => {
   );
 
   const requiredBytes = parsedItems.reduce((acc, item) => acc + (item.sizeBytes || 0), 0);
-  const requiredStr = requiredBytes > 0 
-    ? (requiredBytes < 1024 * 1024 ? `${(requiredBytes / 1024).toFixed(1)} KB` 
+  const requiredStr = requiredBytes > 0
+    ? (requiredBytes < 1024 * 1024 ? `${(requiredBytes / 1024).toFixed(1)} KB`
        : requiredBytes < 1024 * 1024 * 1024 ? `${(requiredBytes / 1024 / 1024).toFixed(1)} MB`
        : `${(requiredBytes / 1024 / 1024 / 1024).toFixed(2)} GB`)
     : 'Unknown';
@@ -416,32 +452,22 @@ export const AddDownloadsModal = () => {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md">
       <div className="w-[900px] h-[650px] bg-bg-modal border border-border-modal rounded-xl shadow-2xl flex flex-col overflow-hidden text-sm">
-        
+
         {/* Main Content Split */}
         <div className="flex flex-1 overflow-hidden">
-          
+
           {/* Left Column: URLs and Preview */}
           <div className="w-[55%] border-r border-border-modal flex flex-col bg-main-bg/50">
             <div className="p-5 flex-1 flex flex-col gap-5">
-              
+
               <div className="flex flex-col gap-2">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2 text-text-primary font-semibold">
                     <Link size={16} className="text-blue-500" />
                     Download Links
                   </div>
-                  <label className="flex items-center gap-2 text-xs text-text-primary font-medium bg-item-hover px-2 py-1 rounded-md border border-border-modal cursor-pointer hover:bg-item-hover/80 transition-colors">
-                    <input 
-                      type="checkbox" 
-                      checked={extractMedia} 
-                      onChange={e => setExtractMedia(e.target.checked)} 
-                      className="rounded border-border-modal text-blue-500 focus:ring-blue-500/20" 
-                    />
-                    <Video size={14} className="text-purple-500" />
-                    Extract Media
-                  </label>
                 </div>
-                <textarea 
+                <textarea
                   className="w-full h-32 bg-bg-input/80 border border-border-modal rounded-lg p-3 text-[13px] text-text-primary focus:outline-none focus:border-blue-500 resize-none font-mono shadow-inner transition-colors"
                   placeholder="Paste HTTP, HTTPS, FTP, or SFTP URLs here..."
                   value={urls}
@@ -480,7 +506,15 @@ export const AddDownloadsModal = () => {
                       </div>
                     ) : (
                       parsedItems.map((item, i) => (
-                        <div key={i} className="flex flex-col text-xs px-2 py-1.5 hover:bg-item-hover rounded-md transition-colors group">
+                        <div
+                          key={i}
+                          onClick={() => setSelectedItemIndex(i)}
+                          className={`flex flex-col text-xs px-2 py-2 cursor-pointer rounded-md transition-all group ${
+                            selectedItemIndex === i
+                              ? 'bg-blue-500/10 border border-blue-500/30 shadow-sm'
+                              : 'hover:bg-item-hover border border-transparent'
+                          }`}
+                        >
                           <div className="flex items-center w-full">
                             <div className="flex-[2] text-text-primary font-medium truncate pr-2" title={item.file}>{item.file}</div>
                             <div className={`flex-1 font-mono ${item.status === 'Loading' ? 'text-text-muted/50' : 'text-text-muted'}`}>{item.size || 'Unknown'}</div>
@@ -494,26 +528,6 @@ export const AddDownloadsModal = () => {
                               )}
                             </div>
                           </div>
-                          {item.isMedia && item.formats && (
-                            <div className="mt-2 pl-2">
-                              <select 
-                                className="w-full bg-bg-input border border-border-modal rounded px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-purple-500"
-                                value={item.selectedFormat}
-                                onChange={(e) => {
-                                  const newItems = [...parsedItems];
-                                  const selIdx = parseInt(e.target.value, 10);
-                                  newItems[i].selectedFormat = selIdx;
-                                  newItems[i].size = newItems[i].formats?.[selIdx].detail || 'Unknown';
-                                  newItems[i].sizeBytes = newItems[i].formats?.[selIdx].bytes || 0;
-                                  setParsedItems(newItems);
-                                }}
-                              >
-                                {item.formats.map((f, idx) => (
-                                  <option key={idx} value={idx}>{f.name} {f.detail ? `(${f.detail})` : ''}</option>
-                                ))}
-                              </select>
-                            </div>
-                          )}
                         </div>
                       ))
                     )}
@@ -527,20 +541,79 @@ export const AddDownloadsModal = () => {
           {/* Right Column: Settings */}
           <div className="w-[45%] flex flex-col overflow-y-auto bg-bg-modal">
             <div className="p-6 space-y-7">
-              
+
+              {/* Media Format (Dynamic) */}
+              {selectedItemIndex !== null && parsedItems[selectedItemIndex]?.isMedia && (
+                <section className="bg-gradient-to-br from-purple-500/5 to-blue-500/5 border border-purple-500/20 rounded-xl p-4 shadow-sm relative overflow-hidden">
+                  <div className="absolute top-0 right-0 p-2 opacity-10">
+                    <Video size={48} />
+                  </div>
+                  <div className="flex items-center gap-2 text-sm font-semibold text-text-primary mb-3 relative z-10">
+                    <Video size={16} className="text-purple-500" /> Media Format
+                  </div>
+
+                  {parsedItems[selectedItemIndex].status === 'Loading' ? (
+                    <div className="flex flex-col items-center justify-center py-6 gap-3 relative z-10">
+                      <RefreshCw size={24} className="animate-spin text-purple-500" />
+                      <span className="text-xs text-text-muted font-medium animate-pulse">Fetching media streams...</span>
+                    </div>
+                  ) : parsedItems[selectedItemIndex].formats ? (
+                    <div className="space-y-3 relative z-10">
+                      <div className="flex flex-col gap-1.5">
+                        <label className="text-[10px] uppercase font-bold tracking-wider text-text-muted">Available Streams</label>
+                        <div className="flex flex-col gap-1 max-h-48 overflow-y-auto pr-1">
+                          {parsedItems[selectedItemIndex].formats!.map((f: any, idx: number) => {
+                          const isSelected = parsedItems[selectedItemIndex].selectedFormat === idx;
+                          const Icon = f.type === 'Audio' ? Music : Film;
+                          return (
+                            <div
+                              key={idx}
+                              onClick={() => {
+                                const newItems = [...parsedItems];
+                                newItems[selectedItemIndex].selectedFormat = idx;
+                                newItems[selectedItemIndex].size = f.detail || 'Unknown';
+                                newItems[selectedItemIndex].sizeBytes = f.bytes || 0;
+                                // Update filename extension
+                                const baseName = newItems[selectedItemIndex].file.substring(0, newItems[selectedItemIndex].file.lastIndexOf('.')) || newItems[selectedItemIndex].file;
+                                newItems[selectedItemIndex].file = `${baseName}.${f.ext}`;
+                                setParsedItems(newItems);
+                              }}
+                              className={`flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer text-xs border transition-all ${
+                                isSelected ? 'bg-purple-500/10 border-purple-500/30 text-purple-600 dark:text-purple-400 font-semibold shadow-sm' : 'bg-bg-input border-border-modal text-text-secondary hover:border-border-modal/80 hover:bg-item-hover/50'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <Icon size={14} className={isSelected ? 'text-purple-500' : 'text-text-muted'} />
+                                <span>{f.name}</span>
+                              </div>
+                              <span className="font-mono text-[11px] opacity-80">{f.detail}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center py-4 relative z-10">
+                      <span className="text-xs text-red-400 font-medium">Failed to load media streams.</span>
+                    </div>
+                  )}
+                </section>
+              )}
+
               {/* Save Location */}
               <section>
                 <div className="flex items-center gap-2 text-sm font-semibold text-text-primary mb-3">
                   <FolderPlus size={16} className="text-blue-500" /> Save Location
                 </div>
                 <div className="flex gap-2">
-                  <input 
-                    type="text" 
-                    readOnly 
-                    value={saveLocation} 
-                    className="flex-1 bg-bg-input border border-border-modal rounded-md px-3 py-1.5 text-xs text-text-muted font-mono" 
+                  <input
+                    type="text"
+                    readOnly
+                    value={saveLocation}
+                    className="flex-1 bg-bg-input border border-border-modal rounded-md px-3 py-1.5 text-xs text-text-muted font-mono"
                   />
-                  <button 
+                  <button
                     onClick={handleBrowse}
                     className="bg-item-hover hover:bg-item-hover/80 text-text-primary border border-border-modal px-3 py-1.5 rounded-md text-xs font-medium transition-colors"
                   >
@@ -558,11 +631,11 @@ export const AddDownloadsModal = () => {
                   <div className="flex items-center justify-between">
                     <label className="text-xs text-text-secondary font-medium">Connections per File</label>
                     <div className="flex items-center gap-2">
-                      <input type="range" min="1" max="16" value={connections} onChange={e=>setConnections(Number(e.target.value))} className="w-24 accent-blue-500" disabled={extractMedia} />
+                      <input type="range" min="1" max="16" value={connections} onChange={e=>setConnections(Number(e.target.value))} className="w-24 accent-blue-500" disabled={parsedItems.some(i => i.isMedia)} />
                       <span className="text-xs text-text-primary font-mono w-4 text-right">{connections}</span>
                     </div>
                   </div>
-                  
+
                   <div className="flex items-center justify-between">
                     <label className="flex items-center gap-2 text-xs text-text-secondary font-medium cursor-pointer">
                       <input type="checkbox" checked={speedLimitEnabled} onChange={e=>setSpeedLimitEnabled(e.target.checked)} className="rounded border-border-modal text-blue-500 focus:ring-blue-500/20" />
@@ -587,7 +660,7 @@ export const AddDownloadsModal = () => {
                   <input type="checkbox" checked={useAuth} onChange={e=>setUseAuth(e.target.checked)} className="rounded border-border-modal text-blue-500 focus:ring-blue-500/20" />
                   Use authorization
                 </label>
-                
+
                 {useAuth && (
                   <div className="space-y-2.5 pl-5 border-l-2 border-border-modal/50">
                     <input type="text" value={username} onChange={e=>setUsername(e.target.value)} placeholder="Username" className="w-full bg-bg-input border border-border-modal rounded-md px-3 py-1.5 text-xs text-text-primary focus:border-blue-500 focus:outline-none" />
@@ -598,21 +671,21 @@ export const AddDownloadsModal = () => {
 
               {/* Advanced */}
               <section className="pt-2 border-t border-border-modal/50">
-                <button 
+                <button
                   onClick={() => setAdvancedExpanded(!advancedExpanded)}
                   className="flex items-center gap-2 text-sm font-semibold text-text-primary w-full hover:text-blue-500 transition-colors"
                 >
                   {advancedExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
                   Advanced Transfer
                 </button>
-                
+
                 {advancedExpanded && (
                   <div className="mt-4 space-y-4 pl-6">
                     <label className="flex items-center gap-2 text-xs text-text-secondary font-medium cursor-pointer">
                       <input type="checkbox" checked={checksumEnabled} onChange={e=>setChecksumEnabled(e.target.checked)} className="rounded border-border-modal text-blue-500 focus:ring-blue-500/20" />
                       Verify Checksum
                     </label>
-                    
+
                     {checksumEnabled && (
                       <div className="flex gap-2">
                         <select value={checksumAlgo} onChange={e=>setChecksumAlgo(e.target.value)} className="w-24 bg-bg-input border border-border-modal rounded-md px-2 text-xs text-text-primary focus:border-blue-500 focus:outline-none">
@@ -651,15 +724,15 @@ export const AddDownloadsModal = () => {
             <button onClick={() => toggleAddModal(false)} className="px-4 py-1.5 rounded-lg text-xs font-medium text-text-secondary hover:text-text-primary hover:bg-item-hover transition-colors">
               Cancel
             </button>
-            <button 
-              onClick={() => handleStart(false)} 
+            <button
+              onClick={() => handleStart(false)}
               disabled={parsedItems.length === 0}
               className="px-4 py-1.5 rounded-lg text-xs font-medium bg-item-hover text-text-primary border border-border-modal hover:bg-border-modal/40 transition-colors disabled:opacity-50"
             >
               Add to Queue
             </button>
-            <button 
-              onClick={() => handleStart(true)} 
+            <button
+              onClick={() => handleStart(true)}
               disabled={parsedItems.length === 0}
               className="px-5 py-1.5 rounded-lg text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-500/20 transition-all active:scale-95 disabled:opacity-50 flex items-center gap-1.5"
             >
