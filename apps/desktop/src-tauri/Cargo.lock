@@ -4418,7 +4418,6 @@ dependencies = [
  "keepawake",
  "keyring",
  "objc",
- "open",
  "regex 1.12.4",
  "reqwest 0.12.28",
  "rusqlite",

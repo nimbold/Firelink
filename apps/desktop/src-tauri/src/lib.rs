@@ -297,9 +297,10 @@ async fn test_deno(app_handle: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn open_file(path: String) -> Result<(), String> {
+async fn open_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
     println!("open_file called for path: {}", path);
-    open::that(&path).map_err(|e| format!("Failed to open file: {}", e))
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_path(&path, None::<String>).map_err(|e| format!("Failed to open file: {}", e))
 }
 
 #[tauri::command]
@@ -312,6 +313,18 @@ async fn show_in_folder(app: tauri::AppHandle, path: String) -> Result<(), Strin
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+
+struct Aria2DaemonGuard(std::sync::Mutex<Option<std::process::Child>>);
+
+impl Drop for Aria2DaemonGuard {
+    fn drop(&mut self) {
+        if let Ok(mut lock) = self.0.lock() {
+            if let Some(mut child) = lock.take() {
+                let _ = child.kill();
+            }
+        }
+    }
+}
 
 mod parity;
 pub mod error;
@@ -413,7 +426,7 @@ async fn start_download(
     }
     
     if !resolved_dest.exists() {
-        let _ = std::fs::create_dir_all(&resolved_dest);
+        let _ = tokio::fs::create_dir_all(&resolved_dest).await;
     }
 
     let gid: String = id.replace("-", "").chars().take(16).collect();
@@ -584,7 +597,7 @@ pub(crate) async fn start_media_download_internal(
     }
 
     if !resolved_dest.exists() {
-        let _ = std::fs::create_dir_all(&resolved_dest);
+        let _ = tokio::fs::create_dir_all(&resolved_dest).await;
     }
 
     let out_path = resolved_dest.join(&filename);
@@ -845,12 +858,12 @@ async fn remove_download(state: tauri::State<'_, AppState>, id: String, filepath
         if !path.is_empty() {
             let p = std::path::Path::new(&path);
             if p.exists() {
-                let _ = std::fs::remove_file(p);
+                let _ = tokio::fs::remove_file(p).await;
             }
             let aria2_path = format!("{}.aria2", path);
             let p_aria2 = std::path::Path::new(&aria2_path);
             if p_aria2.exists() {
-                let _ = std::fs::remove_file(p_aria2);
+                let _ = tokio::fs::remove_file(p_aria2).await;
             }
         }
     }
@@ -1210,7 +1223,10 @@ pub fn run() {
                .arg("--check-certificate=false");
 
             match cmd.spawn() {
-                Ok(_) => println!("Spawned global aria2c daemon on port {}", aria2_port),
+                Ok(child) => {
+                    println!("Spawned global aria2c daemon on port {}", aria2_port);
+                    app.manage(Aria2DaemonGuard(std::sync::Mutex::new(Some(child))));
+                }
                 Err(e) => eprintln!("Failed to spawn aria2c daemon: {}", e),
             }
 
