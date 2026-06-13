@@ -21,6 +21,19 @@ const settingsTabs: { type: SettingsTab; label: string; icon: typeof Download }[
   { type: 'about', label: 'About', icon: Info },
 ];
 
+interface AvailableReleaseUpdate {
+  version: string;
+  tag_name: string;
+  title: string;
+  release_notes: string;
+  release_url: string;
+  published_at: string | null;
+}
+
+type ReleaseCheckOutcome =
+  | { type: 'UpdateAvailable'; update: AvailableReleaseUpdate }
+  | { type: 'UpToDate'; latest_version: string; local_version: string };
+
 export default function SettingsView() {
   const settings = useSettingsStore();
   const activeTab = settings.activeSettingsTab;
@@ -45,6 +58,7 @@ export default function SettingsView() {
 
   // Toast notifications
   const [toastMessage, setToastMessage] = useState('');
+  const [isCheckingForUpdates, setIsCheckingForUpdates] = useState(false);
 
   useEffect(() => {
     if (toastMessage) {
@@ -76,6 +90,29 @@ export default function SettingsView() {
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
+  };
+
+  const handleCheckForUpdates = async () => {
+    if (isCheckingForUpdates) return;
+
+    setIsCheckingForUpdates(true);
+    showToast('Checking for updates...');
+
+    try {
+      const result = await invoke<ReleaseCheckOutcome>('check_for_updates');
+
+      if (result.type === 'UpToDate') {
+        showToast(`Firelink ${result.latest_version} is up to date`);
+      } else if (result.type === 'UpdateAvailable') {
+        showToast(`Firelink ${result.update.version} is available`);
+      } else {
+        showToast('The update check returned an unexpected response');
+      }
+    } catch (error) {
+      showToast(`Update check failed: ${String(error)}`);
+    } finally {
+      setIsCheckingForUpdates(false);
+    }
   };
 
   const handleBrowseCategory = async (category: string) => {
@@ -157,33 +194,34 @@ export default function SettingsView() {
     return (
       <button
         type="button"
+        data-active={active}
         onClick={() => settings.setActiveSettingsTab(type)}
-        className={`flex min-w-0 flex-1 flex-col items-center justify-center rounded-lg px-1 py-2 text-center cursor-default transition-colors ${
+        className={`settings-tab-button flex min-w-0 flex-1 flex-col items-center justify-center rounded-lg px-1 py-2 text-center cursor-default transition-colors ${
           active
-            ? 'bg-accent text-white'
-            : 'text-text-primary hover:bg-item-hover'
+            ? 'text-text-primary'
+            : 'text-text-secondary hover:bg-item-hover hover:text-text-primary'
         }`}
       >
-        <Icon size={16} strokeWidth={2} />
+        <Icon size={15} strokeWidth={active ? 2.2 : 1.8} className={active ? 'text-accent' : ''} />
         <span className="settings-tab-label mt-1 w-full whitespace-nowrap font-medium">{label}</span>
       </button>
     );
   };
 
   return (
-    <div className="flex-1 flex flex-col bg-main-bg relative h-full overflow-hidden">
+    <div className="settings-view flex-1 flex flex-col relative h-full overflow-hidden">
         <WindowDragRegion />
 
         {/* Toast Notification */}
         {toastMessage && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-accent text-white text-[13px] font-medium py-2 px-4 rounded-full shadow-lg z-50 animate-bounce">
+          <div className="app-toast absolute top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 text-[12px] font-medium">
             {toastMessage}
           </div>
         )}
 
         {/* SwiftUI SettingsPaneContainer-style horizontal tab strip */}
-        <div className="border-b border-border-color">
-          <div className="flex items-stretch gap-1 px-8 py-4">
+        <div className="settings-toolbar">
+          <div className="settings-tab-strip mx-6 mb-3 flex items-stretch gap-1 rounded-xl p-1">
             {settingsTabs.map(tab => (
               <TabButton key={tab.type} {...tab} />
             ))}
@@ -191,14 +229,14 @@ export default function SettingsView() {
         </div>
 
         {/* Content Area */}
-        <div className="flex-1 overflow-y-auto bg-main-bg">
-          <div className="w-full p-8">
-            <h1 className="mb-6 text-[28px] font-semibold tracking-tight text-text-primary">{activeTabLabel}</h1>
-            <div className="max-w-[720px]">
+        <div className="settings-scroll flex-1 overflow-y-auto">
+          <div className="w-full p-7">
+            <h1 className="mb-6 text-[22px] font-semibold tracking-tight text-text-primary">{activeTabLabel}</h1>
+            <div className="settings-content max-w-[760px]">
 
           {/* Downloads Pane */}
           {activeTab === 'downloads' && (
-            <div className="space-y-6 max-w-[720px]">
+            <div className="settings-pane space-y-6 max-w-[760px]">
               <h3 className="text-base font-bold text-text-primary border-b border-border-color/30 pb-2">Download Options</h3>
 
               <div className="grid grid-cols-[180px_1fr] items-center gap-4 text-[13px]">
@@ -288,7 +326,7 @@ export default function SettingsView() {
 
           {/* Look & Feel Pane */}
           {activeTab === 'lookandfeel' && (
-            <div className="space-y-6 max-w-[720px]">
+            <div className="settings-pane space-y-6 max-w-[760px]">
               <h3 className="text-base font-semibold text-text-primary border-b border-border-color pb-2">App Theme</h3>
 
               <div className="grid grid-cols-[180px_1fr] items-start gap-4 text-[13px]">
@@ -378,7 +416,7 @@ export default function SettingsView() {
 
           {/* Network Pane */}
           {activeTab === 'network' && (
-            <div className="space-y-6 max-w-[720px]">
+            <div className="settings-pane space-y-6 max-w-[760px]">
               <h3 className="text-base font-bold text-text-primary border-b border-border-color/30 pb-2">Proxy & User Agent</h3>
 
               <div className="grid grid-cols-[180px_1fr] items-start gap-4 text-[13px]">
@@ -456,7 +494,7 @@ export default function SettingsView() {
 
           {/* Locations Pane */}
           {activeTab === 'locations' && (
-            <div className="space-y-6 max-w-[720px]">
+            <div className="settings-pane space-y-6 max-w-[760px]">
               <h3 className="text-base font-bold text-text-primary border-b border-border-color/30 pb-2">Download Directories</h3>
 
               <label className="flex items-start gap-3 cursor-default select-none text-[13px] text-text-secondary">
@@ -529,7 +567,7 @@ export default function SettingsView() {
 
           {/* Site Logins Pane */}
           {activeTab === 'sitelogins' && (
-            <div className="space-y-6 max-w-[720px]">
+            <div className="settings-pane space-y-6 max-w-[760px]">
               <h3 className="text-base font-bold text-text-primary border-b border-border-color/30 pb-2">Site Credentials</h3>
 
               {/* Site Logins List */}
@@ -618,7 +656,7 @@ export default function SettingsView() {
 
           {/* Power Pane */}
           {activeTab === 'power' && (
-            <div className="space-y-6 max-w-[720px]">
+            <div className="settings-pane space-y-6 max-w-[760px]">
               <h3 className="text-base font-bold text-text-primary border-b border-border-color/30 pb-2">Power Management</h3>
 
               <label className="flex items-start gap-3 cursor-default select-none text-[13px] text-text-secondary">
@@ -638,7 +676,7 @@ export default function SettingsView() {
 
           {/* Engine Pane */}
           {activeTab === 'engine' && (
-            <div className="space-y-6 max-w-[720px]">
+            <div className="settings-pane space-y-6 max-w-[760px]">
               <h3 className="text-base font-bold text-text-primary border-b border-border-color/30 pb-2">Media Downloader & Engines</h3>
 
               <div className="space-y-4">
@@ -702,7 +740,7 @@ export default function SettingsView() {
 
           {/* Integrations Pane */}
           {activeTab === 'integrations' && (
-            <div className="space-y-6 max-w-[720px]">
+            <div className="settings-pane space-y-6 max-w-[760px]">
               <div className="flex items-center gap-3 border-b border-border-color/30 pb-3">
                 <Puzzle size={28} className="text-orange-500" />
                 <div>
@@ -794,7 +832,7 @@ export default function SettingsView() {
 
           {/* About Pane */}
           {activeTab === 'about' && (
-            <div className="space-y-6 max-w-[720px]">
+            <div className="settings-pane space-y-6 max-w-[760px]">
               {/* Header Box */}
               <div className="bg-bg-modal border border-border-modal/40 rounded-xl p-6 flex items-center gap-4">
                 <img src={appIcon} alt="Firelink Icon" className="w-[72px] h-[72px] drop-shadow-md rounded-xl" />
@@ -817,16 +855,16 @@ export default function SettingsView() {
                       <p className="text-text-muted text-[11px] mt-0.5">Firelink checks GitHub Releases for new versions.</p>
                     </div>
                     <button
-                      onClick={() => {
-                        showToast("Checking for updates...");
-                        invoke('check_for_updates').then((res: any) => {
-                          if (res === "Up to date.") showToast("Firelink is up to date");
-                          else showToast(res);
-                        }).catch((e) => showToast(String(e)));
-                      }}
-                      className="bg-item-hover hover:bg-item-hover/80 text-text-primary px-4 py-1.5 rounded-lg text-xs font-semibold border border-border-modal/50 transition-colors"
+                      onClick={handleCheckForUpdates}
+                      disabled={isCheckingForUpdates}
+                      className="app-button px-4 text-xs disabled:opacity-50"
                     >
-                      Check Now
+                      {isCheckingForUpdates ? (
+                        <>
+                          <RefreshCw size={13} className="animate-spin" />
+                          Checking...
+                        </>
+                      ) : 'Check Now'}
                     </button>
                   </div>
                   <label className="p-4 flex items-center justify-between cursor-default">

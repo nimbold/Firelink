@@ -63,18 +63,19 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
     return (
       <button
         type="button"
-        className={`group flex w-full items-center px-3 py-1.5 rounded-[10px] text-[13px] text-left cursor-default transition-all duration-200 hover-lift mb-1 ${
+        data-active={isSelected}
+        className={`sidebar-nav-item group flex h-8 w-full items-center px-3.5 rounded-lg text-[12px] text-left cursor-default transition-colors duration-150 mb-0.5 ${
           isSelected
-            ? 'bg-accent text-white font-medium shadow-sm shadow-accent/20 scale-[0.98]'
-            : 'text-text-primary hover:bg-item-hover hover:text-text-primary'
+            ? 'bg-item-selected text-text-primary font-semibold'
+            : 'text-text-secondary hover:bg-item-hover hover:text-text-primary'
         }`}
         onClick={() => onSelectFilter(filter)}
       >
-        <Icon className={`w-4 h-4 mr-2.5 transition-colors ${isSelected ? 'text-white' : 'text-text-secondary group-hover:text-accent'}`} strokeWidth={isSelected ? 2.5 : 2} />
+        <Icon className={`w-4 h-4 mr-2.5 transition-colors ${isSelected ? 'text-accent' : 'text-text-muted group-hover:text-text-secondary'}`} strokeWidth={isSelected ? 2.25 : 1.8} />
         <span className="truncate">{label}</span>
         {getCount(filter) > 0 && (
           <span className={`ml-auto min-w-5 px-1.5 py-0.5 rounded-full text-center text-[10px] leading-none font-semibold transition-colors ${
-            isSelected ? 'bg-black/20 text-white' : 'bg-item-hover text-text-secondary group-hover:bg-item-hover'
+            isSelected ? 'bg-accent/15 text-accent' : 'bg-item-hover text-text-muted'
           }`}>
             {getCount(filter)}
           </span>
@@ -130,19 +131,20 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
     return (
       <button
         type="button"
+        data-active={isSelected}
         onContextMenu={e => handleQueueContextMenu(e, queue.id)}
         onClick={() => onSelectFilter(filterId)}
-        className={`group flex w-full items-center px-3 py-1.5 rounded-[10px] text-[13px] text-left cursor-default transition-all duration-200 hover-lift mb-1 ${
+        className={`sidebar-nav-item group flex h-8 w-full items-center px-3.5 rounded-lg text-[12px] text-left cursor-default transition-colors duration-150 mb-0.5 ${
           isSelected
-            ? 'bg-accent text-white font-medium shadow-sm shadow-accent/20 scale-[0.98]'
-            : 'text-text-primary hover:bg-item-hover hover:text-text-primary'
+            ? 'bg-item-selected text-text-primary font-semibold'
+            : 'text-text-secondary hover:bg-item-hover hover:text-text-primary'
         }`}
       >
-        <List className={`w-4 h-4 mr-2.5 shrink-0 transition-colors ${isSelected ? 'text-white' : 'text-text-secondary group-hover:text-accent'}`} strokeWidth={isSelected ? 2.5 : 2} />
+        <List className={`w-4 h-4 mr-2.5 shrink-0 transition-colors ${isSelected ? 'text-accent' : 'text-text-muted group-hover:text-text-secondary'}`} strokeWidth={isSelected ? 2.25 : 1.8} />
         <span className="truncate">{queue.name}</span>
         {getCount(filterId) > 0 && (
           <span className={`ml-auto min-w-5 px-1.5 py-0.5 rounded-full text-center text-[10px] leading-none font-semibold shrink-0 transition-colors ${
-            isSelected ? 'bg-black/20 text-white' : 'bg-item-hover text-text-secondary group-hover:bg-item-hover'
+            isSelected ? 'bg-accent/15 text-accent' : 'bg-item-hover text-text-muted'
           }`}>
             {getCount(filterId)}
           </span>
@@ -156,12 +158,13 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
     return (
       <button
         type="button"
+        data-active={isSelected}
         onClick={() => setActiveView(view)}
-        className={`group flex w-full items-center px-3 py-1.5 rounded-[10px] text-[13px] text-left cursor-default transition-all duration-200 hover-lift mb-1 ${
-          isSelected ? 'bg-accent text-white font-medium shadow-sm shadow-accent/20 scale-[0.98]' : 'text-text-primary hover:bg-item-hover hover:text-text-primary'
+        className={`sidebar-nav-item group flex h-8 w-full items-center px-3.5 rounded-lg text-[12px] text-left cursor-default transition-colors duration-150 mb-0.5 ${
+          isSelected ? 'bg-item-selected text-text-primary font-semibold' : 'text-text-secondary hover:bg-item-hover hover:text-text-primary'
         }`}
       >
-        <Icon className={`w-4 h-4 mr-2.5 transition-colors ${isSelected ? 'text-white' : 'text-text-secondary group-hover:text-accent'}`} strokeWidth={isSelected ? 2.5 : 2} />
+        <Icon className={`w-4 h-4 mr-2.5 transition-colors ${isSelected ? 'text-accent' : 'text-text-muted group-hover:text-text-secondary'}`} strokeWidth={isSelected ? 2.25 : 1.8} />
         <span>{label}</span>
       </button>
     );
@@ -171,16 +174,16 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
     <aside className="w-full h-full flex flex-col relative shrink-0">
       <WindowDragRegion />
       <div className="overflow-y-auto flex-1 px-3 pb-3">
-        <section className="mb-5">
-          <div className="text-[11px] font-bold tracking-wider text-text-muted/70 uppercase px-3 mb-2">Library</div>
+        <section className="mb-4">
+          <div className="text-[9px] font-bold tracking-[0.14em] text-text-muted uppercase px-3.5 mb-1.5">Library</div>
           <NavItem icon={Inbox} label="All" filter="all" />
           <NavItem icon={Zap} label="Active" filter="active" />
           <NavItem icon={CheckCircle2} label="Completed" filter="completed" />
           <NavItem icon={CircleDashed} label="Unfinished" filter="unfinished" />
         </section>
 
-        <section className="mb-5">
-          <div className="text-[11px] font-bold tracking-wider text-text-muted/70 uppercase px-3 mb-2">Folders</div>
+        <section className="mb-4">
+          <div className="text-[9px] font-bold tracking-[0.14em] text-text-muted uppercase px-3.5 mb-1.5">Folders</div>
           <NavItem icon={Music} label="Musics" filter="Musics" />
           <NavItem icon={Film} label="Movies" filter="Movies" />
           <NavItem icon={Archive} label="Compressed" filter="Compressed" />
@@ -190,8 +193,8 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
           <NavItem icon={FileQuestion} label="Other" filter="Other" />
         </section>
 
-        <section className="mb-5">
-          <div className="text-[11px] font-bold tracking-wider text-text-muted/70 uppercase px-3 mb-2">Queues</div>
+        <section className="mb-4">
+          <div className="text-[9px] font-bold tracking-[0.14em] text-text-muted uppercase px-3.5 mb-1.5">Queues</div>
           {queues.map(queue => (
             <QueueItem key={queue.id} queue={queue} />
           ))}
@@ -216,7 +219,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             <button
               type="button"
               onClick={() => { setIsAddingQueue(true); setNewQueueName(''); }}
-              className="flex w-full items-center px-2.5 py-1.5 rounded-lg text-[13px] text-text-secondary hover:bg-item-hover cursor-default transition-colors"
+              className="flex w-full items-center px-3.5 py-1.5 rounded-lg text-[12px] text-text-muted hover:bg-item-hover hover:text-text-secondary cursor-default transition-colors"
             >
               <Plus className="w-4 h-4 mr-2 shrink-0" strokeWidth={2} />
               <span className="truncate">Add new queue</span>
@@ -225,23 +228,24 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
         </section>
 
         <section className="mt-auto pt-4 border-t border-border-color/30">
-          <div className="text-[11px] font-bold tracking-wider text-text-muted/70 uppercase px-3 mb-2">Tools</div>
+          <div className="text-[9px] font-bold tracking-[0.14em] text-text-muted uppercase px-3.5 mb-1.5">Tools</div>
           <ToolItem icon={CalendarClock} label="Scheduler" view="scheduler" />
           <ToolItem icon={Gauge} label="Speed Limiter" view="speedLimiter" />
         </section>
       </div>
 
-      <div className="shrink-0 border-t border-border-color bg-sidebar-glass px-2 py-2 backdrop-blur-xl">
+      <div className="shrink-0 border-t border-border-color bg-sidebar-bg px-3 py-2">
         <button
           type="button"
+          data-active={activeView === 'settings'}
           onClick={() => setActiveView('settings')}
-          className={`flex w-full items-center px-2.5 py-2 rounded-lg text-[13px] text-left cursor-default transition-colors ${
+          className={`sidebar-nav-item flex h-8 w-full items-center px-3.5 rounded-lg text-[12px] text-left cursor-default transition-colors ${
             activeView === 'settings'
-              ? 'bg-accent text-white font-medium'
-              : 'text-text-primary hover:bg-item-hover'
+              ? 'bg-item-selected text-text-primary font-semibold'
+              : 'text-text-secondary hover:bg-item-hover hover:text-text-primary'
           }`}
         >
-          <Settings className={`w-4 h-4 mr-2 ${activeView === 'settings' ? 'text-white' : 'text-text-secondary'}`} strokeWidth={activeView === 'settings' ? 2.25 : 2} />
+          <Settings className={`w-4 h-4 mr-2 ${activeView === 'settings' ? 'text-accent' : 'text-text-muted'}`} strokeWidth={activeView === 'settings' ? 2.25 : 1.8} />
           <span>Settings</span>
         </button>
       </div>

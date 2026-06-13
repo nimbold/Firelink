@@ -625,8 +625,8 @@ export const AddDownloadsModal = () => {
           onCancel={() => setShowingDuplicates(false)} 
         />
       )}
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md">
-      <div className="w-[900px] h-[650px] bg-bg-modal border border-border-modal rounded-xl shadow-2xl flex flex-col overflow-hidden text-sm">
+    <div className="app-modal-backdrop fixed inset-0 z-50 flex items-center justify-center">
+      <div className="app-modal w-[900px] h-[650px] flex flex-col overflow-hidden text-sm">
 
         {/* Main Content Split */}
         <div className="flex flex-1 overflow-hidden">
@@ -643,7 +643,7 @@ export const AddDownloadsModal = () => {
                   </div>
                 </div>
                 <textarea
-                  className="w-full h-32 bg-bg-input/80 border border-border-modal rounded-lg p-3 text-[13px] text-text-primary focus:outline-none focus:border-blue-500 resize-none font-mono shadow-inner transition-colors"
+                  className="w-full h-32 bg-bg-input/80 border border-border-modal rounded-lg p-3 text-[13px] text-text-primary focus:outline-none focus:border-accent resize-none font-mono shadow-inner transition-colors"
                   placeholder="Paste HTTP, HTTPS, FTP, or SFTP URLs here..."
                   value={urls}
                   onChange={(e) => setUrls(e.target.value)}
@@ -719,7 +719,7 @@ export const AddDownloadsModal = () => {
 
               {/* Media Format (Dynamic) */}
               {selectedItemIndex !== null && parsedItems[selectedItemIndex]?.isMedia && (
-                <section className="bg-gradient-to-br from-purple-500/5 to-blue-500/5 border border-purple-500/20 rounded-xl p-4 shadow-sm relative overflow-hidden">
+                <section className="app-card relative overflow-hidden p-4">
                   <div className="absolute top-0 right-0 p-2 opacity-10">
                     <Video size={48} />
                   </div>
@@ -805,7 +805,7 @@ export const AddDownloadsModal = () => {
                   <div className="flex flex-col gap-3">
                     <div className="flex items-center justify-between">
                       <label className="text-xs text-text-secondary font-medium">Target Queue</label>
-                      <select value={selectedQueueId} onChange={e=>setSelectedQueueId(e.target.value)} className="w-32 bg-bg-input border border-border-modal rounded-md px-2 py-1 text-xs text-text-primary focus:border-blue-500 focus:outline-none">
+                      <select value={selectedQueueId} onChange={e=>setSelectedQueueId(e.target.value)} className="w-32 bg-bg-input border border-border-modal rounded-lg px-2 py-1 text-xs text-text-primary focus:border-accent focus:outline-none">
                         {queues.map(q => (
                           <option key={q.id} value={q.id}>{q.name}</option>
                         ))}
@@ -827,7 +827,7 @@ export const AddDownloadsModal = () => {
                     </label>
                     {speedLimitEnabled && (
                       <div className="flex items-center gap-1.5">
-                        <input type="number" value={speedLimit} onChange={e=>setSpeedLimit(e.target.value)} className="w-16 bg-bg-input border border-border-modal rounded px-2 py-1 text-xs font-mono text-text-primary focus:border-blue-500 focus:outline-none" />
+                        <input type="number" value={speedLimit} onChange={e=>setSpeedLimit(e.target.value)} className="w-16 bg-bg-input border border-border-modal rounded-lg px-2 py-1 text-xs font-mono text-text-primary focus:border-accent focus:outline-none" />
                         <span className="text-[10px] text-text-muted">KiB/s</span>
                       </div>
                     )}
@@ -847,8 +847,8 @@ export const AddDownloadsModal = () => {
 
                 {useAuth && (
                   <div className="space-y-2.5 pl-5 border-l-2 border-border-modal/50">
-                    <input type="text" value={username} onChange={e=>setUsername(e.target.value)} placeholder="Username" className="w-full bg-bg-input border border-border-modal rounded-md px-3 py-1.5 text-xs text-text-primary focus:border-blue-500 focus:outline-none" />
-                    <input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password" className="w-full bg-bg-input border border-border-modal rounded-md px-3 py-1.5 text-xs text-text-primary focus:border-blue-500 focus:outline-none" />
+                    <input type="text" value={username} onChange={e=>setUsername(e.target.value)} placeholder="Username" className="w-full bg-bg-input border border-border-modal rounded-lg px-3 py-1.5 text-xs text-text-primary focus:border-accent focus:outline-none" />
+                    <input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password" className="w-full bg-bg-input border border-border-modal rounded-lg px-3 py-1.5 text-xs text-text-primary focus:border-accent focus:outline-none" />
                   </div>
                 )}
               </section>
@@ -872,24 +872,24 @@ export const AddDownloadsModal = () => {
 
                     {checksumEnabled && (
                       <div className="flex gap-2">
-                        <select value={checksumAlgo} onChange={e=>setChecksumAlgo(e.target.value)} className="w-24 bg-bg-input border border-border-modal rounded-md px-2 text-xs text-text-primary focus:border-blue-500 focus:outline-none">
+                        <select value={checksumAlgo} onChange={e=>setChecksumAlgo(e.target.value)} className="w-24 bg-bg-input border border-border-modal rounded-lg px-2 text-xs text-text-primary focus:border-accent focus:outline-none">
                           <option>MD5</option><option>SHA-1</option><option>SHA-256</option>
                         </select>
-                        <input type="text" value={checksumValue} onChange={e=>setChecksumValue(e.target.value)} placeholder="Expected digest" className="flex-1 bg-bg-input border border-border-modal rounded-md px-3 py-1.5 text-xs font-mono text-text-primary focus:border-blue-500 focus:outline-none" />
+                        <input type="text" value={checksumValue} onChange={e=>setChecksumValue(e.target.value)} placeholder="Expected digest" className="flex-1 bg-bg-input border border-border-modal rounded-lg px-3 py-1.5 text-xs font-mono text-text-primary focus:border-accent focus:outline-none" />
                       </div>
                     )}
 
                     <div>
                       <label className="block text-[10px] uppercase font-bold tracking-wider text-text-muted mb-1">Headers</label>
-                      <textarea value={headers} onChange={e=>setHeaders(e.target.value)} className="w-full h-12 bg-bg-input border border-border-modal rounded-md px-3 py-1.5 text-xs font-mono text-text-primary focus:border-blue-500 focus:outline-none resize-none" />
+                      <textarea value={headers} onChange={e=>setHeaders(e.target.value)} className="w-full h-12 bg-bg-input border border-border-modal rounded-lg px-3 py-1.5 text-xs font-mono text-text-primary focus:border-accent focus:outline-none resize-none" />
                     </div>
                     <div>
                       <label className="block text-[10px] uppercase font-bold tracking-wider text-text-muted mb-1">Cookies</label>
-                      <input type="text" value={cookies} onChange={e=>setCookies(e.target.value)} placeholder="name=value; other=value" className="w-full bg-bg-input border border-border-modal rounded-md px-3 py-1.5 text-xs font-mono text-text-primary focus:border-blue-500 focus:outline-none" />
+                      <input type="text" value={cookies} onChange={e=>setCookies(e.target.value)} placeholder="name=value; other=value" className="w-full bg-bg-input border border-border-modal rounded-lg px-3 py-1.5 text-xs font-mono text-text-primary focus:border-accent focus:outline-none" />
                     </div>
                     <div>
                       <label className="block text-[10px] uppercase font-bold tracking-wider text-text-muted mb-1">Mirrors</label>
-                      <textarea value={mirrors} onChange={e=>setMirrors(e.target.value)} className="w-full h-12 bg-bg-input border border-border-modal rounded-md px-3 py-1.5 text-xs font-mono text-text-primary focus:border-blue-500 focus:outline-none resize-none" />
+                      <textarea value={mirrors} onChange={e=>setMirrors(e.target.value)} className="w-full h-12 bg-bg-input border border-border-modal rounded-lg px-3 py-1.5 text-xs font-mono text-text-primary focus:border-accent focus:outline-none resize-none" />
                     </div>
                   </div>
                 )}
@@ -905,20 +905,20 @@ export const AddDownloadsModal = () => {
             {parsedItems.length === 0 ? "Paste one or more links." : `Ready to add ${parsedItems.length} download(s).`}
           </div>
           <div className="flex gap-2.5">
-            <button onClick={() => toggleAddModal(false)} className="px-4 py-1.5 rounded-lg text-xs font-medium text-text-secondary hover:text-text-primary hover:bg-item-hover transition-colors">
+            <button onClick={() => toggleAddModal(false)} className="app-button border-transparent bg-transparent px-4 text-xs text-text-secondary">
               Cancel
             </button>
             <button
               onClick={() => handleStart(false)}
               disabled={parsedItems.length === 0}
-              className="px-4 py-1.5 rounded-lg text-xs font-medium bg-item-hover text-text-primary border border-border-modal hover:bg-border-modal/40 transition-colors disabled:opacity-50"
+              className="app-button px-4 text-xs disabled:opacity-50"
             >
               Add to Queue
             </button>
             <button
               onClick={() => handleStart(true)}
               disabled={parsedItems.length === 0}
-              className="px-5 py-1.5 rounded-lg text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-500/20 transition-all active:scale-95 disabled:opacity-50 flex items-center gap-1.5"
+              className="app-button app-button-primary px-5 text-xs disabled:opacity-50"
             >
               <Play size={12} fill="currentColor" /> Start Downloads
             </button>

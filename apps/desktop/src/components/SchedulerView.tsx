@@ -126,8 +126,8 @@ export default function SchedulerView() {
     <div className="flex-1 flex h-full flex-col overflow-hidden bg-main-bg">
       <WindowDragRegion />
 
-      <div className="flex items-center gap-4 border-b border-border-color px-6 pb-5">
-        <label className="flex items-center gap-3 text-xl font-bold text-text-primary">
+      <div className="flex items-center gap-3 border-b border-border-color px-6 pb-4">
+        <label className="flex items-center gap-3 text-[17px] font-semibold tracking-tight text-text-primary">
           <input
             type="checkbox"
             checked={draft.enabled}
@@ -142,35 +142,35 @@ export default function SchedulerView() {
           {schedulerRunning ? 'Running' : nextRun}
         </span>
         <div className="ml-auto flex gap-2">
-          <button onClick={runNow} className="flex items-center gap-2 rounded-md border border-border-modal bg-bg-input px-3 py-2 text-[12px] font-medium text-text-primary hover:bg-item-hover">
+          <button onClick={runNow} className="app-button px-3 text-[11px]">
             <Play size={14} /> Run Now
           </button>
-          <button onClick={pauseNow} className="flex items-center gap-2 rounded-md border border-border-modal bg-bg-input px-3 py-2 text-[12px] font-medium text-text-primary hover:bg-item-hover">
+          <button onClick={pauseNow} className="app-button px-3 text-[11px]">
             <Pause size={14} /> Pause
           </button>
-          <button onClick={save} className="flex items-center gap-2 rounded-md bg-accent px-3 py-2 text-[12px] font-semibold text-white hover:opacity-90">
+          <button onClick={save} className="app-button app-button-primary px-3 text-[11px]">
             <Save size={14} /> Save Settings
           </button>
         </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-6">
-        <div className={`max-w-[760px] space-y-5 ${draft.enabled ? '' : 'opacity-50'}`}>
-          <section className="rounded-xl border border-border-modal bg-bg-modal/40 p-5">
+        <div className={`max-w-[760px] space-y-4 ${draft.enabled ? '' : 'opacity-50'}`}>
+          <section className="app-card p-5">
             <div className="mb-5 flex items-center gap-2 font-semibold text-text-primary">
               <Clock3 size={17} className="text-accent" /> Timing
             </div>
             <div className="flex flex-wrap items-end gap-8">
               <label className="space-y-2 text-[12px] text-text-secondary">
                 <span className="block">Start Time</span>
-                <input type="time" value={draft.startTime} onChange={event => updateDraft('startTime', event.target.value)} disabled={!draft.enabled} className="rounded-md border border-border-modal bg-bg-input px-3 py-2 text-text-primary" />
+                <input type="time" value={draft.startTime} onChange={event => updateDraft('startTime', event.target.value)} disabled={!draft.enabled} className="app-control px-3 py-2 text-text-primary" />
               </label>
               <div className="space-y-2">
                 <label className="flex items-center gap-2 text-[12px] text-text-secondary">
                   <input type="checkbox" checked={draft.stopTimeEnabled} onChange={event => updateDraft('stopTimeEnabled', event.target.checked)} disabled={!draft.enabled} className="accent-accent" />
                   Stop Time
                 </label>
-                <input type="time" value={draft.stopTime} onChange={event => updateDraft('stopTime', event.target.value)} disabled={!draft.enabled || !draft.stopTimeEnabled} className="rounded-md border border-border-modal bg-bg-input px-3 py-2 text-text-primary disabled:opacity-50" />
+                <input type="time" value={draft.stopTime} onChange={event => updateDraft('stopTime', event.target.value)} disabled={!draft.enabled || !draft.stopTimeEnabled} className="app-control px-3 py-2 text-text-primary disabled:opacity-50" />
               </div>
             </div>
 
@@ -201,7 +201,7 @@ export default function SchedulerView() {
             )}
           </section>
 
-          <section className="rounded-xl border border-border-modal bg-bg-modal/40 p-5">
+          <section className="app-card p-5">
             <div className="mb-4 flex items-center gap-2 font-semibold text-text-primary">
               <List size={17} className="text-accent" /> Queues to Schedule
             </div>
@@ -212,7 +212,7 @@ export default function SchedulerView() {
             </label>
           </section>
 
-          <section className="rounded-xl border border-border-modal bg-bg-modal/40 p-5">
+          <section className="app-card p-5">
             <div className="mb-2 flex items-center gap-2 font-semibold text-text-primary">
               <Power size={17} className="text-accent" /> After Completion
             </div>
@@ -238,14 +238,14 @@ export default function SchedulerView() {
         </div>
 
         {isMac && (
-          <section className="mt-5 max-w-[760px] rounded-xl border border-border-modal bg-bg-modal/40 p-5">
+          <section className="app-card mt-4 max-w-[760px] p-5">
             <div className="mb-2 flex items-center gap-2 font-semibold text-text-primary">
               <LockKeyhole size={17} className="text-accent" /> System Permissions
             </div>
             <p className="mb-4 text-[12px] text-text-muted">Sleep, restart, and shut down require macOS Automation permission for Finder.</p>
             <div className="flex gap-2">
-              <button onClick={requestPermission} className="rounded-md bg-accent px-3 py-2 text-[12px] font-semibold text-white">Grant Permission</button>
-              <button onClick={() => invoke('open_automation_settings')} className="rounded-md border border-border-modal bg-bg-input px-3 py-2 text-[12px] text-text-primary">Open Settings</button>
+              <button onClick={requestPermission} className="app-button app-button-primary px-3 text-[11px]">Grant Permission</button>
+              <button onClick={() => invoke('open_automation_settings')} className="app-button px-3 text-[11px]">Open Settings</button>
             </div>
             {permissionMessage && <p className="mt-3 text-[11px] text-text-muted">{permissionMessage}</p>}
           </section>
@@ -253,7 +253,7 @@ export default function SchedulerView() {
       </div>
 
       {toast && (
-        <div className="pointer-events-none absolute bottom-7 left-1/2 -translate-x-1/2 rounded-full border border-border-modal bg-bg-modal px-4 py-2 text-[12px] font-medium text-text-primary shadow-xl">
+        <div className="app-toast pointer-events-none absolute bottom-7 left-1/2 -translate-x-1/2 px-4 py-2 text-[12px] font-medium">
           {toast}
         </div>
       )}

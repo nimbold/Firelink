@@ -58,8 +58,8 @@ export default function SpeedLimiterView() {
     <div className="flex-1 flex h-full flex-col overflow-hidden bg-main-bg">
       <WindowDragRegion />
 
-      <div className="flex items-center gap-4 border-b border-border-color px-6 pb-5">
-        <label className="flex items-center gap-3 text-xl font-bold text-text-primary">
+      <div className="flex items-center gap-3 border-b border-border-color px-6 pb-4">
+        <label className="flex items-center gap-3 text-[17px] font-semibold tracking-tight text-text-primary">
           <input type="checkbox" checked={enabled} onChange={event => setEnabled(event.target.checked)} className="h-4 w-4 accent-accent" />
           Speed Limiter
         </label>
@@ -68,13 +68,13 @@ export default function SpeedLimiterView() {
         }`}>
           {enabled ? `${value} ${unit}` : 'Unlimited'}
         </span>
-        <button onClick={save} className="ml-auto flex items-center gap-2 rounded-md bg-accent px-3 py-2 text-[12px] font-semibold text-white hover:opacity-90">
+        <button onClick={save} className="app-button app-button-primary ml-auto px-3 text-[11px]">
           <Save size={14} /> Save Limit
         </button>
       </div>
 
       <div className="flex-1 overflow-y-auto p-6">
-        <section className={`max-w-[720px] rounded-xl border border-border-modal bg-bg-modal/40 p-5 ${enabled ? '' : 'opacity-50'}`}>
+        <section className={`app-card max-w-[720px] p-5 ${enabled ? '' : 'opacity-50'}`}>
           <div className="mb-2 flex items-center gap-2 font-semibold text-text-primary">
             <Gauge size={18} className="text-accent" /> Global Speed Limit
           </div>
@@ -90,7 +90,7 @@ export default function SpeedLimiterView() {
               value={value}
               disabled={!enabled}
               onChange={event => setValue(Math.max(1, Number(event.target.value) || 1))}
-              className="w-28 rounded-md border border-border-modal bg-bg-input px-3 py-2 text-right font-mono text-text-primary focus:border-accent focus:outline-none"
+              className="app-control w-28 px-3 py-2 text-right font-mono"
             />
             <div className="flex rounded-md border border-border-modal bg-bg-input p-1">
               {(['KB/s', 'MB/s'] as SpeedUnit[]).map(option => (
@@ -120,7 +120,7 @@ export default function SpeedLimiterView() {
                 type="button"
                 disabled={!enabled}
                 onClick={() => preset(presetValue)}
-                className="rounded-md border border-border-modal bg-bg-input px-4 py-2 text-[12px] font-medium text-text-primary hover:bg-item-hover disabled:cursor-default"
+                className="app-button px-4 text-[12px] disabled:opacity-50"
               >
                 {presetValue} MB/s
               </button>
@@ -130,7 +130,7 @@ export default function SpeedLimiterView() {
       </div>
 
       {toast && (
-        <div className="pointer-events-none absolute bottom-7 left-1/2 -translate-x-1/2 rounded-full border border-border-modal bg-bg-modal px-4 py-2 text-[12px] font-medium text-text-primary shadow-xl">
+        <div className="app-toast pointer-events-none absolute bottom-7 left-1/2 -translate-x-1/2 px-4 py-2 text-[12px] font-medium">
           {toast}
         </div>
       )}

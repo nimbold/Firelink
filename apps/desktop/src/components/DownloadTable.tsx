@@ -13,7 +13,7 @@ interface DownloadTableProps {
 
 export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   const { downloads, toggleAddModal, updateDownload, removeDownload, clearFinished, redownload } = useDownloadStore();
-  const { isSidebarVisible, toggleSidebar } = useSettingsStore();
+  const { isSidebarVisible, toggleSidebar, listRowDensity } = useSettingsStore();
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; id: string } | null>(null);
 
@@ -87,6 +87,11 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   };
 
   const contextItem = contextMenu ? downloads.find(d => d.id === contextMenu.id) : null;
+  const rowPadding = {
+    compact: 'py-2',
+    standard: 'py-2.5',
+    relaxed: 'py-3.5'
+  }[listRowDensity];
 
   const getCategoryIcon = (category: string) => {
     switch(category) {
@@ -102,64 +107,69 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   }
 
   return (
-    <div className="flex-1 flex flex-col bg-transparent h-full relative p-4 pb-0">
-      <div className="glass-panel shrink-0 rounded-[16px] mb-3 shadow-sm border border-border-color/40 z-10">
+    <div className="flex-1 flex flex-col bg-transparent h-full relative p-3 pb-0">
+      <div className="app-surface shrink-0 rounded-xl mb-3 z-10">
         <WindowDragRegion className={!isSidebarVisible ? 'pl-20' : ''} />
 
         {/* Download Toolbar */}
-        <div className={`flex px-5 pb-3 pt-1 items-center ${!isSidebarVisible ? 'pl-20' : ''}`}>
+        <div className={`flex px-3 pb-2.5 pt-0.5 items-center ${!isSidebarVisible ? 'pl-20' : ''}`}>
           <button
             onClick={toggleSidebar}
-            className="mr-4 p-1.5 rounded-lg text-text-secondary hover:text-text-primary hover:bg-item-hover transition-all duration-200 hover-lift"
+            className="app-icon-button mr-2"
             title="Toggle Sidebar"
           >
-            <PanelLeft size={18} strokeWidth={2.5} />
+            <PanelLeft size={17} strokeWidth={2} />
           </button>
-          <h2 className="text-[15px] font-bold mr-auto text-text-primary tracking-tight cursor-default">{getFilterTitle()}</h2>
+          <div className="mr-auto">
+            <h2 className="text-[14px] font-semibold text-text-primary tracking-tight cursor-default">{getFilterTitle()}</h2>
+            <p className="mt-0.5 text-[10px] text-text-muted tabular-nums">
+              {filteredDownloads.length} {filteredDownloads.length === 1 ? 'item' : 'items'}
+            </p>
+          </div>
 
-          <div className="flex gap-2 items-center bg-item-hover/30 p-1 rounded-xl border border-border-color/30">
+          <div className="flex items-center gap-0.5">
             <button
               onClick={() => toggleAddModal(true)}
-              className="p-1.5 rounded-lg text-text-secondary hover:text-white hover:bg-accent hover:shadow-md hover:shadow-accent/30 transition-all duration-200 hover-lift"
+              className="app-icon-button text-accent"
               title="Add Download"
             >
-              <Plus size={16} strokeWidth={2.5} />
+              <Plus size={17} strokeWidth={2.25} />
             </button>
-            <div className="w-[1px] h-4 bg-border-color/50"></div>
+            <div className="mx-1 h-4 w-px bg-border-color"></div>
             <button
               onClick={() => {
                 filteredDownloads.filter(d => d.status === 'paused').forEach(d => handleResume(d));
               }}
-              className="p-1.5 rounded-lg text-text-secondary hover:text-white hover:bg-green-500 hover:shadow-md hover:shadow-green-500/30 transition-all duration-200 hover-lift"
+              className="app-icon-button"
               title="Resume All"
             >
-              <Play size={16} fill="currentColor" className="opacity-90" />
+              <Play size={15} fill="currentColor" className="opacity-80" />
             </button>
             <button
               onClick={() => {
                 filteredDownloads.filter(d => d.status === 'downloading').forEach(d => handlePause(d.id));
               }}
-              className="p-1.5 rounded-lg text-text-secondary hover:text-white hover:bg-orange-500 hover:shadow-md hover:shadow-orange-500/30 transition-all duration-200 hover-lift"
+              className="app-icon-button"
               title="Pause All"
             >
-              <Pause size={16} fill="currentColor" className="opacity-90" />
+              <Pause size={15} fill="currentColor" className="opacity-80" />
             </button>
-            <div className="w-[1px] h-4 bg-border-color/50"></div>
+            <div className="mx-1 h-4 w-px bg-border-color"></div>
             <button
               onClick={clearFinished}
-              className="p-1.5 rounded-lg text-text-secondary hover:text-white hover:bg-red-500 hover:shadow-md hover:shadow-red-500/30 transition-all duration-200 hover-lift"
+              className="app-icon-button hover:text-red-400"
               title="Clear Finished"
             >
-              <Trash2 size={16} strokeWidth={2} />
+              <Trash2 size={15} strokeWidth={1.9} />
             </button>
           </div>
         </div>
       </div>
 
       {/* List */}
-      <div className="flex-1 overflow-auto bg-transparent px-1 pb-4 relative">
+      <div className="flex-1 overflow-auto bg-transparent pb-3 relative">
         <div className="w-full text-left">
-          <div className="flex text-text-muted/60 text-[10px] font-bold tracking-widest uppercase px-4 pb-2 pt-2 sticky top-0 z-0 bg-transparent backdrop-blur-md">
+          <div className="flex text-text-muted text-[9px] font-bold tracking-[0.12em] uppercase px-4 pb-2 pt-1 sticky top-0 z-0 bg-main-bg/85 backdrop-blur-md">
             <div className="flex-1 min-w-[200px]">FILE</div>
             <div className="w-32">SIZE</div>
             <div className="w-32">STATUS</div>
@@ -169,19 +179,25 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
           </div>
           <div className="flex flex-col gap-2">
             {filteredDownloads.length === 0 ? (
-              <div className="p-16 text-center glass-card rounded-[16px] mx-2 mt-4">
-                <div className="flex flex-col items-center justify-center text-text-muted/50 gap-4">
-                  <div className="p-4 bg-item-hover rounded-full animate-float">
-                    <Box size={40} strokeWidth={1.5} />
+              <div className="app-card mx-1 mt-2 py-14 text-center">
+                <div className="flex flex-col items-center justify-center gap-3">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-border-color bg-bg-input text-text-muted">
+                    <Box size={23} strokeWidth={1.6} />
                   </div>
-                  <span className="text-[13px] font-medium tracking-wide">No downloads in this view</span>
+                  <div>
+                    <p className="text-[13px] font-semibold text-text-primary">No downloads here</p>
+                    <p className="mt-1 text-[11px] text-text-muted">Add a link to start a new transfer.</p>
+                  </div>
+                  <button onClick={() => toggleAddModal(true)} className="app-button app-button-primary mt-1 px-3 text-[11px]">
+                    <Plus size={14} /> Add Download
+                  </button>
                 </div>
               </div>
             ) : (
               filteredDownloads.map(d => (
                 <div
                   key={d.id}
-                  className="flex items-center px-4 py-3 bg-item-hover/20 hover:bg-item-hover/50 border border-border-color/20 hover:border-border-color/40 rounded-[14px] transition-all duration-200 group cursor-default hover-lift shadow-sm mx-1"
+                  className={`group mx-1 flex items-center rounded-lg border border-border-color bg-bg-modal/30 px-4 ${rowPadding} cursor-default transition-colors duration-150 hover:border-border-modal hover:bg-item-hover/50`}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     setContextMenu({
@@ -193,7 +209,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                 >
                   <div className="flex-1 min-w-[200px] text-[13px] text-text-primary pr-4">
                     <div className="flex items-center gap-3">
-                      <div className="p-2.5 bg-bg-modal shadow-sm rounded-xl border border-border-color/40 text-text-muted group-hover:scale-105 transition-transform">
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-border-color bg-bg-input text-text-muted">
                          {getCategoryIcon(d.category)}
                       </div>
                       <span className="font-medium truncate max-w-[280px]">{d.fileName}</span>
@@ -233,12 +249,12 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                       </span>
                       <div className="flex justify-end gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-200 absolute right-4 top-1/2 -translate-y-1/2">
                         {d.status === 'downloading' && (
-                          <button onClick={() => handlePause(d.id)} className="p-1.5 bg-bg-modal border border-border-color shadow-sm hover:border-orange-500 hover:text-orange-500 rounded-lg text-text-muted transition-all hover-lift" title="Pause">
+                          <button onClick={() => handlePause(d.id)} className="app-icon-button h-7 w-7 border border-border-color bg-bg-modal hover:text-orange-400" title="Pause">
                             <Pause size={14} fill="currentColor" />
                           </button>
                         )}
                         {d.status === 'paused' && (
-                          <button onClick={() => handleResume(d)} className="p-1.5 bg-bg-modal border border-border-color shadow-sm hover:border-green-500 hover:text-green-500 rounded-lg text-text-muted transition-all hover-lift" title="Resume">
+                          <button onClick={() => handleResume(d)} className="app-icon-button h-7 w-7 border border-border-color bg-bg-modal hover:text-green-400" title="Resume">
                             <Play size={14} fill="currentColor" />
                           </button>
                         )}
@@ -247,7 +263,8 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                              e.stopPropagation();
                              setContextMenu({ x: e.clientX, y: e.clientY, id: d.id });
                           }}
-                          className="p-1.5 bg-bg-modal border border-border-color shadow-sm hover:border-accent hover:text-accent rounded-lg text-text-muted transition-all hover-lift"
+                          className="app-icon-button h-7 w-7 border border-border-color bg-bg-modal hover:text-accent"
+                          title="More Actions"
                         >
                           <MoreVertical size={14} />
                         </button>
@@ -264,7 +281,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
       {/* Floating Context Menu */}
       {contextMenu && contextItem && (
         <div
-          className="fixed z-50 bg-bg-modal/95 backdrop-blur-xl border border-border-modal rounded-xl shadow-2xl py-1.5 min-w-[180px] text-[13px] font-medium text-text-primary overflow-hidden"
+          className="app-modal fixed z-50 min-w-[180px] overflow-hidden py-1.5 text-[12px] font-medium text-text-primary"
           style={{
              top: Math.min(contextMenu.y, window.innerHeight - 300),
              left: Math.min(contextMenu.x, window.innerWidth - 200)
@@ -282,7 +299,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                   console.error("Failed to open file:", e);
                 }
               }}
-              className="w-full text-left px-4 py-1.5 hover:bg-blue-500 hover:text-white transition-colors"
+              className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
             >
               Open File
             </button>
@@ -298,7 +315,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                 console.error("Failed to show in folder:", e);
               }
             }}
-            className="w-full text-left px-4 py-1.5 hover:bg-blue-500 hover:text-white transition-colors"
+            className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
           >
             Show in Finder
           </button>
@@ -311,7 +328,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                 setContextMenu(null);
                 handlePause(contextItem.id);
               }}
-              className="w-full text-left px-4 py-1.5 hover:bg-blue-500 hover:text-white transition-colors"
+              className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
             >
               Pause
             </button>
@@ -323,7 +340,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                 setContextMenu(null);
                 handleResume(contextItem);
               }}
-              className="w-full text-left px-4 py-1.5 hover:bg-blue-500 hover:text-white transition-colors"
+              className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
             >
               Resume
             </button>
@@ -335,7 +352,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                 setContextMenu(null);
                 redownload(contextItem.id);
               }}
-              className="w-full text-left px-4 py-1.5 hover:bg-blue-500 hover:text-white transition-colors"
+              className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
             >
               Redownload
             </button>
@@ -348,7 +365,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
               setContextMenu(null);
               navigator.clipboard.writeText(contextItem.url);
             }}
-            className="w-full text-left px-4 py-1.5 hover:bg-blue-500 hover:text-white transition-colors"
+            className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
           >
             Copy Address
           </button>
@@ -360,7 +377,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                 const fullPath = await resolvePath(contextItem.destination || '~/Downloads', contextItem.fileName);
                 navigator.clipboard.writeText(fullPath);
               }}
-              className="w-full text-left px-4 py-1.5 hover:bg-blue-500 hover:text-white transition-colors"
+              className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
             >
               Copy File Path
             </button>
@@ -373,7 +390,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
               setContextMenu(null);
               handleDelete(contextItem.id);
             }}
-            className="w-full text-left px-4 py-1.5 hover:bg-red-500 hover:text-white text-red-500 transition-colors"
+            className="w-full text-left px-3 py-2 text-red-400 hover:bg-red-500/10 transition-colors"
           >
             Remove from List
           </button>
@@ -385,7 +402,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
               setContextMenu(null);
               useDownloadStore.getState().setSelectedPropertiesDownloadId(contextItem.id);
             }}
-            className="w-full text-left px-4 py-1.5 hover:bg-blue-500 hover:text-white transition-colors"
+            className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
           >
             Properties
           </button>

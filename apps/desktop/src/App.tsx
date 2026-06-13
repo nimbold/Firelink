@@ -236,21 +236,21 @@ function App() {
   }, []);
 
   return (
-    <div className="flex h-screen w-screen bg-main-bg app-bg-gradient text-text-primary overflow-hidden">
+    <div className="app-shell flex h-screen w-screen text-text-primary overflow-hidden">
       
       {/* Left Side Panel - Curved Second Layer on Top */}
       <div
-        className={`flex flex-col overflow-hidden relative z-20 shrink-0 transition-all duration-300 ease-in-out glass-panel ${
-          isSidebarVisible ? 'w-[240px] opacity-100 shadow-[4px_0_24px_rgba(0,0,0,0.2)] border-r border-border-color/30' : 'w-0 opacity-0 border-r-0'
+        className={`app-sidebar flex flex-col overflow-hidden relative z-20 shrink-0 transition-all duration-300 ease-in-out ${
+          isSidebarVisible ? 'w-[244px] opacity-100' : 'w-0 opacity-0'
         }`}
       >
-        <div className="w-[240px] h-full flex flex-col shrink-0">
+        <div className="w-[244px] h-full flex flex-col shrink-0">
           <Sidebar selectedFilter={filter} onSelectFilter={(f) => { setFilter(f); useSettingsStore.getState().setActiveView('downloads'); }} />
         </div>
       </div>
       
       {/* Main Content - Base Layer */}
-      <div className="flex-1 flex flex-col h-full relative z-0">
+      <div className="app-workspace flex-1 flex flex-col h-full relative z-0">
         <div className="flex-1 flex flex-col overflow-hidden relative">
           {activeView === 'downloads' && <DownloadTable filter={filter} />}
           {activeView === 'settings' && <SettingsView />}
@@ -259,12 +259,12 @@ function App() {
         </div>
         
         {/* Status Bar */}
-        <div className="h-8 px-6 flex items-center justify-between text-[11px] text-text-muted font-medium shrink-0 border-t border-border-color/20 glass-panel">
+        <div className="app-statusbar h-8 px-5 flex items-center justify-between text-[10px] text-text-muted font-medium shrink-0 border-t border-border-color">
           <span className="flex items-center gap-2">
-            <span className="w-1.5 h-1.5 rounded-full bg-accent/80 animate-pulse"></span>
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
             Ready
           </span>
-          <div className="flex gap-4">
+          <div className="flex gap-3 tabular-nums">
             <span className="flex items-center gap-1.5">
               <span className="text-text-primary">{activeDownloadCount}</span> active
             </span>

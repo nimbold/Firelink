@@ -148,8 +148,8 @@ export const PropertiesModal = () => {
   else if (item.status === 'failed') { statusColor = 'text-red-500'; StatusIcon = AlertCircle; }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="w-[720px] h-[580px] bg-bg-modal border border-border-modal rounded-xl shadow-2xl flex flex-col overflow-hidden text-sm">
+    <div className="app-modal-backdrop fixed inset-0 z-50 flex items-center justify-center">
+      <div className="app-modal w-[720px] h-[580px] flex flex-col overflow-hidden text-sm">
         
         {/* Header Summary */}
         <div className="p-4 px-5 bg-sidebar-bg/50">
@@ -202,14 +202,14 @@ export const PropertiesModal = () => {
             <h3 className="text-sm font-semibold text-text-primary mb-4 pb-1 border-b border-border-modal/50">Download</h3>
             <div className="grid grid-cols-[100px_1fr] gap-y-3.5 gap-x-4 items-center">
               <label className="text-xs text-text-muted text-right">URL</label>
-              <input type="text" value={url} onChange={e => setUrl(e.target.value)} disabled={isLocked} className="bg-bg-input border border-border-modal rounded px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-blue-500 disabled:opacity-50" />
+              <input type="text" value={url} onChange={e => setUrl(e.target.value)} disabled={isLocked} className="bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-accent disabled:opacity-50" />
               
               <label className="text-xs text-text-muted text-right">File name</label>
-              <input type="text" value={fileName} onChange={e => setFileName(e.target.value)} disabled={isLocked} className="bg-bg-input border border-border-modal rounded px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-blue-500 disabled:opacity-50" />
+              <input type="text" value={fileName} onChange={e => setFileName(e.target.value)} disabled={isLocked} className="bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-50" />
               
               <label className="text-xs text-text-muted text-right">Save location</label>
               <div className="flex gap-2">
-                <input type="text" value={saveLocation} readOnly disabled={isLocked} className="flex-1 bg-bg-input border border-border-modal rounded px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-blue-500 disabled:opacity-50" />
+                <input type="text" value={saveLocation} readOnly disabled={isLocked} className="flex-1 bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-accent disabled:opacity-50" />
                 <button onClick={handleBrowse} disabled={isLocked} className="bg-item-hover hover:bg-item-hover/80 text-text-primary border border-border-modal px-3 py-1.5 rounded text-xs transition-colors disabled:opacity-40 flex items-center gap-1.5">
                   <FolderPlus size={14} /> Select
                 </button>
@@ -217,7 +217,7 @@ export const PropertiesModal = () => {
               
               <label className="text-xs text-text-muted text-right">Connections</label>
               <div className="flex items-center gap-2">
-                <input type="number" value={connections} min={1} max={16} onChange={e=>setConnections(Number(e.target.value))} disabled={isTransferLocked} className="w-16 bg-bg-input border border-border-modal rounded px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-blue-500 disabled:opacity-50" />
+                <input type="number" value={connections} min={1} max={16} onChange={e=>setConnections(Number(e.target.value))} disabled={isTransferLocked} className="w-16 bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-50" />
                 <span className="text-xs text-text-muted">per file</span>
               </div>
               
@@ -229,7 +229,7 @@ export const PropertiesModal = () => {
                 </label>
                 {speedLimitEnabled && (
                   <div className="flex items-center gap-2">
-                    <input type="number" value={speedLimitValue} min={1} step={128} onChange={e=>setSpeedLimitValue(e.target.value)} className="w-20 bg-bg-input border border-border-modal rounded px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-blue-500" />
+                    <input type="number" value={speedLimitValue} min={1} step={128} onChange={e=>setSpeedLimitValue(e.target.value)} className="w-20 bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent" />
                     <span className="text-xs text-text-muted">KiB/s</span>
                   </div>
                 )}
@@ -265,10 +265,10 @@ export const PropertiesModal = () => {
               {loginMode === 'custom' && (
                 <>
                   <label className="text-xs text-text-muted text-right">Username</label>
-                  <input type="text" value={username} onChange={e=>setUsername(e.target.value)} disabled={isTransferLocked} placeholder="Username" className="max-w-[250px] bg-bg-input border border-border-modal rounded px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-blue-500 disabled:opacity-50" />
+                  <input type="text" value={username} onChange={e=>setUsername(e.target.value)} disabled={isTransferLocked} placeholder="Username" className="max-w-[250px] bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-50" />
                   
                   <label className="text-xs text-text-muted text-right">Password</label>
-                  <input type="password" value={password} onChange={e=>setPassword(e.target.value)} disabled={isTransferLocked} placeholder="Password" className="max-w-[250px] bg-bg-input border border-border-modal rounded px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-blue-500 disabled:opacity-50" />
+                  <input type="password" value={password} onChange={e=>setPassword(e.target.value)} disabled={isTransferLocked} placeholder="Password" className="max-w-[250px] bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-50" />
                 </>
               )}
             </div>
@@ -295,7 +295,7 @@ export const PropertiesModal = () => {
                  {checksumEnabled && (
                     <>
                       <label className="text-xs text-text-muted text-right">Algorithm</label>
-                      <select value={checksumAlgorithm} onChange={e=>setChecksumAlgorithm(e.target.value)} disabled={isTransferLocked} className="max-w-[150px] bg-bg-input border border-border-modal rounded px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-blue-500 disabled:opacity-50">
+                      <select value={checksumAlgorithm} onChange={e=>setChecksumAlgorithm(e.target.value)} disabled={isTransferLocked} className="max-w-[150px] bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-50">
                         <option value="MD5">MD5</option>
                         <option value="SHA-1">SHA-1</option>
                         <option value="SHA-256">SHA-256</option>
@@ -303,21 +303,21 @@ export const PropertiesModal = () => {
                       </select>
 
                       <label className="text-xs text-text-muted text-right">Digest</label>
-                      <input type="text" value={checksumValue} onChange={e=>setChecksumValue(e.target.value)} disabled={isTransferLocked} placeholder="Expected digest" className="bg-bg-input border border-border-modal rounded px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-blue-500 disabled:opacity-50" />
+                      <input type="text" value={checksumValue} onChange={e=>setChecksumValue(e.target.value)} disabled={isTransferLocked} placeholder="Expected digest" className="bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-accent disabled:opacity-50" />
                     </>
                  )}
 
                  <label className="text-xs text-text-muted text-right">Cookies</label>
-                 <input type="text" value={cookies} onChange={e=>setCookies(e.target.value)} disabled={isTransferLocked} placeholder="Cookies" className="bg-bg-input border border-border-modal rounded px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-blue-500 disabled:opacity-50" />
+                 <input type="text" value={cookies} onChange={e=>setCookies(e.target.value)} disabled={isTransferLocked} placeholder="Cookies" className="bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-accent disabled:opacity-50" />
                  
                  <div className="col-span-2 mt-2">
                    <label className="block text-xs text-text-muted mb-1.5">Headers</label>
-                   <textarea value={headers} onChange={e=>setHeaders(e.target.value)} disabled={isTransferLocked} className="w-full h-16 bg-bg-input border border-border-modal rounded px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-blue-500 disabled:opacity-50 resize-none"></textarea>
+                   <textarea value={headers} onChange={e=>setHeaders(e.target.value)} disabled={isTransferLocked} className="w-full h-16 bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-accent disabled:opacity-50 resize-none"></textarea>
                  </div>
 
                  <div className="col-span-2">
                    <label className="block text-xs text-text-muted mb-1.5">Mirrors</label>
-                   <textarea value={mirrors} onChange={e=>setMirrors(e.target.value)} disabled={isTransferLocked} className="w-full h-16 bg-bg-input border border-border-modal rounded px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-blue-500 disabled:opacity-50 resize-none"></textarea>
+                   <textarea value={mirrors} onChange={e=>setMirrors(e.target.value)} disabled={isTransferLocked} className="w-full h-16 bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-accent disabled:opacity-50 resize-none"></textarea>
                  </div>
                </div>
              )}
@@ -335,13 +335,13 @@ export const PropertiesModal = () => {
           <div className="flex gap-2">
             <button 
               onClick={() => setSelectedPropertiesDownloadId(null)} 
-              className="px-4 py-1.5 rounded border border-border-modal text-xs font-medium text-text-secondary hover:text-text-primary hover:bg-item-hover transition-colors"
+              className="app-button border-transparent bg-transparent px-4 text-xs text-text-secondary"
             >
               Cancel
             </button>
             <button 
               onClick={handleSave} 
-              className="px-4 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white shadow-sm transition-all active:scale-95 flex items-center gap-1.5"
+              className="app-button app-button-primary px-4 text-xs"
             >
               <CheckCircle size={14} />
               Save
