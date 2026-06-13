@@ -985,6 +985,18 @@ async fn set_concurrent_limit(state: tauri::State<'_, AppState>, limit: usize) -
 }
 
 #[tauri::command]
+async fn set_global_speed_limit(state: tauri::State<'_, AppState>, limit: Option<String>) -> Result<(), String> {
+    let limit_str = limit.unwrap_or_else(|| "0".to_string());
+    let _ = rpc_call(
+        state.aria2_port,
+        &state.aria2_secret,
+        "aria2.changeGlobalOption",
+        serde_json::json!([{"max-overall-download-limit": limit_str}])
+    ).await;
+    Ok(())
+}
+
+#[tauri::command]
 fn request_automation_permission() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -1383,7 +1395,7 @@ pub fn run() {
             request_automation_permission, open_automation_settings,
             set_keychain_password, get_keychain_password, delete_keychain_password,
             check_file_exists, delete_file, toggle_tray_icon, set_extension_pairing_token,
-            set_extension_frontend_ready, set_concurrent_limit, remove_download,
+            set_extension_frontend_ready, set_concurrent_limit, set_global_speed_limit, remove_download,
             parity::get_system_proxy, parity::get_file_category, parity::check_for_updates, parity::is_supported_media
         ])
         .run(tauri::generate_context!())

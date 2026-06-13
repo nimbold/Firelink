@@ -48,41 +48,7 @@ const syncSystemIntegrations = () => {
   }
 };
 
-const speedLimitToKiB = (value?: string | null): number | null => {
-  if (!value) return null;
-  const match = value.trim().match(/^(\d+(?:\.\d+)?)\s*([kmgt]?)b?(?:\/s)?$/i);
-  if (!match) return null;
-
-  const amount = Number(match[1]);
-  if (!Number.isFinite(amount) || amount <= 0) return null;
-
-  const multipliers: Record<string, number> = {
-    '': 1,
-    k: 1,
-    m: 1024,
-    g: 1024 * 1024,
-    t: 1024 * 1024 * 1024
-  };
-  return Math.max(1, Math.round(amount * multipliers[match[2].toLowerCase()]));
-};
-
-const effectiveSpeedLimit = (
-  itemLimit: string | null | undefined,
-  globalLimit: string,
-  maxConcurrentDownloads: number
-): string | null => {
-  const itemKiB = speedLimitToKiB(itemLimit);
-  const globalKiB = speedLimitToKiB(globalLimit);
-  const perSlotGlobalKiB = globalKiB
-    ? Math.max(1, Math.floor(globalKiB / Math.max(maxConcurrentDownloads, 1)))
-    : null;
-
-  const effectiveKiB = itemKiB && perSlotGlobalKiB
-    ? Math.min(itemKiB, perSlotGlobalKiB)
-    : itemKiB ?? perSlotGlobalKiB;
-
-  return effectiveKiB ? `${effectiveKiB}K` : null;
-};
+// Legacy manual speed limit math removed
 
 export type DownloadStatus = 'downloading' | 'paused' | 'completed' | 'failed' | 'queued';
 export const MAIN_QUEUE_ID = '00000000-0000-0000-0000-000000000001';
@@ -117,6 +83,7 @@ export interface DownloadItem {
   isMedia?: boolean;
   mediaFormatSelector?: string;
   queueId: string;
+  _dispatched?: boolean;
 }
 
 export interface ExtensionDownloadRequest {
@@ -149,7 +116,6 @@ interface DownloadState {
   addQueue: (name: string) => void;
   renameQueue: (id: string, name: string) => void;
   removeQueue: (id: string) => void;
-  restartActiveDownloads: () => Promise<number>;
 }
 
 export const useDownloadStore = create<DownloadState>((set, get) => ({
@@ -265,7 +231,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     set((state) => ({
       downloads: state.downloads.map(d => 
         d.id === id 
-          ? { ...d, status: 'queued', fraction: 0, speed: '-', eta: '-' } 
+          ? { ...d, status: 'queued', _dispatched: false, fraction: 0, speed: '-', eta: '-' } 
           : d
       )
     }));
@@ -281,7 +247,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     set((state) => ({
       downloads: state.downloads.map(item =>
         runnableIds.includes(item.id)
-          ? { ...item, status: 'queued', speed: '-', eta: '-' }
+          ? { ...item, status: 'queued', _dispatched: false, speed: '-', eta: '-' }
           : item
       )
     }));
@@ -320,47 +286,15 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
       downloads: state.downloads.map(d => d.queueId === id ? { ...d, queueId: MAIN_QUEUE_ID } : d)
     }));
   },
-  restartActiveDownloads: async () => {
-    const activeIds = get().downloads
-      .filter(item => item.status === 'downloading')
-      .map(item => item.id);
-
-    if (activeIds.length === 0) return 0;
-
-    set((state) => ({
-      downloads: state.downloads.map(item =>
-        activeIds.includes(item.id)
-          ? { ...item, status: 'paused', speed: '-', eta: '-' }
-          : item
-      )
-    }));
-    await Promise.all(activeIds.map(id => invoke('pause_download', { id }).catch(() => {})));
-    await new Promise(resolve => window.setTimeout(resolve, 350));
-    set((state) => ({
-      downloads: state.downloads.map(item =>
-        activeIds.includes(item.id)
-          ? { ...item, status: 'queued' }
-          : item
-      )
-    }));
-    await get().processQueue();
-    return activeIds.length;
-  },
   processQueue: async () => {
     const { downloads, updateDownload } = get();
-    const settingsSnapshot = useSettingsStore.getState();
-    const { maxConcurrentDownloads } = settingsSnapshot;
     
-    const activeCount = downloads.filter(d => d.status === 'downloading').length;
-    if (activeCount >= maxConcurrentDownloads) return;
-
-    const queuedItems = downloads.filter(d => d.status === 'queued');
-    const slotsAvailable = maxConcurrentDownloads - activeCount;
-    
-    const itemsToStart = queuedItems.slice(0, slotsAvailable);
+    // Find all queued items that haven't been dispatched to the backend yet
+    const itemsToStart = downloads.filter(d => d.status === 'queued' && !d._dispatched);
     
     for (const item of itemsToStart) {
-      updateDownload(item.id, { status: 'downloading' });
+      // Mark as dispatched so we don't send it again on the next pass
+      updateDownload(item.id, { _dispatched: true });
       try {
         const settings = useSettingsStore.getState();
         const login = getSiteLogin(item.url, settings);
@@ -379,11 +313,6 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
                          '~/Downloads';
 
         if (item.isMedia) {
-          const speedLimit = effectiveSpeedLimit(
-            item.speedLimit,
-            settings.globalSpeedLimit,
-            settings.maxConcurrentDownloads
-          );
           await invoke('start_media_download', {
             id: item.id,
             url: item.url,
@@ -391,7 +320,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
             filename: item.fileName,
             formatSelector: item.mediaFormatSelector || null,
             cookieSource: settings.mediaCookieSource !== 'none' ? settings.mediaCookieSource : null,
-            speedLimit,
+            speedLimit: item.speedLimit || null,
             username: item.username || (login ? login.username : null),
             password: item.password || keychainPassword,
             headers: item.headers || null,
@@ -400,18 +329,13 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
             maxTries: settings.maxAutomaticRetries
           });
         } else {
-          const speedLimit = effectiveSpeedLimit(
-            item.speedLimit,
-            settings.globalSpeedLimit,
-            settings.maxConcurrentDownloads
-          );
           await invoke('start_download', {
             id: item.id,
             url: item.url,
             destination: destPath,
             filename: item.fileName,
             connections: item.connections || settings.perServerConnections || null,
-            speedLimit,
+            speedLimit: item.speedLimit || null,
             username: item.username || (login ? login.username : null),
             password: item.password || keychainPassword,
             headers: item.headers || null,

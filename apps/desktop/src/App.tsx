@@ -93,12 +93,24 @@ function App() {
   useEffect(() => {
     if (previousSpeedLimit.current === globalSpeedLimit) return;
     previousSpeedLimit.current = globalSpeedLimit;
-    const timeout = window.setTimeout(() => {
-      useDownloadStore.getState().restartActiveDownloads().catch(error => {
-        console.error('Failed to apply global speed limit:', error);
-      });
-    }, 500);
-    return () => window.clearTimeout(timeout);
+    
+    // Convert to aria2 format (e.g. "1M", "500K")
+    let formattedLimit = null;
+    if (globalSpeedLimit) {
+      const match = globalSpeedLimit.trim().match(/^(\d+(?:\.\d+)?)\s*([kmgt]?)b?(?:\/s)?$/i);
+      if (match) {
+        const amount = Number(match[1]);
+        if (Number.isFinite(amount) && amount > 0) {
+           const multipliers: Record<string, number> = { '': 1, k: 1024, m: 1048576, g: 1073741824 };
+           const bytes = Math.round(amount * multipliers[match[2].toLowerCase()]);
+           formattedLimit = `${bytes}`;
+        }
+      }
+    }
+
+    invoke('set_global_speed_limit', { limit: formattedLimit }).catch(error => {
+      console.error('Failed to apply global speed limit:', error);
+    });
   }, [globalSpeedLimit]);
 
   useEffect(() => {
@@ -192,7 +204,13 @@ function App() {
   useEffect(() => {
     const unlistenProgress = listen('download-progress', (event: any) => {
       const { id, fraction, speed, eta } = event.payload;
-      updateDownload(id, { fraction, speed, eta });
+      const state = useDownloadStore.getState();
+      const current = state.downloads.find(d => d.id === id);
+      if (current && current.status === 'queued') {
+        updateDownload(id, { status: 'downloading', fraction, speed, eta });
+      } else {
+        updateDownload(id, { fraction, speed, eta });
+      }
     });
 
     const unlistenComplete = listen('download-complete', (event: any) => {
