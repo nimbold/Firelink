@@ -39,3 +39,10 @@ axum = "0.8.9"
 tower-http = { version = "0.6.11", features = ["cors"] }
 sysproxy = "0.3.0"
 semver = "1.0.28"
+keepawake = "0.6.0"
+open = "5.3.5"
+system_shutdown = "4.1.0"
+tokio-tungstenite = "0.29.0"
+futures-util = { version = "0.3.32", features = ["sink"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+chrono = "0.4.38"

@@ -56,6 +56,10 @@ function App() {
   const maxConcurrentDownloads = useSettingsStore(state => state.maxConcurrentDownloads);
 
   useEffect(() => {
+    useDownloadStore.getState().initDB();
+  }, []);
+
+  useEffect(() => {
     window.document.documentElement.setAttribute('data-font-size', appFontSize);
   }, [appFontSize]);
 
@@ -114,39 +118,20 @@ function App() {
   }, [globalSpeedLimit]);
 
   useEffect(() => {
-    const checkSchedule = async () => {
+    const unlisten = listen('schedule-trigger', async (event) => {
       const state = useSettingsStore.getState();
-      const scheduler = state.scheduler;
-      if (!scheduler.enabled) return;
-
-      const now = new Date();
-      const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-      const allowedToday = scheduler.everyday || scheduler.selectedDays.includes(now.getDay());
-      if (!allowedToday) return;
-
-      const dateKey = localDateKey(now);
-      if (scheduler.startTime === currentTime) {
-        const triggerKey = `${dateKey}-${currentTime}`;
-        if (state.schedulerLastStartKey !== triggerKey) {
-          state.setSchedulerLastStartKey(triggerKey);
-          const started = await useDownloadStore.getState().startQueue(MAIN_QUEUE_ID);
-          state.setSchedulerRunning(started > 0);
-        }
+      if (event.payload === 'start') {
+        const started = await useDownloadStore.getState().startQueue(MAIN_QUEUE_ID);
+        state.setSchedulerRunning(started > 0);
+      } else if (event.payload === 'stop') {
+        await useDownloadStore.getState().pauseQueue(MAIN_QUEUE_ID);
+        state.setSchedulerRunning(false);
       }
-
-      if (scheduler.stopTimeEnabled && scheduler.stopTime === currentTime) {
-        const triggerKey = `${dateKey}-${currentTime}`;
-        if (state.schedulerLastStopKey !== triggerKey) {
-          state.setSchedulerLastStopKey(triggerKey);
-          await useDownloadStore.getState().pauseQueue(MAIN_QUEUE_ID);
-          state.setSchedulerRunning(false);
-        }
-      }
+    });
+    
+    return () => {
+      unlisten.then(f => f()).catch(console.error);
     };
-
-    void checkSchedule();
-    const interval = window.setInterval(() => void checkSchedule(), 10_000);
-    return () => window.clearInterval(interval);
   }, []);
 
   useEffect(() => {

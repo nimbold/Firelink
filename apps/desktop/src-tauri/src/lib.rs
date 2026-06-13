@@ -296,80 +296,14 @@ async fn test_deno(app_handle: tauri::AppHandle) -> Result<String, String> {
 #[tauri::command]
 async fn open_file(path: String) -> Result<(), String> {
     println!("open_file called for path: {}", path);
-    #[cfg(target_os = "macos")]
-    {
-        let status = std::process::Command::new("open")
-            .arg(&path)
-            .status();
-        match status {
-            Ok(s) if s.success() => Ok(()),
-            _ => Err(format!("Failed to open file: {:?}", status)),
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let status = std::process::Command::new("cmd")
-            .arg("/c")
-            .arg("start")
-            .arg("")
-            .arg(&path)
-            .status();
-        match status {
-            Ok(s) if s.success() => Ok(()),
-            _ => Err(format!("Failed to open file: {:?}", status)),
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let status = std::process::Command::new("xdg-open")
-            .arg(&path)
-            .status();
-        match status {
-            Ok(s) if s.success() => Ok(()),
-            _ => Err(format!("Failed to open file: {:?}", status)),
-        }
-    }
+    open::that(&path).map_err(|e| format!("Failed to open file: {}", e))
 }
 
 #[tauri::command]
-async fn show_in_folder(path: String) -> Result<(), String> {
+async fn show_in_folder(app: tauri::AppHandle, path: String) -> Result<(), String> {
     println!("show_in_folder called for path: {}", path);
-    #[cfg(target_os = "macos")]
-    {
-        let status = std::process::Command::new("open")
-            .arg("-R")
-            .arg(&path)
-            .status();
-        match status {
-            Ok(s) if s.success() => Ok(()),
-            _ => Err(format!("Failed to show in Finder: {:?}", status)),
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let status = std::process::Command::new("explorer")
-            .arg("/select,")
-            .arg(path.replace("/", "\\"))
-            .status();
-        match status {
-            Ok(s) if s.success() => Ok(()),
-            _ => Err(format!("Failed to show in Explorer: {:?}", status)),
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(parent) = std::path::Path::new(&path).parent() {
-            let status = std::process::Command::new("xdg-open")
-                .arg(parent)
-                .status();
-            match status {
-                Ok(s) if s.success() => Ok(()),
-                _ => Err(format!("Failed to open folder: {:?}", status)),
-            }
-        } else {
-            Err("No parent folder found".to_string())
-        }
-    }
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().reveal_item_in_dir(&path).map_err(|e| format!("Failed to reveal in folder: {}", e))
 }
 
 use std::collections::HashMap;
@@ -393,6 +327,7 @@ pub struct AppState {
     pub aria2_port: u16,
     pub aria2_secret: String,
     pub media_semaphore: Arc<tokio::sync::Semaphore>,
+    pub sleep_preventer: Arc<Mutex<Option<keepawake::KeepAwake>>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -935,41 +870,25 @@ fn update_dock_badge(_app_handle: tauri::AppHandle, count: i32) {
 
 #[tauri::command]
 fn set_prevent_sleep(state: tauri::State<'_, AppState>, prevent: bool) {
-    #[cfg(target_os = "macos")]
-    {
-        let mut tasks = state.tasks.lock().unwrap();
-        if prevent {
-            if !tasks.contains_key("sleep_prevent") {
-                if let Ok(child) = std::process::Command::new("caffeinate")
-                    .arg("-i")
-                    .spawn()
-                {
-                    tasks.insert("sleep_prevent".to_string(), TaskHandle::Pid(child.id()));
-                }
-            }
-        } else {
-            if let Some(TaskHandle::Pid(pid)) = tasks.remove("sleep_prevent") {
-                let _ = std::process::Command::new("kill")
-                    .arg("-15")
-                    .arg(pid.to_string())
-                    .status();
+    let mut current_preventer = state.sleep_preventer.lock().unwrap();
+    if prevent {
+        if current_preventer.is_none() {
+            if let Ok(keepawake) = keepawake::Builder::default().display(true).reason("Downloading files").create() {
+                *current_preventer = Some(keepawake);
             }
         }
+    } else {
+        *current_preventer = None;
     }
 }
 
 #[tauri::command]
 fn perform_system_action(action: String) -> Result<(), String> {
-    let status = match action.as_str() {
-        "shutdown" => std::process::Command::new("osascript").arg("-e").arg("tell app \"System Events\" to shut down").status(),
-        "restart" => std::process::Command::new("osascript").arg("-e").arg("tell app \"System Events\" to restart").status(),
-        "sleep" => std::process::Command::new("osascript").arg("-e").arg("tell app \"System Events\" to sleep").status(),
-        _ => return Err("Invalid action".to_string())
-    };
-
-    match status {
-        Ok(_) => Ok(()),
-        Err(e) => Err(e.to_string())
+    match action.as_str() {
+        "shutdown" => system_shutdown::shutdown().map_err(|e| e.to_string()),
+        "restart" => system_shutdown::reboot().map_err(|e| e.to_string()),
+        "sleep" => system_shutdown::sleep().map_err(|e| e.to_string()),
+        _ => Err("Invalid action".to_string())
     }
 }
 
@@ -1258,8 +1177,14 @@ pub fn run() {
             aria2_port,
             aria2_secret: aria2_secret.clone(),
             media_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
+            sleep_preventer: Arc::new(Mutex::new(None)),
         })
         .setup(move |app| {
+            let db_conn = crate::db::init_db(app.handle()).expect("Failed to init db");
+            app.manage(crate::db::DbState { conn: std::sync::Mutex::new(db_conn) });
+
+            crate::scheduler::spawn_scheduler(app.handle().clone());
+
             let resource_dir = app.path().resource_dir().unwrap();
             let aria2c_path = resource_dir.join("binaries").join("aria2c");
             
@@ -1284,86 +1209,140 @@ pub fn run() {
             let aria2_port_clone = aria2_port;
             let aria2_secret_clone = aria2_secret.clone();
             tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let ws_url = format!("ws://127.0.0.1:{}/jsonrpc", aria2_port_clone);
+                
+                use futures_util::{StreamExt, SinkExt};
+                use tokio_tungstenite::connect_async;
+                use tokio_tungstenite::tungstenite::Message;
+
+                let (mut ws_stream, _) = match connect_async(&ws_url).await {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        eprintln!("Failed to connect to aria2 WebSocket: {}", e);
+                        return;
+                    }
+                };
+
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(1000));
+                
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-                    
-                    let state = app_handle_clone.state::<AppState>();
-                    let tasks = state.tasks.clone();
-                    
-                    let mut gid_to_id = HashMap::new();
-                    {
-                        let map = tasks.lock().unwrap();
-                        for (id, handle) in map.iter() {
-                            if let TaskHandle::Aria2(gid) = handle {
-                                gid_to_id.insert(gid.clone(), id.clone());
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            let req = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": "progress",
+                                "method": "aria2.tellActive",
+                                "params": [
+                                    format!("token:{}", aria2_secret_clone),
+                                    ["gid", "status", "completedLength", "totalLength", "downloadSpeed"]
+                                ]
+                            });
+                            if let Ok(msg) = serde_json::to_string(&req) {
+                                let _ = ws_stream.send(Message::Text(msg.into())).await;
                             }
                         }
-                    }
-
-                    if let Ok(json) = crate::rpc_call(aria2_port_clone, &aria2_secret_clone, "aria2.tellActive", serde_json::json!([["gid", "status", "completedLength", "totalLength", "downloadSpeed"]])).await {
-                        if let Some(arr) = json.get("result").and_then(|r| r.as_array()) {
-                            for item in arr {
-                                if let Some(gid) = item.get("gid").and_then(|v| v.as_str()) {
-                                    if let Some(id) = gid_to_id.get(gid) {
-                                        let completed = item.get("completedLength").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                                        let total = item.get("totalLength").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(1.0);
-                                        let speed_bytes = item.get("downloadSpeed").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                        msg = ws_stream.next() => {
+                            match msg {
+                                Some(Ok(Message::Text(text))) => {
+                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(text.as_str()) {
+                                        let state = app_handle_clone.state::<AppState>();
+                                        let tasks = state.tasks.clone();
                                         
-                                        let fraction = if total > 0.0 { completed / total } else { 0.0 };
-                                        let speed = if speed_bytes > 1024.0 * 1024.0 {
-                                            format!("{:.1} MB/s", speed_bytes / (1024.0 * 1024.0))
-                                        } else if speed_bytes > 1024.0 {
-                                            format!("{:.1} KB/s", speed_bytes / 1024.0)
-                                        } else {
-                                            format!("{:.0} B/s", speed_bytes)
-                                        };
-
-                                        let eta = if speed_bytes > 0.0 && total > completed {
-                                            let seconds = (total - completed) / speed_bytes;
-                                            if seconds > 3600.0 {
-                                                format!("{:.0}h {:.0}m", seconds / 3600.0, (seconds % 3600.0) / 60.0)
-                                            } else if seconds > 60.0 {
-                                                format!("{:.0}m {:.0}s", seconds / 60.0, seconds % 60.0)
-                                            } else {
-                                                format!("{:.0}s", seconds)
+                                        // Process progress
+                                        if json.get("id").and_then(|i| i.as_str()) == Some("progress") {
+                                            let mut gid_to_id = HashMap::new();
+                                            {
+                                                let map = tasks.lock().unwrap();
+                                                for (id, handle) in map.iter() {
+                                                    if let TaskHandle::Aria2(gid) = handle {
+                                                        gid_to_id.insert(gid.clone(), id.clone());
+                                                    }
+                                                }
                                             }
-                                        } else {
-                                            "-".to_string()
-                                        };
-
-                                        let _ = app_handle_clone.emit("download-progress", DownloadProgressEvent {
-                                            id: id.clone(),
-                                            fraction,
-                                            speed,
-                                            eta,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
+                                            
+                                            if let Some(arr) = json.get("result").and_then(|r| r.as_array()) {
+                                                for item in arr {
+                                                    if let Some(gid) = item.get("gid").and_then(|v| v.as_str()) {
+                                                        if let Some(id) = gid_to_id.get(gid) {
+                                                            let completed = item.get("completedLength").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                                                            let total = item.get("totalLength").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(1.0);
+                                                            let speed_bytes = item.get("downloadSpeed").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                                                            
+                                                            let fraction = if total > 0.0 { completed / total } else { 0.0 };
+                                                            let speed = if speed_bytes > 1024.0 * 1024.0 {
+                                                                format!("{:.1} MB/s", speed_bytes / (1024.0 * 1024.0))
+                                                            } else if speed_bytes > 1024.0 {
+                                                                format!("{:.1} KB/s", speed_bytes / 1024.0)
+                                                            } else {
+                                                                format!("{:.0} B/s", speed_bytes)
+                                                            };
                     
-                    if let Ok(json) = crate::rpc_call(aria2_port_clone, &aria2_secret_clone, "aria2.tellStopped", serde_json::json!([0, 100, ["gid", "status", "completedLength", "totalLength"]])).await {
-                        if let Some(arr) = json.get("result").and_then(|r| r.as_array()) {
-                            for item in arr {
-                                if let Some(gid) = item.get("gid").and_then(|v| v.as_str()) {
-                                    if let Some(id) = gid_to_id.get(gid) {
-                                        let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                                        if status == "complete" {
-                                            let _ = app_handle_clone.emit("download-complete", id.clone());
-                                            tasks.lock().unwrap().remove(id);
-                                        } else if status == "error" {
-                                            let comp = item.get("completedLength").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                                            let tot = item.get("totalLength").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(1.0);
-                                            if comp > 0.0 && comp >= tot {
-                                                let _ = app_handle_clone.emit("download-complete", id.clone());
-                                            } else {
-                                                let _ = app_handle_clone.emit("download-failed", id.clone());
+                                                            let eta = if speed_bytes > 0.0 && total > completed {
+                                                                let seconds = (total - completed) / speed_bytes;
+                                                                if seconds > 3600.0 {
+                                                                    format!("{:.0}h {:.0}m", seconds / 3600.0, (seconds % 3600.0) / 60.0)
+                                                                } else if seconds > 60.0 {
+                                                                    format!("{:.0}m {:.0}s", seconds / 60.0, seconds % 60.0)
+                                                                } else {
+                                                                    format!("{:.0}s", seconds)
+                                                                }
+                                                            } else {
+                                                                "-".to_string()
+                                                            };
+                    
+                                                            let _ = app_handle_clone.emit("download-progress", DownloadProgressEvent {
+                                                                id: id.clone(),
+                                                                fraction,
+                                                                speed,
+                                                                eta,
+                                                            });
+                                                        }
+                                                    }
+                                                }
                                             }
-                                            tasks.lock().unwrap().remove(id);
+                                        }
+                                        
+                                        // Process Events
+                                        if let Some(method) = json.get("method").and_then(|m| m.as_str()) {
+                                            if method == "aria2.onDownloadComplete" || method == "aria2.onDownloadError" {
+                                                if let Some(params) = json.get("params").and_then(|p| p.as_array()) {
+                                                    if let Some(event_info) = params.get(0) {
+                                                        if let Some(gid) = event_info.get("gid").and_then(|g| g.as_str()) {
+                                                            let mut target_id = None;
+                                                            {
+                                                                let map = tasks.lock().unwrap();
+                                                                for (id, handle) in map.iter() {
+                                                                    if let TaskHandle::Aria2(task_gid) = handle {
+                                                                        if task_gid == gid {
+                                                                            target_id = Some(id.clone());
+                                                                            break;
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            
+                                                            if let Some(id) = target_id {
+                                                                if method == "aria2.onDownloadComplete" {
+                                                                    let _ = app_handle_clone.emit("download-complete", id.clone());
+                                                                } else {
+                                                                    let _ = app_handle_clone.emit("download-failed", id.clone());
+                                                                }
+                                                                tasks.lock().unwrap().remove(&id);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
+                                Some(Err(e)) => {
+                                    eprintln!("WebSocket error: {}", e);
+                                    break;
+                                }
+                                None => break, // Stream closed
+                                _ => {} // Ignore binary/ping/pong for now
                             }
                         }
                     }
@@ -1396,9 +1375,60 @@ pub fn run() {
             set_keychain_password, get_keychain_password, delete_keychain_password,
             check_file_exists, delete_file, toggle_tray_icon, set_extension_pairing_token,
             set_extension_frontend_ready, set_concurrent_limit, set_global_speed_limit, remove_download,
-            parity::get_system_proxy, parity::get_file_category, parity::check_for_updates, parity::is_supported_media
+            parity::get_system_proxy, parity::get_file_category, parity::check_for_updates, parity::is_supported_media,
+            db_save_settings, db_load_settings, db_get_all_downloads, db_save_download, db_delete_download, db_get_all_queues, db_save_queue, db_delete_queue
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 mod extension_server;
+mod db;
+mod scheduler;
+
+#[tauri::command]
+fn db_save_settings(state: tauri::State<crate::db::DbState>, data: String) -> Result<(), String> {
+    let conn = state.conn.lock().unwrap();
+    crate::db::save_settings(&conn, &data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn db_load_settings(state: tauri::State<crate::db::DbState>) -> Result<Option<String>, String> {
+    let conn = state.conn.lock().unwrap();
+    crate::db::get_settings(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn db_get_all_downloads(state: tauri::State<crate::db::DbState>) -> Result<Vec<String>, String> {
+    let conn = state.conn.lock().unwrap();
+    crate::db::get_all_downloads(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn db_save_download(state: tauri::State<crate::db::DbState>, id: String, status: String, queue_id: String, data: String) -> Result<(), String> {
+    let conn = state.conn.lock().unwrap();
+    crate::db::insert_download(&conn, &id, &status, &queue_id, &data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn db_delete_download(state: tauri::State<crate::db::DbState>, id: String) -> Result<(), String> {
+    let conn = state.conn.lock().unwrap();
+    crate::db::delete_download(&conn, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn db_get_all_queues(state: tauri::State<crate::db::DbState>) -> Result<Vec<String>, String> {
+    let conn = state.conn.lock().unwrap();
+    crate::db::get_all_queues(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn db_save_queue(state: tauri::State<crate::db::DbState>, id: String, data: String) -> Result<(), String> {
+    let conn = state.conn.lock().unwrap();
+    crate::db::insert_queue(&conn, &id, &data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn db_delete_queue(state: tauri::State<crate::db::DbState>, id: String) -> Result<(), String> {
+    let conn = state.conn.lock().unwrap();
+    crate::db::delete_queue(&conn, &id).map_err(|e| e.to_string())
+}

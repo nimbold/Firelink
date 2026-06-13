@@ -116,6 +116,7 @@ interface DownloadState {
   addQueue: (name: string) => void;
   renameQueue: (id: string, name: string) => void;
   removeQueue: (id: string) => void;
+  initDB: () => Promise<void>;
 }
 
 export const useDownloadStore = create<DownloadState>((set, get) => ({
@@ -174,14 +175,23 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     });
 
     set(state => ({ downloads: [...state.downloads, ...downloads] }));
+    downloads.forEach(item => {
+      const toSave = { ...item };
+      delete toSave.fraction; delete toSave.speed; delete toSave.eta;
+      invoke('db_save_download', { id: item.id, status: item.status, queueId: item.queueId, data: JSON.stringify(toSave) }).catch(console.error);
+    });
     void get().processQueue();
   },
   setSelectedPropertiesDownloadId: (id) => set({ selectedPropertiesDownloadId: id }),
   addDownload: (item) => {
     set((state) => ({ downloads: [...state.downloads, item] }));
+    const toSave = { ...item };
+    delete toSave.fraction; delete toSave.speed; delete toSave.eta;
+    invoke('db_save_download', { id: item.id, status: item.status, queueId: item.queueId, data: JSON.stringify(toSave) }).catch(console.error);
     get().processQueue();
   },
   updateDownload: (id, updates) => {
+    let updatedItem: DownloadItem | null = null;
     set((state) => ({
       downloads: state.downloads.map(d => {
         if (d.id === id) {
@@ -189,15 +199,23 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
           if (newFraction === 0 && d.fraction && d.fraction > 0) {
             newFraction = d.fraction;
           }
-          return { 
+          const updated = { 
             ...d, 
             ...updates,
             fraction: newFraction !== undefined ? newFraction : updates.fraction !== undefined ? updates.fraction : d.fraction
           };
+          updatedItem = updated;
+          return updated;
         }
         return d;
       })
     }));
+    
+    if (updatedItem && Object.keys(updates).some(k => !['fraction', 'speed', 'eta'].includes(k))) {
+      const toSave = { ...(updatedItem as DownloadItem) };
+      delete toSave.fraction; delete toSave.speed; delete toSave.eta;
+      invoke('db_save_download', { id: toSave.id, status: toSave.status, queueId: toSave.queueId, data: JSON.stringify(toSave) }).catch(console.error);
+    }
     
     // If status changed to something that frees up a slot, process queue
     if (updates.status && ['completed', 'failed', 'paused'].includes(updates.status)) {
@@ -219,22 +237,37 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     set((state) => ({
       downloads: state.downloads.filter(d => d.id !== id)
     }));
+    invoke('db_delete_download', { id }).catch(console.error);
     get().processQueue();
     syncSystemIntegrations();
   },
   clearFinished: () => {
+    const downloads = get().downloads;
+    const toRemove = downloads.filter(d => ['completed', 'failed'].includes(d.status));
     set((state) => ({
       downloads: state.downloads.filter(d => !['completed', 'failed'].includes(d.status))
     }));
+    toRemove.forEach(d => {
+      invoke('db_delete_download', { id: d.id }).catch(console.error);
+    });
   },
   redownload: (id) => {
+    let updatedItem: DownloadItem | null = null;
     set((state) => ({
-      downloads: state.downloads.map(d => 
-        d.id === id 
-          ? { ...d, status: 'queued', _dispatched: false, fraction: 0, speed: '-', eta: '-' } 
-          : d
-      )
+      downloads: state.downloads.map(d => {
+        if (d.id === id) {
+          const updated: DownloadItem = { ...d, status: 'queued', _dispatched: false, fraction: 0, speed: '-', eta: '-' };
+          updatedItem = updated;
+          return updated;
+        }
+        return d;
+      })
     }));
+    if (updatedItem) {
+      const toSave = { ...(updatedItem as DownloadItem) };
+      delete toSave.fraction; delete toSave.speed; delete toSave.eta;
+      invoke('db_save_download', { id: toSave.id, status: toSave.status, queueId: toSave.queueId, data: JSON.stringify(toSave) }).catch(console.error);
+    }
     get().processQueue();
   },
   startQueue: async (queueId) => {
@@ -273,18 +306,83 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     return activeIds.length;
   },
   addQueue: (name) => {
-    set((state) => ({ queues: [...state.queues, { id: crypto.randomUUID(), name, isMain: false }] }));
+    const id = crypto.randomUUID();
+    const q = { id, name, isMain: false };
+    set((state) => ({
+      queues: [...state.queues, q]
+    }));
+    invoke('db_save_queue', { id, data: JSON.stringify(q) }).catch(console.error);
   },
   renameQueue: (id, name) => {
+    let updatedQ: Queue | null = null;
     set((state) => ({
-      queues: state.queues.map(q => q.id === id ? { ...q, name } : q)
+      queues: state.queues.map(q => {
+        if (q.id === id) {
+          const newQ = { ...q, name };
+          updatedQ = newQ;
+          return newQ;
+        }
+        return q;
+      })
     }));
+    if (updatedQ) {
+      invoke('db_save_queue', { id, data: JSON.stringify(updatedQ) }).catch(console.error);
+    }
   },
   removeQueue: (id) => {
+    if (id === MAIN_QUEUE_ID) return;
     set((state) => ({
-      queues: state.queues.filter(q => q.id !== id || q.isMain),
-      downloads: state.downloads.map(d => d.queueId === id ? { ...d, queueId: MAIN_QUEUE_ID } : d)
+      queues: state.queues.filter(q => q.id !== id),
+      downloads: state.downloads.map(d => 
+        d.queueId === id ? { ...d, queueId: MAIN_QUEUE_ID } : d
+      )
     }));
+    invoke('db_delete_queue', { id }).catch(console.error);
+    
+    // Also we need to save the updated downloads to DB
+    const downloads = get().downloads.filter(d => d.queueId === id);
+    downloads.forEach(d => {
+      const toSave = { ...d, queueId: MAIN_QUEUE_ID };
+      delete toSave.fraction; delete toSave.speed; delete toSave.eta;
+      invoke('db_save_download', { id: toSave.id, status: toSave.status, queueId: MAIN_QUEUE_ID, data: JSON.stringify(toSave) }).catch(console.error);
+    });
+  },
+  initDB: async () => {
+    try {
+      const queuesStr = await invoke<string[]>('db_get_all_queues');
+      const queues = queuesStr.map(q => JSON.parse(q));
+      
+      const downloadsStr = await invoke<string[]>('db_get_all_downloads');
+      const downloads = downloadsStr.map(d => JSON.parse(d));
+      
+      set(state => ({
+        queues: queues.length > 0 ? queues : state.queues,
+        downloads: downloads.length > 0 ? downloads : state.downloads
+      }));
+      
+      // Auto resume downloads that were active
+      const active = get().downloads.filter(d => d.status === 'downloading');
+      active.forEach(item => {
+        if (item.isMedia) {
+          invoke('start_media_download', {
+            id: item.id, url: item.url, destination: item.destination,
+            filename: item.fileName, format_selector: item.mediaFormatSelector,
+            proxy: null
+          }).catch(console.error);
+        } else {
+          invoke('start_download', {
+            id: item.id, url: item.url, destination: item.destination, filename: item.fileName,
+            connections: item.connections, speed_limit: item.speedLimit, username: item.username,
+            password: item.password, headers: item.headers, checksum: item.checksum, cookies: item.cookies,
+            mirrors: item.mirrors, user_agent: null, max_tries: null, proxy: null
+          }).catch(console.error);
+        }
+      });
+      
+      void get().processQueue();
+    } catch (e) {
+      console.error("Failed to init DB", e);
+    }
   },
   processQueue: async () => {
     const { downloads, updateDownload } = get();

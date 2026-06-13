@@ -1,6 +1,33 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { persist, createJSONStorage, StateStorage } from 'zustand/middleware';
 import { invoke } from '@tauri-apps/api/core';
+
+const tauriStorage: StateStorage = {
+  getItem: async (name: string): Promise<string | null> => {
+    if (name === 'firelink-settings') {
+      try {
+        const data = await invoke<string | null>('db_load_settings');
+        return data;
+      } catch (e) {
+        console.error("Failed to load settings from DB", e);
+        return null;
+      }
+    }
+    return null;
+  },
+  setItem: async (name: string, value: string): Promise<void> => {
+    if (name === 'firelink-settings') {
+      try {
+        await invoke('db_save_settings', { data: value });
+      } catch (e) {
+        console.error("Failed to save settings to DB", e);
+      }
+    }
+  },
+  removeItem: async (name: string): Promise<void> => {
+    // no-op for now
+  },
+};
 
 export interface SiteLogin {
   id: string;
@@ -243,6 +270,7 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: 'firelink-settings',
+      storage: createJSONStorage(() => tauriStorage),
       partialize: (state) => ({
         theme: state.theme,
         defaultDownloadPath: state.defaultDownloadPath,
