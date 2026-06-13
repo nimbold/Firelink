@@ -39,8 +39,90 @@ pub async fn get_system_proxy() -> Result<Option<String>, String> {
         }
         Ok(None)
     }
-    #[cfg(not(target_os = "macos"))]
+
+    #[cfg(target_os = "windows")]
     {
+        use std::process::Command;
+        let enable_output = Command::new("reg")
+            .args(&["query", r#"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings"#, "/v", "ProxyEnable"])
+            .output();
+        
+        if let Ok(output) = enable_output {
+            let enable_stdout = String::from_utf8_lossy(&output.stdout);
+            if !enable_stdout.contains("0x1") {
+                return Ok(None);
+            }
+        } else {
+            return Ok(None);
+        }
+
+        let proxy_output = Command::new("reg")
+            .args(&["query", r#"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings"#, "/v", "ProxyServer"])
+            .output();
+            
+        if let Ok(output) = proxy_output {
+            let proxy_stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(line) = proxy_stdout.lines().find(|l| l.contains("ProxyServer")) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 3 {
+                    let mut proxy = parts.last().unwrap().to_string();
+                    if !proxy.starts_with("http") {
+                        proxy = format!("http://{}", proxy);
+                    }
+                    return Ok(Some(proxy));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(proxy) = std::env::var("https_proxy") {
+            if !proxy.is_empty() { return Ok(Some(proxy)); }
+        }
+        if let Ok(proxy) = std::env::var("HTTPS_PROXY") {
+            if !proxy.is_empty() { return Ok(Some(proxy)); }
+        }
+        if let Ok(proxy) = std::env::var("http_proxy") {
+            if !proxy.is_empty() { return Ok(Some(proxy)); }
+        }
+        if let Ok(proxy) = std::env::var("HTTP_PROXY") {
+            if !proxy.is_empty() { return Ok(Some(proxy)); }
+        }
+
+        use std::process::Command;
+        let mode_output = Command::new("gsettings")
+            .args(&["get", "org.gnome.system.proxy", "mode"])
+            .output();
+            
+        if let Ok(output) = mode_output {
+            let mode = String::from_utf8_lossy(&output.stdout);
+            if mode.contains("'manual'") {
+                let https_host = Command::new("gsettings").args(&["get", "org.gnome.system.proxy.https", "host"]).output();
+                let https_port = Command::new("gsettings").args(&["get", "org.gnome.system.proxy.https", "port"]).output();
+                
+                if let (Ok(h), Ok(p)) = (https_host, https_port) {
+                    let host = String::from_utf8_lossy(&h.stdout).replace("'", "").trim().to_string();
+                    let port = String::from_utf8_lossy(&p.stdout).trim().to_string();
+                    if !host.is_empty() && port != "0" {
+                        return Ok(Some(format!("https://{}:{}", host, port)));
+                    }
+                }
+                
+                let http_host = Command::new("gsettings").args(&["get", "org.gnome.system.proxy.http", "host"]).output();
+                let http_port = Command::new("gsettings").args(&["get", "org.gnome.system.proxy.http", "port"]).output();
+                
+                if let (Ok(h), Ok(p)) = (http_host, http_port) {
+                    let host = String::from_utf8_lossy(&h.stdout).replace("'", "").trim().to_string();
+                    let port = String::from_utf8_lossy(&p.stdout).trim().to_string();
+                    if !host.is_empty() && port != "0" {
+                        return Ok(Some(format!("http://{}:{}", host, port)));
+                    }
+                }
+            }
+        }
+
         Ok(None)
     }
 }
