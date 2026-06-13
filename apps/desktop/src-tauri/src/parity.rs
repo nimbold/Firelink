@@ -2,128 +2,17 @@ use serde::{Deserialize, Serialize};
 
 #[tauri::command]
 pub async fn get_system_proxy() -> Result<Option<String>, String> {
-    #[cfg(target_os = "macos")]
-    {
-        use std::process::Command;
-        let output = Command::new("scutil").arg("--proxy").output().map_err(|e| e.to_string())?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        
-        let mut http_enable = false;
-        let mut http_proxy = String::new();
-        let mut http_port = String::new();
-        let mut https_enable = false;
-        let mut https_proxy = String::new();
-        let mut https_port = String::new();
-
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.splitn(2, ':').collect();
-            if parts.len() == 2 {
-                let key = parts[0].trim();
-                let value = parts[1].trim();
-                match key {
-                    "HTTPEnable" => http_enable = value == "1",
-                    "HTTPProxy" => http_proxy = value.to_string(),
-                    "HTTPPort" => http_port = value.to_string(),
-                    "HTTPSEnable" => https_enable = value == "1",
-                    "HTTPSProxy" => https_proxy = value.to_string(),
-                    "HTTPSPort" => https_port = value.to_string(),
-                    _ => {}
-                }
+    match sysproxy::Sysproxy::get_system_proxy() {
+        Ok(proxy) => {
+            if proxy.enable {
+                // Determine protocol, usually sysproxy returns the host and port
+                // We'll default to http:// unless the user has configured something specific
+                Ok(Some(format!("http://{}:{}", proxy.host, proxy.port)))
+            } else {
+                Ok(None)
             }
         }
-
-        if https_enable && !https_proxy.is_empty() {
-            return Ok(Some(format!("http://{}:{}", https_proxy, https_port))); // Often https proxy is HTTP
-        } else if http_enable && !http_proxy.is_empty() {
-            return Ok(Some(format!("http://{}:{}", http_proxy, http_port)));
-        }
-        Ok(None)
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::process::Command;
-        let enable_output = Command::new("reg")
-            .args(&["query", r#"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings"#, "/v", "ProxyEnable"])
-            .output();
-        
-        if let Ok(output) = enable_output {
-            let enable_stdout = String::from_utf8_lossy(&output.stdout);
-            if !enable_stdout.contains("0x1") {
-                return Ok(None);
-            }
-        } else {
-            return Ok(None);
-        }
-
-        let proxy_output = Command::new("reg")
-            .args(&["query", r#"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings"#, "/v", "ProxyServer"])
-            .output();
-            
-        if let Ok(output) = proxy_output {
-            let proxy_stdout = String::from_utf8_lossy(&output.stdout);
-            if let Some(line) = proxy_stdout.lines().find(|l| l.contains("ProxyServer")) {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    let mut proxy = parts.last().unwrap().to_string();
-                    if !proxy.starts_with("http") {
-                        proxy = format!("http://{}", proxy);
-                    }
-                    return Ok(Some(proxy));
-                }
-            }
-        }
-        Ok(None)
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(proxy) = std::env::var("https_proxy") {
-            if !proxy.is_empty() { return Ok(Some(proxy)); }
-        }
-        if let Ok(proxy) = std::env::var("HTTPS_PROXY") {
-            if !proxy.is_empty() { return Ok(Some(proxy)); }
-        }
-        if let Ok(proxy) = std::env::var("http_proxy") {
-            if !proxy.is_empty() { return Ok(Some(proxy)); }
-        }
-        if let Ok(proxy) = std::env::var("HTTP_PROXY") {
-            if !proxy.is_empty() { return Ok(Some(proxy)); }
-        }
-
-        use std::process::Command;
-        let mode_output = Command::new("gsettings")
-            .args(&["get", "org.gnome.system.proxy", "mode"])
-            .output();
-            
-        if let Ok(output) = mode_output {
-            let mode = String::from_utf8_lossy(&output.stdout);
-            if mode.contains("'manual'") {
-                let https_host = Command::new("gsettings").args(&["get", "org.gnome.system.proxy.https", "host"]).output();
-                let https_port = Command::new("gsettings").args(&["get", "org.gnome.system.proxy.https", "port"]).output();
-                
-                if let (Ok(h), Ok(p)) = (https_host, https_port) {
-                    let host = String::from_utf8_lossy(&h.stdout).replace("'", "").trim().to_string();
-                    let port = String::from_utf8_lossy(&p.stdout).trim().to_string();
-                    if !host.is_empty() && port != "0" {
-                        return Ok(Some(format!("https://{}:{}", host, port)));
-                    }
-                }
-                
-                let http_host = Command::new("gsettings").args(&["get", "org.gnome.system.proxy.http", "host"]).output();
-                let http_port = Command::new("gsettings").args(&["get", "org.gnome.system.proxy.http", "port"]).output();
-                
-                if let (Ok(h), Ok(p)) = (http_host, http_port) {
-                    let host = String::from_utf8_lossy(&h.stdout).replace("'", "").trim().to_string();
-                    let port = String::from_utf8_lossy(&p.stdout).trim().to_string();
-                    if !host.is_empty() && port != "0" {
-                        return Ok(Some(format!("http://{}:{}", host, port)));
-                    }
-                }
-            }
-        }
-
-        Ok(None)
+        Err(_) => Ok(None),
     }
 }
 
@@ -233,21 +122,15 @@ pub async fn check_for_updates(app_handle: tauri::AppHandle) -> Result<ReleaseCh
 }
 
 fn cmp_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    use semver::Version;
+    
     let a_clean = a.trim_start_matches(|c| c == 'v' || c == 'V');
     let b_clean = b.trim_start_matches(|c| c == 'v' || c == 'V');
     
-    let a_parts: Vec<u32> = a_clean.split('.').filter_map(|s| s.parse().ok()).collect();
-    let b_parts: Vec<u32> = b_clean.split('.').filter_map(|s| s.parse().ok()).collect();
+    let a_ver = Version::parse(a_clean).unwrap_or_else(|_| Version::new(0, 0, 0));
+    let b_ver = Version::parse(b_clean).unwrap_or_else(|_| Version::new(0, 0, 0));
     
-    let len = std::cmp::max(a_parts.len(), b_parts.len());
-    for i in 0..len {
-        let a_val = a_parts.get(i).unwrap_or(&0);
-        let b_val = b_parts.get(i).unwrap_or(&0);
-        if a_val != b_val {
-            return a_val.cmp(b_val);
-        }
-    }
-    std::cmp::Ordering::Equal
+    a_ver.cmp(&b_ver)
 }
 
 #[tauri::command]

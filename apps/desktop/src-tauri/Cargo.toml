@@ -37,3 +37,5 @@ tempfile = "3"
 thiserror = "2.0.18"
 axum = "0.8.9"
 tower-http = { version = "0.6.11", features = ["cors"] }
+sysproxy = "0.3.0"
+semver = "1.0.28"
