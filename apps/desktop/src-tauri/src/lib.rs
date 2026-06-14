@@ -204,37 +204,6 @@ async fn test_ytdlp(app_handle: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn test_aria2c(app_handle: tauri::AppHandle) -> Result<String, String> {
-    println!("test_aria2c called!");
-    let resource_dir = app_handle.path().resource_dir().map_err(|e| e.to_string())?;
-    let aria2c_path = resource_dir.join("binaries").join("aria2c");
-    println!("Resolved aria2c path: {:?}", aria2c_path);
-
-    let output = AsyncCommand::new(&aria2c_path)
-        .arg("--version")
-        .output()
-        .await
-        .map_err(|e| {
-            println!("Failed to execute: {}", e);
-            format!("Failed to execute aria2c: {}", e)
-        })?;
-
-    println!("aria2c execution finished with status: {}", output.status);
-    if output.status.success() {
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        // aria2c prints a lot, just get the first line for the version
-        let first_line = text.lines().next().unwrap_or("").to_string();
-        let clean = first_line.replace("aria2 version ", "");
-        println!("aria2c output: {}", clean);
-        Ok(clean)
-    } else {
-        let err = String::from_utf8_lossy(&output.stderr);
-        println!("aria2c error output: {}", err);
-        Err(format!("aria2c error: {}", err))
-    }
-}
-
-#[tauri::command]
 async fn test_ffmpeg(app_handle: tauri::AppHandle) -> Result<String, String> {
     println!("test_ffmpeg called!");
     let resource_dir = app_handle.path().resource_dir().map_err(|e| e.to_string())?;
@@ -326,6 +295,38 @@ impl Drop for Aria2DaemonGuard {
     }
 }
 
+#[cfg(all(target_os = "macos", debug_assertions))]
+fn resign_aria2_debug_bundle(aria2c_path: &std::path::Path) -> Result<(), String> {
+    let lib_dir = aria2c_path
+        .parent()
+        .ok_or_else(|| "aria2 resource directory is missing".to_string())?
+        .join("aria2-libs");
+    let mut libraries = std::fs::read_dir(&lib_dir)
+        .map_err(|error| format!("Failed to read aria2 libraries: {error}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("dylib"))
+        .collect::<Vec<_>>();
+    libraries.sort();
+
+    for path in libraries.into_iter().chain(std::iter::once(aria2c_path.to_path_buf())) {
+        let output = std::process::Command::new("/usr/bin/codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(&path)
+            .output()
+            .map_err(|error| format!("Failed to run codesign for {}: {error}", path.display()))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Failed to sign {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 mod parity;
 pub mod error;
 pub use error::AppError;
@@ -386,7 +387,30 @@ async fn rpc_call(port: u16, secret: &str, method: &str, params: serde_json::Val
         .map_err(|e| e.to_string())?;
     
     let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    Ok(json)
+    if let Some(error) = json.get("error") {
+        return Err(error.to_string());
+    }
+    json.get("result")
+        .cloned()
+        .ok_or_else(|| "aria2 returned no result".to_string())
+}
+
+#[tauri::command]
+async fn test_aria2c(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let result = rpc_call(
+        state.aria2_port,
+        &state.aria2_secret,
+        "aria2.getVersion",
+        serde_json::json!([]),
+    )
+    .await
+    .map_err(|error| format!("aria2 daemon unavailable: {error}"))?;
+
+    result
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "aria2 returned an invalid version response".to_string())
 }
 
 #[tauri::command]
@@ -1201,6 +1225,7 @@ pub fn run() {
             media_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
             sleep_preventer: Arc::new(Mutex::new(None)),
         })
+        .manage(Aria2DaemonGuard(std::sync::Mutex::new(None)))
         .setup(move |app| {
             let db_conn = crate::db::init_db(app.handle()).expect("Failed to init db");
             app.manage(crate::db::DbState { conn: std::sync::Mutex::new(db_conn) });
@@ -1219,23 +1244,30 @@ pub fn run() {
 
             let resource_dir = app.path().resource_dir().unwrap();
             let aria2c_path = resource_dir.join("binaries").join("aria2c");
-            
-            let mut cmd = std::process::Command::new(&aria2c_path);
-            cmd.arg("--enable-rpc=true")
-               .arg(format!("--rpc-listen-port={}", aria2_port))
-               .arg(format!("--rpc-secret={}", aria2_secret))
-               .arg("--rpc-listen-all=false")
-               .arg("--continue=true")
-               .arg("--allow-overwrite=false")
-               .arg("--summary-interval=1")
-               .arg("--console-log-level=warn")
-               .arg("--download-result=hide")
-               .arg("--check-certificate=false");
 
-            match cmd.spawn() {
-                Ok(child) => {
+            #[cfg(all(target_os = "macos", debug_assertions))]
+            if let Err(error) = resign_aria2_debug_bundle(&aria2c_path) {
+                eprintln!("{error}");
+            }
+            
+            let aria2_process = std::process::Command::new(&aria2c_path)
+                .arg("--enable-rpc=true")
+                .arg(format!("--rpc-listen-port={}", aria2_port))
+                .arg(format!("--rpc-secret={}", aria2_secret))
+                .arg("--rpc-listen-all=false")
+                .arg("--continue=true")
+                .arg("--allow-overwrite=false")
+                .arg("--summary-interval=1")
+                .arg("--console-log-level=warn")
+                .arg("--download-result=hide")
+                .arg("--check-certificate=false")
+                .spawn();
+
+            match aria2_process {
+                Ok(process) => {
                     println!("Spawned global aria2c daemon on port {}", aria2_port);
-                    app.manage(Aria2DaemonGuard(std::sync::Mutex::new(Some(child))));
+                    let guard = app.state::<Aria2DaemonGuard>();
+                    *guard.0.lock().unwrap() = Some(process);
                 }
                 Err(e) => eprintln!("Failed to spawn aria2c daemon: {}", e),
             }
@@ -1251,12 +1283,36 @@ pub fn run() {
                 use tokio_tungstenite::connect_async;
                 use tokio_tungstenite::tungstenite::Message;
 
-                let (mut ws_stream, _) = match connect_async(&ws_url).await {
-                    Ok(stream) => stream,
-                    Err(e) => {
-                        eprintln!("Failed to connect to aria2 WebSocket: {}", e);
-                        return;
+                let mut connection = None;
+                for attempt in 1..=20 {
+                    match connect_async(&ws_url).await {
+                        Ok(stream) => {
+                            connection = Some(stream);
+                            break;
+                        }
+                        Err(error) if attempt < 20 => {
+                            if let Some(status) = app_handle_clone
+                                .state::<Aria2DaemonGuard>()
+                                .0
+                                .lock()
+                                .ok()
+                                .and_then(|mut guard| guard.as_mut().and_then(|child| child.try_wait().ok()).flatten())
+                            {
+                                eprintln!("aria2 daemon exited before RPC startup: {}", status);
+                                return;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                            if attempt == 1 {
+                                eprintln!("Waiting for aria2 WebSocket: {}", error);
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("Failed to connect to aria2 WebSocket after retries: {}", error);
+                        }
                     }
+                }
+                let Some((mut ws_stream, _)) = connection else {
+                    return;
                 };
 
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(1000));
