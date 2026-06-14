@@ -90,12 +90,30 @@ pub async fn start_server(
     Ok(())
 }
 
-async fn ping_handler(State(state): State<ServerState>) -> StatusCode {
-    if state.frontend_ready.load(Ordering::Acquire) {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
+async fn ping_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> StatusCode {
+    if !state.frontend_ready.load(Ordering::Acquire) {
+        return StatusCode::SERVICE_UNAVAILABLE;
     }
+
+    let signature = match headers.get("x-firelink-signature").and_then(|v| v.to_str().ok()) {
+        Some(v) => v,
+        None => return StatusCode::FORBIDDEN,
+    };
+
+    let timestamp_str = match headers.get("x-firelink-timestamp").and_then(|v| v.to_str().ok()) {
+        Some(v) => v,
+        None => return StatusCode::FORBIDDEN,
+    };
+
+    if verify_signature(signature, timestamp_str, &body, &state.pairing_token).is_err() {
+        return StatusCode::FORBIDDEN;
+    }
+
+    StatusCode::OK
 }
 
 async fn download_handler(
@@ -107,25 +125,34 @@ async fn download_handler(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    let signature = headers
-        .get("x-firelink-signature")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::FORBIDDEN)?;
+    let signature = match headers.get("x-firelink-signature").and_then(|v| v.to_str().ok()) {
+        Some(v) => v,
+        None => return Err(StatusCode::FORBIDDEN),
+    };
 
-    let timestamp_str = headers
-        .get("x-firelink-timestamp")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::FORBIDDEN)?;
+    let timestamp_str = match headers.get("x-firelink-timestamp").and_then(|v| v.to_str().ok()) {
+        Some(v) => v,
+        None => return Err(StatusCode::FORBIDDEN),
+    };
 
-    let timestamp = verify_signature(signature, timestamp_str, &body, &state.pairing_token)
-        .map_err(|_| StatusCode::FORBIDDEN)?;
+    let timestamp = match verify_signature(signature, timestamp_str, &body, &state.pairing_token) {
+        Ok(v) => v,
+        Err(_) => return Err(StatusCode::FORBIDDEN),
+    };
 
     if !claim_request(signature, timestamp, &state.replay_cache) {
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let payload: ExtensionRequest = serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let download = normalize_download(payload).ok_or(StatusCode::BAD_REQUEST)?;
+    let payload: ExtensionRequest = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return Err(StatusCode::BAD_REQUEST),
+    };
+
+    let download = match normalize_download(payload) {
+        Some(v) => v,
+        None => return Err(StatusCode::BAD_REQUEST),
+    };
 
     if let Some(window) = state.app_handle.get_webview_window("main") {
         let _ = window.show();

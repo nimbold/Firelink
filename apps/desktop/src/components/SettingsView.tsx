@@ -510,11 +510,11 @@ export default function SettingsView() {
                   <div className="flex gap-2">
                     <input
                       type="text" readOnly placeholder="Choose base folder..."
-                      className="app-control w-48 text-text-muted text-[11px]"
+                      className="app-control w-64 text-text-muted text-[11px] px-2"
                     />
                     <button
                       onClick={handleBrowseBulk}
-                      className="app-icon-button bg-accent/10 hover:bg-accent/20 text-accent font-semibold px-3"
+                      className="app-button px-3 text-xs font-semibold text-accent border border-accent/20 bg-accent/10 hover:bg-accent/20"
                     >
                       Browse
                     </button>
@@ -529,11 +529,11 @@ export default function SettingsView() {
                         type="text"
                         value={(settings.downloadDirectories || {})[category] || ''}
                         onChange={(e) => settings.setCategoryDirectory(category, e.target.value)}
-                        className="app-control w-48 text-[11px]"
+                        className="app-control w-64 text-[11px] px-2"
                       />
                       <button
                         onClick={() => handleBrowseCategory(category)}
-                        className="app-icon-button hover:bg-item-hover text-text-secondary px-3"
+                        className="app-button px-3 text-xs text-text-secondary hover:bg-item-hover"
                       >
                         Browse
                       </button>
