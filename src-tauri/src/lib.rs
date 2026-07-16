@@ -2705,6 +2705,7 @@ pub struct AppState {
     pub storage_layout: crate::storage::StorageLayout,
     pub extension_pairing_token: extension_server::SharedExtensionToken,
     pub extension_frontend_ready: extension_server::SharedFrontendReady,
+    pub extension_acks: extension_server::SharedExtensionAcks,
     pub extension_server_port: extension_server::SharedServerPort,
     pub extension_server_shutdown: tokio::sync::watch::Sender<bool>,
     pub aria2_port: std::sync::Arc<std::sync::atomic::AtomicU16>,
@@ -6201,6 +6202,19 @@ fn set_extension_frontend_ready(state: tauri::State<'_, AppState>, ready: bool) 
     });
 }
 
+#[tauri::command]
+fn ack_extension_download(
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+) -> Result<(), String> {
+    if request_id.len() != 32 || !request_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Invalid extension request id".to_string());
+    }
+
+    extension_server::acknowledge_extension_download(&state.extension_acks, &request_id);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -7948,6 +7962,8 @@ pub fn run() {
     let server_pairing_token = extension_pairing_token.clone();
     let extension_frontend_ready = Arc::new(AtomicBool::new(false));
     let server_frontend_ready = extension_frontend_ready.clone();
+    let extension_acks = Arc::new(Mutex::new(HashMap::new()));
+    let server_extension_acks = extension_acks.clone();
     let extension_server_port = Arc::new(RwLock::new(None));
     let server_extension_port = extension_server_port.clone();
     let (extension_server_shutdown_tx, extension_server_shutdown_rx) =
@@ -8074,6 +8090,7 @@ pub fn run() {
                 storage_layout,
                 extension_pairing_token,
                 extension_frontend_ready,
+                extension_acks,
                 extension_server_port,
                 extension_server_shutdown: extension_server_shutdown_tx.clone(),
                 aria2_port: aria2_port.clone(),
@@ -8529,6 +8546,7 @@ pub fn run() {
                     ext_app_handle.clone(),
                     server_pairing_token.clone(),
                     server_frontend_ready.clone(),
+                    server_extension_acks.clone(),
                     server_extension_port.clone(),
                     extension_server_shutdown_rx.clone(),
                 ).await {
@@ -8600,7 +8618,7 @@ pub fn run() {
             hydrate_extension_pairing_token, get_session_pairing_token, regenerate_pairing_token, grant_keychain_access,
             acknowledge_pairing_token_change,
             check_file_exists, toggle_tray_icon, set_extension_pairing_token,
-            get_extension_server_port, set_extension_frontend_ready, set_concurrent_limit, set_global_speed_limit, remove_download,
+            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_global_speed_limit, remove_download,
             detach_download_for_reconfigure,
             enqueue_download, enqueue_many, cancel_enqueue_generation, move_in_queue, move_many_in_queue, remove_from_queue, get_pending_order,
             commands::reveal_in_file_manager, commands::open_downloaded_file,

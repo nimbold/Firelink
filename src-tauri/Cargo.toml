@@ -45,7 +45,7 @@ tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
 tempfile = "3"
 thiserror = "2.0.18"
 axum = "0.8.9"
-tower-http = { version = "0.7", features = ["cors"] }
+tower-http = { version = "0.7", features = ["cors", "limit"] }
 sysproxy = "0.3.0"
 semver = "1.0.28"
 keepawake = "0.6.0"

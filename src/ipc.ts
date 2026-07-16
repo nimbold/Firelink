@@ -65,6 +65,7 @@ type CommandMap = {
   grant_keychain_access: { args: undefined; result: PairingTokenHydration };
   acknowledge_pairing_token_change: { args: undefined; result: void };
   set_extension_frontend_ready: { args: { ready: boolean }; result: void };
+  ack_extension_download: { args: { requestId: string }; result: void };
   get_system_proxy: { args: undefined; result: string | null };
   get_file_category: { args: { filename: string }; result: DownloadCategory };
   check_for_updates: { args: undefined; result: ReleaseCheckOutcome };

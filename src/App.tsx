@@ -137,7 +137,7 @@ function App() {
   const maxConcurrentDownloads = useSettingsStore(state => state.maxConcurrentDownloads);
   const preventsSleepWhileDownloading = useSettingsStore(state => state.preventsSleepWhileDownloading);
   const activeTransferCount = downloads.filter(download => isTransferActiveStatus(download.status)).length;
-  const { addToast } = useToast();
+  const { addToast, removeToast } = useToast();
   const isMacUserAgent = navigator.userAgent.includes('Mac');
   const usesCustomWindowControls = !isMacUserAgent && platform.os !== 'macos';
   // Keep dialogs out of the titlebar area while platform detection is still
@@ -179,19 +179,20 @@ function App() {
 
     const actionLabel = action === 'shutdown' ? 'Shut down' : action === 'restart' ? 'Restart' : 'Sleep';
     let timerId: number | null = null;
+    let toastId: string | null = null;
     const cancel = () => {
-      if (timerId !== null) {
-        window.clearTimeout(timerId);
-        if (pendingPostActionTimer.current === timerId) {
-          pendingPostActionTimer.current = null;
-        }
-        timerId = null;
+      clearPendingPostActionTimer();
+      timerId = null;
+      if (toastId !== null) {
+        removeToast(toastId);
+        toastId = null;
       }
     };
 
-    addToast({
+    toastId = addToast({
       variant: 'warning',
       isActionable: true,
+      onDismiss: clearPendingPostActionTimer,
       message: (
         <div className="flex items-center gap-3">
           <span>{actionLabel} in 10 seconds.</span>
@@ -207,6 +208,10 @@ function App() {
     });
 
     timerId = window.setTimeout(() => {
+      if (toastId !== null) {
+        removeToast(toastId);
+        toastId = null;
+      }
       if (pendingPostActionTimer.current === timerId) {
         pendingPostActionTimer.current = null;
       }
@@ -233,7 +238,7 @@ function App() {
       });
     }, 10_000);
     pendingPostActionTimer.current = timerId;
-  }, [addToast, clearPendingPostActionTimer]);
+  }, [addToast, clearPendingPostActionTimer, removeToast]);
 
   const startSidebarResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -326,6 +331,11 @@ function App() {
           }
         });
         unlistenExtension = await listen('extension-add-download', (event) => {
+          if (event.payload.request_id) {
+            void invoke('ack_extension_download', { requestId: event.payload.request_id }).catch(error => {
+              console.error('Failed to acknowledge browser extension download:', error);
+            });
+          }
           if (!startupInputReady.current || useSettingsStore.getState().showKeychainModal) {
             pendingStartupInputs.current.push({ type: 'extension', payload: event.payload });
             return;

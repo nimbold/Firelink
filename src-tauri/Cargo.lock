@@ -5487,6 +5487,8 @@ dependencies = [
  "bitflags 2.13.1",
  "bytes",
  "http",
+ "http-body",
+ "http-body-util",
  "percent-encoding",
  "pin-project-lite",
  "tower-layer",

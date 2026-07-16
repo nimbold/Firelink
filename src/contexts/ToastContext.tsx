@@ -14,6 +14,7 @@ export interface ToastMessage {
   variant?: ToastVariant;
   duration?: number;
   isActionable?: boolean;
+  onDismiss?: () => void;
 }
 
 interface ToastState extends ToastMessage {
@@ -21,7 +22,7 @@ interface ToastState extends ToastMessage {
 }
 
 interface ToastContextType {
-  addToast: (toast: Omit<ToastMessage, 'id'>) => void;
+  addToast: (toast: Omit<ToastMessage, 'id'>) => string;
   removeToast: (id: string) => void;
 }
 
@@ -33,10 +34,12 @@ export const ToastProvider: React.FC<{ children: ReactNode }> = ({ children }) =
 
   const addToast = useCallback((toast: Omit<ToastMessage, 'id'>) => {
     nextToastId.current += 1;
+    const id = `toast-${nextToastId.current}`;
     setToasts(prev => {
-      const next = [...prev, { ...toast, id: `toast-${nextToastId.current}` }];
+      const next = [...prev, { ...toast, id }];
       return next.slice(-MAX_VISIBLE_TOASTS);
     });
+    return id;
   }, []);
 
   const removeToast = useCallback((id: string) => {
@@ -70,6 +73,7 @@ const ToastItem: React.FC<{ toast: ToastState; removeToast: (id: string) => void
   const [isHovered, setIsHovered] = useState(false);
   const timerStartedAt = useRef<number | null>(null);
   const remainingDuration = useRef<number | null>(null);
+  const onDismissCalled = useRef(false);
 
   useLayoutEffect(() => {
     const frame = requestAnimationFrame(() => setIsMounted(true));
@@ -98,6 +102,16 @@ const ToastItem: React.FC<{ toast: ToastState; removeToast: (id: string) => void
       }
     };
   }, [toast, isHovered, removeToast]);
+
+  useEffect(() => {
+    const dismiss = () => {
+      if (onDismissCalled.current) return;
+      onDismissCalled.current = true;
+      toast.onDismiss?.();
+    };
+    if (toast.exiting) dismiss();
+    return dismiss;
+  }, [toast.exiting, toast.onDismiss]);
 
   useEffect(() => {
     if (toast.exiting) {

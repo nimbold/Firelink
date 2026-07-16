@@ -17,13 +17,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::watch;
-use tower_http::cors::{Any, CorsLayer};
+use tokio::sync::{oneshot, watch};
+use tower_http::{
+    cors::{Any, CorsLayer},
+    limit::RequestBodyLimitLayer,
+};
 use ts_rs::TS;
 
 pub const EXTENSION_SERVER_PORT: u16 = 6412;
 pub const EXTENSION_SERVER_PORT_RANGE: std::ops::RangeInclusive<u16> = EXTENSION_SERVER_PORT..=6422;
 const MAX_URL_COUNT: usize = 200;
+const MAX_REQUEST_BODY_BYTES: usize = 256 * 1024;
 const SIGNATURE_MAX_AGE_MS: u64 = 60_000;
 const SERVER_HEADER: &str = "x-firelink-server";
 const PROTOCOL_VERSION_HEADER: &str = "x-firelink-protocol-version";
@@ -33,11 +37,14 @@ const SERVER_PORT_HEADER: &str = "x-firelink-server-port";
 const SMOKE_PROCESS_ID_HEADER: &str = "x-firelink-smoke-process-id";
 const SERVER_PROOF_PREFIX: &[u8] = b"firelink-server-proof\n";
 const PROTOCOL_VERSION: &str = "4";
+const MAX_PENDING_EXTENSION_ACKS: usize = 64;
+const EXTENSION_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 type HmacSha256 = Hmac<Sha256>;
 pub type SharedExtensionToken = Arc<RwLock<String>>;
 pub type SharedFrontendReady = Arc<AtomicBool>;
 pub type SharedServerPort = Arc<RwLock<Option<u16>>>;
+pub type SharedExtensionAcks = Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>;
 type ReplayCache = Arc<Mutex<HashMap<String, u64>>>;
 
 #[derive(Clone)]
@@ -45,6 +52,7 @@ pub struct ServerState {
     pub app_handle: AppHandle,
     pub pairing_token: SharedExtensionToken,
     pub frontend_ready: SharedFrontendReady,
+    pub extension_acks: SharedExtensionAcks,
     pub replay_cache: ReplayCache,
     pub bound_port: u16,
 }
@@ -78,6 +86,8 @@ pub struct ExtensionCookieScope {
 #[derive(Clone, Serialize, TS)]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct ExtensionDownload {
+    #[ts(optional)]
+    request_id: Option<String>,
     urls: Vec<String>,
     referer: Option<String>,
     silent: bool,
@@ -92,6 +102,7 @@ pub async fn start_server(
     app_handle: AppHandle,
     pairing_token: SharedExtensionToken,
     frontend_ready: SharedFrontendReady,
+    extension_acks: SharedExtensionAcks,
     server_port: SharedServerPort,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<(), String> {
@@ -100,6 +111,7 @@ pub async fn start_server(
         app_handle,
         pairing_token,
         frontend_ready,
+        extension_acks,
         replay_cache: Arc::new(Mutex::new(HashMap::new())),
         bound_port: port,
     };
@@ -116,6 +128,7 @@ pub async fn start_server(
         .route("/ping", get(ping_handler))
         .route("/download", post(download_handler))
         .layer(cors)
+        .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BODY_BYTES))
         .layer(middleware::from_fn(add_server_identity))
         .with_state(state);
 
@@ -245,10 +258,11 @@ async fn download_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<StatusCode, StatusCode> {
-    if !has_allowed_request_origin(&headers) || !has_valid_optional_nonce(&headers) {
-        return Err(StatusCode::FORBIDDEN);
-    }
+) -> Result<Response, StatusCode> {
+    let nonce = match required_client_nonce(&headers) {
+        Some(nonce) if has_allowed_request_origin(&headers) => nonce,
+        _ => return Err(StatusCode::FORBIDDEN),
+    };
 
     let signature = match headers
         .get("x-firelink-signature")
@@ -303,15 +317,45 @@ async fn download_handler(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
+    let request_id = uuid::Uuid::new_v4().simple().to_string();
+    let ack_receiver = register_extension_ack(&state.extension_acks, request_id.clone())
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let mut download = download;
+    download.request_id = Some(request_id.clone());
+
     if state
         .app_handle
         .emit("extension-add-download", download)
         .is_err()
     {
+        remove_extension_ack(&state.extension_acks, &request_id);
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    Ok(StatusCode::OK)
+    if tokio::time::timeout(EXTENSION_ACK_TIMEOUT, ack_receiver)
+        .await
+        .is_err()
+    {
+        remove_extension_ack(&state.extension_acks, &request_id);
+        // The event may already have reached the frontend even when its
+        // acknowledgement was delayed or lost. Do not return 503 here:
+        // extension callers retry 503 and could create a duplicate modal.
+        return Err(StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    let proof = sign_server_proof(timestamp_str, nonce, state.bound_port, &state.pairing_token)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut response = Response::new(Body::empty());
+    response.headers_mut().insert(
+        SERVER_PROOF_HEADER,
+        HeaderValue::from_str(&proof).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
+    response.headers_mut().insert(
+        SERVER_PORT_HEADER,
+        HeaderValue::from_str(&state.bound_port.to_string())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
+    Ok(response)
 }
 
 async fn wait_for_frontend(frontend_ready: &SharedFrontendReady) -> bool {
@@ -324,12 +368,45 @@ async fn wait_for_frontend(frontend_ready: &SharedFrontendReady) -> bool {
     false
 }
 
+fn register_extension_ack(
+    registry: &SharedExtensionAcks,
+    request_id: String,
+) -> Option<oneshot::Receiver<()>> {
+    let (sender, receiver) = oneshot::channel();
+    let mut pending = registry.lock().ok()?;
+    if pending.len() >= MAX_PENDING_EXTENSION_ACKS {
+        return None;
+    }
+    pending.insert(request_id, sender);
+    Some(receiver)
+}
+
+pub fn acknowledge_extension_download(registry: &SharedExtensionAcks, request_id: &str) -> bool {
+    let Some(sender) = registry
+        .lock()
+        .ok()
+        .and_then(|mut pending| pending.remove(request_id))
+    else {
+        return false;
+    };
+    sender.send(()).is_ok()
+}
+
+fn remove_extension_ack(registry: &SharedExtensionAcks, request_id: &str) {
+    if let Ok(mut pending) = registry.lock() {
+        pending.remove(request_id);
+    }
+}
+
 fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload> {
+    if payload.urls.len() > MAX_URL_COUNT {
+        return None;
+    }
+
     let mut seen = HashSet::new();
     let urls = payload
         .urls
         .into_iter()
-        .take(MAX_URL_COUNT)
         .filter_map(|raw_url| normalize_url(&raw_url))
         .filter(|url| seen.insert(url.clone()))
         .collect::<Vec<_>>();
@@ -377,6 +454,7 @@ fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload
     });
 
     Some(ExtensionDownload {
+        request_id: None,
         urls,
         referer,
         silent: payload.silent,
@@ -519,6 +597,13 @@ fn has_valid_optional_nonce(headers: &HeaderMap) -> bool {
     }
 }
 
+fn required_client_nonce(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(CLIENT_NONCE_HEADER)
+        .and_then(|nonce| nonce.to_str().ok())
+        .filter(|nonce| is_valid_client_nonce(nonce))
+}
+
 fn sign_server_proof(
     timestamp_text: &str,
     nonce: &str,
@@ -553,16 +638,22 @@ fn claim_request(signature: &str, timestamp: u64, replay_cache: &ReplayCache) ->
         Some(now) => now,
         None => return false,
     };
+    claim_request_at(signature, timestamp, replay_cache, now)
+}
+
+fn claim_request_at(signature: &str, timestamp: u64, replay_cache: &ReplayCache, now: u64) -> bool {
     let mut cache = match replay_cache.lock() {
         Ok(cache) => cache,
         Err(_) => return false,
     };
-    cache.retain(|_, seen_at| now.saturating_sub(*seen_at) < SIGNATURE_MAX_AGE_MS);
-    if cache.len() > 10_000 {
+    cache.retain(|_, expires_at| now < *expires_at);
+    let key = format!("{timestamp}:{}", signature.to_ascii_lowercase());
+    if cache.len() >= 10_000 && !cache.contains_key(&key) {
         return false;
     }
-    let key = format!("{timestamp}:{}", signature.to_ascii_lowercase());
-    cache.insert(key, now).is_none()
+    cache
+        .insert(key, timestamp.saturating_add(SIGNATURE_MAX_AGE_MS))
+        .is_none()
 }
 
 fn current_time_millis() -> Option<u64> {
@@ -605,9 +696,10 @@ fn is_allowed_origin(origin: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_server_identity, claim_request, has_allowed_request_origin, has_valid_optional_nonce,
-        is_valid_client_nonce, normalize_download, sign_server_proof, ExtensionRequest,
-        ExtensionCookieScope, PROTOCOL_VERSION_HEADER, SERVER_HEADER,
+        acknowledge_extension_download, add_server_identity, claim_request_at,
+        has_allowed_request_origin, has_valid_optional_nonce, is_valid_client_nonce,
+        normalize_download, required_client_nonce, sign_server_proof, ExtensionCookieScope,
+        ExtensionRequest, MAX_URL_COUNT, PROTOCOL_VERSION_HEADER, SERVER_HEADER,
     };
     use axum::{
         http::{HeaderMap, HeaderValue, StatusCode},
@@ -680,6 +772,27 @@ mod tests {
     }
 
     #[test]
+    fn requires_a_valid_client_nonce_for_downloads() {
+        let mut headers = HeaderMap::new();
+        assert!(required_client_nonce(&headers).is_none());
+
+        headers.insert(
+            "x-firelink-client-nonce",
+            HeaderValue::from_static("not-a-valid-nonce"),
+        );
+        assert!(required_client_nonce(&headers).is_none());
+
+        headers.insert(
+            "x-firelink-client-nonce",
+            HeaderValue::from_static("0123456789abcdef0123456789abcdef"),
+        );
+        assert_eq!(
+            required_client_nonce(&headers),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+    }
+
+    #[test]
     fn media_handoffs_reject_non_http_page_urls() {
         let download = normalize_download(ExtensionRequest {
             urls: vec!["ftp://example.com/audio.mp3".to_string()],
@@ -696,12 +809,61 @@ mod tests {
     }
 
     #[test]
+    fn rejects_oversized_url_lists_instead_of_truncating_them() {
+        let download = normalize_download(ExtensionRequest {
+            urls: (0..=MAX_URL_COUNT)
+                .map(|index| format!("https://example.com/file-{index}.bin"))
+                .collect(),
+            referer: None,
+            silent: false,
+            filename: None,
+            headers: None,
+            cookies: None,
+            cookie_scopes: None,
+            media: false,
+        });
+
+        assert!(download.is_none());
+    }
+
+    #[test]
     fn rejects_replayed_download_signature() {
         let cache = Arc::new(Mutex::new(HashMap::new()));
         let signature = "a".repeat(64);
+        let now = 1_000_000;
 
-        assert!(claim_request(&signature, 42, &cache));
-        assert!(!claim_request(&signature, 42, &cache));
+        assert!(claim_request_at(&signature, now, &cache, now));
+        assert!(!claim_request_at(&signature, now, &cache, now + 1));
+    }
+
+    #[test]
+    fn future_timestamp_replay_claim_survives_cache_pruning_window() {
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let signature = "b".repeat(64);
+        let now = 1_000_000;
+        let future_timestamp = now + 30_000;
+
+        assert!(claim_request_at(&signature, future_timestamp, &cache, now));
+        assert!(!claim_request_at(
+            &signature,
+            future_timestamp,
+            &cache,
+            now + 70_000
+        ));
+    }
+
+    #[tokio::test]
+    async fn acknowledges_and_removes_pending_extension_event() {
+        let registry = Arc::new(Mutex::new(HashMap::new()));
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        registry
+            .lock()
+            .unwrap()
+            .insert("request-1".to_string(), sender);
+
+        assert!(acknowledge_extension_download(&registry, "request-1"));
+        assert!(!acknowledge_extension_download(&registry, "request-1"));
+        assert!(receiver.await.is_ok());
     }
 
     #[test]
@@ -776,10 +938,7 @@ mod tests {
 
         assert_eq!(download.cookies.as_deref(), Some("SID=mail-session"));
         assert_eq!(
-            download
-                .cookie_scopes
-                .as_ref()
-                .map(|scopes| scopes.len()),
+            download.cookie_scopes.as_ref().map(|scopes| scopes.len()),
             Some(2)
         );
         assert_eq!(
