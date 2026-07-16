@@ -590,13 +590,6 @@ fn has_allowed_request_origin(headers: &HeaderMap) -> bool {
     }
 }
 
-fn has_valid_optional_nonce(headers: &HeaderMap) -> bool {
-    match headers.get(CLIENT_NONCE_HEADER) {
-        None => true,
-        Some(nonce) => nonce.to_str().ok().is_some_and(is_valid_client_nonce),
-    }
-}
-
 fn required_client_nonce(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(CLIENT_NONCE_HEADER)
@@ -697,7 +690,7 @@ fn is_allowed_origin(origin: &str) -> bool {
 mod tests {
     use super::{
         acknowledge_extension_download, add_server_identity, claim_request_at,
-        has_allowed_request_origin, has_valid_optional_nonce, is_valid_client_nonce,
+        has_allowed_request_origin, is_valid_client_nonce,
         normalize_download, required_client_nonce, sign_server_proof, ExtensionCookieScope,
         ExtensionRequest, MAX_URL_COUNT, PROTOCOL_VERSION_HEADER, SERVER_HEADER,
     };
@@ -748,10 +741,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_origins_and_malformed_optional_nonces() {
+    fn rejects_invalid_origins() {
         let mut headers = HeaderMap::new();
         assert!(has_allowed_request_origin(&headers));
-        assert!(has_valid_optional_nonce(&headers));
 
         headers.insert(
             "origin",
@@ -763,12 +755,7 @@ mod tests {
             "origin",
             HeaderValue::from_static("moz-extension://firelink"),
         );
-        headers.insert(
-            "x-firelink-client-nonce",
-            HeaderValue::from_static("not-a-valid-nonce"),
-        );
         assert!(has_allowed_request_origin(&headers));
-        assert!(!has_valid_optional_nonce(&headers));
     }
 
     #[test]
