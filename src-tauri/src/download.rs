@@ -77,7 +77,7 @@ impl DownloadCoordinator {
         &self,
         id: String,
         lifecycle_generation: u64,
-        ack: tokio::sync::oneshot::Sender<()>,
+        ack: tokio::sync::oneshot::Sender<bool>,
     ) -> Result<(), String> {
         self.media_tx
             .send(MediaCmd::PauseWithAck {
@@ -128,7 +128,7 @@ enum MediaCmd {
     PauseWithAck {
         id: String,
         lifecycle_generation: u64,
-        ack: tokio::sync::oneshot::Sender<()>,
+        ack: tokio::sync::oneshot::Sender<bool>,
     },
     Finished {
         id: String,
@@ -144,7 +144,7 @@ async fn run_coordinator(
     let mut active_media = HashMap::<String, (u64, watch::Sender<bool>)>::new();
     let mut cancelled_media_generations = HashMap::<String, u64>::new();
     let mut pending_media_acks =
-        HashMap::<(String, u64), tokio::sync::oneshot::Sender<()>>::new();
+        HashMap::<(String, u64), tokio::sync::oneshot::Sender<bool>>::new();
     let mut pending_captured_urls = Vec::<String>::new();
     let mut frontend_ready = false;
     let mut command_open = true;
@@ -228,7 +228,10 @@ async fn run_coordinator(
                                 .entry(id)
                                 .and_modify(|generation| *generation = (*generation).max(lifecycle_generation))
                                 .or_insert(lifecycle_generation);
-                            let _ = ack.send(());
+                            // No runner was registered for this generation.
+                            // The caller may retire the cancellation tombstone
+                            // while it still owns the per-download lock.
+                            let _ = ack.send(false);
                         }
                     }
                     MediaCmd::Finished { id, lifecycle_generation } => {
@@ -238,7 +241,9 @@ async fn run_coordinator(
                         if let Some(ack) =
                             pending_media_acks.remove(&(id.clone(), lifecycle_generation))
                         {
-                            let _ = ack.send(());
+                            // A pending acknowledgement means the runner was
+                            // registered and has now observed cancellation.
+                            let _ = ack.send(true);
                         }
                         if cancelled_media_generations
                             .get(&id)
@@ -402,6 +407,30 @@ mod tests {
         })
         .await
         .expect("late media registration was not cancelled");
+    }
+
+    #[tokio::test]
+    async fn unregistered_media_pause_tombstone_can_be_reconciled() {
+        let (coordinator, _events) = DownloadCoordinator::spawn_headless();
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+
+        coordinator
+            .pause_media_with_ack("abandoned-media".to_string(), 9, ack_tx)
+            .await
+            .unwrap();
+        assert!(!ack_rx.await.unwrap());
+
+        // Once the queue lifecycle is invalidated under its control lock,
+        // it can retire the tombstone without allowing a late runner to
+        // start. A later registration must therefore remain uncancelled.
+        coordinator
+            .finish_media("abandoned-media".to_string(), 9)
+            .await;
+        let cancel_rx = coordinator
+            .register_media("abandoned-media".to_string(), 9)
+            .await
+            .unwrap();
+        assert!(!*cancel_rx.borrow());
     }
 
     #[tokio::test]

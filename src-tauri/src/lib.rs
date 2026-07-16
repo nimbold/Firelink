@@ -1928,6 +1928,15 @@ struct ShellCommandOutput {
     stderr: Vec<u8>,
 }
 
+fn terminate_shell_process_tree(child: tauri_plugin_shell::process::CommandChild) {
+    crate::process::kill_process_tree(child.pid());
+    // The process-tree helper may already have signalled the root. The
+    // direct kill is still needed when the root was not visible in the
+    // snapshot, but its result is cleanup telemetry, not the operation's
+    // primary error.
+    let _ = child.kill();
+}
+
 async fn shell_command_output_with_timeout(
     command: tauri_plugin_shell::process::Command,
     timeout: Duration,
@@ -1988,33 +1997,21 @@ async fn shell_command_output_with_timeout(
 
     match tokio::time::timeout(timeout, collect_output).await {
         Ok(Ok(output)) if output.status_code.is_some() => Ok(output),
-        Ok(Ok(_)) => match child.kill() {
-            Ok(()) => Err(format!(
-                "{operation} ended without a process exit status"
-            )),
-            Err(error) => Err(format!(
-                "{operation} ended without a process exit status and failed to terminate the child process: {error}"
-            )),
-        },
-        Ok(Err(error)) => {
-            let kill_error = child.kill().err();
-            match kill_error {
-                Some(kill_error) => Err(format!(
-                    "{error}; failed to terminate the child process: {kill_error}"
-                )),
-                None => Err(error),
-            }
+        Ok(Ok(_)) => {
+            terminate_shell_process_tree(child);
+            Err(format!("{operation} ended without a process exit status"))
         }
-        Err(_) => match child.kill() {
-            Ok(()) => Err(format!(
+        Ok(Err(error)) => {
+            terminate_shell_process_tree(child);
+            Err(error)
+        }
+        Err(_) => {
+            terminate_shell_process_tree(child);
+            Err(format!(
                 "{operation} timed out after {}s",
                 timeout.as_secs()
-            )),
-            Err(error) => Err(format!(
-                "{operation} timed out after {}s and failed to terminate the child process: {error}",
-                timeout.as_secs()
-            )),
-        },
+            ))
+        }
     }
 }
 
@@ -3770,8 +3767,7 @@ pub(crate) async fn start_media_download_internal(
         let failure_reason = loop {
             tokio::select! {
                 _ = cancel_rx.changed() => {
-                    crate::process::kill_process_tree(child.pid());
-                    let _ = child.kill();
+                    terminate_shell_process_tree(child);
                     if processing_started {
                         cleanup_media_processing_artifacts(&out_path).await;
                     }
@@ -4148,10 +4144,20 @@ async fn pause_download(
             .pause_media_with_ack(id.clone(), media_lifecycle_generation, tx)
             .await?;
     } else {
-        let _ = tx.send(());
+        let _ = tx.send(false);
     }
-    rx.await
+    let media_was_registered = rx
+        .await
         .map_err(|_| "download worker stopped without acknowledging pause".to_string())?;
+    if matches!(active_kind, Some(crate::queue::TaskKind::Media)) && !media_was_registered {
+        // No media runner reached the coordinator. The queue control lock is
+        // still held, and run_media now checks the same lifecycle generation
+        // before registration, so this tombstone can be retired safely.
+        state
+            .download_coordinator
+            .finish_media(id.clone(), media_lifecycle_generation)
+            .await;
+    }
 
     state.queue_manager.release_permit(&id).await;
     if registered_lifecycle_generation.is_some()
@@ -4514,9 +4520,15 @@ async fn remove_download(
                 .pause_media_with_ack(id.clone(), media_lifecycle_generation, tx)
                 .await?;
         } else {
-            let _ = tx.send(());
+            let _ = tx.send(false);
         }
-        let _ = rx.await;
+        let media_was_registered = rx.await.unwrap_or(false);
+        if matches!(active_kind, Some(crate::queue::TaskKind::Media)) && !media_was_registered {
+            state
+                .download_coordinator
+                .finish_media(id.clone(), media_lifecycle_generation)
+                .await;
+        }
 
         state.queue_manager.release_permit(&id).await;
         state.queue_manager.clear_aria2_retry_state(&id).await;
@@ -4682,9 +4694,15 @@ async fn detach_download_for_reconfigure(
                 .pause_media_with_ack(id.clone(), media_lifecycle_generation, tx)
                 .await?;
         } else {
-            let _ = tx.send(()); // Fallback if no task exists
+            let _ = tx.send(false); // Fallback if no task exists
         }
-        let _ = rx.await; // Wait for the writer to stop
+        let media_was_registered = rx.await.unwrap_or(false); // Wait for the writer to stop
+        if matches!(active_kind, Some(crate::queue::TaskKind::Media)) && !media_was_registered {
+            state
+                .download_coordinator
+                .finish_media(id.clone(), media_lifecycle_generation)
+                .await;
+        }
 
         state.queue_manager.release_permit(&id).await;
         state.queue_manager.clear_aria2_retry_state(&id).await;
@@ -5101,13 +5119,20 @@ async fn validate_enqueue_url(url: &str) -> Result<(), String> {
     }
 }
 
+async fn validate_enqueue_uris(url: &str, mirrors: Option<&str>) -> Result<(), String> {
+    for uri in collect_download_uris(url, mirrors) {
+        validate_enqueue_url(&uri).await?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn enqueue_download(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     mut item: queue::EnqueueItem,
 ) -> Result<crate::ipc::EnqueueAccepted, AppError> {
-    validate_enqueue_url(&item.url)
+    validate_enqueue_uris(&item.url, item.mirrors.as_deref())
         .await
         .map_err(AppError::Internal)?;
     let id = item.id.clone();
@@ -5174,7 +5199,7 @@ async fn enqueue_many(
     let mut results = Vec::with_capacity(items.len());
     for mut item in items {
         let id = item.id.clone();
-        if let Err(error) = validate_enqueue_url(&item.url).await {
+        if let Err(error) = validate_enqueue_uris(&item.url, item.mirrors.as_deref()).await {
             results.push(crate::ipc::EnqueueResult {
                 id,
                 success: false,
@@ -6199,7 +6224,7 @@ mod tests {
         observe_aria2_connections, observe_aria2_connections_with_epoch,
         Aria2ConnectionObservation, Aria2ConnectionSample, Aria2RecoveryReason,
         parse_media_playlist_metadata,
-        validate_enqueue_url,
+        validate_enqueue_url, validate_enqueue_uris,
     };
     use serde_json::json;
     use std::time::{Duration, Instant};
@@ -6224,6 +6249,26 @@ mod tests {
         );
         assert_eq!(
             validate_enqueue_url("file:///tmp/file.zip").await,
+            Err("Unsupported URL scheme".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn enqueue_uri_validation_covers_mirrors_not_only_the_primary_url() {
+        assert_eq!(
+            validate_enqueue_uris(
+                "http://192.0.2.1/file.zip",
+                Some("http://127.0.0.1/internal\nfile:///etc/passwd"),
+            )
+            .await,
+            Err("SSRF blocked: Private/local IP not allowed".to_string())
+        );
+        assert_eq!(
+            validate_enqueue_uris(
+                "http://192.0.2.1/file.zip",
+                Some("file:///etc/passwd"),
+            )
+            .await,
             Err("Unsupported URL scheme".to_string())
         );
     }

@@ -2076,10 +2076,24 @@ impl SidecarSpawner for ProductionSpawner {
         lifecycle_generation: u64,
     ) -> Result<(), String> {
         let state = self.app_handle.state::<crate::AppState>();
+        // Serialize registration with pause/remove/detach. If the queue
+        // lifecycle was invalidated before this worker reached the
+        // coordinator, do not create a late media registration that could
+        // outlive the row's permit and ownership.
+        let control_guard = state.queue_manager.acquire_aria2_control(id).await;
+        if !state
+            .queue_manager
+            .is_registered_generation(id, lifecycle_generation)
+            .await
+        {
+            drop(control_guard);
+            return Err(crate::queue::MEDIA_RUN_CANCELLED.to_string());
+        }
         let mut cancel_rx = state
             .download_coordinator
             .register_media(id.to_string(), lifecycle_generation)
             .await?;
+        drop(control_guard);
         let outcome = if *cancel_rx.borrow() {
             Err(crate::queue::MEDIA_RUN_CANCELLED.to_string())
         } else {
