@@ -29,6 +29,7 @@ import {
 } from '../utils/downloadLocations';
 import { usePlatformInfo } from '../utils/platform';
 import { isTrustedFirelinkReleaseUrl } from '../utils/releaseUrls';
+import { normalizeCustomProxy } from '../store/useDownloadStore';
 
 const settingsTabs: { type: SettingsTab; label: string; icon: typeof Download }[] = [
   { type: 'downloads', label: 'Downloads', icon: Download },
@@ -75,6 +76,8 @@ type ManualUpdateStatus =
   | { type: 'up-to-date'; latestVersion: string; localVersion: string }
   | { type: 'update-available'; version: string; releaseUrl: string }
   | { type: 'error'; message: string };
+
+type SystemProxyStatus = 'idle' | 'checking' | 'detected' | 'none' | 'error';
 
 const engineStatusCache = new Map<string, EngineStatusItem>();
 const engineStatusInFlight = new Map<string, Promise<EngineStatusItem>>();
@@ -276,8 +279,9 @@ const [engineStatus, setEngineStatus] = useState<EngineStatusItem[] | null>(null
 const [expandedEngine, setExpandedEngine] = useState<string | null>(null);
 const [isRecheckingEngines, setIsRecheckingEngines] = useState(false);
 const engineRunId = useRef(0);
-const [appVersion, setAppVersion] = useState('Unknown');
-const [extensionServerPort, setExtensionServerPort] = useState<number | null>(null);
+  const [appVersion, setAppVersion] = useState('Unknown');
+  const [extensionServerPort, setExtensionServerPort] = useState<number | null>(null);
+  const [systemProxyStatus, setSystemProxyStatus] = useState<SystemProxyStatus>('idle');
 
   // Local state for adding site login
   const [loginPattern, setLoginPattern] = useState('');
@@ -319,6 +323,27 @@ useEffect(() => {
     window.clearInterval(timer);
   };
 }, [settings.activeView, activeTab]);
+
+useEffect(() => {
+  if (settings.activeView !== 'settings' || activeTab !== 'network' || settings.proxyMode !== 'system') {
+    setSystemProxyStatus('idle');
+    return;
+  }
+
+  let active = true;
+  setSystemProxyStatus('checking');
+  invoke('get_system_proxy')
+    .then(proxy => {
+      if (active) setSystemProxyStatus(typeof proxy === 'string' && proxy.trim() ? 'detected' : 'none');
+    })
+    .catch(() => {
+      if (active) setSystemProxyStatus('error');
+    });
+
+  return () => {
+    active = false;
+  };
+}, [settings.activeView, settings.proxyMode, activeTab]);
 
 const runEngineChecks = useCallback((force = false) => {
 const runId = ++engineRunId.current;
@@ -880,10 +905,20 @@ runEngineChecks(false);
                 <p className="settings-group-footer">
                   {settings.proxyMode === 'none' && 'Downloads ignore configured proxies.'}
                   {settings.proxyMode === 'system' && `Downloads use the detected ${platform.os === 'macos' ? 'macOS' : platform.os === 'windows' ? 'Windows' : 'desktop'} system proxy. Normal file downloads require an HTTP or HTTPS proxy endpoint; media downloads can use SOCKS.`}
-                  {settings.proxyMode === 'custom' && (settings.proxyHost
+                  {settings.proxyMode === 'custom' && (normalizeCustomProxy(settings.proxyHost, settings.proxyPort)
                     ? 'Downloads use the configured HTTP proxy endpoint for metadata and download engines.'
-                    : 'Enter a proxy host and port to enable the custom proxy.')}
+                    : settings.proxyHost
+                      ? 'Enter a valid HTTP proxy host and port to enable the custom proxy.'
+                      : 'Enter a proxy host and port to enable the custom proxy.')}
                 </p>
+                {settings.proxyMode === 'system' && (
+                  <p className="settings-group-footer" role="status">
+                    {systemProxyStatus === 'checking' && 'Checking system proxy configuration…'}
+                    {systemProxyStatus === 'detected' && 'A system proxy was detected. Normal file downloads require an HTTP or HTTPS endpoint; media downloads can use SOCKS.'}
+                    {systemProxyStatus === 'none' && 'No usable system proxy was detected. Downloads will use no proxy.'}
+                    {systemProxyStatus === 'error' && 'System proxy configuration could not be read. Downloads will use no proxy until it is available.'}
+                  </p>
+                )}
               </div>
 
               <h2 className="settings-section-title">Identity</h2>

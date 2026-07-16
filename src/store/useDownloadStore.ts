@@ -276,6 +276,7 @@ export const normalizeCustomProxy = (host: string, port: number): string | null 
     try {
       const parsed = new URL(trimmedHost);
       if (parsed.protocol !== 'http:') return null;
+      if (!parsed.hostname) return null;
       if (!parsed.port) parsed.port = String(normalizedPort);
       return parsed.toString().replace(/\/$/, '');
     } catch {
@@ -283,7 +284,24 @@ export const normalizeCustomProxy = (host: string, port: number): string | null 
     }
   }
 
-  return `http://${trimmedHost}:${normalizedPort}`;
+  try {
+    const parsed = new URL(`http://${trimmedHost}:${normalizedPort}`);
+    if (
+      !parsed.hostname
+      || parsed.username
+      || parsed.password
+      || parsed.pathname !== '/'
+      || parsed.search
+      || parsed.hash
+      || (parsed.port && Number(parsed.port) !== normalizedPort)
+      || (!parsed.port && normalizedPort !== 80)
+    ) {
+      return null;
+    }
+    return `http://${trimmedHost}:${normalizedPort}`;
+  } catch {
+    return null;
+  }
 };
 
 export const getProxyArgs = async (settings: ReturnType<typeof useSettingsStore.getState>) => {

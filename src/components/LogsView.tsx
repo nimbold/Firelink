@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { invokeCommand as invoke } from '../ipc';
 import { save } from '@tauri-apps/plugin-dialog';
+import { homeDir } from '@tauri-apps/api/path';
 import { attachLogger, setLogPaused, initLogger, setLogStreamActive } from '../utils/logger';
 import { FileDown, Trash2, Terminal, Filter, Play, Pause, Info, Copy } from 'lucide-react';
 import { WindowDragRegion } from './WindowDragRegion';
@@ -24,6 +25,7 @@ export default function LogsView() {
   const [levelFilter, setLevelFilter] = useState<LogEntry['level'] | 'All'>('All');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; text: string } | null>(null);
   const [pageVisible, setPageVisible] = useState(() => document.visibilityState !== 'hidden');
+  const homeDirectoryRef = useRef('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const liveBatchRef = useRef<LogEntry[]>([]);
   const liveFrameRef = useRef<number | null>(null);
@@ -32,6 +34,18 @@ export default function LogsView() {
   const toggleInFlightRef = useRef<Promise<void> | null>(null);
   const [isClearing, setIsClearing] = useState(false);
   const [isToggling, setIsToggling] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void homeDir()
+      .then(directory => {
+        if (active) homeDirectoryRef.current = directory;
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     const handleVisibilityChange = () => setPageVisible(document.visibilityState !== 'hidden');
@@ -80,7 +94,7 @@ export default function LogsView() {
         if (logsEnabled) {
           unlistenPromise = attachLogger((log) => {
             if (!active) return;
-            scheduleLiveEntry(liveLogEntry(log.level, log.message));
+            scheduleLiveEntry(liveLogEntry(log.level, log.message, new Date(), homeDirectoryRef.current));
           });
           await unlistenPromise;
           if (!active) return;
@@ -93,7 +107,7 @@ export default function LogsView() {
 
         const lines = await invoke('read_logs', { limit: MAX_LOG_LINES });
         if (!active) return;
-        const snapshot = lines.map(persistedLogEntry);
+        const snapshot = lines.map(line => persistedLogEntry(line, homeDirectoryRef.current));
         initialized = true;
         if (initGeneration !== clearGenerationRef.current) {
           pendingLiveEntries = [];

@@ -5,6 +5,7 @@ import {
   mergeLogSnapshotAndLiveEntries,
   persistedLogEntry,
   pushBoundedLogEntry,
+  redactLogText,
   type LogEntry
 } from './logEntries';
 
@@ -28,6 +29,29 @@ describe('log entry streaming', () => {
       level: 'Info',
       message: '[2026-07-10 14:30:00] [INFO] download started'
     });
+  });
+
+  it('redacts live secrets, signed URL components, and the home path', () => {
+    const message = 'Cookie: session=secret; https://example.com/file?token=signed https://example.com/file#fragment /Users/nima/Downloads/file';
+    const redacted = redactLogText(message, '/Users/nima');
+
+    expect(redacted).toBe('Cookie: [redacted]; https://example.com/file?[redacted] https://example.com/file#[redacted] <HOME>/Downloads/file');
+    expect(redacted).not.toContain('secret');
+    expect(redacted).not.toContain('signed');
+    expect(redacted).not.toContain('/Users/nima');
+  });
+
+  it('redacts live content before it is formatted for display', () => {
+    expect(liveLogEntry(3, 'Authorization: Bearer secret').message).toContain('Authorization: [redacted]');
+    expect(liveLogEntry(3, 'Authorization: Bearer secret').message).not.toContain('secret');
+  });
+
+  it('redacts persisted content and quoted credential fields', () => {
+    const persisted = persistedLogEntry('{"api_key":"json-secret","path":"/Users/nima/file"}', '/Users/nima');
+
+    expect(persisted.message).toContain('api_key');
+    expect(persisted.message).not.toContain('json-secret');
+    expect(persisted.message).not.toContain('/Users/nima');
   });
 
   it('merges only the ordered snapshot-to-stream overlap', () => {

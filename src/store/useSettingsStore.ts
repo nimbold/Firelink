@@ -20,8 +20,28 @@ import {
 import { normalizeSpeedLimitForBackend } from '../utils/downloads';
 
 let settingsSave = Promise.resolve();
+const settingsPersistenceErrorListeners = new Set<() => void>();
+let settingsPersistenceFailed = false;
 const DEFAULT_SCHEDULER_QUEUE_ID = '00000000-0000-0000-0000-000000000001';
 export const DEFAULT_SPEED_LIMIT_PRESET_VALUES = [1, 5, 10];
+
+export const subscribeToSettingsPersistenceErrors = (listener: () => void): (() => void) => {
+  settingsPersistenceErrorListeners.add(listener);
+  if (settingsPersistenceFailed) listener();
+  return () => settingsPersistenceErrorListeners.delete(listener);
+};
+
+const notifySettingsPersistenceError = () => {
+  if (settingsPersistenceFailed) return;
+  settingsPersistenceFailed = true;
+  for (const listener of settingsPersistenceErrorListeners) {
+    try {
+      listener();
+    } catch (error) {
+      console.error('Settings persistence error listener failed', error);
+    }
+  }
+};
 
 const THEME_VALUES = ['system', 'light', 'dark', 'dracula', 'nord'] as const;
 const APP_FONT_SIZE_VALUES = ['small', 'standard', 'large'] as const;
@@ -83,9 +103,13 @@ const tauriStorage: StateStorage = {
   setItem: async (name: string, value: string): Promise<void> => {
     if (name === 'firelink-settings') {
       settingsSave = settingsSave
+        .catch(() => undefined)
         .then(() => invoke('db_save_settings', { data: value }))
-        .catch(e => {
-          console.error("Failed to save settings to DB", e);
+        .then(() => {
+          settingsPersistenceFailed = false;
+        }, () => {
+          console.error('Failed to save settings to DB');
+          notifySettingsPersistenceError();
         });
       await settingsSave;
     }

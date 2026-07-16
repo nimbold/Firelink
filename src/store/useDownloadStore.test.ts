@@ -200,6 +200,9 @@ describe('useDownloadStore', () => {
     expect(normalizeCustomProxy(' socks5://127.0.0.1 ', 1080)).toBeNull();
     expect(normalizeCustomProxy('https://proxy.local', 8443)).toBeNull();
     expect(normalizeCustomProxy('127.0.0.1', NaN)).toBeNull();
+    expect(normalizeCustomProxy('127.0.0.1:9000', 8080)).toBeNull();
+    expect(normalizeCustomProxy('127.0.0.1/path', 8080)).toBeNull();
+    expect(normalizeCustomProxy('[::1]', 8080)).toBe('http://[::1]:8080');
 
     expect(await getProxyArgs({
       proxyMode: 'none',

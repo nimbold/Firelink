@@ -19,24 +19,60 @@ const LIVE_LEVELS: Record<number, LogLevel> = {
 const levelFromMessage = (message: string): LogLevel | undefined =>
   LEVEL_NAMES.find(level => message.includes(`[${level.toUpperCase()}]`));
 
-export const persistedLogEntry = (message: string): LogEntry => ({
+export const persistedLogEntry = (message: string, homePath = ''): LogEntry => ({
   level: levelFromMessage(message) || 'Debug',
-  message
+  message: redactLogText(message, homePath)
 });
+
+export const redactLogText = (message: string, homePath = ''): string => {
+  const normalizedHome = homePath.trim();
+  const normalizedHomeWithForwardSlashes = normalizedHome.replace(/\\/g, '/');
+  let redacted = message;
+
+  if (normalizedHome) {
+    redacted = redacted.split(normalizedHome).join('<HOME>');
+  }
+  if (normalizedHomeWithForwardSlashes && normalizedHomeWithForwardSlashes !== normalizedHome) {
+    redacted = redacted.split(normalizedHomeWithForwardSlashes).join('<HOME>');
+  }
+
+  redacted = redacted.replace(
+    /(["'])(authorization|proxy-authorization|cookie|set-cookie|password|token|secret|credential|pairing[-_ ]?token|api[-_ ]?key)(["'])(\s*[:=]\s*)["'][^"\r\n,;]*["']/gi,
+    '$1$2$3$4[redacted]'
+  );
+  redacted = redacted.replace(
+    /([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^@\s/?#]+@/g,
+    '$1[redacted]@'
+  );
+  redacted = redacted.replace(
+    /([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s?]+)\?[^\s]+/g,
+    '$1?[redacted]'
+  );
+  redacted = redacted.replace(
+    /([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s?#]+)#\S+/g,
+    '$1#[redacted]'
+  );
+  return redacted.replace(
+    /(authorization|proxy-authorization|cookie|set-cookie|password|token|secret|credential|pairing[-_ ]?token|api[-_ ]?key)(\s*)([:=])(\s*)([^\r\n,;]+)/gi,
+    '$1$2$3$4[redacted]'
+  );
+};
 
 export const liveLogEntry = (
   numericLevel: number,
   message: string,
-  now: Date = new Date()
+  now: Date = new Date(),
+  homePath = ''
 ): LogEntry => {
-  const level = levelFromMessage(message) || LIVE_LEVELS[numericLevel] || 'Debug';
-  const alreadyFormatted = /^\[\d{4}-\d{2}-\d{2}\]\[\d{2}:\d{2}:\d{2}\]\[(TRACE|DEBUG|INFO|WARN|ERROR)\]/.test(message);
+  const redactedMessage = redactLogText(message, homePath);
+  const level = levelFromMessage(redactedMessage) || LIVE_LEVELS[numericLevel] || 'Debug';
+  const alreadyFormatted = /^\[\d{4}-\d{2}-\d{2}\]\[\d{2}:\d{2}:\d{2}\]\[(TRACE|DEBUG|INFO|WARN|ERROR)\]/.test(redactedMessage);
 
   return {
     level,
     message: alreadyFormatted
-      ? message
-      : `[${now.toISOString().replace('T', ' ').substring(0, 19)}] [${level.toUpperCase()}] ${message}`
+      ? redactedMessage
+      : `[${now.toISOString().replace('T', ' ').substring(0, 19)}] [${level.toUpperCase()}] ${redactedMessage}`
   };
 };
 

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useSettingsStore } from './useSettingsStore';
+import { subscribeToSettingsPersistenceErrors, useSettingsStore } from './useSettingsStore';
 import * as ipc from '../ipc';
 
 vi.mock('../ipc', () => ({
@@ -64,5 +64,28 @@ describe('useSettingsStore credential-store startup flow', () => {
     expect(useSettingsStore.getState().keychainAccessReady).toBe(false);
     expect(useSettingsStore.getState().keychainAccessVersion).toBe('1.0.5');
     expect(useSettingsStore.getState().keychainPromptDismissed).toBe(true);
+  });
+});
+
+describe('useSettingsStore persistence failures', () => {
+  it('reports a database save failure and retries the next settings update', async () => {
+    vi.clearAllMocks();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const onPersistenceError = vi.fn();
+    const unsubscribe = subscribeToSettingsPersistenceErrors(onPersistenceError);
+    vi.mocked(ipc.invokeCommand).mockRejectedValueOnce(new Error('database unavailable'));
+
+    useSettingsStore.setState({ theme: 'dark' });
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(onPersistenceError).toHaveBeenCalledTimes(1);
+
+    vi.mocked(ipc.invokeCommand).mockResolvedValueOnce(undefined);
+    useSettingsStore.setState({ theme: 'light' });
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(onPersistenceError).toHaveBeenCalledTimes(1);
+    unsubscribe();
   });
 });

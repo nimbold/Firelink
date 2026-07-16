@@ -12,7 +12,7 @@ import { readClipboardDownloadUrls } from './utils/clipboard';
 import { listenEvent as listen, invokeCommand as invoke } from "./ipc";
 import { useDownloadStore, MAIN_QUEUE_ID, type ExtensionDownloadRequest } from './store/useDownloadStore';
 import { initDownloadListener } from './store/downloadStore';
-import { useSettingsStore } from "./store/useSettingsStore";
+import { subscribeToSettingsPersistenceErrors, useSettingsStore } from "./store/useSettingsStore";
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import SchedulerView from "./components/SchedulerView";
 import SpeedLimiterView from "./components/SpeedLimiterView";
@@ -27,6 +27,7 @@ import { getKeychainConsentVersion, getKeychainStartupDecision } from './utils/k
 import { getVersion } from '@tauri-apps/api/app';
 import type { PostQueueAction } from './bindings/PostQueueAction';
 import { PanelLeft } from 'lucide-react';
+import { isTrustedFirelinkReleaseUrl } from './utils/releaseUrls';
 
 let automaticUpdateCheckStarted = false;
 const processingScheduleKeys = new Set<string>();
@@ -143,6 +144,14 @@ function App() {
   // resolving. The conservative fallback prevents a startup handoff from
   // briefly rendering underneath native or custom window controls.
   const hasWindowChrome = isMacUserAgent || ['macos', 'windows', 'linux', 'unknown'].includes(platform.os);
+
+  useEffect(() => subscribeToSettingsPersistenceErrors(() => {
+    addToast({
+      message: 'Could not save settings. Check storage permissions and try again.',
+      variant: 'error',
+      isActionable: true
+    });
+  }), [addToast]);
 
   const acknowledgePairingTokenChange = () => {
     invoke('acknowledge_pairing_token_change').catch(error => {
@@ -515,6 +524,9 @@ function App() {
       invoke('check_for_updates')
         .then(result => {
           if (result.type !== 'UpdateAvailable') return;
+          if (!isTrustedFirelinkReleaseUrl(result.update.release_url)) {
+            throw new Error('The update check returned an untrusted release URL.');
+          }
           addToast({
             variant: 'info',
             isActionable: true,
@@ -657,6 +669,7 @@ function App() {
   }, [addToast, clearPendingPostActionTimer, coreReady]);
 
   useEffect(() => {
+    if (!coreReady) return;
     if (!schedulerRunning) return;
     if (schedulerActiveDownloadIds.length === 0) return;
     clearPendingPostActionTimer();
@@ -687,6 +700,7 @@ function App() {
   }, [
     addToast,
     clearPendingPostActionTimer,
+    coreReady,
     downloads,
     schedulePostQueueAction,
     schedulerRunning,

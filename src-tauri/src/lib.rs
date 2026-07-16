@@ -5868,6 +5868,7 @@ async fn log_files(app_handle: &tauri::AppHandle) -> Result<Vec<std::path::PathB
 pub(crate) fn redact_sensitive_text(line: &str) -> String {
     use std::sync::OnceLock;
     static SECRET: OnceLock<regex::Regex> = OnceLock::new();
+    static QUOTED_SECRET: OnceLock<regex::Regex> = OnceLock::new();
     static HEADER: OnceLock<regex::Regex> = OnceLock::new();
     static QUERY: OnceLock<regex::Regex> = OnceLock::new();
     static USERINFO: OnceLock<regex::Regex> = OnceLock::new();
@@ -5877,6 +5878,12 @@ pub(crate) fn redact_sensitive_text(line: &str) -> String {
             r"(?i)(authorization|proxy-authorization|cookie|set-cookie|password|token|secret|credential|pairing[-_ ]?token|api[-_ ]?key)\s*[:=]\s*([^\r\n,;]+)",
         )
             .expect("valid secret redaction regex")
+    });
+    let quoted_secret = QUOTED_SECRET.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?i)(["'])(authorization|proxy-authorization|cookie|set-cookie|password|token|secret|credential|pairing[-_ ]?token|api[-_ ]?key)(["'])(\s*[:=]\s*)["'][^"\r\n,;]*["']"#,
+        )
+        .expect("valid quoted secret redaction regex")
     });
     let header = HEADER.get_or_init(|| {
         regex::Regex::new(
@@ -5897,6 +5904,7 @@ pub(crate) fn redact_sensitive_text(line: &str) -> String {
             .expect("valid URL fragment redaction regex")
     });
     let redacted = header.replace_all(line, "$1: [redacted]");
+    let redacted = quoted_secret.replace_all(&redacted, "$1$2$3$4[redacted]");
     let redacted = secret.replace_all(&redacted, "$1=[redacted]");
     let redacted = userinfo.replace_all(&redacted, "$1[redacted]@");
     let redacted = query.replace_all(&redacted, "$1?[redacted]");
@@ -7090,6 +7098,15 @@ mod tests {
         assert!(!redacted.contains("user:pass"));
         assert!(!redacted.contains("signature=secret"));
         assert!(redacted.contains("http://[redacted]@example.com/file#[redacted]"));
+    }
+
+    #[test]
+    fn redacts_quoted_json_credentials() {
+        let line = r#"{"api_key":"json-secret","cookie":"session=secret"}"#;
+        let redacted = redact_log_line(line);
+        assert!(!redacted.contains("json-secret"));
+        assert!(!redacted.contains("session=secret"));
+        assert!(redacted.contains("[redacted]"));
     }
 
     #[test]
