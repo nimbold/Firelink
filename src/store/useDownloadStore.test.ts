@@ -1318,6 +1318,10 @@ describe('useDownloadStore', () => {
       filename: 'file.bin',
       headers: 'X-Test: value',
       cookies: 'session=secret',
+      cookie_scopes: [
+        { url: 'https://mail.google.com/', cookies: 'SID=mail-session' },
+        { url: 'https://accounts.google.com/', cookies: 'SID=account-session' }
+      ],
       media: false
     });
 
@@ -1328,6 +1332,10 @@ describe('useDownloadStore', () => {
     expect(state.pendingAddFilename).toBe('file.bin');
 	  expect(state.pendingAddHeaders).toBe('X-Test: value');
 	  expect(state.pendingAddCookies).toBe('session=secret');
+    expect(state.pendingAddRequestContexts['https://example.com/file.bin'].cookieScopes).toEqual([
+      { url: 'https://mail.google.com/', cookies: 'SID=mail-session' },
+      { url: 'https://accounts.google.com/', cookies: 'SID=account-session' }
+    ]);
     expect(state.pendingAddMediaUrls).toEqual([]);
 	 });
 
@@ -1349,6 +1357,7 @@ describe('useDownloadStore', () => {
 	   filename: null,
 	   headers: 'User-Agent: Firefox Test',
 	   cookies: null,
+      cookie_scopes: null,
       media: false
 	  });
 
@@ -1369,6 +1378,7 @@ describe('useDownloadStore', () => {
 	   filename: 'report.pdf',
 	   headers: 'User-Agent: Test',
 	   cookies: 'session=secret',
+      cookie_scopes: null,
       media: false
 	  });
 
@@ -1390,6 +1400,7 @@ describe('useDownloadStore', () => {
       filename: 'first.zip',
       headers: 'User-Agent: First Browser',
       cookies: 'first=session',
+      cookie_scopes: null,
       media: false
     });
     await useDownloadStore.getState().handleExtensionDownload({
@@ -1399,6 +1410,7 @@ describe('useDownloadStore', () => {
       filename: 'second.zip',
       headers: 'User-Agent: Second Browser',
       cookies: 'second=session',
+      cookie_scopes: null,
       media: false
     });
 
@@ -1435,6 +1447,7 @@ describe('useDownloadStore', () => {
       filename: null,
       headers: `Cookie: stale=${'x'.repeat(64 * 1024)}\nUser-Agent: Firefox Test`,
       cookies: `oversized=${'x'.repeat(64 * 1024)}`,
+      cookie_scopes: null,
       media: true
     });
 
@@ -1454,10 +1467,29 @@ describe('useDownloadStore', () => {
       filename: 'private.zip',
       headers: null,
       cookies: 'session=secret',
+      cookie_scopes: null,
       media: false
     });
 
     expect(useDownloadStore.getState().pendingAddCookies).toBe('session=secret');
+  });
+
+  it('drops extension cookie scopes for explicit media captures', async () => {
+    await useDownloadStore.getState().handleExtensionDownload({
+      urls: ['https://media.example/watch/123'],
+      referer: 'https://media.example/watch/123',
+      silent: true,
+      filename: null,
+      headers: null,
+      cookies: null,
+      cookie_scopes: [
+        { url: 'https://media.example/', cookies: 'session=secret' }
+      ],
+      media: true
+    });
+
+    expect(useDownloadStore.getState().pendingAddRequestContexts['https://media.example/watch/123']?.cookieScopes)
+      .toBeUndefined();
   });
 
   it('clears stale request context when the same URL is captured without it later', async () => {
@@ -1469,6 +1501,7 @@ describe('useDownloadStore', () => {
       filename: 'private.zip',
       headers: 'Authorization: secret',
       cookies: 'session=secret',
+      cookie_scopes: null,
       media: false
     });
     await useDownloadStore.getState().handleExtensionDownload({
@@ -1478,6 +1511,7 @@ describe('useDownloadStore', () => {
       filename: null,
       headers: null,
       cookies: null,
+      cookie_scopes: null,
       media: false
     });
 
@@ -1505,6 +1539,7 @@ describe('useDownloadStore', () => {
       filename: null,
       headers: 'User-Agent: Firefox Test',
       cookies: 'session=secret',
+      cookie_scopes: null,
       media: true
     });
 
@@ -1524,6 +1559,7 @@ describe('useDownloadStore', () => {
       filename: 'file.bin',
       headers: 'User-Agent: Firefox Test',
       cookies: null,
+      cookie_scopes: null,
       media: false
     });
 

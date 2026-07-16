@@ -5,6 +5,7 @@ import { invokeCommand as invoke } from '../ipc';
 import type { DownloadItem } from '../bindings/DownloadItem';
 import type { DownloadStatus } from '../bindings/DownloadStatus';
 import type { ExtensionDownload } from '../bindings/ExtensionDownload';
+import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
 import type { Queue } from '../bindings/Queue';
 import { useSettingsStore } from './useSettingsStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
@@ -451,6 +452,7 @@ export type PendingAddRequestContext = {
   filename: string;
   headers: string;
   cookies: string;
+  cookieScopes?: ExtensionCookieScope[];
   media: boolean;
 };
 
@@ -487,7 +489,8 @@ interface DownloadState {
     filename?: string | null,
     headers?: string | null,
     cookies?: string | null,
-    media?: boolean
+    media?: boolean,
+    cookieScopes?: ExtensionCookieScope[] | null
   ) => void;
   handleExtensionDownload: (request: ExtensionDownloadRequest) => Promise<void>;
   deleteModalState: DeleteModalState;
@@ -652,7 +655,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     // opened or closed without URLs.
     pendingAddRequestVersion: state.pendingAddRequestVersion + 1
   })),
-  openAddModalWithUrls: (urls, referer, filename, headers, cookies, media = false) => set((state) => {
+  openAddModalWithUrls: (urls, referer, filename, headers, cookies, media = false, cookieScopes) => set((state) => {
     const isAppending = state.isAddModalOpen && Boolean(state.pendingAddUrls);
     const existingUrls = isAppending ? state.pendingAddUrls : '';
     const mergedUrls = existingUrls ? `${existingUrls}\n${urls}` : urls;
@@ -660,6 +663,12 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     const cleanFilename = filename?.trim() || '';
     const cleanHeaders = headers?.trim() || '';
     const cleanCookies = cookies?.trim() || '';
+    const cleanCookieScopes = cookieScopes
+      ?.map(scope => ({
+        url: scope.url.trim(),
+        cookies: scope.cookies.trim()
+      }))
+      .filter(scope => scope.url && scope.cookies);
     const requestVersion = state.pendingAddRequestVersion + 1;
     const pendingAddRequestContexts = isAppending
       ? { ...state.pendingAddRequestContexts }
@@ -683,6 +692,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
         filename: cleanFilename,
         headers: cleanHeaders,
         cookies: cleanCookies,
+        ...(cleanCookieScopes?.length ? { cookieScopes: cleanCookieScopes } : {}),
         media
       };
     }
@@ -719,7 +729,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
       urls.length === 1 ? request.filename : null,
       headers,
       cookies,
-      request.media === true
+      request.media === true,
+      request.media === true ? undefined : request.cookie_scopes
     );
   },
   setSelectedPropertiesDownloadId: (id) => set({ selectedPropertiesDownloadId: id }),

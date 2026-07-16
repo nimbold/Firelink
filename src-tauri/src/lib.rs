@@ -116,7 +116,20 @@ fn filename_from_url_path(raw_url: &str) -> Option<String> {
     // If the escape sequence cannot form valid UTF-8, retain the raw segment
     // so a malformed URL cannot erase an otherwise usable filename.
     let decoded = percent_decode_metadata_value(last).unwrap_or_else(|| last.to_string());
-    sanitize_metadata_filename(&decoded)
+    let filename = sanitize_metadata_filename(&decoded)?;
+    let is_gmail_profile_path = parsed.host_str() == Some("mail.google.com")
+        && parsed.path().contains("/mail/u/");
+    let is_gmail_profile_number = is_gmail_profile_path
+        && filename.chars().all(|character| character.is_ascii_digit());
+    (!is_weak_url_filename(&filename) && !is_gmail_profile_number).then_some(filename)
+}
+
+fn is_weak_url_filename(filename: &str) -> bool {
+    let normalized = filename.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "identifier" | "download" | "view" | "uc"
+    )
 }
 
 fn metadata_filename_from_response(
@@ -129,11 +142,13 @@ fn metadata_filename_from_response(
         .get(reqwest::header::CONTENT_DISPOSITION)
         .and_then(|value| value.to_str().ok())
         .and_then(filename_from_content_disposition)
+        .filter(|filename| !is_weak_url_filename(filename))
     {
         return filename;
     }
 
     filename_from_url_disposition_query(current_url)
+        .filter(|filename| !is_weak_url_filename(filename))
         .or_else(|| filename_from_url_path(original_url))
         .or_else(|| filename_from_url_path(current_url))
         .unwrap_or_else(|| "download".to_string())
@@ -149,7 +164,11 @@ fn metadata_response_error(status: reqwest::StatusCode) -> Option<String> {
     })
 }
 
-fn metadata_cookie_header_present(headers: Option<&str>, cookies: Option<&str>) -> bool {
+fn metadata_cookie_header_present(
+    headers: Option<&str>,
+    cookies: Option<&str>,
+    cookie_scopes: Option<&[extension_server::ExtensionCookieScope]>,
+) -> bool {
     cookies.is_some_and(|value| !value.trim().is_empty())
         || headers.is_some_and(|value| {
             value.lines().any(|line| {
@@ -159,11 +178,14 @@ fn metadata_cookie_header_present(headers: Option<&str>, cookies: Option<&str>) 
                 name.trim().eq_ignore_ascii_case("cookie") && !value.trim().is_empty()
             })
         })
+        || cookie_scopes.is_some_and(|scopes| {
+            scopes.iter().any(|scope| !scope.cookies.trim().is_empty())
+        })
 }
 
 fn metadata_headers(
     headers: Option<&str>,
-    cookies: Option<&str>,
+    cookie_header: Option<&str>,
     include_cookies: bool,
 ) -> reqwest::header::HeaderMap {
     let mut header_map = reqwest::header::HeaderMap::new();
@@ -191,8 +213,11 @@ fn metadata_headers(
     }
 
     if include_cookies {
-        if let Some(cookies) = cookies.map(str::trim).filter(|value| !value.is_empty()) {
-            if let Ok(value) = reqwest::header::HeaderValue::from_str(cookies) {
+        if let Some(cookie_header) = cookie_header
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if let Ok(value) = reqwest::header::HeaderValue::from_str(cookie_header) {
                 header_map.insert(reqwest::header::COOKIE, value);
             }
         }
@@ -1592,6 +1617,41 @@ fn should_send_metadata_credentials(
             .is_some_and(|(original, current)| same_origin(original, current))
 }
 
+fn cookie_scope_for_url<'a>(
+    current_url: &str,
+    cookie_scopes: Option<&'a [extension_server::ExtensionCookieScope]>,
+) -> Option<&'a str> {
+    let current = reqwest::Url::parse(current_url).ok()?;
+    cookie_scopes?.iter().find_map(|scope| {
+        let scope_url = reqwest::Url::parse(&scope.url).ok()?;
+        let same_googleusercontent_site = scope_url.scheme() == current.scheme()
+            && scope_url.port_or_known_default() == current.port_or_known_default()
+            && scope_url.host_str() == Some("googleusercontent.com")
+            && current
+                .host_str()
+                .is_some_and(|host| host.ends_with(".googleusercontent.com"));
+        (same_origin(&scope_url, &current) || same_googleusercontent_site)
+            .then_some(scope.cookies.as_str())
+    })
+}
+
+fn metadata_authentication_error(current_url: &str, content_type: Option<&str>) -> Option<String> {
+    let url = reqwest::Url::parse(current_url).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let path = url.path().to_ascii_lowercase();
+    let content_type = content_type.unwrap_or_default().to_ascii_lowercase();
+    let is_html = content_type.starts_with("text/html")
+        || content_type.starts_with("application/xhtml+xml");
+    let is_google_auth_host = host == "accounts.google.com"
+        && (path.contains("signin")
+            || path.contains("servicelogin")
+            || url.query().is_some_and(|query| query.contains("continue=")));
+
+    (is_google_auth_host && (is_html || path.contains("signin"))).then(|| {
+        "The server returned a Google sign-in page instead of the requested attachment. Re-authenticate in the browser and try again.".to_string()
+    })
+}
+
 #[allow(clippy::too_many_arguments)] // Keep the metadata IPC fields explicit and independently typed.
 #[tauri::command]
 async fn fetch_metadata(
@@ -1601,6 +1661,7 @@ async fn fetch_metadata(
     password: Option<String>,
     headers: Option<String>,
     cookies: Option<String>,
+    cookie_scopes: Option<Vec<extension_server::ExtensionCookieScope>>,
     proxy: Option<String>,
     defer_cookies: Option<bool>,
 ) -> Result<MetadataResponse, String> {
@@ -1609,7 +1670,11 @@ async fn fetch_metadata(
     let mut current_url = url.clone();
     let original_origin = reqwest::Url::parse(&url).ok();
     let mut redirects = 0;
-    let cookies_available = metadata_cookie_header_present(headers.as_deref(), cookies.as_deref());
+    let cookies_available = metadata_cookie_header_present(
+        headers.as_deref(),
+        cookies.as_deref(),
+        cookie_scopes.as_deref(),
+    );
     let defer_cookies = defer_cookies.unwrap_or(false);
     let mut send_cookies = !defer_cookies || !cookies_available;
     let mut cookie_retry_attempted = false;
@@ -1657,16 +1722,29 @@ async fn fetch_metadata(
         }
 
         let current_origin = reqwest::Url::parse(&current_url).ok();
-        let should_send_auth = should_send_metadata_credentials(
+        let same_origin_credentials = should_send_metadata_credentials(
             original_origin.as_ref(),
             current_origin.as_ref(),
             redirects,
         );
 
-        let header_map = if should_send_auth {
-            metadata_headers(headers.as_deref(), cookies.as_deref(), send_cookies)
+        let scoped_cookie = if send_cookies {
+            cookie_scope_for_url(&current_url, cookie_scopes.as_deref())
         } else {
-            reqwest::header::HeaderMap::new()
+            None
+        };
+        let cookie_header = if same_origin_credentials {
+            scoped_cookie.or(cookies.as_deref())
+        } else {
+            scoped_cookie
+        };
+        let header_map = if same_origin_credentials {
+            metadata_headers(headers.as_deref(), cookie_header, send_cookies)
+        } else {
+            // A cross-origin redirect may receive only the cookie scope that
+            // explicitly matches its host. Never forward captured headers or
+            // a source-host Cookie header to an unrelated redirect target.
+            metadata_headers(None, cookie_header, send_cookies)
         };
         builder = builder.default_headers(header_map);
 
@@ -1677,7 +1755,7 @@ async fn fetch_metadata(
             let mut get_req = client
                 .get(&request_url)
                 .header(reqwest::header::RANGE, "bytes=0-0");
-            if should_send_auth {
+            if same_origin_credentials {
                 if let Some(ref user) = username {
                     if !user.is_empty() {
                         get_req = get_req.basic_auth(user, password.as_deref());
@@ -1688,7 +1766,7 @@ async fn fetch_metadata(
         };
 
         let mut head_req = client.head(&request_url);
-        if should_send_auth {
+        if same_origin_credentials {
             if let Some(ref user) = username {
                 if !user.is_empty() {
                     head_req = head_req.basic_auth(user, password.as_deref());
@@ -1758,6 +1836,16 @@ async fn fetch_metadata(
                     }
                 }
             }
+        }
+
+        if let Some(error) = metadata_authentication_error(
+            &current_url,
+            current_res
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+        ) {
+            return Err(error);
         }
 
         if let Some(error) = metadata_response_error(current_res.status()) {
@@ -6090,7 +6178,8 @@ mod tests {
         filename_from_url_disposition_query, filename_from_url_path, is_excluded_yt_dlp_format,
         is_browser_cookie_extraction_error, json_lower, media_metadata_cache_key,
         media_output_template, media_progress_args, media_progress_speed,
-        metadata_cookie_header_present, metadata_headers, metadata_response_error,
+        cookie_scope_for_url, metadata_authentication_error, metadata_cookie_header_present,
+        metadata_headers, metadata_response_error,
         normalize_speed_limit_for_aria2,
         parse_firelink_deep_link, parse_ffmpeg_version, parse_media_progress_line,
         redact_log_line, redact_log_line_for_output, sanitize_ytdlp_config_value,
@@ -6600,7 +6689,8 @@ mod tests {
         let headers = "Cookie: oversized=secret\nReferer: https://example.com/page";
         assert!(metadata_cookie_header_present(
             Some(headers),
-            Some("session=secret")
+            Some("session=secret"),
+            None
         ));
 
         let initial_headers = metadata_headers(Some(headers), Some("session=secret"), false);
@@ -6619,6 +6709,43 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("session=secret")
         );
+    }
+
+    #[test]
+    fn metadata_cookie_scopes_select_only_the_matching_origin() {
+        let scopes = vec![
+            crate::extension_server::ExtensionCookieScope {
+                url: "https://mail.google.com/".to_string(),
+                cookies: "mail=session".to_string(),
+            },
+            crate::extension_server::ExtensionCookieScope {
+                url: "https://accounts.google.com/".to_string(),
+                cookies: "account=session".to_string(),
+            },
+            crate::extension_server::ExtensionCookieScope {
+                url: "https://googleusercontent.com/".to_string(),
+                cookies: "googleusercontent=session".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            cookie_scope_for_url("https://mail.google.com/mail/u/0/", Some(&scopes)),
+            Some("mail=session")
+        );
+        assert_eq!(
+            cookie_scope_for_url("https://accounts.google.com/v3/signin/identifier", Some(&scopes)),
+            Some("account=session")
+        );
+        assert_eq!(
+            cookie_scope_for_url("https://mail-attachment.googleusercontent.com/file", Some(&scopes)),
+            Some("googleusercontent=session")
+        );
+        assert_eq!(
+            cookie_scope_for_url("https://attacker.example/redirect", Some(&scopes)),
+            None
+        );
+        assert!(!metadata_cookie_header_present(None, None, Some(&scopes[..0])));
+        assert!(metadata_cookie_header_present(None, None, Some(&scopes)));
     }
 
     #[test]
@@ -6865,6 +6992,38 @@ mod tests {
             filename_from_url_path("https://example.com/files/a%2Fb.mkv"),
             Some("b.mkv".to_string())
         );
+        assert_eq!(
+            filename_from_url_path("https://accounts.google.com/v3/signin/identifier"),
+            None
+        );
+        assert_eq!(
+            filename_from_url_path("https://mail.google.com/mail/u/0/"),
+            None
+        );
+        assert_eq!(
+            filename_from_url_path("https://example.com/files/123"),
+            Some("123".to_string())
+        );
+    }
+
+    #[test]
+    fn metadata_rejects_google_sign_in_interstitials() {
+        let message = metadata_authentication_error(
+            "https://accounts.google.com/v3/signin/identifier?continue=https%3A%2F%2Fmail.google.com%2F",
+            Some("text/html; charset=UTF-8"),
+        )
+        .expect("Google sign-in HTML must not become a download");
+        assert!(message.contains("Google sign-in page"));
+        assert!(metadata_authentication_error(
+            "https://accounts.google.com/drive/download/report.zip",
+            Some("application/zip"),
+        )
+        .is_none());
+        assert!(metadata_authentication_error(
+            "https://downloads.example.com/signin/identifier",
+            Some("text/html"),
+        )
+        .is_none());
     }
 
     #[test]

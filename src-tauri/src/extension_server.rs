@@ -63,7 +63,16 @@ struct ExtensionRequest {
     #[serde(default)]
     cookies: Option<String>,
     #[serde(default)]
+    cookie_scopes: Option<Vec<ExtensionCookieScope>>,
+    #[serde(default)]
     media: bool,
+}
+
+#[derive(Clone, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct ExtensionCookieScope {
+    pub url: String,
+    pub cookies: String,
 }
 
 #[derive(Clone, Serialize, TS)]
@@ -75,6 +84,7 @@ pub struct ExtensionDownload {
     filename: Option<String>,
     headers: Option<String>,
     cookies: Option<String>,
+    cookie_scopes: Option<Vec<ExtensionCookieScope>>,
     media: bool,
 }
 
@@ -314,7 +324,7 @@ async fn wait_for_frontend(frontend_ready: &SharedFrontendReady) -> bool {
     false
 }
 
-fn normalize_download(payload: ExtensionRequest) -> Option<ExtensionDownload> {
+fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload> {
     let mut seen = HashSet::new();
     let urls = payload
         .urls
@@ -345,13 +355,26 @@ fn normalize_download(payload: ExtensionRequest) -> Option<ExtensionDownload> {
     // request headers, but drop Cookie headers and the dedicated cookie field
     // so a legacy or untrusted caller cannot reuse one session across hosts.
     let headers = normalize_headers(payload.headers, payload.media || urls.len() > 1);
-    let cookies = if !payload.media && urls.len() == 1 {
-        payload
-            .cookies
-            .filter(|value| !value.trim().is_empty())
+    let cookie_scopes = if !payload.media && urls.len() == 1 {
+        let mut scopes = payload.cookie_scopes.take().unwrap_or_default();
+        if let Some(cookies) = payload.cookies.take() {
+            if !cookies.trim().is_empty() {
+                scopes.push(ExtensionCookieScope {
+                    url: urls[0].clone(),
+                    cookies,
+                });
+            }
+        }
+        normalize_cookie_scopes(scopes)
     } else {
         None
     };
+    let cookies = cookie_scopes.as_ref().and_then(|scopes| {
+        scopes
+            .iter()
+            .find(|scope| same_origin_url(&scope.url, &urls[0]))
+            .map(|scope| scope.cookies.clone())
+    });
 
     Some(ExtensionDownload {
         urls,
@@ -365,8 +388,60 @@ fn normalize_download(payload: ExtensionRequest) -> Option<ExtensionDownload> {
         // builds pay for a doomed metadata request before retrying. Ordinary
         // captured downloads still need their exact request cookies.
         cookies,
+        cookie_scopes,
         media: payload.media,
     })
+}
+
+fn normalize_cookie_scopes(scopes: Vec<ExtensionCookieScope>) -> Option<Vec<ExtensionCookieScope>> {
+    let mut normalized = Vec::new();
+    let mut seen_origins = HashSet::new();
+
+    for scope in scopes {
+        let Ok(url) = Url::parse(scope.url.trim()) else {
+            continue;
+        };
+        if !matches!(url.scheme(), "http" | "https") {
+            continue;
+        }
+        let cookies = scope.cookies.trim();
+        if cookies.is_empty() {
+            continue;
+        }
+        let Some(host) = url.host_str() else {
+            continue;
+        };
+        let origin = format!(
+            "{}://{}:{}",
+            url.scheme(),
+            host,
+            url.port_or_known_default().unwrap_or(443)
+        );
+        if !seen_origins.insert(origin) {
+            continue;
+        }
+        normalized.push(ExtensionCookieScope {
+            url: url.to_string(),
+            cookies: cookies.to_string(),
+        });
+        if normalized.len() >= 16 {
+            break;
+        }
+    }
+
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn same_origin_url(left: &str, right: &str) -> bool {
+    let Some(left) = Url::parse(left).ok() else {
+        return false;
+    };
+    let Some(right) = Url::parse(right).ok() else {
+        return false;
+    };
+    left.scheme() == right.scheme()
+        && left.host() == right.host()
+        && left.port_or_known_default() == right.port_or_known_default()
 }
 
 fn normalize_headers(headers: Option<String>, media: bool) -> Option<String> {
@@ -532,7 +607,7 @@ mod tests {
     use super::{
         add_server_identity, claim_request, has_allowed_request_origin, has_valid_optional_nonce,
         is_valid_client_nonce, normalize_download, sign_server_proof, ExtensionRequest,
-        PROTOCOL_VERSION_HEADER, SERVER_HEADER,
+        ExtensionCookieScope, PROTOCOL_VERSION_HEADER, SERVER_HEADER,
     };
     use axum::{
         http::{HeaderMap, HeaderValue, StatusCode},
@@ -613,6 +688,7 @@ mod tests {
             filename: None,
             headers: None,
             cookies: None,
+            cookie_scopes: None,
             media: true,
         });
 
@@ -640,6 +716,7 @@ mod tests {
                 "x".repeat(64 * 1024)
             )),
             cookies: Some(format!("large={}", "x".repeat(64 * 1024))),
+            cookie_scopes: None,
             media: true,
         })
         .expect("valid media handoff");
@@ -658,6 +735,7 @@ mod tests {
             filename: None,
             headers: None,
             cookies: Some("session=browser-cookie-header".to_string()),
+            cookie_scopes: None,
             media: false,
         })
         .expect("valid download handoff");
@@ -666,6 +744,47 @@ mod tests {
         assert_eq!(
             download.cookies.as_deref(),
             Some("session=browser-cookie-header")
+        );
+    }
+
+    #[test]
+    fn regular_capture_normalizes_host_scoped_cookie_headers() {
+        let download = normalize_download(ExtensionRequest {
+            urls: vec!["https://mail.google.com/mail/u/0/?view=att".to_string()],
+            referer: Some("https://mail.google.com/mail/u/0/".to_string()),
+            silent: true,
+            filename: Some("report.zip".to_string()),
+            headers: None,
+            cookies: Some("SID=mail-session".to_string()),
+            cookie_scopes: Some(vec![
+                ExtensionCookieScope {
+                    url: "https://mail.google.com/".to_string(),
+                    cookies: "SID=mail-session".to_string(),
+                },
+                ExtensionCookieScope {
+                    url: "https://accounts.google.com/".to_string(),
+                    cookies: "SID=account-session".to_string(),
+                },
+                ExtensionCookieScope {
+                    url: "https://mail.google.com/another-path".to_string(),
+                    cookies: "duplicate=ignored".to_string(),
+                },
+            ]),
+            media: false,
+        })
+        .expect("valid download handoff");
+
+        assert_eq!(download.cookies.as_deref(), Some("SID=mail-session"));
+        assert_eq!(
+            download
+                .cookie_scopes
+                .as_ref()
+                .map(|scopes| scopes.len()),
+            Some(2)
+        );
+        assert_eq!(
+            download.cookie_scopes.as_ref().unwrap()[1].cookies,
+            "SID=account-session"
         );
     }
 
@@ -681,6 +800,7 @@ mod tests {
             filename: None,
             headers: Some("Cookie: session=secret\nUser-Agent: Firefox".to_string()),
             cookies: Some("session=secret".to_string()),
+            cookie_scopes: None,
             media: false,
         })
         .expect("valid multi-url handoff");

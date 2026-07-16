@@ -51,9 +51,48 @@ const normalizeComparableUrl = (rawUrl: string) => {
   }
 };
 
-const urlsHaveDifferentHosts = (sourceUrl: string, targetUrl: string) => {
+const urlsHaveDifferentOrigins = (sourceUrl: string, targetUrl: string) => {
   try {
-    return new URL(sourceUrl).hostname.toLowerCase() !== new URL(targetUrl).hostname.toLowerCase();
+    const source = new URL(sourceUrl);
+    const target = new URL(targetUrl);
+    return source.protocol !== target.protocol
+      || source.hostname.toLowerCase() !== target.hostname.toLowerCase()
+      || source.port !== target.port;
+  } catch {
+    return false;
+  }
+};
+
+const cookieScopeForUrl = (context: PendingAddRequestContext | undefined, targetUrl: string) => {
+  if (!context?.cookieScopes?.length) return '';
+  try {
+    const target = new URL(targetUrl);
+    return context.cookieScopes.find(scope => {
+      try {
+        const scopeUrl = new URL(scope.url);
+        const sameGoogleusercontentSite = scopeUrl.protocol === target.protocol
+          && scopeUrl.port === target.port
+          && scopeUrl.hostname.toLowerCase() === 'googleusercontent.com'
+          && target.hostname.toLowerCase().endsWith('.googleusercontent.com');
+        return sameGoogleusercontentSite || (scopeUrl.protocol === target.protocol
+          && scopeUrl.hostname.toLowerCase() === target.hostname.toLowerCase()
+          && scopeUrl.port === target.port);
+      } catch {
+        return false;
+      }
+    })?.cookies.trim() || '';
+  } catch {
+    return '';
+  }
+};
+
+const isGoogleAuthenticatedCaptureUrl = (rawUrl: string) => {
+  try {
+    const hostname = new URL(rawUrl).hostname.toLowerCase();
+    return hostname === 'mail.google.com'
+      || hostname === 'accounts.google.com'
+      || hostname === 'googleusercontent.com'
+      || hostname.endsWith('.googleusercontent.com');
   } catch {
     return false;
   }
@@ -152,14 +191,16 @@ export const AddDownloadsModal = () => {
   const cookiesForRow = (sourceUrl: string, targetUrl = sourceUrl) => {
     if (cookiesManuallyEditedRef.current) return cookies.trim();
     const context = requestContextForUrl(sourceUrl);
-    if (context && context.cookies && urlsHaveDifferentHosts(sourceUrl, targetUrl)) {
-      return '';
-    }
+    const scopedCookies = cookieScopeForUrl(context, targetUrl);
+    if (scopedCookies) return scopedCookies;
+    if (context && urlsHaveDifferentOrigins(sourceUrl, targetUrl)) return '';
     if (context) return context.cookies.trim();
     return hasExtensionRequestContext ? '' : cookies.trim();
   };
   const shouldDeferCookiesForRow = (sourceUrl: string) =>
-    !cookiesManuallyEditedRef.current && Boolean(requestContextForUrl(sourceUrl));
+    !cookiesManuallyEditedRef.current
+      && Boolean(requestContextForUrl(sourceUrl))
+      && !isGoogleAuthenticatedCaptureUrl(sourceUrl);
   const suggestedFilenameForRow = (sourceUrl: string) => {
     const context = requestContextForUrl(sourceUrl);
     if (context?.filename) return context.filename;
@@ -389,6 +430,7 @@ export const AddDownloadsModal = () => {
           const proxy = await getProxyArgs(settingsStore);
           const login = getSiteLogin(row.sourceUrl, settingsStore);
           const contextUrl = requestContextUrlForRow(row);
+          const requestContext = requestContextForUrl(contextUrl);
           if (login && !useAuth && !keychainAccessReady && !keychainPromptDismissed) {
             settingsStore.setShowKeychainModal(true);
             return;
@@ -493,6 +535,7 @@ export const AddDownloadsModal = () => {
               password: useAuth ? password || null : keychainPassword,
               headers: headersForRow(contextUrl) || null,
               cookies: cookiesForRow(contextUrl, row.sourceUrl) || null,
+              cookieScopes: requestContext?.cookieScopes || null,
               proxy,
               deferCookies: shouldDeferCookiesForRow(row.sourceUrl)
             });
