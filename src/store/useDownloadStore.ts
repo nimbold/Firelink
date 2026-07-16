@@ -394,6 +394,50 @@ const normalizeQueuePositions = (downloads: DownloadItem[]): DownloadItem[] => {
 
 export type { DownloadStatus };
 export const MAIN_QUEUE_ID = '00000000-0000-0000-0000-000000000001';
+const DEFAULT_MAIN_QUEUE_NAME = 'Main Queue';
+
+const queueNameKey = (name: string): string => name.trim().toLowerCase();
+
+export const normalizePersistedQueueState = (queues: Queue[]) => {
+  const validQueues = queues.filter(queue =>
+    queue && typeof queue.id === 'string' && typeof queue.name === 'string'
+  );
+  const persistedMain = validQueues.find(queue => queue.id === MAIN_QUEUE_ID)
+    || validQueues.find(queue => queue.isMain);
+  const persistedMainId = persistedMain?.id.trim();
+  const mainName = persistedMain?.name.trim() || DEFAULT_MAIN_QUEUE_NAME;
+  const normalized: Queue[] = [{ id: MAIN_QUEUE_ID, name: mainName, isMain: true }];
+  const seenIds = new Set([MAIN_QUEUE_ID]);
+  const seenNames = new Set([queueNameKey(mainName)]);
+  const queueIdRemap = new Map<string, string>();
+  if (persistedMainId && persistedMainId !== MAIN_QUEUE_ID) {
+    queueIdRemap.set(persistedMainId, MAIN_QUEUE_ID);
+  }
+
+  for (const queue of validQueues) {
+    const id = queue.id.trim();
+    if (!id || id === MAIN_QUEUE_ID || id === persistedMainId || seenIds.has(id)) continue;
+    if (queue.isMain) {
+      queueIdRemap.set(id, MAIN_QUEUE_ID);
+      continue;
+    }
+    let name = queue.name.trim() || `Queue ${id.slice(0, 8)}`;
+    const baseName = name;
+    let suffix = 2;
+    while (seenNames.has(queueNameKey(name))) {
+      name = `${baseName} (${suffix})`;
+      suffix += 1;
+    }
+    seenIds.add(id);
+    seenNames.add(queueNameKey(name));
+    normalized.push({ id, name, isMain: false });
+  }
+
+  return { queues: normalized, queueIdRemap };
+};
+
+export const normalizePersistedQueues = (queues: Queue[]): Queue[] =>
+  normalizePersistedQueueState(queues).queues;
 
 export type { DownloadItem, Queue };
 export type ExtensionDownloadRequest = ExtensionDownload;
@@ -461,8 +505,8 @@ interface DownloadState {
   startAll: () => Promise<number>;
   pauseAll: () => Promise<number>;
   assignToQueue: (ids: string[], queueId: string) => Promise<void>;
-  addQueue: (name: string) => void;
-  renameQueue: (id: string, name: string) => void;
+  addQueue: (name: string) => boolean;
+  renameQueue: (id: string, name: string) => boolean;
   removeQueue: (id: string) => Promise<void>;
   resumePendingDownloads: () => Promise<void>;
   initDB: () => Promise<void>;
@@ -612,13 +656,6 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     const isAppending = state.isAddModalOpen && Boolean(state.pendingAddUrls);
     const existingUrls = isAppending ? state.pendingAddUrls : '';
     const mergedUrls = existingUrls ? `${existingUrls}\n${urls}` : urls;
-    const existingMediaUrls = isAppending ? state.pendingAddMediaUrls : [];
-    const pendingAddMediaUrls = media
-      ? [...new Set([
-          ...existingMediaUrls,
-          ...urls.split('\n').map(url => url.trim()).filter(Boolean)
-        ])]
-      : existingMediaUrls;
     const cleanReferer = referer?.trim() || '';
     const cleanFilename = filename?.trim() || '';
     const cleanHeaders = headers?.trim() || '';
@@ -649,6 +686,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
         media
       };
     }
+    const pendingAddMediaUrls = Object.entries(pendingAddRequestContexts)
+      .filter(([, context]) => context.media)
+      .map(([url]) => url);
     return {
       isAddModalOpen: true,
       pendingAddUrls: mergedUrls,
@@ -1103,22 +1143,37 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     }));
   },
   addQueue: (name) => {
+    const normalizedName = name.trim();
+    if (!normalizedName) return false;
+    const duplicate = get().queues.some(queue =>
+      queueNameKey(queue.name) === queueNameKey(normalizedName)
+    );
+    if (duplicate) return false;
     const id = crypto.randomUUID();
-    const q = { id, name, isMain: false };
+    const q = { id, name: normalizedName, isMain: false };
     set((state) => ({
       queues: [...state.queues, q]
     }));
+    return true;
   },
   renameQueue: (id, name) => {
+    const normalizedName = name.trim();
+    if (!normalizedName) return false;
+    const duplicate = get().queues.some(queue =>
+      queue.id !== id
+      && queueNameKey(queue.name) === queueNameKey(normalizedName)
+    );
+    if (duplicate || !get().queues.some(queue => queue.id === id)) return false;
     set((state) => ({
       queues: state.queues.map(q => {
         if (q.id === id) {
-          const newQ = { ...q, name };
+          const newQ = { ...q, name: normalizedName };
           return newQ;
         }
         return q;
       })
     }));
+    return true;
   },
   removeQueue: async (id) => {
     if (id === MAIN_QUEUE_ID) return;
@@ -1290,13 +1345,28 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
   },
   initDB: async () => {
     try {
-      const queues = (await invoke('db_get_all_queues')).map(value => JSON.parse(value) as Queue);
+      const persistedQueues = (await invoke('db_get_all_queues')).flatMap(value => {
+        try {
+          return [JSON.parse(value) as Queue];
+        } catch {
+          console.warn('Skipping malformed persisted queue record during startup');
+          return [];
+        }
+      });
+      const normalizedQueueState = normalizePersistedQueueState(persistedQueues);
+      const queues = normalizedQueueState.queues;
+      const knownQueueIds = new Set(queues.map(queue => queue.id));
       const downloads = (await invoke('db_get_all_downloads')).map(
         value => JSON.parse(value) as DownloadItem
-      );
+      ).map(download => {
+        const persistedQueueId = download.queueId || MAIN_QUEUE_ID;
+        const queueId = normalizedQueueState.queueIdRemap.get(persistedQueueId)
+          || (knownQueueIds.has(persistedQueueId) ? persistedQueueId : MAIN_QUEUE_ID);
+        return { ...download, queueId };
+      });
       
       set(state => ({
-        queues: queues.length > 0 ? queues : state.queues,
+        queues,
         downloads: downloads.length > 0
           ? normalizeQueuePositions(downloads)
           : state.downloads

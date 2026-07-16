@@ -444,6 +444,9 @@ describe('add download metadata workflow', () => {
       row({ id: 'fallback', status: 'metadata-error' })
     ])).toBe(true);
     expect(canSubmitMetadataRows([
+      row({ id: 'unsafe', status: 'metadata-error', metadataBlockedReason: 'unsafe-url' })
+    ])).toBe(false);
+    expect(canSubmitMetadataRows([
       row(),
       row({ id: 'media-fallback', status: 'metadata-error', isMedia: true })
     ])).toBe(false);
@@ -524,6 +527,9 @@ describe('add download metadata workflow', () => {
     expect(metadataSummaryMessage([
       row({ status: 'metadata-error' })
     ])).toContain('can still be added');
+    expect(metadataSummaryMessage([
+      row({ status: 'metadata-error', metadataBlockedReason: 'unsafe-url' })
+    ])).toContain('unsafe URL');
     expect(metadataSummaryMessage([
       row({ status: 'metadata-error', isMedia: true })
     ])).toContain('Refresh metadata before adding');

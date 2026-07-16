@@ -92,7 +92,8 @@ export const AddDownloadsModal = () => {
     baseDownloadFolder,
     perServerConnections,
     keychainAccessReady,
-    keychainPromptDismissed
+    keychainPromptDismissed,
+    showKeychainModal
   } = useSettingsStore();
 
   const [urls, setUrls] = useState('');
@@ -168,13 +169,13 @@ export const AddDownloadsModal = () => {
     row.playlistSourceUrl || row.sourceUrl;
 
   const closeModalFromDismissAction = useCallback(() => {
-    if (isSubmitting || isSubmittingRef.current) return;
+    if (isSubmitting || isSubmittingRef.current || showKeychainModal) return;
     const hasPendingInput = Boolean(
       urls.trim() || pendingAddUrls.trim() || parsedItems.length || headers.trim() || cookies.trim()
     );
     if (hasPendingInput && !window.confirm('Discard this download setup?')) return;
     toggleAddModal(false);
-  }, [cookies, headers, isSubmitting, parsedItems.length, pendingAddUrls, toggleAddModal, urls]);
+  }, [cookies, headers, isSubmitting, parsedItems.length, pendingAddUrls, showKeychainModal, toggleAddModal, urls]);
 
   useEffect(() => {
     if (!isAddModalOpen) {
@@ -271,6 +272,7 @@ export const AddDownloadsModal = () => {
     if (!isAddModalOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
+      if (showKeychainModal) return;
       if (showingDuplicates) {
         setShowingDuplicates(false);
       } else if (isQueueMenuOpen) {
@@ -281,7 +283,7 @@ export const AddDownloadsModal = () => {
     };
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [closeModalFromDismissAction, isAddModalOpen, isQueueMenuOpen, showingDuplicates]);
+  }, [closeModalFromDismissAction, isAddModalOpen, isQueueMenuOpen, showKeychainModal, showingDuplicates]);
 
   useEffect(() => {
     const requestId = ++freeSpaceRequestRef.current;
@@ -511,12 +513,23 @@ export const AddDownloadsModal = () => {
                 size: meta.size_bytes ? meta.size : undefined,
                 sizeBytes: meta.size_bytes || undefined,
                 status: 'ready',
-                resumable: meta.resumable
+                resumable: meta.resumable,
+                metadataBlockedReason: undefined
               })
             ));
           }
         } catch (e) {
           console.error("Meta fetch failed", e);
+          const errorMessage = e instanceof Error ? e.message : String(e);
+          const metadataBlockedReason = [
+            'SSRF blocked: Invalid URL',
+            'SSRF blocked: No host',
+            'SSRF blocked: DNS resolution failed',
+            'SSRF blocked: No DNS records',
+            'SSRF blocked: Private/local IP not allowed'
+          ].some(prefix => errorMessage.startsWith(prefix))
+            ? 'unsafe-url' as const
+            : undefined;
           setParsedItems(current => updateRowIfCurrent(
             current,
             row.id,
@@ -530,8 +543,9 @@ export const AddDownloadsModal = () => {
               status: 'metadata-error',
               formats: undefined,
               selectedFormat: undefined,
+              metadataBlockedReason,
               playlistError: row.isPlaylist
-                ? (e instanceof Error ? e.message : String(e))
+                ? errorMessage
                 : undefined
             })
           ));
@@ -1003,7 +1017,10 @@ export const AddDownloadsModal = () => {
   const failedMediaMetadataCount = selectedItems.filter(
     item => item.status === 'metadata-error' && item.isMedia
   ).length;
-  const fallbackMetadataCount = failedMetadataCount - failedMediaMetadataCount;
+  const blockedMetadataCount = selectedItems.filter(
+    item => item.metadataBlockedReason === 'unsafe-url'
+  ).length;
+  const fallbackMetadataCount = failedMetadataCount - failedMediaMetadataCount - blockedMetadataCount;
   const activePlaylistUrls = new Set(
     urls.split('\n').map(url => url.trim()).filter(Boolean).map(normalizeComparableUrl)
   );
@@ -1084,7 +1101,7 @@ export const AddDownloadsModal = () => {
                 })}
                 <div className="flex justify-between items-center px-1">
                   <span className="text-[11px] text-text-muted font-medium">
-                    {selectedItems.filter(item => item.status === 'ready').length} selected ready, {fallbackMetadataCount} fallback, {failedMediaMetadataCount} media retry
+                    {selectedItems.filter(item => item.status === 'ready').length} selected ready, {fallbackMetadataCount} fallback, {failedMediaMetadataCount} media retry, {blockedMetadataCount} blocked
                   </span>
                     <button
                       type="button"
@@ -1166,7 +1183,7 @@ export const AddDownloadsModal = () => {
                                 </div>
                               ) : (
                                 item.status === 'metadata-error'
-                                  ? item.isPlaylist ? 'Playlist failed' : item.isMedia ? 'Metadata failed' : 'Fallback'
+                                  ? item.metadataBlockedReason === 'unsafe-url' ? 'Unsafe URL' : item.isPlaylist ? 'Playlist failed' : item.isMedia ? 'Metadata failed' : 'Fallback'
                                   : item.status === 'invalid'
                                     ? 'Invalid'
                                     : 'Ready'
@@ -1404,7 +1421,7 @@ export const AddDownloadsModal = () => {
             {metadataSummaryMessage(parsedItems)}
           </div>
           <div className="flex gap-2.5">
-            <button onClick={closeModalFromDismissAction} disabled={isSubmitting} className="add-download-button add-download-button-cancel px-4 text-xs">
+            <button onClick={closeModalFromDismissAction} disabled={isSubmitting || showKeychainModal} className="add-download-button add-download-button-cancel px-4 text-xs">
               Cancel
             </button>
             <div ref={actionMenuRef} className="relative flex gap-2.5">

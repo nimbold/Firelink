@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { dispatchItem, getProxyArgs, getSiteLogin, normalizeCustomProxy, useDownloadStore } from './useDownloadStore';
+import { dispatchItem, getProxyArgs, getSiteLogin, normalizeCustomProxy, normalizePersistedQueueState, normalizePersistedQueues, useDownloadStore } from './useDownloadStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
 import { useSettingsStore } from './useSettingsStore';
 import * as ipc from '../ipc';
@@ -109,6 +109,89 @@ describe('useDownloadStore', () => {
 
     useDownloadStore.getState().toggleAddModal(false);
     expect(useDownloadStore.getState().pendingAddRequestVersion).toBe(initialVersion + 2);
+  });
+
+  it('replaces stale media intent when an appended handoff reuses a URL', () => {
+    useDownloadStore.getState().openAddModalWithUrls(
+      'https://example.com/file.bin', '', '', '', '', true
+    );
+    useDownloadStore.getState().openAddModalWithUrls(
+      'https://example.com/file.bin', '', '', '', '', false
+    );
+
+    const state = useDownloadStore.getState();
+    expect(state.pendingAddMediaUrls).toEqual([]);
+    expect(state.pendingAddRequestContexts['https://example.com/file.bin']?.media).toBe(false);
+  });
+
+  it('rejects empty and duplicate queue names', () => {
+    useDownloadStore.setState({
+      queues: [
+        { id: 'main', name: 'Main Queue', isMain: true },
+        { id: 'queue-a', name: 'Downloads', isMain: false }
+      ]
+    });
+
+    expect(useDownloadStore.getState().addQueue('')).toBe(false);
+    expect(useDownloadStore.getState().addQueue(' downloads ')).toBe(false);
+    expect(useDownloadStore.getState().addQueue('Archive')).toBe(true);
+    expect(useDownloadStore.getState().renameQueue('queue-a', ' archive ')).toBe(false);
+    expect(useDownloadStore.getState().renameQueue('queue-a', '')).toBe(false);
+  });
+
+  it('normalizes malformed persisted queues around one canonical main queue', () => {
+    expect(normalizePersistedQueues([
+      { id: 'custom-a', name: ' Downloads ', isMain: false },
+      { id: 'custom-b', name: 'downloads', isMain: false },
+      { id: 'custom-a', name: 'Duplicate ID', isMain: false },
+      { id: 'legacy-main', name: 'Primary', isMain: true },
+      { id: 'empty-name', name: '   ', isMain: false },
+      { id: 'main-id', name: 'Ignored Main', isMain: true }
+    ])).toEqual([
+      { id: '00000000-0000-0000-0000-000000000001', name: 'Primary', isMain: true },
+      { id: 'custom-a', name: 'Downloads', isMain: false },
+      { id: 'custom-b', name: 'downloads (2)', isMain: false },
+      { id: 'empty-name', name: 'Queue empty-na', isMain: false }
+    ]);
+    expect(normalizePersistedQueueState([
+      { id: 'legacy-main', name: 'Primary', isMain: true }
+    ]).queueIdRemap.get('legacy-main')).toBe('00000000-0000-0000-0000-000000000001');
+  });
+
+  it('remaps persisted downloads when queue records are malformed or missing', async () => {
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'db_get_all_queues') {
+        return [JSON.stringify({ id: 'legacy-main', name: 'Primary', isMain: true })];
+      }
+      if (cmd === 'db_get_all_downloads') {
+        return [
+          JSON.stringify({
+            id: 'legacy-download',
+            url: 'https://example.com/legacy.bin',
+            fileName: 'legacy.bin',
+            status: 'ready',
+            category: 'Other',
+            dateAdded: '',
+            queueId: 'legacy-main'
+          }),
+          JSON.stringify({
+            id: 'orphan-download',
+            url: 'https://example.com/orphan.bin',
+            fileName: 'orphan.bin',
+            status: 'ready',
+            category: 'Other',
+            dateAdded: '',
+            queueId: 'missing-queue'
+          })
+        ];
+      }
+      return undefined;
+    });
+
+    await useDownloadStore.getState().initDB();
+
+    expect(useDownloadStore.getState().downloads.map(download => download.queueId))
+      .toEqual(['00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001']);
   });
 
   it('normalizes proxy settings for download dispatch', async () => {

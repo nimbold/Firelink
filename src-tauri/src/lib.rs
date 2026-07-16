@@ -1527,42 +1527,52 @@ fn should_cleanup_media_artifacts_after_failure(
     !(crate::retry::is_transient_network_error(failure_reason) && strike < max_retries)
 }
 
+fn is_blocked_network_address(ip: std::net::IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_multicast() || ip.is_unspecified() {
+        return true;
+    }
+    match ip {
+        std::net::IpAddr::V4(ipv4) => ipv4.is_private() || ipv4.is_link_local(),
+        std::net::IpAddr::V6(ipv6) => {
+            ipv6.to_ipv4().is_some_and(|ipv4| is_blocked_network_address(ipv4.into()))
+                || (ipv6.segments()[0] & 0xfe00) == 0xfc00
+                || (ipv6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+async fn resolve_and_validate_url_host(
+    parsed: &reqwest::Url,
+) -> Result<(String, std::net::SocketAddr), String> {
+    let host = parsed.host_str().ok_or("SSRF blocked: No host")?;
+    let lookup_host = host.trim_start_matches('[').trim_end_matches(']');
+    let port = parsed.port_or_known_default().unwrap_or_else(|| match parsed.scheme() {
+        "ftp" => 21,
+        "sftp" => 22,
+        _ => 80,
+    });
+
+    let addrs: Vec<_> = if let Ok(ip) = lookup_host.parse::<std::net::IpAddr>() {
+        vec![std::net::SocketAddr::new(ip, port)]
+    } else {
+        tokio::net::lookup_host((lookup_host, port))
+            .await
+            .map_err(|_| "SSRF blocked: DNS resolution failed")?
+            .collect()
+    };
+    let addr = addrs.first().copied().ok_or("SSRF blocked: No DNS records")?;
+    if addrs.iter().any(|candidate| is_blocked_network_address(candidate.ip())) {
+        return Err("SSRF blocked: Private/local IP not allowed".to_string());
+    }
+    Ok((lookup_host.to_string(), addr))
+}
+
 async fn validate_url_ssrf(url: &str) -> Result<Option<(String, std::net::SocketAddr)>, String> {
     let parsed = reqwest::Url::parse(url).map_err(|_| "SSRF blocked: Invalid URL")?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err("SSRF blocked: Only HTTP/HTTPS schemes allowed".to_string());
     }
-    let host = parsed.host_str().ok_or("SSRF blocked: No host")?;
-    let port = parsed.port_or_known_default().unwrap_or(80);
-
-    let mut addrs = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|_| "SSRF blocked: DNS resolution failed")?;
-
-    let addr = addrs.next().ok_or("SSRF blocked: No DNS records")?;
-    let ip = addr.ip();
-
-    if ip.is_loopback() || ip.is_multicast() || ip.is_unspecified() {
-        return Err("SSRF blocked: Private/local IP not allowed".to_string());
-    }
-    match ip {
-        std::net::IpAddr::V4(ipv4) => {
-            if ipv4.is_private() || ipv4.is_link_local() {
-                return Err("SSRF blocked: Private/local IP not allowed".to_string());
-            }
-        }
-        std::net::IpAddr::V6(ipv6) => {
-            if (ipv6.segments()[0] & 0xfe00) == 0xfc00 {
-                // ULA check
-                return Err("SSRF blocked: Private/local IP not allowed".to_string());
-            }
-            if (ipv6.segments()[0] & 0xffc0) == 0xfe80 {
-                // Link-local check
-                return Err("SSRF blocked: Private/local IP not allowed".to_string());
-            }
-        }
-    }
-    Ok(Some((host.to_string(), addr)))
+    resolve_and_validate_url_host(&parsed).await.map(Some)
 }
 
 fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
@@ -1632,7 +1642,15 @@ async fn fetch_metadata(
             builder = builder.user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36");
         }
 
-        let resolved_addr = validate_url_ssrf(&current_url).await?;
+        let parsed_current_url = reqwest::Url::parse(&current_url)
+            .map_err(|_| "SSRF blocked: Invalid URL".to_string())?;
+        let resolved_addr = match parsed_current_url.scheme() {
+            "http" | "https" => validate_url_ssrf(&current_url).await?,
+            "ftp" | "sftp" => resolve_and_validate_url_host(&parsed_current_url)
+                .await
+                .map(Some)?,
+            _ => return Err("Unsupported URL scheme".to_string()),
+        };
 
         if let Some((host, addr)) = resolved_addr {
             builder = builder.resolve(&host, addr);
@@ -4985,12 +5003,25 @@ fn enqueue_lifecycle_generation(item: &queue::EnqueueItem) -> Result<u64, String
         .map(|generation| generation.unwrap_or_default())
 }
 
+async fn validate_enqueue_url(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| "SSRF blocked: Invalid URL".to_string())?;
+    match parsed.scheme() {
+        "http" | "https" | "ftp" | "sftp" => {
+            resolve_and_validate_url_host(&parsed).await.map(|_| ())
+        }
+        _ => Err("Unsupported URL scheme".to_string()),
+    }
+}
+
 #[tauri::command]
 async fn enqueue_download(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     mut item: queue::EnqueueItem,
 ) -> Result<crate::ipc::EnqueueAccepted, AppError> {
+    validate_enqueue_url(&item.url)
+        .await
+        .map_err(AppError::Internal)?;
     let id = item.id.clone();
     item.filename = crate::download_ownership::canonical_download_filename(&item.filename);
     let accepted_filename = item.filename.clone();
@@ -5054,8 +5085,17 @@ async fn enqueue_many(
 ) -> Result<Vec<crate::ipc::EnqueueResult>, AppError> {
     let mut results = Vec::with_capacity(items.len());
     for mut item in items {
-        item.filename = crate::download_ownership::canonical_download_filename(&item.filename);
         let id = item.id.clone();
+        if let Err(error) = validate_enqueue_url(&item.url).await {
+            results.push(crate::ipc::EnqueueResult {
+                id,
+                success: false,
+                filename: None,
+                error: Some(error),
+            });
+            continue;
+        }
+        item.filename = crate::download_ownership::canonical_download_filename(&item.filename);
         let filename = item.filename.clone();
         let lifecycle_generation = match enqueue_lifecycle_generation(&item) {
             Ok(generation) => generation,
@@ -6062,9 +6102,34 @@ mod tests {
         observe_aria2_connections, observe_aria2_connections_with_epoch,
         Aria2ConnectionObservation, Aria2RecoveryReason,
         parse_media_playlist_metadata,
+        validate_enqueue_url,
     };
     use serde_json::json;
     use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn enqueue_url_validation_blocks_local_http_but_preserves_ftp() {
+        assert_eq!(
+            validate_enqueue_url("http://127.0.0.1/file.zip").await,
+            Err("SSRF blocked: Private/local IP not allowed".to_string())
+        );
+        assert_eq!(
+            validate_enqueue_url("ftp://127.0.0.1/file.zip").await,
+            Err("SSRF blocked: Private/local IP not allowed".to_string())
+        );
+        assert_eq!(
+            validate_enqueue_url("sftp://[::1]/file.zip").await,
+            Err("SSRF blocked: Private/local IP not allowed".to_string())
+        );
+        assert_eq!(
+            validate_enqueue_url("http://[::ffff:127.0.0.1]/file.zip").await,
+            Err("SSRF blocked: Private/local IP not allowed".to_string())
+        );
+        assert_eq!(
+            validate_enqueue_url("file:///tmp/file.zip").await,
+            Err("Unsupported URL scheme".to_string())
+        );
+    }
 
     #[test]
     fn slow_nonzero_aria2_throughput_recovers_after_a_sustained_degradation() {

@@ -38,6 +38,8 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
 
   const addInputRef = useRef<HTMLInputElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
+  const addQueueSubmitRef = useRef(false);
+  const renameQueueSubmitRef = useRef(false);
 
   useEffect(() => {
     const handleCloseMenu = () => setContextMenu(null);
@@ -139,15 +141,34 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
   };
 
   const handleAddQueueSubmit = () => {
-    if (newQueueName.trim()) addQueue(newQueueName.trim());
+    if (addQueueSubmitRef.current) return;
+    const normalizedName = newQueueName.trim();
+    if (!normalizedName) {
+      addToast({ message: 'Queue name cannot be empty', variant: 'error', isActionable: true });
+      return;
+    }
+    if (!addQueue(normalizedName)) {
+      addToast({ message: 'A queue with this name already exists', variant: 'error', isActionable: true });
+      return;
+    }
+    addQueueSubmitRef.current = true;
     setNewQueueName('');
     setIsAddingQueue(false);
   };
 
   const handleRenameQueueSubmit = () => {
-    if (renamingQueueId && editingQueueName.trim()) {
-      renameQueue(renamingQueueId, editingQueueName.trim());
+    if (renameQueueSubmitRef.current) return;
+    const normalizedName = editingQueueName.trim();
+    if (!renamingQueueId) return;
+    if (!normalizedName) {
+      addToast({ message: 'Queue name cannot be empty', variant: 'error', isActionable: true });
+      return;
     }
+    if (!renameQueue(renamingQueueId, normalizedName)) {
+      addToast({ message: 'A queue with this name already exists', variant: 'error', isActionable: true });
+      return;
+    }
+    renameQueueSubmitRef.current = true;
     setRenamingQueueId(null);
   };
 
@@ -293,7 +314,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
           ) : (
             <button
               type="button"
-              onClick={() => { setIsAddingQueue(true); setNewQueueName(''); }}
+              onClick={() => { addQueueSubmitRef.current = false; setIsAddingQueue(true); setNewQueueName(''); }}
               className="flex w-full items-center px-3.5 py-1.5 rounded-lg text-[13px] text-text-muted hover:bg-item-hover hover:text-text-secondary cursor-default transition-colors mb-1"
             >
               <Plus className="w-4 h-4 mr-2 shrink-0" strokeWidth={2} />
@@ -372,6 +393,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             onClick={() => {
               const q = queues.find(q => q.id === contextMenu.id);
               if (q) {
+                renameQueueSubmitRef.current = false;
                 setEditingQueueName(q.name);
                 setRenamingQueueId(q.id);
               }

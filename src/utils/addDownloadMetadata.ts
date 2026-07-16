@@ -39,6 +39,7 @@ export interface AddDownloadDraftRow {
   playlistCount?: number;
   playlistEntryTitle?: string;
   playlistError?: string;
+  metadataBlockedReason?: 'unsafe-url';
   selected?: boolean;
 }
 
@@ -215,7 +216,8 @@ export const reconcileDownloadRows = (
           playlistIndex: input.playlistIndex,
           playlistCount: input.playlistCount,
           playlistEntryTitle: input.playlistEntryTitle,
-          playlistError: undefined
+          playlistError: undefined,
+          metadataBlockedReason: undefined
         };
       }
       return preserved;
@@ -249,6 +251,7 @@ export const reconcileDownloadRows = (
       playlistIndex: input.playlistIndex,
       playlistCount: input.playlistCount,
       playlistEntryTitle: input.playlistEntryTitle,
+      metadataBlockedReason: undefined,
       selected: input.selected !== false
     };
   });
@@ -302,7 +305,8 @@ export const refreshFailedMetadataRows = (
     ? {
         ...row,
         status: 'loading',
-        generation: row.generation + 1
+        generation: row.generation + 1,
+        metadataBlockedReason: undefined
       }
     : row
 );
@@ -312,7 +316,7 @@ export const canSubmitMetadataRows = (rows: AddDownloadDraftRow[]): boolean => {
   return selectedRows.length > 0
   && selectedRows.every(row =>
     row.status === 'ready'
-    || (!row.isMedia && row.status === 'metadata-error')
+    || (!row.isMedia && row.status === 'metadata-error' && !row.metadataBlockedReason)
   );
 };
 
@@ -375,7 +379,11 @@ export const metadataSummaryMessage = (rows: AddDownloadDraftRow[]): string => {
 
   const failed = selectedRows.filter(row => row.status === 'metadata-error').length;
   const failedMedia = selectedRows.filter(row => row.status === 'metadata-error' && row.isMedia).length;
+  const blocked = selectedRows.filter(row => row.metadataBlockedReason === 'unsafe-url').length;
   const ready = selectedRows.filter(row => row.status === 'ready').length;
+  if (blocked > 0) {
+    return `Remove ${blocked} unsafe URL${blocked === 1 ? '' : 's'} before continuing.`;
+  }
   if (failedMedia > 0) {
     return `Media metadata is unavailable for ${failedMedia} item${failedMedia === 1 ? '' : 's'}. Refresh metadata before adding.`;
   }

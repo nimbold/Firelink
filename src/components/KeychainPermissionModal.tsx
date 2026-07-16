@@ -5,6 +5,9 @@ import { KeyRound, ShieldAlert } from 'lucide-react';
 import { usePlatformInfo } from '../utils/platform';
 import { getKeychainConsentVersion } from '../utils/keychainStartup';
 import { getVersion } from '@tauri-apps/api/app';
+import type { PairingTokenHydration } from '../bindings/PairingTokenHydration';
+
+const KEYCHAIN_GRANT_TIMEOUT_MS = 30_000;
 
 type KeychainPermissionModalProps = {
   consentVersion: string;
@@ -54,27 +57,48 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
     setIsGranting(true);
     setError(null);
 
+    let timeoutId: number | undefined;
+    let persistentGrantApplied = false;
+    const applyPersistentGrant = async (result: PairingTokenHydration): Promise<boolean> => {
+      if (!result.persistent || persistentGrantApplied) return result.persistent;
+      persistentGrantApplied = true;
+      const grantedVersion = consentVersion || getKeychainConsentVersion(await getVersion().catch(() => ''));
+      // Keep state in sync with the grant result instead of rehydrating
+      // before Zustand has persisted keychainAccessGranted.
+      useSettingsStore.setState({
+        keychainAccessGranted: true,
+        keychainAccessVersion: grantedVersion,
+        keychainAccessReady: true,
+        extensionPairingToken: result.token,
+        isPairingTokenPersistent: true,
+        keychainPromptDismissed: false,
+        showKeychainModal: false
+      });
+      return true;
+    };
+    const grantRequest = invoke('grant_keychain_access');
+    // A native credential-store call cannot be cancelled by the webview. Keep
+    // a late successful result useful even if the UI timeout has already
+    // restored the Later/retry controls.
+    grantRequest.then(applyPersistentGrant).catch(() => undefined);
+
     try {
-      const result = await invoke('grant_keychain_access');
-      if (result.persistent) {
-        const grantedVersion = consentVersion || getKeychainConsentVersion(await getVersion().catch(() => ''));
-        // Keep state in sync with the grant result instead of rehydrating
-        // before Zustand has persisted keychainAccessGranted.
-        useSettingsStore.setState({
-          keychainAccessGranted: true,
-          keychainAccessVersion: grantedVersion,
-          keychainAccessReady: true,
-          extensionPairingToken: result.token,
-          isPairingTokenPersistent: true,
-          keychainPromptDismissed: false,
-          showKeychainModal: false
-        });
-      } else {
+      const result = await Promise.race([
+        grantRequest,
+        new Promise<never>((_, reject) => {
+          timeoutId = window.setTimeout(
+            () => reject(new Error('Credential storage request timed out. You can select Later and try again.')),
+            KEYCHAIN_GRANT_TIMEOUT_MS
+          );
+        })
+      ]);
+      if (!(await applyPersistentGrant(result))) {
         setError(result.error || `${siteCredentialStoreName} is unavailable.`);
       }
     } catch (e: any) {
       setError(e.toString());
     } finally {
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
       setIsGranting(false);
     }
   };
