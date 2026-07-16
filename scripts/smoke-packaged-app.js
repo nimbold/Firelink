@@ -17,6 +17,7 @@ if (!executableArg) {
 const executable = path.resolve(executableArg);
 const assertNoVisibleChildWindows = process.argv.includes('--assert-no-visible-child-windows');
 const assertPortableData = process.argv.includes('--assert-portable-data');
+const READY_PORT_TIMEOUT_MS = 500;
 const child = spawn(executable, [], {
   cwd: process.env.RUNNER_TEMP || process.env.TMPDIR || process.cwd(),
   detached: process.platform !== 'win32',
@@ -60,18 +61,21 @@ async function findReadyPort() {
       break;
     }
 
-    for (let port = 6412; port <= 6422; port += 1) {
+    const ports = Array.from({ length: 11 }, (_, index) => 6412 + index);
+    const matches = await Promise.all(ports.map(async port => {
       try {
-        const response = await fetch(`http://127.0.0.1:${port}/ping`);
-        if (
-          response.headers.get('x-firelink-server') === '1'
-          && response.headers.get('x-firelink-smoke-process-id') === String(child.pid)
-        ) {
-          readyPort = port;
-          break;
-        }
-      } catch {}
-    }
+        const response = await fetch(`http://127.0.0.1:${port}/ping`, {
+          signal: AbortSignal.timeout(READY_PORT_TIMEOUT_MS),
+        });
+        const matchesChild = response.headers.get('x-firelink-server') === '1'
+          && response.headers.get('x-firelink-smoke-process-id') === String(child.pid);
+        await response.body?.cancel();
+        return matchesChild ? port : null;
+      } catch {
+        return null;
+      }
+    }));
+    readyPort = matches.find(port => port !== null) ?? null;
 
     if (readyPort === null) {
       await sleep(250);
@@ -134,46 +138,161 @@ function waitForChildExit(timeoutMs) {
   }
 
   return new Promise(resolve => {
-    const timer = setTimeout(() => {
+    let timer;
+    const onExit = () => {
+      clearTimeout(timer);
+      child.off('exit', onExit);
+      resolve(true);
+    };
+    timer = setTimeout(() => {
+      child.off('exit', onExit);
       resolve(false);
     }, timeoutMs);
-    child.once('exit', () => {
-      clearTimeout(timer);
-      resolve(true);
-    });
+    child.once('exit', onExit);
   });
 }
 
-async function terminateChild() {
-  if (!child.pid || childExit) {
-    return true;
-  }
-
+function isProcessGroupAlive(rootPid) {
   if (process.platform === 'win32') {
-    try {
-      execFileSync('taskkill', ['/pid', String(child.pid), '/t', '/f'], {
-        stdio: 'ignore',
-        windowsHide: true,
-      });
-    } catch {}
-    return waitForChildExit(10000);
+    return false;
   }
 
   try {
-    process.kill(-child.pid, 'SIGTERM');
-  } catch {
-    child.kill('SIGTERM');
-  }
-  if (await waitForChildExit(5000)) {
+    process.kill(-rootPid, 0);
     return true;
+  } catch (error) {
+    return error?.code !== 'ESRCH';
+  }
+}
+
+async function waitForProcessGroupExit(rootPid, timeoutMs) {
+  if (process.platform === 'win32') {
+    return true;
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isProcessGroupAlive(rootPid)) {
+      return true;
+    }
+    await sleep(100);
+  }
+
+  return !isProcessGroupAlive(rootPid);
+}
+
+function windowsBundleRoot() {
+  return path.dirname(executable).replaceAll("'", "''");
+}
+
+function windowsBundleProcessIds() {
+  const root = windowsBundleRoot();
+  const script = `
+$root = '${root}'
+$rootPrefix = $root.TrimEnd('\\') + '\\'
+Get-CimInstance Win32_Process |
+  Where-Object {
+    $commandLine = $_.CommandLine
+    $commandLine -and $commandLine.TrimStart([char]34).StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+  } |
+  Select-Object -ExpandProperty ProcessId
+`;
+  try {
+    const output = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    return output
+      .split(/\r?\n/)
+      .map(value => Number.parseInt(value.trim(), 10))
+      .filter(Number.isInteger);
+  } catch {
+    return null;
+  }
+}
+
+function terminateWindowsBundleProcesses() {
+  const root = windowsBundleRoot();
+  const script = `
+$root = '${root}'
+$rootPrefix = $root.TrimEnd('\\') + '\\'
+Get-CimInstance Win32_Process |
+  Where-Object {
+    $commandLine = $_.CommandLine
+    $commandLine -and $commandLine.TrimStart([char]34).StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+  } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+`;
+  try {
+    execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+  } catch {}
+}
+
+async function waitForWindowsBundleExit(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const processIds = windowsBundleProcessIds();
+    if (processIds?.length === 0) {
+      return true;
+    }
+    await sleep(100);
+  }
+  return windowsBundleProcessIds()?.length === 0;
+}
+
+async function terminateChild() {
+  if (!child.pid) {
+    return true;
+  }
+
+  const childWasRunning = !childExit;
+  if (process.platform === 'win32') {
+    if (childWasRunning) {
+      try {
+        execFileSync('taskkill', ['/pid', String(child.pid), '/t', '/f'], {
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+      } catch {}
+    }
+    const childExited = await waitForChildExit(10000);
+    const bundleExited = await waitForWindowsBundleExit(5000);
+    if (childExited && bundleExited) {
+      return true;
+    }
+    terminateWindowsBundleProcesses();
+    return await waitForChildExit(5000) && await waitForWindowsBundleExit(5000);
+  }
+
+  if (childWasRunning && !childExit) {
+    try {
+      process.kill(-child.pid, 'SIGTERM');
+    } catch {
+      if (!childExit) {
+        child.kill('SIGTERM');
+      }
+    }
+  }
+  if (await waitForChildExit(5000) && await waitForProcessGroupExit(child.pid, 5000)) {
+    return true;
+  }
+
+  if (!childWasRunning || childExit) {
+    return false;
   }
 
   try {
     process.kill(-child.pid, 'SIGKILL');
   } catch {
-    child.kill('SIGKILL');
+    if (!childExit) {
+      child.kill('SIGKILL');
+    }
   }
-  return waitForChildExit(5000);
+  return await waitForChildExit(5000) && await waitForProcessGroupExit(child.pid, 5000);
 }
 
 async function assertPortableStorage() {
