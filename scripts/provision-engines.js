@@ -2,6 +2,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { collectRegularFiles, sha256 } from './engine-payload-integrity.js';
@@ -35,6 +37,44 @@ const destination = path.join(repoRoot, 'src-tauri', 'provisioned-engines', targ
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), `firelink-engines-${target}-`));
 const isWindows = target.includes('windows');
 const executableSuffix = isWindows ? '.exe' : '';
+const DOWNLOAD_ATTEMPTS = 3;
+const DOWNLOAD_IDLE_TIMEOUT_MS = 120_000;
+const DOWNLOAD_RETRY_DELAYS_MS = [2_000, 5_000];
+const FILE_LOCK_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000];
+
+function sleep(milliseconds) {
+  return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+async function removeFileWithRetry(file) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fs.rmSync(file, { force: true });
+      return;
+    } catch (error) {
+      const retryable = process.platform === 'win32'
+        && ['EACCES', 'EBUSY', 'EPERM'].includes(error?.code);
+      if (!retryable || attempt >= FILE_LOCK_RETRY_DELAYS_MS.length) {
+        throw error;
+      }
+      await sleep(FILE_LOCK_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+}
+
+function createDownloadTimeout() {
+  const controller = new AbortController();
+  let timer;
+  const refresh = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      controller.abort(new Error(`Download idle for ${DOWNLOAD_IDLE_TIMEOUT_MS}ms`));
+    }, DOWNLOAD_IDLE_TIMEOUT_MS);
+  };
+  const dispose = () => clearTimeout(timer);
+  refresh();
+  return { signal: controller.signal, refresh, dispose };
+}
 
 async function download(name, source) {
   const sourcePath = new URL(source.url).pathname;
@@ -42,20 +82,51 @@ async function download(name, source) {
     temporary,
     `${name}${sourcePath.endsWith('.tar.xz') ? '.tar.xz' : '.zip'}`
   );
-  const response = await fetch(source.url, { redirect: 'follow' });
-  if (!response.ok || !response.body) {
-    throw new Error(`Failed to download ${name}: HTTP ${response.status}`);
-  }
-  const output = fs.createWriteStream(archive);
-  const reader = response.body.getReader();
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!output.write(Buffer.from(value))) {
-      await new Promise(resolve => output.once('drain', resolve));
+
+  let lastError;
+  for (let attempt = 1; attempt <= DOWNLOAD_ATTEMPTS; attempt += 1) {
+    const downloadTimeout = createDownloadTimeout();
+    try {
+      const response = await fetch(source.url, {
+        redirect: 'follow',
+        signal: downloadTimeout.signal,
+      });
+      if (!response.ok || !response.body) {
+        throw new Error(`Failed to download ${name}: HTTP ${response.status}`);
+      }
+
+      await pipeline(
+        Readable.fromWeb(response.body),
+        new Transform({
+          transform(chunk, encoding, callback) {
+            downloadTimeout.refresh();
+            callback(null, chunk, encoding);
+          },
+        }),
+        fs.createWriteStream(archive),
+        { signal: downloadTimeout.signal }
+      );
+      break;
+    } catch (error) {
+      lastError = error;
+      await removeFileWithRetry(archive);
+      if (attempt === DOWNLOAD_ATTEMPTS) {
+        throw new Error(
+          `Failed to download ${name} after ${DOWNLOAD_ATTEMPTS} attempts: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          { cause: error }
+        );
+      }
+      await sleep(DOWNLOAD_RETRY_DELAYS_MS[attempt - 1]);
+    } finally {
+      downloadTimeout.dispose();
     }
   }
-  await new Promise(resolve => output.end(resolve));
+
+  if (lastError && !fs.existsSync(archive)) {
+    throw lastError;
+  }
 
   const actual = sha256(archive);
   if (actual !== source.sha256) {

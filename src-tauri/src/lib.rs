@@ -6189,7 +6189,7 @@ mod tests {
         percent_decode_metadata_value, MediaProgress,
         MediaProgressEmitterState, MediaSpeedSampler, MEDIA_PROGRESS_PREFIX,
         observe_aria2_connections, observe_aria2_connections_with_epoch,
-        Aria2ConnectionObservation, Aria2RecoveryReason,
+        Aria2ConnectionObservation, Aria2ConnectionSample, Aria2RecoveryReason,
         parse_media_playlist_metadata,
         validate_enqueue_url,
     };
@@ -6377,46 +6377,52 @@ mod tests {
         ] {
             observe_aria2_connections_with_epoch(
                 &mut observation,
-                "gid-epoch",
-                1,
-                "active",
-                100 * 1024 * 1024,
-                completed,
-                speed,
-                16,
-                16,
-                false,
-                start + Duration::from_secs(offset),
+                Aria2ConnectionSample {
+                    gid: "gid-epoch",
+                    control_epoch: 1,
+                    status: "active",
+                    total: 100 * 1024 * 1024,
+                    completed,
+                    speed_bytes: speed,
+                    active_connections: 16,
+                    requested_connections: 16,
+                    speed_limited: false,
+                    now: start + Duration::from_secs(offset),
+                },
             );
         }
         observe_aria2_connections_with_epoch(
             &mut observation,
-            "gid-epoch",
-            1,
-            "active",
-            100 * 1024 * 1024,
-            13 * 1024 * 1024,
-            1024.0 * 1024.0,
-            16,
-            16,
-            false,
-            start + Duration::from_secs(31),
+            Aria2ConnectionSample {
+                gid: "gid-epoch",
+                control_epoch: 1,
+                status: "active",
+                total: 100 * 1024 * 1024,
+                completed: 13 * 1024 * 1024,
+                speed_bytes: 1024.0 * 1024.0,
+                active_connections: 16,
+                requested_connections: 16,
+                speed_limited: false,
+                now: start + Duration::from_secs(31),
+            },
         );
         assert!(observation.saw_multiple_connections);
 
         assert_eq!(
             observe_aria2_connections_with_epoch(
                 &mut observation,
-                "gid-epoch",
-                2,
-                "active",
-                100 * 1024 * 1024,
-                13 * 1024 * 1024,
-                1024.0 * 1024.0,
-                1,
-                16,
-                false,
-                start + Duration::from_secs(62),
+                Aria2ConnectionSample {
+                    gid: "gid-epoch",
+                    control_epoch: 2,
+                    status: "active",
+                    total: 100 * 1024 * 1024,
+                    completed: 13 * 1024 * 1024,
+                    speed_bytes: 1024.0 * 1024.0,
+                    active_connections: 1,
+                    requested_connections: 16,
+                    speed_limited: false,
+                    now: start + Duration::from_secs(62),
+                },
             ),
             None
         );
@@ -6442,7 +6448,7 @@ mod tests {
                     1,
                     16,
                     false,
-                    start + Duration::from_secs(offset as u64),
+                    start + Duration::from_secs(offset),
                 ),
                 None
             );
@@ -6524,7 +6530,7 @@ mod tests {
                     "gid-1",
                     "active",
                     100 * 1024 * 1024,
-                    10 * 1024 * 1024 + offset as u64 * 1024,
+                    10 * 1024 * 1024 + offset * 1024,
                     1024.0 * 1024.0,
                     16,
                     16,
@@ -7671,6 +7677,19 @@ struct Aria2ConnectionObservation {
     last_completed: u64,
 }
 
+struct Aria2ConnectionSample<'a> {
+    gid: &'a str,
+    control_epoch: u64,
+    status: &'a str,
+    total: u64,
+    completed: u64,
+    speed_bytes: f64,
+    active_connections: i32,
+    requested_connections: i32,
+    speed_limited: bool,
+    now: Instant,
+}
+
 const ARIA2_CONNECTION_RECOVERY_DELAY: Duration = Duration::from_secs(30);
 const ARIA2_CONNECTION_RECOVERY_COOLDOWN: Duration = Duration::from_secs(45);
 const ARIA2_MIN_REMAINING_FOR_CONNECTION_RECOVERY: u64 = 1024 * 1024;
@@ -7679,6 +7698,8 @@ const ARIA2_DEGRADED_SPEED_FRACTION: f64 = 0.20;
 const ARIA2_MIN_HEALTHY_SPEED_SAMPLES: u8 = 3;
 
 #[cfg(test)]
+// Keep the test scenarios explicit while the production path uses the typed sample.
+#[allow(clippy::too_many_arguments)]
 fn observe_aria2_connections(
     observation: &mut Aria2ConnectionObservation,
     gid: &str,
@@ -7693,8 +7714,28 @@ fn observe_aria2_connections(
 ) -> Option<Aria2RecoveryReason> {
     observe_aria2_connections_with_epoch(
         observation,
+        Aria2ConnectionSample {
+            gid,
+            control_epoch: 0,
+            status,
+            total,
+            completed,
+            speed_bytes,
+            active_connections,
+            requested_connections,
+            speed_limited,
+            now,
+        },
+    )
+}
+
+fn observe_aria2_connections_with_epoch(
+    observation: &mut Aria2ConnectionObservation,
+    sample: Aria2ConnectionSample<'_>,
+) -> Option<Aria2RecoveryReason> {
+    let Aria2ConnectionSample {
         gid,
-        0,
+        control_epoch,
         status,
         total,
         completed,
@@ -7703,22 +7744,7 @@ fn observe_aria2_connections(
         requested_connections,
         speed_limited,
         now,
-    )
-}
-
-fn observe_aria2_connections_with_epoch(
-    observation: &mut Aria2ConnectionObservation,
-    gid: &str,
-    control_epoch: u64,
-    status: &str,
-    total: u64,
-    completed: u64,
-    speed_bytes: f64,
-    active_connections: i32,
-    requested_connections: i32,
-    speed_limited: bool,
-    now: Instant,
-) -> Option<Aria2RecoveryReason> {
+    } = sample;
     if observation.gid != gid || observation.control_epoch != control_epoch {
         *observation = Aria2ConnectionObservation {
             gid: gid.to_string(),
@@ -7796,7 +7822,7 @@ fn observe_aria2_connections_with_epoch(
 
     observation.last_completed = completed;
 
-    let recovery_allowed = observation.last_refreshed_at.map_or(true, |last| {
+    let recovery_allowed = observation.last_refreshed_at.is_none_or(|last| {
         now.duration_since(last) >= ARIA2_CONNECTION_RECOVERY_COOLDOWN
     });
     if !recovery_allowed {
@@ -8301,16 +8327,18 @@ pub fn run() {
                                     let observation = observations.entry(id.clone()).or_default();
                                     let recovery_reason = observe_aria2_connections_with_epoch(
                                         observation,
-                                        gid,
-                                        control_epoch,
-                                        status,
-                                        total,
-                                        completed,
-                                        speed_bytes,
-                                        active_connections,
-                                        requested_connections,
-                                        speed_limited,
-                                        now,
+                                        Aria2ConnectionSample {
+                                            gid,
+                                            control_epoch,
+                                            status,
+                                            total,
+                                            completed,
+                                            speed_bytes,
+                                            active_connections,
+                                            requested_connections,
+                                            speed_limited,
+                                            now,
+                                        },
                                     );
 
                                     let fraction = if total > 0 { completed as f64 / total as f64 } else { 0.0 };

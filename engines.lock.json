@@ -23,10 +23,10 @@
           "sha256": "f65b4ba782b25e9f4374765d421793c6613f692d8e50b2888079657793619034"
         },
         "deno": {
-          "version": "2.9.2",
+          "version": "2.9.3",
           "source": "https://github.com/denoland/deno",
           "build": "official aarch64-apple-darwin executable",
-          "sha256": "218ab752ae8f64f0a7822af710886488f15169fdae153a3aada4861f9635b266"
+          "sha256": "80c83cdfb20289f8818a71220b570df363f6f0ba93580c29c70f08ab14e93568"
         }
       },
       "runtimeTrees": {
