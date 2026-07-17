@@ -94,17 +94,19 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
           ? `${sizeDisplay.downloaded} downloaded of ${sizeDisplay.totalIsEstimate ? 'approximately ' : ''}${sizeDisplay.total} ${sizeDisplay.unit}`
           : completedSizeLabel}
       >
-        {hasDownloadedAmount ? (
-          <span className="download-size-progress">
-            <span className={downloadProgressColorClass(download.status)}>{sizeDisplay.downloaded}</span>
-            <span className="text-text-muted"> / </span>
+        <div className="download-size-content">
+          {hasDownloadedAmount ? (
+            <span className="download-size-progress">
+              <span className={downloadProgressColorClass(download.status)}>{sizeDisplay.downloaded}</span>
+              <span className="text-text-muted"> / </span>
+            </span>
+          ) : null}
+          <span className="download-size-total">
+            {hasDownloadedAmount
+              ? `${sizeDisplay.totalIsEstimate ? '~' : ''}${sizeDisplay.total} ${sizeDisplay.unit}`
+              : completedSizeLabel}
           </span>
-        ) : null}
-        <span className="download-size-total">
-          {hasDownloadedAmount
-            ? `${sizeDisplay.totalIsEstimate ? '~' : ''}${sizeDisplay.total} ${sizeDisplay.unit}`
-            : completedSizeLabel}
-        </span>
+        </div>
       </div>
       
       <div className="download-status-cell">

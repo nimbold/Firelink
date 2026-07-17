@@ -1973,31 +1973,35 @@ html[data-list-density="relaxed"] .download-ghost-row {
 
 .download-size-cell {
   justify-content: flex-end;
-  text-align: right;
-}
-
-.download-size-cell > .download-size-progress {
-  flex: 1 1 auto;
-  text-align: right;
-}
-
-.download-size-cell > .download-size-total {
-  flex: 0 0 auto;
   text-align: left;
-  white-space: nowrap;
 }
 
-.download-size-cell > .download-size-progress,
-.download-size-cell > .download-size-total {
+.download-size-content {
+  display: flex;
+  align-items: center;
+  width: min(100%, 12rem);
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+}
+
+.download-size-content > .download-size-progress {
+  flex: 0 1 auto;
+  text-align: left;
+}
+
+.download-size-content > .download-size-total {
+  flex: 0 1 auto;
+  text-align: left;
+}
+
+.download-size-content > .download-size-progress,
+.download-size-content > .download-size-total {
   max-width: 100%;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.download-size-cell > .download-size-progress {
-  text-align: right;
 }
 
 .download-row > .download-size-cell {
