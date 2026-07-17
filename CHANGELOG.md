@@ -5,6 +5,27 @@ All notable changes to Firelink will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-07-17
+
+This patch release focuses on transfer reliability, browser captures, and easier download control.
+
+### New
+- Add YouTube playlist downloads with smoother queueing and scrolling for large playlists.
+- Add live per-download connection controls, clipboard capture for the Add window, and byte-level progress updates.
+
+### Improved
+- Recover slow or stalled transfers more reliably and apply connection defaults consistently, addressing [#19](https://github.com/nimbold/Firelink/issues/19) and [#20](https://github.com/nimbold/Firelink/issues/20).
+- Make pause, resume, retry, cancel, remove, and completion handling more consistent when actions or background events overlap.
+- Improve playlist state, media size estimates, and large-list performance.
+- Keep clipboard, browser, and deep-link handoffs behind the startup consent explanation, and make that boundary clearer.
+- Refresh bundled engines and dependencies while strengthening cross-platform package and diagnostic checks.
+
+### Fixed
+- Fix Gmail and other authenticated browser downloads that could lose their filename or save a sign-in page after a redirect, including Chrome Incognito, addressing [#21](https://github.com/nimbold/Firelink/issues/21).
+- Keep browser-capture metadata, cookies, and destinations tied to the correct download through redirects.
+- Prevent invalid URLs, late download events, stale progress, and abandoned media work from creating misleading rows or leftover temporary files.
+- Keep sensitive local paths, credentials, and persisted records protected in errors, diagnostics, and download state.
+
 ## [1.1.0] - 2026-07-15
 
 This is a stability-focused release with safer downloads, browser handoffs, settings, and cross-platform packages.

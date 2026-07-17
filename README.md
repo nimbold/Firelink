@@ -5,7 +5,7 @@
 
   **A fast, focused desktop download manager for macOS, Windows, and Linux.**
 
-  [![Version](https://img.shields.io/badge/version-1.1.0-6f42c1?style=flat-square)](https://github.com/nimbold/Firelink/releases)
+  [![Version](https://img.shields.io/badge/version-1.1.1-6f42c1?style=flat-square)](https://github.com/nimbold/Firelink/releases)
   [![macOS](https://img.shields.io/badge/macOS-111111?style=flat-square&logo=apple&logoColor=white)](#platforms)
   [![Windows](.github/badges/windows.svg)](#platforms)
   [![Linux](https://img.shields.io/badge/Linux-FCC624?style=flat-square&logo=linux&logoColor=black)](#platforms)
@@ -33,19 +33,20 @@
 
 ## Why Firelink
 
-Firelink is a desktop download manager for fast transfers, browser capture, media extraction, scheduling, and clear file placement.
+Firelink is a cross-platform desktop download manager for direct transfers, browser capture, media extraction, scheduling, and clear file placement.
 
-It is now a cross-platform Rust/Tauri app with a React and TypeScript interface. A native backend coordinates downloads with aria2, yt-dlp, FFmpeg, Deno, and SQLite.
+It combines a Rust/Tauri backend with a React and TypeScript interface. Bundled aria2, yt-dlp, FFmpeg, Deno, and SQLite support the download and media workflows.
 
-The current desktop release is **1.1.0**, paired with Firelink Companion **2.0.4**.
+The current desktop release is **1.1.1**, paired with Firelink Companion **2.0.5**.
 
-This stability-focused release adds a secure Windows portable build and strengthens queues, browser handoffs, media metadata, persistence, and packaged release checks.
+This release adds YouTube playlist downloads, live connection controls, clipboard capture, and clearer byte-level progress. It also improves slow-transfer recovery, authenticated browser captures, and startup consent handling.
 
 ## Features
 
 - **Segmented downloads** with aria2, retries, speed limits, and connection controls.
 - **Media downloads** with yt-dlp, FFmpeg, Deno, live progress, speed, and ETA.
-- **Add window** for metadata, duplicates, location choices, captured links, and clipboard-prefilled URLs.
+- **Playlist downloads** for YouTube playlists with queueing and efficient large-list rendering.
+- **Add window** for metadata, duplicates, location choices, captured links, clipboard-prefilled URLs, and live connection limits.
 - **Persistent queues** with pause, resume, retry, redownload, sorting, multi-select, and bulk actions.
 - **Scheduling** with start/stop windows, speed rules, and post-queue actions.
 - **File organization** with categories, default folders, a collapsible Folders section, per-download overrides, and reveal/trash actions.
@@ -61,16 +62,17 @@ Download desktop builds from [GitHub Releases](https://github.com/nimbold/Fireli
 | --- | --- | --- |
 | **macOS Apple silicon** | `.dmg` | Not notarized. If macOS blocks the first launch, approve Firelink in **System Settings -> Privacy & Security**. |
 | **Windows x64** | NSIS `.exe` installer | Unsigned. Windows SmartScreen may warn until code signing is added. |
-| **Windows x64 portable** | `.zip` archive | Extract to a writable folder and launch `firelink.exe`. App data stays under the archive's `data/` directory. |
+| **Windows x64 portable** | `.zip` archive | Extract to a writable folder and launch `firelink.exe`. See the expandable notes below. |
 | **Linux x64** | `.deb`, `.rpm`, or `.AppImage` | Use `.deb` for Debian-family systems, `.rpm` for Fedora/RPM-family systems, or AppImage as the self-contained package. AppImage may need executable permission. |
 
 Bundles include the required engines. Users do not need aria2, yt-dlp, FFmpeg, Deno, Python, Homebrew, or another package manager.
 
 The native packages use the distribution's normal desktop runtime dependencies. AppImage is self-contained but uses the normal per-user application-data locations.
 
-### Windows portable
+<details>
+<summary><strong>Windows portable ZIP notes</strong></summary>
 
-The portable ZIP is an opt-in secondary distribution:
+The portable ZIP is an opt-in secondary distribution. Extract it to a writable folder and launch `firelink.exe`:
 
 - Keep the extracted folder writable; avoid `Program Files`, read-only media, and folders that block SQLite or WebView writes.
 - Settings, queues, logs, and WebView data stay beside `firelink.exe` under `data/`.
@@ -81,6 +83,8 @@ The portable ZIP is an opt-in secondary distribution:
 - Saved absolute download locations may need to be selected again after moving the folder to another drive.
 - The installer remains the supported path for `firelink://` browser launch registration.
 
+</details>
+
 ## Browser Extension
 
 <p align="center">
@@ -89,7 +93,7 @@ The portable ZIP is an opt-in secondary distribution:
   <a href="https://github.com/nimbold/Firelink-Extension#manual-chromium-installation"><img src="https://img.shields.io/badge/Manual%20install-Chromium-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Read manual Chromium install instructions" /></a>
 </p>
 
-Firelink Companion sends browser links and downloads to the desktop app.
+Firelink Companion connects browser links and downloads to the desktop app.
 
 What it adds:
 
@@ -101,9 +105,9 @@ What it adds:
 - Fallback to the browser download when Firelink is closed or rejects a handoff.
 - Captured links always open Firelink's Add window before anything is added to the download list.
 
-Install the extension, open Firelink, then pair it from **Settings -> Integrations**. Firefox users can install from Mozilla Add-ons. Chromium users can use the [manual load-unpacked flow](https://github.com/nimbold/Firelink-Extension#manual-chromium-installation) with `firelink-chromium.zip` from the [extension releases](https://github.com/nimbold/Firelink-Extension/releases). Firelink Companion 2.0.4 is the matching extension release for Firelink 1.1.0.
+Install the extension, open Firelink, then pair it from **Settings -> Integrations**. Firefox users can install it from Mozilla Add-ons. Chromium users can load `firelink-chromium.zip` from the [extension releases](https://github.com/nimbold/Firelink-Extension/releases) with the [manual Chromium instructions](https://github.com/nimbold/Firelink-Extension#manual-chromium-installation).
 
-The extension lives in [Firelink-Extension](https://github.com/nimbold/Firelink-Extension). This repo also vendors it as the `Extensions/Browser` submodule.
+Use the latest [Firelink Companion release](https://github.com/nimbold/Firelink-Extension/releases) with Firelink 1.1.1. The source is in the [Firelink-Extension repository](https://github.com/nimbold/Firelink-Extension), which this repo vendors as the `Extensions/Browser` submodule.
 
 ## Platforms
 
