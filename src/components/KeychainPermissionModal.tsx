@@ -6,6 +6,7 @@ import { usePlatformInfo } from '../utils/platform';
 import { getKeychainConsentVersion } from '../utils/keychainStartup';
 import { getVersion } from '@tauri-apps/api/app';
 import type { PairingTokenHydration } from '../bindings/PairingTokenHydration';
+import { useTranslation } from 'react-i18next';
 
 const KEYCHAIN_GRANT_TIMEOUT_MS = 30_000;
 
@@ -14,6 +15,7 @@ type KeychainPermissionModalProps = {
 };
 
 export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = ({ consentVersion }) => {
+  const { t } = useTranslation();
   const showKeychainModal = useSettingsStore(state => state.showKeychainModal);
   const dismissKeychainPrompt = useSettingsStore(state => state.dismissKeychainPrompt);
   const platform = usePlatformInfo();
@@ -36,22 +38,22 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
   const isMac = platform.os === 'macos';
   const pairingStoreName =
     platform.portable
-      ? 'the portable Firelink data folder'
+      ? t($ => $.keychain.stores.portable)
       : platform.os === 'windows'
-      ? 'Windows Credential Manager'
+      ? t($ => $.keychain.stores.windows)
       : platform.os === 'linux'
-        ? 'your Linux credential store'
+        ? t($ => $.keychain.stores.linux)
         : platform.os === 'macos'
-          ? 'macOS Keychain'
-          : "this system's credential store";
+          ? t($ => $.keychain.stores.macos)
+          : t($ => $.keychain.stores.system);
   const siteCredentialStoreName = platform.portable
-    ? "the system's credential store"
+    ? t($ => $.keychain.stores.siteCredentials)
     : pairingStoreName;
   const grantLabel = platform.portable
-    ? 'Continue'
+    ? t($ => $.keychain.grantLabelPortable)
     : isMac
-      ? 'Grant Access'
-      : 'Enable Secure Storage';
+      ? t($ => $.keychain.grantLabelMacos)
+      : t($ => $.keychain.grantLabelDefault);
 
   const handleGrant = async () => {
     setIsGranting(true);
@@ -87,13 +89,13 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
         grantRequest,
         new Promise<never>((_, reject) => {
           timeoutId = window.setTimeout(
-            () => reject(new Error('Credential storage request timed out. You can select Later and try again.')),
+            () => reject(new Error(t($ => $.keychain.timeout))),
             KEYCHAIN_GRANT_TIMEOUT_MS
           );
         })
       ]);
       if (!(await applyPersistentGrant(result))) {
-        setError(result.error || `${siteCredentialStoreName} is unavailable.`);
+        setError(result.error || t($ => $.keychain.unavailable, { store: siteCredentialStoreName }));
       }
     } catch (e: any) {
       setError(e.toString());
@@ -124,28 +126,27 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
           <div className="p-2 bg-blue-500/10 rounded-full items-center justify-center">
             <KeyRound size={20} className="text-blue-500" />
           </div>
-          <h2 className="text-lg font-semibold text-text-primary m-0">Credential Storage Access Needed</h2>
+          <h2 className="text-lg font-semibold text-text-primary m-0">{t($ => $.keychain.title)}</h2>
         </div>
 
         <div className="px-5 py-6 flex-1 min-h-0 overflow-y-auto text-sm text-text-secondary leading-relaxed space-y-4">
           <p>
-            Firelink uses the browser extension to capture downloads. To keep the extension paired after restarts,
-            Firelink stores its pairing token in {pairingStoreName}. Optional site credentials are stored in {siteCredentialStoreName}.
+            {t($ => $.keychain.description, { pairingStore: pairingStoreName, siteCredentialStore: siteCredentialStoreName })}
           </p>
 
           <p>
             {platform.portable
-              ? 'The pairing token is portable with this folder. Site credentials remain in the system credential store; a system prompt may appear after you grant access.'
+              ? t($ => $.keychain.portableExplanation)
               : isMac
-              ? 'macOS may show a Keychain prompt after you grant access.'
-              : 'This usually completes silently. If the credential service is unavailable, Firelink will show the error here and the extension will stay paired for this session only.'}
+              ? t($ => $.keychain.macosExplanation)
+              : t($ => $.keychain.defaultExplanation)}
           </p>
 
           <p>
-            <strong>Note:</strong>{' '}
+            <strong>{t($ => $.keychain.note)}</strong>{' '}
             {platform.portable
-              ? 'Portable mode stores only the pairing token in this folder. It does not copy site passwords or browser credentials.'
-              : 'Firelink only writes its own dedicated credential entry. It cannot access other saved passwords or credential items on your system.'}
+              ? t($ => $.keychain.portableNote)
+              : t($ => $.keychain.defaultNote)}
           </p>
 
           {error && (
@@ -156,11 +157,11 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
           )}
 
           <div className="bg-bg-modal-accent p-3 rounded-lg border border-border-modal text-xs">
-            <strong>Hint:</strong>{' '}
+            <strong>{t($ => $.keychain.hint)}</strong>{' '}
             {platform.portable
-              ? 'The portable pairing token is already stored with this folder; you can enable it here or select Later.'
-              : 'If you select Later, the extension will only work for this session.'}
-            You can enable storage anytime from <strong>Settings &gt; Integrations</strong>.
+              ? t($ => $.keychain.portableHint)
+              : t($ => $.keychain.defaultHint)}{' '}
+            {t($ => $.keychain.enableFromSettings)}
           </div>
         </div>
 
@@ -170,14 +171,14 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
             disabled={isGranting}
             className="px-4 py-2 rounded-lg text-sm font-medium transition-colors text-text-secondary hover:bg-item-hover hover:text-text-primary disabled:opacity-50"
           >
-            Later
+            {t($ => $.keychain.later)}
           </button>
           <button
             onClick={handleGrant}
             disabled={isGranting}
             className="px-4 py-2 rounded-lg text-sm font-medium transition-colors bg-accent text-white hover:bg-accent/90 disabled:opacity-50"
           >
-            {isGranting ? 'Enabling...' : grantLabel}
+            {isGranting ? t($ => $.keychain.enabling) : grantLabel}
           </button>
         </div>
       </div>

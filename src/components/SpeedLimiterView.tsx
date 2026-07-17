@@ -3,6 +3,7 @@ import { Gauge, Plus, Save, X, Zap } from 'lucide-react';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { WindowDragRegion } from './WindowDragRegion';
 import { useToast } from '../contexts/ToastContext';
+import { useTranslation } from 'react-i18next';
 
 type SpeedUnit = 'KB/s' | 'MB/s';
 
@@ -89,6 +90,7 @@ export function formatPresetValue(value: number): string {
 }
 
 export default function SpeedLimiterView() {
+  const { t } = useTranslation();
   const globalSpeedLimit = useSettingsStore(state => state.globalSpeedLimit);
   const lastCustomSpeedLimitKiB = useSettingsStore(state => state.lastCustomSpeedLimitKiB);
   const lastCustomSpeedLimitUnit = useSettingsStore(state => state.lastCustomSpeedLimitUnit);
@@ -132,12 +134,14 @@ export default function SpeedLimiterView() {
       setLastCustomSpeedLimitKiB(valueKiB);
       setLastCustomSpeedLimitUnit(unit);
       addToast({
-        message: enabled ? `Global limit saved at ${numericValue} ${unit}` : 'Global speed limit disabled',
+        message: enabled
+          ? t($ => $.speedLimiter.globalLimitSaved, { value: numericValue, unit })
+          : t($ => $.speedLimiter.globalLimitDisabled),
         variant: 'success'
       });
     } catch (error) {
       addToast({
-        message: `Could not save global speed limit: ${String(error)}`,
+        message: t($ => $.speedLimiter.saveFailed, { detail: String(error) }),
         variant: 'error',
         isActionable: true
       });
@@ -163,8 +167,8 @@ export default function SpeedLimiterView() {
     setValue(String(storedPresetDisplayValue));
     addToast({
       message: alreadyExists
-        ? `${formatPresetValue(storedPresetDisplayValue)} ${unit} is already in quick presets`
-        : `Added ${formatPresetValue(storedPresetDisplayValue)} ${unit} quick preset`,
+        ? t($ => $.speedLimiter.presetAlreadyExists, { value: formatPresetValue(storedPresetDisplayValue), unit })
+        : t($ => $.speedLimiter.presetAdded, { value: formatPresetValue(storedPresetDisplayValue), unit }),
       variant: alreadyExists ? 'info' : 'success'
     });
   };
@@ -174,7 +178,7 @@ export default function SpeedLimiterView() {
     const nextPresets = presetValues.filter(value => value !== presetValue);
     setSpeedLimitPresetValues(nextPresets);
     addToast({
-      message: `Removed ${formatPresetValue(displayValue)} ${unit} quick preset`,
+      message: t($ => $.speedLimiter.presetRemoved, { value: formatPresetValue(displayValue), unit }),
       variant: 'info'
     });
   };
@@ -207,25 +211,25 @@ export default function SpeedLimiterView() {
               className={`inline-block h-4 w-4 transform rounded-full bg-white transition duration-200 ease-in-out ${enabled ? 'translate-x-4' : 'translate-x-1'}`}
             />
           </button>
-          Speed Limiter
+          {t($ => $.speedLimiter.title)}
         </div>
         <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
           enabled ? 'bg-accent/15 text-accent' : 'bg-item-hover text-text-muted'
         }`}>
-          {enabled ? `${currentDisplayValue} ${unit}` : 'Unlimited'}
+          {enabled ? `${currentDisplayValue} ${unit}` : t($ => $.speedLimiter.unlimited)}
         </span>
         <button onClick={() => void save()} disabled={isSaving} className="app-button app-button-primary ml-auto px-3 text-[11px] disabled:opacity-50">
-          <Save size={14} /> Save Limit
+          <Save size={14} /> {t($ => $.speedLimiter.saveLimit)}
         </button>
       </div>
 
       <div className="flex-1 overflow-y-auto p-6">
         <section className={`app-card max-w-[760px] p-5 ${enabled ? '' : 'opacity-55'}`}>
           <div className="mb-2 flex items-center gap-2 font-semibold text-text-primary">
-            <Gauge size={18} className="text-accent" /> Global Speed Limit
+            <Gauge size={18} className="text-accent" /> {t($ => $.speedLimiter.globalSpeedLimit)}
           </div>
           <p className="max-w-2xl text-[12px] leading-relaxed text-text-muted">
-            Applies to new and active aria2 transfers and new yt-dlp media downloads. Explicit per-download limits remain attached to those transfers.
+            {t($ => $.speedLimiter.description)}
           </p>
 
           <div className="mt-6 flex items-center gap-3">
@@ -257,7 +261,7 @@ export default function SpeedLimiterView() {
 
           <div className="my-6 border-t border-border-color" />
           <div className="mb-3 flex items-center gap-2 text-[12px] font-medium text-text-secondary">
-            <Zap size={14} /> Quick Presets
+            <Zap size={14} /> {t($ => $.speedLimiter.quickPresets)}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {presetValues.map(presetValue => {
@@ -280,8 +284,8 @@ export default function SpeedLimiterView() {
                     disabled={!enabled || isSaving}
                     onClick={() => removePreset(presetValue)}
                     className="flex h-full w-7 items-center justify-center border-l border-border-modal text-text-muted transition-colors hover:bg-red-500/10 hover:text-red-400 focus-visible:bg-red-500/10 focus-visible:text-red-400 disabled:opacity-50"
-                    title={`Remove ${formatPresetValue(displayValue)} ${unit} preset`}
-                    aria-label={`Remove ${formatPresetValue(displayValue)} ${unit} preset`}
+                    title={t($ => $.speedLimiter.removePreset, { value: formatPresetValue(displayValue), unit })}
+                    aria-label={t($ => $.speedLimiter.removePreset, { value: formatPresetValue(displayValue), unit })}
                   >
                     <X size={12} />
                   </button>
@@ -297,7 +301,7 @@ export default function SpeedLimiterView() {
                 disabled={!enabled || isSaving}
                 onChange={event => setCustomPresetValue(event.target.value)}
                 className="w-12 bg-transparent text-right font-mono text-[12px] text-text-primary outline-none disabled:opacity-50"
-                aria-label={`Custom preset in ${unit}`}
+                aria-label={t($ => $.speedLimiter.customPresetIn, { unit })}
               />
               <span className="text-[11px] text-text-muted">{unit}</span>
               <button
@@ -305,8 +309,8 @@ export default function SpeedLimiterView() {
                 disabled={!enabled || isSaving}
                 onClick={applyCustomPreset}
                 className="app-icon-button h-6 w-6 disabled:opacity-50"
-                title="Add quick preset"
-                aria-label="Add quick preset"
+                title={t($ => $.speedLimiter.addQuickPreset)}
+                aria-label={t($ => $.speedLimiter.addQuickPreset)}
               >
                 <Plus size={14} />
               </button>

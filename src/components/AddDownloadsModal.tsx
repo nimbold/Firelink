@@ -22,12 +22,13 @@ import {
 import { getPlatformInfo } from '../utils/platform';
 import { isTransferLocked } from '../utils/downloadActions';
 import { useToast } from '../contexts/ToastContext';
+import { useTranslation } from 'react-i18next';
 import {
   canSubmitMetadataRows,
   appendRequestUrlsAfterVersion,
   mediaFileNameForSelectedFormat,
   mediaFormatSelectorForRow,
-  metadataSummaryMessage,
+  metadataSummaryState,
   playlistFilePrefix,
   reconcileDownloadRows,
   refreshFailedMetadataRows,
@@ -36,7 +37,6 @@ import {
 } from '../utils/addDownloadMetadata';
 
 const formatBytes = (bytes: number) => {
-  if (bytes === 0) return 'Unknown size';
   const k = 1024;
   const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
@@ -112,6 +112,7 @@ const extensionHeaders = (context: PendingAddRequestContext | undefined) => [
 ].filter(Boolean).join('\n');
 
 export const AddDownloadsModal = () => {
+  const { t } = useTranslation();
   const { addToast } = useToast();
   const {
     isAddModalOpen,
@@ -214,7 +215,7 @@ export const AddDownloadsModal = () => {
     const hasPendingInput = Boolean(
       urls.trim() || pendingAddUrls.trim() || parsedItems.length || headers.trim() || cookies.trim()
     );
-    if (hasPendingInput && !window.confirm('Discard this download setup?')) return;
+    if (hasPendingInput && !window.confirm(t($ => $.addDownloads.discardSetup))) return;
     toggleAddModal(false);
   }, [cookies, headers, isSubmitting, parsedItems.length, pendingAddUrls, showKeychainModal, toggleAddModal, urls]);
 
@@ -468,7 +469,7 @@ export const AddDownloadsModal = () => {
               });
               if (latestPlaylistRequestRef.current.get(row.sourceUrl) !== requestKey) return;
               if (!playlistData.entries.length) {
-                throw new Error('Playlist contains no downloadable entries');
+                throw new Error(t($ => $.addDownloads.playlistNoEntries));
               }
               setPlaylistExpansions(current => ({
                 ...current,
@@ -492,7 +493,7 @@ export const AddDownloadsModal = () => {
                   bytes,
                   isApproximate,
                   formatLabel: f.format_label || f.ext.toUpperCase(),
-                  detail: bytes ? `${isApproximate ? '~' : ''}${formatBytes(bytes)}` : 'Unknown size',
+                  detail: bytes ? `${isApproximate ? '~' : ''}${formatBytes(bytes)}` : t($ => $.addDownloads.unknownSize),
                   selector: f.format_id,
                   type: quality.toLowerCase().includes('audio') ? 'Audio' : 'Video'
                 };
@@ -517,7 +518,7 @@ export const AddDownloadsModal = () => {
                 })
               ));
             } else {
-              throw new Error("Invalid media metadata or no formats found");
+              throw new Error(t($ => $.addDownloads.invalidMediaMetadata));
             }
           } else {
             let keychainPassword = null;
@@ -657,7 +658,7 @@ export const AddDownloadsModal = () => {
       return;
     }
     if (speedLimitEnabled && (!Number.isFinite(Number(speedLimit)) || Number(speedLimit) <= 0)) {
-      addToast({ message: 'Speed limit must be greater than zero', variant: 'error', isActionable: true });
+      addToast({ message: t($ => $.addDownloads.speedInvalid), variant: 'error', isActionable: true });
       return;
     }
     isSubmittingRef.current = true;
@@ -723,12 +724,12 @@ export const AddDownloadsModal = () => {
         )
       );
       if (isUrlDupe) {
-        newConflicts.push({ id: i.toString(), fileName: finalFile, reason: { type: 'url', msg: 'URL already in queue' }, resolution: 'rename' });
+        newConflicts.push({ id: i.toString(), fileName: finalFile, reason: { type: 'url', msg: t($ => $.addDownloads.urlAlreadyQueued) }, resolution: 'rename' });
       } else if (hasBatchConflict) {
         newConflicts.push({
           id: i.toString(),
           fileName: finalFile,
-          reason: { type: 'file', msg: 'Another selected download uses this destination' },
+          reason: { type: 'file', msg: t($ => $.addDownloads.destinationConflict) },
           resolution: 'rename',
           replaceAllowed: false
         });
@@ -767,8 +768,8 @@ export const AddDownloadsModal = () => {
             reason: {
               type: 'file',
               msg: fileExistsInStore
-                ? 'Existing Firelink download uses this destination'
-                : 'File exists on disk; rename or skip to avoid deleting unrelated data'
+                ? t($ => $.addDownloads.existingDownloadDestination)
+                : t($ => $.addDownloads.fileExistsOnDisk)
             },
             resolution: 'rename',
             replaceAllowed: fileExistsInStore
@@ -881,7 +882,7 @@ export const AddDownloadsModal = () => {
                      count++;
                  }
                  if (exists) {
-                   throw new Error(`Could not find an available name for ${finalFile}.`);
+                   throw new Error(t($ => $.addDownloads.noAvailableName, { file: finalFile }));
                  }
                  
                  itemsToAdd[idx] = { ...item, file: newName };
@@ -917,11 +918,11 @@ export const AddDownloadsModal = () => {
         }
 
                  if (existingItem && isTransferLocked(existingItem.status)) {
-                   throw new Error(`Pause ${existingItem.fileName} before replacing it.`);
+                   throw new Error(t($ => $.addDownloads.pauseBeforeReplace, { file: existingItem.fileName }));
                  }
 
                  if (!existingItem) {
-                   throw new Error(`Cannot replace ${finalFile}: file is not owned by a Firelink download.`);
+                   throw new Error(t($ => $.addDownloads.cannotReplace, { file: finalFile }));
                  }
                  // Let the backend decide whether resumable sidecars still
                  // exist after stopping the old transfer. This avoids a race
@@ -972,7 +973,7 @@ export const AddDownloadsModal = () => {
           sizeBytes: item.sizeBytes
         }, action);
         if (!added) {
-          throw new Error('Backend rejected download start.');
+          throw new Error(t($ => $.addDownloads.backendRejectedStart));
         }
         addedCount += 1;
         } catch (e) {
@@ -983,13 +984,15 @@ export const AddDownloadsModal = () => {
       toggleAddModal(false);
       if (failures.length > 0) {
         addToast({
-          message: `${addedCount} added, ${failures.length} failed. ${failures[0]}`,
+          message: t($ => $.addDownloads.addedWithFailures, { added: addedCount, failed: failures.length, detail: failures[0] }),
           variant: 'error',
           isActionable: true
         });
       } else if (addedCount > 0) {
         addToast({
-          message: `${addedCount} download${addedCount === 1 ? '' : 's'} added`,
+          message: addedCount === 1
+            ? t($ => $.addDownloads.addedOne)
+            : t($ => $.addDownloads.addedMany, { count: addedCount }),
           variant: 'success'
         });
       }
@@ -1070,6 +1073,21 @@ export const AddDownloadsModal = () => {
   );
   const playlistSummaries = Object.entries(playlistExpansions)
     .filter(([sourceUrl]) => activePlaylistUrls.has(sourceUrl));
+  const metadataSummary = (() => {
+    const summary = metadataSummaryState(parsedItems);
+    const plural = (count: number) => count === 1 ? '' : 's';
+    switch (summary.type) {
+      case 'empty': return t($ => $.addDownloads.pasteOneOrMore);
+      case 'none-selected': return t($ => $.addDownloads.selectAtLeastOne);
+      case 'invalid': return t($ => $.addDownloads.correctInvalid, { count: summary.count, plural: plural(summary.count) });
+      case 'loading': return t($ => $.addDownloads.waitingForMetadata, { count: summary.count, plural: plural(summary.count) });
+      case 'unsafe': return t($ => $.addDownloads.removeUnsafe, { count: summary.count, plural: plural(summary.count) });
+      case 'media-error': return t($ => $.addDownloads.mediaMetadataUnavailableSummary, { count: summary.count, plural: plural(summary.count) });
+      case 'all-error': return t($ => $.addDownloads.metadataUnavailableFallback);
+      case 'fallback': return t($ => $.addDownloads.fallbackReady, { ready: summary.ready, readyPlural: plural(summary.ready), failed: summary.failed });
+      case 'ready': return t($ => $.addDownloads.readyToAdd, { count: summary.count, plural: plural(summary.count) });
+    }
+  })();
 
   return (
     <>
@@ -1090,7 +1108,7 @@ export const AddDownloadsModal = () => {
             )
               .catch(error => {
                 addToast({
-                  message: `Could not resolve duplicate downloads: ${String(error)}`,
+                  message: t($ => $.addDownloads.duplicateResolveFailed, { detail: String(error) }),
                   variant: 'error',
                   isActionable: true
                 });
@@ -1124,12 +1142,12 @@ export const AddDownloadsModal = () => {
                 <div className="flex items-center justify-between">
                   <div className="add-download-section-title flex items-center gap-2">
                     <Link size={16} className="text-blue-500" />
-                    Download Links
+                    {t($ => $.addDownloads.downloadLinks)}
                   </div>
                 </div>
                 <textarea
                   className="add-download-control add-download-links-input w-full h-32 p-3 text-[13px] resize-none"
-                  placeholder={"Paste HTTP, HTTPS, FTP, or SFTP URLs here...\n\nFor media downloads, paste links from Youtube, X, TikTok, Instagram, Reddit, etc."}
+                  placeholder={t($ => $.addDownloads.pastePlaceholder)}
                   value={urls}
                   onChange={(e) => setUrls(e.target.value)}
                 />
@@ -1137,15 +1155,24 @@ export const AddDownloadsModal = () => {
                   const total = playlist.entry_count || playlist.entries.length;
                   return (
                     <p key={sourceUrl} className="px-1 text-[11px] text-purple-500 dark:text-purple-400">
-                      Playlist “{playlist.title}”: {playlist.entries.length}{total > playlist.entries.length ? ` of ${total}` : ''} entries loaded
-                      {playlist.truncated ? ' (safe entry limit reached)' : ''}
-                      {playlist.skipped_entries > 0 ? `; ${playlist.skipped_entries} skipped, unavailable, duplicated, or outside the safe limit` : ''}.
+                      {t($ => $.addDownloads.playlistSummary, {
+                        title: playlist.title,
+                        loaded: playlist.entries.length,
+                        total: total > playlist.entries.length ? ` of ${total}` : '',
+                        truncated: playlist.truncated ? t($ => $.addDownloads.safeEntryLimit) : '',
+                        skipped: playlist.skipped_entries > 0 ? `; ${playlist.skipped_entries} skipped, unavailable, duplicated, or outside the safe limit` : '',
+                      })}.
                     </p>
                   );
                 })}
                 <div className="flex justify-between items-center px-1">
                   <span className="text-[11px] text-text-muted font-medium">
-                    {selectedItems.filter(item => item.status === 'ready').length} selected ready, {fallbackMetadataCount} fallback, {failedMediaMetadataCount} media retry, {blockedMetadataCount} blocked
+                    {t($ => $.addDownloads.selectedSummary, {
+                      ready: selectedItems.filter(item => item.status === 'ready').length,
+                      fallback: fallbackMetadataCount,
+                      mediaRetry: failedMediaMetadataCount,
+                      blocked: blockedMetadataCount,
+                    })}
                   </span>
                     <button
                       type="button"
@@ -1153,7 +1180,7 @@ export const AddDownloadsModal = () => {
                       disabled={failedMetadataCount === 0}
                       className="add-download-link-button flex items-center gap-1.5 text-[11px] font-medium"
                     >
-                      <RefreshCw size={12} /> Refresh Metadata
+                      <RefreshCw size={12} /> {t($ => $.addDownloads.refreshMetadata)}
                     </button>
                     <button
                       type="button"
@@ -1161,33 +1188,33 @@ export const AddDownloadsModal = () => {
                       disabled={parsedItems.length === 0}
                       className="add-download-link-button ml-3 text-[11px] font-medium"
                     >
-                      {allRowsSelected ? 'Clear selection' : 'Select all'}
+                      {allRowsSelected ? t($ => $.addDownloads.clearSelection) : t($ => $.addDownloads.selectAll)}
                     </button>
                   </div>
               </div>
 
               <div className="grid grid-cols-4 gap-3">
-                <SummaryBox title="Files" value={selectedItems.length === parsedItems.length ? parsedItems.length : `${selectedItems.length}/${parsedItems.length}`} icon={FileText} color="text-blue-500" />
-                <SummaryBox title="Required" value={requiredStr} icon={Database} color="text-orange-500" />
-                <SummaryBox title="Free" value={freeSpace} icon={HardDrive} color="text-green-500" />
-                <SummaryBox title="Unknown" value={selectedItems.filter(i => !i.sizeBytes).length} icon={FileText} color="text-purple-500" />
+                <SummaryBox title={t($ => $.addDownloads.files)} value={selectedItems.length === parsedItems.length ? parsedItems.length : `${selectedItems.length}/${parsedItems.length}`} icon={FileText} color="text-blue-500" />
+                <SummaryBox title={t($ => $.addDownloads.required)} value={requiredStr === 'Unknown' ? t($ => $.addDownloads.unknown) : requiredStr} icon={Database} color="text-orange-500" />
+                <SummaryBox title={t($ => $.addDownloads.free)} value={freeSpace === 'Unknown' ? t($ => $.addDownloads.unknown) : freeSpace} icon={HardDrive} color="text-green-500" />
+                <SummaryBox title={t($ => $.addDownloads.unknown)} value={selectedItems.filter(i => !i.sizeBytes).length} icon={FileText} color="text-purple-500" />
               </div>
 
               <div className="flex flex-col gap-2 flex-1 min-h-0 min-w-0 overflow-hidden">
                 <div className="add-download-section-title flex items-center gap-2">
                   <ArrowRight size={16} className="text-blue-500" />
-                  Preview
+                  {t($ => $.addDownloads.preview)}
                 </div>
                 <div className="add-download-preview flex-1 min-h-0 min-w-0 overflow-hidden flex flex-col">
                   <div className="add-download-preview-header px-3 py-2 flex text-[11px] font-semibold text-text-muted uppercase tracking-wider">
-                    <div className="flex-[2]">File</div>
-                    <div className="flex-1">Size</div>
-                    <div className="flex-[1.5]">Status</div>
+                    <div className="flex-[2]">{t($ => $.addDownloads.file)}</div>
+                    <div className="flex-1">{t($ => $.addDownloads.size)}</div>
+                    <div className="flex-[1.5]">{t($ => $.addDownloads.status)}</div>
                   </div>
-                  <div className="flex-1 min-h-0 min-w-0 overflow-y-auto p-2 space-y-1" role="listbox" aria-label="Download preview">
+                  <div className="flex-1 min-h-0 min-w-0 overflow-y-auto p-2 space-y-1" role="listbox" aria-label={t($ => $.addDownloads.downloadPreview)}>
                     {parsedItems.length === 0 ? (
                       <div className="add-download-empty h-full flex items-center justify-center text-text-muted text-xs">
-                        No links added yet.
+                        {t($ => $.addDownloads.noLinks)}
                       </div>
                     ) : (
                       parsedItems.map((item, i) => (
@@ -1215,22 +1242,22 @@ export const AddDownloadsModal = () => {
                               checked={item.selected !== false}
                               onChange={() => toggleRowSelection(i)}
                               onClick={event => event.stopPropagation()}
-                              aria-label={`Select ${item.file}`}
+                              aria-label={t($ => $.addDownloads.selectItem, { file: item.file })}
                               className="mr-2 shrink-0 accent-purple-500"
                             />
                             <div className="flex-[2] text-text-primary font-medium truncate pr-2" title={item.file}>{item.file}</div>
-                            <div className={`flex-1 font-mono ${item.status === 'loading' ? 'text-text-muted/50' : 'text-text-muted'}`}>{item.size || 'Unknown'}</div>
+                            <div className={`flex-1 font-mono ${item.status === 'loading' ? 'text-text-muted/50' : 'text-text-muted'}`}>{item.size || t($ => $.addDownloads.unknown)}</div>
                             <div className={`flex-[1.5] font-medium ${item.status === 'metadata-error' || item.status === 'invalid' ? 'text-red-500' : item.status === 'loading' ? 'text-orange-400' : 'text-blue-500'}`}>
                               {item.status === 'loading' ? (
                                 <div className="flex items-center gap-1.5">
-                                  <RefreshCw size={12} className="animate-spin" /> {item.isPlaylist ? 'Fetching playlist...' : 'Fetching...'}
+                                  <RefreshCw size={12} className="animate-spin" /> {item.isPlaylist ? t($ => $.addDownloads.fetchingPlaylist) : t($ => $.addDownloads.fetching)}
                                 </div>
                               ) : (
                                 item.status === 'metadata-error'
-                                  ? item.metadataBlockedReason === 'unsafe-url' ? 'Unsafe URL' : item.isPlaylist ? 'Playlist failed' : item.isMedia ? 'Metadata failed' : 'Fallback'
+                                  ? item.metadataBlockedReason === 'unsafe-url' ? t($ => $.addDownloads.unsafeUrl) : item.isPlaylist ? t($ => $.addDownloads.playlistFailed) : item.isMedia ? t($ => $.addDownloads.metadataFailed) : t($ => $.addDownloads.fallback)
                                   : item.status === 'invalid'
-                                    ? 'Invalid'
-                                    : 'Ready'
+                                    ? t($ => $.addDownloads.invalid)
+                                    : t($ => $.addDownloads.ready)
                               )}
                             </div>
                           </div>
@@ -1255,10 +1282,10 @@ export const AddDownloadsModal = () => {
                     <Video size={48} />
                   </div>
                   <div className="add-download-section-title flex items-center gap-2 mb-3 relative z-10">
-                    <Video size={16} className="text-purple-500" /> Media Format
+                    <Video size={16} className="text-purple-500" /> {t($ => $.addDownloads.mediaFormat)}
                     {parsedItems[selectedItemIndex].playlistSourceUrl && (
                       <span className="text-[10px] font-normal text-text-muted">
-                        Playlist item {parsedItems[selectedItemIndex].playlistIndex || '?'}
+                        {t($ => $.addDownloads.playlistItem, { index: parsedItems[selectedItemIndex].playlistIndex || '?' })}
                       </span>
                     )}
                   </div>
@@ -1266,13 +1293,13 @@ export const AddDownloadsModal = () => {
                   {parsedItems[selectedItemIndex].status === 'loading' ? (
                     <div className="flex flex-col items-center justify-center py-6 gap-3 relative z-10">
                       <RefreshCw size={24} className="animate-spin text-purple-500" />
-                      <span className="text-xs text-text-muted font-medium animate-pulse">Fetching media streams...</span>
+                      <span className="text-xs text-text-muted font-medium animate-pulse">{t($ => $.addDownloads.fetchingMediaStreams)}</span>
                     </div>
                   ) : parsedItems[selectedItemIndex].formats ? (
                     <div className="space-y-3 relative z-10">
                       <div className="flex flex-col gap-1.5">
-                        <label className="text-[10px] uppercase font-bold tracking-wider text-text-muted">Available Streams</label>
-                        <div className="flex flex-col gap-1 max-h-48 overflow-y-auto pr-1" role="radiogroup" aria-label="Available media streams">
+                        <label className="text-[10px] uppercase font-bold tracking-wider text-text-muted">{t($ => $.addDownloads.availableStreams)}</label>
+                        <div className="flex flex-col gap-1 max-h-48 overflow-y-auto pr-1" role="radiogroup" aria-label={t($ => $.addDownloads.availableMediaStreams)}>
                           {parsedItems[selectedItemIndex].formats!.map((f, idx) => {
                           const isSelected = parsedItems[selectedItemIndex].selectedFormat === idx;
                           const Icon = f.type === 'Audio' ? Music : Film;
@@ -1309,7 +1336,7 @@ export const AddDownloadsModal = () => {
                   </div>
                   ) : (
                     <div className="flex flex-col items-center justify-center py-4 relative z-10">
-                      <span className="text-xs text-red-400 font-medium">Metadata unavailable. Refresh metadata before adding this media.</span>
+                      <span className="text-xs text-red-400 font-medium">{t($ => $.addDownloads.metadataUnavailable)}</span>
                     </div>
                   )}
                 </section>
@@ -1318,7 +1345,7 @@ export const AddDownloadsModal = () => {
               {/* Save Location */}
               <section className="add-download-section">
                 <div className="add-download-section-title flex items-center gap-2 mb-3">
-                  <FolderPlus size={16} className="text-blue-500" /> Save Location
+                  <FolderPlus size={16} className="text-blue-500" /> {t($ => $.addDownloads.saveLocation)}
                 </div>
                 <div className="flex gap-2">
                   <input
@@ -1326,23 +1353,23 @@ export const AddDownloadsModal = () => {
                     readOnly
                     value={saveLocation}
                     className="add-download-control flex-1 px-3 py-1.5 text-xs text-text-muted font-mono"
-                    aria-label="Save location"
+                    aria-label={t($ => $.addDownloads.saveLocation)}
                   />
                   <button
                     onClick={handleBrowse}
                     className="add-download-button add-download-button-secondary px-3 text-xs font-medium"
                   >
-                    Browse
+                    {t($ => $.addDownloads.browse)}
                   </button>
                 </div>
                 {parsedItems.length > 1 && !isSaveLocationManual && (
                   <p className="mt-2 text-[11px] text-text-muted">
-                    Files will be organized into category folders.
+                    {t($ => $.addDownloads.categoryFolders)}
                   </p>
                 )}
                 {isSaveLocationManual && (
                   <p className="mt-2 text-[11px] text-text-muted">
-                    All selected downloads will use this folder.
+                    {t($ => $.addDownloads.sharedFolder)}
                   </p>
                 )}
               </section>
@@ -1350,13 +1377,13 @@ export const AddDownloadsModal = () => {
               {/* Transfer Settings */}
               <section className="add-download-section">
                 <div className="add-download-section-title flex items-center gap-2 mb-3">
-                  <Settings size={16} className="text-blue-500" /> Transfer Settings
+                  <Settings size={16} className="text-blue-500" /> {t($ => $.addDownloads.transferSettings)}
                 </div>
                   <div className="flex flex-col gap-3">
                     <div className="flex items-center justify-between">
-                      <label className="text-xs text-text-secondary font-medium">Connections per File</label>
+                      <label className="text-xs text-text-secondary font-medium">{t($ => $.addDownloads.connectionsPerFile)}</label>
                     <div className="flex items-center gap-2">
-                      <input type="range" min="1" max="16" value={connections} onChange={e=>setConnections(Number(e.target.value))} className="add-download-range w-24 accent-blue-500 cursor-pointer" aria-label="Connections per file" />
+                      <input type="range" min="1" max="16" value={connections} onChange={e=>setConnections(Number(e.target.value))} className="add-download-range w-24 accent-blue-500 cursor-pointer" aria-label={t($ => $.addDownloads.connectionsPerFileAria)} />
                       <span className="add-download-value text-xs text-text-primary font-mono w-6 text-center">{connections}</span>
                     </div>
                   </div>
@@ -1364,11 +1391,11 @@ export const AddDownloadsModal = () => {
                   <div className="flex items-center justify-between">
                     <label className="flex items-center gap-2 text-xs text-text-secondary font-medium cursor-pointer">
                       <input type="checkbox" checked={speedLimitEnabled} onChange={e=>setSpeedLimitEnabled(e.target.checked)} className="add-download-checkbox" />
-                      Limit speed per file
+                      {t($ => $.addDownloads.limitSpeedPerFile)}
                     </label>
                     {speedLimitEnabled && (
                       <div className="flex items-center gap-1.5">
-                        <input type="number" value={speedLimit} onChange={e=>setSpeedLimit(e.target.value)} className="add-download-control w-16 px-2 py-1 text-xs font-mono" aria-label="Speed limit per file" />
+                        <input type="number" value={speedLimit} onChange={e=>setSpeedLimit(e.target.value)} className="add-download-control w-16 px-2 py-1 text-xs font-mono" aria-label={t($ => $.addDownloads.speedLimitPerFileAria)} />
                         <span className="text-[10px] text-text-muted">KiB/s</span>
                       </div>
                     )}
@@ -1379,17 +1406,17 @@ export const AddDownloadsModal = () => {
               {/* Authorization */}
               <section className="add-download-section">
                 <div className="add-download-section-title flex items-center gap-2 mb-3">
-                  <Shield size={16} className="text-blue-500" /> Authorization
+                  <Shield size={16} className="text-blue-500" /> {t($ => $.addDownloads.authorization)}
                 </div>
                 <label className="flex items-center gap-2 text-xs text-text-secondary font-medium cursor-pointer mb-3">
                   <input type="checkbox" checked={useAuth} onChange={e=>setUseAuth(e.target.checked)} className="add-download-checkbox" />
-                  Use authorization
+                  {t($ => $.addDownloads.useAuthorization)}
                 </label>
 
                 {useAuth && (
                   <div className="space-y-2.5 pl-5 border-l-2 border-border-modal/50">
-                    <input type="text" value={username} onChange={e=>setUsername(e.target.value)} placeholder="Username" className="add-download-control w-full px-3 py-1.5 text-xs" />
-                    <input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password" className="add-download-control w-full px-3 py-1.5 text-xs" />
+                    <input type="text" value={username} onChange={e=>setUsername(e.target.value)} placeholder={t($ => $.addDownloads.username)} className="add-download-control w-full px-3 py-1.5 text-xs" />
+                    <input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder={t($ => $.addDownloads.password)} className="add-download-control w-full px-3 py-1.5 text-xs" />
                   </div>
                 )}
               </section>
@@ -1402,27 +1429,27 @@ export const AddDownloadsModal = () => {
                   aria-expanded={advancedExpanded}
                 >
                   {advancedExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-                  Advanced Transfer
+                  {t($ => $.addDownloads.advancedTransfer)}
                 </button>
 
                 {advancedExpanded && (
                   <div className="mt-4 space-y-4 pl-6">
                     <label className="flex items-center gap-2 text-xs text-text-secondary font-medium cursor-pointer">
                       <input type="checkbox" checked={checksumEnabled} onChange={e=>setChecksumEnabled(e.target.checked)} className="add-download-checkbox" />
-                      Verify Checksum
+                      {t($ => $.addDownloads.verifyChecksum)}
                     </label>
 
                     {checksumEnabled && (
                       <div className="flex gap-2">
-                        <select value={checksumAlgo} onChange={e=>setChecksumAlgo(e.target.value)} className="add-download-control add-download-select w-24 px-2 text-xs" aria-label="Checksum algorithm">
+                        <select value={checksumAlgo} onChange={e=>setChecksumAlgo(e.target.value)} className="add-download-control add-download-select w-24 px-2 text-xs" aria-label={t($ => $.addDownloads.checksumAlgorithm)}>
                           <option>MD5</option><option>SHA-1</option><option>SHA-256</option>
                         </select>
-                        <input type="text" value={checksumValue} onChange={e=>setChecksumValue(e.target.value)} placeholder="Expected digest" className="add-download-control flex-1 px-3 py-1.5 text-xs font-mono" />
+                        <input type="text" value={checksumValue} onChange={e=>setChecksumValue(e.target.value)} placeholder={t($ => $.addDownloads.expectedDigest)} className="add-download-control flex-1 px-3 py-1.5 text-xs font-mono" />
                       </div>
                     )}
 
                     <div>
-                      <label className="block text-[10px] uppercase font-bold tracking-wider text-text-muted mb-1">Headers</label>
+                      <label className="block text-[10px] uppercase font-bold tracking-wider text-text-muted mb-1">{t($ => $.addDownloads.headers)}</label>
                       <textarea
                         value={headers}
                         onChange={e => {
@@ -1430,11 +1457,11 @@ export const AddDownloadsModal = () => {
                           setHeaders(e.target.value);
                         }}
                         className="add-download-control w-full h-12 px-3 py-1.5 text-xs font-mono resize-none"
-                        aria-label="Request headers"
+                        aria-label={t($ => $.addDownloads.requestHeaders)}
                       />
                     </div>
                     <div>
-                      <label className="block text-[10px] uppercase font-bold tracking-wider text-text-muted mb-1">Cookies</label>
+                      <label className="block text-[10px] uppercase font-bold tracking-wider text-text-muted mb-1">{t($ => $.addDownloads.cookies)}</label>
                       <input
                         type="text"
                         value={cookies}
@@ -1442,14 +1469,14 @@ export const AddDownloadsModal = () => {
                           cookiesManuallyEditedRef.current = true;
                           setCookies(e.target.value);
                         }}
-                        placeholder="name=value; other=value"
+                        placeholder={t($ => $.addDownloads.cookiePlaceholder)}
                         className="add-download-control w-full px-3 py-1.5 text-xs font-mono"
-                        aria-label="Cookies"
+                        aria-label={t($ => $.addDownloads.cookies)}
                       />
                     </div>
                     <div>
-                      <label className="block text-[10px] uppercase font-bold tracking-wider text-text-muted mb-1">Mirrors</label>
-                      <textarea value={mirrors} onChange={e=>setMirrors(e.target.value)} className="add-download-control w-full h-12 px-3 py-1.5 text-xs font-mono resize-none" aria-label="Mirrors" />
+                      <label className="block text-[10px] uppercase font-bold tracking-wider text-text-muted mb-1">{t($ => $.addDownloads.mirrors)}</label>
+                      <textarea value={mirrors} onChange={e=>setMirrors(e.target.value)} className="add-download-control w-full h-12 px-3 py-1.5 text-xs font-mono resize-none" aria-label={t($ => $.addDownloads.mirrors)} />
                     </div>
                   </div>
                 )}
@@ -1462,11 +1489,11 @@ export const AddDownloadsModal = () => {
         {/* Footer */}
         <div className="add-download-footer p-4 flex items-center shrink-0">
           <div className="text-[11px] text-text-muted font-medium flex-1">
-            {metadataSummaryMessage(parsedItems)}
+            {metadataSummary}
           </div>
           <div className="flex gap-2.5">
             <button onClick={closeModalFromDismissAction} disabled={isSubmitting || showKeychainModal} className="add-download-button add-download-button-secondary px-4 text-xs">
-              Cancel
+              {t($ => $.addDownloads.cancel)}
             </button>
             <div ref={actionMenuRef} className="relative flex gap-2.5">
               <button
@@ -1474,7 +1501,7 @@ export const AddDownloadsModal = () => {
                 disabled={!canSubmit || isSubmitting}
                 className="add-download-button add-download-button-primary px-5 text-xs"
               >
-                <Play size={12} fill="currentColor" /> Start Downloads
+                <Play size={12} fill="currentColor" /> {t($ => $.addDownloads.startDownloads)}
               </button>
               <div className="relative">
                 <button
@@ -1482,11 +1509,11 @@ export const AddDownloadsModal = () => {
                   onClick={() => setIsQueueMenuOpen(open => !open)}
                   disabled={!canSubmit || isSubmitting}
                   className="add-download-button add-download-button-secondary px-4 text-xs"
-                  aria-label="Add to queue"
+                  aria-label={t($ => $.addDownloads.addToQueue)}
                   aria-haspopup="menu"
                   aria-expanded={isQueueMenuOpen}
                 >
-                  Add to queue <ChevronDown size={14} className="ml-1" />
+                  {t($ => $.addDownloads.addToQueue)} <ChevronDown size={14} className="ml-1" />
                 </button>
                 {isQueueMenuOpen && (
                   <div

@@ -1,6 +1,7 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Minus, Square, X } from 'lucide-react';
 import type { PointerEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 
 const appWindow = getCurrentWindow();
 
@@ -9,13 +10,15 @@ const stopTitlebarDrag = (event: PointerEvent<HTMLButtonElement>) => {
 };
 
 export function WindowControls() {
+  const { t } = useTranslation();
+
   return (
-    <div className="window-controls" aria-label="Window controls">
+    <div className="window-controls" aria-label={t($ => $.window.controls)}>
       <button
         type="button"
         className="window-control close"
-        title="Close"
-        aria-label="Close"
+        title={t($ => $.window.close)}
+        aria-label={t($ => $.window.close)}
         onPointerDown={stopTitlebarDrag}
         onClick={(event) => {
           event.stopPropagation();
@@ -27,8 +30,8 @@ export function WindowControls() {
       <button
         type="button"
         className="window-control minimize"
-        title="Minimize"
-        aria-label="Minimize"
+        title={t($ => $.window.minimize)}
+        aria-label={t($ => $.window.minimize)}
         onPointerDown={stopTitlebarDrag}
         onClick={(event) => {
           event.stopPropagation();
@@ -40,8 +43,8 @@ export function WindowControls() {
       <button
         type="button"
         className="window-control maximize"
-        title="Maximize"
-        aria-label="Maximize"
+        title={t($ => $.window.maximize)}
+        aria-label={t($ => $.window.maximize)}
         onPointerDown={stopTitlebarDrag}
         onClick={(event) => {
           event.stopPropagation();

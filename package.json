@@ -47,9 +47,11 @@
     "@tauri-apps/plugin-log": "^2.9.0",
     "@tauri-apps/plugin-notification": "^2.3.3",
     "@tauri-apps/plugin-opener": "^2",
+    "i18next": "^26.3.6",
     "lucide-react": "^1.24.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "react-i18next": "^17.0.10",
     "zustand": "^5.0.14"
   },
   "devDependencies": {

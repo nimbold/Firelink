@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 export type DuplicateReason = { type: 'url', msg: string } | { type: 'file', msg: string };
 type DuplicateResolution = 'rename' | 'replace' | 'skip';
@@ -18,6 +19,7 @@ interface Props {
 }
 
 export const DuplicateResolutionModal = ({ conflicts: initialConflicts, onConfirm, onCancel }: Props) => {
+  const { t } = useTranslation();
   const [conflicts, setConflicts] = useState<DuplicateConflict[]>(initialConflicts);
 
   useEffect(() => {
@@ -43,8 +45,8 @@ export const DuplicateResolutionModal = ({ conflicts: initialConflicts, onConfir
     >
       <div className="app-modal w-[500px] flex flex-col overflow-hidden text-sm">
         <div className="p-4 border-b border-border-modal flex flex-col gap-2">
-          <h2 className="text-lg font-semibold text-text-primary">Duplicate Downloads Detected</h2>
-          <p className="text-xs text-text-muted">Some of the downloads you are adding already exist in the queue or on disk. Please choose how to resolve these conflicts.</p>
+          <h2 className="text-lg font-semibold text-text-primary">{t($ => $.dialogs.duplicateDownloads.title)}</h2>
+          <p className="text-xs text-text-muted">{t($ => $.dialogs.duplicateDownloads.description)}</p>
         </div>
         
         <div className="max-h-[300px] overflow-y-auto p-4 space-y-3">
@@ -59,9 +61,9 @@ export const DuplicateResolutionModal = ({ conflicts: initialConflicts, onConfir
                 onChange={(e) => updateResolution(conflict.id, e.target.value as DuplicateResolution)}
                 className="app-control w-24 shrink-0 px-2 py-1 text-xs"
               >
-                <option value="rename">Rename</option>
-                {conflict.reason.type === 'file' && conflict.replaceAllowed && <option value="replace">Replace</option>}
-                <option value="skip">Skip</option>
+                <option value="rename">{t($ => $.dialogs.duplicateDownloads.rename)}</option>
+                {conflict.reason.type === 'file' && conflict.replaceAllowed && <option value="replace">{t($ => $.dialogs.duplicateDownloads.replace)}</option>}
+                <option value="skip">{t($ => $.dialogs.duplicateDownloads.skip)}</option>
               </select>
             </div>
           ))}
@@ -69,13 +71,13 @@ export const DuplicateResolutionModal = ({ conflicts: initialConflicts, onConfir
 
         <div className="p-4 border-t border-border-modal flex items-center justify-between bg-sidebar-bg/50">
           <button onClick={onCancel} className="app-button px-4 text-xs">
-            Cancel
+            {t($ => $.actions.cancel)}
           </button>
           <button 
             onClick={() => onConfirm(conflicts.map(c => ({ id: c.id, resolution: c.resolution })))}
             className="app-button app-button-primary px-5 text-xs"
           >
-            Continue
+            {t($ => $.actions.continue)}
           </button>
         </div>
       </div>

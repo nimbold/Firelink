@@ -19,6 +19,7 @@ import {
   normalizeDownloadLocationSettings
 } from '../utils/downloadLocations';
 import { normalizeSpeedLimitForBackend } from '../utils/downloads';
+import i18n from '../i18n';
 
 let settingsQueue: Promise<void> = Promise.resolve();
 let pairingTokenHydrationRequest: Promise<PairingTokenHydration> | null = null;
@@ -425,11 +426,11 @@ export const useSettingsStore = create<SettingsState>()(
         const current = get();
         if (!current.keychainAccessReady && !current.isPairingTokenPersistent) {
           set({ showKeychainModal: true });
-          throw new Error('Grant credential-store access before regenerating the pairing token.');
+          throw new Error(i18n.t($ => $.keychain.accessRequired));
         }
         const result = await invoke('regenerate_pairing_token');
         if (!result.persistent) {
-          throw new Error(result.error || 'Credential store access is unavailable.');
+          throw new Error(result.error || i18n.t($ => $.keychain.storeUnavailable));
         }
         set({
           extensionPairingToken: result.token,

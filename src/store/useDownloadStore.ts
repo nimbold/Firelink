@@ -14,6 +14,7 @@ import {
   resolveCategoryDestination
 } from '../utils/downloadLocations';
 import { canPauseDownload, canStartDownload } from '../utils/downloadActions';
+import i18n from '../i18n';
 
 export type { DownloadCategory } from '../utils/downloads';
 
@@ -896,7 +897,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     if (!item) return;
 
     if (item.status === 'downloading' || item.status === 'processing' || item.status === 'retrying') {
-      throw new Error("Cannot change properties while transfer is active. Pause it first.");
+      throw new Error(i18n.t($ => $.downloadTable.transferActive));
     }
 
     if (item.status === 'ready' || item.status === 'staged' || item.status === 'completed' || item.status === 'failed') {
@@ -1011,15 +1012,17 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     await waitForPendingStartupResume();
     const targetItem = get().downloads.find(d => d.id === id);
     if (!targetItem) {
-      throw new Error('Cannot redownload: download was not found.');
+      throw new Error(i18n.t($ => $.downloadTable.redownloadNotFound));
     }
 
     if (!['completed', 'failed', 'paused'].includes(targetItem.status)) {
-      throw new Error(`Cannot redownload a ${targetItem.status} download. Pause or wait for it to finish first.`);
+      throw new Error(i18n.t($ => $.downloadTable.redownloadActive, {
+        status: i18n.t($ => $.downloads.status[targetItem.status])
+      }));
     }
 
     const url = targetItem.url?.trim();
-    if (!url) throw new Error('Cannot redownload: original URL is missing.');
+    if (!url) throw new Error(i18n.t($ => $.downloadTable.originalUrlMissing));
 
     setDownloadControlIntent(id, 'resume');
     await invalidateAndWaitForDispatch(id);
@@ -1283,7 +1286,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     const selected = get().downloads.filter(item => selectedIds.has(item.id));
     const locked = selected.find(item => isActiveDownloadStatus(item.status) && item.status !== 'queued');
     if (locked) {
-      throw new Error(`Pause ${locked.fileName} before moving it to another queue.`);
+      throw new Error(i18n.t($ => $.downloadTable.pauseBeforeMove, { file: locked.fileName }));
     }
 
     const movableSelected = selected.filter(item => item.status !== 'completed');

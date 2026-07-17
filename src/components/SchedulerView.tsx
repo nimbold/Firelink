@@ -10,22 +10,23 @@ import { isActiveDownloadStatus } from '../utils/downloads';
 import { WindowDragRegion } from './WindowDragRegion';
 import { useToast } from '../contexts/ToastContext';
 import { usePlatformInfo } from '../utils/platform';
+import { useTranslation } from 'react-i18next';
 
 const days = [
-  { value: 0, label: 'Su' },
-  { value: 1, label: 'Mo' },
-  { value: 2, label: 'Tu' },
-  { value: 3, label: 'We' },
-  { value: 4, label: 'Th' },
-  { value: 5, label: 'Fr' },
-  { value: 6, label: 'Sa' },
-];
+  { value: 0, key: 'su' },
+  { value: 1, key: 'mo' },
+  { value: 2, key: 'tu' },
+  { value: 3, key: 'we' },
+  { value: 4, key: 'th' },
+  { value: 5, key: 'fr' },
+  { value: 6, key: 'sa' },
+] as const;
 
-const postActions: { value: PostQueueAction; label: string; icon: typeof Moon }[] = [
-  { value: 'none', label: 'Do nothing', icon: CheckCircle2 },
-  { value: 'sleep', label: 'Sleep', icon: Moon },
-  { value: 'restart', label: 'Restart', icon: RotateCcw },
-  { value: 'shutdown', label: 'Shut down', icon: Power },
+const postActions: { value: PostQueueAction; icon: typeof Moon }[] = [
+  { value: 'none', icon: CheckCircle2 },
+  { value: 'sleep', icon: Moon },
+  { value: 'restart', icon: RotateCcw },
+  { value: 'shutdown', icon: Power },
 ];
 
 const minuteOfDay = (value: string) => {
@@ -33,8 +34,8 @@ const minuteOfDay = (value: string) => {
   return hour * 60 + minute;
 };
 
-function nextScheduledRun(settings: SchedulerSettings): string {
-  if (!settings.enabled) return 'Scheduler is disabled';
+function nextScheduledRun(settings: SchedulerSettings): Date | 'disabled' | 'none' {
+  if (!settings.enabled) return 'disabled';
 
   const [hour, minute] = settings.startTime.split(':').map(Number);
   const now = new Date();
@@ -45,20 +46,15 @@ function nextScheduledRun(settings: SchedulerSettings): string {
     candidate.setHours(hour, minute, 0, 0);
     const allowedDay = settings.everyday || settings.selectedDays.includes(candidate.getDay());
     if (allowedDay && candidate > now) {
-      return candidate.toLocaleString(undefined, {
-        weekday: 'short',
-        month: 'short',
-        day: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit'
-      });
+      return candidate;
     }
   }
 
-  return 'No scheduled day selected';
+  return 'none';
 }
 
 export default function SchedulerView() {
+  const { t } = useTranslation();
   const savedSettings = useSettingsStore(state => state.scheduler);
   const schedulerRunning = useSettingsStore(state => state.schedulerRunning);
   const setScheduler = useSettingsStore(state => state.setScheduler);
@@ -75,7 +71,18 @@ export default function SchedulerView() {
   }, [savedSettings]);
 
 
-  const nextRun = useMemo(() => nextScheduledRun(draft), [draft]);
+  const nextRun = useMemo(() => {
+    const scheduledRun = nextScheduledRun(draft);
+    if (scheduledRun === 'disabled') return t($ => $.scheduler.disabled);
+    if (scheduledRun === 'none') return t($ => $.scheduler.noScheduledDay);
+    return scheduledRun.toLocaleString(undefined, {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit'
+    });
+  }, [draft, t]);
   const hasUnsavedChanges = useMemo(
     () => JSON.stringify(draft) !== JSON.stringify(savedSettings),
     [draft, savedSettings]
@@ -116,15 +123,15 @@ export default function SchedulerView() {
 
   const save = () => {
     if (draft.enabled && !draft.everyday && draft.selectedDays.length === 0) {
-      addToast({ message: 'Select at least one day for the scheduler', variant: 'error', isActionable: true });
+      addToast({ message: t($ => $.scheduler.validationDay), variant: 'error', isActionable: true });
       return;
     }
     if (draft.enabled && effectiveSelectedQueueIds.length === 0) {
-      addToast({ message: 'Select at least one queue for the scheduler', variant: 'error', isActionable: true });
+      addToast({ message: t($ => $.scheduler.validationQueue), variant: 'error', isActionable: true });
       return;
     }
     if (draft.enabled && draft.stopTimeEnabled && minuteOfDay(draft.stopTime) <= minuteOfDay(draft.startTime)) {
-      addToast({ message: 'Stop time must be later than start time', variant: 'error', isActionable: true });
+      addToast({ message: t($ => $.scheduler.validationStopTime), variant: 'error', isActionable: true });
       return;
     }
     const normalized = {
@@ -134,7 +141,7 @@ export default function SchedulerView() {
     };
     setScheduler(normalized);
     setDraft(normalized);
-    addToast({ message: 'Scheduler settings saved', variant: 'success' });
+    addToast({ message: t($ => $.scheduler.saved), variant: 'success' });
   };
 
   const runNow = async () => {
@@ -155,9 +162,14 @@ export default function SchedulerView() {
     if (activeIds.length > 0) {
       useSettingsStore.getState().setSchedulerRunning(true);
       useSettingsStore.getState().setSchedulerActiveDownloadIds(activeIds);
-      addToast({ message: `Tracking ${activeIds.length} scheduled download${activeIds.length === 1 ? '' : 's'}`, variant: 'success' });
+      addToast({
+        message: activeIds.length === 1
+          ? t($ => $.scheduler.trackingOne)
+          : t($ => $.scheduler.trackingMany, { count: activeIds.length }),
+        variant: 'success'
+      });
     } else {
-      addToast({ message: 'No downloads in the selected queues can be started', variant: 'info' });
+      addToast({ message: t($ => $.scheduler.noStartableDownloads), variant: 'info' });
     }
   };
 
@@ -168,7 +180,14 @@ export default function SchedulerView() {
     const count = counts.reduce((total, queueCount) => total + queueCount, 0);
     useSettingsStore.getState().setSchedulerRunning(false);
     useSettingsStore.getState().setSchedulerActiveDownloadIds([]);
-    addToast({ message: count > 0 ? `Paused ${count} active download${count === 1 ? '' : 's'}` : 'No active downloads', variant: 'info' });
+    addToast({
+      message: count === 0
+        ? t($ => $.scheduler.noActiveDownloads)
+        : count === 1
+          ? t($ => $.scheduler.pausedOne)
+          : t($ => $.scheduler.pausedMany, { count }),
+      variant: 'info'
+    });
   };
 
   const refreshPermissionStatus = useCallback(async (showMessage = false) => {
@@ -178,12 +197,12 @@ export default function SchedulerView() {
       await invoke('check_automation_permission');
       setAutomationPermissionGranted(true);
       if (showMessage) {
-        setPermissionMessage('Automation permission is available.');
+        setPermissionMessage(t($ => $.scheduler.permissionAvailable));
       }
     } catch {
       setAutomationPermissionGranted(false);
       if (showMessage) {
-        setPermissionMessage('Automation permission is missing. Enable Firelink under Automation for System Events in System Settings.');
+        setPermissionMessage(t($ => $.scheduler.permissionMissingDetails));
       }
     }
   }, [isMac]);
@@ -222,18 +241,18 @@ export default function SchedulerView() {
 
   const handlePermissionAction = async () => {
     if (automationPermissionGranted) {
-      await openAutomationSettings('macOS does not allow Firelink to revoke Automation permission directly. Revoke System Events access in System Settings, then return to Firelink.');
+      await openAutomationSettings(t($ => $.scheduler.revokePermissionDetails));
       return;
     }
 
-    setPermissionMessage('Requesting Automation permission...');
+    setPermissionMessage(t($ => $.scheduler.requestingPermission));
     try {
       await invoke('request_automation_permission');
       setAutomationPermissionGranted(true);
-      setPermissionMessage('Automation permission is available.');
+      setPermissionMessage(t($ => $.scheduler.permissionAvailable));
     } catch {
       setAutomationPermissionGranted(false);
-      await openAutomationSettings('Enable Firelink under Automation for System Events in System Settings, then return to Firelink.');
+      await openAutomationSettings(t($ => $.scheduler.enablePermissionDetails));
     }
   };
 
@@ -253,27 +272,27 @@ export default function SchedulerView() {
               className={`inline-block h-4 w-4 transform rounded-full bg-white transition duration-200 ease-in-out ${draft.enabled ? 'translate-x-4' : 'translate-x-1'}`}
             />
           </button>
-          Scheduler
+          {t($ => $.scheduler.title)}
         </div>
         <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
           schedulerRunning ? 'bg-green-500/15 text-green-500' : 'bg-item-hover text-text-muted'
         }`}>
-          {schedulerRunning ? 'Running' : nextRun}
+          {schedulerRunning ? t($ => $.scheduler.running) : nextRun}
         </span>
         {hasUnsavedChanges && (
           <span className="rounded-full bg-orange-500/10 px-2.5 py-1 text-[11px] font-semibold text-orange-300">
-            Unsaved changes
+            {t($ => $.scheduler.unsavedChanges)}
           </span>
         )}
         <div className="ml-auto flex gap-2">
           <button onClick={runNow} className="app-button px-3 text-[11px]">
-            <Play size={14} /> Run Now
+            <Play size={14} /> {t($ => $.scheduler.runNow)}
           </button>
           <button onClick={pauseNow} className="app-button px-3 text-[11px]">
-            <Pause size={14} /> Pause
+            <Pause size={14} /> {t($ => $.scheduler.pause)}
           </button>
           <button onClick={save} className="app-button app-button-primary px-3 text-[11px]">
-            <Save size={14} /> Save Settings
+            <Save size={14} /> {t($ => $.scheduler.saveSettings)}
           </button>
         </div>
       </div>
@@ -282,29 +301,29 @@ export default function SchedulerView() {
         <div className={`max-w-[760px] space-y-4 ${draft.enabled ? '' : 'opacity-50'}`}>
           <section className="app-card p-5">
             <div className="mb-5 flex items-center gap-2 font-semibold text-text-primary">
-              <Clock3 size={17} className="text-accent" /> Timing
+              <Clock3 size={17} className="text-accent" /> {t($ => $.scheduler.timing)}
             </div>
             <div className="flex flex-wrap items-end gap-8">
               <label className="space-y-2 text-[12px] text-text-secondary">
-                <span className="block">Start Time</span>
+                <span className="block">{t($ => $.scheduler.startTime)}</span>
                 <input type="time" value={draft.startTime} onChange={event => updateDraft('startTime', event.target.value)} disabled={!draft.enabled} className="app-control px-3 py-2 text-text-primary" />
               </label>
               <div className="space-y-2">
                 <label className="flex items-center gap-2 text-[12px] text-text-secondary">
                   <input type="checkbox" checked={draft.stopTimeEnabled} onChange={event => updateDraft('stopTimeEnabled', event.target.checked)} disabled={!draft.enabled} className="accent-accent" />
-                  Stop Time
+                  {t($ => $.scheduler.stopTime)}
                 </label>
                 <input type="time" value={draft.stopTime} onChange={event => updateDraft('stopTime', event.target.value)} disabled={!draft.enabled || !draft.stopTimeEnabled} className="app-control px-3 py-2 text-text-primary disabled:opacity-50" />
               </div>
             </div>
             <p className="mt-4 text-[11px] text-text-muted">
-              If Firelink is asleep at the start time, it starts the selected queues when it returns later that day, unless the stop time has already passed.
+              {t($ => $.scheduler.timingDescription)}
             </p>
 
             <div className="my-5 border-t border-border-color" />
             <label className="flex items-center gap-2 text-[13px] font-medium text-text-primary">
               <input type="checkbox" checked={draft.everyday} onChange={event => updateDraft('everyday', event.target.checked)} disabled={!draft.enabled} className="accent-accent" />
-              Run Every Day
+              {t($ => $.scheduler.runEveryDay)}
             </label>
             {!draft.everyday && (
               <div className="mt-4 flex gap-2">
@@ -320,7 +339,7 @@ export default function SchedulerView() {
                         selected ? 'bg-accent text-white' : 'bg-bg-input text-text-primary hover:bg-item-hover'
                       }`}
                     >
-                      {day.label}
+                      {t($ => $.scheduler.days[day.key])}
                     </button>
                   );
                 })}
@@ -330,7 +349,7 @@ export default function SchedulerView() {
 
           <section className="app-card p-5">
             <div className="mb-4 flex items-center gap-2 font-semibold text-text-primary">
-              <List size={17} className="text-accent" /> Queues to Schedule
+              <List size={17} className="text-accent" /> {t($ => $.scheduler.queuesToSchedule)}
             </div>
             <div className="space-y-3">
               {queues.map(queue => {
@@ -346,7 +365,7 @@ export default function SchedulerView() {
                     />
                     {queue.name}
                     {queue.isMain && (
-                      <span className="text-[11px] text-text-muted">Default queue</span>
+                      <span className="text-[11px] text-text-muted">{t($ => $.scheduler.defaultQueue)}</span>
                     )}
                   </label>
                 );
@@ -356,9 +375,9 @@ export default function SchedulerView() {
 
           <section className="app-card p-5">
             <div className="mb-2 flex items-center gap-2 font-semibold text-text-primary">
-              <Power size={17} className="text-accent" /> After Completion
+              <Power size={17} className="text-accent" /> {t($ => $.scheduler.afterCompletion)}
             </div>
-            <p className="mb-4 text-[12px] text-text-muted">Choose what happens after downloads started by the scheduler finish.</p>
+            <p className="mb-4 text-[12px] text-text-muted">{t($ => $.scheduler.afterCompletionDescription)}</p>
             <div className="grid grid-cols-2 gap-2">
               {postActions.map(action => {
                 const Icon = action.icon;
@@ -368,13 +387,13 @@ export default function SchedulerView() {
                   }`}>
                     <input type="radio" name="post-action" checked={draft.postQueueAction === action.value} onChange={() => updateDraft('postQueueAction', action.value)} disabled={!draft.enabled} className="accent-accent" />
                     <Icon size={15} />
-                    {action.label}
+                    {t($ => $.scheduler.postActions[action.value])}
                   </label>
                 );
               })}
             </div>
             {draft.postQueueAction !== 'none' && (
-              <p className="mt-3 text-[11px] text-orange-400">This action can interrupt other work on the computer. Firelink invokes it immediately after the scheduled queue finishes.</p>
+              <p className="mt-3 text-[11px] text-orange-400">{t($ => $.scheduler.actionWarning)}</p>
             )}
           </section>
         </div>
@@ -382,27 +401,27 @@ export default function SchedulerView() {
         {isMac ? (
           <section className="app-card mt-4 max-w-[760px] p-5">
             <div className="mb-2 flex items-center gap-2 font-semibold text-text-primary">
-              <LockKeyhole size={17} className="text-accent" /> System Permissions
+              <LockKeyhole size={17} className="text-accent" /> {t($ => $.scheduler.systemPermissions)}
             </div>
-          <p className="mb-4 text-[12px] text-text-muted">Sleep, restart, and shut down require macOS Automation permission for System Events.</p>
+          <p className="mb-4 text-[12px] text-text-muted">{t($ => $.scheduler.macPermissionDescription)}</p>
           <div className="mb-4 flex items-center gap-2 text-[12px]">
             {automationPermissionGranted ? (
               <>
                 <CheckCircle2 size={16} className="text-green-500" />
-                <span className="font-medium text-green-500">Automation permission granted</span>
+                <span className="font-medium text-green-500">{t($ => $.scheduler.permissionGranted)}</span>
               </>
             ) : (
               <>
                 <AlertCircle size={16} className="text-orange-400" />
                 <span className="font-medium text-orange-400">
-                  {automationPermissionGranted === null ? 'Checking Automation permission...' : 'Automation permission missing'}
+                  {automationPermissionGranted === null ? t($ => $.scheduler.permissionChecking) : t($ => $.scheduler.permissionMissing)}
                 </span>
               </>
             )}
           </div>
           <div className="flex gap-2">
             <button onClick={handlePermissionAction} className="app-button app-button-primary px-3 text-[11px]">
-              {automationPermissionGranted ? 'Revoke permission' : 'Grant permission'}
+              {automationPermissionGranted ? t($ => $.scheduler.revokePermission) : t($ => $.scheduler.grantPermission)}
             </button>
           </div>
             {permissionMessage && <p className="mt-3 text-[11px] text-text-muted">{permissionMessage}</p>}
@@ -410,11 +429,12 @@ export default function SchedulerView() {
         ) : (
           <section className="app-card mt-4 max-w-[760px] p-5">
             <div className="mb-2 flex items-center gap-2 font-semibold text-text-primary">
-              <LockKeyhole size={17} className="text-accent" /> System Actions
+              <LockKeyhole size={17} className="text-accent" /> {t($ => $.scheduler.systemActions)}
             </div>
             <p className="text-[12px] text-text-muted">
-              Sleep, restart, and shut down use {platform.os === 'windows' ? 'Windows system privileges' : 'your Linux desktop and system policy'}.
-              Firelink reports any rejected action when it runs; no permanent permission is claimed in advance.
+              {platform.os === 'windows'
+                ? t($ => $.scheduler.windowsActionsDescription)
+                : t($ => $.scheduler.linuxActionsDescription)}
             </p>
           </section>
         )}

@@ -14,11 +14,11 @@ import {
 import {
   canPauseDownload,
   canRedownload,
-  canStartDownload,
-  startActionLabel
+  canStartDownload
 } from '../utils/downloadActions';
 import { isActiveDownloadStatus, isTransferActiveStatus } from '../utils/downloads';
 import { readClipboardDownloadUrls } from '../utils/clipboard';
+import { useTranslation } from 'react-i18next';
 import {
   sortDownloads,
   type DownloadSortColumn,
@@ -33,6 +33,7 @@ const DEFAULT_COLUMN_WIDTHS = [340, 100, 220, 100, 80, 170];
 const COLUMN_WIDTHS_STORAGE_KEY = 'firelink-download-column-widths';
 
 export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
+  const { t } = useTranslation();
   const { downloads, queues, assignToQueue, openDeleteModal, redownload, moveInQueue } = useDownloadStore();
   const { addToast } = useToast();
   const isMac = navigator.userAgent.includes('Mac');
@@ -174,7 +175,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
       await invoke('open_downloaded_file', { path: fullPath });
     } catch (error) {
       console.error("Failed to open file:", error);
-      showInteractionError('Could not open downloaded file', error);
+      showInteractionError(t($ => $.downloadTable.openFileFailed), error);
     }
   }, [getDownloadPath, openProperties, showInteractionError]);
 
@@ -190,7 +191,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
       await invoke('reveal_in_file_manager', { path: pathToReveal });
     } catch (error) {
       console.error("Failed to show in Finder:", error);
-      showInteractionError('Could not show download in Finder', error);
+      showInteractionError(t($ => $.downloadTable.revealFileFailed), error);
     }
   };
 
@@ -351,13 +352,20 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     if (filter.startsWith('queue:')) {
       const qid = filter.replace('queue:', '');
       const queue = useDownloadStore.getState().queues.find(q => q.id === qid);
-      return queue ? queue.name : 'Unknown Queue';
+      return queue ? queue.name : t($ => $.downloadTable.unknownQueue);
     }
     switch (filter) {
-      case 'all': return 'All Downloads';
-      case 'active': return 'Active';
-      case 'completed': return 'Completed';
-      case 'unfinished': return 'Unfinished';
+      case 'all': return t($ => $.downloadTable.allDownloads);
+      case 'active': return t($ => $.downloadTable.active);
+      case 'completed': return t($ => $.downloadTable.completed);
+      case 'unfinished': return t($ => $.downloadTable.unfinished);
+      case 'Musics': return t($ => $.navigation.categories.musics);
+      case 'Movies': return t($ => $.navigation.categories.movies);
+      case 'Compressed': return t($ => $.navigation.categories.compressed);
+      case 'Documents': return t($ => $.navigation.categories.documents);
+      case 'Pictures': return t($ => $.navigation.categories.pictures);
+      case 'Applications': return t($ => $.navigation.categories.applications);
+      case 'Other': return t($ => $.navigation.categories.other);
       default: return filter;
     }
   };
@@ -365,7 +373,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   const handlePause = useCallback(async (id: string, skipConfirm = false) => {
     const download = useDownloadStore.getState().downloads.find(d => d.id === id);
     if (!skipConfirm && download && download.resumable === false) {
-      const confirmPause = window.confirm("This download does not support resuming. If you pause it, you will have to start over again later. Are you sure you want to pause?");
+      const confirmPause = window.confirm(t($ => $.downloadTable.nonResumableOne));
       if (!confirmPause) {
         return;
       }
@@ -375,7 +383,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
       await useDownloadStore.getState().pauseDownload(id);
     } catch (e) {
       console.error("Failed to pause:", e);
-      showInteractionError('Could not pause download', e);
+      showInteractionError(t($ => $.downloadTable.pauseFailed), e);
     }
   }, [showInteractionError]);
 
@@ -383,11 +391,11 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     try {
       const resumed = await useDownloadStore.getState().resumeDownload(item.id);
       if (!resumed) {
-        throw new Error('The backend rejected the start/resume request.');
+        throw new Error(t($ => $.downloadTable.backendRejectedStart));
       }
     } catch (error) {
       console.error("Failed to resume:", error);
-      showInteractionError(`Could not resume ${item.fileName}`, error);
+        showInteractionError(t($ => $.downloadTable.resumeFailed, { fileName: item.fileName }), error);
     }
   }, [showInteractionError]);
 
@@ -480,7 +488,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
             onClick={() => void handleAddDownload()}
             disabled={isReadingClipboard}
             aria-busy={isReadingClipboard}
-            title="Add Download"
+            title={t($ => $.downloadTable.addDownload)}
           >
             <Plus size={16} />
           </button>
@@ -491,7 +499,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
             onClick={() => {
               void resumeItemsSequentially(sortedDownloads.filter(d => canStartDownload(d.status)));
             }}
-            title="Resume All"
+            title={t($ => $.downloadTable.resumeAll)}
           >
             <Play size={15} fill="currentColor" />
           </button>
@@ -505,8 +513,8 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
               if (nonResumableCount > 0) {
                 const confirmPause = window.confirm(
                   nonResumableCount === 1
-                    ? "1 download does not support resuming. If you pause it, you will have to start over again later. Are you sure you want to pause?"
-                    : `${nonResumableCount} downloads do not support resuming. If you pause them, you will have to start over again later. Are you sure you want to pause?`
+                    ? t($ => $.downloadTable.nonResumableOne)
+                    : t($ => $.downloadTable.nonResumableMany, { count: nonResumableCount })
                 );
                 if (!confirmPause) {
                   return;
@@ -515,7 +523,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
               // Skip the individual check by passing a flag to handlePause, or just invoking directly.
               toPause.forEach(d => handlePause(d.id, true));
             }}
-            title="Pause All"
+            title={t($ => $.downloadTable.pauseAll)}
           >
             <Pause size={15} fill="currentColor" />
           </button>
@@ -532,15 +540,22 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
       <div className="downloads-table flex-1 flex flex-col">
         <div className="download-table-scroll">
           <div className="download-table-header" style={{ gridTemplateColumns: tableGridTemplate }}>
-            {['File Name', 'Size', 'Status', 'Speed', 'ETA', 'Date Added'].map((label, index) => (
+            {[
+              { key: 'File Name' as const, label: t($ => $.downloadTable.headers.fileName) },
+              { key: 'Size' as const, label: t($ => $.downloadTable.headers.size) },
+              { key: 'Status' as const, label: t($ => $.downloadTable.headers.status) },
+              { key: 'Speed' as const, label: t($ => $.downloadTable.headers.speed) },
+              { key: 'ETA' as const, label: t($ => $.downloadTable.headers.eta) },
+              { key: 'Date Added' as const, label: t($ => $.downloadTable.headers.dateAdded) },
+            ].map(({ key, label }, index) => (
               <div 
-                key={label} 
+                key={key}
                 className={`${index === 5 ? 'download-cell-right' : ''} cursor-pointer hover:text-text-primary transition-colors flex items-center justify-between`}
-                onClick={() => handleSort(label as DownloadSortColumn)}
+                onClick={() => handleSort(key)}
               >
                 <div className="flex items-center gap-1 w-full h-full select-none">
                   <span>{label}</span>
-                  {(isQueueFilter ? queueSortConfig : sortConfig)?.column === label && (
+                  {(isQueueFilter ? queueSortConfig : sortConfig)?.column === key && (
                     (isQueueFilter ? queueSortConfig : sortConfig)?.direction === 'asc'
                       ? <ChevronUp size={14} />
                       : <ChevronDown size={14} />
@@ -560,16 +575,16 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                 <div className="downloads-empty-state">
                   <ArrowDownCircle aria-hidden="true" />
                   <div className="downloads-empty-title">
-                    {isQueueFilter ? 'Queue is empty' : filter === 'completed' ? 'No Completed Downloads' : 'No Downloads'}
+                    {isQueueFilter ? t($ => $.downloadTable.queueEmpty) : filter === 'completed' ? t($ => $.downloadTable.noCompletedDownloads) : t($ => $.downloadTable.noDownloads)}
                   </div>
                   <div className="downloads-empty-description flex items-center justify-center mt-2.5 text-[13px] text-text-muted">
                     {isQueueFilter ? (
-                      'Add downloads to this queue from an item menu or the Add window.'
+                      t($ => $.downloadTable.queueEmptyDescription)
                     ) : filter === 'completed' ? (
-                      'Completed downloads will appear here.'
+                      t($ => $.downloadTable.completedDescription)
                     ) : (
                       <>
-                        Click <Plus size={15} className="text-accent stroke-[3] mx-1.5" /> button or
+                        {t($ => $.downloadTable.clickToAdd)} <Plus size={15} className="text-accent stroke-[3] mx-1.5" /> {t($ => $.downloadTable.addButtonOr)}
                         <span className="flex items-center mx-1.5">
                           <span className="flex items-center justify-center px-1.5 py-0.5 bg-item-hover rounded border border-border-color shadow-sm min-w-[22px] min-h-[22px]">
                             {isMac ? <Command size={12} strokeWidth={2.5} className="text-text-primary" /> : <span className="text-[10px] font-bold text-text-primary">Ctrl</span>}
@@ -579,7 +594,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                             <span className="text-[11px] font-bold text-text-primary">V</span>
                           </span>
                         </span>
-                        to add downloads
+                        {t($ => $.downloadTable.toAddDownloads)}
                       </>
                     )}
                   </div>
@@ -642,7 +657,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
               }}
                 className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
               >
-                Start/Resume
+                {t($ => $.downloadTable.startResume)}
               </button>
               )}
 
@@ -654,8 +669,8 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                     if (nonResumableCount > 0) {
                       const confirmPause = window.confirm(
                         nonResumableCount === 1
-                          ? "1 download does not support resuming. If you pause it, you will have to start over again later. Are you sure you want to pause?"
-                          : `${nonResumableCount} downloads do not support resuming. If you pause them, you will have to start over again later. Are you sure you want to pause?`
+                          ? t($ => $.downloadTable.nonResumableOne)
+                          : t($ => $.downloadTable.nonResumableMany, { count: nonResumableCount })
                       );
                       if (!confirmPause) {
                         return;
@@ -665,7 +680,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                   }}
                   className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
                 >
-                  Pause
+                  {t($ => $.downloadTable.pause)}
                 </button>
               )}
 
@@ -676,7 +691,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
               {itemsToQueue.length > 0 && (
                 <div className="group relative">
                   <button className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors flex justify-between items-center">
-                    Add to Queue
+                    {t($ => $.downloadTable.addToQueue)}
                     <ChevronRight size={14} />
                   </button>
                   <div className="absolute left-full top-0 hidden group-hover:block ml-1 min-w-[150px] bg-bg-modal border border-border-modal rounded-lg shadow-lg py-1.5 z-50">
@@ -684,7 +699,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                       <button key={q.id} onClick={() => {
                         setContextMenu(null);
                         void assignToQueue(itemsToQueue.map(item => item.id), q.id).catch(error => {
-                          showInteractionError('Could not move downloads to queue', error);
+                          showInteractionError(t($ => $.downloadTable.moveManyFailed), error);
                         });
                       }} className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors text-[12px]">
                         {q.name}
@@ -704,12 +719,12 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                     .filter(Boolean)
                     .join('\n');
                   navigator.clipboard.writeText(urls).catch(error => {
-                    showInteractionError('Could not copy addresses', error);
+                    showInteractionError(t($ => $.downloadTable.copyAddressesFailed), error);
                   });
                 }}
                 className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
               >
-                Copy Address
+                {t($ => $.downloadTable.copyAddress)}
               </button>
 
               <div className="h-[1px] bg-border-modal/60 my-1.5 mx-2"></div>
@@ -721,7 +736,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                 }}
                 className="w-full text-left px-3 py-2 text-red-400 hover:bg-red-500/10 transition-colors"
               >
-                Remove
+                {t($ => $.downloadTable.remove)}
               </button>
             </>
             );
@@ -736,7 +751,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                   }}
                   className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
                 >
-                  Open
+                  {t($ => $.downloadTable.open)}
                 </button>
               )}
 
@@ -747,7 +762,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                 }}
                 className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
               >
-              Show in Folder
+              {t($ => $.downloadTable.showInFolder)}
               </button>
 
               <div className="h-[1px] bg-border-modal/60 my-1.5 mx-2"></div>
@@ -760,7 +775,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                   }}
                   className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
                 >
-                  Pause
+                  {t($ => $.downloadTable.pause)}
                 </button>
               )}
 
@@ -772,7 +787,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                   }}
                   className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
                 >
-                  {startActionLabel(contextItem.status)}
+                  {contextItem.status === 'paused' ? t($ => $.downloadTable.resume) : t($ => $.downloadTable.start)}
                 </button>
               )}
 
@@ -783,19 +798,19 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                     try {
                       await redownload(contextItem.id);
                     } catch (error) {
-                      showInteractionError('Redownload failed', error);
+                      showInteractionError(t($ => $.downloadTable.redownloadFailed), error);
                     }
                   }}
                   className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
                 >
-                  Redownload
+                  {t($ => $.downloadTable.redownload)}
                 </button>
               )}
 
               {contextItem.status !== 'completed' && (
                 <div className="group relative">
                   <button className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors flex justify-between items-center">
-                    Add to Queue
+                    {t($ => $.downloadTable.addToQueue)}
                     <ChevronRight size={14} />
                   </button>
                   <div className="absolute left-full top-0 hidden group-hover:block ml-1 min-w-[150px] bg-bg-modal border border-border-modal rounded-lg shadow-lg py-1.5 z-50">
@@ -803,7 +818,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                       <button key={q.id} onClick={() => {
                         setContextMenu(null);
                         void assignToQueue([contextItem.id], q.id).catch(error => {
-                          showInteractionError('Could not move download to queue', error);
+                          showInteractionError(t($ => $.downloadTable.moveOneFailed), error);
                         });
                       }} className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors text-[12px]">
                         {q.name}
@@ -819,12 +834,12 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                 onClick={() => {
                   setContextMenu(null);
                   navigator.clipboard.writeText(contextItem.url).catch(error => {
-                    showInteractionError('Could not copy address', error);
+                    showInteractionError(t($ => $.downloadTable.copyAddressFailed), error);
                   });
                 }}
                 className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
               >
-                Copy Address
+                {t($ => $.downloadTable.copyAddress)}
               </button>
 
               {contextItem.status === 'completed' && (
@@ -833,18 +848,18 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                     setContextMenu(null);
                     const fullPath = await getDownloadPath(contextItem);
                     if (!fullPath) {
-                      showInteractionError('Could not copy file path', 'File name is missing');
+                      showInteractionError(t($ => $.downloadTable.copyPathFailed), t($ => $.downloadTable.missingFileName));
                       return;
                     }
                     try {
                       await navigator.clipboard.writeText(fullPath);
                     } catch (error) {
-                      showInteractionError('Could not copy file path', error);
+                      showInteractionError(t($ => $.downloadTable.copyPathFailed), error);
                     }
                   }}
                   className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
                 >
-                  Copy File Path
+                  {t($ => $.downloadTable.copyFilePath)}
                 </button>
               )}
 
@@ -857,7 +872,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                 }}
                 className="w-full text-left px-3 py-2 text-red-400 hover:bg-red-500/10 transition-colors"
               >
-                Remove
+                {t($ => $.downloadTable.remove)}
               </button>
 
               <div className="h-[1px] bg-border-modal/60 my-1.5 mx-2"></div>
@@ -869,7 +884,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                 }}
                 className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
               >
-                Properties
+                {t($ => $.downloadTable.properties)}
               </button>
             </>
           )}

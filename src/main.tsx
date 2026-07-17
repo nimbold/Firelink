@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./index.css";
 import App from "./App";
+import { i18nReady } from "./i18n";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ToastProvider } from "./contexts/ToastContext";
 import { error as logError, warn as logWarn, initLogger } from "./utils/logger";
@@ -34,7 +35,9 @@ console.warn = (...values: unknown[]) => {
 };
 
 const rootElement = document.getElementById("root");
-if (rootElement) {
+const renderApp = () => {
+  if (!rootElement) return;
+
   createRoot(rootElement).render(
     <StrictMode>
       <ErrorBoundary>
@@ -44,7 +47,12 @@ if (rootElement) {
       </ErrorBoundary>
     </StrictMode>,
   );
-}
+};
+
+void i18nReady.then(renderApp).catch(error => {
+  console.error('Failed to initialize localization:', error);
+  renderApp();
+});
 
 // Prevent the webview's default context menu ("Reload", etc.) on right-click.
 // Individual components that provide custom context menus call preventDefault()

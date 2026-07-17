@@ -32,6 +32,8 @@ import { getVersion } from '@tauri-apps/api/app';
 import type { PostQueueAction } from './bindings/PostQueueAction';
 import { PanelLeft } from 'lucide-react';
 import { isTrustedFirelinkReleaseUrl } from './utils/releaseUrls';
+import { syncDocumentLocale } from './i18n';
+import { useTranslation } from 'react-i18next';
 
 let automaticUpdateCheckStarted = false;
 const processingScheduleKeys = new Set<string>();
@@ -99,10 +101,21 @@ const playCompletionChime = async () => {
 };
 
 function App() {
+  const { i18n, t } = useTranslation();
   const platform = usePlatformInfo();
   const [filter, setFilter] = useState<SidebarFilter>('all');
   const [coreReady, setCoreReady] = useState(false);
   const [keychainConsentVersion, setKeychainConsentVersion] = useState('');
+
+  useEffect(() => {
+    const handleLanguageChanged = (language?: string) => {
+      syncDocumentLocale(language ?? i18n.language);
+    };
+
+    handleLanguageChanged();
+    i18n.on('languageChanged', handleLanguageChanged);
+    return () => i18n.off('languageChanged', handleLanguageChanged);
+  }, [i18n]);
 
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const stored = Number(window.localStorage.getItem('firelink-sidebar-width'));
@@ -151,7 +164,7 @@ function App() {
 
   useEffect(() => subscribeToSettingsPersistenceErrors(() => {
     addToast({
-      message: 'Could not save settings. Check storage permissions and try again.',
+      message: t($ => $.app.settingsSaveFailed),
       variant: 'error',
       isActionable: true
     });
@@ -181,7 +194,7 @@ function App() {
   const schedulePostQueueAction = useCallback((action: Exclude<PostQueueAction, 'none'>) => {
     clearPendingPostActionTimer();
 
-    const actionLabel = action === 'shutdown' ? 'Shut down' : action === 'restart' ? 'Restart' : 'Sleep';
+    const actionLabel = t($ => $.scheduler.postActions[action]);
     let timerId: number | null = null;
     let toastId: string | null = null;
     const cancel = () => {
@@ -199,13 +212,13 @@ function App() {
       onDismiss: clearPendingPostActionTimer,
       message: (
         <div className="flex items-center gap-3">
-          <span>{actionLabel} in 10 seconds.</span>
+          <span>{t($ => $.app.systemActionCountdown, { action: actionLabel })}</span>
           <button
             type="button"
             className="app-button px-2 py-1"
             onClick={cancel}
           >
-            Cancel
+            {t($ => $.actions.cancel)}
           </button>
         </div>
       )
@@ -226,7 +239,7 @@ function App() {
       );
       if (activeTransfers) {
         addToast({
-          message: 'System action cancelled because another download is active or queued.',
+          message: t($ => $.app.systemActionCancelled),
           variant: 'warning',
           isActionable: true
         });
@@ -235,7 +248,7 @@ function App() {
       invoke('perform_system_action', { action }).catch(error => {
         console.error('Scheduled post action failed:', error);
         addToast({
-          message: `Scheduled system action failed: ${String(error)}`,
+          message: t($ => $.app.systemActionFailed, { detail: String(error) }),
           variant: 'error',
           isActionable: true
         });
@@ -313,12 +326,12 @@ function App() {
           if (!settings.showNotifications) return;
 
           const item = useDownloadStore.getState().downloads.find(d => d.id === event.payload.id);
-          const fileName = item?.fileName || 'A file';
+          const fileName = item?.fileName || t($ => $.app.unknownFile);
           if (event.payload.status === 'completed') {
             try {
               sendNotification({
-                title: 'Download Complete',
-                body: `${fileName} has finished downloading.`
+                title: t($ => $.app.downloadCompleteTitle),
+                body: t($ => $.app.downloadCompleteBody, { fileName })
               });
             } catch (error) {
               console.error('Completion notification failed:', error);
@@ -326,8 +339,8 @@ function App() {
           } else {
             try {
               sendNotification({
-                title: 'Download Failed',
-                body: `${fileName} failed to download.`,
+                title: t($ => $.app.downloadFailedTitle),
+                body: t($ => $.app.downloadFailedBody, { fileName }),
               });
             } catch (error) {
               console.error('Failure notification failed:', error);
@@ -371,7 +384,7 @@ function App() {
         if (!active) return;
         console.error('Failed to initialize Firelink state:', error);
         addToast({
-          message: `Could not initialize saved downloads: ${String(error)}`,
+          message: t($ => $.app.initializeDownloadsFailed, { detail: String(error) }),
           variant: 'error',
           isActionable: true
         });
@@ -424,7 +437,7 @@ function App() {
             isActionable: true,
             message: (
               <div className="flex flex-col gap-2">
-                <p>Browser extension disconnected because its pairing token changed.</p>
+                <p>{t($ => $.app.extensionDisconnected)}</p>
                 <div className="flex gap-2 justify-end">
                   <button
                     type="button"
@@ -438,14 +451,14 @@ function App() {
                         acknowledgePairingTokenChange();
                       } catch (error) {
                         addToast({
-                          message: `Could not copy pairing token: ${String(error)}`,
+                          message: t($ => $.app.copyTokenFailed, { detail: String(error) }),
                           variant: 'error',
                           isActionable: true
                         });
                       }
                     }}
                   >
-                    Copy token
+                    {t($ => $.app.copyToken)}
                   </button>
                   <button
                     type="button"
@@ -457,7 +470,7 @@ function App() {
                       acknowledgePairingTokenChange();
                     }}
                   >
-                    Integrations
+                    {t($ => $.app.integrations)}
                   </button>
                 </div>
               </div>
@@ -467,7 +480,7 @@ function App() {
       } catch (error) {
         console.error('Failed to hydrate extension pairing token:', error);
         addToast({
-          message: `Secure credential persistence is unavailable. Browser pairing works for this session only: ${String(error)}`,
+          message: t($ => $.app.credentialPersistenceFailed, { detail: String(error) }),
           variant: 'error',
           isActionable: true
         });
@@ -521,7 +534,7 @@ function App() {
     useDownloadStore.getState().resumePendingDownloads().catch(error => {
       console.error('Failed to resume saved downloads after startup:', error);
       addToast({
-        message: `Could not resume saved downloads: ${String(error)}`,
+        message: t($ => $.app.resumeDownloadsFailed, { detail: String(error) }),
         variant: 'error',
         isActionable: true
       });
@@ -545,14 +558,14 @@ function App() {
         .then(result => {
           if (result.type !== 'UpdateAvailable') return;
           if (!isTrustedFirelinkReleaseUrl(result.update.release_url)) {
-            throw new Error('The update check returned an untrusted release URL.');
+            throw new Error(t($ => $.settings.common.updateUntrustedReleaseUrl));
           }
           addToast({
             variant: 'info',
             isActionable: true,
             message: (
               <div className="flex items-center gap-3">
-                <span>Firelink {result.update.version} is available.</span>
+                <span>{t($ => $.app.updateAvailable, { version: result.update.version })}</span>
                 <button
                   type="button"
                   className="app-button px-2 py-1"
@@ -560,7 +573,7 @@ function App() {
                     void openUrl(result.update.release_url);
                   }}
                 >
-                  View release
+                  {t($ => $.app.viewRelease)}
                 </button>
               </div>
             )
@@ -595,7 +608,7 @@ function App() {
     }).catch(error => {
       console.error('Failed to update sleep prevention:', error);
       addToast({
-        message: `Could not update sleep prevention: ${String(error)}`,
+        message: t($ => $.app.sleepPreventionFailed, { detail: String(error) }),
         variant: 'error',
         isActionable: true
       });
@@ -634,7 +647,7 @@ function App() {
             state.setSchedulerActiveDownloadIds([]);
             state.setSchedulerRunning(false);
             addToast({
-              message: 'Scheduler has no valid queues selected. Update Scheduler settings.',
+              message: t($ => $.app.schedulerNoQueues),
               variant: 'warning',
               isActionable: true
             });
@@ -668,7 +681,9 @@ function App() {
             const failedPauses = pauseResults.filter(result => result.status === 'rejected').length;
             if (failedPauses > 0) {
               addToast({
-                message: `Scheduler could not pause ${failedPauses} download${failedPauses === 1 ? '' : 's'}.`,
+                message: failedPauses === 1
+                  ? t($ => $.app.schedulerPauseOneFailed)
+                  : t($ => $.app.schedulerPauseManyFailed, { count: failedPauses }),
                 variant: 'error',
                 isActionable: true
               });
@@ -702,14 +717,14 @@ function App() {
 
     if (completionState !== 'completed') {
       addToast({
-        message: 'Scheduled downloads did not all complete. The post-queue system action was skipped.',
+        message: t($ => $.app.scheduledIncomplete),
         variant: 'warning',
         isActionable: true
       });
     } else if (settings.scheduler.postQueueAction !== 'none') {
       if (downloads.some(download => isActiveDownloadStatus(download.status))) {
         addToast({
-          message: 'Scheduled system action skipped because another download is active or queued.',
+          message: t($ => $.app.scheduledActionSkippedActive),
           variant: 'warning',
           isActionable: true
         });
@@ -736,7 +751,7 @@ function App() {
           const permission = await requestPermission();
           if (permission !== 'granted') {
             addToast({
-              message: 'System notifications are disabled for Firelink.',
+              message: t($ => $.app.notificationsDisabled),
               variant: 'warning',
               isActionable: true
             });
@@ -744,7 +759,7 @@ function App() {
         }
       } catch (error) {
         addToast({
-          message: `Could not configure notifications: ${String(error)}`,
+          message: t($ => $.app.notificationsFailed, { detail: String(error) }),
           variant: 'error',
           isActionable: true
         });
@@ -920,7 +935,7 @@ function App() {
         <div
           className="sidebar-resize-handle"
           onPointerDown={startSidebarResize}
-          title="Resize Sidebar"
+          title={t($ => $.actions.resizeSidebar)}
         />
       </div>
 
@@ -934,8 +949,8 @@ function App() {
             type="button"
             onClick={toggleSidebar}
             className="app-icon-button app-sidebar-reveal-button h-7 w-7"
-            title="Show Sidebar"
-            aria-label="Show Sidebar"
+            title={t($ => $.actions.showSidebar)}
+            aria-label={t($ => $.actions.showSidebar)}
           >
             <PanelLeft size={16} strokeWidth={2} />
           </button>
@@ -950,11 +965,11 @@ function App() {
         
         {/* Status Bar */}
         <div className="app-statusbar px-[14px] flex items-center justify-between text-text-muted shrink-0">
-          <span>Ready</span>
+          <span>{t($ => $.status.ready)}</span>
           <div className="flex gap-3 tabular-nums">
-            <span>{activeDownloadCount} active</span>
-            <span>{queuedCount} queued</span>
-            <span>{doneCount} done</span>
+            <span>{t($ => $.status.active, { count: activeDownloadCount })}</span>
+            <span>{t($ => $.status.queued, { count: queuedCount })}</span>
+            <span>{t($ => $.status.done, { count: doneCount })}</span>
           </div>
         </div>
       </div>

@@ -4,6 +4,7 @@ import {
   isMediaUrl
 } from './downloads';
 import type { MediaPlaylistMetadata } from '../bindings/MediaPlaylistMetadata';
+import i18n from '../i18n';
 
 export type MetadataStatus = 'loading' | 'ready' | 'metadata-error' | 'invalid';
 
@@ -361,20 +362,55 @@ export const mediaFileNameForSelectedFormat = (
   return canonicalizeDownloadFileName(`${baseName}.${selectedExt}`);
 };
 
-export const metadataSummaryMessage = (rows: AddDownloadDraftRow[]): string => {
-  if (rows.length === 0) return 'Paste one or more links.';
+export type MetadataSummaryState =
+  | { type: 'empty' }
+  | { type: 'none-selected' }
+  | { type: 'invalid'; count: number }
+  | { type: 'loading'; count: number }
+  | { type: 'unsafe'; count: number }
+  | { type: 'media-error'; count: number }
+  | { type: 'all-error' }
+  | { type: 'fallback'; ready: number; failed: number }
+  | { type: 'ready'; count: number };
+
+export const metadataSummaryState = (rows: AddDownloadDraftRow[]): MetadataSummaryState => {
+  if (rows.length === 0) return { type: 'empty' };
 
   const selectedRows = rows.filter(row => row.selected !== false);
-  if (selectedRows.length === 0) return 'Select at least one download.';
+  if (selectedRows.length === 0) return { type: 'none-selected' };
+
+  const invalid = selectedRows.filter(row => row.status === 'invalid').length;
+  if (invalid > 0) return { type: 'invalid', count: invalid };
+
+  const loading = selectedRows.filter(row => row.status === 'loading').length;
+  if (loading > 0) return { type: 'loading', count: loading };
+
+  const failed = selectedRows.filter(row => row.status === 'metadata-error').length;
+  const failedMedia = selectedRows.filter(row => row.status === 'metadata-error' && row.isMedia).length;
+  const blocked = selectedRows.filter(row => row.metadataBlockedReason === 'unsafe-url').length;
+  const ready = selectedRows.filter(row => row.status === 'ready').length;
+  if (blocked > 0) return { type: 'unsafe', count: blocked };
+  if (failedMedia > 0) return { type: 'media-error', count: failedMedia };
+  if (failed === selectedRows.length) return { type: 'all-error' };
+  if (failed > 0) return { type: 'fallback', ready, failed };
+  return { type: 'ready', count: ready };
+};
+
+export const metadataSummaryMessage = (rows: AddDownloadDraftRow[]): string => {
+  if (rows.length === 0) return i18n.t($ => $.addDownloads.pasteOneOrMore);
+
+  const selectedRows = rows.filter(row => row.selected !== false);
+  if (selectedRows.length === 0) return i18n.t($ => $.addDownloads.selectAtLeastOne);
+  const plural = (count: number) => count === 1 ? '' : 's';
 
   const invalid = selectedRows.filter(row => row.status === 'invalid').length;
   if (invalid > 0) {
-    return `Correct or remove ${invalid} invalid URL${invalid === 1 ? '' : 's'} before continuing.`;
+    return i18n.t($ => $.addDownloads.correctInvalid, { count: invalid, plural: plural(invalid) });
   }
 
   const loading = selectedRows.filter(row => row.status === 'loading').length;
   if (loading > 0) {
-    return `Waiting for metadata for ${loading} download${loading === 1 ? '' : 's'}.`;
+    return i18n.t($ => $.addDownloads.waitingForMetadata, { count: loading, plural: plural(loading) });
   }
 
   const failed = selectedRows.filter(row => row.status === 'metadata-error').length;
@@ -382,16 +418,16 @@ export const metadataSummaryMessage = (rows: AddDownloadDraftRow[]): string => {
   const blocked = selectedRows.filter(row => row.metadataBlockedReason === 'unsafe-url').length;
   const ready = selectedRows.filter(row => row.status === 'ready').length;
   if (blocked > 0) {
-    return `Remove ${blocked} unsafe URL${blocked === 1 ? '' : 's'} before continuing.`;
+    return i18n.t($ => $.addDownloads.removeUnsafe, { count: blocked, plural: plural(blocked) });
   }
   if (failedMedia > 0) {
-    return `Media metadata is unavailable for ${failedMedia} item${failedMedia === 1 ? '' : 's'}. Refresh metadata before adding.`;
+    return i18n.t($ => $.addDownloads.mediaMetadataUnavailableSummary, { count: failedMedia, plural: plural(failedMedia) });
   }
   if (failed === selectedRows.length) {
-    return 'Metadata is unavailable. Downloads can still be added using fallback details.';
+    return i18n.t($ => $.addDownloads.metadataUnavailableFallback);
   }
   if (failed > 0) {
-    return `${ready} download${ready === 1 ? '' : 's'} ready; ${failed} will use fallback filename and unknown size.`;
+    return i18n.t($ => $.addDownloads.fallbackReady, { ready, readyPlural: plural(ready), failed });
   }
-  return `Ready to add ${ready} download${ready === 1 ? '' : 's'}.`;
+  return i18n.t($ => $.addDownloads.readyToAdd, { count: ready, plural: plural(ready) });
 };

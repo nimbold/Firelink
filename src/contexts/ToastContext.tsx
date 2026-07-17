@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect, useRef, useLayoutEffect } from 'react';
 import { CheckCircle2, AlertCircle, Info, XCircle, X } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 export type ToastVariant = 'success' | 'info' | 'warning' | 'error';
 
@@ -69,6 +70,7 @@ export const useToast = () => {
 };
 
 const ToastItem: React.FC<{ toast: ToastState; removeToast: (id: string) => void; removeToastCompletely: (id: string) => void }> = ({ toast, removeToast, removeToastCompletely }) => {
+  const { t } = useTranslation();
   const [isMounted, setIsMounted] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
   const timerStartedAt = useRef<number | null>(null);
@@ -196,7 +198,7 @@ const ToastItem: React.FC<{ toast: ToastState; removeToast: (id: string) => void
           <button
             onClick={() => removeToast(toast.id)}
             className="ml-2 mt-0.5 shrink-0 rounded-md p-1 text-text-secondary opacity-70 transition-all hover:bg-item-hover hover:text-text-primary hover:opacity-100 active:scale-95"
-            aria-label="Dismiss notification"
+            aria-label={t($ => $.actions.dismissNotification)}
           >
             <X className="w-4 h-4" strokeWidth={2.5} />
           </button>

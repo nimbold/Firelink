@@ -11,6 +11,7 @@ import { ActiveView, useSettingsStore } from '../store/useSettingsStore';
 import { WindowDragRegion } from './WindowDragRegion';
 import { useToast } from '../contexts/ToastContext';
 import { isTransferActiveStatus } from '../utils/downloads';
+import { useTranslation } from 'react-i18next';
 
 export type SidebarFilter = 'all' | 'active' | 'completed' | 'unfinished' | DownloadCategory | 'settings' | string;
 
@@ -24,6 +25,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
   const { downloads, queues, addQueue, renameQueue, removeQueue, startQueue, pauseQueue } = useDownloadStore();
   const { activeView, setActiveView, toggleSidebar } = useSettingsStore();
   const { addToast } = useToast();
+  const { t } = useTranslation();
 
   const [isAddingQueue, setIsAddingQueue] = useState(false);
   const [newQueueName, setNewQueueName] = useState('');
@@ -84,11 +86,11 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             const queueId = selectedFilter.replace('queue:', '');
             const q = queues.find(q => q.id === queueId);
             if (q && !q.isMain) {
-              if (!window.confirm(`Delete queue "${q.name}"? Its unfinished downloads will move to Main Queue.`)) {
+              if (!window.confirm(t($ => $.sidebar.deleteQueueConfirm, { name: q.name }))) {
                 return;
               }
               void removeQueue(queueId).catch(error => {
-                addToast({ message: `Could not delete queue: ${String(error)}`, variant: 'error', isActionable: true });
+                addToast({ message: t($ => $.sidebar.deleteQueueFailed, { detail: String(error) }), variant: 'error', isActionable: true });
               });
             }
           }
@@ -144,11 +146,11 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
     if (addQueueSubmitRef.current) return;
     const normalizedName = newQueueName.trim();
     if (!normalizedName) {
-      addToast({ message: 'Queue name cannot be empty', variant: 'error', isActionable: true });
+      addToast({ message: t($ => $.sidebar.queueNameEmpty), variant: 'error', isActionable: true });
       return;
     }
     if (!addQueue(normalizedName)) {
-      addToast({ message: 'A queue with this name already exists', variant: 'error', isActionable: true });
+      addToast({ message: t($ => $.sidebar.queueNameExists), variant: 'error', isActionable: true });
       return;
     }
     addQueueSubmitRef.current = true;
@@ -161,11 +163,11 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
     const normalizedName = editingQueueName.trim();
     if (!renamingQueueId) return;
     if (!normalizedName) {
-      addToast({ message: 'Queue name cannot be empty', variant: 'error', isActionable: true });
+      addToast({ message: t($ => $.sidebar.queueNameEmpty), variant: 'error', isActionable: true });
       return;
     }
     if (!renameQueue(renamingQueueId, normalizedName)) {
-      addToast({ message: 'A queue with this name already exists', variant: 'error', isActionable: true });
+      addToast({ message: t($ => $.sidebar.queueNameExists), variant: 'error', isActionable: true });
       return;
     }
     renameQueueSubmitRef.current = true;
@@ -240,18 +242,18 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
           type="button"
           onClick={toggleSidebar}
           className="sidebar-toggle-button"
-          title="Hide Sidebar"
+          title={t($ => $.actions.hideSidebar)}
         >
           <PanelLeft size={14} strokeWidth={1.9} />
         </button>
       </div>
       <div className="sidebar-scroll">
         <section className="sidebar-section">
-          <div className="sidebar-section-label">Library</div>
-          <NavItem icon={Inbox} label="All" filter="all" />
-          <NavItem icon={Zap} label="Active" filter="active" />
-          <NavItem icon={CheckCircle2} label="Completed" filter="completed" />
-          <NavItem icon={CircleDashed} label="Unfinished" filter="unfinished" />
+          <div className="sidebar-section-label">{t($ => $.navigation.library)}</div>
+          <NavItem icon={Inbox} label={t($ => $.navigation.filters.all)} filter="all" />
+          <NavItem icon={Zap} label={t($ => $.navigation.filters.active)} filter="active" />
+          <NavItem icon={CheckCircle2} label={t($ => $.navigation.filters.completed)} filter="completed" />
+          <NavItem icon={CircleDashed} label={t($ => $.navigation.filters.unfinished)} filter="unfinished" />
         </section>
 
         <section className="sidebar-section">
@@ -263,7 +265,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             aria-controls="sidebar-folders-list"
             onClick={() => setFoldersCollapsed(collapsed => !collapsed)}
           >
-            <span>Folders</span>
+            <span>{t($ => $.navigation.folders)}</span>
             <ChevronDown
               aria-hidden="true"
               size={13}
@@ -278,19 +280,19 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             inert={foldersCollapsed}
           >
             <div className="sidebar-collapse-content">
-              <NavItem icon={Music} label="Musics" filter="Musics" />
-              <NavItem icon={Film} label="Movies" filter="Movies" />
-              <NavItem icon={Archive} label="Compressed" filter="Compressed" />
-              <NavItem icon={FileText} label="Documents" filter="Documents" />
-              <NavItem icon={ImageIcon} label="Pictures" filter="Pictures" />
-              <NavItem icon={Box} label="Applications" filter="Applications" />
-              <NavItem icon={FileQuestion} label="Other" filter="Other" />
+              <NavItem icon={Music} label={t($ => $.navigation.categories.musics)} filter="Musics" />
+              <NavItem icon={Film} label={t($ => $.navigation.categories.movies)} filter="Movies" />
+              <NavItem icon={Archive} label={t($ => $.navigation.categories.compressed)} filter="Compressed" />
+              <NavItem icon={FileText} label={t($ => $.navigation.categories.documents)} filter="Documents" />
+              <NavItem icon={ImageIcon} label={t($ => $.navigation.categories.pictures)} filter="Pictures" />
+              <NavItem icon={Box} label={t($ => $.navigation.categories.applications)} filter="Applications" />
+              <NavItem icon={FileQuestion} label={t($ => $.navigation.categories.other)} filter="Other" />
             </div>
           </div>
         </section>
 
         <section className="sidebar-section">
-          <div className="sidebar-section-label">Queues</div>
+          <div className="sidebar-section-label">{t($ => $.navigation.queues)}</div>
           {queues.map(queue => (
             <QueueItem key={queue.id} queue={queue} />
           ))}
@@ -300,7 +302,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
               <input
                 ref={addInputRef}
                 type="text"
-                placeholder="Queue name"
+                placeholder={t($ => $.actions.queueName)}
                 className="flex-1 bg-transparent border border-accent rounded px-1 text-[13px] text-text-primary outline-none min-w-0"
                 value={newQueueName}
                 onChange={e => setNewQueueName(e.target.value)}
@@ -318,16 +320,16 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
               className="flex w-full items-center px-3.5 py-1.5 rounded-lg text-[13px] text-text-muted hover:bg-item-hover hover:text-text-secondary cursor-default transition-colors mb-1"
             >
               <Plus className="w-4 h-4 mr-2 shrink-0" strokeWidth={2} />
-              <span className="truncate">Add new queue</span>
+              <span className="truncate">{t($ => $.actions.addNewQueue)}</span>
             </button>
           )}
         </section>
 
         <section className="sidebar-section">
-          <div className="sidebar-section-label">Tools</div>
-          <ToolItem icon={CalendarClock} label="Scheduler" view="scheduler" />
-          <ToolItem icon={Gauge} label="Speed Limiter" view="speedLimiter" />
-          <ToolItem icon={Bug} label="Logs" view="logs" />
+          <div className="sidebar-section-label">{t($ => $.navigation.tools)}</div>
+          <ToolItem icon={CalendarClock} label={t($ => $.navigation.scheduler)} view="scheduler" />
+          <ToolItem icon={Gauge} label={t($ => $.navigation.speedLimiter)} view="speedLimiter" />
+          <ToolItem icon={Bug} label={t($ => $.navigation.logs)} view="logs" />
         </section>
       </div>
 
@@ -339,7 +341,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
           className="sidebar-nav-item sidebar-settings-button group flex w-full items-center text-[13px] text-left cursor-default font-medium transition-colors"
         >
           <Settings className={`w-[18px] h-[18px] mr-3 shrink-0 ${activeView === 'settings' ? 'text-white' : 'text-text-muted'}`} strokeWidth={activeView === 'settings' ? 2.5 : 2} />
-          <span>Settings</span>
+          <span>{t($ => $.navigation.settings)}</span>
         </button>
       </div>
 
@@ -360,7 +362,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
               setContextMenu(null);
               void startQueue(queueId).catch(error => {
                 addToast({
-                  message: `Could not start queue: ${String(error)}`,
+                  message: t($ => $.sidebar.startQueueFailed, { detail: String(error) }),
                   variant: 'error',
                   isActionable: true
                 });
@@ -368,7 +370,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             }}
           >
             <Play size={14} className="mr-2 text-text-secondary" />
-            Start Queue
+            {t($ => $.actions.startQueue)}
           </button>
           <button
             className="w-full text-left px-3 py-1.5 flex items-center hover:bg-item-hover"
@@ -377,7 +379,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
               setContextMenu(null);
               void pauseQueue(queueId).catch(error => {
                 addToast({
-                  message: `Could not pause queue: ${String(error)}`,
+                  message: t($ => $.sidebar.pauseQueueFailed, { detail: String(error) }),
                   variant: 'error',
                   isActionable: true
                 });
@@ -385,7 +387,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             }}
           >
             <Pause size={14} className="mr-2 text-text-secondary" />
-            Pause Queue
+            {t($ => $.actions.pauseQueue)}
           </button>
           <div className="h-px bg-border-color my-1 mx-2" />
           <button
@@ -401,7 +403,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             }}
           >
             <Edit2 size={14} className="mr-2 text-text-secondary" />
-            Rename Queue
+            {t($ => $.actions.renameQueue)}
           </button>
           {!queues.find(q => q.id === contextMenu.id)?.isMain && (
             <button
@@ -413,13 +415,13 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
                   setContextMenu(null);
                   return;
                 }
-                if (!window.confirm(`Delete queue "${queue.name}"? Its unfinished downloads will move to Main Queue.`)) {
+                if (!window.confirm(t($ => $.sidebar.deleteQueueConfirm, { name: queue.name }))) {
                   return;
                 }
                 setContextMenu(null);
                 void removeQueue(queueId).catch(error => {
                   addToast({
-                    message: `Could not delete queue: ${String(error)}`,
+                    message: t($ => $.sidebar.deleteQueueFailed, { detail: String(error) }),
                     variant: 'error',
                     isActionable: true
                   });
@@ -427,7 +429,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
               }}
             >
               <Trash2 size={14} className="mr-2" />
-              Delete Queue
+              {t($ => $.actions.deleteQueue)}
             </button>
           )}
         </div>

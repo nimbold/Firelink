@@ -16,6 +16,7 @@ import {
   resolveDownloadSizeDisplay
 } from '../utils/downloadProgress';
 import { resolveDownloadConnections } from '../utils/downloads';
+import { useTranslation } from 'react-i18next';
 
 type LoginMode = 'matching' | 'custom' | 'none';
 
@@ -28,6 +29,18 @@ const formatLastTry = (value?: string): string => {
 };
 
 export const PropertiesModal = () => {
+  const { t } = useTranslation();
+  const categoryLabel = (category: string) => {
+    switch (category) {
+      case 'Musics': return t($ => $.navigation.categories.musics);
+      case 'Movies': return t($ => $.navigation.categories.movies);
+      case 'Compressed': return t($ => $.navigation.categories.compressed);
+      case 'Documents': return t($ => $.navigation.categories.documents);
+      case 'Pictures': return t($ => $.navigation.categories.pictures);
+      case 'Applications': return t($ => $.navigation.categories.applications);
+      default: return t($ => $.navigation.categories.other);
+    }
+  };
   const selectedPropertiesDownloadId = useDownloadStore(state => state.selectedPropertiesDownloadId);
   const setSelectedPropertiesDownloadId = useDownloadStore(state => state.setSelectedPropertiesDownloadId);
   const item = useDownloadStore(useShallow(state =>
@@ -159,11 +172,11 @@ export const PropertiesModal = () => {
 
   const handleSave = async () => {
     if (!url.trim()) {
-      setErrorMessage("Enter a valid URL.");
+      setErrorMessage(t($ => $.properties.enterValidUrl));
       return;
     }
     if (!fileName.trim()) {
-      setErrorMessage("File name cannot be empty.");
+      setErrorMessage(t($ => $.properties.fileNameEmpty));
       return;
     }
 
@@ -211,9 +224,22 @@ export const PropertiesModal = () => {
   });
   const hasDownloadedAmount = item.status !== 'completed' &&
     Boolean(sizeDisplay.downloaded && sizeDisplay.total);
-  const completedSizeLabel = item.status === 'completed'
-    ? formatDownloadTotal(sizeDisplay)
-    : sizeDisplay.fallback;
+  const completedSizeLabel = (() => {
+    const value = item.status === 'completed' ? formatDownloadTotal(sizeDisplay) : sizeDisplay.fallback;
+    return value === 'Unknown' ? t($ => $.addDownloads.unknown) : value;
+  })();
+  const statusLabel = t($ => $.downloads.status[item.status]);
+  const sizeDescription = sizeDisplay.totalIsEstimate
+    ? t($ => $.downloads.size.downloadedOfApproximate, {
+      downloaded: sizeDisplay.downloaded ?? '',
+      total: sizeDisplay.total ?? '',
+      unit: sizeDisplay.unit ?? '',
+    })
+    : t($ => $.downloads.size.downloadedOf, {
+      downloaded: sizeDisplay.downloaded ?? '',
+      total: sizeDisplay.total ?? '',
+      unit: sizeDisplay.unit ?? '',
+    });
 
   let statusColor = 'text-text-secondary';
   let StatusIcon = Info;
@@ -240,7 +266,7 @@ export const PropertiesModal = () => {
             <h2 className="text-base font-semibold truncate text-text-primary pr-4">{item.fileName}</h2>
             <span className={`flex items-center gap-1.5 text-xs font-semibold tracking-wide uppercase ${statusColor}`}>
               <StatusIcon size={14} />
-              {item.status}
+              {statusLabel}
             </span>
           </div>
           
@@ -249,13 +275,13 @@ export const PropertiesModal = () => {
           </div>
           
             <div className="grid grid-cols-4 gap-y-2 gap-x-4 text-[11px] leading-tight">
-              <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[90px] shrink-0">Progress</span><span className="text-text-secondary truncate">{`${(displayedFraction * 100).toFixed(0)}%`}</span></div>
+              <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[90px] shrink-0">{t($ => $.properties.progress)}</span><span className="text-text-secondary truncate">{`${(displayedFraction * 100).toFixed(0)}%`}</span></div>
               <div className="flex gap-1.5 min-w-0">
-                <span className="text-text-muted font-medium w-[40px] shrink-0">Size</span>
+                <span className="text-text-muted font-medium w-[40px] shrink-0">{t($ => $.properties.size)}</span>
                 <span
                   className="truncate"
                   title={hasDownloadedAmount
-                    ? `${sizeDisplay.downloaded} downloaded of ${sizeDisplay.totalIsEstimate ? 'approximately ' : ''}${sizeDisplay.total} ${sizeDisplay.unit}`
+                    ? sizeDescription
                     : completedSizeLabel}
                 >
                   {hasDownloadedAmount ? (
@@ -269,19 +295,19 @@ export const PropertiesModal = () => {
                   ) : completedSizeLabel}
                 </span>
               </div>
-              <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[40px] shrink-0">Speed</span><span className="text-text-secondary truncate">{displayedSpeed}</span></div>
-              <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[30px] shrink-0">ETA</span><span className="text-text-secondary truncate">{displayedEta}</span></div>
+              <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[40px] shrink-0">{t($ => $.properties.speed)}</span><span className="text-text-secondary truncate">{displayedSpeed}</span></div>
+              <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[30px] shrink-0">{t($ => $.properties.eta)}</span><span className="text-text-secondary truncate">{displayedEta}</span></div>
 
-              <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[90px] shrink-0">Connections</span><span className="text-text-secondary truncate" title={item.connections !== undefined ? 'Saved for this download; Settings changes apply to new downloads.' : 'Using the current default for new downloads.'}>{resolveDownloadConnections(item.connections, perServerConnections)}{item.connections !== undefined ? ' (saved)' : ' (default)'}</span></div>
-              <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[60px] shrink-0">Speed cap</span><span className="text-text-secondary truncate">{item.speedLimit || '-'}</span></div>
-              <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[55px] shrink-0">Category</span><span className="text-text-secondary truncate">{item.category}</span></div>
-            <div className="flex gap-1.5"><span className="text-text-muted font-medium w-[50px]">Last try</span><span className="text-text-secondary truncate">{formatLastTry(item.lastTry)}</span></div>
+              <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[90px] shrink-0">{t($ => $.properties.connections)}</span><span className="text-text-secondary truncate" title={item.connections !== undefined ? t($ => $.properties.savedTooltip) : t($ => $.properties.defaultTooltip)}>{resolveDownloadConnections(item.connections, perServerConnections)}{item.connections !== undefined ? t($ => $.properties.saved) : t($ => $.properties.defaultValue)}</span></div>
+              <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[60px] shrink-0">{t($ => $.properties.speedCap)}</span><span className="text-text-secondary truncate">{item.speedLimit || '-'}</span></div>
+              <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[55px] shrink-0">{t($ => $.properties.category)}</span><span className="text-text-secondary truncate">{categoryLabel(item.category)}</span></div>
+            <div className="flex gap-1.5"><span className="text-text-muted font-medium w-[50px]">{t($ => $.properties.lastTry)}</span><span className="text-text-secondary truncate">{formatLastTry(item.lastTry)}</span></div>
             
-              <div className="flex gap-1.5 col-span-2"><span className="text-text-muted font-medium w-[90px]">Date added</span><span className="text-text-secondary truncate">{new Date(item.dateAdded).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</span></div>
-              <div className="flex gap-1.5 col-span-2"><span className="text-text-muted font-medium w-[70px]">Destination</span><span className="text-text-secondary truncate" title={saveLocation}>{saveLocation || baseDownloadFolder}</span></div>
+              <div className="flex gap-1.5 col-span-2"><span className="text-text-muted font-medium w-[90px]">{t($ => $.properties.dateAdded)}</span><span className="text-text-secondary truncate">{new Date(item.dateAdded).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</span></div>
+              <div className="flex gap-1.5 col-span-2"><span className="text-text-muted font-medium w-[70px]">{t($ => $.properties.destination)}</span><span className="text-text-secondary truncate" title={saveLocation}>{saveLocation || baseDownloadFolder}</span></div>
             {item.lastError && (item.status === 'failed' || item.status === 'retrying') && (
               <div className="flex gap-1.5 col-span-4 min-w-0">
-                <span className="text-text-muted font-medium w-[90px] shrink-0">Last error</span>
+                <span className="text-text-muted font-medium w-[90px] shrink-0">{t($ => $.properties.lastError)}</span>
                 <span className="text-red-400 truncate" title={item.lastError}>{item.lastError}</span>
               </div>
             )}
@@ -298,53 +324,53 @@ export const PropertiesModal = () => {
               {item.status === 'completed' ? <CheckCircle size={16} className="text-green-500" /> : <AlertCircle size={16} className="text-blue-500" />}
               <span>
                 {item.status === 'completed' 
-                  ? "File identity is read-only. Transfer settings are saved for redownload." 
-                  : "Transfer settings can be changed after stopping or pausing. Current transfers keep their existing backend options."}
+                  ? t($ => $.properties.identityReadOnly)
+                  : t($ => $.properties.transferSettings)}
               </span>
             </div>
           )}
 
           {/* Download Section */}
           <section>
-            <h3 className="text-sm font-semibold text-text-primary mb-4 pb-1 border-b border-border-modal/50">Download</h3>
+            <h3 className="text-sm font-semibold text-text-primary mb-4 pb-1 border-b border-border-modal/50">{t($ => $.properties.download)}</h3>
             <div className="grid grid-cols-[100px_1fr] gap-y-3.5 gap-x-4 items-center">
-              <label className="text-xs text-text-muted text-right">URL</label>
+              <label className="text-xs text-text-muted text-right">{t($ => $.properties.url)}</label>
               <input type="text" value={url} onChange={e => setUrl(e.target.value)} disabled={identityLocked} className="bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-accent disabled:opacity-50" />
               
-              <label className="text-xs text-text-muted text-right">File name</label>
+              <label className="text-xs text-text-muted text-right">{t($ => $.properties.fileName)}</label>
               <input type="text" value={fileName} onChange={e => setFileName(e.target.value)} disabled={identityLocked} className="bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-50" />
               
-              <label className="text-xs text-text-muted text-right">Save location</label>
+              <label className="text-xs text-text-muted text-right">{t($ => $.properties.saveLocation)}</label>
               <div className="flex gap-2">
                 <input type="text" value={saveLocation} readOnly disabled={identityLocked} className="flex-1 bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-accent disabled:opacity-50" />
                 <button onClick={handleBrowse} disabled={identityLocked} className="bg-item-hover hover:bg-item-hover/80 text-text-primary border border-border-modal px-3 py-1.5 rounded text-xs transition-colors disabled:opacity-40 flex items-center gap-1.5">
-                  <FolderPlus size={14} /> Select
+                  <FolderPlus size={14} /> {t($ => $.properties.select)}
                 </button>
               </div>
               
-              <label className="text-xs text-text-muted text-right">Connections</label>
+              <label className="text-xs text-text-muted text-right">{t($ => $.properties.connections)}</label>
               <div className="flex items-center gap-2">
                 <input type="number" value={connections} min={1} max={16} onChange={e=>{ setConnections(Number(e.target.value)); setConnectionsDirty(true); }} disabled={transferLocked} className="w-16 bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-50" />
-                <span className="text-xs text-text-muted">per file</span>
+                <span className="text-xs text-text-muted">{t($ => $.properties.perFile)}</span>
                 {!transferLocked && item.connections !== undefined && item.connections !== perServerConnections && (
                   <button
                     type="button"
                     onClick={() => { setConnections(perServerConnections); setConnectionsDirty(true); }}
                     className="text-[11px] text-accent hover:underline whitespace-nowrap"
                   >
-                    Use current default ({perServerConnections})
+                    {t($ => $.properties.useCurrentDefault, { count: perServerConnections })}
                   </button>
                 )}
               </div>
               <div className="col-start-2 text-[11px] text-text-muted">
-                Saved per download. The Settings default applies to new downloads.
+                {t($ => $.properties.savedPerDownload)}
               </div>
               
-              <label className="text-xs text-text-muted text-right">Speed</label>
+              <label className="text-xs text-text-muted text-right">{t($ => $.properties.speed)}</label>
               <div className="flex items-center gap-3">
                 <label className="flex items-center gap-2 text-xs text-text-primary">
                       <input type="checkbox" checked={speedLimitEnabled} onChange={e => setSpeedLimitEnabled(e.target.checked)} disabled={transferLocked} className="rounded border-border-modal text-blue-500 focus:ring-blue-500/20 bg-bg-input disabled:opacity-50" />
-                  Limit
+                  {t($ => $.properties.limit)}
                 </label>
                 {speedLimitEnabled && (
                   <div className="flex items-center gap-2">
@@ -359,7 +385,7 @@ export const PropertiesModal = () => {
           {/* Site Login Section */}
           <section>
             <h3 className="text-sm font-semibold text-text-primary mb-4 pb-1 border-b border-border-modal/50">
-              {item.status === 'completed' ? 'Site Login for Redownload' : 'Site Login'}
+              {item.status === 'completed' ? t($ => $.properties.siteLoginRedownload) : t($ => $.properties.siteLogin)}
             </h3>
             
             <div className="flex gap-1 p-1 bg-border-color rounded-lg mb-4 w-fit mx-auto md:mx-0">
@@ -370,7 +396,7 @@ export const PropertiesModal = () => {
                   disabled={transferLocked}
                   className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 ${loginMode === mode ? 'bg-bg-modal text-text-primary shadow-sm' : 'text-text-muted hover:text-text-secondary'}`}
                 >
-                  {mode === 'matching' ? 'Matching site login' : mode === 'custom' ? 'Custom credentials' : 'No login'}
+                  {mode === 'matching' ? t($ => $.properties.matchingSiteLogin) : mode === 'custom' ? t($ => $.properties.customCredentials) : t($ => $.properties.noLogin)}
                 </button>
               ))}
             </div>
@@ -378,16 +404,16 @@ export const PropertiesModal = () => {
             <div className="grid grid-cols-[100px_1fr] gap-y-3.5 gap-x-4 items-center">
               {loginMode === 'matching' && (
                 <div className="col-start-2 text-xs text-text-secondary italic">
-                  Will use saved login if available.
+                  {t($ => $.properties.useSavedLogin)}
                 </div>
               )}
               {loginMode === 'custom' && (
                 <>
-                  <label className="text-xs text-text-muted text-right">Username</label>
-                  <input type="text" value={username} onChange={e=>setUsername(e.target.value)} disabled={transferLocked} placeholder="Username" className="max-w-[250px] bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-50" />
+                  <label className="text-xs text-text-muted text-right">{t($ => $.properties.username)}</label>
+                  <input type="text" value={username} onChange={e=>setUsername(e.target.value)} disabled={transferLocked} placeholder={t($ => $.properties.username)} className="max-w-[250px] bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-50" />
                   
-                  <label className="text-xs text-text-muted text-right">Password</label>
-                  <input type="password" value={password} onChange={e=>setPassword(e.target.value)} disabled={transferLocked} placeholder="Password" className="max-w-[250px] bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-50" />
+                  <label className="text-xs text-text-muted text-right">{t($ => $.properties.password)}</label>
+                  <input type="password" value={password} onChange={e=>setPassword(e.target.value)} disabled={transferLocked} placeholder={t($ => $.properties.password)} className="max-w-[250px] bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-50" />
                 </>
               )}
             </div>
@@ -400,20 +426,20 @@ export const PropertiesModal = () => {
                 className="flex items-center gap-2 text-sm font-semibold text-text-primary w-full pb-1 border-b border-border-modal/50 hover:text-blue-400 transition-colors"
               >
                 {advancedExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-                {item.status === 'completed' ? 'Advanced Transfer for Redownload' : 'Advanced Transfer'}
+                {item.status === 'completed' ? t($ => $.properties.advancedTransferRedownload) : t($ => $.properties.advancedTransfer)}
              </button>
              
              {advancedExpanded && (
                <div className="mt-4 grid grid-cols-[100px_1fr] gap-y-3.5 gap-x-4 items-center pl-6">
-                 <label className="text-xs text-text-muted text-right">Checksum</label>
+                 <label className="text-xs text-text-muted text-right">{t($ => $.properties.checksum)}</label>
                  <label className="flex items-center gap-2 text-xs text-text-primary">
                     <input type="checkbox" checked={checksumEnabled} onChange={e => setChecksumEnabled(e.target.checked)} disabled={transferLocked} className="rounded border-border-modal text-blue-500 focus:ring-blue-500/20 bg-bg-input" />
-                    Verify
+                    {t($ => $.properties.verify)}
                  </label>
 
                  {checksumEnabled && (
                     <>
-                      <label className="text-xs text-text-muted text-right">Algorithm</label>
+                      <label className="text-xs text-text-muted text-right">{t($ => $.properties.algorithm)}</label>
                       <select value={checksumAlgorithm} onChange={e=>setChecksumAlgorithm(e.target.value)} disabled={transferLocked} className="max-w-[150px] bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-50">
                         <option value="MD5">MD5</option>
                         <option value="SHA-1">SHA-1</option>
@@ -421,21 +447,21 @@ export const PropertiesModal = () => {
                         <option value="SHA-512">SHA-512</option>
                       </select>
 
-                      <label className="text-xs text-text-muted text-right">Digest</label>
-                      <input type="text" value={checksumValue} onChange={e=>setChecksumValue(e.target.value)} disabled={transferLocked} placeholder="Expected digest" className="bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-accent disabled:opacity-50" />
+                      <label className="text-xs text-text-muted text-right">{t($ => $.properties.digest)}</label>
+                      <input type="text" value={checksumValue} onChange={e=>setChecksumValue(e.target.value)} disabled={transferLocked} placeholder={t($ => $.properties.expectedDigest)} className="bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-accent disabled:opacity-50" />
                     </>
                  )}
 
-                 <label className="text-xs text-text-muted text-right">Cookies</label>
-                 <input type="text" value={cookies} onChange={e=>setCookies(e.target.value)} disabled={transferLocked} placeholder="Cookies" className="bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-accent disabled:opacity-50" />
+                 <label className="text-xs text-text-muted text-right">{t($ => $.properties.cookies)}</label>
+                 <input type="text" value={cookies} onChange={e=>setCookies(e.target.value)} disabled={transferLocked} placeholder={t($ => $.properties.cookies)} className="bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-accent disabled:opacity-50" />
                  
                  <div className="col-span-2 mt-2">
-                   <label className="block text-xs text-text-muted mb-1.5">Headers</label>
+                   <label className="block text-xs text-text-muted mb-1.5">{t($ => $.properties.headers)}</label>
                    <textarea value={headers} onChange={e=>setHeaders(e.target.value)} disabled={transferLocked} className="w-full h-16 bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-accent disabled:opacity-50 resize-none"></textarea>
                  </div>
 
                  <div className="col-span-2">
-                   <label className="block text-xs text-text-muted mb-1.5">Mirrors</label>
+                   <label className="block text-xs text-text-muted mb-1.5">{t($ => $.properties.mirrors)}</label>
                    <textarea value={mirrors} onChange={e=>setMirrors(e.target.value)} disabled={transferLocked} className="w-full h-16 bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-accent disabled:opacity-50 resize-none"></textarea>
                  </div>
                </div>
@@ -456,7 +482,7 @@ export const PropertiesModal = () => {
               onClick={() => setSelectedPropertiesDownloadId(null)} 
               className="app-button px-4 text-xs"
             >
-              Cancel
+              {t($ => $.properties.cancel)}
             </button>
             <button 
               onClick={handleSave} 
@@ -464,7 +490,7 @@ export const PropertiesModal = () => {
               className={`app-button app-button-primary px-4 text-xs ${transferLocked ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
               <CheckCircle size={14} />
-              Save
+              {t($ => $.properties.save)}
             </button>
           </div>
         </div>

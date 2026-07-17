@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { useDownloadStore } from '../store/useDownloadStore';
 import { AlertTriangle } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 export const DeleteConfirmationModal: React.FC = () => {
+  const { t } = useTranslation();
   const { deleteModalState, closeDeleteModal, removeDownload } = useDownloadStore();
   const [errorMessage, setErrorMessage] = useState('');
   const [isRemoving, setIsRemoving] = useState(false);
@@ -50,7 +52,11 @@ export const DeleteConfirmationModal: React.FC = () => {
     }
 
     if (failures.length > 0) {
-      setErrorMessage(`${succeeded} removed, ${failures.length} failed: ${failures[0]}`);
+      setErrorMessage(t($ => $.dialogs.removeDownload.errorSummary, {
+        succeeded,
+        failed: failures.length,
+        detail: failures[0],
+      }));
       setIsRemoving(false);
       return;
     }
@@ -60,6 +66,7 @@ export const DeleteConfirmationModal: React.FC = () => {
 
   const handleRemoveFromList = () => removeMany(false);
   const handleDeleteFile = () => removeMany(true);
+  const itemCount = deleteModalState.downloadIds?.length ?? 0;
 
   return (
     <div
@@ -78,11 +85,13 @@ export const DeleteConfirmationModal: React.FC = () => {
           <div className="p-2 bg-red-500/10 rounded-full flex items-center justify-center">
             <AlertTriangle size={20} className="text-red-400" />
           </div>
-          <h2 className="text-lg font-semibold text-text-primary m-0">Remove Download</h2>
+          <h2 className="text-lg font-semibold text-text-primary m-0">{t($ => $.dialogs.removeDownload.title)}</h2>
         </div>
 
         <div className="px-5 py-6 flex-1 text-sm text-text-secondary leading-relaxed">
-          {`Are you sure you want to remove ${deleteModalState.downloadIds?.length && deleteModalState.downloadIds.length > 1 ? 'these ' + deleteModalState.downloadIds.length + ' items' : 'this item'} from the list? You can also choose to delete the underlying file from your hard drive.`}
+          {itemCount > 1
+            ? t($ => $.dialogs.removeDownload.confirmationMultiple, { count: itemCount })
+            : t($ => $.dialogs.removeDownload.confirmationSingle)}
           {errorMessage && <div className="mt-3 text-xs text-red-400">{errorMessage}</div>}
         </div>
 
@@ -92,21 +101,21 @@ export const DeleteConfirmationModal: React.FC = () => {
             disabled={isRemoving}
             className="app-button px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
           >
-            Cancel
+            {t($ => $.actions.cancel)}
           </button>
           <button
             onClick={handleRemoveFromList}
             disabled={isRemoving}
             className="px-4 py-2 rounded-lg text-sm font-medium transition-colors bg-border-modal hover:bg-border-modal/80 text-text-primary disabled:opacity-50"
           >
-            Remove
+            {t($ => $.dialogs.removeDownload.remove)}
           </button>
           <button
             onClick={handleDeleteFile}
             disabled={isRemoving}
             className="px-4 py-2 rounded-lg text-sm font-medium transition-colors bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50"
           >
-            Delete file
+            {t($ => $.dialogs.removeDownload.deleteFile)}
           </button>
         </div>
       </div>

@@ -2,7 +2,8 @@ import React from 'react';
 import { useDownloadProgressStore } from '../store/downloadProgressStore';
 import { Play, Pause, MoreVertical, Clock, ArrowUp, ArrowDown } from 'lucide-react';
 import type { DownloadItem as DownloadItemType } from '../bindings/DownloadItem';
-import { canPauseDownload, canStartDownload, startActionLabel } from '../utils/downloadActions';
+import { canPauseDownload, canStartDownload } from '../utils/downloadActions';
+import { useTranslation } from 'react-i18next';
 import {
   downloadProgressColorClass,
   formatDownloadTotal,
@@ -38,6 +39,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   onMoveInQueue,
   onClick,
 }) => {
+  const { t } = useTranslation();
   const liveProgress = useDownloadProgressStore(state => state.progressMap[download.id]);
 
   const displayFraction = download.status === 'downloading'
@@ -47,12 +49,12 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   const displaySpeed = download.status === 'downloading'
     ? liveProgress?.speed ?? download.speed
     : download.status === 'processing'
-      ? 'Processing...'
+      ? t($ => $.downloads.values.processing)
       : '-';
   const displayEta = download.status === 'downloading'
     ? liveProgress?.eta ?? download.eta
     : download.status === 'processing'
-      ? 'Muxing...'
+      ? t($ => $.downloads.values.muxing)
       : '-';
   const sizeDisplay = resolveDownloadSizeDisplay({
     downloadedBytes: liveProgress?.downloaded_bytes ?? download.downloadedBytes,
@@ -62,9 +64,22 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   });
   const hasDownloadedAmount = download.status !== 'completed' &&
     Boolean(sizeDisplay.downloaded && sizeDisplay.total);
-  const completedSizeLabel = download.status === 'completed'
-    ? formatDownloadTotal(sizeDisplay)
-    : sizeDisplay.fallback;
+  const completedSizeLabel = (() => {
+    const value = download.status === 'completed' ? formatDownloadTotal(sizeDisplay) : sizeDisplay.fallback;
+    return value === 'Unknown' ? t($ => $.addDownloads.unknown) : value;
+  })();
+  const downloadStatusLabel = t($ => $.downloads.status[download.status]);
+  const downloadedSizeLabel = sizeDisplay.totalIsEstimate
+    ? t($ => $.downloads.size.downloadedOfApproximate, {
+      downloaded: sizeDisplay.downloaded ?? '',
+      total: sizeDisplay.total ?? '',
+      unit: sizeDisplay.unit ?? '',
+    })
+    : t($ => $.downloads.size.downloadedOf, {
+      downloaded: sizeDisplay.downloaded ?? '',
+      total: sizeDisplay.total ?? '',
+      unit: sizeDisplay.unit ?? '',
+    });
 
   return (
     <div
@@ -88,10 +103,10 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
       <div
         className="download-cell-truncate download-size-cell tabular-nums"
         title={hasDownloadedAmount
-          ? `${sizeDisplay.downloaded} downloaded of ${sizeDisplay.totalIsEstimate ? '~' : ''}${sizeDisplay.total} ${sizeDisplay.unit}`
+          ? downloadedSizeLabel
           : completedSizeLabel}
         aria-label={hasDownloadedAmount
-          ? `${sizeDisplay.downloaded} downloaded of ${sizeDisplay.totalIsEstimate ? 'approximately ' : ''}${sizeDisplay.total} ${sizeDisplay.unit}`
+          ? downloadedSizeLabel
           : completedSizeLabel}
       >
         <div className="download-size-content">
@@ -111,7 +126,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
       
       <div className="download-status-cell">
         {download.status === 'completed' ? (
-          <span className="download-status download-status-completed" title="Completed">Completed</span>
+          <span className="download-status download-status-completed" title={downloadStatusLabel}>{downloadStatusLabel}</span>
         ) : (
           <>
             <div className="download-progress-track">
@@ -130,12 +145,12 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
               download.lastError && (download.status === 'failed' || download.status === 'retrying')
                 ? download.lastError
                 : (download.status === 'queued' || download.status === 'staged') && queueIndex !== -1
-                ? `${download.status === 'staged' ? 'In queue' : 'Queued'} #${queueIndex + 1}`
+                ? `${downloadStatusLabel} #${queueIndex + 1}`
                 : download.status === 'downloading'
-                  ? displayPercent
-                  : download.status === 'processing'
-                    ? 'Processing'
-                    : download.status.charAt(0).toUpperCase() + download.status.slice(1)
+                ? displayPercent
+                : download.status === 'processing'
+                    ? downloadStatusLabel
+                    : downloadStatusLabel
             }
             className={`download-status flex items-center gap-1.5 ${
               download.status === 'paused' ? 'download-status-paused' : 
@@ -150,15 +165,15 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                 <>
                   <Clock size={12} className={download.status === 'queued' ? 'animate-pulse shrink-0' : 'shrink-0'} />
                   <span className="truncate">
-                    {download.status === 'staged' ? 'In queue' : 'Queued'} #{queueIndex + 1}
+                    {downloadStatusLabel} #{queueIndex + 1}
                   </span>
                 </>
               ) : download.status === 'downloading' ? (
                 displayPercent
               ) : download.status === 'processing' ? (
-                'Processing'
+                downloadStatusLabel
               ) : (
-                download.status.charAt(0).toUpperCase() + download.status.slice(1)
+                downloadStatusLabel
               )}
             </span>
           </>
@@ -202,7 +217,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                 onClick={() => onMoveInQueue(download.id, 'up')}
                 disabled={queueIndex === 0}
                 className="app-icon-button h-7 w-7 disabled:opacity-40" 
-                title="Move Up"
+                title={t($ => $.downloads.actions.moveUp)}
               >
                 <ArrowUp size={14} />
               </button>
@@ -210,19 +225,19 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                 onClick={() => onMoveInQueue(download.id, 'down')}
                 disabled={queueIndex === queueLength - 1}
                 className="app-icon-button h-7 w-7 disabled:opacity-40" 
-                title="Move Down"
+                title={t($ => $.downloads.actions.moveDown)}
               >
                 <ArrowDown size={14} />
               </button>
             </>
           )}
           {canPauseDownload(download.status) && (
-            <button onClick={() => handlePause(download.id)} className="app-icon-button h-7 w-7" title="Pause">
+            <button onClick={() => handlePause(download.id)} className="app-icon-button h-7 w-7" title={t($ => $.downloads.actions.pause)}>
               <Pause size={14} fill="currentColor" />
             </button>
           )}
           {canStartDownload(download.status) && (
-            <button onClick={() => handleResume(download)} className="app-icon-button h-7 w-7" title={startActionLabel(download.status)}>
+            <button onClick={() => handleResume(download)} className="app-icon-button h-7 w-7" title={download.status === 'paused' ? t($ => $.downloads.actions.resume) : t($ => $.downloads.actions.start)}>
               <Play size={14} fill="currentColor" />
             </button>
           )}
@@ -232,7 +247,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                setContextMenu({ x: e.clientX, y: e.clientY, id: download.id });
             }}
             className="app-icon-button h-7 w-7"
-            title="Options"
+            title={t($ => $.downloads.actions.options)}
           >
             <MoreVertical size={14} />
           </button>

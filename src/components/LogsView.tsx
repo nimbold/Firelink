@@ -7,6 +7,7 @@ import { FileDown, Trash2, Terminal, Filter, Play, Pause, Info, Copy } from 'luc
 import { WindowDragRegion } from './WindowDragRegion';
 import { useToast } from '../contexts/ToastContext';
 import { useSettingsStore } from '../store/useSettingsStore';
+import { useTranslation } from 'react-i18next';
 import {
   MAX_LOG_LINES,
   appendBoundedLogEntries,
@@ -18,6 +19,7 @@ import {
 } from '../utils/logEntries';
 
 export default function LogsView() {
+  const { t } = useTranslation();
   const { addToast } = useToast();
   const logsEnabled = useSettingsStore(state => state.logsEnabled);
   const setLogsEnabled = useSettingsStore(state => state.setLogsEnabled);
@@ -169,10 +171,10 @@ export default function LogsView() {
     if (contextMenu?.text) {
       try {
         await navigator.clipboard.writeText(contextMenu.text);
-        addToast({ message: 'Copied to clipboard', variant: 'success' });
+        addToast({ message: t($ => $.logs.copied), variant: 'success' });
       } catch (err) {
         console.error('Clipboard write error:', err);
-        addToast({ message: 'Failed to copy to clipboard', variant: 'error' });
+        addToast({ message: t($ => $.logs.copyFailed), variant: 'error' });
       }
     }
     setContextMenu(null);
@@ -182,14 +184,14 @@ export default function LogsView() {
     try {
       const path = await save({
         defaultPath: 'Firelink-Support-Logs.log',
-        filters: [{ name: 'Log Files', extensions: ['log'] }],
+        filters: [{ name: t($ => $.logs.logFiles), extensions: ['log'] }],
       });
       if (!path) return;
       await invoke('export_logs', { destination: path });
-      addToast({ message: 'Support logs exported', variant: 'success' });
+      addToast({ message: t($ => $.logs.exported), variant: 'success' });
     } catch (e) {
       console.error('Export failed:', e);
-      addToast({ message: `Could not export logs: ${String(e)}`, variant: 'error', isActionable: true });
+      addToast({ message: t($ => $.logs.exportFailed, { detail: String(e) }), variant: 'error', isActionable: true });
     }
   };
 
@@ -208,10 +210,10 @@ export default function LogsView() {
         liveFrameRef.current = null;
       }
       setLogs([]);
-      addToast({ message: 'Logs cleared', variant: 'info' });
+      addToast({ message: t($ => $.logs.cleared), variant: 'info' });
     } catch (error) {
       addToast({
-        message: `Could not clear logs: ${String(error)}`,
+        message: t($ => $.logs.clearFailed, { detail: String(error) }),
         variant: 'error',
         isActionable: true
       });
@@ -231,7 +233,7 @@ export default function LogsView() {
       await setLogPaused(!nextEnabled);
       setLogsEnabled(nextEnabled);
       addToast({
-        message: nextEnabled ? 'Diagnostic logging enabled' : 'Diagnostic logging disabled',
+        message: nextEnabled ? t($ => $.logs.enabled) : t($ => $.logs.disabled),
         variant: 'success'
       });
     })();
@@ -241,7 +243,7 @@ export default function LogsView() {
       await toggleOperation;
     } catch (error) {
       addToast({
-        message: `Could not update diagnostic logging: ${String(error)}`,
+        message: t($ => $.logs.updateFailed, { detail: String(error) }),
         variant: 'error',
         isActionable: true
       });
@@ -270,12 +272,12 @@ export default function LogsView() {
       <div className="logs-toolbar flex items-center justify-between px-4 py-2 shrink-0">
         <div className="flex items-center gap-2 text-text-secondary">
           <Terminal size={16} strokeWidth={1.8} />
-          <span className="text-[13px] font-semibold text-text-primary">Logs</span>
-          <span className="text-[11px] text-text-muted">({logs.length} entries)</span>
+          <span className="text-[13px] font-semibold text-text-primary">{t($ => $.logs.title)}</span>
+          <span className="text-[11px] text-text-muted">{t($ => $.logs.entries, { count: logs.length })}</span>
           <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
             logsEnabled ? 'bg-accent/15 text-accent' : 'bg-item-hover text-text-muted'
           }`}>
-            {logsEnabled ? 'Collecting' : 'Off'}
+            {logsEnabled ? t($ => $.logs.collecting) : t($ => $.logs.off)}
           </span>
         </div>
         <div className="flex items-center gap-3">
@@ -286,12 +288,12 @@ export default function LogsView() {
               onChange={e => setLevelFilter(e.target.value as LogEntry['level'] | 'All')}
               className="bg-bg-input border border-border-modal rounded px-1.5 py-0.5 text-[11px] text-text-primary focus:outline-none focus:border-accent"
             >
-              <option value="All">All Levels</option>
-              <option value="Error">Error</option>
-              <option value="Warn">Warn</option>
-              <option value="Info">Info</option>
-              <option value="Debug">Debug</option>
-              <option value="Trace">Trace</option>
+              <option value="All">{t($ => $.logs.allLevels)}</option>
+              <option value="Error">{t($ => $.logs.levels.error)}</option>
+              <option value="Warn">{t($ => $.logs.levels.warn)}</option>
+              <option value="Info">{t($ => $.logs.levels.info)}</option>
+              <option value="Debug">{t($ => $.logs.levels.debug)}</option>
+              <option value="Trace">{t($ => $.logs.levels.trace)}</option>
             </select>
           </div>
           <div className="w-[1px] h-4 bg-border-modal mx-0.5" />
@@ -299,7 +301,7 @@ export default function LogsView() {
             onClick={handleToggleLogging}
             disabled={isToggling}
             className={`app-icon-button disabled:cursor-not-allowed disabled:opacity-50 ${logsEnabled ? 'text-accent' : ''}`}
-            title={logsEnabled ? "Pause diagnostic logging" : "Enable diagnostic logging"}
+            title={logsEnabled ? t($ => $.logs.pauseLogging) : t($ => $.logs.enableLogging)}
           >
             {logsEnabled ? <Pause size={14} /> : <Play size={14} />}
           </button>
@@ -307,17 +309,17 @@ export default function LogsView() {
             onClick={handleClear}
             disabled={isClearing}
             className="app-icon-button disabled:cursor-not-allowed disabled:opacity-50"
-            title="Clear displayed logs"
+            title={t($ => $.logs.clearDisplayed)}
           >
             <Trash2 size={14} />
           </button>
           <button
             onClick={handleExport}
             className="app-button px-3 text-[11px] gap-1.5"
-            title="Export logs"
+            title={t($ => $.logs.export)}
           >
             <FileDown size={13} />
-            Export Logs
+            {t($ => $.logs.exportButton)}
           </button>
         </div>
       </div>
@@ -326,8 +328,8 @@ export default function LogsView() {
       <div className="bg-black/10 border-y border-border-modal px-4 py-2 shrink-0 flex items-center gap-2 text-text-muted text-[10px] select-none">
         <Info size={12} className="text-text-muted opacity-80 shrink-0" />
         <span className="opacity-90 leading-tight">
-          <strong className="font-medium text-text-primary mr-1">Local diagnostics:</strong>
-          Diagnostic collection is opt-in, bounded, and local. Common secrets, URL queries, and home-directory paths are redacted during display and export. Nothing is uploaded automatically.
+          <strong className="font-medium text-text-primary mr-1">{t($ => $.logs.localDiagnostics)}</strong>
+          {t($ => $.logs.diagnosticsDescription)}
         </span>
       </div>
 
@@ -340,7 +342,7 @@ export default function LogsView() {
       >
         {logs.length === 0 && (
           <div className="text-text-muted italic select-none">
-            {logsEnabled ? 'No persisted log entries are available yet.' : 'Diagnostic logging is off. Existing support logs will appear here when available.'}
+            {logsEnabled ? t($ => $.logs.noEntries) : t($ => $.logs.disabledDescription)}
           </div>
         )}
         {logs.filter(entry => levelFilter === 'All' || entry.level === levelFilter).map((entry, i) => (
@@ -364,7 +366,7 @@ export default function LogsView() {
             onClick={handleCopy}
           >
             <Copy size={13} className="mr-2 text-text-secondary" />
-            Copy
+            {t($ => $.logs.copy)}
           </button>
         </div>
       )}
