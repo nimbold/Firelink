@@ -5,7 +5,11 @@ import type { DownloadItem } from '../bindings/DownloadItem';
 import { categoryForFileName } from '../utils/downloads';
 import { useDownloadProgressStore } from './downloadProgressStore';
 
-import { useDownloadStore } from './useDownloadStore';
+import {
+  clearDownloadControlIntent,
+  downloadControlIntentFor,
+  useDownloadStore
+} from './useDownloadStore';
 
 export { useDownloadProgressStore } from './downloadProgressStore';
 
@@ -77,6 +81,28 @@ const startDownloadListeners = async () => {
         return;
       }
       const status = payload.status as DownloadStatus;
+
+      // resume_download queues the row before the backend can emit its new
+      // active state. A paused event already emitted by the old lifecycle may
+      // arrive in that gap. Do not let it overwrite the queued transition;
+      // otherwise the guard below would reject the legitimate downloading
+      // event and leave the row visibly paused forever.
+      if (status === 'paused' &&
+          current.status === 'queued' &&
+          downloadControlIntentFor(payload.id) === 'resume') {
+        // Consume only the stale pause event that caused the resume race.
+        // A later real pause must be allowed through even if the backend has
+        // not emitted a new active state yet.
+        clearDownloadControlIntent(payload.id, 'resume');
+        return;
+      }
+      if (status === 'downloading' || status === 'processing' ||
+          status === 'completed' || status === 'failed') {
+        clearDownloadControlIntent(payload.id, 'resume');
+      }
+      if (status === 'paused') {
+        clearDownloadControlIntent(payload.id, 'pause');
+      }
 
       // Prevent stale lifecycle events from moving a paused row back into an
       // active state. A pause request can finish before one already-emitted

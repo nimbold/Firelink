@@ -198,7 +198,7 @@ function App() {
           <span>{actionLabel} in 10 seconds.</span>
           <button
             type="button"
-            className="app-button px-2 py-1"
+            className="app-button app-button-cancel px-2 py-1"
             onClick={cancel}
           >
             Cancel

@@ -24,6 +24,29 @@ const queueStartPromises = new Map<string, Promise<string[]>>();
 const queueControlGenerations = new Map<string, number>();
 let pendingStartupResume: Promise<void> | null = null;
 
+type DownloadControlIntent = 'pause' | 'resume';
+const downloadControlIntents = new Map<string, DownloadControlIntent>();
+
+// State events do not carry a lifecycle generation. Keep the intent that
+// initiated a control transition long enough for the listener to discard an
+// already-emitted event from the previous transition.
+export const setDownloadControlIntent = (id: string, intent: DownloadControlIntent): void => {
+  downloadControlIntents.set(id, intent);
+};
+
+export const clearDownloadControlIntent = (id: string, intent?: DownloadControlIntent): void => {
+  if (intent === undefined || downloadControlIntents.get(id) === intent) {
+    downloadControlIntents.delete(id);
+  }
+};
+
+export const downloadControlIntentFor = (id: string): DownloadControlIntent | undefined =>
+  downloadControlIntents.get(id);
+
+export const clearDownloadControlIntents = (): void => {
+  downloadControlIntents.clear();
+};
+
 const waitForPendingStartupResume = async (): Promise<void> => {
   const pending = pendingStartupResume;
   if (pending) await pending.catch(() => undefined);
@@ -871,6 +894,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
   },
   removeDownload: async (id, deleteFile = false, preserveResumable = false) => {
     await waitForPendingStartupResume();
+    clearDownloadControlIntent(id);
     const { pendingDispatch } = await invalidateDispatch(id);
     if (pendingDispatch) {
       await pendingDispatch;
@@ -898,17 +922,23 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
   },
   pauseDownload: async (id) => {
     await waitForPendingStartupResume();
+    if (!get().downloads.some(download => download.id === id)) return;
+    setDownloadControlIntent(id, 'pause');
     const { generation, pendingDispatch } = await invalidateDispatch(id);
-    if (pendingDispatch) {
-      await pendingDispatch;
-    }
+    try {
+      if (pendingDispatch) {
+        await pendingDispatch;
+      }
 
-    await invoke('pause_download', { id });
+      await invoke('pause_download', { id });
 
-    if (!isCurrentDownloadLifecycle(id, generation)) return;
-    const current = get().downloads.find(download => download.id === id);
-    if (current && current.status !== 'completed' && current.status !== 'failed') {
-      get().updateDownload(id, { status: 'paused', speed: '-', eta: '-' });
+      if (!isCurrentDownloadLifecycle(id, generation)) return;
+      const current = get().downloads.find(download => download.id === id);
+      if (current && current.status !== 'completed' && current.status !== 'failed') {
+        get().updateDownload(id, { status: 'paused', speed: '-', eta: '-' });
+      }
+    } finally {
+      clearDownloadControlIntent(id, 'pause');
     }
   },
   redownload: async (id) => {
@@ -925,6 +955,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     const url = targetItem.url?.trim();
     if (!url) throw new Error('Cannot redownload: original URL is missing.');
 
+    setDownloadControlIntent(id, 'resume');
     await invalidateAndWaitForDispatch(id);
 
     // Remove from backend to clear its state and delete the existing file so we can overwrite
@@ -933,6 +964,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
       get().unregisterBackendIds([id]);
     } catch (e) {
       console.warn("Could not remove old download from backend", e);
+      clearDownloadControlIntent(id, 'resume');
       throw e;
     }
 
@@ -951,6 +983,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     if (!await dispatchItem(id)) {
       console.error("Failed to enqueue redownload");
       get().updateDownload(id, { status: 'failed' });
+      clearDownloadControlIntent(id, 'resume');
     } else {
       get().updateDownload(id, { hasBeenDispatched: true });
       info(`Download ${id} redownloaded (queued)`);
@@ -961,6 +994,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     const targetItem = get().downloads.find(d => d.id === id);
     if (!targetItem) return false;
 
+    setDownloadControlIntent(id, 'resume');
     try {
       if (targetItem.status === 'ready' || targetItem.status === 'staged') {
         get().updateDownload(id, { status: 'queued', hasBeenDispatched: true });
@@ -968,6 +1002,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
           return true;
         }
         get().updateDownload(id, { status: targetItem.status });
+        clearDownloadControlIntent(id, 'resume');
         return false;
       }
 
@@ -1002,11 +1037,13 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
       } else {
         console.error("Failed to re-enqueue for resume");
         get().updateDownload(id, { status: prevStatus });
+        clearDownloadControlIntent(id, 'resume');
         return false;
       }
     } catch (e) {
       console.error("Failed to resume download:", e);
       get().updateDownload(id, { status: targetItem.status });
+      clearDownloadControlIntent(id, 'resume');
       return false;
     }
   },

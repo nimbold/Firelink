@@ -441,7 +441,7 @@ html[data-list-density="relaxed"] {
     color: hsl(var(--text-primary));
     font-weight: 500;
     font-size: 13px;
-    transition: background-color 100ms ease, transform 100ms ease;
+    transition: background-color 100ms ease, border-color 100ms ease, box-shadow 100ms ease, transform 100ms ease;
     box-shadow: 0 1px 1px hsl(var(--shadow-color));
   }
 
@@ -462,6 +462,28 @@ html[data-list-density="relaxed"] {
 
   .app-button-primary:hover:not(:disabled) {
     background: hsl(var(--accent-color) / 0.9);
+  }
+
+  .app-button-cancel {
+    border-color: hsl(var(--border-modal));
+    background:
+      linear-gradient(180deg, hsl(0 0% 100% / 0.055), transparent),
+      hsl(var(--bg-input) / 0.88);
+    color: hsl(var(--text-secondary));
+    box-shadow:
+      inset 0 1px 0 hsl(0 0% 100% / 0.055),
+      0 1px 2px hsl(var(--shadow-color));
+  }
+
+  .app-button-cancel:hover:not(:disabled) {
+    border-color: hsl(var(--text-muted) / 0.65);
+    background:
+      linear-gradient(hsl(var(--item-hover)), hsl(var(--item-hover))),
+      hsl(var(--bg-input));
+    color: hsl(var(--text-primary));
+    box-shadow:
+      inset 0 1px 0 hsl(0 0% 100% / 0.07),
+      0 2px 5px hsl(var(--shadow-color));
   }
 
   .app-icon-button {
@@ -844,12 +866,25 @@ html[data-list-density="relaxed"] {
   }
 
   .add-download-button-cancel {
+    border-color: hsl(var(--border-modal));
+    background:
+      linear-gradient(180deg, hsl(0 0% 100% / 0.055), transparent),
+      hsl(var(--bg-input) / 0.88);
     color: hsl(var(--text-secondary));
+    box-shadow:
+      inset 0 1px 0 hsl(0 0% 100% / 0.055),
+      0 1px 2px hsl(var(--shadow-color));
   }
 
   .add-download-button-cancel:hover:not(:disabled) {
-    background: hsl(var(--item-hover));
+    border-color: hsl(var(--text-muted) / 0.65);
+    background:
+      linear-gradient(hsl(var(--item-hover)), hsl(var(--item-hover))),
+      hsl(var(--bg-input));
     color: hsl(var(--text-primary));
+    box-shadow:
+      inset 0 1px 0 hsl(0 0% 100% / 0.07),
+      0 2px 5px hsl(var(--shadow-color));
   }
 
   .add-download-button-primary {
@@ -982,9 +1017,25 @@ html[data-list-density="relaxed"] {
     box-shadow: none;
   }
 
+  :is(.theme-dark, .theme-dracula, .theme-nord) .add-download-button-cancel {
+    border-color: hsl(var(--add-keyline));
+    background: hsl(var(--add-section-bg));
+    box-shadow:
+      inset 0 1px 0 hsl(0 0% 100% / 0.055),
+      0 1px 2px hsl(var(--add-shadow));
+  }
+
   :is(.theme-dark, .theme-dracula, .theme-nord) .add-download-button-secondary:hover:not(:disabled) {
     border-color: hsl(var(--add-keyline-strong));
     background: hsl(var(--item-hover));
+  }
+
+  :is(.theme-dark, .theme-dracula, .theme-nord) .add-download-button-cancel:hover:not(:disabled) {
+    border-color: hsl(var(--add-keyline-strong));
+    background: hsl(var(--item-hover));
+    box-shadow:
+      inset 0 1px 0 hsl(0 0% 100% / 0.07),
+      0 2px 5px hsl(var(--add-shadow));
   }
 
   :is(.theme-dark, .theme-dracula, .theme-nord) .add-download-button-primary {
@@ -1978,6 +2029,39 @@ html[data-list-density="relaxed"] .download-ghost-row {
   justify-content: flex-start;
   min-width: 0;
   overflow: hidden;
+}
+
+.download-size-cell {
+  justify-content: flex-end;
+  text-align: right;
+}
+
+.download-size-cell > .download-size-progress {
+  flex: 1 1 auto;
+  text-align: right;
+}
+
+.download-size-cell > .download-size-total {
+  flex: 0 0 auto;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.download-size-cell > .download-size-progress,
+.download-size-cell > .download-size-total {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-size-cell > .download-size-progress {
+  text-align: right;
+}
+
+.download-row > .download-size-cell {
+  padding-right: calc(var(--download-column-padding-x) + 6px);
 }
 
 .download-cell-truncate > span,

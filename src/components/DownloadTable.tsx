@@ -538,7 +538,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                 className={`${index === 5 ? 'download-cell-right' : ''} cursor-pointer hover:text-text-primary transition-colors flex items-center justify-between`}
                 onClick={() => handleSort(label as DownloadSortColumn)}
               >
-                <div className="flex items-center gap-1 w-full h-full select-none">
+                <div className={`flex items-center gap-1 w-full h-full select-none ${index === 1 ? 'justify-end' : ''}`}>
                   <span>{label}</span>
                   {(isQueueFilter ? queueSortConfig : sortConfig)?.column === label && (
                     (isQueueFilter ? queueSortConfig : sortConfig)?.direction === 'asc'

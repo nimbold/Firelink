@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { initDownloadListener, useDownloadProgressStore } from './downloadStore';
-import { useDownloadStore } from './useDownloadStore';
+import {
+  clearDownloadControlIntents,
+  setDownloadControlIntent,
+  useDownloadStore
+} from './useDownloadStore';
 import * as ipc from '../ipc';
 
 vi.mock('../ipc', () => ({
@@ -13,6 +17,7 @@ describe('useDownloadProgressStore', () => {
     vi.clearAllMocks();
     vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined);
     useDownloadProgressStore.setState({ progressMap: {} });
+    clearDownloadControlIntents();
   });
 
   it('prunes terminal progress entries', () => {
@@ -231,6 +236,72 @@ describe('useDownloadProgressStore', () => {
       status: 'completed'
     } });
     expect(useDownloadStore.getState().downloads[0].status).toBe('completed');
+    release();
+  });
+
+  it('ignores a stale paused event during resume and accepts the new active state', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'resume-race',
+        url: 'https://example.com/file',
+        fileName: 'file.bin',
+        status: 'queued',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+    setDownloadControlIntent('resume-race', 'resume');
+
+    const release = await initDownloadListener();
+    handlers['download-state']({ payload: {
+      id: 'resume-race',
+      status: 'paused'
+    } });
+    expect(useDownloadStore.getState().downloads[0].status).toBe('queued');
+
+    handlers['download-state']({ payload: {
+      id: 'resume-race',
+      status: 'downloading'
+    } });
+    expect(useDownloadStore.getState().downloads[0].status).toBe('downloading');
+    release();
+  });
+
+  it('allows a later genuine pause after consuming the stale resume event', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'resume-pause-race',
+        url: 'https://example.com/file',
+        fileName: 'file.bin',
+        status: 'queued',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+    setDownloadControlIntent('resume-pause-race', 'resume');
+
+    const release = await initDownloadListener();
+    handlers['download-state']({ payload: {
+      id: 'resume-pause-race',
+      status: 'paused'
+    } });
+    expect(useDownloadStore.getState().downloads[0].status).toBe('queued');
+
+    handlers['download-state']({ payload: {
+      id: 'resume-pause-race',
+      status: 'paused'
+    } });
+    expect(useDownloadStore.getState().downloads[0].status).toBe('paused');
     release();
   });
 });

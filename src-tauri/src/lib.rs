@@ -1320,10 +1320,12 @@ fn aggregate_media_byte_progress(
 ) -> Option<(u64, u64, bool)> {
     if track_changed {
         if let Some(total_bytes) = state.current_track_total_bytes {
-            let completed_downloaded = state
-                .current_track_downloaded_bytes
-                .unwrap_or(total_bytes)
-                .clamp(0.0, total_bytes.max(0.0));
+            let completed_downloaded = state.current_track_downloaded_bytes.unwrap_or(total_bytes);
+            let completed_downloaded = if state.current_track_total_is_estimate {
+                completed_downloaded.max(0.0)
+            } else {
+                completed_downloaded.clamp(0.0, total_bytes.max(0.0))
+            };
             *state
                 .completed_tracks_total_bytes
                 .get_or_insert(0.0) += total_bytes;
@@ -1339,14 +1341,38 @@ fn aggregate_media_byte_progress(
         state.current_track_total_bytes = None;
         state.current_track_total_is_estimate = false;
     }
-    state.current_track_total_bytes = progress.total_bytes;
+    // yt-dlp's estimated total is a moving bitrate-based guess. Keep the
+    // first total observed for a stream stable so the UI does not make the
+    // download's size appear to change on every progress update. A new media
+    // track gets its own stable total when split audio/video downloads switch
+    // tracks.
+    let next_total = progress
+        .total_bytes
+        .filter(|total_bytes| total_bytes.is_finite() && *total_bytes > 0.0);
+    if state.current_track_total_bytes.is_none()
+        || (state.current_track_total_is_estimate && !progress.total_is_estimate)
+    {
+        if let Some(total_bytes) = next_total {
+            state.current_track_total_bytes = Some(total_bytes);
+            state.current_track_total_is_estimate = progress.total_is_estimate;
+        }
+    }
+    let stable_total_bytes = state.current_track_total_bytes;
     state.current_track_downloaded_bytes = progress
         .downloaded_bytes
         .or_else(|| progress.total_bytes.map(|total| total * progress.fraction))
-        .zip(progress.total_bytes)
-        .map(|(downloaded, total)| downloaded.clamp(0.0, total.max(0.0)))
+        .zip(stable_total_bytes)
+        .map(|(downloaded, total)| {
+            // An estimated total is only a display anchor. yt-dlp can
+            // legitimately download more bytes than that first estimate,
+            // so never turn a moving estimate into a false 100% byte count.
+            if state.current_track_total_is_estimate {
+                downloaded.max(0.0)
+            } else {
+                downloaded.clamp(0.0, total.max(0.0))
+            }
+        })
         .or(progress.downloaded_bytes);
-    state.current_track_total_is_estimate = progress.total_is_estimate;
 
     match (
         state.completed_tracks_downloaded_bytes,
@@ -1388,6 +1414,12 @@ fn emit_media_progress(
     }
     let byte_progress = aggregate_media_byte_progress(&progress, track_changed, state);
     let (speed, eta) = media_progress_speed(&progress, Instant::now(), &mut state.speed_sampler);
+    let size = byte_progress
+        .map(|(_, total, total_is_estimate)| {
+            let prefix = if total_is_estimate { "~" } else { "" };
+            format!("{prefix}{}", crate::download::format_size(total as f64))
+        })
+        .or(progress.size);
 
     let now = Instant::now();
     if now.duration_since(state.last_progress_at) >= MEDIA_PROGRESS_EMIT_INTERVAL {
@@ -1398,7 +1430,7 @@ fn emit_media_progress(
                 fraction: overall_fraction,
                 speed,
                 eta,
-                size: progress.size,
+                size,
                 size_is_final: false,
                 downloaded_bytes: byte_progress.map(|value| value.0 as f64),
                 total_bytes: byte_progress.map(|value| value.1 as f64),
@@ -7638,6 +7670,84 @@ mod tests {
         assert_eq!(
             aggregate_media_byte_progress(&second, true, &mut state),
             Some((101, 300, true))
+        );
+    }
+
+    #[test]
+    fn freezes_a_media_track_estimate_across_progress_updates() {
+        let mut state = MediaProgressEmitterState::new();
+        let first = MediaProgress {
+            fraction: 0.25,
+            speed: "-".to_string(),
+            eta: "-".to_string(),
+            size: Some("~100B".to_string()),
+            downloaded_bytes: Some(25.0),
+            total_bytes: Some(100.0),
+            total_is_estimate: true,
+        };
+        let later = MediaProgress {
+            fraction: 0.75,
+            speed: "-".to_string(),
+            eta: "-".to_string(),
+            size: Some("~200B".to_string()),
+            downloaded_bytes: Some(150.0),
+            total_bytes: Some(200.0),
+            total_is_estimate: true,
+        };
+
+        assert_eq!(
+            aggregate_media_byte_progress(&first, false, &mut state),
+            Some((25, 100, true))
+        );
+        assert_eq!(
+            aggregate_media_byte_progress(&later, false, &mut state),
+            Some((150, 100, true))
+        );
+
+        let exact = MediaProgress {
+            fraction: 0.9,
+            speed: "-".to_string(),
+            eta: "-".to_string(),
+            size: Some("200B".to_string()),
+            downloaded_bytes: Some(180.0),
+            total_bytes: Some(200.0),
+            total_is_estimate: false,
+        };
+        assert_eq!(
+            aggregate_media_byte_progress(&exact, false, &mut state),
+            Some((180, 200, false))
+        );
+    }
+
+    #[test]
+    fn preserves_estimated_bytes_when_a_split_track_exceeds_its_estimate() {
+        let mut state = MediaProgressEmitterState::new();
+        let first = MediaProgress {
+            fraction: 0.75,
+            speed: "-".to_string(),
+            eta: "-".to_string(),
+            size: Some("~100B".to_string()),
+            downloaded_bytes: Some(150.0),
+            total_bytes: Some(100.0),
+            total_is_estimate: true,
+        };
+        let second = MediaProgress {
+            fraction: 0.01,
+            speed: "-".to_string(),
+            eta: "-".to_string(),
+            size: Some("50B".to_string()),
+            downloaded_bytes: Some(1.0),
+            total_bytes: Some(50.0),
+            total_is_estimate: false,
+        };
+
+        assert_eq!(
+            aggregate_media_byte_progress(&first, false, &mut state),
+            Some((150, 100, true))
+        );
+        assert_eq!(
+            aggregate_media_byte_progress(&second, true, &mut state),
+            Some((151, 150, true))
         );
     }
 

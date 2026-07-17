@@ -90,7 +90,7 @@ export const DeleteConfirmationModal: React.FC = () => {
           <button
             onClick={handleCancel}
             disabled={isRemoving}
-            className="px-4 py-2 rounded-lg text-sm font-medium transition-colors text-text-secondary hover:bg-item-hover hover:text-text-primary disabled:opacity-50"
+            className="app-button app-button-cancel px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
           >
             Cancel
           </button>

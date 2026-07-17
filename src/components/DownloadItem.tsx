@@ -85,25 +85,25 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
         </span>
       </div>
       
-      <div className="download-cell-truncate">
-        <span
-          className="tabular-nums"
-          title={hasDownloadedAmount
-            ? `${sizeDisplay.downloaded} downloaded of ${sizeDisplay.totalIsEstimate ? '~' : ''}${sizeDisplay.total} ${sizeDisplay.unit}`
+      <div
+        className="download-cell-truncate download-size-cell tabular-nums"
+        title={hasDownloadedAmount
+          ? `${sizeDisplay.downloaded} downloaded of ${sizeDisplay.totalIsEstimate ? '~' : ''}${sizeDisplay.total} ${sizeDisplay.unit}`
+          : completedSizeLabel}
+        aria-label={hasDownloadedAmount
+          ? `${sizeDisplay.downloaded} downloaded of ${sizeDisplay.totalIsEstimate ? 'approximately ' : ''}${sizeDisplay.total} ${sizeDisplay.unit}`
+          : completedSizeLabel}
+      >
+        {hasDownloadedAmount ? (
+          <span className="download-size-progress">
+            <span className={downloadProgressColorClass(download.status)}>{sizeDisplay.downloaded}</span>
+            <span className="text-text-muted"> / </span>
+          </span>
+        ) : null}
+        <span className="download-size-total">
+          {hasDownloadedAmount
+            ? `${sizeDisplay.totalIsEstimate ? '~' : ''}${sizeDisplay.total} ${sizeDisplay.unit}`
             : completedSizeLabel}
-          aria-label={hasDownloadedAmount
-            ? `${sizeDisplay.downloaded} downloaded of ${sizeDisplay.totalIsEstimate ? 'approximately ' : ''}${sizeDisplay.total} ${sizeDisplay.unit}`
-            : completedSizeLabel}
-        >
-          {hasDownloadedAmount ? (
-            <>
-              <span className={downloadProgressColorClass(download.status)}>{sizeDisplay.downloaded}</span>
-              <span className="text-text-muted"> / </span>
-              <span>
-                {sizeDisplay.totalIsEstimate ? '~' : ''}{sizeDisplay.total} {sizeDisplay.unit}
-              </span>
-            </>
-          ) : completedSizeLabel}
         </span>
       </div>
       
