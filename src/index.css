@@ -1972,14 +1972,14 @@ html[data-list-density="relaxed"] .download-ghost-row {
 }
 
 .download-size-cell {
-  justify-content: flex-end;
+  justify-content: flex-start;
   text-align: left;
 }
 
 .download-size-content {
   display: flex;
   align-items: center;
-  width: min(100%, 12rem);
+  width: 100%;
   min-width: 0;
   overflow: hidden;
   text-align: left;
@@ -2005,7 +2005,11 @@ html[data-list-density="relaxed"] .download-ghost-row {
 }
 
 .download-row > .download-size-cell {
-  padding-right: calc(var(--download-column-padding-x) + 6px);
+  padding-left: calc(var(--download-column-padding-x) + 8px);
+}
+
+.download-table-header > div:nth-child(2) {
+  padding-left: calc(var(--download-column-padding-x) + 8px);
 }
 
 .download-cell-truncate > span,
