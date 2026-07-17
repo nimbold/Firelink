@@ -19,7 +19,7 @@ import {
 } from '../utils/downloadLocations';
 import { normalizeSpeedLimitForBackend } from '../utils/downloads';
 
-let settingsSave = Promise.resolve();
+let settingsQueue: Promise<void> = Promise.resolve();
 const settingsPersistenceErrorListeners = new Set<() => void>();
 let settingsPersistenceFailed = false;
 const DEFAULT_SCHEDULER_QUEUE_ID = '00000000-0000-0000-0000-000000000001';
@@ -30,6 +30,16 @@ export const subscribeToSettingsPersistenceErrors = (listener: () => void): (() 
   if (settingsPersistenceFailed) listener();
   return () => settingsPersistenceErrorListeners.delete(listener);
 };
+
+const enqueueSettingsTask = <T>(task: () => Promise<T>): Promise<T> => {
+  const result = settingsQueue.then(task, task);
+  settingsQueue = result.then(() => undefined, () => undefined);
+  return result;
+};
+
+export const runSettingsPersistenceTransaction = <T>(
+  operation: () => Promise<T>
+): Promise<T> => enqueueSettingsTask(operation);
 
 const notifySettingsPersistenceError = () => {
   if (settingsPersistenceFailed) return;
@@ -102,16 +112,15 @@ const tauriStorage: StateStorage = {
   },
   setItem: async (name: string, value: string): Promise<void> => {
     if (name === 'firelink-settings') {
-      settingsSave = settingsSave
-        .catch(() => undefined)
-        .then(() => invoke('db_save_settings', { data: value }))
-        .then(() => {
+      await enqueueSettingsTask(async () => {
+        try {
+          await invoke('db_save_settings', { data: value });
           settingsPersistenceFailed = false;
-        }, () => {
+        } catch {
           console.error('Failed to save settings to DB');
           notifySettingsPersistenceError();
-        });
-      await settingsSave;
+        }
+      });
     }
   },
   removeItem: async (_name: string): Promise<void> => {

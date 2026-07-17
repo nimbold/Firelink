@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { subscribeToSettingsPersistenceErrors, useSettingsStore } from './useSettingsStore';
+import {
+  runSettingsPersistenceTransaction,
+  subscribeToSettingsPersistenceErrors,
+  useSettingsStore
+} from './useSettingsStore';
 import * as ipc from '../ipc';
 
 vi.mock('../ipc', () => ({
@@ -68,6 +72,24 @@ describe('useSettingsStore credential-store startup flow', () => {
 });
 
 describe('useSettingsStore persistence failures', () => {
+  it('keeps settings writes queued behind a credential transaction', async () => {
+    const events: string[] = [];
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
+      if (command === 'db_save_settings') events.push('settings-write');
+      return undefined;
+    });
+
+    await runSettingsPersistenceTransaction(async () => {
+      events.push('transaction-start');
+      useSettingsStore.setState({ theme: 'dark' });
+      events.push('transaction-end');
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(events.slice(0, 2)).toEqual(['transaction-start', 'transaction-end']);
+    expect(events).toContain('settings-write');
+  });
+
   it('reports a database save failure and retries the next settings update', async () => {
     vi.clearAllMocks();
     await new Promise(resolve => setTimeout(resolve, 0));

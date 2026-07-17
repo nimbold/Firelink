@@ -55,6 +55,11 @@ type CommandMap = {
   set_keychain_password: { args: { id: string; password: string }; result: void };
   get_keychain_password: { args: { id: string }; result: string };
   delete_keychain_password: { args: { id: string }; result: void };
+  save_site_login: {
+    args: { id: string; urlPattern: string; username: string; password: string };
+    result: void;
+  };
+  delete_site_login: { args: { id: string }; result: void };
   check_file_exists: { args: { path: string }; result: boolean };
   toggle_tray_icon: { args: { show: boolean }; result: void };
   set_extension_pairing_token: { args: { token: string }; result: void };

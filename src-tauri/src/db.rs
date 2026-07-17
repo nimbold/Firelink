@@ -707,6 +707,188 @@ pub fn save_settings(connection: &Connection, data: &str) -> Result<(), String> 
     Ok(())
 }
 
+fn settings_state_mut(
+    document: &mut Value,
+) -> Result<&mut serde_json::Map<String, Value>, String> {
+    if document.get("state").is_some() {
+        document
+            .get_mut("state")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| "persisted settings state must be an object".to_string())
+    } else {
+        document
+            .as_object_mut()
+            .ok_or_else(|| "persisted settings must be an object".to_string())
+    }
+}
+
+fn add_site_login_to_settings(
+    data: &str,
+    id: &str,
+    url_pattern: &str,
+    username: &str,
+) -> Result<String, String> {
+    let mut document: Value = serde_json::from_str(data)
+        .map_err(|error| format!("failed to decode settings: {error}"))?;
+    let state = settings_state_mut(&mut document)?;
+    let logins = state
+        .entry("siteLogins")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let logins = logins
+        .as_array_mut()
+        .ok_or_else(|| "persisted site logins must be an array".to_string())?;
+    if logins.iter().any(|login| {
+        login
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|existing_id| existing_id == id)
+    }) {
+        return Err("site login already exists".to_string());
+    }
+    logins.push(serde_json::json!({
+        "id": id,
+        "urlPattern": url_pattern,
+        "username": username,
+    }));
+    serde_json::to_string(&document)
+        .map_err(|error| format!("failed to encode settings: {error}"))
+}
+
+fn remove_site_login_from_settings(
+    data: &str,
+    id: &str,
+) -> Result<(String, bool), String> {
+    let mut document: Value = serde_json::from_str(data)
+        .map_err(|error| format!("failed to decode settings: {error}"))?;
+    let state = settings_state_mut(&mut document)?;
+    let Some(logins) = state.get_mut("siteLogins") else {
+        return Ok((data.to_string(), false));
+    };
+    let logins = logins
+        .as_array_mut()
+        .ok_or_else(|| "persisted site logins must be an array".to_string())?;
+    let original_len = logins.len();
+    logins.retain(|login| {
+        login
+            .get("id")
+            .and_then(Value::as_str)
+            .is_none_or(|existing_id| existing_id != id)
+    });
+    if logins.len() == original_len {
+        return Ok((data.to_string(), false));
+    }
+    let updated = serde_json::to_string(&document)
+        .map_err(|error| format!("failed to encode settings: {error}"))?;
+    Ok((updated, true))
+}
+
+fn validate_site_login_id(id: &str) -> Result<&str, String> {
+    let trimmed = id.trim();
+    if trimmed.is_empty()
+        || trimmed != id
+        || trimmed == PAIRING_TOKEN_KEYCHAIN_ID
+    {
+        return Err("invalid site login identifier".to_string());
+    }
+    Ok(trimmed)
+}
+
+fn validate_site_login_input(
+    id: &str,
+    url_pattern: &str,
+    username: &str,
+    password: &str,
+) -> Result<(), String> {
+    validate_site_login_id(id)?;
+    if url_pattern.trim().is_empty() || url_pattern.chars().any(char::is_whitespace) {
+        return Err("site login URL pattern must be non-empty and contain no whitespace".to_string());
+    }
+    if username.trim().is_empty() {
+        return Err("site login username must be non-empty".to_string());
+    }
+    if password.is_empty() {
+        return Err("site login password must be non-empty".to_string());
+    }
+    Ok(())
+}
+
+pub fn save_site_login(
+    connection: &Connection,
+    id: &str,
+    url_pattern: &str,
+    username: &str,
+    password: &str,
+) -> Result<(), String> {
+    validate_site_login_input(id, url_pattern, username, password)?;
+    let id = validate_site_login_id(id)?;
+    let _keyring_guard = lock_keyring_operations()?;
+    let original = load_settings(connection)?.unwrap_or_else(|| {
+        // A first-run standard-mode install can grant keychain access before
+        // any frontend setting has been persisted. Start with a valid
+        // Zustand envelope so the first site login is not rejected.
+        serde_json::json!({ "state": {}, "version": 3 }).to_string()
+    });
+    if get_keychain_password_if_present_unlocked(id)?.is_some() {
+        return Err("a credential already exists for this site login".to_string());
+    }
+    let updated = add_site_login_to_settings(&original, id, url_pattern, username)?;
+
+    // Persist metadata before creating the secret. If the credential-store
+    // write fails, restore the exact previous settings document so a failed
+    // add cannot leave an orphaned keychain entry or a visible login row.
+    save_settings(connection, &updated)?;
+    if let Err(error) = set_keychain_password_unlocked(id, password) {
+        let keychain_rollback = delete_keychain_password_unlocked(id);
+        let settings_rollback = save_settings(connection, &original);
+        if let Err(rollback_error) = keychain_rollback {
+            return Err(format!(
+                "failed to save site login credential: {error}; credential rollback also failed: {rollback_error}"
+            ));
+        }
+        if let Err(rollback_error) = settings_rollback {
+            return Err(format!(
+                "failed to save site login credential: {error}; settings rollback also failed: {rollback_error}"
+            ));
+        }
+        return Err(format!("failed to save site login credential: {error}"));
+    }
+    Ok(())
+}
+
+pub fn delete_site_login(connection: &Connection, id: &str) -> Result<(), String> {
+    let id = validate_site_login_id(id)?;
+    let _keyring_guard = lock_keyring_operations()?;
+    let Some(original) = load_settings(connection)? else {
+        return Err("settings are not persisted yet".to_string());
+    };
+    let (updated, removed) = remove_site_login_from_settings(&original, id)?;
+    if !removed {
+        return Err("site login was not found".to_string());
+    }
+    let _existing_password = get_keychain_password_if_present_unlocked(id)?;
+
+    // Remove the metadata first only after the keychain has been checked. If
+    // deleting the secret fails, restore the metadata so the UI cannot lose a
+    // credential that still exists.
+    save_settings(connection, &updated)?;
+    if let Err(error) = delete_keychain_password_unlocked(id) {
+        if matches!(
+            get_keychain_password_if_present_unlocked(id),
+            Ok(None)
+        ) {
+            return Ok(());
+        }
+        if let Err(rollback_error) = save_settings(connection, &original) {
+            return Err(format!(
+                "failed to delete site login credential: {error}; settings rollback also failed: {rollback_error}"
+            ));
+        }
+        return Err(format!("failed to delete site login credential: {error}"));
+    }
+
+    Ok(())
+}
+
 fn save_settings_tx(transaction: &Transaction<'_>, data: &str) -> Result<(), String> {
     transaction
         .execute(
@@ -1355,20 +1537,23 @@ pub fn set_keychain_password(id: &str, password: &str) -> Result<(), String> {
     set_keychain_password_unlocked(id, password)
 }
 
-fn get_keychain_password_unlocked(id: &str) -> Result<String, String> {
+fn get_keychain_password_if_present_unlocked(id: &str) -> Result<Option<String>, String> {
     let entry = keychain_entry(id)?;
     match entry.get_password() {
-        Ok(password) => Ok(password),
+        Ok(password) => Ok(Some(password)),
         #[cfg(target_os = "linux")]
         Err(keyring_core::Error::NoEntry) => unique_legacy_linux_keychain_entry(id)?
-            .ok_or_else(|| keyring_core::Error::NoEntry.to_string())?
-            .get_password()
-            .map_err(|error| error.to_string()),
-        #[cfg(target_os = "linux")]
-        Err(error) => Err(error.to_string()),
+            .map(|legacy| legacy.get_password().map_err(|error| error.to_string()))
+            .transpose(),
         #[cfg(not(target_os = "linux"))]
+        Err(keyring_core::Error::NoEntry) => Ok(None),
         Err(error) => Err(error.to_string()),
     }
+}
+
+fn get_keychain_password_unlocked(id: &str) -> Result<String, String> {
+    get_keychain_password_if_present_unlocked(id)?
+        .ok_or_else(|| keyring_core::Error::NoEntry.to_string())
 }
 
 pub fn get_keychain_password(id: &str) -> Result<String, String> {
@@ -1404,6 +1589,88 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::TempDir;
+
+    #[test]
+    fn site_login_settings_update_preserves_envelope_without_password() {
+        let original = json!({
+            "state": {
+                "theme": "dark",
+                "siteLogins": []
+            },
+            "version": 3
+        })
+        .to_string();
+
+        let updated = add_site_login_to_settings(
+            &original,
+            "login-1",
+            "https://example.com/*",
+            "nima",
+        )
+        .unwrap();
+        let document: Value = serde_json::from_str(&updated).unwrap();
+        assert_eq!(document["state"]["theme"], "dark");
+        assert_eq!(document["version"], 3);
+        assert_eq!(document["state"]["siteLogins"][0]["id"], "login-1");
+        assert_eq!(document["state"]["siteLogins"][0]["username"], "nima");
+        assert!(!updated.contains("password"));
+    }
+
+    #[test]
+    fn site_login_settings_update_rejects_duplicate_ids() {
+        let original = json!({
+            "state": {
+                "siteLogins": [{
+                    "id": "login-1",
+                    "urlPattern": "https://example.com/*",
+                    "username": "old-user"
+                }]
+            },
+            "version": 3
+        })
+        .to_string();
+
+        let error = add_site_login_to_settings(
+            &original,
+            "login-1",
+            "https://example.com/*",
+            "new-user",
+        )
+        .unwrap_err();
+        assert_eq!(error, "site login already exists");
+    }
+
+    #[test]
+    fn site_login_settings_removal_reports_whether_metadata_changed() {
+        let original = json!({
+            "state": {
+                "siteLogins": [{
+                    "id": "login-1",
+                    "urlPattern": "https://example.com/*",
+                    "username": "nima"
+                }]
+            },
+            "version": 3
+        })
+        .to_string();
+
+        let (updated, removed) = remove_site_login_from_settings(&original, "login-1").unwrap();
+        assert!(removed);
+        let document: Value = serde_json::from_str(&updated).unwrap();
+        assert!(document["state"]["siteLogins"].as_array().unwrap().is_empty());
+
+        let (unchanged, removed) = remove_site_login_from_settings(&updated, "missing").unwrap();
+        assert!(!removed);
+        assert_eq!(unchanged, updated);
+    }
+
+    #[test]
+    fn site_login_ids_cannot_alias_the_pairing_token_or_hide_whitespace() {
+        assert_eq!(validate_site_login_id("login-1").unwrap(), "login-1");
+        assert!(validate_site_login_id(" extension-pairing-token").is_err());
+        assert!(validate_site_login_id("extension-pairing-token ").is_err());
+        assert!(validate_site_login_id(" login-1").is_err());
+    }
 
     #[test]
     fn migrates_v0_database_and_creates_backup() {

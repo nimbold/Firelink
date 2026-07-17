@@ -125,6 +125,16 @@ const removeStaleBackendDispatch = async (id: string): Promise<void> => {
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
+export class SystemProxyResolutionError extends Error {
+  constructor(reason: string) {
+    super(`System proxy configuration could not be read: ${reason}. Choose No Proxy or try again.`);
+    this.name = 'SystemProxyResolutionError';
+  }
+}
+
+const isSystemProxyConfigurationError = (error: unknown): boolean =>
+  error instanceof SystemProxyResolutionError;
+
 const stripCookieHeaders = (value: string | null | undefined): string =>
   (value || '')
     .split(/\r?\n/)
@@ -159,7 +169,7 @@ const speedLimitForDispatch = (
   return normalizeSpeedLimitForBackend(globalSpeedLimit);
 };
 
-export async function dispatchItem(id: string): Promise<boolean> {
+export async function dispatchItem(id: string, proxyOverride?: string | null): Promise<boolean> {
   await waitForPendingStartupResume();
   if (backendDispatchPromises.has(id)) return backendDispatchPromises.get(id)!;
 
@@ -193,7 +203,9 @@ export async function dispatchItem(id: string): Promise<boolean> {
       }
       if (!isCurrentDownloadLifecycle(id, lifecycleGeneration)) return false;
 
-      const proxy = await getProxyArgs(settings);
+      const proxy = proxyOverride === undefined
+        ? await getProxyArgs(settings)
+        : proxyOverride;
       if (!isCurrentDownloadLifecycle(id, lifecycleGeneration)) return false;
 
       const enqueueItem = {
@@ -252,8 +264,9 @@ export async function dispatchItem(id: string): Promise<boolean> {
         await removeStaleBackendDispatch(id);
       }
       if (lifecycleGeneration !== null && isCurrentDownloadLifecycle(id, lifecycleGeneration)) {
+        const proxyBlocked = isSystemProxyConfigurationError(e);
         useDownloadStore.getState().updateDownload(id, {
-          status: 'failed',
+          status: proxyBlocked ? 'queued' : 'failed',
           lastError: errorMessage(e)
         });
       }
@@ -310,8 +323,8 @@ export const getProxyArgs = async (settings: ReturnType<typeof useSettingsStore.
       const sysProxy = await invoke('get_system_proxy');
       return typeof sysProxy === 'string' && sysProxy ? sysProxy : "none";
     } catch (e) {
-      console.warn("Failed to get system proxy:", e);
-      return "none";
+      const reason = e instanceof Error ? e.message : String(e);
+      throw new SystemProxyResolutionError(reason);
     }
   }
   if (settings.proxyMode === 'custom') {
@@ -1008,6 +1021,39 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
 
       if (runnable.length === 0 || !isCurrentQueueControlGeneration(queueId, requestedGeneration)) return [];
 
+      const needsNewDispatch = runnable.some(item => {
+        const currentItem = get().downloads.find(download => download.id === item.id);
+        if (!currentItem) return false;
+        const backendRegistered = get().backendRegisteredIds.has(item.id);
+        const backendPending = get().pendingOrder.includes(item.id);
+        if (currentItem.status === 'queued' && backendRegistered && !backendPending) {
+          return false;
+        }
+        return currentItem.status === 'ready' ||
+          currentItem.status === 'staged' ||
+          currentItem.status === 'failed' ||
+          !currentItem.hasBeenDispatched ||
+          !backendRegistered;
+      });
+      let queueProxy: string | null | undefined;
+      if (needsNewDispatch) {
+        try {
+          queueProxy = await getProxyArgs(useSettingsStore.getState());
+        } catch (error) {
+          const message = errorMessage(error);
+          console.error(`Could not safely resolve the proxy for queue ${queueId}:`, error);
+          const runnableIds = new Set(runnable.map(item => item.id));
+          set(state => ({
+            downloads: state.downloads.map(item =>
+              runnableIds.has(item.id) && item.status !== 'completed'
+                ? { ...item, lastError: message }
+                : item
+            )
+          }));
+          return [];
+        }
+      }
+
       const acceptedIds: string[] = [];
       for (const item of runnable) {
         if (!isCurrentQueueControlGeneration(queueId, requestedGeneration)) break;
@@ -1031,7 +1077,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
           !currentItem.hasBeenDispatched ||
           !backendRegistered
         ) {
-          if (await dispatchItem(item.id)) {
+          if (await dispatchItem(item.id, queueProxy)) {
             if (!isCurrentQueueControlGeneration(queueId, requestedGeneration)) {
               const afterDispatch = get().downloads.find(download => download.id === item.id);
               if (
@@ -1240,6 +1286,22 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
 
       try {
         const settings = useSettingsStore.getState();
+        let proxy: string | null;
+        try {
+          proxy = await getProxyArgs(settings);
+        } catch (error) {
+          const message = errorMessage(error);
+          console.error('Could not safely resolve the system proxy during startup resume:', error);
+          const activeIds = new Set(active.map(item => item.id));
+          set(state => ({
+            downloads: state.downloads.map(item =>
+              activeIds.has(item.id) && item.status === 'queued'
+                ? { ...item, lastError: message }
+                : item
+            )
+          }));
+          return;
+        }
         const itemsToEnqueue = [];
         for (const pendingItem of active) {
           const item = get().downloads.find(download => download.id === pendingItem.id);
@@ -1272,7 +1334,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
             mirrors: item.mirrors || null,
             user_agent: settings.customUserAgent.trim() || null,
             max_tries: settings.maxAutomaticRetries,
-            proxy: await getProxyArgs(settings),
+            proxy,
             format_selector: item.mediaFormatSelector || null,
             cookie_source: settings.mediaCookieSource !== 'none' ? settings.mediaCookieSource : null,
             is_media: item.isMedia || false,

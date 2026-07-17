@@ -45,16 +45,34 @@ const searchRoot = argValue('--search-root');
 function findEngineRoot(root) {
   const expected = `yt-dlp-${targetTriple}${ext}`;
   const matches = [];
+  const resolvedRoot = path.resolve(root);
+  const hasExpectedEngineFile = directory => {
+    try {
+      return fs.lstatSync(path.join(directory, expected)).isFile();
+    } catch (error) {
+      if (error?.code === 'ENOENT') return false;
+      throw new Error(`Unable to inspect packaged engine root '${directory}': ${error.message}`);
+    }
+  };
+  if (hasExpectedEngineFile(resolvedRoot)) {
+    matches.push(resolvedRoot);
+  }
   const walk = directory => {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    let entries;
+    try {
+      entries = fs.readdirSync(directory, { withFileTypes: true });
+    } catch (error) {
+      throw new Error(`Unable to inspect packaged engine directory '${directory}': ${error.message}`);
+    }
+    for (const entry of entries) {
       const candidate = path.join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (fs.existsSync(path.join(candidate, expected))) matches.push(candidate);
+        if (hasExpectedEngineFile(candidate)) matches.push(candidate);
         walk(candidate);
       }
     }
   };
-  walk(path.resolve(root));
+  walk(resolvedRoot);
   if (matches.length !== 1) {
     throw new Error(`Expected exactly one packaged engine root under ${root}, found ${matches.length}`);
   }

@@ -217,11 +217,53 @@ describe('useDownloadStore', () => {
       proxyPort: 8080
     } as ReturnType<typeof useSettingsStore.getState>)).toBe('none');
 
+    vi.mocked(ipc.invokeCommand).mockRejectedValueOnce(new Error('system settings unavailable'));
+    await expect(getProxyArgs({
+      proxyMode: 'system',
+      proxyHost: '',
+      proxyPort: 8080
+    } as ReturnType<typeof useSettingsStore.getState>)).rejects.toThrow(
+      'System proxy configuration could not be read: system settings unavailable'
+    );
+
     expect(await getProxyArgs({
       proxyMode: 'custom',
       proxyHost: 'http://127.0.0.1',
       proxyPort: 1080
     } as ReturnType<typeof useSettingsStore.getState>)).toBe('http://127.0.0.1:1080');
+  });
+
+  it('keeps an item queued when system proxy resolution fails closed', async () => {
+    vi.mocked(useSettingsStore.getState).mockReturnValue({
+      ...useSettingsStore.getState(),
+      proxyMode: 'system'
+    } as unknown as ReturnType<typeof useSettingsStore.getState>);
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'get_system_proxy') {
+        throw new Error('system settings unavailable');
+      }
+      return undefined;
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'system-proxy-blocked',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        destination: '/tmp',
+        status: 'queued',
+        category: 'Other',
+        dateAdded: ''
+      }] as any[],
+      backendRegisteredIds: new Set()
+    });
+
+    await expect(dispatchItem('system-proxy-blocked')).resolves.toBe(false);
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'queued',
+      lastError: 'System proxy configuration could not be read: system settings unavailable. Choose No Proxy or try again.'
+    });
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
   });
 
   it('matches site logins by host, wildcard host, path, and full URL patterns', () => {
@@ -772,6 +814,41 @@ describe('useDownloadStore', () => {
       status: 'failed',
       lastError: 'aria2 addUri failed: connection refused'
     });
+  });
+
+  it('keeps all startup items retryable when system proxy resolution fails', async () => {
+    vi.mocked(useSettingsStore.getState).mockReturnValue({
+      ...useSettingsStore.getState(),
+      proxyMode: 'system'
+    } as unknown as ReturnType<typeof useSettingsStore.getState>);
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'db_get_all_queues') return [];
+      if (command === 'db_get_all_downloads') {
+        return [JSON.stringify({
+          id: 'startup-proxy-blocked',
+          url: 'https://example.com/file.bin',
+          fileName: 'file.bin',
+          status: 'queued',
+          category: 'Other',
+          dateAdded: '',
+          queueId: '00000000-0000-0000-0000-000000000001',
+          hasBeenDispatched: true
+        })];
+      }
+      if (command === 'get_system_proxy') {
+        throw new Error('system settings unavailable');
+      }
+      return undefined;
+    });
+
+    await useDownloadStore.getState().initDB();
+    await useDownloadStore.getState().resumePendingDownloads();
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'queued',
+      lastError: 'System proxy configuration could not be read: system settings unavailable. Choose No Proxy or try again.'
+    });
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_many', expect.anything());
   });
 
   it('keeps accepted startup registrations when pending-order refresh fails', async () => {

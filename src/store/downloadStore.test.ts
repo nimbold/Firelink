@@ -201,4 +201,36 @@ describe('useDownloadProgressStore', () => {
     expect(useDownloadProgressStore.getState().progressMap).toEqual({});
     release();
   });
+
+  it('ignores stale active state events after pause but accepts terminal reconciliation', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'paused-race',
+        url: 'https://example.com/file',
+        fileName: 'file.bin',
+        status: 'paused',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-state']({ payload: {
+      id: 'paused-race',
+      status: 'downloading'
+    } });
+    expect(useDownloadStore.getState().downloads[0].status).toBe('paused');
+
+    handlers['download-state']({ payload: {
+      id: 'paused-race',
+      status: 'completed'
+    } });
+    expect(useDownloadStore.getState().downloads[0].status).toBe('completed');
+    release();
+  });
 });

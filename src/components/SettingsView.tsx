@@ -4,6 +4,7 @@ import {
   type ListRowDensity,
   type SettingsState,
   SettingsTab,
+  runSettingsPersistenceTransaction,
   useSettingsStore
 } from '../store/useSettingsStore';
 import {
@@ -288,6 +289,8 @@ const engineRunId = useRef(0);
   const [loginUser, setLoginUser] = useState('');
   const [loginPass, setLoginPass] = useState('');
   const [loginError, setLoginError] = useState('');
+  const [isSavingLogin, setIsSavingLogin] = useState(false);
+  const saveLoginInFlight = useRef(false);
   const [loginFieldErrors, setLoginFieldErrors] = useState<{
     pattern?: string;
     username?: string;
@@ -546,6 +549,7 @@ runEngineChecks(false);
   };
 
   const handleAddLogin = async () => {
+    if (saveLoginInFlight.current) return;
     const fieldErrors: typeof loginFieldErrors = {};
     if (!loginPattern.trim()) {
       fieldErrors.pattern = 'URL pattern is required.';
@@ -571,22 +575,31 @@ runEngineChecks(false);
       setLoginError('Grant credential-store access before saving a site login.');
       return;
     }
-    
-    if (loginPass) {
-      try {
-        await invoke('set_keychain_password', { id, password: loginPass });
-      } catch (e) {
-        console.error("Failed to save password to keychain:", e);
-        setLoginError("Failed to save password securely.");
-        return;
-      }
+    saveLoginInFlight.current = true;
+    setIsSavingLogin(true);
+    try {
+      await runSettingsPersistenceTransaction(async () => {
+        await invoke('save_site_login', {
+          id,
+          urlPattern: loginPattern.trim(),
+          username: loginUser.trim(),
+          password: loginPass
+        });
+        settings.addSiteLogin({
+          id,
+          urlPattern: loginPattern.trim(),
+          username: loginUser.trim()
+        });
+      });
+    } catch (e) {
+      console.error("Failed to save site login:", e);
+      setLoginError("Failed to save site credential securely.");
+      return;
+    } finally {
+      saveLoginInFlight.current = false;
+      setIsSavingLogin(false);
     }
 
-    settings.addSiteLogin({
-      id,
-      urlPattern: loginPattern.trim(),
-      username: loginUser.trim()
-    });
     setLoginPattern('');
     setLoginUser('');
     setLoginPass('');
@@ -916,7 +929,7 @@ runEngineChecks(false);
                     {systemProxyStatus === 'checking' && 'Checking system proxy configuration…'}
                     {systemProxyStatus === 'detected' && 'A system proxy was detected. Normal file downloads require an HTTP or HTTPS endpoint; media downloads can use SOCKS.'}
                     {systemProxyStatus === 'none' && 'No usable system proxy was detected. Downloads will use no proxy.'}
-                    {systemProxyStatus === 'error' && 'System proxy configuration could not be read. Downloads will use no proxy until it is available.'}
+                    {systemProxyStatus === 'error' && 'System proxy configuration could not be read. Choose No Proxy or try again when it is available.'}
                   </p>
                 )}
               </div>
@@ -1107,8 +1120,10 @@ runEngineChecks(false);
                             return;
                           }
                           try {
-                            await invoke('delete_keychain_password', { id: login.id });
-                            settings.removeSiteLogin(login.id);
+                            await runSettingsPersistenceTransaction(async () => {
+                              await invoke('delete_site_login', { id: login.id });
+                              settings.removeSiteLogin(login.id);
+                            });
                             showToast("Deleted credential", 'success');
                           } catch (error) {
                             showToast(`Could not delete credential: ${String(error)}`, 'error');
@@ -1182,10 +1197,12 @@ runEngineChecks(false);
 
                 <div className="flex justify-end pt-2">
                   <button
+                    type="button"
                     onClick={handleAddLogin}
+                    disabled={isSavingLogin}
                     className="bg-accent hover:bg-accent text-white px-4 py-1.5 rounded-lg text-xs font-semibold shadow flex items-center gap-1.5"
                   >
-                    <Plus size={14} /> Add Login
+                    <Plus size={14} /> {isSavingLogin ? 'Saving…' : 'Add Login'}
                   </button>
                 </div>
               </div>

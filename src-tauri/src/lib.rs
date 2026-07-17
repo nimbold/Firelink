@@ -5536,6 +5536,27 @@ fn delete_keychain_password(
     crate::db::delete_keychain_password(&id)
 }
 
+#[tauri::command]
+fn save_site_login(
+    database: tauri::State<'_, crate::db::DbState>,
+    id: String,
+    url_pattern: String,
+    username: String,
+    password: String,
+) -> Result<(), String> {
+    let connection = database.lock()?;
+    crate::db::save_site_login(&connection, &id, &url_pattern, &username, &password)
+}
+
+#[tauri::command]
+fn delete_site_login(
+    database: tauri::State<'_, crate::db::DbState>,
+    id: String,
+) -> Result<(), String> {
+    let connection = database.lock()?;
+    crate::db::delete_site_login(&connection, &id)
+}
+
 #[derive(Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
@@ -8615,6 +8636,7 @@ pub fn run() {
             ack_schedule_trigger,
             check_automation_permission, request_automation_permission, open_automation_settings,
             set_keychain_password, get_keychain_password, delete_keychain_password,
+            save_site_login, delete_site_login,
             hydrate_extension_pairing_token, get_session_pairing_token, regenerate_pairing_token, grant_keychain_access,
             acknowledge_pairing_token_change,
             check_file_exists, toggle_tray_icon, set_extension_pairing_token,

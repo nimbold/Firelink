@@ -78,9 +78,19 @@ const startDownloadListeners = async () => {
       }
       const status = payload.status as DownloadStatus;
 
-      // Prevent race condition: don't transition backwards from terminal state
+      // Prevent stale lifecycle events from moving a paused row back into an
+      // active state. A pause request can finish before one already-emitted
+      // worker event reaches the frontend. Resume paths set the row to queued
+      // before asking the backend to resume, so an active event arriving while
+      // the row is still paused cannot represent a new lifecycle.
       if ((current.status === 'completed' || current.status === 'failed') &&
           status !== current.status) {
+        return;
+      }
+      if (current.status === 'paused' &&
+          status !== 'paused' &&
+          status !== 'completed' &&
+          status !== 'failed') {
         return;
       }
 
