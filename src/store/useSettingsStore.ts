@@ -8,6 +8,7 @@ import type { ListRowDensity } from '../bindings/ListRowDensity';
 import type { MediaCookieSource } from '../bindings/MediaCookieSource';
 import type { PostQueueAction } from '../bindings/PostQueueAction';
 import type { PersistedSettings } from '../bindings/PersistedSettings';
+import type { PairingTokenHydration } from '../bindings/PairingTokenHydration';
 import type { ProxyMode } from '../bindings/ProxyMode';
 import type { SchedulerSettings } from '../bindings/SchedulerSettings';
 import type { SettingsTab } from '../bindings/SettingsTab';
@@ -20,6 +21,7 @@ import {
 import { normalizeSpeedLimitForBackend } from '../utils/downloads';
 
 let settingsQueue: Promise<void> = Promise.resolve();
+let pairingTokenHydrationRequest: Promise<PairingTokenHydration> | null = null;
 const settingsPersistenceErrorListeners = new Set<() => void>();
 let settingsPersistenceFailed = false;
 const DEFAULT_SCHEDULER_QUEUE_ID = '00000000-0000-0000-0000-000000000001';
@@ -35,6 +37,16 @@ const enqueueSettingsTask = <T>(task: () => Promise<T>): Promise<T> => {
   const result = settingsQueue.then(task, task);
   settingsQueue = result.then(() => undefined, () => undefined);
   return result;
+};
+
+const requestPairingTokenHydration = (): Promise<PairingTokenHydration> => {
+  if (!pairingTokenHydrationRequest) {
+    pairingTokenHydrationRequest = invoke('hydrate_extension_pairing_token')
+      .finally(() => {
+        pairingTokenHydrationRequest = null;
+      });
+  }
+  return pairingTokenHydrationRequest;
 };
 
 export const runSettingsPersistenceTransaction = <T>(
@@ -240,11 +252,11 @@ export interface SettingsState {
   removeSiteLogin: (id: string) => void;
   regeneratePairingToken: () => Promise<void>;
   setAutoCheckUpdates: (autoCheckUpdates: boolean) => void;
-  hydratePairingToken: () => Promise<boolean>;
+  hydratePairingToken: (isCurrent?: () => boolean) => Promise<boolean>;
   setShowKeychainModal: (show: boolean) => void;
   setKeychainAccessReady: (ready: boolean) => void;
   dismissKeychainPrompt: (version?: string) => void;
-  hydrateSessionPairingToken: () => Promise<void>;
+  hydrateSessionPairingToken: (isCurrent?: () => boolean) => Promise<void>;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -410,6 +422,11 @@ export const useSettingsStore = create<SettingsState>()(
         siteLogins: state.siteLogins.filter((login) => login.id !== id)
       })),
       regeneratePairingToken: async () => {
+        const current = get();
+        if (!current.keychainAccessReady && !current.isPairingTokenPersistent) {
+          set({ showKeychainModal: true });
+          throw new Error('Grant credential-store access before regenerating the pairing token.');
+        }
         const result = await invoke('regenerate_pairing_token');
         if (!result.persistent) {
           throw new Error(result.error || 'Credential store access is unavailable.');
@@ -420,11 +437,12 @@ export const useSettingsStore = create<SettingsState>()(
           showKeychainModal: false
         });
       },
-      hydratePairingToken: async () => {
+      hydratePairingToken: async (isCurrent) => {
         // The backend migrates legacy settings copies and reads the token from
         // the credential store after the app state is ready to receive it.
         // Portable mode remains the explicit folder-contained exception.
-        const result = await invoke('hydrate_extension_pairing_token');
+        const result = await requestPairingTokenHydration();
+        if (isCurrent && !isCurrent()) return false;
         set({ 
           extensionPairingToken: result.token,
           isPairingTokenPersistent: result.persistent,
@@ -432,8 +450,9 @@ export const useSettingsStore = create<SettingsState>()(
         });
         return result.tokenChanged;
       },
-      hydrateSessionPairingToken: async () => {
+      hydrateSessionPairingToken: async (isCurrent) => {
         const result = await invoke('get_session_pairing_token');
+        if (isCurrent && !isCurrent()) return;
         set({
           extensionPairingToken: result.token,
           isPairingTokenPersistent: false,

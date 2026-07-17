@@ -1,7 +1,32 @@
 import { describe, expect, it } from 'vitest';
-import { getKeychainConsentVersion, getKeychainStartupDecision } from './keychainStartup';
+import {
+  getKeychainAccessReady,
+  getKeychainConsentVersion,
+  getKeychainStartupDecision
+} from './keychainStartup';
 
 describe('getKeychainStartupDecision', () => {
+  it('keeps portable site credentials gated until system-store access is granted', () => {
+    expect(getKeychainAccessReady({
+      portable: true,
+      accessGranted: false,
+      persistent: true
+    })).toBe(false);
+    expect(getKeychainAccessReady({
+      portable: true,
+      accessGranted: true,
+      persistent: true
+    })).toBe(true);
+  });
+
+  it('uses persistent pairing state for standard-mode readiness', () => {
+    expect(getKeychainAccessReady({
+      portable: false,
+      accessGranted: false,
+      persistent: true
+    })).toBe(true);
+  });
+
   it('changes the consent identity when the credential-access policy changes', () => {
     expect(getKeychainConsentVersion('1.1.0')).toMatch(
       /^1\.1\.0\|(build-.+|keychain-policy-2)$/

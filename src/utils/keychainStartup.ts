@@ -11,6 +11,12 @@ export type KeychainStartupDecision = {
   showKeychainPrompt: boolean;
 };
 
+export type KeychainAccessReadiness = {
+  portable: boolean;
+  accessGranted: boolean;
+  persistent: boolean;
+};
+
 // The semantic app version can remain unchanged across release-candidate and
 // packaging rebuilds. Use the build identity so an updated binary cannot skip
 // Firelink's explanation and invoke the OS prompt directly. The policy epoch
@@ -29,6 +35,13 @@ export const getKeychainConsentVersion = (appVersion: string): string => {
     ? `${normalizedVersion}|${consentIdentity}`
     : '';
 };
+
+export const getKeychainAccessReady = ({
+  portable,
+  accessGranted,
+  persistent
+}: KeychainAccessReadiness): boolean =>
+  portable ? accessGranted : persistent;
 
 export const getKeychainStartupDecision = ({
   portable,

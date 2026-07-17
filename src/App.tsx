@@ -23,7 +23,11 @@ import { useToast } from "./contexts/ToastContext";
 import { setLogStreamActive } from './utils/logger';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { getPlatformInfo, usePlatformInfo } from './utils/platform';
-import { getKeychainConsentVersion, getKeychainStartupDecision } from './utils/keychainStartup';
+import {
+  getKeychainAccessReady,
+  getKeychainConsentVersion,
+  getKeychainStartupDecision
+} from './utils/keychainStartup';
 import { getVersion } from '@tauri-apps/api/app';
 import type { PostQueueAction } from './bindings/PostQueueAction';
 import { PanelLeft } from 'lucide-react';
@@ -198,7 +202,7 @@ function App() {
           <span>{actionLabel} in 10 seconds.</span>
           <button
             type="button"
-            className="app-button app-button-cancel px-2 py-1"
+            className="app-button px-2 py-1"
             onClick={cancel}
           >
             Cancel
@@ -384,6 +388,7 @@ function App() {
 
       try {
         const settings = useSettingsStore.getState();
+        const isStartupActive = () => active;
         const { deferKeychainHydration, showKeychainPrompt } = getKeychainStartupDecision({
           portable: currentPlatform?.portable === true,
           appVersion: currentKeychainConsentVersion,
@@ -398,15 +403,20 @@ function App() {
           // This token is already owned by the backend and does not access
           // the OS credential store. Render our explanation before any native
           // Keychain/Credential Manager prompt can be user-triggered.
-          await settings.hydrateSessionPairingToken();
+          await settings.hydrateSessionPairingToken(isStartupActive);
+          if (!active) return;
           if (showKeychainPrompt) {
             settings.setShowKeychainModal(true);
           }
         } else {
-          changed = await settings.hydratePairingToken();
-          settings.setKeychainAccessReady(
-            currentPlatform?.portable !== true && useSettingsStore.getState().isPairingTokenPersistent
-          );
+          changed = await settings.hydratePairingToken(isStartupActive);
+          if (!active) return;
+          const currentSettings = useSettingsStore.getState();
+          settings.setKeychainAccessReady(getKeychainAccessReady({
+            portable: currentPlatform?.portable === true,
+            accessGranted: currentSettings.keychainAccessGranted,
+            persistent: currentSettings.isPairingTokenPersistent
+          }));
         }
         if (changed) {
           addToast({

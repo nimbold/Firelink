@@ -68,7 +68,7 @@ export const DuplicateResolutionModal = ({ conflicts: initialConflicts, onConfir
         </div>
 
         <div className="p-4 border-t border-border-modal flex items-center justify-between bg-sidebar-bg/50">
-          <button onClick={onCancel} className="app-button app-button-cancel px-4 text-xs">
+          <button onClick={onCancel} className="app-button px-4 text-xs">
             Cancel
           </button>
           <button 

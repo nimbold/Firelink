@@ -464,28 +464,6 @@ html[data-list-density="relaxed"] {
     background: hsl(var(--accent-color) / 0.9);
   }
 
-  .app-button-cancel {
-    border-color: hsl(var(--border-modal));
-    background:
-      linear-gradient(180deg, hsl(0 0% 100% / 0.055), transparent),
-      hsl(var(--bg-input) / 0.88);
-    color: hsl(var(--text-secondary));
-    box-shadow:
-      inset 0 1px 0 hsl(0 0% 100% / 0.055),
-      0 1px 2px hsl(var(--shadow-color));
-  }
-
-  .app-button-cancel:hover:not(:disabled) {
-    border-color: hsl(var(--text-muted) / 0.65);
-    background:
-      linear-gradient(hsl(var(--item-hover)), hsl(var(--item-hover))),
-      hsl(var(--bg-input));
-    color: hsl(var(--text-primary));
-    box-shadow:
-      inset 0 1px 0 hsl(0 0% 100% / 0.07),
-      0 2px 5px hsl(var(--shadow-color));
-  }
-
   .app-icon-button {
     display: inline-flex;
     width: 28px;
@@ -865,28 +843,6 @@ html[data-list-density="relaxed"] {
       hsl(var(--bg-input));
   }
 
-  .add-download-button-cancel {
-    border-color: hsl(var(--border-modal));
-    background:
-      linear-gradient(180deg, hsl(0 0% 100% / 0.055), transparent),
-      hsl(var(--bg-input) / 0.88);
-    color: hsl(var(--text-secondary));
-    box-shadow:
-      inset 0 1px 0 hsl(0 0% 100% / 0.055),
-      0 1px 2px hsl(var(--shadow-color));
-  }
-
-  .add-download-button-cancel:hover:not(:disabled) {
-    border-color: hsl(var(--text-muted) / 0.65);
-    background:
-      linear-gradient(hsl(var(--item-hover)), hsl(var(--item-hover))),
-      hsl(var(--bg-input));
-    color: hsl(var(--text-primary));
-    box-shadow:
-      inset 0 1px 0 hsl(0 0% 100% / 0.07),
-      0 2px 5px hsl(var(--shadow-color));
-  }
-
   .add-download-button-primary {
     border-color: hsl(var(--accent-color) / 0.86);
     background:
@@ -1017,25 +973,9 @@ html[data-list-density="relaxed"] {
     box-shadow: none;
   }
 
-  :is(.theme-dark, .theme-dracula, .theme-nord) .add-download-button-cancel {
-    border-color: hsl(var(--add-keyline));
-    background: hsl(var(--add-section-bg));
-    box-shadow:
-      inset 0 1px 0 hsl(0 0% 100% / 0.055),
-      0 1px 2px hsl(var(--add-shadow));
-  }
-
   :is(.theme-dark, .theme-dracula, .theme-nord) .add-download-button-secondary:hover:not(:disabled) {
     border-color: hsl(var(--add-keyline-strong));
     background: hsl(var(--item-hover));
-  }
-
-  :is(.theme-dark, .theme-dracula, .theme-nord) .add-download-button-cancel:hover:not(:disabled) {
-    border-color: hsl(var(--add-keyline-strong));
-    background: hsl(var(--item-hover));
-    box-shadow:
-      inset 0 1px 0 hsl(0 0% 100% / 0.07),
-      0 2px 5px hsl(var(--add-shadow));
   }
 
   :is(.theme-dark, .theme-dracula, .theme-nord) .add-download-button-primary {

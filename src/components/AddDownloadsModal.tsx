@@ -1465,7 +1465,7 @@ export const AddDownloadsModal = () => {
             {metadataSummaryMessage(parsedItems)}
           </div>
           <div className="flex gap-2.5">
-            <button onClick={closeModalFromDismissAction} disabled={isSubmitting || showKeychainModal} className="add-download-button add-download-button-cancel px-4 text-xs">
+            <button onClick={closeModalFromDismissAction} disabled={isSubmitting || showKeychainModal} className="add-download-button add-download-button-secondary px-4 text-xs">
               Cancel
             </button>
             <div ref={actionMenuRef} className="relative flex gap-2.5">

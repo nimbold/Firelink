@@ -5,6 +5,7 @@ import {
   useSettingsStore
 } from './useSettingsStore';
 import * as ipc from '../ipc';
+import type { PairingTokenHydration } from '../bindings/PairingTokenHydration';
 
 vi.mock('../ipc', () => ({
   invokeCommand: vi.fn()
@@ -68,6 +69,74 @@ describe('useSettingsStore credential-store startup flow', () => {
     expect(useSettingsStore.getState().keychainAccessReady).toBe(false);
     expect(useSettingsStore.getState().keychainAccessVersion).toBe('1.0.5');
     expect(useSettingsStore.getState().keychainPromptDismissed).toBe(true);
+  });
+
+  it('opens the consent modal instead of regenerating through the credential store', async () => {
+    await expect(useSettingsStore.getState().regeneratePairingToken())
+      .rejects.toThrow('Grant credential-store access before regenerating the pairing token.');
+
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('regenerate_pairing_token');
+    expect(useSettingsStore.getState().showKeychainModal).toBe(true);
+  });
+
+  it('does not apply pairing hydration after startup becomes inactive', async () => {
+    vi.mocked(ipc.invokeCommand).mockResolvedValueOnce({
+      token: 'stale-token',
+      tokenChanged: true,
+      persistent: true,
+      error: null
+    });
+
+    await expect(useSettingsStore.getState().hydratePairingToken(() => false)).resolves.toBe(false);
+
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('hydrate_extension_pairing_token');
+    expect(useSettingsStore.getState().extensionPairingToken).toBe('');
+    expect(useSettingsStore.getState().isPairingTokenPersistent).toBe(false);
+  });
+
+  it('does not apply session hydration after startup becomes inactive', async () => {
+    vi.mocked(ipc.invokeCommand).mockResolvedValueOnce({
+      token: 'stale-session-token',
+      tokenChanged: false,
+      persistent: false,
+      error: null
+    });
+
+    await useSettingsStore.getState().hydrateSessionPairingToken(() => false);
+
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('get_session_pairing_token');
+    expect(useSettingsStore.getState().extensionPairingToken).toBe('');
+    expect(useSettingsStore.getState().isPairingTokenPersistent).toBe(false);
+  });
+
+  it('shares a concurrent pairing hydration request', async () => {
+    let resolveRequest!: (value: PairingTokenHydration) => void;
+    const request = new Promise<PairingTokenHydration>(resolve => {
+      resolveRequest = resolve;
+    });
+    let hydrationRequestCount = 0;
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'hydrate_extension_pairing_token') {
+        hydrationRequestCount += 1;
+        return request;
+      }
+      return undefined;
+    });
+
+    const first = useSettingsStore.getState().hydratePairingToken();
+    const second = useSettingsStore.getState().hydratePairingToken();
+
+    expect(hydrationRequestCount).toBe(1);
+    resolveRequest({
+      token: 'shared-token',
+      tokenChanged: false,
+      persistent: true,
+      error: null
+    });
+    await Promise.all([first, second]);
+
+    expect(useSettingsStore.getState().extensionPairingToken).toBe('shared-token');
+    expect(useSettingsStore.getState().isPairingTokenPersistent).toBe(true);
   });
 });
 

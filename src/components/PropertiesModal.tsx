@@ -454,7 +454,7 @@ export const PropertiesModal = () => {
           <div className="flex gap-2">
             <button 
               onClick={() => setSelectedPropertiesDownloadId(null)} 
-              className="app-button app-button-cancel px-4 text-xs"
+              className="app-button px-4 text-xs"
             >
               Cancel
             </button>
