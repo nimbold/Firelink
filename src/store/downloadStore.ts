@@ -8,6 +8,7 @@ import { useDownloadProgressStore } from './downloadProgressStore';
 import {
   clearDownloadControlIntent,
   downloadControlIntentFor,
+  hasStaleTemporaryMediaEstimate,
   useDownloadStore
 } from './useDownloadStore';
 
@@ -67,6 +68,25 @@ const startDownloadListeners = async () => {
       }
       if (payload.total_is_estimate !== null && payload.total_is_estimate !== undefined) {
         updates.totalIsEstimate = payload.total_is_estimate;
+      }
+      const observedDownloadedBytes = Math.max(
+        current.downloadedBytes ?? 0,
+        payload.downloaded_bytes ?? 0
+      );
+      // Older lifecycles may have persisted yt-dlp's temporary fragmented
+      // estimate (often 1 KiB). Once actual bytes exceed it and the current
+      // progress frame has no reliable total, discard that stale denominator
+      // so it cannot survive a pause, queue transition, or app restart.
+      if (payload.total_bytes == null && hasStaleTemporaryMediaEstimate({
+        isMedia: current.isMedia,
+        downloadedBytes: observedDownloadedBytes,
+        totalBytes: current.totalBytes,
+        totalIsEstimate: current.totalIsEstimate,
+        size: current.size
+      })) {
+        updates.size = undefined;
+        updates.totalBytes = undefined;
+        updates.totalIsEstimate = undefined;
       }
       if (Object.keys(updates).length > 0) {
         mainStore.updateDownload(payload.id, updates);

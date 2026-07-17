@@ -968,7 +968,8 @@ export const AddDownloadsModal = () => {
           isMedia: item.isMedia,
           resumable: item.resumable,
           mediaFormatSelector: formatSelector,
-          size: item.size || (item.sizeBytes ? formatBytes(item.sizeBytes) : undefined)
+          size: item.size || (item.sizeBytes ? formatBytes(item.sizeBytes) : undefined),
+          sizeBytes: item.sizeBytes
         }, action);
         if (!added) {
           throw new Error('Backend rejected download start.');

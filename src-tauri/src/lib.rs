@@ -1080,10 +1080,17 @@ fn parse_media_progress_line(line: &str) -> Option<MediaProgress> {
                     .map(|seconds| format!("{}s", seconds.round() as u64))
             })
             .unwrap_or_else(|| "-".to_string());
-        let size = progress_json_string(&progress, "_total_bytes_str")
-            .or_else(|| progress_json_string(&progress, "_total_bytes_estimate_str"))
-            .or_else(|| (total > 0.0).then(|| crate::download::format_size(total)));
         let total_is_estimate = exact_total.is_none() && estimated_total.is_some();
+        // yt-dlp's estimated total is a moving bitrate-based guess. Use it to
+        // derive a percentage when no better signal exists, but never expose
+        // it as the media byte denominator. The Add window supplies the
+        // stable format estimate, and an exact total is emitted at completion.
+        let size = if total_is_estimate {
+            None
+        } else {
+            progress_json_string(&progress, "_total_bytes_str")
+                .or_else(|| exact_total.map(|total| crate::download::format_size(total)))
+        };
 
         return Some(MediaProgress {
             fraction: fraction.clamp(0.0, 1.0),
@@ -1091,7 +1098,7 @@ fn parse_media_progress_line(line: &str) -> Option<MediaProgress> {
             eta,
             size,
             downloaded_bytes: (total > 0.0 || downloaded > 0.0).then_some(downloaded),
-            total_bytes: (total > 0.0).then_some(total),
+            total_bytes: exact_total.filter(|total| total.is_finite() && *total > 0.0),
             total_is_estimate,
         });
     }
@@ -1394,6 +1401,23 @@ fn aggregate_media_byte_progress(
     }
 }
 
+fn media_progress_event_totals(
+    progress: &MediaProgress,
+    byte_progress: Option<(u64, u64, bool)>,
+    total_tracks: f64,
+) -> (Option<f64>, Option<bool>) {
+    let fallback_total = (total_tracks <= 1.0)
+        .then_some(progress.total_bytes)
+        .flatten();
+    let total_bytes = byte_progress
+        .map(|value| value.1 as f64)
+        .or(fallback_total);
+    let total_is_estimate = byte_progress
+        .map(|value| value.2)
+        .or_else(|| fallback_total.map(|_| progress.total_is_estimate));
+    (total_bytes, total_is_estimate)
+}
+
 fn emit_media_progress(
     app_handle: &tauri::AppHandle,
     id: &str,
@@ -1414,6 +1438,11 @@ fn emit_media_progress(
     }
     let byte_progress = aggregate_media_byte_progress(&progress, track_changed, state);
     let (speed, eta) = media_progress_speed(&progress, Instant::now(), &mut state.speed_sampler);
+    let (total_bytes, total_is_estimate) =
+        media_progress_event_totals(&progress, byte_progress, total_tracks);
+    let downloaded_bytes = byte_progress
+        .map(|value| value.0 as f64)
+        .or(progress.downloaded_bytes);
     let size = byte_progress
         .map(|(_, total, total_is_estimate)| {
             let prefix = if total_is_estimate { "~" } else { "" };
@@ -1432,9 +1461,9 @@ fn emit_media_progress(
                 eta,
                 size,
                 size_is_final: false,
-                downloaded_bytes: byte_progress.map(|value| value.0 as f64),
-                total_bytes: byte_progress.map(|value| value.1 as f64),
-                total_is_estimate: byte_progress.map(|value| value.2),
+                downloaded_bytes,
+                total_bytes,
+                total_is_estimate,
             },
         );
         state.last_progress_at = now;
@@ -6277,7 +6306,8 @@ mod tests {
         collect_download_uris, drain_media_output_lines, filename_from_content_disposition,
         filename_from_url_disposition_query, filename_from_url_path, is_excluded_yt_dlp_format,
         is_browser_cookie_extraction_error, json_lower, media_metadata_cache_key,
-        media_output_template, media_progress_args, media_progress_speed,
+        media_output_template, media_progress_args, media_progress_event_totals,
+        media_progress_speed,
         cookie_scope_for_url, metadata_authentication_error, metadata_cookie_header_present,
         metadata_headers, metadata_response_error,
         normalize_speed_limit_for_aria2,
@@ -7528,7 +7558,7 @@ mod tests {
     }
 
     #[test]
-    fn marks_structured_estimated_total_when_exact_total_is_null() {
+    fn keeps_structured_estimated_total_out_of_stable_byte_progress() {
         let line = format!(
             "{MEDIA_PROGRESS_PREFIX}{{\"downloaded_bytes\":5242880,\"total_bytes\":null,\"total_bytes_estimate\":10485760,\"_total_bytes_estimate_str\":\"~10.00MiB\"}}"
         );
@@ -7539,12 +7569,26 @@ mod tests {
                 fraction: 0.5,
                 speed: "-".to_string(),
                 eta: "-".to_string(),
-                size: Some("~10.00MiB".to_string()),
+                size: None,
                 downloaded_bytes: Some(5242880.0),
-                total_bytes: Some(10485760.0),
+                total_bytes: None,
                 total_is_estimate: true,
             })
         );
+    }
+
+    #[test]
+    fn ignores_estimated_media_totals_without_fragment_metadata() {
+        let line = format!(
+            "{MEDIA_PROGRESS_PREFIX}{{\"downloaded_bytes\":512,\"total_bytes_estimate\":1024,\"_percent_str\":\"50.0%\"}}"
+        );
+
+        let progress = parse_media_progress_line(&line).expect("structured progress should parse");
+        assert_eq!(progress.fraction, 0.5);
+        assert_eq!(progress.size, None);
+        assert_eq!(progress.downloaded_bytes, Some(512.0));
+        assert_eq!(progress.total_bytes, None);
+        assert!(progress.total_is_estimate);
     }
 
     #[test]
@@ -7599,10 +7643,11 @@ mod tests {
             "{MEDIA_PROGRESS_PREFIX}{{\"downloaded_bytes\":1024,\"total_bytes_estimate\":1024,\"fragment_index\":0,\"fragment_count\":354,\"_percent_str\":\"100.0%\"}}"
         );
 
-        assert_eq!(
-            parse_media_progress_line(&line).map(|progress| progress.fraction),
-            Some(0.0)
-        );
+        let progress = parse_media_progress_line(&line).expect("structured progress should parse");
+        assert_eq!(progress.fraction, 0.0);
+        assert_eq!(progress.size, None);
+        assert_eq!(progress.total_bytes, None);
+        assert!(progress.total_is_estimate);
     }
 
     #[test]
@@ -7670,6 +7715,32 @@ mod tests {
         assert_eq!(
             aggregate_media_byte_progress(&second, true, &mut state),
             Some((101, 300, true))
+        );
+    }
+
+    #[test]
+    fn preserves_single_track_totals_when_byte_aggregation_is_unavailable() {
+        let progress = MediaProgress {
+            fraction: 0.5,
+            speed: "-".to_string(),
+            eta: "-".to_string(),
+            size: Some("~2.00 KB".to_string()),
+            downloaded_bytes: Some(1024.0),
+            total_bytes: Some(2048.0),
+            total_is_estimate: true,
+        };
+
+        assert_eq!(
+            media_progress_event_totals(&progress, None, 1.0),
+            (Some(2048.0), Some(true))
+        );
+        assert_eq!(
+            media_progress_event_totals(&progress, None, 2.0),
+            (None, None)
+        );
+        assert_eq!(
+            media_progress_event_totals(&progress, Some((1024, 4096, false)), 1.0),
+            (Some(4096.0), Some(false))
         );
     }
 

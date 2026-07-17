@@ -447,6 +447,64 @@ const normalizeQueuePositions = (downloads: DownloadItem[]): DownloadItem[] => {
   });
 };
 
+const TEMPORARY_MEDIA_ESTIMATE_MAX_BYTES = 1024;
+const DISPLAYED_SIZE_UNIT_MULTIPLIERS: Record<string, number> = {
+  B: 1,
+  KB: 1024,
+  KIB: 1024,
+  MB: 1024 ** 2,
+  MIB: 1024 ** 2,
+  GB: 1024 ** 3,
+  GIB: 1024 ** 3,
+  TB: 1024 ** 4,
+  TIB: 1024 ** 4
+};
+
+const displayedSizeBytes = (size: string | undefined): number | undefined => {
+  const match = size?.trim().match(/^~\s*([0-9]+(?:\.[0-9]+)?)\s*(B|KB|KIB|MB|MIB|GB|GIB|TB|TIB)$/i);
+  if (!match) return undefined;
+
+  const bytes = Number(match[1]) * DISPLAYED_SIZE_UNIT_MULTIPLIERS[match[2].toUpperCase()];
+  return Number.isFinite(bytes) ? bytes : undefined;
+};
+
+export const hasStaleTemporaryMediaEstimate = (
+  download: Pick<DownloadItem, 'isMedia' | 'downloadedBytes' | 'totalBytes' | 'totalIsEstimate' | 'size'>
+): boolean => {
+  if (download.isMedia !== true) return false;
+
+  const hasImpossibleNumericEstimate = download.totalIsEstimate === true &&
+    typeof download.totalBytes === 'number' &&
+    Number.isFinite(download.totalBytes) &&
+    download.totalBytes > 0 &&
+    download.totalBytes <= TEMPORARY_MEDIA_ESTIMATE_MAX_BYTES &&
+    typeof download.downloadedBytes === 'number' &&
+    Number.isFinite(download.downloadedBytes) &&
+    download.downloadedBytes > download.totalBytes;
+  const visibleEstimateBytes = displayedSizeBytes(download.size);
+  const hasImpossibleVisibleEstimate = visibleEstimateBytes !== undefined &&
+    visibleEstimateBytes <= TEMPORARY_MEDIA_ESTIMATE_MAX_BYTES &&
+    typeof download.downloadedBytes === 'number' &&
+    Number.isFinite(download.downloadedBytes) &&
+    download.downloadedBytes > visibleEstimateBytes &&
+    (download.totalBytes == null || download.totalBytes <= TEMPORARY_MEDIA_ESTIMATE_MAX_BYTES);
+
+  return hasImpossibleNumericEstimate || hasImpossibleVisibleEstimate;
+};
+
+export const normalizePersistedDownloadProgress = (download: DownloadItem): DownloadItem =>
+  hasStaleTemporaryMediaEstimate(download)
+    ? {
+        ...download,
+        // The old lifecycle could persist yt-dlp's temporary HLS estimate as
+        // both the numeric denominator and the visible size. Neither value is
+        // recoverable after the fact, so remove the false claim on startup.
+        size: undefined,
+        totalBytes: undefined,
+        totalIsEstimate: undefined
+      }
+    : download;
+
 export type { DownloadStatus };
 export const MAIN_QUEUE_ID = '00000000-0000-0000-0000-000000000001';
 const DEFAULT_MAIN_QUEUE_NAME = 'Main Queue';
@@ -499,7 +557,10 @@ export type ExtensionDownloadRequest = ExtensionDownload;
 export type AddDownloadAction =
   | { type: 'start-now' }
   | { type: 'add-to-queue'; queueId: string };
-export type DownloadDraft = Omit<DownloadItem, 'status' | 'queueId' | 'hasBeenDispatched'>;
+export type DownloadDraft = Omit<DownloadItem, 'status' | 'queueId' | 'hasBeenDispatched'> & {
+  /** Numeric format estimate supplied by the media Add window. */
+  sizeBytes?: number;
+};
 export type PendingAddRequestContext = {
   version: number;
   referer: string;
@@ -797,8 +858,13 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     );
     const maxPos = queueItems.reduce((max, d) => Math.max(max, d.queuePosition ?? 0), -1);
     const queuePosition = maxPos + 1;
+    const { sizeBytes, ...downloadDraft } = item;
     const ownedItem: DownloadItem = {
-      ...item,
+      ...downloadDraft,
+      totalBytes: item.totalBytes ?? sizeBytes,
+      totalIsEstimate: item.totalIsEstimate ?? (
+        item.isMedia === true && item.size?.trim().startsWith('~')
+      ),
       connections: resolveDownloadConnections(item.connections, settings.perServerConnections),
       destination: destPath,
       status: action.type === 'add-to-queue' ? 'staged' : 'ready',
@@ -1490,7 +1556,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
         const persistedQueueId = download.queueId || MAIN_QUEUE_ID;
         const queueId = normalizedQueueState.queueIdRemap.get(persistedQueueId)
           || (knownQueueIds.has(persistedQueueId) ? persistedQueueId : MAIN_QUEUE_ID);
-        return { ...download, queueId };
+        return normalizePersistedDownloadProgress({ ...download, queueId });
       });
       
       set(state => ({

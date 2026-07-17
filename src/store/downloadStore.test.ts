@@ -207,6 +207,86 @@ describe('useDownloadProgressStore', () => {
     release();
   });
 
+  it('drops a persisted temporary media estimate when fragmented progress has no total', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'stale-media-estimate',
+        url: 'https://youtube.com/watch?v=stale',
+        fileName: 'video.mkv',
+        status: 'downloading',
+        category: 'Movies',
+        dateAdded: '',
+        isMedia: true,
+        downloadedBytes: 11989,
+        totalBytes: 1024,
+        totalIsEstimate: true,
+        size: '~85.7 MB'
+      }]
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-progress']({ payload: {
+      id: 'stale-media-estimate',
+      fraction: 0.38,
+      speed: '2.7 MB/s',
+      eta: '7s',
+      size: null,
+      size_is_final: false,
+      downloaded_bytes: 13000,
+      total_bytes: null,
+      total_is_estimate: null
+    } });
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      downloadedBytes: 13000,
+      size: undefined
+    });
+    expect(useDownloadStore.getState().downloads[0].totalBytes).toBeUndefined();
+    expect(useDownloadStore.getState().downloads[0].totalIsEstimate).toBeUndefined();
+    release();
+  });
+
+  it('removes a stale tiny media size after restart when byte counters were volatile', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'stale-media-size',
+        url: 'https://youtube.com/watch?v=stale-size',
+        fileName: 'video.mkv',
+        status: 'downloading',
+        category: 'Movies',
+        dateAdded: '',
+        isMedia: true,
+        size: '~1.00 KB'
+      }]
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-progress']({ payload: {
+      id: 'stale-media-size',
+      fraction: 0.01,
+      speed: '2.7 MB/s',
+      eta: '7s',
+      size: null,
+      size_is_final: false,
+      downloaded_bytes: 2048,
+      total_bytes: null,
+      total_is_estimate: null
+    } });
+
+    expect(useDownloadStore.getState().downloads[0].size).toBeUndefined();
+    release();
+  });
+
   it('ignores stale active state events after pause but accepts terminal reconciliation', async () => {
     const handlers: Record<string, (event: any) => void> = {};
     vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {

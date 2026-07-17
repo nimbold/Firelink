@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { dispatchItem, getProxyArgs, getSiteLogin, normalizeCustomProxy, normalizePersistedQueueState, normalizePersistedQueues, useDownloadStore } from './useDownloadStore';
+import { dispatchItem, getProxyArgs, getSiteLogin, hasStaleTemporaryMediaEstimate, normalizeCustomProxy, normalizePersistedDownloadProgress, normalizePersistedQueueState, normalizePersistedQueues, useDownloadStore } from './useDownloadStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
 import { useSettingsStore } from './useSettingsStore';
 import * as ipc from '../ipc';
@@ -192,6 +192,95 @@ describe('useDownloadStore', () => {
 
     expect(useDownloadStore.getState().downloads.map(download => download.queueId))
       .toEqual(['00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001']);
+  });
+
+  it('removes persisted temporary media estimates that are smaller than downloaded bytes', async () => {
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'db_get_all_queues') return [];
+      if (cmd === 'db_get_all_downloads') {
+        return [JSON.stringify({
+          id: 'stale-media-estimate',
+          url: 'https://youtube.com/watch?v=stale',
+          fileName: 'video.mkv',
+          status: 'queued',
+          category: 'Movies',
+          dateAdded: '',
+          queueId: '00000000-0000-0000-0000-000000000001',
+          isMedia: true,
+          size: '~1.00 KB',
+          downloadedBytes: 11_989,
+          totalBytes: 1_024,
+          totalIsEstimate: true
+        })];
+      }
+      return undefined;
+    });
+
+    await useDownloadStore.getState().initDB();
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      size: undefined,
+      downloadedBytes: 11_989,
+      totalBytes: undefined,
+      totalIsEstimate: undefined
+    });
+  });
+
+  it('does not discard a legitimate large media estimate when downloaded bytes exceed it', () => {
+    const media = {
+      isMedia: true,
+      downloadedBytes: 90_000_000,
+      totalBytes: 89_817_907,
+      totalIsEstimate: true,
+      size: '~85.7 MB'
+    } as const;
+
+    expect(hasStaleTemporaryMediaEstimate(media)).toBe(false);
+    expect(normalizePersistedDownloadProgress({
+      id: 'large-estimate',
+      url: 'https://youtube.com/watch?v=large',
+      fileName: 'video.mkv',
+      status: 'queued',
+      category: 'Movies',
+      dateAdded: '',
+      ...media
+    })).toMatchObject({
+      size: '~85.7 MB',
+      downloadedBytes: 90_000_000,
+      totalBytes: 89_817_907,
+      totalIsEstimate: true
+    });
+  });
+
+  it('does not discard a legitimate small media estimate without contradictory progress', () => {
+    const media = {
+      isMedia: true,
+      size: '~500 B',
+      downloadedBytes: 500,
+      totalBytes: undefined,
+      totalIsEstimate: true
+    } as const;
+
+    expect(hasStaleTemporaryMediaEstimate(media)).toBe(false);
+    expect(normalizePersistedDownloadProgress({
+      id: 'small-media',
+      url: 'https://youtube.com/watch?v=small',
+      fileName: 'short.mkv',
+      status: 'queued',
+      category: 'Movies',
+      dateAdded: '',
+      ...media
+    })).toMatchObject(media);
+  });
+
+  it('recognizes IEC-formatted temporary media estimates', () => {
+    expect(hasStaleTemporaryMediaEstimate({
+      isMedia: true,
+      size: '~1.00 KiB',
+      downloadedBytes: 2_048,
+      totalBytes: undefined,
+      totalIsEstimate: true
+    })).toBe(true);
   });
 
   it('normalizes proxy settings for download dispatch', async () => {
@@ -580,6 +669,25 @@ describe('useDownloadStore', () => {
     expect(item.queueId).toBe('queue-b');
     expect(item.queuePosition).toBe(0);
     expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
+  });
+
+  it('carries a media format estimate into numeric progress state', async () => {
+    await useDownloadStore.getState().addDownload({
+      id: 'media-estimate',
+      url: 'https://youtube.com/watch?v=estimate',
+      fileName: 'video.mkv',
+      category: 'Movies',
+      dateAdded: '',
+      isMedia: true,
+      size: '~85.7 MB',
+      sizeBytes: 89_817_907
+    }, { type: 'add-to-queue', queueId: 'queue-b' });
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      totalBytes: 89_817_907,
+      totalIsEstimate: true
+    });
+    expect(useDownloadStore.getState().downloads[0]).not.toHaveProperty('sizeBytes');
   });
 
   it('starts immediately in the main queue', async () => {
