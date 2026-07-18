@@ -1605,6 +1605,23 @@ fn is_browser_cookie_extraction_error(message: &str) -> bool {
         || lower.contains("failed to decrypt with dpapi")
 }
 
+fn should_retry_without_browser_cookies(
+    cookie_browser: Option<&str>,
+    failure_reason: &str,
+    fallback_used: bool,
+) -> bool {
+    // Browser cookies are an optional authentication enhancement. Chromium on
+    // Windows can deny access to its database independently of whether the
+    // requested media needs authentication, so only this narrowly classified
+    // extraction failure may downgrade to a public-media attempt.
+    !fallback_used
+        && cookie_browser.is_some_and(|source| {
+            let source = source.trim();
+            !source.is_empty() && !source.eq_ignore_ascii_case("none")
+        })
+        && is_browser_cookie_extraction_error(failure_reason)
+}
+
 fn should_cleanup_media_artifacts_after_failure(
     failure_reason: &str,
     strike: usize,
@@ -2204,6 +2221,11 @@ async fn fetch_media_metadata(
     }
     drop(cache_guard);
 
+    // A fallback result was resolved without the configured browser session;
+    // keep that effective identity separate so a later successful cookie
+    // extraction can refresh authenticated formats instead of hitting stale
+    // public-only metadata.
+    let mut result_cache_key = cache_key;
     let result = fetch_media_metadata_uncached(
         app_handle.clone(),
         url.clone(),
@@ -2219,11 +2241,34 @@ async fn fetch_media_metadata(
 
     let result = match (result, cookie_browser.as_deref()) {
         (Err(error), Some(browser))
-            if !browser.trim().is_empty() && is_browser_cookie_extraction_error(&error) =>
+            if should_retry_without_browser_cookies(Some(browser), &error, false) =>
         {
-            Err(format!(
-                "Browser cookie extraction failed for {browser}: {error}"
-            ))
+            log::warn!(
+                "yt-dlp could not read browser cookies from {}; retrying media metadata without browser cookies",
+                browser
+            );
+            result_cache_key = media_metadata_cache_key(
+                &url,
+                &None,
+                &user_agent,
+                &username,
+                &password,
+                &headers,
+                &cookies,
+                &proxy,
+            );
+            fetch_media_metadata_uncached(
+                app_handle,
+                url,
+                None,
+                user_agent,
+                username,
+                password,
+                headers,
+                cookies,
+                proxy,
+            )
+            .await
         }
         (result, _) => result,
     };
@@ -2235,7 +2280,7 @@ async fn fetch_media_metadata(
         Ok(metadata) => {
             let mut cache_guard = cache.lock().await;
             if cache_guard.len() >= MEDIA_METADATA_CACHE_MAX_ENTRIES
-                && !cache_guard.contains_key(&cache_key)
+                && !cache_guard.contains_key(&result_cache_key)
             {
                 if let Some(oldest_key) = cache_guard
                     .iter()
@@ -2245,7 +2290,7 @@ async fn fetch_media_metadata(
                     cache_guard.remove(&oldest_key);
                 }
             }
-            cache_guard.insert(cache_key, (Instant::now(), metadata.clone()));
+            cache_guard.insert(result_cache_key, (Instant::now(), metadata.clone()));
             Ok(metadata)
         }
         Err(error) => Err(error),
@@ -2272,6 +2317,56 @@ async fn fetch_media_playlist_metadata(
 ) -> Result<MediaPlaylistMetadata, String> {
     validate_url_ssrf(&url).await?;
 
+    let result = fetch_media_playlist_metadata_uncached(
+        app_handle.clone(),
+        url.clone(),
+        cookie_browser.clone(),
+        user_agent.clone(),
+        username.clone(),
+        password.clone(),
+        headers.clone(),
+        cookies.clone(),
+        proxy.clone(),
+    )
+    .await;
+
+    match (result, cookie_browser.as_deref()) {
+        (Err(error), Some(browser))
+            if should_retry_without_browser_cookies(Some(browser), &error, false) =>
+        {
+            log::warn!(
+                "yt-dlp could not read browser cookies from {}; retrying playlist metadata without browser cookies",
+                browser
+            );
+            fetch_media_playlist_metadata_uncached(
+                app_handle,
+                url,
+                None,
+                user_agent,
+                username,
+                password,
+                headers,
+                cookies,
+                proxy,
+            )
+            .await
+        }
+        (result, _) => result,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fetch_media_playlist_metadata_uncached(
+    app_handle: tauri::AppHandle,
+    url: String,
+    cookie_browser: Option<String>,
+    user_agent: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+    headers: Option<String>,
+    cookies: Option<String>,
+    proxy: Option<String>,
+) -> Result<MediaPlaylistMetadata, String> {
     let deno_path = resolve_bundled_binary_path(&app_handle, "deno")
         .map_err(|e| format!("failed to find bundled deno: {e}"))?;
     let ffmpeg_path = resolve_bundled_binary_path(&app_handle, "ffmpeg")
@@ -3703,9 +3798,13 @@ pub(crate) async fn start_media_download_internal(
 
     let max_retries = max_tries.unwrap_or(0).max(0) as usize;
     let mut strike = 0_usize;
-    let effective_cookie_source = cookie_source.clone();
+    let mut effective_cookie_source = cookie_source.clone();
+    let mut browser_cookie_fallback_used = false;
 
     while strike <= max_retries {
+        if *cancel_rx.borrow() {
+            return Err(crate::queue::MEDIA_RUN_CANCELLED.to_string());
+        }
         let mut processing_started = false;
         let ytdlp_path = resolve_bundled_binary_path(&app_handle, "yt-dlp")?;
         let mut cmd = app_handle.shell().command(&ytdlp_path);
@@ -3806,6 +3905,10 @@ pub(crate) async fn start_media_download_internal(
         }
 
         cmd = cmd.arg("--").arg(&url);
+
+        if *cancel_rx.borrow() {
+            return Err(crate::queue::MEDIA_RUN_CANCELLED.to_string());
+        }
 
         let (mut rx, child) = cmd
             .spawn()
@@ -3995,15 +4098,20 @@ pub(crate) async fn start_media_download_internal(
         if should_cleanup_media_artifacts_after_failure(&failure_reason, strike, max_retries) {
             cleanup_media_artifacts(&out_path, false).await;
         }
-        if effective_cookie_source
-            .as_deref()
-            .is_some_and(|source| !source.trim().is_empty() && source != "none")
-            && is_browser_cookie_extraction_error(&failure_reason)
+        if should_retry_without_browser_cookies(
+            effective_cookie_source.as_deref(),
+            &failure_reason,
+            browser_cookie_fallback_used,
+        )
         {
             let source = effective_cookie_source.clone().unwrap_or_default();
-            return Err(format!(
-                "Browser cookie extraction failed for {source}: {failure_reason}"
-            ));
+            log::warn!(
+                "yt-dlp could not read browser cookies from {}; retrying media download without browser cookies",
+                source
+            );
+            effective_cookie_source = None;
+            browser_cookie_fallback_used = true;
+            continue;
         }
         if !(transient && strikes_left) {
             return Err(failure_reason);
@@ -6314,6 +6422,7 @@ mod tests {
         parse_firelink_deep_link, parse_ffmpeg_version, parse_media_progress_line,
         redact_log_line, redact_log_line_for_output, sanitize_ytdlp_config_value,
         has_resumable_download_assets, should_cleanup_media_artifacts_after_failure,
+        should_retry_without_browser_cookies,
         retry_metadata_with_cookies, should_retry_metadata_with_cookies,
         should_send_metadata_credentials, collect_log_files, FirelinkDeepLink,
         percent_decode_metadata_value, MediaProgress,
@@ -7061,10 +7170,21 @@ mod tests {
             &Some("session=one".to_string()),
             &None,
         );
+        let without_browser = media_metadata_cache_key(
+            "https://example.com/watch?v=1",
+            &None,
+            &Some("Custom UA A".to_string()),
+            &None,
+            &None,
+            &Some("User-Agent: Browser A".to_string()),
+            &Some("session=one".to_string()),
+            &None,
+        );
 
         assert_ne!(base, changed_headers);
         assert_ne!(base, changed_cookies);
         assert_ne!(base, changed_user_agent);
+        assert_ne!(base, without_browser);
     }
 
     #[test]
@@ -7478,6 +7598,38 @@ mod tests {
         ));
         assert!(!is_browser_cookie_extraction_error(
             "ERROR: requested format is not available"
+        ));
+    }
+
+    #[test]
+    fn retries_once_without_browser_cookies_only_for_cookie_database_failures() {
+        let cookie_database_error =
+            "ERROR: Could not copy Chrome cookie database. See https://github.com/yt-dlp/yt-dlp/issues/7271";
+
+        assert!(should_retry_without_browser_cookies(
+            Some("chrome"),
+            cookie_database_error,
+            false
+        ));
+        assert!(!should_retry_without_browser_cookies(
+            Some("chrome"),
+            cookie_database_error,
+            true
+        ));
+        assert!(!should_retry_without_browser_cookies(
+            Some("none"),
+            cookie_database_error,
+            false
+        ));
+        assert!(!should_retry_without_browser_cookies(
+            None,
+            cookie_database_error,
+            false
+        ));
+        assert!(!should_retry_without_browser_cookies(
+            Some("chrome"),
+            "ERROR: Sign in to confirm you are not a bot",
+            false
         ));
     }
 
