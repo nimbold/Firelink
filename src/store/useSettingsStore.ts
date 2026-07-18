@@ -20,6 +20,7 @@ import {
 } from '../utils/downloadLocations';
 import { normalizeSpeedLimitForBackend } from '../utils/downloads';
 import i18n from '../i18n';
+import { isAppLocalePreference, type AppLocalePreference } from '../i18n/locales';
 
 let settingsQueue: Promise<void> = Promise.resolve();
 let pairingTokenHydrationRequest: Promise<PairingTokenHydration> | null = null;
@@ -78,6 +79,7 @@ const SETTINGS_TAB_VALUES = [
 ] as const;
 
 type PersistedSettingsSnapshot = PersistedSettings & {
+  language: AppLocalePreference;
   keychainPromptDismissed: boolean;
   keychainAccessVersion: string;
 };
@@ -164,6 +166,7 @@ export type {
 
 export interface SettingsState {
   theme: Theme;
+  language: AppLocalePreference;
   baseDownloadFolder: string;
   categorySubfoldersEnabled: boolean;
   categorySubfolders: Record<string, string>;
@@ -215,6 +218,7 @@ export interface SettingsState {
   showKeychainModal: boolean;
 
   setTheme: (theme: Theme) => void;
+  setLanguage: (language: AppLocalePreference) => void;
   setBaseDownloadFolder: (path: string) => void;
   approveDownloadRoot: (path: string) => Promise<string>;
   setMaxConcurrentDownloads: (count: number) => void;
@@ -269,6 +273,7 @@ export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
       theme: 'system',
+      language: 'system',
       baseDownloadFolder: '~/Downloads',
       categorySubfoldersEnabled: true,
       categorySubfolders: { ...DEFAULT_CATEGORY_SUBFOLDERS },
@@ -328,6 +333,7 @@ export const useSettingsStore = create<SettingsState>()(
       showKeychainModal: false,
 
       setTheme: (theme) => { info('Settings updated: theme'); set({ theme }); },
+      setLanguage: (language) => { info('Settings updated: language'); set({ language }); },
       setBaseDownloadFolder: (path) => {
         info('Settings updated: baseDownloadFolder');
         set({ baseDownloadFolder: path });
@@ -494,7 +500,7 @@ export const useSettingsStore = create<SettingsState>()(
     {
       name: 'firelink-settings',
       storage: createJSONStorage(() => tauriStorage),
-      version: 3,
+      version: 4,
       migrate: (persistedState) => {
         if (!persistedState || typeof persistedState !== 'object') {
           return persistedState as SettingsState;
@@ -530,6 +536,7 @@ export const useSettingsStore = create<SettingsState>()(
       },
       partialize: (state): PersistedSettingsSnapshot => ({
         theme: state.theme,
+        language: state.language,
         baseDownloadFolder: state.baseDownloadFolder,
         categorySubfoldersEnabled: state.categorySubfoldersEnabled,
         categorySubfolders: state.categorySubfolders,
@@ -588,6 +595,9 @@ export const useSettingsStore = create<SettingsState>()(
           theme: isAllowedSetting(THEME_VALUES, persisted.theme)
             ? persisted.theme
             : currentState.theme,
+          language: isAppLocalePreference(persisted.language)
+            ? persisted.language
+            : currentState.language,
           appFontSize: isAllowedSetting(APP_FONT_SIZE_VALUES, persisted.appFontSize)
             ? persisted.appFontSize
             : currentState.appFontSize,

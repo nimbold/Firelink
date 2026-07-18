@@ -218,7 +218,7 @@ export default function SpeedLimiterView() {
         }`}>
           {enabled ? `${currentDisplayValue} ${unit}` : t($ => $.speedLimiter.unlimited)}
         </span>
-        <button onClick={() => void save()} disabled={isSaving} className="app-button app-button-primary ml-auto px-3 text-[11px] disabled:opacity-50">
+        <button onClick={() => void save()} disabled={isSaving} className="app-button app-button-primary ms-auto px-3 text-[11px] disabled:opacity-50">
           <Save size={14} /> {t($ => $.speedLimiter.saveLimit)}
         </button>
       </div>
@@ -275,7 +275,7 @@ export default function SpeedLimiterView() {
                     type="button"
                     disabled={!enabled || isSaving}
                     onClick={() => preset(presetValue)}
-                    className="h-full flex-1 px-3 text-left disabled:opacity-50"
+                    className="h-full flex-1 px-3 text-start disabled:opacity-50"
                   >
                     {formatPresetValue(displayValue)} {unit}
                   </button>
@@ -283,7 +283,7 @@ export default function SpeedLimiterView() {
                     type="button"
                     disabled={!enabled || isSaving}
                     onClick={() => removePreset(presetValue)}
-                    className="flex h-full w-7 items-center justify-center border-l border-border-modal text-text-muted transition-colors hover:bg-red-500/10 hover:text-red-400 focus-visible:bg-red-500/10 focus-visible:text-red-400 disabled:opacity-50"
+                    className="flex h-full w-7 items-center justify-center border-s border-border-modal text-text-muted transition-colors hover:bg-red-500/10 hover:text-red-400 focus-visible:bg-red-500/10 focus-visible:text-red-400 disabled:opacity-50"
                     title={t($ => $.speedLimiter.removePreset, { value: formatPresetValue(displayValue), unit })}
                     aria-label={t($ => $.speedLimiter.removePreset, { value: formatPresetValue(displayValue), unit })}
                   >
@@ -292,7 +292,7 @@ export default function SpeedLimiterView() {
                 </div>
               );
             })}
-            <div className="ml-1 flex h-8 items-center gap-1.5 rounded-md border border-border-modal bg-bg-input px-2">
+            <div className="ms-1 flex h-8 items-center gap-1.5 rounded-md border border-border-modal bg-bg-input px-2">
               <input
                 type="number"
                 min={speedValueFromKiB(1, unit)}

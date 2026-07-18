@@ -122,13 +122,13 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
       <button
         type="button"
         data-active={isSelected}
-        className="sidebar-nav-item group flex w-full items-center text-[13px] text-left cursor-default font-medium"
+        className="sidebar-nav-item group flex w-full items-center text-[13px] text-start cursor-default font-medium"
         onClick={() => onSelectFilter(filter)}
       >
-        <Icon className="w-[18px] h-[18px] mr-3 shrink-0" strokeWidth={isSelected ? 2.5 : 2} />
+        <Icon className="w-[18px] h-[18px] me-3 shrink-0" strokeWidth={isSelected ? 2.5 : 2} />
         <span className="truncate">{label}</span>
         {getCount(filter) > 0 && (
-          <span className="sidebar-count ml-auto min-w-5 px-1.5 py-0.5 rounded-full text-center text-[10px] leading-none font-bold">
+          <span className="sidebar-count ms-auto min-w-5 px-1.5 py-0.5 rounded-full text-center text-[10px] leading-none font-bold">
             {getCount(filter)}
           </span>
         )}
@@ -182,7 +182,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
     if (isRenaming) {
       return (
         <div className="flex items-center px-2.5 py-1 rounded-lg mb-0.5 bg-item-hover">
-          <List className="w-4 h-4 mr-2 text-text-secondary" strokeWidth={2} />
+          <List className="w-4 h-4 me-2 text-text-secondary" strokeWidth={2} />
           <input
             ref={renameInputRef}
             type="text"
@@ -205,12 +205,12 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
         data-active={isSelected}
         onContextMenu={e => handleQueueContextMenu(e, queue.id)}
         onClick={() => onSelectFilter(filterId)}
-        className="sidebar-nav-item group flex w-full items-center text-[13px] text-left cursor-default font-medium"
+        className="sidebar-nav-item group flex w-full items-center text-[13px] text-start cursor-default font-medium"
       >
-        <List className="w-[18px] h-[18px] mr-3 shrink-0" strokeWidth={isSelected ? 2.5 : 2} />
+        <List className="w-[18px] h-[18px] me-3 shrink-0" strokeWidth={isSelected ? 2.5 : 2} />
         <span className="truncate">{queue.name}</span>
         {getCount(filterId) > 0 && (
-          <span className="sidebar-count ml-auto min-w-5 px-1.5 py-0.5 rounded-full text-center text-[10px] leading-none font-bold shrink-0">
+          <span className="sidebar-count ms-auto min-w-5 px-1.5 py-0.5 rounded-full text-center text-[10px] leading-none font-bold shrink-0">
             {getCount(filterId)}
           </span>
         )}
@@ -225,9 +225,9 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
         type="button"
         data-active={isSelected}
         onClick={() => setActiveView(view)}
-        className="sidebar-nav-item group flex w-full items-center text-[13px] text-left cursor-default font-medium"
+        className="sidebar-nav-item group flex w-full items-center text-[13px] text-start cursor-default font-medium"
       >
-        <Icon className="w-[18px] h-[18px] mr-3 shrink-0" strokeWidth={isSelected ? 2.5 : 2} />
+        <Icon className="w-[18px] h-[18px] me-3 shrink-0" strokeWidth={isSelected ? 2.5 : 2} />
         <span>{label}</span>
       </button>
     );
@@ -298,7 +298,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
           ))}
           {isAddingQueue ? (
             <div className="flex items-center px-3.5 py-1.5 rounded-lg bg-item-hover mb-1">
-              <Plus className="w-4 h-4 mr-2 text-text-secondary shrink-0" strokeWidth={2} />
+              <Plus className="w-4 h-4 me-2 text-text-secondary shrink-0" strokeWidth={2} />
               <input
                 ref={addInputRef}
                 type="text"
@@ -319,7 +319,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
               onClick={() => { addQueueSubmitRef.current = false; setIsAddingQueue(true); setNewQueueName(''); }}
               className="flex w-full items-center px-3.5 py-1.5 rounded-lg text-[13px] text-text-muted hover:bg-item-hover hover:text-text-secondary cursor-default transition-colors mb-1"
             >
-              <Plus className="w-4 h-4 mr-2 shrink-0" strokeWidth={2} />
+              <Plus className="w-4 h-4 me-2 shrink-0" strokeWidth={2} />
               <span className="truncate">{t($ => $.actions.addNewQueue)}</span>
             </button>
           )}
@@ -338,9 +338,9 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
           type="button"
           data-active={activeView === 'settings'}
           onClick={() => setActiveView('settings')}
-          className="sidebar-nav-item sidebar-settings-button group flex w-full items-center text-[13px] text-left cursor-default font-medium transition-colors"
+          className="sidebar-nav-item sidebar-settings-button group flex w-full items-center text-[13px] text-start cursor-default font-medium transition-colors"
         >
-          <Settings className={`w-[18px] h-[18px] mr-3 shrink-0 ${activeView === 'settings' ? 'text-white' : 'text-text-muted'}`} strokeWidth={activeView === 'settings' ? 2.5 : 2} />
+          <Settings className={`w-[18px] h-[18px] me-3 shrink-0 ${activeView === 'settings' ? 'text-white' : 'text-text-muted'}`} strokeWidth={activeView === 'settings' ? 2.5 : 2} />
           <span>{t($ => $.navigation.settings)}</span>
         </button>
       </div>

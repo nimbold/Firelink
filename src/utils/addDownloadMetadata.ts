@@ -5,6 +5,7 @@ import {
 } from './downloads';
 import type { MediaPlaylistMetadata } from '../bindings/MediaPlaylistMetadata';
 import i18n from '../i18n';
+import { localePluralVariant } from '../i18n/locales';
 
 export type MetadataStatus = 'loading' | 'ready' | 'metadata-error' | 'invalid';
 
@@ -397,20 +398,42 @@ export const metadataSummaryState = (rows: AddDownloadDraftRow[]): MetadataSumma
 };
 
 export const metadataSummaryMessage = (rows: AddDownloadDraftRow[]): string => {
+  const pluralMessage = (
+    count: number,
+    one: () => string,
+    few: () => string,
+    many: () => string
+  ): string => {
+    switch (localePluralVariant(i18n.language, count)) {
+      case 'one': return one();
+      case 'few': return few();
+      case 'many': return many();
+    }
+  };
+
   if (rows.length === 0) return i18n.t($ => $.addDownloads.pasteOneOrMore);
 
   const selectedRows = rows.filter(row => row.selected !== false);
   if (selectedRows.length === 0) return i18n.t($ => $.addDownloads.selectAtLeastOne);
-  const plural = (count: number) => count === 1 ? '' : 's';
 
   const invalid = selectedRows.filter(row => row.status === 'invalid').length;
   if (invalid > 0) {
-    return i18n.t($ => $.addDownloads.correctInvalid, { count: invalid, plural: plural(invalid) });
+    return pluralMessage(
+      invalid,
+      () => i18n.t($ => $.addDownloads.correctInvalidOne, { count: invalid }),
+      () => i18n.t($ => $.addDownloads.correctInvalidFew, { count: invalid }),
+      () => i18n.t($ => $.addDownloads.correctInvalidMany, { count: invalid })
+    );
   }
 
   const loading = selectedRows.filter(row => row.status === 'loading').length;
   if (loading > 0) {
-    return i18n.t($ => $.addDownloads.waitingForMetadata, { count: loading, plural: plural(loading) });
+    return pluralMessage(
+      loading,
+      () => i18n.t($ => $.addDownloads.waitingForMetadataOne, { count: loading }),
+      () => i18n.t($ => $.addDownloads.waitingForMetadataFew, { count: loading }),
+      () => i18n.t($ => $.addDownloads.waitingForMetadataMany, { count: loading })
+    );
   }
 
   const failed = selectedRows.filter(row => row.status === 'metadata-error').length;
@@ -418,16 +441,36 @@ export const metadataSummaryMessage = (rows: AddDownloadDraftRow[]): string => {
   const blocked = selectedRows.filter(row => row.metadataBlockedReason === 'unsafe-url').length;
   const ready = selectedRows.filter(row => row.status === 'ready').length;
   if (blocked > 0) {
-    return i18n.t($ => $.addDownloads.removeUnsafe, { count: blocked, plural: plural(blocked) });
+    return pluralMessage(
+      blocked,
+      () => i18n.t($ => $.addDownloads.removeUnsafeOne, { count: blocked }),
+      () => i18n.t($ => $.addDownloads.removeUnsafeFew, { count: blocked }),
+      () => i18n.t($ => $.addDownloads.removeUnsafeMany, { count: blocked })
+    );
   }
   if (failedMedia > 0) {
-    return i18n.t($ => $.addDownloads.mediaMetadataUnavailableSummary, { count: failedMedia, plural: plural(failedMedia) });
+    return pluralMessage(
+      failedMedia,
+      () => i18n.t($ => $.addDownloads.mediaMetadataUnavailableSummaryOne, { count: failedMedia }),
+      () => i18n.t($ => $.addDownloads.mediaMetadataUnavailableSummaryFew, { count: failedMedia }),
+      () => i18n.t($ => $.addDownloads.mediaMetadataUnavailableSummaryMany, { count: failedMedia })
+    );
   }
   if (failed === selectedRows.length) {
     return i18n.t($ => $.addDownloads.metadataUnavailableFallback);
   }
   if (failed > 0) {
-    return i18n.t($ => $.addDownloads.fallbackReady, { ready, readyPlural: plural(ready), failed });
+    return pluralMessage(
+      ready,
+      () => i18n.t($ => $.addDownloads.fallbackReadyOne, { ready, failed }),
+      () => i18n.t($ => $.addDownloads.fallbackReadyFew, { ready, failed }),
+      () => i18n.t($ => $.addDownloads.fallbackReadyMany, { ready, failed })
+    );
   }
-  return i18n.t($ => $.addDownloads.readyToAdd, { count: ready, plural: plural(ready) });
+  return pluralMessage(
+    ready,
+    () => i18n.t($ => $.addDownloads.readyToAddOne, { count: ready }),
+    () => i18n.t($ => $.addDownloads.readyToAddFew, { count: ready }),
+    () => i18n.t($ => $.addDownloads.readyToAddMany, { count: ready })
+  );
 };

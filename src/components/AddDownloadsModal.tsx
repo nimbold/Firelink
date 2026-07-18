@@ -25,6 +25,7 @@ import { getPlatformInfo } from '../utils/platform';
 import { isTransferLocked } from '../utils/downloadActions';
 import { useToast } from '../contexts/ToastContext';
 import { useTranslation } from 'react-i18next';
+import { localePluralVariant } from '../i18n/locales';
 import {
   canSubmitMetadataRows,
   appendRequestUrlsAfterVersion,
@@ -114,7 +115,7 @@ const extensionHeaders = (context: PendingAddRequestContext | undefined) => [
 ].filter(Boolean).join('\n');
 
 export const AddDownloadsModal = () => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { addToast } = useToast();
   const {
     isAddModalOpen,
@@ -1132,19 +1133,60 @@ export const AddDownloadsModal = () => {
   );
   const playlistSummaries = Object.entries(playlistExpansions)
     .filter(([sourceUrl]) => activePlaylistUrls.has(sourceUrl));
+  const pluralMessage = (
+    count: number,
+    one: () => string,
+    few: () => string,
+    many: () => string
+  ): string => {
+    switch (localePluralVariant(i18n.language, count)) {
+      case 'one': return one();
+      case 'few': return few();
+      case 'many': return many();
+    }
+  };
   const metadataSummary = (() => {
     const summary = metadataSummaryState(parsedItems);
-    const plural = (count: number) => count === 1 ? '' : 's';
     switch (summary.type) {
       case 'empty': return t($ => $.addDownloads.pasteOneOrMore);
       case 'none-selected': return t($ => $.addDownloads.selectAtLeastOne);
-      case 'invalid': return t($ => $.addDownloads.correctInvalid, { count: summary.count, plural: plural(summary.count) });
-      case 'loading': return t($ => $.addDownloads.waitingForMetadata, { count: summary.count, plural: plural(summary.count) });
-      case 'unsafe': return t($ => $.addDownloads.removeUnsafe, { count: summary.count, plural: plural(summary.count) });
-      case 'media-error': return t($ => $.addDownloads.mediaMetadataUnavailableSummary, { count: summary.count, plural: plural(summary.count) });
+      case 'invalid': return pluralMessage(
+        summary.count,
+        () => t($ => $.addDownloads.correctInvalidOne, { count: summary.count }),
+        () => t($ => $.addDownloads.correctInvalidFew, { count: summary.count }),
+        () => t($ => $.addDownloads.correctInvalidMany, { count: summary.count })
+      );
+      case 'loading': return pluralMessage(
+        summary.count,
+        () => t($ => $.addDownloads.waitingForMetadataOne, { count: summary.count }),
+        () => t($ => $.addDownloads.waitingForMetadataFew, { count: summary.count }),
+        () => t($ => $.addDownloads.waitingForMetadataMany, { count: summary.count })
+      );
+      case 'unsafe': return pluralMessage(
+        summary.count,
+        () => t($ => $.addDownloads.removeUnsafeOne, { count: summary.count }),
+        () => t($ => $.addDownloads.removeUnsafeFew, { count: summary.count }),
+        () => t($ => $.addDownloads.removeUnsafeMany, { count: summary.count })
+      );
+      case 'media-error': return pluralMessage(
+        summary.count,
+        () => t($ => $.addDownloads.mediaMetadataUnavailableSummaryOne, { count: summary.count }),
+        () => t($ => $.addDownloads.mediaMetadataUnavailableSummaryFew, { count: summary.count }),
+        () => t($ => $.addDownloads.mediaMetadataUnavailableSummaryMany, { count: summary.count })
+      );
       case 'all-error': return t($ => $.addDownloads.metadataUnavailableFallback);
-      case 'fallback': return t($ => $.addDownloads.fallbackReady, { ready: summary.ready, readyPlural: plural(summary.ready), failed: summary.failed });
-      case 'ready': return t($ => $.addDownloads.readyToAdd, { count: summary.count, plural: plural(summary.count) });
+      case 'fallback': return pluralMessage(
+        summary.ready,
+        () => t($ => $.addDownloads.fallbackReadyOne, { ready: summary.ready, failed: summary.failed }),
+        () => t($ => $.addDownloads.fallbackReadyFew, { ready: summary.ready, failed: summary.failed }),
+        () => t($ => $.addDownloads.fallbackReadyMany, { ready: summary.ready, failed: summary.failed })
+      );
+      case 'ready': return pluralMessage(
+        summary.count,
+        () => t($ => $.addDownloads.readyToAddOne, { count: summary.count }),
+        () => t($ => $.addDownloads.readyToAddFew, { count: summary.count }),
+        () => t($ => $.addDownloads.readyToAddMany, { count: summary.count })
+      );
     }
   })();
 
@@ -1194,7 +1236,7 @@ export const AddDownloadsModal = () => {
         <div className="flex flex-1 min-h-0 overflow-hidden">
 
           {/* Left Column: URLs and Preview */}
-          <div className="add-download-left w-[55%] border-r border-border-modal flex flex-col">
+          <div className="add-download-left w-[55%] flex flex-col">
             <div className="add-download-pane p-5 flex-1 min-h-0 min-w-0 flex flex-col gap-5">
 
               <div className="flex flex-col gap-2">
@@ -1245,7 +1287,7 @@ export const AddDownloadsModal = () => {
                       type="button"
                       onClick={toggleAllRows}
                       disabled={parsedItems.length === 0}
-                      className="add-download-link-button ml-3 text-[11px] font-medium"
+                      className="add-download-link-button ms-3 text-[11px] font-medium"
                     >
                       {allRowsSelected ? t($ => $.addDownloads.clearSelection) : t($ => $.addDownloads.selectAll)}
                     </button>
@@ -1302,9 +1344,9 @@ export const AddDownloadsModal = () => {
                               onChange={() => toggleRowSelection(i)}
                               onClick={event => event.stopPropagation()}
                               aria-label={t($ => $.addDownloads.selectItem, { file: item.file })}
-                              className="mr-2 shrink-0 accent-purple-500"
+                              className="me-2 shrink-0 accent-purple-500"
                             />
-                            <div className="flex-[2] text-text-primary font-medium truncate pr-2" title={item.file}>{item.file}</div>
+                            <div className="flex-[2] text-text-primary font-medium truncate pe-2" title={item.file}>{item.file}</div>
                             <div className={`flex-1 font-mono ${item.status === 'loading' ? 'text-text-muted/50' : 'text-text-muted'}`}>{item.size || t($ => $.addDownloads.unknown)}</div>
                             <div className={`flex-[1.5] font-medium ${item.status === 'metadata-error' || item.status === 'invalid' ? 'text-red-500' : item.status === 'loading' ? 'text-orange-400' : 'text-blue-500'}`}>
                               {item.status === 'loading' ? (
@@ -1337,7 +1379,7 @@ export const AddDownloadsModal = () => {
               {/* Media Format (Dynamic) */}
               {selectedItemIndex !== null && parsedItems[selectedItemIndex]?.isMedia && (
                 <section className="add-download-section add-download-media-section relative overflow-hidden p-4">
-                  <div className="absolute top-0 right-0 p-2 opacity-10">
+                  <div className="absolute top-0 end-0 p-2 opacity-10">
                     <Video size={48} />
                   </div>
                   <div className="add-download-section-title flex items-center gap-2 mb-3 relative z-10">
@@ -1358,7 +1400,7 @@ export const AddDownloadsModal = () => {
                     <div className="space-y-3 relative z-10">
                       <div className="flex flex-col gap-1.5">
                         <label className="text-[10px] uppercase font-bold tracking-wider text-text-muted">{t($ => $.addDownloads.availableStreams)}</label>
-                        <div className="flex flex-col gap-1 max-h-48 overflow-y-auto pr-1" role="radiogroup" aria-label={t($ => $.addDownloads.availableMediaStreams)}>
+                        <div className="flex flex-col gap-1 max-h-48 overflow-y-auto pe-1" role="radiogroup" aria-label={t($ => $.addDownloads.availableMediaStreams)}>
                           {parsedItems[selectedItemIndex].formats!.map((f, idx) => {
                           const isSelected = parsedItems[selectedItemIndex].selectedFormat === idx;
                           const Icon = f.type === 'Audio' ? Music : Film;
@@ -1474,7 +1516,7 @@ export const AddDownloadsModal = () => {
                 </label>
 
                 {useAuth && (
-                  <div className="space-y-2.5 pl-5 border-l-2 border-border-modal/50">
+                  <div className="add-download-nested-fields space-y-2.5">
                     <input type="text" value={username} onChange={e=>setUsername(e.target.value)} placeholder={t($ => $.addDownloads.username)} className="add-download-control w-full px-3 py-1.5 text-xs" />
                     <input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder={t($ => $.addDownloads.password)} className="add-download-control w-full px-3 py-1.5 text-xs" />
                   </div>
@@ -1493,7 +1535,7 @@ export const AddDownloadsModal = () => {
                 </button>
 
                 {advancedExpanded && (
-                  <div className="mt-4 space-y-4 pl-6">
+                  <div className="add-download-advanced-fields mt-4 space-y-4">
                     <label className="flex items-center gap-2 text-xs text-text-secondary font-medium cursor-pointer">
                       <input type="checkbox" checked={checksumEnabled} onChange={e=>setChecksumEnabled(e.target.checked)} className="add-download-checkbox" />
                       {t($ => $.addDownloads.verifyChecksum)}
@@ -1573,12 +1615,12 @@ export const AddDownloadsModal = () => {
                   aria-haspopup="menu"
                   aria-expanded={isQueueMenuOpen}
                 >
-                  {t($ => $.addDownloads.addToQueue)} <ChevronDown size={14} className="ml-1" />
+                  {t($ => $.addDownloads.addToQueue)} <ChevronDown size={14} className="ms-1" />
                 </button>
                 {isQueueMenuOpen && (
                   <div
                     role="menu"
-                    className="app-modal absolute bottom-full right-0 z-[70] mb-2 min-w-[200px] overflow-visible py-1.5 text-xs"
+                    className="add-download-queue-menu app-modal absolute bottom-full z-[70] mb-2 min-w-[200px] overflow-visible py-1.5 text-xs"
                   >
                     {queues.map(queue => (
                       <button
@@ -1589,7 +1631,7 @@ export const AddDownloadsModal = () => {
                           setIsQueueMenuOpen(false);
                           void handleAction({ type: 'add-to-queue', queueId: queue.id });
                         }}
-                        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-item-hover"
+                        className="flex w-full items-center gap-2 px-3 py-2 text-start hover:bg-item-hover"
                       >
                         <span className="truncate">{queue.name}</span>
                       </button>

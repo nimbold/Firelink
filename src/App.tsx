@@ -1,12 +1,8 @@
 import { initMediaDomains, isActiveDownloadStatus, isTransferActiveStatus } from './utils/downloads';
 import { schedulerCompletionState } from './utils/schedulerCompletion';
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Sidebar, SidebarFilter } from "./components/Sidebar";
 import { DownloadTable } from "./components/DownloadTable";
-import { AddDownloadsModal } from "./components/AddDownloadsModal";
-import SettingsView from "./components/SettingsView";
-import { PropertiesModal } from "./components/PropertiesModal";
-import { DeleteConfirmationModal } from "./components/DeleteConfirmationModal";
 import { extractValidDownloadUrls } from './utils/url';
 import { readClipboardDownloadUrls } from './utils/clipboard';
 import { listenEvent as listen, invokeCommand as invoke } from "./ipc";
@@ -14,10 +10,6 @@ import { useDownloadStore, MAIN_QUEUE_ID, type ExtensionDownloadRequest } from '
 import { initDownloadListener } from './store/downloadStore';
 import { subscribeToSettingsPersistenceErrors, useSettingsStore } from "./store/useSettingsStore";
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
-import SchedulerView from "./components/SchedulerView";
-import SpeedLimiterView from "./components/SpeedLimiterView";
-import LogsView from "./components/LogsView";
-import { KeychainPermissionModal } from "./components/KeychainPermissionModal";
 import { WindowControls } from "./components/WindowControls";
 import { useToast } from "./contexts/ToastContext";
 import { setLogStreamActive } from './utils/logger';
@@ -32,8 +24,25 @@ import { getVersion } from '@tauri-apps/api/app';
 import type { PostQueueAction } from './bindings/PostQueueAction';
 import { PanelLeft } from 'lucide-react';
 import { isTrustedFirelinkReleaseUrl } from './utils/releaseUrls';
-import { syncDocumentLocale } from './i18n';
+import { changeAppLocale, resolveAppLocale, syncDocumentLocale } from './i18n';
 import { useTranslation } from 'react-i18next';
+
+const SettingsView = lazy(() => import('./components/SettingsView'));
+const SchedulerView = lazy(() => import('./components/SchedulerView'));
+const SpeedLimiterView = lazy(() => import('./components/SpeedLimiterView'));
+const LogsView = lazy(() => import('./components/LogsView'));
+const AddDownloadsModal = lazy(() => import('./components/AddDownloadsModal').then(module => ({
+  default: module.AddDownloadsModal,
+})));
+const PropertiesModal = lazy(() => import('./components/PropertiesModal').then(module => ({
+  default: module.PropertiesModal,
+})));
+const DeleteConfirmationModal = lazy(() => import('./components/DeleteConfirmationModal').then(module => ({
+  default: module.DeleteConfirmationModal,
+})));
+const KeychainPermissionModal = lazy(() => import('./components/KeychainPermissionModal').then(module => ({
+  default: module.KeychainPermissionModal,
+})));
 
 let automaticUpdateCheckStarted = false;
 const processingScheduleKeys = new Set<string>();
@@ -123,11 +132,21 @@ function App() {
   });
 
   const theme = useSettingsStore(state => state.theme);
+  const languagePreference = useSettingsStore(state => state.language);
   const isSidebarVisible = useSettingsStore(state => state.isSidebarVisible);
   const toggleSidebar = useSettingsStore(state => state.toggleSidebar);
   const activeView = useSettingsStore(state => state.activeView);
   const appFontSize = useSettingsStore(state => state.appFontSize);
   const listRowDensity = useSettingsStore(state => state.listRowDensity);
+
+  useEffect(() => {
+    const locale = languagePreference === 'system'
+      ? resolveAppLocale(typeof navigator === 'undefined' ? undefined : navigator.language)
+      : languagePreference;
+    if (i18n.language !== locale) {
+      void changeAppLocale(locale);
+    }
+  }, [i18n, languagePreference]);
   const autoCheckUpdates = useSettingsStore(state => state.autoCheckUpdates);
   const autoAddClipboardLinks = useSettingsStore(state => state.autoAddClipboardLinks);
   const showNotifications = useSettingsStore(state => state.showNotifications);
@@ -135,6 +154,9 @@ function App() {
   const showMenuBarIcon = useSettingsStore(state => state.showMenuBarIcon);
   const extensionPairingToken = useSettingsStore(state => state.extensionPairingToken);
   const showKeychainModal = useSettingsStore(state => state.showKeychainModal);
+  const isAddModalOpen = useDownloadStore(state => state.isAddModalOpen);
+  const selectedPropertiesDownloadId = useDownloadStore(state => state.selectedPropertiesDownloadId);
+  const isDeleteModalOpen = useDownloadStore(state => state.deleteModalState.isOpen);
   const downloads = useDownloadStore(state => state.downloads);
   const activeDownloadCount = downloads.filter(download => isTransferActiveStatus(download.status)).length;
   const queuedCount = downloads.filter(download =>
@@ -920,7 +942,7 @@ function App() {
         }`}
         style={{ 
           width: sidebarWidth,
-          marginLeft: isSidebarVisible ? 0 : -sidebarWidth
+          marginInlineStart: isSidebarVisible ? 0 : -sidebarWidth
         }}
       >
         <div className="app-sidebar-panel h-full w-full">
@@ -956,11 +978,13 @@ function App() {
           </button>
         )}
         <div className="flex-1 flex flex-col overflow-hidden relative">
-          {activeView === 'downloads' && <DownloadTable filter={filter} />}
-          {activeView === 'settings' && <SettingsView />}
-          {activeView === 'scheduler' && <SchedulerView />}
-          {activeView === 'speedLimiter' && <SpeedLimiterView />}
-          {activeView === 'logs' && <LogsView />}
+          <Suspense fallback={null}>
+            {activeView === 'downloads' && <DownloadTable filter={filter} />}
+            {activeView === 'settings' && <SettingsView />}
+            {activeView === 'scheduler' && <SchedulerView />}
+            {activeView === 'speedLimiter' && <SpeedLimiterView />}
+            {activeView === 'logs' && <LogsView />}
+          </Suspense>
         </div>
         
         {/* Status Bar */}
@@ -974,10 +998,12 @@ function App() {
         </div>
       </div>
       
-      <AddDownloadsModal />
-      <PropertiesModal />
-      <DeleteConfirmationModal />
-      <KeychainPermissionModal consentVersion={keychainConsentVersion} />
+      <Suspense fallback={null}>
+        {isAddModalOpen && <AddDownloadsModal />}
+        {selectedPropertiesDownloadId !== null && <PropertiesModal />}
+        {isDeleteModalOpen && <DeleteConfirmationModal />}
+        {showKeychainModal && <KeychainPermissionModal consentVersion={keychainConsentVersion} />}
+      </Suspense>
 
     </div>
   );

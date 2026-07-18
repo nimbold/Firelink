@@ -692,9 +692,9 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                 <div className="group relative">
                   <button className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors flex justify-between items-center">
                     {t($ => $.downloadTable.addToQueue)}
-                    <ChevronRight size={14} />
+                    <ChevronRight size={14} className="download-context-menu-chevron" />
                   </button>
-                  <div className="absolute left-full top-0 hidden group-hover:block ml-1 min-w-[150px] bg-bg-modal border border-border-modal rounded-lg shadow-lg py-1.5 z-50">
+                  <div className="download-context-submenu absolute top-0 hidden group-hover:block min-w-[150px] bg-bg-modal border border-border-modal rounded-lg shadow-lg py-1.5 z-50">
                     {queues.map(q => (
                       <button key={q.id} onClick={() => {
                         setContextMenu(null);
@@ -811,9 +811,9 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                 <div className="group relative">
                   <button className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors flex justify-between items-center">
                     {t($ => $.downloadTable.addToQueue)}
-                    <ChevronRight size={14} />
+                    <ChevronRight size={14} className="download-context-menu-chevron" />
                   </button>
-                  <div className="absolute left-full top-0 hidden group-hover:block ml-1 min-w-[150px] bg-bg-modal border border-border-modal rounded-lg shadow-lg py-1.5 z-50">
+                  <div className="download-context-submenu absolute top-0 hidden group-hover:block min-w-[150px] bg-bg-modal border border-border-modal rounded-lg shadow-lg py-1.5 z-50">
                     {queues.map(q => (
                       <button key={q.id} onClick={() => {
                         setContextMenu(null);

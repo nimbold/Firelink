@@ -6,6 +6,10 @@ fn default_speed_limit_unit() -> String {
     "MB/s".to_string()
 }
 
+fn default_language_preference() -> String {
+    "system".to_string()
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../src/bindings/")]
@@ -257,6 +261,8 @@ pub struct SchedulerSettings {
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct PersistedSettings {
     pub theme: Theme,
+    #[serde(default = "default_language_preference")]
+    pub language: String,
     pub base_download_folder: String,
     pub category_subfolders_enabled: bool,
     pub category_subfolders: HashMap<String, String>,

@@ -328,7 +328,7 @@ export default function LogsView() {
       <div className="bg-black/10 border-y border-border-modal px-4 py-2 shrink-0 flex items-center gap-2 text-text-muted text-[10px] select-none">
         <Info size={12} className="text-text-muted opacity-80 shrink-0" />
         <span className="opacity-90 leading-tight">
-          <strong className="font-medium text-text-primary mr-1">{t($ => $.logs.localDiagnostics)}</strong>
+          <strong className="font-medium text-text-primary me-1">{t($ => $.logs.localDiagnostics)}</strong>
           {t($ => $.logs.diagnosticsDescription)}
         </span>
       </div>
@@ -362,10 +362,10 @@ export default function LogsView() {
           onClick={(e) => e.stopPropagation()}
         >
           <button
-            className="w-full text-left px-3 py-2 flex items-center hover:bg-item-hover transition-colors"
+            className="w-full text-start px-3 py-2 flex items-center hover:bg-item-hover transition-colors"
             onClick={handleCopy}
           >
-            <Copy size={13} className="mr-2 text-text-secondary" />
+            <Copy size={13} className="me-2 text-text-secondary" />
             {t($ => $.logs.copy)}
           </button>
         </div>

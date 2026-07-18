@@ -192,6 +192,11 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
         "theme",
         &["system", "light", "dark", "dracula", "nord"],
     );
+    sanitize_allowed_string(
+        state,
+        "language",
+        &["system", "en", "zh-CN", "he", "fa", "uk", "ru"],
+    );
     sanitize_allowed_string(state, "appFontSize", &["small", "standard", "large"]);
     sanitize_allowed_string(state, "listRowDensity", &["compact", "standard", "relaxed"]);
     sanitize_allowed_string(state, "activeSettingsTab", &[
@@ -410,6 +415,7 @@ fn derived_location_path(base: &str, subfolder: &str) -> String {
 fn default_settings() -> PersistedSettings {
     PersistedSettings {
         theme: Theme::System,
+        language: "system".to_string(),
         base_download_folder: "~/Downloads".to_string(),
         category_subfolders_enabled: true,
         category_subfolders: default_category_subfolders(),

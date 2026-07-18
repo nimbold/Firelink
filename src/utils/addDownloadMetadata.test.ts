@@ -12,6 +12,7 @@ import {
   updateRowIfCurrent,
   type AddDownloadDraftRow
 } from './addDownloadMetadata';
+import i18n, { changeAppLocale } from '../i18n';
 
 const row = (
   overrides: Partial<AddDownloadDraftRow> = {}
@@ -536,5 +537,20 @@ describe('add download metadata workflow', () => {
     expect(metadataSummaryMessage([
       row({ status: 'invalid' })
     ])).toContain('Correct or remove 1 invalid URL');
+  });
+
+  it('uses few forms for Russian and Ukrainian metadata summaries', async () => {
+    const originalLanguage = i18n.language;
+    const twoReadyRows = [row(), row({ id: 'row-2' })];
+
+    try {
+      await changeAppLocale('ru');
+      expect(metadataSummaryMessage(twoReadyRows)).toBe('Готово к добавлению: 2 загрузки.');
+
+      await changeAppLocale('uk');
+      expect(metadataSummaryMessage(twoReadyRows)).toBe('Готово до додавання: 2 завантаження.');
+    } finally {
+      await changeAppLocale(originalLanguage === 'uk' || originalLanguage === 'ru' ? originalLanguage : 'en');
+    }
   });
 });
