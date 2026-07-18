@@ -126,7 +126,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
         onClick={() => onSelectFilter(filter)}
       >
         <Icon className="w-[18px] h-[18px] me-3 shrink-0" strokeWidth={isSelected ? 2.5 : 2} />
-        <span className="truncate">{label}</span>
+        <span className="sidebar-nav-label truncate">{label}</span>
         {getCount(filter) > 0 && (
           <span className="sidebar-count ms-auto min-w-5 px-1.5 py-0.5 rounded-full text-center text-[10px] leading-none font-bold">
             {getCount(filter)}
@@ -208,7 +208,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
         className="sidebar-nav-item group flex w-full items-center text-[13px] text-start cursor-default font-medium"
       >
         <List className="w-[18px] h-[18px] me-3 shrink-0" strokeWidth={isSelected ? 2.5 : 2} />
-        <span className="truncate">{queue.name}</span>
+        <span className="sidebar-nav-label truncate">{queue.name}</span>
         {getCount(filterId) > 0 && (
           <span className="sidebar-count ms-auto min-w-5 px-1.5 py-0.5 rounded-full text-center text-[10px] leading-none font-bold shrink-0">
             {getCount(filterId)}
@@ -228,7 +228,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
         className="sidebar-nav-item group flex w-full items-center text-[13px] text-start cursor-default font-medium"
       >
         <Icon className="w-[18px] h-[18px] me-3 shrink-0" strokeWidth={isSelected ? 2.5 : 2} />
-        <span>{label}</span>
+        <span className="sidebar-nav-label">{label}</span>
       </button>
     );
   };
@@ -341,7 +341,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
           className="sidebar-nav-item sidebar-settings-button group flex w-full items-center text-[13px] text-start cursor-default font-medium transition-colors"
         >
           <Settings className={`w-[18px] h-[18px] me-3 shrink-0 ${activeView === 'settings' ? 'text-white' : 'text-text-muted'}`} strokeWidth={activeView === 'settings' ? 2.5 : 2} />
-          <span>{t($ => $.navigation.settings)}</span>
+          <span className="sidebar-nav-label">{t($ => $.navigation.settings)}</span>
         </button>
       </div>
 
