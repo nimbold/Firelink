@@ -48,6 +48,26 @@ interface LegacyDownloadLocationSettings {
   downloadDirectories?: unknown;
 }
 
+export interface AddWindowLocationSuggestion {
+  path: string;
+  isManual: boolean;
+}
+
+export const resolveInitialAddWindowLocation = (
+  baseDownloadFolder: string,
+  rememberLastUsedDownloadDirectory: boolean,
+  lastUsedDownloadDirectory: string | null
+): AddWindowLocationSuggestion => {
+  const rememberedPath = rememberLastUsedDownloadDirectory
+    ? lastUsedDownloadDirectory?.trim()
+    : undefined;
+  const basePath = baseDownloadFolder.trim() || '~/Downloads';
+  return {
+    path: rememberedPath || basePath,
+    isManual: Boolean(rememberedPath)
+  };
+};
+
 const stringRecord = (value: unknown): Record<string, string> => {
   if (!value || typeof value !== 'object') return {};
   return Object.fromEntries(

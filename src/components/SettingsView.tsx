@@ -1072,6 +1072,21 @@ runEngineChecks(false);
               <div className="mac-settings-group">
                 <label className="mac-settings-row cursor-default">
                   <div>
+                    <span className="text-[13px] text-text-primary">{t($ => $.settings.locations.rememberLastUsedDownloadDirectory)}</span>
+                    <p className="mt-0.5 text-[11px] text-text-muted">{t($ => $.settings.locations.rememberLastUsedDownloadDirectoryDescription)}</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.rememberLastUsedDownloadDirectory}
+                    onChange={(e) => settings.setRememberLastUsedDownloadDirectory(e.target.checked)}
+                    className="mac-switch"
+                  />
+                </label>
+              </div>
+
+              <div className="mac-settings-group">
+                <label className="mac-settings-row cursor-default">
+                  <div>
                     <span className="text-[13px] text-text-primary">{t($ => $.settings.locations.automaticCategorySubfolders)}</span>
                     <p className="mt-0.5 text-[11px] text-text-muted">{t($ => $.settings.locations.automaticCategorySubfoldersDescription)}</p>
                   </div>

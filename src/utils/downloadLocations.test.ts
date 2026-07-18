@@ -14,6 +14,7 @@ import {
   formatDerivedCategoryPath,
   normalizeCategorySubfolder,
   normalizeDownloadLocationSettings,
+  resolveInitialAddWindowLocation,
   resolveCategoryDestination,
   subfolderFromDerivedCategoryPath
 } from './downloadLocations';
@@ -23,6 +24,25 @@ describe('download locations', () => {
     expect(downloadLocationEquals('D:\\Downloads', 'Movie.MP4', 'd:/downloads', 'movie.mp4', 'windows')).toBe(true);
     expect(downloadLocationEquals('/Users/Test', 'Movie.MP4', '/users/test', 'movie.mp4', 'macos')).toBe(false);
     expect(downloadLocationEquals('/home/Test', 'Movie.MP4', '/home/test', 'movie.mp4', 'linux')).toBe(false);
+  });
+
+  it('uses a remembered Add-window directory only when the setting is enabled', () => {
+    expect(resolveInitialAddWindowLocation(
+      'D:\\Downloads',
+      true,
+      'D:\\Course_Videos'
+    )).toEqual({ path: 'D:\\Course_Videos', isManual: true });
+
+    expect(resolveInitialAddWindowLocation(
+      'D:\\Downloads',
+      false,
+      'D:\\Course_Videos'
+    )).toEqual({ path: 'D:\\Downloads', isManual: false });
+  });
+
+  it('falls back to the normalized base folder when no directory was remembered', () => {
+    expect(resolveInitialAddWindowLocation('  ', true, null))
+      .toEqual({ path: '~/Downloads', isManual: false });
   });
   beforeEach(() => {
     vi.clearAllMocks();

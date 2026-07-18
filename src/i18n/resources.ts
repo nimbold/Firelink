@@ -591,6 +591,8 @@ const common = {
       baseFolderCreateFailed: 'Base folder saved, but category folders could not be created: {{detail}}',
       baseFolderUpdated: 'Base download folder updated',
       askWhereToSave: 'Ask where to save when adding downloads',
+      rememberLastUsedDownloadDirectory: 'Remember the last used download directory',
+      rememberLastUsedDownloadDirectoryDescription: 'Use the last folder selected in the Add window for the next download until the app restarts.',
       automaticCategorySubfolders: 'Automatically save files to category subfolders',
       automaticCategorySubfoldersDescription: 'When off, automatic downloads use the base folder.',
       categorySubfolders: 'Category Subfolders',

@@ -15,9 +15,11 @@ import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResoluti
 import { canonicalizeDownloadFileName, categoryForFileName } from '../utils/downloads';
 import { fetchMediaMetadataDeduped, fetchMediaPlaylistMetadataDeduped } from '../utils/mediaMetadata';
 import {
+  expandTilde,
   resolveCategoryDestination,
   resolveDownloadFilePath,
-  downloadLocationEquals
+  downloadLocationEquals,
+  resolveInitialAddWindowLocation
 } from '../utils/downloadLocations';
 import { getPlatformInfo } from '../utils/platform';
 import { isTransferLocked } from '../utils/downloadActions';
@@ -130,6 +132,8 @@ export const AddDownloadsModal = () => {
   } = useDownloadStore();
   const {
     baseDownloadFolder,
+    rememberLastUsedDownloadDirectory,
+    lastUsedDownloadDirectory,
     perServerConnections,
     keychainAccessReady,
     keychainPromptDismissed,
@@ -158,6 +162,9 @@ export const AddDownloadsModal = () => {
   // Right Form
   const [saveLocation, setSaveLocation] = useState(baseDownloadFolder);
   const [isSaveLocationManual, setIsSaveLocationManual] = useState(false);
+  const locationResolutionRequestRef = useRef(0);
+  const folderPickerRequestRef = useRef(0);
+  const pendingLastUsedDownloadDirectoryRef = useRef<string | null>(null);
   const [connections, setConnections] = useState(perServerConnections);
   const [speedLimitEnabled, setSpeedLimitEnabled] = useState(false);
   const [speedLimit, setSpeedLimit] = useState('1024');
@@ -222,6 +229,8 @@ export const AddDownloadsModal = () => {
   useEffect(() => {
     if (!isAddModalOpen) {
       modalSessionRef.current = false;
+      ++folderPickerRequestRef.current;
+      pendingLastUsedDownloadDirectoryRef.current = null;
       setUrls('');
       setPlaylistExpansions({});
       playlistRequestsRef.current.clear();
@@ -238,8 +247,13 @@ export const AddDownloadsModal = () => {
       ? requestContextForUrl(initialUrlLines[0])
       : undefined;
 
-    setSaveLocation(baseDownloadFolder);
-    setIsSaveLocationManual(false);
+    const initialLocation = resolveInitialAddWindowLocation(
+      baseDownloadFolder,
+      rememberLastUsedDownloadDirectory,
+      lastUsedDownloadDirectory
+    );
+    setSaveLocation(initialLocation.path);
+    setIsSaveLocationManual(initialLocation.isManual);
     setUrls(initialUrls);
     setParsedItems([]);
     setPlaylistExpansions({});
@@ -279,6 +293,8 @@ export const AddDownloadsModal = () => {
     pendingAddCookies,
     pendingAddMediaUrls,
     baseDownloadFolder,
+    rememberLastUsedDownloadDirectory,
+    lastUsedDownloadDirectory,
     perServerConnections
   ]);
 
@@ -609,6 +625,13 @@ export const AddDownloadsModal = () => {
   ]);
 
   useEffect(() => {
+    if (!rememberLastUsedDownloadDirectory) {
+      pendingLastUsedDownloadDirectoryRef.current = null;
+    }
+  }, [rememberLastUsedDownloadDirectory]);
+
+  useEffect(() => {
+    const requestId = ++locationResolutionRequestRef.current;
     if (parsedItems.length === 0) {
       setSelectedItemIndex(null);
       return;
@@ -618,7 +641,12 @@ export const AddDownloadsModal = () => {
     );
     if (isSaveLocationManual) return;
     if (parsedItems.length > 1) {
-      setSaveLocation(useSettingsStore.getState().baseDownloadFolder || '~/Downloads');
+      const baseFolder = useSettingsStore.getState().baseDownloadFolder || '~/Downloads';
+      void expandTilde(baseFolder).then(location => {
+        if (requestId === locationResolutionRequestRef.current) {
+          setSaveLocation(location);
+        }
+      });
       return;
     }
     const first = parsedItems[0];
@@ -626,22 +654,35 @@ export const AddDownloadsModal = () => {
     void resolveCategoryDestination(
       useSettingsStore.getState(),
       categoryForFileName(first.file)
-    ).then(setSaveLocation);
+    ).then(location => {
+      if (requestId === locationResolutionRequestRef.current) {
+        setSaveLocation(location);
+      }
+    });
   }, [isSaveLocationManual, parsedItems]);
 
   if (!isAddModalOpen) return null;
 
   const handleBrowse = async () => {
     try {
+      const requestId = ++folderPickerRequestRef.current;
+      const defaultPath = await expandTilde(saveLocation);
       const selected = await open({
         directory: true,
         multiple: false,
-        defaultPath: saveLocation.startsWith('~') ? undefined : saveLocation
+        defaultPath
     });
+    if (requestId !== folderPickerRequestRef.current) return;
     if (selected && typeof selected === 'string') {
+      ++locationResolutionRequestRef.current;
       const approvedPath = await useSettingsStore.getState().approveDownloadRoot(selected);
+      if (requestId !== folderPickerRequestRef.current) return;
       setSaveLocation(approvedPath);
       setIsSaveLocationManual(true);
+      const settings = useSettingsStore.getState();
+      if (settings.rememberLastUsedDownloadDirectory) {
+        pendingLastUsedDownloadDirectoryRef.current = approvedPath;
+      }
     }
     } catch (e) {
       console.error("Failed to select folder:", e);
@@ -663,6 +704,7 @@ export const AddDownloadsModal = () => {
     }
     isSubmittingRef.current = true;
     setIsSubmitting(true);
+    ++folderPickerRequestRef.current;
     let finalLocation = saveLocation;
     let useSharedDestination = isSaveLocationManual;
     const destinationOverrides: Record<number, string> = {};
@@ -679,18 +721,24 @@ export const AddDownloadsModal = () => {
             directory: true,
             multiple: false,
             title: `Choose a folder for ${item.file}`,
-            defaultPath: suggestedLocation.startsWith('~') ? undefined : suggestedLocation
+            defaultPath: await expandTilde(suggestedLocation)
           });
           if (selected && typeof selected === 'string') {
             const approvedPath = await useSettingsStore.getState().approveDownloadRoot(selected);
             destinationOverrides[index] = approvedPath;
+            const currentSettings = useSettingsStore.getState();
+            if (currentSettings.rememberLastUsedDownloadDirectory) {
+              pendingLastUsedDownloadDirectoryRef.current = approvedPath;
+            }
           } else {
+            pendingLastUsedDownloadDirectoryRef.current = null;
             isSubmittingRef.current = false;
             setIsSubmitting(false);
             return;
           }
         } catch (e) {
           console.error("Failed to select folder:", e);
+          pendingLastUsedDownloadDirectoryRef.current = null;
           isSubmittingRef.current = false;
           setIsSubmitting(false);
           return;
@@ -981,6 +1029,17 @@ export const AddDownloadsModal = () => {
           failures.push(`${item.file}: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
+      const currentSettings = useSettingsStore.getState();
+      if (
+        addedCount > 0
+        && currentSettings.rememberLastUsedDownloadDirectory
+        && pendingLastUsedDownloadDirectoryRef.current
+      ) {
+        currentSettings.setLastUsedDownloadDirectory(
+          pendingLastUsedDownloadDirectoryRef.current
+        );
+      }
+      pendingLastUsedDownloadDirectoryRef.current = null;
       toggleAddModal(false);
       if (failures.length > 0) {
         addToast({
@@ -1357,7 +1416,8 @@ export const AddDownloadsModal = () => {
                   />
                   <button
                     onClick={handleBrowse}
-                    className="add-download-button add-download-button-secondary px-3 text-xs font-medium"
+                    disabled={isSubmitting}
+                    className="add-download-button add-download-button-secondary px-3 text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {t($ => $.addDownloads.browse)}
                   </button>

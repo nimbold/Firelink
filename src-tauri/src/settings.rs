@@ -451,6 +451,7 @@ fn default_settings() -> PersistedSettings {
         proxy_port: 8080,
         custom_user_agent: String::new(),
         ask_where_to_save_each_file: false,
+        remember_last_used_download_directory: true,
         prevents_sleep_while_downloading: true,
         media_cookie_source: MediaCookieSource::default(),
         site_logins: Vec::new(),
@@ -700,6 +701,25 @@ mod tests {
     fn opt_in_defaults_match_the_frontend_defaults() {
         assert!(!default_settings().play_completion_sound);
         assert!(!default_settings().auto_add_clipboard_links);
+    }
+
+    #[test]
+    fn remembers_last_used_download_directory_by_default() {
+        assert!(default_settings().remember_last_used_download_directory);
+    }
+
+    #[test]
+    fn decodes_disabled_last_used_download_directory_setting() {
+        let stored = json!({
+            "state": {
+                "rememberLastUsedDownloadDirectory": false
+            },
+            "version": 3
+        });
+
+        let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
+
+        assert!(!settings.remember_last_used_download_directory);
     }
 
     #[test]

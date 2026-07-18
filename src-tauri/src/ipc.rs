@@ -291,6 +291,7 @@ pub struct PersistedSettings {
     pub proxy_port: u16,
     pub custom_user_agent: String,
     pub ask_where_to_save_each_file: bool,
+    pub remember_last_used_download_directory: bool,
     pub prevents_sleep_while_downloading: bool,
     pub media_cookie_source: MediaCookieSource,
     pub site_logins: Vec<SiteLogin>,

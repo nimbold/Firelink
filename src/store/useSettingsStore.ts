@@ -168,6 +168,9 @@ export interface SettingsState {
   categorySubfoldersEnabled: boolean;
   categorySubfolders: Record<string, string>;
   categoryDirectoryOverrides: Record<string, string>;
+  rememberLastUsedDownloadDirectory: boolean;
+  /** Session-only path selected in the Add window; intentionally not persisted. */
+  lastUsedDownloadDirectory: string | null;
   approvedDownloadRoots: string[];
   maxConcurrentDownloads: number;
   globalSpeedLimit: string;
@@ -245,6 +248,8 @@ export interface SettingsState {
   setAskWhereToSaveEachFile: (ask: boolean) => void;
   setPreventsSleepWhileDownloading: (prevent: boolean) => void;
   setMediaCookieSource: (source: MediaCookieSource) => void;
+  setRememberLastUsedDownloadDirectory: (enabled: boolean) => void;
+  setLastUsedDownloadDirectory: (path: string) => void;
   setCategorySubfoldersEnabled: (enabled: boolean) => void;
   setCategorySubfolder: (category: string, subfolder: string) => void;
   setCategoryDirectoryOverride: (category: string, path?: string) => void;
@@ -268,6 +273,8 @@ export const useSettingsStore = create<SettingsState>()(
       categorySubfoldersEnabled: true,
       categorySubfolders: { ...DEFAULT_CATEGORY_SUBFOLDERS },
       categoryDirectoryOverrides: {},
+      rememberLastUsedDownloadDirectory: true,
+      lastUsedDownloadDirectory: null,
       approvedDownloadRoots: [],
       maxConcurrentDownloads: 3,
       globalSpeedLimit: '',
@@ -390,6 +397,18 @@ export const useSettingsStore = create<SettingsState>()(
         set({ preventsSleepWhileDownloading });
       },
       setMediaCookieSource: (mediaCookieSource) => { info('Settings updated: mediaCookieSource'); set({ mediaCookieSource }); },
+      setRememberLastUsedDownloadDirectory: (rememberLastUsedDownloadDirectory) => {
+        info('Settings updated: rememberLastUsedDownloadDirectory');
+        set({
+          rememberLastUsedDownloadDirectory,
+          ...(rememberLastUsedDownloadDirectory ? {} : { lastUsedDownloadDirectory: null })
+        });
+      },
+      setLastUsedDownloadDirectory: (path) => {
+        const trimmedPath = path.trim();
+        if (!trimmedPath) return;
+        set({ lastUsedDownloadDirectory: trimmedPath });
+      },
       setCategorySubfoldersEnabled: (categorySubfoldersEnabled) => {
         info('Settings updated: categorySubfoldersEnabled');
         set({ categorySubfoldersEnabled });
@@ -515,6 +534,7 @@ export const useSettingsStore = create<SettingsState>()(
         categorySubfoldersEnabled: state.categorySubfoldersEnabled,
         categorySubfolders: state.categorySubfolders,
         categoryDirectoryOverrides: state.categoryDirectoryOverrides,
+        rememberLastUsedDownloadDirectory: state.rememberLastUsedDownloadDirectory,
         approvedDownloadRoots: state.approvedDownloadRoots,
         maxConcurrentDownloads: state.maxConcurrentDownloads,
         globalSpeedLimit: state.globalSpeedLimit,
@@ -562,6 +582,8 @@ export const useSettingsStore = create<SettingsState>()(
           ...persisted,
           ...locations,
           extensionPairingToken: currentState.extensionPairingToken,
+          // Never hydrate the remembered Add-window path from persisted data.
+          lastUsedDownloadDirectory: currentState.lastUsedDownloadDirectory,
           keychainAccessReady: currentState.keychainAccessReady,
           theme: isAllowedSetting(THEME_VALUES, persisted.theme)
             ? persisted.theme
@@ -586,6 +608,10 @@ export const useSettingsStore = create<SettingsState>()(
           autoAddClipboardLinks: persistedBoolean(
             persisted.autoAddClipboardLinks,
             currentState.autoAddClipboardLinks
+          ),
+          rememberLastUsedDownloadDirectory: persistedBoolean(
+            persisted.rememberLastUsedDownloadDirectory,
+            currentState.rememberLastUsedDownloadDirectory
           ),
           showDockBadge: persistedBoolean(persisted.showDockBadge, currentState.showDockBadge),
           showMenuBarIcon: persistedBoolean(persisted.showMenuBarIcon, currentState.showMenuBarIcon),
