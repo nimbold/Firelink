@@ -41,7 +41,11 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
   const addInputRef = useRef<HTMLInputElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const addQueueSubmitRef = useRef(false);
+  const addQueueCancelRef = useRef(false);
   const renameQueueSubmitRef = useRef(false);
+  const renameQueueCancelRef = useRef<string | null>(null);
+  const renamingQueueIdRef = useRef<string | null>(null);
+  const editingQueueNameRef = useRef('');
 
   useEffect(() => {
     const handleCloseMenu = () => setContextMenu(null);
@@ -74,6 +78,13 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
     }
   }, [foldersCollapsed]);
 
+  const handleFoldersToggle = () => {
+    if (foldersListRef.current?.contains(document.activeElement)) {
+      foldersToggleRef.current?.focus();
+    }
+    setFoldersCollapsed(collapsed => !collapsed);
+  };
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (document.querySelector('.app-modal-backdrop') || document.querySelector('.app-modal')) return;
@@ -82,10 +93,14 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
       
       if (!isInput && (e.key === 'Delete' || e.key === 'Backspace')) {
         if (activeEl && activeEl.closest('.sidebar-inner')) {
-          if (activeView === 'downloads' && selectedFilter.startsWith('queue:')) {
-            const queueId = selectedFilter.replace('queue:', '');
+          const focusedQueueId = activeEl
+            .closest<HTMLElement>('[data-sidebar-queue-id]')
+            ?.dataset.sidebarQueueId;
+          if (activeView === 'downloads' && focusedQueueId) {
+            const queueId = focusedQueueId;
             const q = queues.find(q => q.id === queueId);
             if (q && !q.isMain) {
+              e.preventDefault();
               if (!window.confirm(t($ => $.sidebar.deleteQueueConfirm, { name: q.name }))) {
                 return;
               }
@@ -99,7 +114,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [addToast, activeView, queues, removeQueue, selectedFilter]);
+  }, [addToast, activeView, queues, removeQueue]);
 
   const getCount = (filter: SidebarFilter) => {
     if (filter.startsWith('queue:')) {
@@ -142,10 +157,19 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
     setContextMenu({ x: e.clientX, y: e.clientY, id });
   };
 
-  const handleAddQueueSubmit = () => {
+  const handleAddQueueSubmit = (trigger: 'submit' | 'blur' = 'submit') => {
+    if (addQueueCancelRef.current) {
+      addQueueCancelRef.current = false;
+      return;
+    }
     if (addQueueSubmitRef.current) return;
     const normalizedName = newQueueName.trim();
     if (!normalizedName) {
+      if (trigger === 'blur') {
+        setNewQueueName('');
+        setIsAddingQueue(false);
+        return;
+      }
       addToast({ message: t($ => $.sidebar.queueNameEmpty), variant: 'error', isActionable: true });
       return;
     }
@@ -158,19 +182,31 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
     setIsAddingQueue(false);
   };
 
-  const handleRenameQueueSubmit = () => {
+  const handleRenameQueueSubmit = (queueId: string, trigger: 'submit' | 'blur' = 'submit') => {
+    if (renameQueueCancelRef.current === queueId) {
+      renameQueueCancelRef.current = null;
+      return;
+    }
+    if (renamingQueueIdRef.current !== queueId) return;
     if (renameQueueSubmitRef.current) return;
-    const normalizedName = editingQueueName.trim();
-    if (!renamingQueueId) return;
+    const normalizedName = editingQueueNameRef.current.trim();
     if (!normalizedName) {
+      if (trigger === 'blur') {
+        renamingQueueIdRef.current = null;
+        editingQueueNameRef.current = '';
+        setEditingQueueName('');
+        setRenamingQueueId(null);
+        return;
+      }
       addToast({ message: t($ => $.sidebar.queueNameEmpty), variant: 'error', isActionable: true });
       return;
     }
-    if (!renameQueue(renamingQueueId, normalizedName)) {
+    if (!renameQueue(queueId, normalizedName)) {
       addToast({ message: t($ => $.sidebar.queueNameExists), variant: 'error', isActionable: true });
       return;
     }
     renameQueueSubmitRef.current = true;
+    renamingQueueIdRef.current = null;
     setRenamingQueueId(null);
   };
 
@@ -188,12 +224,22 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             type="text"
             className="flex-1 bg-transparent border border-accent rounded px-1 text-[13px] text-text-primary outline-none min-w-0"
             value={editingQueueName}
-            onChange={e => setEditingQueueName(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === 'Enter') handleRenameQueueSubmit();
-              if (e.key === 'Escape') setRenamingQueueId(null);
+            onChange={e => {
+              editingQueueNameRef.current = e.target.value;
+              setEditingQueueName(e.target.value);
             }}
-            onBlur={handleRenameQueueSubmit}
+            onKeyDown={e => {
+              if (e.key === 'Enter') handleRenameQueueSubmit(queue.id);
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                renameQueueCancelRef.current = queue.id;
+                renamingQueueIdRef.current = null;
+                editingQueueNameRef.current = '';
+                setEditingQueueName('');
+                setRenamingQueueId(null);
+              }
+            }}
+            onBlur={() => handleRenameQueueSubmit(queue.id, 'blur')}
           />
         </div>
       );
@@ -203,6 +249,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
       <button
         type="button"
         data-active={isSelected}
+        data-sidebar-queue-id={queue.id}
         onContextMenu={e => handleQueueContextMenu(e, queue.id)}
         onClick={() => onSelectFilter(filterId)}
         className="sidebar-nav-item group flex w-full items-center text-[13px] text-start cursor-default font-medium"
@@ -263,7 +310,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             className="sidebar-section-label sidebar-section-label-toggle"
             aria-expanded={!foldersCollapsed}
             aria-controls="sidebar-folders-list"
-            onClick={() => setFoldersCollapsed(collapsed => !collapsed)}
+            onClick={handleFoldersToggle}
           >
             <span>{t($ => $.navigation.folders)}</span>
             <ChevronDown
@@ -308,15 +355,25 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
                 onChange={e => setNewQueueName(e.target.value)}
                 onKeyDown={e => {
                   if (e.key === 'Enter') handleAddQueueSubmit();
-                  if (e.key === 'Escape') setIsAddingQueue(false);
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    addQueueCancelRef.current = true;
+                    setNewQueueName('');
+                    setIsAddingQueue(false);
+                  }
                 }}
-                onBlur={handleAddQueueSubmit}
+                onBlur={() => handleAddQueueSubmit('blur')}
               />
             </div>
           ) : (
             <button
               type="button"
-              onClick={() => { addQueueSubmitRef.current = false; setIsAddingQueue(true); setNewQueueName(''); }}
+              onClick={() => {
+                addQueueSubmitRef.current = false;
+                addQueueCancelRef.current = false;
+                setIsAddingQueue(true);
+                setNewQueueName('');
+              }}
               className="flex w-full items-center px-3.5 py-1.5 rounded-lg text-[13px] text-text-muted hover:bg-item-hover hover:text-text-secondary cursor-default transition-colors mb-1"
             >
               <Plus className="w-4 h-4 me-2 shrink-0" strokeWidth={2} />
@@ -356,7 +413,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
           onClick={e => e.stopPropagation()}
         >
           <button
-            className="w-full text-left px-3 py-1.5 flex items-center hover:bg-item-hover"
+            className="w-full text-start px-3 py-1.5 flex items-center hover:bg-item-hover"
             onClick={() => {
               const queueId = contextMenu.id;
               setContextMenu(null);
@@ -369,11 +426,11 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
               });
             }}
           >
-            <Play size={14} className="mr-2 text-text-secondary" />
+            <Play size={14} className="me-2 text-text-secondary" />
             {t($ => $.actions.startQueue)}
           </button>
           <button
-            className="w-full text-left px-3 py-1.5 flex items-center hover:bg-item-hover"
+            className="w-full text-start px-3 py-1.5 flex items-center hover:bg-item-hover"
             onClick={() => {
               const queueId = contextMenu.id;
               setContextMenu(null);
@@ -386,28 +443,31 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
               });
             }}
           >
-            <Pause size={14} className="mr-2 text-text-secondary" />
+            <Pause size={14} className="me-2 text-text-secondary" />
             {t($ => $.actions.pauseQueue)}
           </button>
           <div className="h-px bg-border-color my-1 mx-2" />
           <button
-            className="w-full text-left px-3 py-1.5 flex items-center hover:bg-item-hover"
+            className="w-full text-start px-3 py-1.5 flex items-center hover:bg-item-hover"
             onClick={() => {
               const q = queues.find(q => q.id === contextMenu.id);
               if (q) {
                 renameQueueSubmitRef.current = false;
+                renameQueueCancelRef.current = null;
+                renamingQueueIdRef.current = q.id;
+                editingQueueNameRef.current = q.name;
                 setEditingQueueName(q.name);
                 setRenamingQueueId(q.id);
               }
               setContextMenu(null);
             }}
           >
-            <Edit2 size={14} className="mr-2 text-text-secondary" />
+            <Edit2 size={14} className="me-2 text-text-secondary" />
             {t($ => $.actions.renameQueue)}
           </button>
           {!queues.find(q => q.id === contextMenu.id)?.isMain && (
             <button
-              className="w-full text-left px-3 py-1.5 flex items-center hover:bg-red-500/20 text-red-400"
+              className="w-full text-start px-3 py-1.5 flex items-center hover:bg-red-500/20 text-red-400"
               onClick={() => {
                 const queueId = contextMenu.id;
                 const queue = queues.find(q => q.id === queueId);
@@ -428,7 +488,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
                 });
               }}
             >
-              <Trash2 size={14} className="mr-2" />
+              <Trash2 size={14} className="me-2" />
               {t($ => $.actions.deleteQueue)}
             </button>
           )}

@@ -1120,6 +1120,16 @@ html[data-list-density="relaxed"] {
     direction: rtl;
   }
 
+  html[dir="ltr"] .sidebar-nav-label {
+    direction: ltr;
+    unicode-bidi: isolate;
+  }
+
+  html[dir="rtl"] .sidebar-nav-label {
+    direction: rtl;
+    unicode-bidi: isolate;
+  }
+
   .app-statusbar {
     height: 26px;
     font-size: 10px;

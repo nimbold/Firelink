@@ -9,6 +9,7 @@
         "minWidth": 960,
         "minHeight": 640,
         "transparent": true,
+        "decorations": false,
         "windowEffects": {
           "effects": ["mica"],
           "state": "active"
