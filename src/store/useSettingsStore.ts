@@ -273,7 +273,7 @@ export const useSettingsStore = create<SettingsState>()(
       categorySubfoldersEnabled: true,
       categorySubfolders: { ...DEFAULT_CATEGORY_SUBFOLDERS },
       categoryDirectoryOverrides: {},
-      rememberLastUsedDownloadDirectory: true,
+      rememberLastUsedDownloadDirectory: false,
       lastUsedDownloadDirectory: null,
       approvedDownloadRoots: [],
       maxConcurrentDownloads: 3,

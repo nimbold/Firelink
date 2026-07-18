@@ -15,6 +15,12 @@ vi.mock('../utils/logger', () => ({
   info: vi.fn()
 }));
 
+describe('last used download directory preference', () => {
+  it('is disabled by default', () => {
+    expect(useSettingsStore.getState().rememberLastUsedDownloadDirectory).toBe(false);
+  });
+});
+
 describe('useSettingsStore global speed limit persistence', () => {
   beforeEach(() => {
     vi.clearAllMocks();

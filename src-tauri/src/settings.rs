@@ -451,7 +451,7 @@ fn default_settings() -> PersistedSettings {
         proxy_port: 8080,
         custom_user_agent: String::new(),
         ask_where_to_save_each_file: false,
-        remember_last_used_download_directory: true,
+        remember_last_used_download_directory: false,
         prevents_sleep_while_downloading: true,
         media_cookie_source: MediaCookieSource::default(),
         site_logins: Vec::new(),
@@ -704,8 +704,8 @@ mod tests {
     }
 
     #[test]
-    fn remembers_last_used_download_directory_by_default() {
-        assert!(default_settings().remember_last_used_download_directory);
+    fn does_not_remember_last_used_download_directory_by_default() {
+        assert!(!default_settings().remember_last_used_download_directory);
     }
 
     #[test]
