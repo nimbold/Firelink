@@ -70,6 +70,7 @@ const notifySettingsPersistenceError = () => {
 const THEME_VALUES = ['system', 'light', 'dark', 'dracula', 'nord'] as const;
 const APP_FONT_SIZE_VALUES = ['small', 'standard', 'large'] as const;
 const LIST_ROW_DENSITY_VALUES = ['compact', 'standard', 'relaxed'] as const;
+const SIDEBAR_POSITION_VALUES = ['auto', 'left', 'right'] as const;
 const PROXY_MODE_VALUES = ['none', 'system', 'custom'] as const;
 const MEDIA_COOKIE_SOURCE_VALUES = [
   'none', 'safari', 'chrome', 'chromium', 'firefox', 'edge', 'brave', 'opera', 'vivaldi', 'whale'
@@ -164,6 +165,8 @@ export type {
   Theme
 };
 
+export type SidebarPosition = 'auto' | 'left' | 'right';
+
 export interface SettingsState {
   theme: Theme;
   language: AppLocalePreference;
@@ -180,6 +183,7 @@ export interface SettingsState {
   speedLimitPresetValues: number[];
   logsEnabled: boolean;
   isSidebarVisible: boolean;
+  sidebarPosition: SidebarPosition;
   activeView: ActiveView;
   activeSettingsTab: SettingsTab;
   scheduler: SchedulerSettings;
@@ -225,6 +229,7 @@ export interface SettingsState {
   setGlobalSpeedLimit: (limit: string) => Promise<void>;
   setSpeedLimitPresetValues: (values: number[]) => void;
   setLogsEnabled: (enabled: boolean) => void;
+  setSidebarPosition: (position: SidebarPosition) => void;
   setActiveView: (view: ActiveView) => void;
   setActiveSettingsTab: (tab: SettingsTab) => void;
   setScheduler: (settings: SchedulerSettings) => void;
@@ -288,6 +293,7 @@ export const useSettingsStore = create<SettingsState>()(
       activeView: 'downloads',
       activeSettingsTab: 'downloads',
       isSidebarVisible: true,
+      sidebarPosition: 'auto',
       scheduler: {
         enabled: false,
         startTime: '00:00',
@@ -362,6 +368,7 @@ export const useSettingsStore = create<SettingsState>()(
       },
       setSpeedLimitPresetValues: (speedLimitPresetValues) => set({ speedLimitPresetValues }),
       setLogsEnabled: (logsEnabled) => set({ logsEnabled }),
+      setSidebarPosition: (sidebarPosition) => set({ sidebarPosition }),
       setActiveView: (view) => set({ activeView: view }),
       setActiveSettingsTab: (activeSettingsTab) => set({ activeSettingsTab }),
       setScheduler: (scheduler) => set({ scheduler }),
@@ -500,7 +507,7 @@ export const useSettingsStore = create<SettingsState>()(
     {
       name: 'firelink-settings',
       storage: createJSONStorage(() => tauriStorage),
-      version: 4,
+      version: 5,
       migrate: (persistedState) => {
         if (!persistedState || typeof persistedState !== 'object') {
           return persistedState as SettingsState;
@@ -548,6 +555,7 @@ export const useSettingsStore = create<SettingsState>()(
         speedLimitPresetValues: state.speedLimitPresetValues,
         logsEnabled: state.logsEnabled,
         isSidebarVisible: state.isSidebarVisible,
+        sidebarPosition: state.sidebarPosition,
         activeSettingsTab: state.activeSettingsTab,
         scheduler: state.scheduler,
         schedulerRunning: state.schedulerRunning,
@@ -604,6 +612,9 @@ export const useSettingsStore = create<SettingsState>()(
           listRowDensity: isAllowedSetting(LIST_ROW_DENSITY_VALUES, persisted.listRowDensity)
             ? persisted.listRowDensity
             : currentState.listRowDensity,
+          sidebarPosition: isAllowedSetting(SIDEBAR_POSITION_VALUES, persisted.sidebarPosition)
+            ? persisted.sidebarPosition
+            : currentState.sidebarPosition,
           proxyMode: isAllowedSetting(PROXY_MODE_VALUES, persisted.proxyMode)
             ? persisted.proxyMode
             : currentState.proxyMode,

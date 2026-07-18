@@ -14,7 +14,7 @@ import { WindowControls } from "./components/WindowControls";
 import { useToast } from "./contexts/ToastContext";
 import { setLogStreamActive } from './utils/logger';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { getPlatformInfo, usePlatformInfo } from './utils/platform';
+import { getPlatformInfo, shouldUseCustomWindowControls, usePlatformInfo } from './utils/platform';
 import {
   getKeychainAccessReady,
   getKeychainConsentVersion,
@@ -24,7 +24,7 @@ import { getVersion } from '@tauri-apps/api/app';
 import type { PostQueueAction } from './bindings/PostQueueAction';
 import { PanelLeft } from 'lucide-react';
 import { isTrustedFirelinkReleaseUrl } from './utils/releaseUrls';
-import { changeAppLocale, resolveAppLocale, syncDocumentLocale } from './i18n';
+import { changeAppLocale, localeDirection, resolveAppLocale, syncDocumentLocale } from './i18n';
 import { useTranslation } from 'react-i18next';
 
 const SettingsView = lazy(() => import('./components/SettingsView'));
@@ -134,6 +134,7 @@ function App() {
   const theme = useSettingsStore(state => state.theme);
   const languagePreference = useSettingsStore(state => state.language);
   const isSidebarVisible = useSettingsStore(state => state.isSidebarVisible);
+  const sidebarPosition = useSettingsStore(state => state.sidebarPosition);
   const toggleSidebar = useSettingsStore(state => state.toggleSidebar);
   const activeView = useSettingsStore(state => state.activeView);
   const appFontSize = useSettingsStore(state => state.appFontSize);
@@ -178,7 +179,9 @@ function App() {
   const activeTransferCount = downloads.filter(download => isTransferActiveStatus(download.status)).length;
   const { addToast, removeToast } = useToast();
   const isMacUserAgent = navigator.userAgent.includes('Mac');
-  const usesCustomWindowControls = !isMacUserAgent && platform.os !== 'macos';
+  const usesCustomWindowControls = shouldUseCustomWindowControls(platform.os, navigator.userAgent);
+  const isRtl = localeDirection(resolveAppLocale(i18n.language)) === 'rtl';
+  const isSidebarOnRight = sidebarPosition === 'right' || (sidebarPosition === 'auto' && isRtl);
   // Keep dialogs out of the titlebar area while platform detection is still
   // resolving. The conservative fallback prevents a startup handoff from
   // briefly rendering underneath native or custom window controls.
@@ -285,7 +288,10 @@ function App() {
     const startWidth = sidebarWidth;
 
     const handlePointerMove = (moveEvent: PointerEvent) => {
-      const nextWidth = Math.min(260, Math.max(190, startWidth + moveEvent.clientX - startX));
+      const delta = isSidebarOnRight
+        ? startX - moveEvent.clientX
+        : moveEvent.clientX - startX;
+      const nextWidth = Math.min(260, Math.max(190, startWidth + delta));
       setSidebarWidth(nextWidth);
     };
 
@@ -933,16 +939,21 @@ function App() {
 
   return (
     <div className={`app-shell flex h-screen w-screen overflow-hidden text-text-primary ${
+      isSidebarOnRight ? 'app-shell--sidebar-right' : 'app-shell--sidebar-left'
+    } ${
       hasWindowChrome ? 'app-shell--window-chrome' : ''
     }`}>
-      {(platform.os === 'windows' || platform.os === 'linux') && <WindowControls />}
+      {usesCustomWindowControls && <WindowControls />}
       <div
         className={`app-sidebar-shell relative z-20 shrink-0 transition-all duration-300 ease-[cubic-bezier(0.2,0.8,0.2,1)] ${
+          isSidebarOnRight ? 'app-sidebar-shell--right' : 'app-sidebar-shell--left'
+        } ${
           isSidebarVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
         style={{ 
           width: sidebarWidth,
-          marginInlineStart: isSidebarVisible ? 0 : -sidebarWidth
+          marginInlineStart: isSidebarVisible || isSidebarOnRight ? 0 : -sidebarWidth,
+          marginInlineEnd: isSidebarVisible || !isSidebarOnRight ? 0 : -sidebarWidth
         }}
       >
         <div className="app-sidebar-panel h-full w-full">
@@ -963,6 +974,8 @@ function App() {
 
       <div
         className={`app-workspace relative z-0 flex-1 flex flex-col h-full overflow-hidden ${
+          isSidebarOnRight ? 'app-workspace--sidebar-right' : 'app-workspace--sidebar-left'
+        } ${
           !isSidebarVisible ? 'app-workspace--sidebar-collapsed' : ''
         } ${usesCustomWindowControls ? 'app-workspace--custom-window-controls' : ''}`}
       >

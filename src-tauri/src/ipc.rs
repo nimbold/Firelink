@@ -10,6 +10,10 @@ fn default_language_preference() -> String {
     "system".to_string()
 }
 
+fn default_sidebar_position() -> String {
+    "auto".to_string()
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../src/bindings/")]
@@ -273,6 +277,8 @@ pub struct PersistedSettings {
     pub speed_limit_preset_values: Vec<f64>,
     pub logs_enabled: bool,
     pub is_sidebar_visible: bool,
+    #[serde(default = "default_sidebar_position")]
+    pub sidebar_position: String,
     pub active_settings_tab: SettingsTab,
     pub scheduler: SchedulerSettings,
     pub scheduler_running: bool,

@@ -1002,6 +1002,7 @@ html[data-list-density="relaxed"] {
   }
 
   .app-shell {
+    direction: ltr;
     background: hsl(var(--main-bg));
   }
 
@@ -1009,6 +1010,16 @@ html[data-list-density="relaxed"] {
     padding-block: 9px;
     padding-inline-start: 9px;
     background: transparent;
+  }
+
+  .app-sidebar-shell--left {
+    order: 0;
+  }
+
+  .app-sidebar-shell--right {
+    order: 2;
+    padding-inline-start: 0;
+    padding-inline-end: 9px;
   }
 
   .sidebar-resize-handle {
@@ -1031,6 +1042,16 @@ html[data-list-density="relaxed"] {
     width: 1px;
     background: transparent;
     transition: background-color 100ms ease;
+  }
+
+  .app-sidebar-shell--right .sidebar-resize-handle {
+    inset-inline-start: -4px;
+    inset-inline-end: auto;
+  }
+
+  .app-sidebar-shell--right .sidebar-resize-handle::after {
+    inset-inline-start: 3px;
+    inset-inline-end: auto;
   }
 
   .sidebar-resize-handle:hover::after,
@@ -1059,19 +1080,36 @@ html[data-list-density="relaxed"] {
 
 
   .app-workspace {
+    order: 1;
+    direction: ltr;
     background: hsl(var(--workspace-bg));
+  }
+
+  html[dir="rtl"] .app-sidebar-panel,
+  html[dir="rtl"] .app-workspace {
+    direction: rtl;
   }
 
   .app-sidebar-reveal-button {
     position: absolute;
     top: 12px;
-    inset-inline-start: 88px;
+    left: 88px;
+    right: auto;
     z-index: 80;
     -webkit-app-region: no-drag;
   }
 
   .app-workspace--custom-window-controls .app-sidebar-reveal-button {
-    inset-inline-start: 124px;
+    left: 124px;
+  }
+
+  .app-workspace--sidebar-right .app-sidebar-reveal-button {
+    left: auto;
+    right: 88px;
+  }
+
+  .app-workspace--sidebar-right.app-workspace--custom-window-controls .app-sidebar-reveal-button {
+    right: 124px;
   }
 
   .app-statusbar {
@@ -1584,12 +1622,18 @@ html[data-list-density="relaxed"] {
   position: fixed;
   top: 15px;
   left: 22px;
+  right: auto;
   z-index: 60;
   display: inline-flex;
   align-items: center;
   gap: 8px;
   -webkit-app-region: no-drag;
   pointer-events: auto;
+}
+
+.app-shell--sidebar-right .window-controls {
+  left: auto;
+  right: 22px;
 }
 
 .window-control {
@@ -1643,11 +1687,21 @@ html[data-list-density="relaxed"] {
 }
 
 .app-workspace--sidebar-collapsed .main-titlebar {
-  padding-inline-start: 124px;
+  padding-left: 124px;
+  padding-right: 18px;
 }
 
 .app-workspace--sidebar-collapsed.app-workspace--custom-window-controls .main-titlebar {
-  padding-inline-start: 160px;
+  padding-left: 160px;
+}
+
+.app-workspace--sidebar-right.app-workspace--sidebar-collapsed .main-titlebar {
+  padding-left: 18px;
+  padding-right: 124px;
+}
+
+.app-workspace--sidebar-right.app-workspace--sidebar-collapsed.app-workspace--custom-window-controls .main-titlebar {
+  padding-right: 160px;
 }
 
 .main-titlebar-title {
@@ -1824,6 +1878,8 @@ html[data-list-density="relaxed"] {
 
 .download-table-header > div:first-child {
   padding-inline-start: 0;
+  direction: ltr;
+  text-align: left;
 }
 
 .download-table-header > div:last-child {
@@ -1949,6 +2005,8 @@ html[data-list-density="relaxed"] .download-ghost-row {
   }
 
 .download-file-cell {
+  direction: ltr;
+  text-align: left;
   display: flex;
   align-items: center;
   gap: var(--download-cell-gap);
@@ -1957,6 +2015,8 @@ html[data-list-density="relaxed"] .download-ghost-row {
 }
 
 .download-file-name {
+  direction: ltr;
+  text-align: left;
   display: block;
   flex: 1 1 auto;
   min-width: 0;
@@ -2344,7 +2404,7 @@ html[dir="rtl"] .sidebar-inner .mr-3 {
   margin-left: 0.75rem;
 }
 
-html[dir="rtl"] .app-sidebar-panel {
+.app-sidebar-shell--right .app-sidebar-panel {
   box-shadow:
     inset 0 1px 0 hsl(0 0% 100% / 0.045),
     -2px 0 10px hsl(0 0% 0% / 0.20);

@@ -2,6 +2,7 @@ import { useCallback, useRef, useState, useEffect } from 'react';
 import {
   type AppFontSize,
   type ListRowDensity,
+  type SidebarPosition,
   type SettingsState,
   SettingsTab,
   runSettingsPersistenceTransaction,
@@ -808,6 +809,21 @@ runEngineChecks(false);
                     {languageOptions.map(option => (
                       <option key={option.value} value={option.value}>{option.label}</option>
                     ))}
+                  </select>
+                </div>
+                <div className="mac-settings-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.lookAndFeel.sidebarPosition)}</span>
+                    <small>{t($ => $.settings.lookAndFeel.sidebarPositionDescription)}</small>
+                  </div>
+                  <select
+                    value={settings.sidebarPosition}
+                    onChange={(event) => settings.setSidebarPosition(event.target.value as SidebarPosition)}
+                    className="app-control w-48"
+                  >
+                    <option value="auto">{t($ => $.settings.lookAndFeel.sidebarPositionAutomatic)}</option>
+                    <option value="left">{t($ => $.settings.lookAndFeel.sidebarPositionLeft)}</option>
+                    <option value="right">{t($ => $.settings.lookAndFeel.sidebarPositionRight)}</option>
                   </select>
                 </div>
               </div>

@@ -9,6 +9,9 @@ const fallback: PlatformInfo = {
   portable: false
 };
 
+export const shouldUseCustomWindowControls = (os: string, userAgent: string): boolean =>
+  !userAgent.includes('Mac') && (os === 'windows' || os === 'linux' || os === 'unknown');
+
 let cached: PlatformInfo | null = null;
 let pending: Promise<PlatformInfo> | null = null;
 

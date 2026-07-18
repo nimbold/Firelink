@@ -197,6 +197,7 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
         "language",
         &["system", "en", "zh-CN", "he", "fa", "uk", "ru"],
     );
+    sanitize_allowed_string(state, "sidebarPosition", &["auto", "left", "right"]);
     sanitize_allowed_string(state, "appFontSize", &["small", "standard", "large"]);
     sanitize_allowed_string(state, "listRowDensity", &["compact", "standard", "relaxed"]);
     sanitize_allowed_string(state, "activeSettingsTab", &[
@@ -426,6 +427,7 @@ fn default_settings() -> PersistedSettings {
         speed_limit_preset_values: vec![1.0, 5.0, 10.0],
         logs_enabled: false,
         is_sidebar_visible: true,
+        sidebar_position: "auto".to_string(),
         active_settings_tab: SettingsTab::Downloads,
         scheduler: SchedulerSettings {
             enabled: false,
@@ -506,6 +508,7 @@ mod tests {
             "state": {
                 "maxConcurrentDownloads": 7,
                 "globalSpeedLimit": "2M",
+                "sidebarPosition": "right",
                 "scheduler": {
                     "enabled": true,
                     "startTime": "06:30",
@@ -523,6 +526,7 @@ mod tests {
 
         assert_eq!(settings.max_concurrent_downloads, 7);
         assert_eq!(settings.global_speed_limit, "2M");
+        assert_eq!(settings.sidebar_position, "right");
         assert_eq!(settings.speed_limit_preset_values, vec![1.0, 5.0, 10.0]);
         assert!(!settings.logs_enabled);
         assert!(settings.scheduler.enabled);
@@ -658,6 +662,18 @@ mod tests {
         let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
 
         assert_eq!(settings.max_concurrent_downloads, 3);
+    }
+
+    #[test]
+    fn invalid_sidebar_position_uses_automatic_layout() {
+        let stored = json!({
+            "state": {"sidebarPosition": "diagonal"},
+            "version": 5
+        });
+
+        let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
+
+        assert_eq!(settings.sidebar_position, "auto");
     }
 
     #[test]

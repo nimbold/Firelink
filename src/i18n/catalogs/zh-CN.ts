@@ -532,6 +532,11 @@ const zhCN = {
     lookAndFeel: {
       language: '语言',
       languageDescription: '选择 Firelink 的界面语言。',
+      sidebarPosition: '侧边栏位置',
+      sidebarPositionDescription: '选择侧边栏显示的位置。“自动”会跟随界面文字方向。',
+      sidebarPositionAutomatic: '自动（推荐）',
+      sidebarPositionLeft: '左侧',
+      sidebarPositionRight: '右侧',
       languageSystem: '系统默认',
       languageEnglish: '英语',
       languageChinese: '简体中文',
