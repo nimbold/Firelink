@@ -27,10 +27,21 @@ import { isTrustedFirelinkReleaseUrl } from './utils/releaseUrls';
 import { changeAppLocale, localeDirection, resolveAppLocale, syncDocumentLocale } from './i18n';
 import { useTranslation } from 'react-i18next';
 
-const SettingsView = lazy(() => import('./components/SettingsView'));
-const SchedulerView = lazy(() => import('./components/SchedulerView'));
-const SpeedLimiterView = lazy(() => import('./components/SpeedLimiterView'));
-const LogsView = lazy(() => import('./components/LogsView'));
+const loadSettingsView = () => import('./components/SettingsView');
+const loadSchedulerView = () => import('./components/SchedulerView');
+const loadSpeedLimiterView = () => import('./components/SpeedLimiterView');
+const loadLogsView = () => import('./components/LogsView');
+const pageChunkLoaders = [
+  loadSettingsView,
+  loadSchedulerView,
+  loadSpeedLimiterView,
+  loadLogsView,
+] as const;
+
+const SettingsView = lazy(loadSettingsView);
+const SchedulerView = lazy(loadSchedulerView);
+const SpeedLimiterView = lazy(loadSpeedLimiterView);
+const LogsView = lazy(loadLogsView);
 const AddDownloadsModal = lazy(() => import('./components/AddDownloadsModal').then(module => ({
   default: module.AddDownloadsModal,
 })));
@@ -43,6 +54,50 @@ const DeleteConfirmationModal = lazy(() => import('./components/DeleteConfirmati
 const KeychainPermissionModal = lazy(() => import('./components/KeychainPermissionModal').then(module => ({
   default: module.KeychainPermissionModal,
 })));
+
+const preloadPageChunks = async () => {
+  for (const load of pageChunkLoaders) {
+    try {
+      await load();
+    } catch (error) {
+      console.warn('Failed to preload page chunk:', error);
+    }
+  }
+};
+
+const scheduleAfterFirstPaint = (task: () => void): (() => void) => {
+  const idleWindow = window as typeof window & {
+    requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+    cancelIdleCallback?: (handle: number) => void;
+  };
+
+  if (idleWindow.requestIdleCallback) {
+    const handle = idleWindow.requestIdleCallback(task, { timeout: 1000 });
+    return () => idleWindow.cancelIdleCallback?.(handle);
+  }
+
+  let timeoutHandle: number | null = null;
+  const frameHandle = window.requestAnimationFrame(() => {
+    timeoutHandle = window.setTimeout(task, 0);
+  });
+  return () => {
+    window.cancelAnimationFrame(frameHandle);
+    if (timeoutHandle !== null) window.clearTimeout(timeoutHandle);
+  };
+};
+
+const PageLoadingFallback = () => {
+  const { t } = useTranslation();
+
+  return (
+    <div className="flex flex-1 items-center justify-center bg-main-bg" role="status" aria-live="polite">
+      <span className="sr-only">{t($ => $.app.loading)}</span>
+      <div className="h-1.5 w-24 overflow-hidden rounded-full bg-item-hover" aria-hidden="true">
+        <div className="h-full w-1/3 animate-pulse rounded-full bg-accent" />
+      </div>
+    </div>
+  );
+};
 
 let automaticUpdateCheckStarted = false;
 const processingScheduleKeys = new Set<string>();
@@ -186,6 +241,8 @@ function App() {
   // resolving. The conservative fallback prevents a startup handoff from
   // briefly rendering underneath native or custom window controls.
   const hasWindowChrome = isMacUserAgent || ['macos', 'windows', 'linux', 'unknown'].includes(platform.os);
+
+  useEffect(() => scheduleAfterFirstPaint(preloadPageChunks), []);
 
   useEffect(() => subscribeToSettingsPersistenceErrors(() => {
     addToast({
@@ -1002,7 +1059,7 @@ function App() {
           </button>
         )}
         <div className="flex-1 flex flex-col overflow-hidden relative">
-          <Suspense fallback={null}>
+          <Suspense fallback={<PageLoadingFallback />}>
             {activeView === 'downloads' && <DownloadTable filter={filter} />}
             {activeView === 'settings' && <SettingsView />}
             {activeView === 'scheduler' && <SchedulerView />}

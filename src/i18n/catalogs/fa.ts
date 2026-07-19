@@ -288,6 +288,7 @@ const fa = {
     storeUnavailable: 'دسترسی به مخزن اعتبارنامه در دسترس نیست.',
   },
   app: {
+    loading: 'در حال بارگذاری…',
     settingsSaveFailed: 'تنظیمات ذخیره نشدند. مجوزهای ذخیره‌سازی را بررسی کنید و دوباره امتحان کنید.',
     systemActionCountdown: '{{action}} در ۱۰ ثانیه.',
     systemActionCancelled: 'اقدام سیستم لغو شد زیرا دانلود دیگری فعال یا در صف است.',

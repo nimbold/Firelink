@@ -288,6 +288,7 @@ const common = {
     storeUnavailable: 'Credential store access is unavailable.',
   },
   app: {
+    loading: 'Loading…',
     settingsSaveFailed: 'Could not save settings. Check storage permissions and try again.',
     systemActionCountdown: '{{action}} in 10 seconds.',
     systemActionCancelled: 'System action cancelled because another download is active or queued.',

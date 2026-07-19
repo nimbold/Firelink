@@ -288,6 +288,7 @@ const he = {
     storeUnavailable: 'הגישה לאחסון האישורים אינה זמינה.',
   },
   app: {
+    loading: 'טוען…',
     settingsSaveFailed: 'לא ניתן לשמור הגדרות. בדוק הרשאות אחסון ונסה שוב.',
     systemActionCountdown: '{{action}} בעוד 10 שניות.',
     systemActionCancelled: 'פעולת המערכת בוטלה מכיוון שהורדה אחרת פעילה או בתור.',

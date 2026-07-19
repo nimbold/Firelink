@@ -288,6 +288,7 @@ const zhCN = {
     storeUnavailable: '凭据存储访问不可用。',
   },
   app: {
+    loading: '加载中…',
     settingsSaveFailed: '无法保存设置。请检查存储权限并重试。',
     systemActionCountdown: '10 秒后{{action}}。',
     systemActionCancelled: '系统操作已取消，因为有其他下载正在进行或已排队。',
