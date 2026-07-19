@@ -46,6 +46,8 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
   const renameQueueCancelRef = useRef<string | null>(null);
   const renamingQueueIdRef = useRef<string | null>(null);
   const editingQueueNameRef = useRef('');
+  const rejectedAddQueueNameRef = useRef<string | null>(null);
+  const rejectedRenameRef = useRef<{ queueId: string; name: string } | null>(null);
 
   useEffect(() => {
     const handleCloseMenu = () => setContextMenu(null);
@@ -174,9 +176,17 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
       return;
     }
     if (!addQueue(normalizedName)) {
+      if (trigger === 'blur' && rejectedAddQueueNameRef.current === normalizedName) {
+        rejectedAddQueueNameRef.current = null;
+        setNewQueueName('');
+        setIsAddingQueue(false);
+        return;
+      }
+      rejectedAddQueueNameRef.current = normalizedName;
       addToast({ message: t($ => $.sidebar.queueNameExists), variant: 'error', isActionable: true });
       return;
     }
+    rejectedAddQueueNameRef.current = null;
     addQueueSubmitRef.current = true;
     setNewQueueName('');
     setIsAddingQueue(false);
@@ -202,9 +212,23 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
       return;
     }
     if (!renameQueue(queueId, normalizedName)) {
+      if (
+        trigger === 'blur'
+        && rejectedRenameRef.current?.queueId === queueId
+        && rejectedRenameRef.current.name === normalizedName
+      ) {
+        rejectedRenameRef.current = null;
+        renamingQueueIdRef.current = null;
+        editingQueueNameRef.current = '';
+        setEditingQueueName('');
+        setRenamingQueueId(null);
+        return;
+      }
+      rejectedRenameRef.current = { queueId, name: normalizedName };
       addToast({ message: t($ => $.sidebar.queueNameExists), variant: 'error', isActionable: true });
       return;
     }
+    rejectedRenameRef.current = null;
     renameQueueSubmitRef.current = true;
     renamingQueueIdRef.current = null;
     setRenamingQueueId(null);
@@ -226,6 +250,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             value={editingQueueName}
             onChange={e => {
               editingQueueNameRef.current = e.target.value;
+              rejectedRenameRef.current = null;
               setEditingQueueName(e.target.value);
             }}
             onKeyDown={e => {
@@ -352,7 +377,10 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
                 placeholder={t($ => $.actions.queueName)}
                 className="flex-1 bg-transparent border border-accent rounded px-1 text-[13px] text-text-primary outline-none min-w-0"
                 value={newQueueName}
-                onChange={e => setNewQueueName(e.target.value)}
+                onChange={e => {
+                  rejectedAddQueueNameRef.current = null;
+                  setNewQueueName(e.target.value);
+                }}
                 onKeyDown={e => {
                   if (e.key === 'Enter') handleAddQueueSubmit();
                   if (e.key === 'Escape') {
@@ -371,6 +399,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
               onClick={() => {
                 addQueueSubmitRef.current = false;
                 addQueueCancelRef.current = false;
+                rejectedAddQueueNameRef.current = null;
                 setIsAddingQueue(true);
                 setNewQueueName('');
               }}
@@ -454,6 +483,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
               if (q) {
                 renameQueueSubmitRef.current = false;
                 renameQueueCancelRef.current = null;
+                rejectedRenameRef.current = null;
                 renamingQueueIdRef.current = q.id;
                 editingQueueNameRef.current = q.name;
                 setEditingQueueName(q.name);

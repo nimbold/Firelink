@@ -450,6 +450,12 @@ function App() {
             settings.setShowKeychainModal(true);
           }
         } else {
+          // The backend keeps credential-store access disabled for every new
+          // process. Arm it only after the persisted startup decision has
+          // confirmed that this build was already approved; the hydrate call
+          // below is then the first operation allowed to touch the OS store.
+          await invoke('authorize_keychain_access');
+          if (!active) return;
           changed = await settings.hydratePairingToken(isStartupActive);
           if (!active) return;
           const currentSettings = useSettingsStore.getState();

@@ -33,6 +33,7 @@ import { usePlatformInfo } from '../utils/platform';
 import { isTrustedFirelinkReleaseUrl } from '../utils/releaseUrls';
 import { normalizeCustomProxy } from '../store/useDownloadStore';
 import { useTranslation } from 'react-i18next';
+import { localeDirection, resolveAppLocale } from '../i18n';
 
 const settingsTabs: { type: SettingsTab; icon: typeof Download }[] = [
   { type: 'downloads', icon: Download },
@@ -252,9 +253,12 @@ const CategoryFolderInput = ({
 };
 
 export default function SettingsView() {
-  const { t } = useTranslation();
+  const { i18n, t } = useTranslation();
   const settings = useSettingsStore();
   const activeTab = settings.activeSettingsTab;
+  const isRtl = localeDirection(resolveAppLocale(i18n.language)) === 'rtl';
+  const isSidebarOnRight = settings.sidebarPosition === 'right'
+    || (settings.sidebarPosition === 'auto' && isRtl);
   const platform = usePlatformInfo();
   const platformName =
     platform.os === 'macos'
@@ -680,7 +684,9 @@ runEngineChecks(false);
 
         {/* SwiftUI SettingsPaneContainer-style horizontal tab strip */}
         <div className="settings-toolbar">
-          <div className="settings-tab-strip flex items-stretch gap-1">
+          <div className={`settings-tab-strip flex items-stretch gap-1 ${
+            isSidebarOnRight ? 'settings-tab-strip--sidebar-right' : ''
+          }`}>
             {settingsTabs.map(tab => (
               <TabButton key={tab.type} {...tab} label={tabLabels[tab.type]} />
             ))}

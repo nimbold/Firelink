@@ -45,18 +45,17 @@ struct LegacyData {
 }
 
 pub fn init(storage_layout: &crate::storage::StorageLayout) -> Result<DbState, String> {
-    init_at_path_internal(storage_layout.data_dir(), storage_layout.is_portable(), false)
+    init_at_path_internal(storage_layout.data_dir(), storage_layout.is_portable())
 }
 
 #[cfg(test)]
 fn init_at_path(app_data_dir: &Path) -> Result<DbState, String> {
-    init_at_path_internal(app_data_dir, false, false)
+    init_at_path_internal(app_data_dir, false)
 }
 
 fn init_at_path_internal(
     app_data_dir: &Path,
     portable: bool,
-    migrate_legacy_keychain: bool,
 ) -> Result<DbState, String> {
     fs::create_dir_all(app_data_dir)
         .map_err(|error| format!("failed to create app data directory: {error}"))?;
@@ -78,12 +77,7 @@ fn init_at_path_internal(
     }
     migrate_schema(&mut connection, version)?;
 
-    import_legacy_data(
-        &mut connection,
-        app_data_dir,
-        portable,
-        migrate_legacy_keychain,
-    )?;
+    import_legacy_data(&mut connection, app_data_dir, portable)?;
     if portable {
         sanitize_persisted_downloads(&mut connection)?;
     }
@@ -188,7 +182,6 @@ fn import_legacy_data(
     connection: &mut Connection,
     app_data_dir: &Path,
     portable: bool,
-    migrate_keychain: bool,
 ) -> Result<(), String> {
     let legacy_app_dir = app_data_dir
         .parent()
@@ -226,31 +219,10 @@ fn import_legacy_data(
         let mut pending_pairing_token = None;
         if !portable {
             if let Some(token) = legacy.pairing_token.take() {
-                let migrated = if migrate_keychain {
-                    let keychain_has_token = get_keychain_password(PAIRING_TOKEN_KEYCHAIN_ID)
-                        .ok()
-                        .is_some_and(|value| !value.trim().is_empty());
-                    if !keychain_has_token {
-                        if let Err(error) =
-                            set_keychain_password(PAIRING_TOKEN_KEYCHAIN_ID, &token)
-                        {
-                            log::warn!(
-                                "Legacy pairing token could not be migrated to the credential store; it will remain pending in the current database: {}",
-                                error
-                            );
-                            false
-                        } else {
-                            true
-                        }
-                    } else {
-                        true
-                    }
-                } else {
-                    false
-                };
-                if !migrated {
-                    pending_pairing_token = Some(token);
-                }
+                // Legacy migration is deliberately deferred until the
+                // explicit frontend consent action. Database initialization
+                // must never touch the OS credential store.
+                pending_pairing_token = Some(token);
             }
         }
         if portable {
@@ -1738,7 +1710,7 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let state = init_at_path_internal(temp.path(), true, true).unwrap();
+        let state = init_at_path_internal(temp.path(), true).unwrap();
         let connection = state.lock().unwrap();
         let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
         assert!(saved.get("password").is_none());
@@ -1828,7 +1800,7 @@ mod tests {
         });
         fs::write(&store_path, serde_json::to_vec(&store).unwrap()).unwrap();
 
-        let state = init_at_path_internal(&current, true, true).unwrap();
+        let state = init_at_path_internal(&current, true).unwrap();
         let connection = state.lock().unwrap();
         let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
         assert!(saved.get("password").is_none());
@@ -2104,7 +2076,7 @@ mod tests {
         drop(connection);
         drop(state);
 
-        let state = init_at_path_internal(temp.path(), true, true).unwrap();
+        let state = init_at_path_internal(temp.path(), true).unwrap();
         let connection = state.lock().unwrap();
         let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
         assert!(saved.get("password").is_none());

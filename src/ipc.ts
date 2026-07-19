@@ -66,6 +66,7 @@ type CommandMap = {
   get_extension_server_port: { args: undefined; result: number | null };
   hydrate_extension_pairing_token: { args: undefined; result: PairingTokenHydration };
   get_session_pairing_token: { args: undefined; result: PairingTokenHydration };
+  authorize_keychain_access: { args: undefined; result: void };
   regenerate_pairing_token: { args: undefined; result: PairingTokenHydration };
   grant_keychain_access: { args: undefined; result: PairingTokenHydration };
   acknowledge_pairing_token_change: { args: undefined; result: void };

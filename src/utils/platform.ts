@@ -9,8 +9,15 @@ const fallback: PlatformInfo = {
   portable: false
 };
 
-export const shouldUseCustomWindowControls = (os: string, userAgent: string): boolean =>
-  !userAgent.includes('Mac') && (os === 'windows' || os === 'linux' || os === 'unknown');
+export const shouldUseCustomWindowControls = (os: string, userAgent: string): boolean => {
+  if (os === 'windows' || os === 'linux' || os === 'macos') return true;
+  if (os !== 'unknown') return false;
+
+  // Keep the custom titlebar visible while the native platform query is
+  // resolving. Mobile user agents are the only unknown targets that must not
+  // receive desktop window controls.
+  return !/Android|iPhone|iPad|iPod|Mobile/i.test(userAgent);
+};
 
 let cached: PlatformInfo | null = null;
 let pending: Promise<PlatformInfo> | null = null;

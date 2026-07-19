@@ -1,5 +1,5 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Minus, Square, X } from 'lucide-react';
+import { Maximize2, Minus, X } from 'lucide-react';
 import type { PointerEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -58,7 +58,7 @@ export function WindowControls({ side }: WindowControlsProps) {
           void appWindow.toggleMaximize();
         }}
       >
-        <Square size={8} strokeWidth={3} />
+        <Maximize2 size={9} strokeWidth={3} />
       </button>
     </div>
   );

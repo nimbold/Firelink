@@ -621,7 +621,12 @@ html[data-list-density="relaxed"] {
     border-radius: 10px;
     line-height: 1.55;
     direction: ltr;
-    text-align: start;
+    text-align: left;
+  }
+
+  .add-download-links-input--rtl:placeholder-shown {
+    direction: rtl;
+    text-align: right;
   }
 
   .add-download-link-button {
@@ -1004,6 +1009,9 @@ html[data-list-density="relaxed"] {
   .app-shell {
     direction: ltr;
     background: hsl(var(--main-bg));
+    border: 1px solid hsl(var(--border-color));
+    border-radius: 14px;
+    overflow: hidden;
   }
 
   .app-sidebar-shell {
@@ -1332,6 +1340,10 @@ html[data-list-density="relaxed"] {
     direction: ltr;
   }
 
+  .settings-tab-strip--sidebar-right {
+    flex-direction: row-reverse;
+  }
+
   .settings-tab-button {
     min-height: 64px;
     border-radius: 8px;
@@ -1630,13 +1642,18 @@ html[data-list-density="relaxed"] {
   .mac-switch:checked::after {
     transform: translateX(16px);
   }
+
+  /* Switch thumbs use physical LTR transforms in every interface direction. */
+  button[role="switch"] {
+    direction: ltr;
+  }
 .downloads-view {
   background: hsl(var(--main-bg));
 }
 
 .window-controls {
   position: fixed;
-  top: 15px;
+  top: 20px;
   left: 22px;
   right: auto;
   z-index: 60;
@@ -1691,6 +1708,10 @@ html[data-list-density="relaxed"] {
 .window-control:hover {
   color: hsl(0 0% 8% / 0.68);
   filter: saturate(1.14) brightness(1.05);
+}
+
+.window-controls:hover .window-control {
+  color: hsl(0 0% 8% / 0.68);
 }
 
 .window-control:active {

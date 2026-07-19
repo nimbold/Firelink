@@ -2859,6 +2859,12 @@ pub enum TaskHandle {
 pub struct AppState {
     pub download_coordinator: download::DownloadCoordinator,
     pub storage_layout: crate::storage::StorageLayout,
+    /// Credential-store access is denied until the frontend has completed the
+    /// startup consent decision for this process. This is intentionally
+    /// process-local: a new binary must pass through the consent barrier
+    /// again before any stale or early IPC caller can reach the OS store.
+    pub keychain_access_authorized: Arc<AtomicBool>,
+    pub keychain_grant_in_progress: Arc<AtomicBool>,
     pub extension_pairing_token: extension_server::SharedExtensionToken,
     pub extension_frontend_ready: extension_server::SharedFrontendReady,
     pub extension_acks: extension_server::SharedExtensionAcks,
@@ -2870,6 +2876,38 @@ pub struct AppState {
     pub sleep_preventer: Arc<Mutex<Option<SleepPreventer>>>,
     pub scheduler_settings: Arc<RwLock<Option<crate::ipc::PersistedSettings>>>,
     pub queue_manager: Arc<queue::QueueManager>,
+}
+
+const KEYCHAIN_CONSENT_REQUIRED_ERROR: &str =
+    "Credential-store access requires explicit user consent";
+const KEYCHAIN_GRANT_IN_PROGRESS_ERROR: &str =
+    "Credential-store access is already being requested";
+
+fn require_keychain_access(state: &AppState) -> Result<(), String> {
+    if state
+        .keychain_access_authorized
+        .load(Ordering::Acquire)
+    {
+        Ok(())
+    } else {
+        Err(KEYCHAIN_CONSENT_REQUIRED_ERROR.to_string())
+    }
+}
+
+struct KeychainGrantGuard(Arc<AtomicBool>);
+
+impl Drop for KeychainGrantGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+fn begin_keychain_grant(state: &AppState) -> Result<KeychainGrantGuard, String> {
+    state
+        .keychain_grant_in_progress
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .map(|_| KeychainGrantGuard(Arc::clone(&state.keychain_grant_in_progress)))
+        .map_err(|_| KEYCHAIN_GRANT_IN_PROGRESS_ERROR.to_string())
 }
 
 #[derive(Clone, Serialize, TS)]
@@ -5676,6 +5714,7 @@ fn set_keychain_password(
         crate::db::save_pairing_token_to_settings(&connection, &password, true)?;
         return Ok(());
     }
+    require_keychain_access(&state)?;
     crate::db::set_keychain_password(&id, &password)
 }
 
@@ -5689,6 +5728,7 @@ fn get_keychain_password(
     {
         return Err("portable pairing token is stored in portable settings".to_string());
     }
+    require_keychain_access(&state)?;
     crate::db::get_keychain_password(&id)
 }
 
@@ -5702,17 +5742,20 @@ fn delete_keychain_password(
     {
         return Ok(());
     }
+    require_keychain_access(&state)?;
     crate::db::delete_keychain_password(&id)
 }
 
 #[tauri::command]
 fn save_site_login(
     database: tauri::State<'_, crate::db::DbState>,
+    state: tauri::State<'_, AppState>,
     id: String,
     url_pattern: String,
     username: String,
     password: String,
 ) -> Result<(), String> {
+    require_keychain_access(&state)?;
     let connection = database.lock()?;
     crate::db::save_site_login(&connection, &id, &url_pattern, &username, &password)
 }
@@ -5720,10 +5763,26 @@ fn save_site_login(
 #[tauri::command]
 fn delete_site_login(
     database: tauri::State<'_, crate::db::DbState>,
+    state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
+    require_keychain_access(&state)?;
     let connection = database.lock()?;
     crate::db::delete_site_login(&connection, &id)
+}
+
+/// Arm credential-store access after the frontend has completed its startup
+/// decision. The process-local gate prevents any stale or early IPC caller
+/// from producing a native OS prompt before the explanation is visible.
+#[tauri::command]
+fn authorize_keychain_access(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    if state.storage_layout.is_portable() {
+        return Ok(());
+    }
+    state
+        .keychain_access_authorized
+        .store(true, Ordering::Release);
+    Ok(())
 }
 
 #[derive(Serialize, TS)]
@@ -5761,6 +5820,7 @@ fn hydrate_extension_pairing_token(
         });
     }
 
+    require_keychain_access(&app_state)?;
     let migration_error = crate::db::migrate_legacy_pairing_token(&connection).err();
     let keychain_token = crate::db::get_keychain_password(crate::db::PAIRING_TOKEN_KEYCHAIN_ID)
         .ok()
@@ -5821,6 +5881,7 @@ fn regenerate_pairing_token(
     if app_state.storage_layout.is_portable() {
         crate::db::save_pairing_token_to_settings(&connection, &generated, true)?;
     } else {
+        require_keychain_access(&app_state)?;
         if let Err(error) = crate::db::migrate_legacy_pairing_token(&connection) {
             let token = app_state
                 .extension_pairing_token
@@ -5868,6 +5929,7 @@ fn grant_keychain_access(
     database: tauri::State<'_, crate::db::DbState>,
     app_state: tauri::State<'_, AppState>,
 ) -> Result<PairingTokenHydration, String> {
+    let _grant_guard = begin_keychain_grant(&app_state)?;
     let connection = database.lock()?;
 
     if app_state.storage_layout.is_portable() {
@@ -5882,6 +5944,9 @@ fn grant_keychain_access(
         if let Ok(mut pairing_token) = app_state.extension_pairing_token.write() {
             *pairing_token = token.clone();
         }
+        app_state
+            .keychain_access_authorized
+            .store(true, Ordering::Release);
         return Ok(PairingTokenHydration {
             token,
             token_changed: false,
@@ -5933,6 +5998,9 @@ fn grant_keychain_access(
             *pairing_token = token.clone();
         }
     }
+    app_state
+        .keychain_access_authorized
+        .store(true, Ordering::Release);
     Ok(PairingTokenHydration {
         token,
         token_changed: false,
@@ -8442,6 +8510,8 @@ pub fn run() {
             app.manage(AppState {
                 download_coordinator: download::DownloadCoordinator::spawn(app.handle().clone()),
                 storage_layout,
+                keychain_access_authorized: Arc::new(AtomicBool::new(false)),
+                keychain_grant_in_progress: Arc::new(AtomicBool::new(false)),
                 extension_pairing_token,
                 extension_frontend_ready,
                 extension_acks,
@@ -8971,6 +9041,7 @@ pub fn run() {
             set_keychain_password, get_keychain_password, delete_keychain_password,
             save_site_login, delete_site_login,
             hydrate_extension_pairing_token, get_session_pairing_token, regenerate_pairing_token, grant_keychain_access,
+            authorize_keychain_access,
             acknowledge_pairing_token_change,
             check_file_exists, toggle_tray_icon, set_extension_pairing_token,
             get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_global_speed_limit, remove_download,

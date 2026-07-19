@@ -25,7 +25,7 @@ import { getPlatformInfo } from '../utils/platform';
 import { isTransferLocked } from '../utils/downloadActions';
 import { useToast } from '../contexts/ToastContext';
 import { useTranslation } from 'react-i18next';
-import { localePluralVariant } from '../i18n/locales';
+import { localeDirection, localePluralVariant, resolveAppLocale } from '../i18n/locales';
 import {
   canSubmitMetadataRows,
   appendRequestUrlsAfterVersion,
@@ -116,6 +116,7 @@ const extensionHeaders = (context: PendingAddRequestContext | undefined) => [
 
 export const AddDownloadsModal = () => {
   const { t, i18n } = useTranslation();
+  const isRtl = localeDirection(resolveAppLocale(i18n.language)) === 'rtl';
   const { addToast } = useToast();
   const {
     isAddModalOpen,
@@ -1247,7 +1248,9 @@ export const AddDownloadsModal = () => {
                   </div>
                 </div>
                 <textarea
-                  className="add-download-control add-download-links-input w-full h-32 p-3 text-[13px] resize-none"
+                  className={`add-download-control add-download-links-input w-full h-32 p-3 text-[13px] resize-none ${
+                    isRtl ? 'add-download-links-input--rtl' : ''
+                  }`}
                   placeholder={t($ => $.addDownloads.pastePlaceholder)}
                   value={urls}
                   onChange={(e) => setUrls(e.target.value)}

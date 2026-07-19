@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { invokeCommand as invoke } from '../ipc';
 import { KeyRound, ShieldAlert } from 'lucide-react';
@@ -20,16 +20,23 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
   const dismissKeychainPrompt = useSettingsStore(state => state.dismissKeychainPrompt);
   const platform = usePlatformInfo();
   const [isGranting, setIsGranting] = useState(false);
+  const [grantRequestPending, setGrantRequestPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const grantRequestRef = useRef<Promise<PairingTokenHydration> | null>(null);
 
   useEffect(() => {
-    if (!showKeychainModal || isGranting) return;
+    if (!showKeychainModal || isGranting || grantRequestPending) return;
     const handleEscape = (event: KeyboardEvent) => {
-        if (event.key === 'Escape') dismissKeychainPrompt(consentVersion);
+        if (event.key !== 'Escape') return;
+        if (consentVersion.trim()) {
+          dismissKeychainPrompt(consentVersion);
+        } else {
+          useSettingsStore.getState().setShowKeychainModal(false);
+        }
     };
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
-  }, [consentVersion, dismissKeychainPrompt, isGranting, showKeychainModal]);
+  }, [consentVersion, dismissKeychainPrompt, grantRequestPending, isGranting, showKeychainModal]);
 
   if (!showKeychainModal) {
     return null;
@@ -56,6 +63,10 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
       : t($ => $.keychain.grantLabelDefault);
 
   const handleGrant = async () => {
+    // A native credential-store call cannot be cancelled from the webview.
+    // Keep the request identity until it settles so a UI timeout cannot
+    // launch a second OS prompt while the first one is still outstanding.
+    if (grantRequestRef.current) return;
     setIsGranting(true);
     setError(null);
 
@@ -79,9 +90,21 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
       return true;
     };
     const grantRequest = invoke('grant_keychain_access');
+    grantRequestRef.current = grantRequest;
+    setGrantRequestPending(true);
+    void grantRequest.then(
+      () => {
+        if (grantRequestRef.current === grantRequest) grantRequestRef.current = null;
+        setGrantRequestPending(false);
+      },
+      () => {
+        if (grantRequestRef.current === grantRequest) grantRequestRef.current = null;
+        setGrantRequestPending(false);
+      }
+    );
     // A native credential-store call cannot be cancelled by the webview. Keep
     // a late successful result useful even if the UI timeout has already
-    // restored the Later/retry controls.
+    // returned control to the explanation.
     grantRequest.then(applyPersistentGrant).catch(() => undefined);
 
     try {
@@ -106,14 +129,22 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
   };
 
   const handleLater = () => {
-    dismissKeychainPrompt(consentVersion);
+    if (consentVersion.trim()) {
+      dismissKeychainPrompt(consentVersion);
+    } else {
+      // A modal opened by an early user action can render before the async
+      // app-version lookup completes. Do not persist a dismissal for an
+      // unknown build; startup must make the final consent decision once the
+      // identity is known.
+      useSettingsStore.getState().setShowKeychainModal(false);
+    }
   };
 
   return (
     <div
       className="app-modal-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/40"
       onClick={(event) => {
-        if (event.target === event.currentTarget && !isGranting) handleLater();
+        if (event.target === event.currentTarget && !isGranting && !grantRequestPending) handleLater();
       }}
       role="dialog"
       aria-modal="true"
@@ -168,17 +199,17 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
         <div className="px-5 py-4 border-t border-border-modal flex justify-end gap-3 bg-bg-modal-accent">
           <button
             onClick={handleLater}
-            disabled={isGranting}
+            disabled={isGranting || grantRequestPending}
             className="px-4 py-2 rounded-lg text-sm font-medium transition-colors text-text-secondary hover:bg-item-hover hover:text-text-primary disabled:opacity-50"
           >
             {t($ => $.keychain.later)}
           </button>
           <button
             onClick={handleGrant}
-            disabled={isGranting}
+            disabled={isGranting || grantRequestPending}
             className="px-4 py-2 rounded-lg text-sm font-medium transition-colors bg-accent text-white hover:bg-accent/90 disabled:opacity-50"
           >
-            {isGranting ? t($ => $.keychain.enabling) : grantLabel}
+            {isGranting || grantRequestPending ? t($ => $.keychain.enabling) : grantLabel}
           </button>
         </div>
       </div>

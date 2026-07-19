@@ -401,7 +401,7 @@ const he = {
     pauseBeforeReplace: 'השהה את {{file}} לפני החלפתו.',
     cannotReplace: 'לא ניתן להחליף את {{file}}: הקובץ אינו שייך להורדת Firelink.',
     downloadLinks: 'קישורי הורדה',
-    pastePlaceholder: 'הדבק כתובות HTTP, HTTPS, FTP או SFTP כאן...\n\nעבור הורדות מדיה, הדבק קישורים מ-YouTube, X, TikTok, Instagram, Reddit וכו\'.',
+    pastePlaceholder: 'הדבק כתובות \u2066HTTP\u2069, \u2066HTTPS\u2069, \u2066FTP\u2069 או \u2066SFTP\u2069 כאן...\n\nעבור הורדות מדיה, הדבק קישורים מ-\u2066YouTube\u2069, \u2066X\u2069, \u2066TikTok\u2069, \u2066Instagram\u2069, \u2066Reddit\u2069 וכו\'.',
     playlistSummary: 'פלייליסט "{{title}}": {{loaded}} מתוך {{total}} רשומות נטענו{{truncated}}{{skipped}}',
     safeEntryLimit: ' (הגיע למגבלת רשומות בטוחה)',
     selectedSummary: '{{ready}} נבחרו ומוכנים, {{fallback}} לגיבוי, {{mediaRetry}} מדיה לניסיון חוזר, {{blocked}} חסומים',

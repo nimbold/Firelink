@@ -10,10 +10,7 @@
         "minHeight": 640,
         "transparent": true,
         "decorations": false,
-        "windowEffects": {
-          "effects": ["mica"],
-          "state": "active"
-        }
+        "shadow": false
       }
     ]
   },
