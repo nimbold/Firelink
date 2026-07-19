@@ -1114,10 +1114,12 @@ html[data-list-density="relaxed"] {
 
   .app-sidebar-shell--left .sidebar-nav-item {
     direction: ltr;
+    text-align: left;
   }
 
   .app-sidebar-shell--right .sidebar-nav-item {
     direction: rtl;
+    text-align: right;
   }
 
   html[dir="ltr"] .sidebar-nav-label {
@@ -1145,6 +1147,11 @@ html[data-list-density="relaxed"] {
     margin-bottom: 2px;
     font-size: 12px;
     transition: background-color 100ms ease;
+  }
+
+  .sidebar-nav-label {
+    flex: 1 1 auto;
+    min-width: 0;
   }
 
   .sidebar-nav-item[data-active="true"] {
@@ -1654,6 +1661,11 @@ html[data-list-density="relaxed"] {
   right: 22px;
 }
 
+.window-controls--right {
+  left: auto;
+  right: 22px;
+}
+
 .window-control {
   width: 14px;
   height: 14px;
@@ -1699,14 +1711,15 @@ html[data-list-density="relaxed"] {
   height: 52px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   padding: 0 18px;
+  direction: ltr;
     border-bottom: 1px solid hsl(var(--border-color));
   background: hsl(var(--statusbar-bg));
 }
 
-.app-workspace--custom-window-controls .main-titlebar {
-  padding-left: 160px;
-  padding-right: 160px;
+.app-workspace--sidebar-right .main-titlebar {
+  flex-direction: row-reverse;
 }
 
 .app-workspace--sidebar-collapsed .main-titlebar {
@@ -1735,7 +1748,7 @@ html[data-list-density="relaxed"] {
   }
 
 .main-control-group {
-    margin-inline-start: auto;
+    margin: 0;
     height: 28px;
     display: inline-flex;
     align-items: center;
@@ -2432,6 +2445,10 @@ html[dir="rtl"] .sidebar-inner .mr-3 {
   box-shadow:
     inset 0 1px 0 hsl(0 0% 100% / 0.045),
     -2px 0 10px hsl(0 0% 0% / 0.20);
+}
+
+.app-sidebar-shell--left .app-sidebar-panel {
+  direction: ltr;
 }
 
 .app-sidebar-shell--left .sidebar-toggle-button {

@@ -943,7 +943,9 @@ function App() {
     } ${
       hasWindowChrome ? 'app-shell--window-chrome' : ''
     }`}>
-      {usesCustomWindowControls && <WindowControls />}
+      {usesCustomWindowControls && (
+        <WindowControls side={isSidebarOnRight ? 'right' : 'left'} />
+      )}
       <div
         className={`app-sidebar-shell relative z-20 shrink-0 transition-all duration-300 ease-[cubic-bezier(0.2,0.8,0.2,1)] ${
           isSidebarOnRight ? 'app-sidebar-shell--right' : 'app-sidebar-shell--left'

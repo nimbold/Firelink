@@ -9,11 +9,18 @@ const stopTitlebarDrag = (event: PointerEvent<HTMLButtonElement>) => {
   event.stopPropagation();
 };
 
-export function WindowControls() {
+interface WindowControlsProps {
+  side: 'left' | 'right';
+}
+
+export function WindowControls({ side }: WindowControlsProps) {
   const { t } = useTranslation();
 
   return (
-    <div className="window-controls" aria-label={t($ => $.window.controls)}>
+    <div
+      className={`window-controls window-controls--${side}`}
+      aria-label={t($ => $.window.controls)}
+    >
       <button
         type="button"
         className="window-control close"
