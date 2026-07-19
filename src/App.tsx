@@ -958,7 +958,10 @@ function App() {
           marginInlineEnd: isSidebarVisible || !isSidebarOnRight ? 0 : -sidebarWidth
         }}
       >
-        <div className="app-sidebar-panel h-full w-full">
+        <div
+          className="app-sidebar-panel h-full w-full"
+          dir={isSidebarOnRight ? undefined : 'ltr'}
+        >
           <Sidebar
             selectedFilter={filter}
             onSelectFilter={(f) => {

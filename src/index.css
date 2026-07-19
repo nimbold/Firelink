@@ -1122,16 +1122,6 @@ html[data-list-density="relaxed"] {
     text-align: right;
   }
 
-  html[dir="ltr"] .sidebar-nav-label {
-    direction: ltr;
-    unicode-bidi: isolate;
-  }
-
-  html[dir="rtl"] .sidebar-nav-label {
-    direction: rtl;
-    unicode-bidi: isolate;
-  }
-
   .app-statusbar {
     height: 26px;
     font-size: 10px;
@@ -1339,6 +1329,7 @@ html[data-list-density="relaxed"] {
 
   .settings-tab-strip {
     padding: 16px 32px;
+    direction: ltr;
   }
 
   .settings-tab-button {
@@ -2421,26 +2412,6 @@ html[dir="rtl"] input[type="number"] {
   unicode-bidi: isolate;
 }
 
-html[dir="rtl"] .sidebar-nav-item > svg {
-  margin-right: 0;
-  margin-left: 0.75rem;
-}
-
-html[dir="rtl"] .sidebar-nav-item .sidebar-count {
-  margin-left: 0;
-  margin-right: auto;
-}
-
-html[dir="rtl"] .sidebar-inner .mr-2 {
-  margin-right: 0;
-  margin-left: 0.5rem;
-}
-
-html[dir="rtl"] .sidebar-inner .mr-3 {
-  margin-right: 0;
-  margin-left: 0.75rem;
-}
-
 .app-sidebar-shell--right .app-sidebar-panel {
   box-shadow:
     inset 0 1px 0 hsl(0 0% 100% / 0.045),
@@ -2449,6 +2420,13 @@ html[dir="rtl"] .sidebar-inner .mr-3 {
 
 .app-sidebar-shell--left .app-sidebar-panel {
   direction: ltr;
+  text-align: left;
+}
+
+.app-sidebar-shell--left .sidebar-section-label,
+.app-sidebar-shell--left .sidebar-section-label-toggle {
+  direction: ltr;
+  text-align: left;
 }
 
 .app-sidebar-shell--left .sidebar-toggle-button {
@@ -2480,9 +2458,24 @@ html[dir="rtl"] .sidebar-inner .mr-3 {
   margin-right: 0.75rem;
 }
 
+.app-sidebar-shell--left .sidebar-nav-label {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
 .app-sidebar-shell--right .sidebar-nav-item > svg {
   margin-left: 0.75rem;
   margin-right: 0;
+}
+
+html[dir="ltr"] .app-sidebar-shell--right .sidebar-nav-label {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+html[dir="rtl"] .app-sidebar-shell--right .sidebar-nav-label {
+  direction: rtl;
+  unicode-bidi: isolate;
 }
 
 html[dir="rtl"] .mac-switch::after {
