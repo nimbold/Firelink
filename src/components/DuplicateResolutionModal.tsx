@@ -10,6 +10,7 @@ export interface DuplicateConflict {
   reason: DuplicateReason;
   resolution: DuplicateResolution;
   replaceAllowed?: boolean;
+  existingDownloadId?: string;
 }
 
 interface Props {

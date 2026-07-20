@@ -676,6 +676,7 @@ interface DownloadState {
   closeDeleteModal: () => void;
   setSelectedPropertiesDownloadId: (id: string | null) => void;
   addDownload: (item: DownloadDraft, action: AddDownloadAction) => Promise<boolean>;
+  replaceDownload: (id: string, updates: Partial<DownloadItem>, action: AddDownloadAction) => Promise<boolean>;
   updateDownload: (id: string, updates: Partial<DownloadItem>) => void;
   removeDownload: (id: string, deleteFile?: boolean, preserveResumable?: boolean) => Promise<void>;
   pauseDownload: (id: string) => Promise<void>;
@@ -694,7 +695,115 @@ interface DownloadState {
   
 }
 
-export const useDownloadStore = create<DownloadState>((set, get) => ({
+export const useDownloadStore = create<DownloadState>((set, get) => {
+  const applyPropertiesInternal = async (id: string, updates: Partial<DownloadItem>): Promise<void> => {
+    await waitForPendingStartupResume();
+    const wasDispatching = await invalidateAndWaitForDispatch(id);
+    const state = get();
+    const item = state.downloads.find(d => d.id === id);
+    if (!item) return;
+
+    if (item.status === 'downloading' || item.status === 'processing' || item.status === 'retrying') {
+      throw new Error(i18n.t($ => $.downloadTable.transferActive));
+    }
+
+    if (item.status === 'ready' || item.status === 'staged' || item.status === 'completed' || item.status === 'failed') {
+      state.updateDownload(id, updates);
+      return;
+    }
+
+    // Queued or Paused
+    const isRegistered = state.backendRegisteredIds.has(id);
+
+    if (item.status === 'queued') {
+      if (isRegistered) {
+        await invoke('detach_download_for_reconfigure', { id });
+        state.unregisterBackendIds([id]);
+        set(current => ({ pendingOrder: current.pendingOrder.filter(value => value !== id) }));
+      }
+      state.updateDownload(id, updates);
+      if (isRegistered || wasDispatching) {
+        const dispatched = await dispatchItemInternal(id);
+        if (dispatched) {
+          state.updateDownload(id, { hasBeenDispatched: true });
+        } else {
+          state.removeFromQueue(id);
+        }
+      }
+    } else if (item.status === 'paused') {
+      if (isRegistered) {
+        try {
+          await invoke('detach_download_for_reconfigure', { id });
+        } catch (e) {
+          console.error("Failed to detach for reconfigure:", e);
+          throw e; // Preserve old properties if detach fails
+        }
+        state.unregisterBackendIds([id]);
+      }
+      state.updateDownload(id, updates);
+    }
+  };
+
+  const resumeDownloadInternal = async (id: string): Promise<boolean> => {
+    await waitForPendingStartupResume();
+    const targetItem = get().downloads.find(d => d.id === id);
+    if (!targetItem) return false;
+
+    setDownloadControlIntent(id, 'resume');
+    try {
+      if (targetItem.status === 'ready' || targetItem.status === 'staged') {
+        get().updateDownload(id, { status: 'queued', hasBeenDispatched: true });
+        if (await dispatchItemInternal(id)) {
+          return true;
+        }
+        get().updateDownload(id, { status: targetItem.status });
+        clearDownloadControlIntent(id, 'resume');
+        return false;
+      }
+
+      const prevStatus = targetItem.status;
+      const queueItems = get().downloads.filter(d =>
+        (d.queueId || MAIN_QUEUE_ID) === (targetItem.queueId || MAIN_QUEUE_ID)
+      );
+      const maxPos = queueItems.reduce((max, d) => Math.max(max, d.queuePosition ?? 0), -1);
+
+      get().updateDownload(id, {
+        status: 'queued',
+        speed: '-',
+        eta: '-',
+        queuePosition: maxPos + 1,
+        lastTry: new Date().toISOString()
+      });
+
+      const resumedExisting = await invoke('resume_download', { id });
+
+      let dispatchSucceeded = resumedExisting;
+      if (!dispatchSucceeded) {
+        get().unregisterBackendIds([id]);
+        // A terminal aria2 gid is intentionally re-enqueued as a new
+        // lifecycle. Advance and cancel the old generation before dispatching
+        // so QueueManager does not reject the legitimate user retry as stale.
+        await invalidateAndWaitForDispatch(id);
+        dispatchSucceeded = await dispatchItemInternal(id);
+      }
+
+      if (dispatchSucceeded) {
+        return true;
+      } else {
+        console.error("Failed to re-enqueue for resume");
+        get().updateDownload(id, { status: prevStatus });
+        clearDownloadControlIntent(id, 'resume');
+        return false;
+      }
+    } catch (e) {
+      console.error("Failed to resume download:", e);
+      get().updateDownload(id, { status: targetItem.status });
+      clearDownloadControlIntent(id, 'resume');
+      return false;
+    }
+  };
+
+  return {
   downloads: [],
   queues: [{ id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true }],
   pendingOrder: [],
@@ -951,53 +1060,30 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     }
     return false;
   },
-  applyProperties: (id, updates) => runDownloadLifecycleOperation(id, 'properties', async () => {
-    await waitForPendingStartupResume();
-    const wasDispatching = await invalidateAndWaitForDispatch(id);
-    const state = get();
-    const item = state.downloads.find(d => d.id === id);
-    if (!item) return;
-
-    if (item.status === 'downloading' || item.status === 'processing' || item.status === 'retrying') {
-      throw new Error(i18n.t($ => $.downloadTable.transferActive));
-    }
-
-    if (item.status === 'ready' || item.status === 'staged' || item.status === 'completed' || item.status === 'failed') {
-      state.updateDownload(id, updates);
-      return;
-    }
-
-    // Queued or Paused
-    const isRegistered = state.backendRegisteredIds.has(id);
-
-    if (item.status === 'queued') {
-      if (isRegistered) {
-        await invoke('detach_download_for_reconfigure', { id });
-        state.unregisterBackendIds([id]);
-        set(current => ({ pendingOrder: current.pendingOrder.filter(value => value !== id) }));
+  replaceDownload: (id, updates, action) => runDownloadLifecycleOperation(
+    id,
+    'replace',
+    async () => {
+      if (!get().downloads.some(download => download.id === id)) return false;
+      await applyPropertiesInternal(id, updates);
+      if (!get().downloads.some(download => download.id === id)) return false;
+      if (action.type === 'start-now') {
+        const resumed = await resumeDownloadInternal(id);
+        if (resumed) get().updateDownload(id, { hasBeenDispatched: true });
+        return resumed;
       }
-      state.updateDownload(id, updates);
-      if (isRegistered || wasDispatching) {
-        const dispatched = await dispatchItemInternal(id);
-        if (dispatched) {
-          state.updateDownload(id, { hasBeenDispatched: true });
-        } else {
-          state.removeFromQueue(id);
-        }
-      }
-    } else if (item.status === 'paused') {
-      if (isRegistered) {
-        try {
-          await invoke('detach_download_for_reconfigure', { id });
-        } catch (e) {
-          console.error("Failed to detach for reconfigure:", e);
-          throw e; // Preserve old properties if detach fails
-        }
-        state.unregisterBackendIds([id]);
-      }
-      state.updateDownload(id, updates);
-    }
-  }, false, preemptDispatch),
+      return true;
+    },
+    false,
+    preemptDispatch
+  ),
+  applyProperties: (id, updates) => runDownloadLifecycleOperation(
+    id,
+    'properties',
+    () => applyPropertiesInternal(id, updates),
+    false,
+    preemptDispatch
+  ),
   updateDownload: (id, updates) => {
     set((state) => ({
       downloads: state.downloads.map(d => {
@@ -1126,64 +1212,13 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
       info(`Download ${id} redownloaded (queued)`);
     }
   }, true, preemptDispatch),
-  resumeDownload: (id) => runDownloadLifecycleOperation(id, 'resume', async () => {
-    await waitForPendingStartupResume();
-    const targetItem = get().downloads.find(d => d.id === id);
-    if (!targetItem) return false;
-
-    setDownloadControlIntent(id, 'resume');
-    try {
-      if (targetItem.status === 'ready' || targetItem.status === 'staged') {
-        get().updateDownload(id, { status: 'queued', hasBeenDispatched: true });
-        if (await dispatchItemInternal(id)) {
-          return true;
-        }
-        get().updateDownload(id, { status: targetItem.status });
-        clearDownloadControlIntent(id, 'resume');
-        return false;
-      }
-
-      const prevStatus = targetItem.status;
-      const queueItems = get().downloads.filter(d => 
-        (d.queueId || MAIN_QUEUE_ID) === (targetItem.queueId || MAIN_QUEUE_ID)
-      );
-      const maxPos = queueItems.reduce((max, d) => Math.max(max, d.queuePosition ?? 0), -1);
-      
-      get().updateDownload(id, { 
-        status: 'queued', 
-        speed: '-', 
-        eta: '-',
-        queuePosition: maxPos + 1,
-        lastTry: new Date().toISOString()
-      });
-
-      const resumedExisting = await invoke('resume_download', { id });
-      
-      let dispatchSucceeded = resumedExisting;
-      if (!dispatchSucceeded) {
-        get().unregisterBackendIds([id]);
-        // A terminal aria2 gid is intentionally re-enqueued as a new
-        // lifecycle. Advance and cancel the old generation before dispatching
-        // so QueueManager does not reject the legitimate user retry as stale.
-        await invalidateAndWaitForDispatch(id);
-        dispatchSucceeded = await dispatchItemInternal(id);
-      }
-
-      if (dispatchSucceeded) {
-        return true;
-      } else {
-        console.error("Failed to re-enqueue for resume");
-        get().updateDownload(id, { status: prevStatus });
-        clearDownloadControlIntent(id, 'resume');
-        return false;
-      }
-    } catch (e) {
-      console.error("Failed to resume download:", e);
-      get().updateDownload(id, { status: targetItem.status });
-      clearDownloadControlIntent(id, 'resume');
-      return false;
-    }
-  }, true, preemptDispatch),
+  resumeDownload: (id) => runDownloadLifecycleOperation(
+    id,
+    'resume',
+    () => resumeDownloadInternal(id),
+    true,
+    preemptDispatch
+  ),
   startQueue: (queueId) => {
     const requestedGeneration = currentQueueControlGeneration(queueId);
     const previousOperation = queueStartPromises.get(queueId) ?? Promise.resolve([]);
@@ -1654,7 +1689,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
       throw e;
     }
   }
-}));
+  };
+});
 
 let lastSavedDownloads = '';
 let isSavingDownloads = false;

@@ -7,12 +7,13 @@ import {
   type PendingAddRequestContext
 } from '../store/useDownloadStore';
 import { useSettingsStore } from '../store/useSettingsStore';
+import type { DownloadItem } from '../bindings/DownloadItem';
 import type { MediaPlaylistMetadata } from '../bindings/MediaPlaylistMetadata';
 import { FolderPlus, Settings, Shield, RefreshCw, FileText, HardDrive, Database, Link, ArrowRight, Play, ChevronDown, ChevronRight, Video, Film, Music, type LucideIcon } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invokeCommand as invoke } from '../ipc';
 import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResolutionModal';
-import { canonicalizeDownloadFileName, categoryForFileName } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNamesMatch, downloadMediaKindsMatch } from '../utils/downloads';
 import { fetchMediaMetadataDeduped, fetchMediaPlaylistMetadataDeduped } from '../utils/mediaMetadata';
 import {
   expandTilde,
@@ -752,6 +753,7 @@ export const AddDownloadsModal = () => {
     const store = useDownloadStore.getState();
     const newConflicts: DuplicateConflict[] = [];
     const plannedTargets: Array<{ location: string; fileName: string }> = [];
+    const reservedFilenameMatchIds = new Set<string>();
 
     for (let i = 0; i < parsedItems.length; i++) {
       const item = parsedItems[i];
@@ -784,7 +786,59 @@ export const AddDownloadsModal = () => {
           replaceAllowed: false
         });
       } else {
-        let fileExistsInStore = false;
+        const filenameCandidates: Array<{
+          download: DownloadItem;
+          sameDestination: boolean;
+        }> = [];
+        for (const download of store.downloads) {
+          if (
+            download.status === 'completed'
+            || !downloadMediaKindsMatch(download.isMedia, item.isMedia)
+            || !downloadFileNamesMatch(download.fileName, finalFile)
+          ) {
+            continue;
+          }
+          const destination = download.destination ||
+            await resolveCategoryDestination(settings, download.category);
+          filenameCandidates.push({
+            download,
+            sameDestination: downloadLocationEquals(
+              destination,
+              download.fileName,
+              itemLocation,
+              finalFile,
+              platform.os
+            )
+          });
+        }
+        filenameCandidates.sort((left, right) =>
+          Number(right.sameDestination) - Number(left.sameDestination)
+          || Number(reservedFilenameMatchIds.has(left.download.id)) - Number(reservedFilenameMatchIds.has(right.download.id))
+          || (right.download.downloadedBytes ?? 0) - (left.download.downloadedBytes ?? 0)
+          || (right.download.fraction ?? 0) - (left.download.fraction ?? 0)
+          || left.download.dateAdded.localeCompare(right.download.dateAdded)
+        );
+        const filenameMatch = filenameCandidates.find(candidate =>
+          !reservedFilenameMatchIds.has(candidate.download.id)
+        )?.download || filenameCandidates[0]?.download;
+
+        if (filenameMatch) {
+          const canReplace = !reservedFilenameMatchIds.has(filenameMatch.id)
+            && !isTransferLocked(filenameMatch.status);
+          newConflicts.push({
+            id: i.toString(),
+            fileName: finalFile,
+            reason: { type: 'file', msg: t($ => $.addDownloads.matchingDownloadFilename) },
+            resolution: canReplace ? 'replace' : 'rename',
+            replaceAllowed: canReplace,
+            existingDownloadId: filenameMatch.id
+          });
+          reservedFilenameMatchIds.add(filenameMatch.id);
+          plannedTargets.push({ location: itemLocation, fileName: finalFile });
+          continue;
+        }
+
+        let existingDownload;
         for (const download of store.downloads) {
           const destination = download.destination ||
             await resolveCategoryDestination(settings, download.category);
@@ -797,7 +851,7 @@ export const AddDownloadsModal = () => {
               platform.os
             )
           ) {
-            fileExistsInStore = true;
+            existingDownload = download;
             break;
           }
         }
@@ -811,18 +865,19 @@ export const AddDownloadsModal = () => {
           console.error("Failed to check if file exists on disk:", e);
         }
 
-        if (fileExistsInStore || fileExistsOnDisk) {
+        if (existingDownload || fileExistsOnDisk) {
           newConflicts.push({
             id: i.toString(),
             fileName: finalFile,
             reason: {
               type: 'file',
-              msg: fileExistsInStore
+              msg: existingDownload
                 ? t($ => $.addDownloads.existingDownloadDestination)
                 : t($ => $.addDownloads.fileExistsOnDisk)
             },
             resolution: 'rename',
-            replaceAllowed: fileExistsInStore
+            replaceAllowed: Boolean(existingDownload),
+            existingDownloadId: existingDownload?.id
           });
         }
       }
@@ -859,6 +914,7 @@ export const AddDownloadsModal = () => {
         item.selected === false ? null : item
       );
       const platform = await getPlatformInfo().catch(() => ({ os: 'unknown' }));
+      let updatedCount = 0;
 
       if (resolutions) {
          for (const res of resolutions) {
@@ -941,29 +997,33 @@ export const AddDownloadsModal = () => {
                 itemsToAdd[idx] = null;
                 continue;
               }
-              let finalFile = item.isMedia
+              const finalFile = item.isMedia
                 ? mediaFileNameForSelectedFormat(item.file, item)
                 : canonicalizeDownloadFileName(item.file);
         const itemLocation = useSharedDestination
           ? finalLocation
           : destinationOverrides[idx] || await categoryLocationForFile(finalFile);
         const store = useDownloadStore.getState();
-        let existingItem;
+        let existingItem = conflict?.existingDownloadId
+          ? store.downloads.find(download => download.id === conflict.existingDownloadId)
+          : undefined;
         const currentSettings = useSettingsStore.getState();
-        for (const download of store.downloads) {
-          const destination = download.destination ||
-            await resolveCategoryDestination(currentSettings, download.category);
-          if (
-            downloadLocationEquals(
-              destination,
-              download.fileName,
-              itemLocation,
-              finalFile,
-              platform.os
-            )
-          ) {
-            existingItem = download;
-            break;
+        if (!existingItem && !conflict?.existingDownloadId) {
+          for (const download of store.downloads) {
+            const destination = download.destination ||
+              await resolveCategoryDestination(currentSettings, download.category);
+            if (
+              downloadLocationEquals(
+                destination,
+                download.fileName,
+                itemLocation,
+                finalFile,
+                platform.os
+              )
+            ) {
+              existingItem = download;
+              break;
+            }
           }
         }
 
@@ -974,11 +1034,36 @@ export const AddDownloadsModal = () => {
                  if (!existingItem) {
                    throw new Error(t($ => $.addDownloads.cannotReplace, { file: finalFile }));
                  }
-                 // Let the backend decide whether resumable sidecars still
-                 // exist after stopping the old transfer. This avoids a race
-                 // where a paused item finishes while the replacement is
-                 // being prepared.
-                 await store.removeDownload(existingItem.id, true, existingItem.status !== 'completed');
+                 const incomingMediaFormat = mediaFormatSelectorForRow(item);
+                 const mediaFormatChanged = item.isMedia
+                   && existingItem.mediaFormatSelector !== incomingMediaFormat;
+                 if (existingItem.status === 'completed' || mediaFormatChanged) {
+                   // Completed replacements must remove the old file so the
+                   // new transfer cannot be treated as an already-complete
+                   // aria2 target. Unfinished rows use the in-place path to
+                   // preserve their resumable assets and progress.
+                   await store.removeDownload(existingItem.id, true, false);
+                 } else {
+                   const contextUrl = requestContextUrlForRow(item);
+                   const replaced = await store.replaceDownload(existingItem.id, {
+                     url: item.downloadUrl,
+                     username: useAuth ? username.trim() : undefined,
+                     password: useAuth ? password.trim() : undefined,
+                     headers: headersForRow(contextUrl) || undefined,
+                     cookies: cookiesForRow(contextUrl, item.downloadUrl) || undefined,
+                     mirrors: mirrors.trim() || undefined,
+                     lastError: undefined
+                   }, pendingAction);
+                   if (!replaced) {
+                     throw new Error(t($ => $.addDownloads.backendRejectedStart));
+                   }
+
+                   // The existing row was updated in place; do not create a
+                   // second identity for the same filename.
+                   itemsToAdd[idx] = null;
+                   updatedCount += 1;
+                   continue;
+                 }
              }
          }
       }
@@ -1054,6 +1139,13 @@ export const AddDownloadsModal = () => {
           message: addedCount === 1
             ? t($ => $.addDownloads.addedOne)
             : t($ => $.addDownloads.addedMany, { count: addedCount }),
+          variant: 'success'
+        });
+      } else if (updatedCount > 0) {
+        addToast({
+          message: updatedCount === 1
+            ? t($ => $.addDownloads.updatedOne)
+            : t($ => $.addDownloads.updatedMany, { count: updatedCount }),
           variant: 'success'
         });
       }

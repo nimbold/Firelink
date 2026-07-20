@@ -124,6 +124,132 @@ describe('useDownloadStore', () => {
     expect(state.pendingAddRequestContexts['https://example.com/file.bin']?.media).toBe(false);
   });
 
+  it('replaces a paused download URL in place and preserves its progress', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'replace-in-place',
+        url: 'https://expired.example/file.bin',
+        fileName: 'file.bin',
+        status: 'paused',
+        category: 'Other',
+        dateAdded: '2026-07-15T00:00:00.000Z',
+        downloadedBytes: 1024,
+        totalBytes: 4096,
+        fraction: 0.25
+      }] as any[]
+    });
+    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
+
+    const replaced = await useDownloadStore.getState().replaceDownload(
+      'replace-in-place',
+      { url: 'https://fresh.example/file.bin', lastError: undefined },
+      { type: 'add-to-queue', queueId: 'main' }
+    );
+
+    expect(replaced).toBe(true);
+    expect(useDownloadStore.getState().downloads).toEqual([expect.objectContaining({
+      id: 'replace-in-place',
+      url: 'https://fresh.example/file.bin',
+      status: 'paused',
+      downloadedBytes: 1024,
+      totalBytes: 4096,
+      fraction: 0.25
+    })]);
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('remove_download', expect.anything());
+  });
+
+  it('resumes a replaced paused download without creating a second row', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'replace-and-resume',
+        url: 'https://expired.example/file.bin',
+        fileName: 'file.bin',
+        status: 'paused',
+        category: 'Other',
+        dateAdded: '',
+        destination: '/tmp',
+        downloadedBytes: 2048,
+        totalBytes: 4096
+      }] as any[]
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'resume_download') return false;
+      if (command === 'enqueue_download') {
+        return { id: 'replace-and-resume', filename: 'file.bin' };
+      }
+      if (command === 'get_pending_order') return [];
+      return undefined;
+    });
+
+    const replaced = await useDownloadStore.getState().replaceDownload(
+      'replace-and-resume',
+      { url: 'https://fresh.example/file.bin' },
+      { type: 'start-now' }
+    );
+
+    expect(replaced).toBe(true);
+    expect(useDownloadStore.getState().downloads).toHaveLength(1);
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      id: 'replace-and-resume',
+      url: 'https://fresh.example/file.bin',
+      downloadedBytes: 2048,
+      totalBytes: 4096,
+      hasBeenDispatched: true
+    });
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('remove_download', expect.anything());
+  });
+
+  it('serializes a replacement and a concurrent pause as one lifecycle operation', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'replace-pause-race',
+        url: 'https://expired.example/file.bin',
+        fileName: 'file.bin',
+        status: 'paused',
+        category: 'Other',
+        dateAdded: ''
+      }] as any[]
+    });
+
+    let releaseResume!: () => void;
+    let signalResumeStarted!: () => void;
+    const resumeStarted = new Promise<void>(resolve => {
+      signalResumeStarted = resolve;
+    });
+    const resumeGate = new Promise<void>(resolve => {
+      releaseResume = resolve;
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'resume_download') {
+        signalResumeStarted();
+        await resumeGate;
+        return true;
+      }
+      return undefined;
+    });
+
+    const replacing = useDownloadStore.getState().replaceDownload(
+      'replace-pause-race',
+      { url: 'https://fresh.example/file.bin' },
+      { type: 'start-now' }
+    );
+    await resumeStarted;
+
+    const pausing = useDownloadStore.getState().pauseDownload('replace-pause-race');
+    await Promise.resolve();
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('pause_download', { id: 'replace-pause-race' });
+
+    releaseResume();
+    await replacing;
+    await pausing;
+
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('pause_download', { id: 'replace-pause-race' });
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      url: 'https://fresh.example/file.bin',
+      status: 'paused'
+    });
+  });
+
   it('rejects empty and duplicate queue names', () => {
     useDownloadStore.setState({
       queues: [

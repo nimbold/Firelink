@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { DownloadItem } from '../bindings/DownloadItem';
-import { redactDownloadForPersistence, resolveDownloadConnections } from './downloads';
+import {
+  downloadFileNamesMatch,
+  downloadMediaKindsMatch,
+  redactDownloadForPersistence,
+  resolveDownloadConnections
+} from './downloads';
 
 const item = (status: DownloadItem['status']): DownloadItem => ({
   id: 'download-1',
@@ -54,5 +59,30 @@ describe('download connection resolution', () => {
     expect(resolveDownloadConnections(0, 8)).toBe(1);
     expect(resolveDownloadConnections(17, 8)).toBe(16);
     expect(resolveDownloadConnections(Number.NaN, 8)).toBe(8);
+  });
+});
+
+describe('download filename matching', () => {
+  it('matches case and path spelling while preserving the actual filename', () => {
+    expect(downloadFileNamesMatch(
+      'Media\\Example.Show.S01E01.MKV',
+      'example.show.s01e01.mkv'
+    )).toBe(true);
+  });
+
+  it('does not collapse distinct extensions or names', () => {
+    expect(downloadFileNamesMatch('example.zip', 'example.tar')).toBe(false);
+    expect(downloadFileNamesMatch('example-1.zip', 'example.zip')).toBe(false);
+  });
+
+  it('does not auto-match weak metadata fallback names', () => {
+    expect(downloadFileNamesMatch('download', 'download')).toBe(false);
+    expect(downloadFileNamesMatch('identifier', 'IDENTIFIER')).toBe(false);
+    expect(downloadFileNamesMatch('real-file.bin', 'real-file.bin')).toBe(true);
+  });
+
+  it('treats omitted media flags as ordinary downloads', () => {
+    expect(downloadMediaKindsMatch(undefined, false)).toBe(true);
+    expect(downloadMediaKindsMatch(undefined, true)).toBe(false);
   });
 });

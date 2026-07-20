@@ -132,6 +132,29 @@ export const canonicalizeDownloadFileName = (fileName: string): string => {
   return sanitized && sanitized !== '.' && sanitized !== '..' ? sanitized : 'download';
 };
 
+/**
+ * Compare metadata-derived names without allowing path spelling or case to
+ * turn the same download into a second queue entry. Keep the extension and
+ * the rest of the name intact: URL query strings are not part of this value.
+ */
+export const normalizeDownloadFileNameForMatch = (fileName: string): string =>
+  canonicalizeDownloadFileName(fileName).normalize('NFKC').toLowerCase();
+
+export const downloadMediaKindsMatch = (
+  left: boolean | undefined,
+  right: boolean | undefined
+): boolean => Boolean(left) === Boolean(right);
+
+const WEAK_DOWNLOAD_FILE_NAMES = new Set(['download', 'identifier', 'view', 'uc']);
+
+export const downloadFileNamesMatch = (left: string, right: string): boolean => {
+  const normalizedLeft = normalizeDownloadFileNameForMatch(left);
+  const normalizedRight = normalizeDownloadFileNameForMatch(right);
+  return !WEAK_DOWNLOAD_FILE_NAMES.has(normalizedLeft)
+    && !WEAK_DOWNLOAD_FILE_NAMES.has(normalizedRight)
+    && normalizedLeft === normalizedRight;
+};
+
 export const isMediaUrl = (rawUrl: string): boolean => {
   try {
     const url = new URL(rawUrl);
