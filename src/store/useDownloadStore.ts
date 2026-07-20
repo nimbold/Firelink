@@ -657,6 +657,8 @@ interface DownloadState {
   pendingAddHeaders: string;
   pendingAddCookies: string;
   pendingAddMediaUrls: string[];
+  pendingAddBatch: boolean;
+  pendingAddBatchName: string;
   pendingAddRequestContexts: Record<string, PendingAddRequestContext>;
   pendingAddRequestVersion: number;
   selectedPropertiesDownloadId: string | null;
@@ -668,7 +670,9 @@ interface DownloadState {
     headers?: string | null,
     cookies?: string | null,
     media?: boolean,
-    cookieScopes?: ExtensionCookieScope[] | null
+    cookieScopes?: ExtensionCookieScope[] | null,
+    batch?: boolean,
+    batchName?: string | null
   ) => void;
   handleExtensionDownload: (request: ExtensionDownloadRequest) => Promise<void>;
   deleteModalState: DeleteModalState;
@@ -918,6 +922,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
   pendingAddHeaders: '',
   pendingAddCookies: '',
   pendingAddMediaUrls: [],
+  pendingAddBatch: false,
+  pendingAddBatchName: '',
   pendingAddRequestContexts: {},
   pendingAddRequestVersion: 0,
   selectedPropertiesDownloadId: null,
@@ -937,12 +943,24 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     pendingAddHeaders: '',
     pendingAddCookies: '',
     pendingAddMediaUrls: [],
+    pendingAddBatch: false,
+    pendingAddBatchName: '',
     pendingAddRequestContexts: {},
     // Invalidate any in-flight Add-modal handoff even when the modal is
     // opened or closed without URLs.
     pendingAddRequestVersion: state.pendingAddRequestVersion + 1
   })),
-  openAddModalWithUrls: (urls, referer, filename, headers, cookies, media = false, cookieScopes) => set((state) => {
+  openAddModalWithUrls: (
+    urls,
+    referer,
+    filename,
+    headers,
+    cookies,
+    media = false,
+    cookieScopes,
+    batch = false,
+    batchName
+  ) => set((state) => {
     const isAppending = state.isAddModalOpen && Boolean(state.pendingAddUrls);
     const existingUrls = isAppending ? state.pendingAddUrls : '';
     const mergedUrls = existingUrls ? `${existingUrls}\n${urls}` : urls;
@@ -950,6 +968,13 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     const cleanFilename = filename?.trim() || '';
     const cleanHeaders = headers?.trim() || '';
     const cleanCookies = cookies?.trim() || '';
+    // Keep the first modal request's grouping decision stable while later
+    // handoffs append URLs. This avoids moving an already-visible destination
+    // when a second request races with the user's Add-window setup.
+    const nextBatch = isAppending ? state.pendingAddBatch : batch;
+    const nextBatchName = nextBatch
+      ? (isAppending ? state.pendingAddBatchName : batchName?.trim() || '')
+      : '';
     const cleanCookieScopes = cookieScopes
       ?.map(scope => ({
         url: scope.url.trim(),
@@ -994,6 +1019,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       pendingAddHeaders: cleanHeaders,
       pendingAddCookies: cleanCookies,
       pendingAddMediaUrls,
+      pendingAddBatch: nextBatch,
+      pendingAddBatchName: nextBatchName,
       pendingAddRequestContexts,
       pendingAddRequestVersion: requestVersion
     };
@@ -1017,7 +1044,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       headers,
       cookies,
       request.media === true,
-      request.media === true ? undefined : request.cookie_scopes
+      request.media === true ? undefined : request.cookie_scopes,
+      request.batch === true && urls.length >= 2,
+      request.batch_name
     );
   },
   setSelectedPropertiesDownloadId: (id) => set({ selectedPropertiesDownloadId: id }),

@@ -74,6 +74,10 @@ struct ExtensionRequest {
     cookie_scopes: Option<Vec<ExtensionCookieScope>>,
     #[serde(default)]
     media: bool,
+    #[serde(default)]
+    batch: bool,
+    #[serde(default)]
+    batch_name: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize, TS)]
@@ -96,6 +100,8 @@ pub struct ExtensionDownload {
     cookies: Option<String>,
     cookie_scopes: Option<Vec<ExtensionCookieScope>>,
     media: bool,
+    batch: bool,
+    batch_name: Option<String>,
 }
 
 pub async fn start_server(
@@ -428,6 +434,14 @@ fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload
         matches!(url.scheme(), "http" | "https").then(|| url.to_string())
     });
     let filename = payload.filename.and_then(|value| sanitize_filename(&value));
+    let batch = payload.batch && urls.len() >= 2;
+    let batch_name = batch
+        .then(|| payload.batch_name)
+        .flatten()
+        .and_then(|value| {
+            let value = value.trim().to_string();
+            (!value.is_empty() && value.chars().count() <= 512).then_some(value)
+        });
     // A multi-URL handoff has no per-URL cookie scope. Keep ordinary
     // request headers, but drop Cookie headers and the dedicated cookie field
     // so a legacy or untrusted caller cannot reuse one session across hosts.
@@ -468,6 +482,8 @@ fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload
         cookies,
         cookie_scopes,
         media: payload.media,
+        batch,
+        batch_name,
     })
 }
 
@@ -690,9 +706,9 @@ fn is_allowed_origin(origin: &str) -> bool {
 mod tests {
     use super::{
         acknowledge_extension_download, add_server_identity, claim_request_at,
-        has_allowed_request_origin, is_valid_client_nonce,
-        normalize_download, required_client_nonce, sign_server_proof, ExtensionCookieScope,
-        ExtensionRequest, MAX_URL_COUNT, PROTOCOL_VERSION_HEADER, SERVER_HEADER,
+        has_allowed_request_origin, is_valid_client_nonce, normalize_download,
+        required_client_nonce, sign_server_proof, ExtensionCookieScope, ExtensionRequest,
+        MAX_URL_COUNT, PROTOCOL_VERSION_HEADER, SERVER_HEADER,
     };
     use axum::{
         http::{HeaderMap, HeaderValue, StatusCode},
@@ -790,6 +806,8 @@ mod tests {
             cookies: None,
             cookie_scopes: None,
             media: true,
+            batch: false,
+            batch_name: None,
         });
 
         assert!(download.is_none());
@@ -808,6 +826,8 @@ mod tests {
             cookies: None,
             cookie_scopes: None,
             media: false,
+            batch: false,
+            batch_name: None,
         });
 
         assert!(download.is_none());
@@ -867,6 +887,8 @@ mod tests {
             cookies: Some(format!("large={}", "x".repeat(64 * 1024))),
             cookie_scopes: None,
             media: true,
+            batch: false,
+            batch_name: None,
         })
         .expect("valid media handoff");
 
@@ -886,6 +908,8 @@ mod tests {
             cookies: Some("session=browser-cookie-header".to_string()),
             cookie_scopes: None,
             media: false,
+            batch: false,
+            batch_name: None,
         })
         .expect("valid download handoff");
 
@@ -920,6 +944,8 @@ mod tests {
                 },
             ]),
             media: false,
+            batch: false,
+            batch_name: None,
         })
         .expect("valid download handoff");
 
@@ -948,11 +974,59 @@ mod tests {
             cookies: Some("session=secret".to_string()),
             cookie_scopes: None,
             media: false,
+            batch: false,
+            batch_name: None,
         })
         .expect("valid multi-url handoff");
 
         assert_eq!(download.cookies, None);
         assert_eq!(download.headers.as_deref(), Some("User-Agent: Firefox"));
+    }
+
+    #[test]
+    fn selected_link_batches_preserve_context_only_for_two_or_more_urls() {
+        let download = normalize_download(ExtensionRequest {
+            urls: vec![
+                "https://example.com/one.zip".to_string(),
+                "https://example.com/two.zip".to_string(),
+            ],
+            referer: Some("https://example.com/gallery".to_string()),
+            silent: false,
+            filename: None,
+            headers: None,
+            cookies: None,
+            cookie_scopes: None,
+            media: false,
+            batch: true,
+            batch_name: Some("Example Gallery / Chapter: 1".to_string()),
+        })
+        .expect("valid selected-link batch");
+
+        assert!(download.batch);
+        assert_eq!(
+            download.batch_name.as_deref(),
+            Some("Example Gallery / Chapter: 1")
+        );
+    }
+
+    #[test]
+    fn selected_link_batch_context_is_dropped_for_single_urls() {
+        let download = normalize_download(ExtensionRequest {
+            urls: vec!["https://example.com/one.zip".to_string()],
+            referer: Some("https://example.com/gallery".to_string()),
+            silent: false,
+            filename: None,
+            headers: None,
+            cookies: None,
+            cookie_scopes: None,
+            media: false,
+            batch: true,
+            batch_name: Some("Example Gallery".to_string()),
+        })
+        .expect("valid single-link handoff");
+
+        assert!(!download.batch);
+        assert!(download.batch_name.is_none());
     }
 
     #[test]

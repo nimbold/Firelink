@@ -95,6 +95,8 @@ describe('useDownloadStore', () => {
       pendingAddHeaders: '',
       pendingAddCookies: '',
       pendingAddMediaUrls: [],
+      pendingAddBatch: false,
+      pendingAddBatchName: '',
       pendingAddRequestContexts: {},
       pendingAddRequestVersion: 0,
     });
@@ -1720,7 +1722,9 @@ describe('useDownloadStore', () => {
         { url: 'https://mail.google.com/', cookies: 'SID=mail-session' },
         { url: 'https://accounts.google.com/', cookies: 'SID=account-session' }
       ],
-      media: false
+      media: false,
+      batch: false,
+      batch_name: null
     });
 
     const state = useDownloadStore.getState();
@@ -1756,7 +1760,9 @@ describe('useDownloadStore', () => {
 	   headers: 'User-Agent: Firefox Test',
 	   cookies: null,
       cookie_scopes: null,
-      media: false
+      media: false,
+      batch: false,
+      batch_name: null
 	  });
 
   const state = useDownloadStore.getState();
@@ -1777,7 +1783,9 @@ describe('useDownloadStore', () => {
 	   headers: 'User-Agent: Test',
 	   cookies: 'session=secret',
       cookie_scopes: null,
-      media: false
+      media: false,
+      batch: false,
+      batch_name: null
 	  });
 
   const state = useDownloadStore.getState();
@@ -1790,6 +1798,30 @@ describe('useDownloadStore', () => {
     expect(state.pendingAddMediaUrls).toEqual([]);
 	 });
 
+  it('tracks selected-link batch context without changing ordinary multi-link handoffs', async () => {
+    await useDownloadStore.getState().handleExtensionDownload({
+      urls: ['https://example.com/one.zip', 'https://example.com/two.zip'],
+      referer: 'https://example.com/gallery',
+      silent: false,
+      filename: null,
+      headers: null,
+      cookies: null,
+      cookie_scopes: null,
+      media: false,
+      batch: true,
+      batch_name: 'Example Gallery'
+    });
+
+    expect(useDownloadStore.getState().pendingAddBatch).toBe(true);
+    expect(useDownloadStore.getState().pendingAddBatchName).toBe('Example Gallery');
+
+    useDownloadStore.getState().toggleAddModal(false);
+    useDownloadStore.getState().openAddModalWithUrls(
+      'https://example.com/one.zip\nhttps://example.com/two.zip'
+    );
+    expect(useDownloadStore.getState().pendingAddBatch).toBe(false);
+  });
+
   it('keeps each extension handoff context attached to its own URL while the Add Modal is open', async () => {
     await useDownloadStore.getState().handleExtensionDownload({
       urls: ['https://first.example/file.zip'],
@@ -1799,7 +1831,9 @@ describe('useDownloadStore', () => {
       headers: 'User-Agent: First Browser',
       cookies: 'first=session',
       cookie_scopes: null,
-      media: false
+      media: false,
+      batch: false,
+      batch_name: null
     });
     await useDownloadStore.getState().handleExtensionDownload({
       urls: ['https://second.example/file.zip'],
@@ -1809,7 +1843,9 @@ describe('useDownloadStore', () => {
       headers: 'User-Agent: Second Browser',
       cookies: 'second=session',
       cookie_scopes: null,
-      media: false
+      media: false,
+      batch: false,
+      batch_name: null
     });
 
     const state = useDownloadStore.getState();
@@ -1846,7 +1882,9 @@ describe('useDownloadStore', () => {
       headers: `Cookie: stale=${'x'.repeat(64 * 1024)}\nUser-Agent: Firefox Test`,
       cookies: `oversized=${'x'.repeat(64 * 1024)}`,
       cookie_scopes: null,
-      media: true
+      media: true,
+      batch: false,
+      batch_name: null
     });
 
     const state = useDownloadStore.getState();
@@ -1866,7 +1904,9 @@ describe('useDownloadStore', () => {
       headers: null,
       cookies: 'session=secret',
       cookie_scopes: null,
-      media: false
+      media: false,
+      batch: false,
+      batch_name: null
     });
 
     expect(useDownloadStore.getState().pendingAddCookies).toBe('session=secret');
@@ -1883,7 +1923,9 @@ describe('useDownloadStore', () => {
       cookie_scopes: [
         { url: 'https://media.example/', cookies: 'session=secret' }
       ],
-      media: true
+      media: true,
+      batch: false,
+      batch_name: null
     });
 
     expect(useDownloadStore.getState().pendingAddRequestContexts['https://media.example/watch/123']?.cookieScopes)
@@ -1900,7 +1942,9 @@ describe('useDownloadStore', () => {
       headers: 'Authorization: secret',
       cookies: 'session=secret',
       cookie_scopes: null,
-      media: false
+      media: false,
+      batch: false,
+      batch_name: null
     });
     await useDownloadStore.getState().handleExtensionDownload({
       urls: [url],
@@ -1910,7 +1954,9 @@ describe('useDownloadStore', () => {
       headers: null,
       cookies: null,
       cookie_scopes: null,
-      media: false
+      media: false,
+      batch: false,
+      batch_name: null
     });
 
     expect(useDownloadStore.getState().pendingAddRequestContexts[url]).toEqual({
@@ -1938,7 +1984,9 @@ describe('useDownloadStore', () => {
       headers: 'User-Agent: Firefox Test',
       cookies: 'session=secret',
       cookie_scopes: null,
-      media: true
+      media: true,
+      batch: false,
+      batch_name: null
     });
 
     expect(useDownloadStore.getState().pendingAddMediaUrls).toEqual([
@@ -1958,7 +2006,9 @@ describe('useDownloadStore', () => {
       headers: 'User-Agent: Firefox Test',
       cookies: null,
       cookie_scopes: null,
-      media: false
+      media: false,
+      batch: false,
+      batch_name: null
     });
 
     expect(useDownloadStore.getState().pendingAddMediaUrls).toEqual([]);

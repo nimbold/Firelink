@@ -9,7 +9,7 @@ import {
 import { useSettingsStore } from '../store/useSettingsStore';
 import type { DownloadItem } from '../bindings/DownloadItem';
 import type { MediaPlaylistMetadata } from '../bindings/MediaPlaylistMetadata';
-import { FolderPlus, Settings, Shield, RefreshCw, FileText, HardDrive, Database, Link, ArrowRight, Play, ChevronDown, ChevronRight, Video, Film, Music, type LucideIcon } from 'lucide-react';
+import { FolderPlus, Save, Settings, Shield, RefreshCw, FileText, HardDrive, Database, Link, ArrowRight, Play, ChevronDown, ChevronRight, Video, Film, Music, type LucideIcon } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invokeCommand as invoke } from '../ipc';
 import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResolutionModal';
@@ -18,7 +18,10 @@ import { fetchMediaMetadataDeduped, fetchMediaPlaylistMetadataDeduped } from '..
 import {
   expandTilde,
   resolveCategoryDestination,
+  deriveBatchFolderName,
   resolveDownloadFilePath,
+  resolveSubfolderDestination,
+  sanitizeBatchFolderName,
   downloadLocationEquals,
   resolveInitialAddWindowLocation
 } from '../utils/downloadLocations';
@@ -127,6 +130,7 @@ export const AddDownloadsModal = () => {
     pendingAddHeaders,
     pendingAddCookies,
     pendingAddMediaUrls,
+    pendingAddBatchName,
     pendingAddRequestContexts,
     pendingAddRequestVersion,
     toggleAddModal,
@@ -165,6 +169,9 @@ export const AddDownloadsModal = () => {
   // Right Form
   const [saveLocation, setSaveLocation] = useState(baseDownloadFolder);
   const [isSaveLocationManual, setIsSaveLocationManual] = useState(false);
+  const [saveInDedicatedFolder, setSaveInDedicatedFolder] = useState(false);
+  const [dedicatedFolderName, setDedicatedFolderName] = useState('');
+  const dedicatedFolderNameEditedRef = useRef(false);
   const locationResolutionRequestRef = useRef(0);
   const folderPickerRequestRef = useRef(0);
   const pendingLastUsedDownloadDirectoryRef = useRef<string | null>(null);
@@ -257,6 +264,9 @@ export const AddDownloadsModal = () => {
     );
     setSaveLocation(initialLocation.path);
     setIsSaveLocationManual(initialLocation.isManual);
+    setSaveInDedicatedFolder(false);
+    dedicatedFolderNameEditedRef.current = false;
+    setDedicatedFolderName(deriveBatchFolderName(pendingAddBatchName, pendingAddReferer));
     setUrls(initialUrls);
     setParsedItems([]);
     setPlaylistExpansions({});
@@ -295,6 +305,7 @@ export const AddDownloadsModal = () => {
     pendingAddHeaders,
     pendingAddCookies,
     pendingAddMediaUrls,
+    pendingAddBatchName,
     baseDownloadFolder,
     rememberLastUsedDownloadDirectory,
     lastUsedDownloadDirectory,
@@ -664,6 +675,22 @@ export const AddDownloadsModal = () => {
     });
   }, [isSaveLocationManual, parsedItems]);
 
+  useEffect(() => {
+    if (
+      !isAddModalOpen
+      || parsedItems.length < 2
+      || dedicatedFolderNameEditedRef.current
+    ) {
+      return;
+    }
+    setDedicatedFolderName(deriveBatchFolderName(
+      pendingAddBatchName,
+      pendingAddReferer,
+      new Date(),
+      parsedItems.map(item => item.file)
+    ));
+  }, [isAddModalOpen, parsedItems, pendingAddBatchName, pendingAddReferer]);
+
   if (!isAddModalOpen) return null;
 
   const handleBrowse = async () => {
@@ -697,12 +724,49 @@ export const AddDownloadsModal = () => {
     return resolveCategoryDestination(useSettingsStore.getState(), category);
   };
 
+  const commitDedicatedFolderName = () => {
+    const safeName = sanitizeBatchFolderName(dedicatedFolderName);
+    if (!safeName) {
+      addToast({
+        message: t($ => $.addDownloads.dedicatedFolderNameRequired),
+        variant: 'error',
+        isActionable: true
+      });
+      return;
+    }
+    dedicatedFolderNameEditedRef.current = true;
+    setDedicatedFolderName(safeName);
+  };
+
+  const destinationForFile = async (
+    fileName: string,
+    finalLocation: string,
+    useSharedDestination: boolean,
+    destinationOverride?: string
+  ): Promise<string> => {
+    if (destinationOverride) return destinationOverride;
+    const root = useSharedDestination
+      ? finalLocation
+      : await categoryLocationForFile(fileName);
+    return saveInDedicatedFolder
+      ? resolveSubfolderDestination(root, dedicatedFolderName)
+      : root;
+  };
+
   const handleAction = async (action: AddDownloadAction) => {
     if (isSubmitting || isSubmittingRef.current || !canSubmitMetadataRows(parsedItems)) {
       return;
     }
     if (speedLimitEnabled && (!Number.isFinite(Number(speedLimit)) || Number(speedLimit) <= 0)) {
       addToast({ message: t($ => $.addDownloads.speedInvalid), variant: 'error', isActionable: true });
+      return;
+    }
+    if (saveInDedicatedFolder && !sanitizeBatchFolderName(dedicatedFolderName)) {
+      addToast({
+        message: t($ => $.addDownloads.dedicatedFolderNameRequired),
+        variant: 'error',
+        isActionable: true
+      });
       return;
     }
     isSubmittingRef.current = true;
@@ -717,9 +781,11 @@ export const AddDownloadsModal = () => {
       for (const [index, item] of parsedItems.entries()) {
         if (item.selected === false) continue;
         try {
-          const suggestedLocation = isSaveLocationManual
-            ? finalLocation
-            : await categoryLocationForFile(item.file);
+          const suggestedLocation = await destinationForFile(
+            item.file,
+            finalLocation,
+            isSaveLocationManual
+          );
           const selected = await open({
             directory: true,
             multiple: false,
@@ -761,9 +827,12 @@ export const AddDownloadsModal = () => {
       let finalFile = item.isMedia
         ? mediaFileNameForSelectedFormat(item.file, item)
         : canonicalizeDownloadFileName(item.file);
-      const itemLocation = useSharedDestination
-        ? finalLocation
-        : destinationOverrides[i] || await categoryLocationForFile(finalFile);
+      const itemLocation = await destinationForFile(
+        finalFile,
+        finalLocation,
+        useSharedDestination,
+        destinationOverrides[i]
+      );
 
       const isUrlDupe = store.downloads.some(d => d.url === item.downloadUrl && d.status !== 'failed' && d.status !== 'completed');
       const hasBatchConflict = plannedTargets.some(target =>
@@ -929,9 +998,12 @@ export const AddDownloadsModal = () => {
                  let finalFile = item.isMedia
                    ? mediaFileNameForSelectedFormat(item.file, item)
                    : canonicalizeDownloadFileName(item.file);
-        const itemLocation = useSharedDestination
-          ? finalLocation
-          : destinationOverrides[idx] || await categoryLocationForFile(finalFile);
+        const itemLocation = await destinationForFile(
+          finalFile,
+          finalLocation,
+          useSharedDestination,
+          destinationOverrides[idx]
+        );
                  
                  let count = 1;
                  const base = finalFile.substring(0, finalFile.lastIndexOf('.')) || finalFile;
@@ -944,9 +1016,12 @@ export const AddDownloadsModal = () => {
                    const candidateFile = candidate.isMedia
                      ? mediaFileNameForSelectedFormat(candidate.file, candidate)
                      : canonicalizeDownloadFileName(candidate.file);
-                   const candidateLocation = useSharedDestination
-                     ? finalLocation
-                     : destinationOverrides[candidateIndex] || await categoryLocationForFile(candidateFile);
+                   const candidateLocation = await destinationForFile(
+                     candidateFile,
+                     finalLocation,
+                     useSharedDestination,
+                     destinationOverrides[candidateIndex]
+                   );
                    batchTargets.push({ location: candidateLocation, fileName: candidateFile });
                  }
                  
@@ -1000,9 +1075,12 @@ export const AddDownloadsModal = () => {
               const finalFile = item.isMedia
                 ? mediaFileNameForSelectedFormat(item.file, item)
                 : canonicalizeDownloadFileName(item.file);
-        const itemLocation = useSharedDestination
-          ? finalLocation
-          : destinationOverrides[idx] || await categoryLocationForFile(finalFile);
+        const itemLocation = await destinationForFile(
+          finalFile,
+          finalLocation,
+          useSharedDestination,
+          destinationOverrides[idx]
+        );
         const store = useDownloadStore.getState();
         let existingItem = conflict?.existingDownloadId
           ? store.downloads.find(download => download.id === conflict.existingDownloadId)
@@ -1098,9 +1176,14 @@ export const AddDownloadsModal = () => {
             : undefined,
           cookies: cookiesForRow(contextUrl, item.downloadUrl) || undefined,
           mirrors: mirrors.trim() || undefined,
-          destination: useSharedDestination
-            ? finalLocation
-            : destinationOverrides[itemIndex],
+          destination: useSharedDestination || saveInDedicatedFolder || destinationOverrides[itemIndex]
+            ? await destinationForFile(
+                finalFile,
+                finalLocation,
+                useSharedDestination,
+                destinationOverrides[itemIndex]
+              )
+            : undefined,
           isMedia: item.isMedia,
           resumable: item.resumable,
           mediaFormatSelector: formatSelector,
@@ -1552,6 +1635,7 @@ export const AddDownloadsModal = () => {
                     aria-label={t($ => $.addDownloads.saveLocation)}
                   />
                   <button
+                    type="button"
                     onClick={handleBrowse}
                     disabled={isSubmitting}
                     className="add-download-button add-download-button-secondary px-3 text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1559,12 +1643,70 @@ export const AddDownloadsModal = () => {
                     {t($ => $.addDownloads.browse)}
                   </button>
                 </div>
+                {parsedItems.length > 1 && (
+                  <div className="mt-3">
+                    <label className="flex items-center gap-2 text-xs text-text-secondary font-medium cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={saveInDedicatedFolder}
+                        onChange={event => {
+                          const enabled = event.target.checked;
+                          if (enabled && !sanitizeBatchFolderName(dedicatedFolderName)) {
+                            dedicatedFolderNameEditedRef.current = false;
+                            setDedicatedFolderName(deriveBatchFolderName(
+                              pendingAddBatchName,
+                              pendingAddReferer,
+                              new Date(),
+                              parsedItems.map(item => item.file)
+                            ));
+                          }
+                          setSaveInDedicatedFolder(enabled);
+                        }}
+                        className="add-download-checkbox"
+                      />
+                      {t($ => $.addDownloads.dedicatedFolder)}
+                    </label>
+                    {saveInDedicatedFolder && (
+                      <>
+                        <div className="flex gap-2 mt-2">
+                          <input
+                            type="text"
+                            value={dedicatedFolderName}
+                            onChange={event => {
+                              dedicatedFolderNameEditedRef.current = true;
+                              setDedicatedFolderName(event.target.value);
+                            }}
+                            placeholder={t($ => $.addDownloads.dedicatedFolderName)}
+                            aria-label={t($ => $.addDownloads.dedicatedFolderName)}
+                            className="add-download-control flex-1 px-3 py-1.5 text-xs"
+                            disabled={isSubmitting}
+                          />
+                          <button
+                            type="button"
+                            onClick={commitDedicatedFolderName}
+                            disabled={isSubmitting}
+                            className="add-download-button add-download-button-secondary px-2.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            aria-label={t($ => $.addDownloads.saveFolderName)}
+                            title={t($ => $.addDownloads.saveFolderName)}
+                          >
+                            <Save size={14} />
+                          </button>
+                        </div>
+                        <p className="mt-2 text-[11px] text-text-muted">
+                          {t(isSaveLocationManual
+                            ? $ => $.addDownloads.dedicatedFolderManualDescription
+                            : $ => $.addDownloads.dedicatedFolderDescription)}
+                        </p>
+                      </>
+                    )}
+                  </div>
+                )}
                 {parsedItems.length > 1 && !isSaveLocationManual && (
                   <p className="mt-2 text-[11px] text-text-muted">
                     {t($ => $.addDownloads.categoryFolders)}
                   </p>
                 )}
-                {isSaveLocationManual && (
+                {isSaveLocationManual && !saveInDedicatedFolder && (
                   <p className="mt-2 text-[11px] text-text-muted">
                     {t($ => $.addDownloads.sharedFolder)}
                   </p>

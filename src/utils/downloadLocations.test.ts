@@ -11,11 +11,14 @@ vi.mock('@tauri-apps/api/path', () => ({
 import {
   downloadLocationEquals,
   DEFAULT_CATEGORY_SUBFOLDERS,
+  deriveBatchFolderName,
   formatDerivedCategoryPath,
   normalizeCategorySubfolder,
   normalizeDownloadLocationSettings,
   resolveInitialAddWindowLocation,
   resolveCategoryDestination,
+  resolveSubfolderDestination,
+  sanitizeBatchFolderName,
   subfolderFromDerivedCategoryPath
 } from './downloadLocations';
 
@@ -43,6 +46,48 @@ describe('download locations', () => {
   it('falls back to the normalized base folder when no directory was remembered', () => {
     expect(resolveInitialAddWindowLocation('  ', true, null))
       .toEqual({ path: '~/Downloads', isManual: false });
+  });
+
+  it('derives safe batch folder names from title, referer, and timestamp fallback', () => {
+    expect(deriveBatchFolderName(
+      'Gallery / Chapter: 1',
+      'https://example.com/gallery'
+    )).toBe('Gallery - Chapter- 1');
+    expect(deriveBatchFolderName(
+      'New Tab',
+      'https://example.com/gallery/part-1?token=secret'
+    )).toBe('example.com-gallery-part-1');
+    expect(deriveBatchFolderName(
+      'New Tab',
+      'https://example.com/gallery',
+      new Date('2026-07-20T12:34:56.789Z'),
+      ['example.part1.rar', 'example.part2.rar']
+    )).toBe('example');
+    expect(deriveBatchFolderName(
+      'CON',
+      null,
+      new Date('2026-07-20T12:34:56.789Z')
+    )).toBe('batch-CON');
+    expect(deriveBatchFolderName(
+      '',
+      null,
+      new Date('2026-07-20T12:34:56.789Z')
+    )).toBe('firelink-batch-2026-07-20-12-34-56-789');
+    expect(deriveBatchFolderName(
+      '',
+      null,
+      new Date('2026-07-20T12:34:56.789Z'),
+      ['example.part1.rar', 'example.part2.rar']
+    )).toBe('example');
+    expect(sanitizeBatchFolderName('../Example: Parts')).toBe('Example- Parts');
+    expect(sanitizeBatchFolderName('😀'.repeat(100))).toBe('😀'.repeat(96));
+  });
+
+  it('places the optional folder below an existing category destination', async () => {
+    expect(await resolveSubfolderDestination(
+      '/Users/test/Downloads/Compressed',
+      'Example: Parts'
+    )).toBe('/Users/test/Downloads/Compressed/Example- Parts');
   });
   beforeEach(() => {
     vi.clearAllMocks();

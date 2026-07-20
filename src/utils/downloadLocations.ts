@@ -53,6 +53,93 @@ export interface AddWindowLocationSuggestion {
   isManual: boolean;
 }
 
+const MAX_BATCH_FOLDER_NAME_LENGTH = 96;
+const WEAK_BATCH_PAGE_TITLES = new Set(['new tab', 'untitled', 'about:blank']);
+
+const truncateBatchFolderName = (value: string): string => Array.from(value)
+  .filter(character => {
+    const codePoint = character.codePointAt(0) || 0;
+    return codePoint < 0xd800 || codePoint > 0xdfff;
+  })
+  .slice(0, MAX_BATCH_FOLDER_NAME_LENGTH)
+  .join('');
+
+export const sanitizeBatchFolderName = (value: string): string => {
+  const sanitized = truncateBatchFolderName(
+    value
+      .trim()
+      .replace(/[\u0000-\u001f\u007f]/g, '-')
+      .replace(/[<>:"/\\|?*]/g, '-')
+      .replace(/\s+/g, ' ')
+      .replace(/-+/g, '-')
+      .replace(/^[ .-]+|[ .-]+$/g, '')
+  )
+    .trim()
+    .replace(/[ .-]+$/g, '');
+
+  if (!sanitized || sanitized === '.' || sanitized === '..') return '';
+  if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(sanitized)) {
+    return `batch-${sanitized}`;
+  }
+  return sanitized;
+};
+
+const batchFolderSlugFromReferer = (referer: string): string => {
+  try {
+    const url = new URL(referer);
+    if (!['http:', 'https:'].includes(url.protocol) || !url.hostname) return '';
+    const path = url.pathname.replace(/^\/+|\/+$/g, '');
+    return sanitizeBatchFolderName(`${url.hostname}${path ? `-${path}` : ''}`);
+  } catch {
+    return '';
+  }
+};
+
+const batchFolderNameFromFiles = (fileNames: string[]): string => {
+  const stems = fileNames
+    .map(fileName => fileName.replace(/\\/g, '/').split('/').pop() || '')
+    .map(fileName => fileName.replace(/\.[^.]+$/, ''))
+    .filter(Boolean);
+  if (stems.length === 0) return '';
+
+  const partStems = stems.map(stem => stem.replace(/[._ -]?part\s*\d+$/i, ''));
+  const candidate = partStems.every(stem => stem && stem === partStems[0])
+    ? partStems[0]
+    : stems.length === 1 ? stems[0] : '';
+  return candidate ? sanitizeBatchFolderName(candidate) : '';
+};
+
+export const deriveBatchFolderName = (
+  pageTitle?: string | null,
+  referer?: string | null,
+  now = new Date(),
+  fileNames: string[] = []
+): string => {
+  const title = pageTitle?.trim() || '';
+  if (title && !WEAK_BATCH_PAGE_TITLES.has(title.toLocaleLowerCase())) {
+    const safeTitle = sanitizeBatchFolderName(title);
+    if (safeTitle) return safeTitle;
+  }
+
+  const fileNameSlug = batchFolderNameFromFiles(fileNames);
+  if (fileNameSlug) return fileNameSlug;
+
+  const refererSlug = batchFolderSlugFromReferer(referer?.trim() || '');
+  if (refererSlug) return refererSlug;
+
+  const timestamp = now.toISOString().replace(/[.:]/g, '-').replace('T', '-').replace('Z', '');
+  return `firelink-batch-${timestamp}`;
+};
+
+export const resolveSubfolderDestination = async (
+  destination: string,
+  folderName: string
+): Promise<string> => {
+  const root = await expandTilde(destination.trim() || '~/Downloads');
+  const safeFolderName = sanitizeBatchFolderName(folderName);
+  return safeFolderName ? join(root, safeFolderName) : root;
+};
+
 export const resolveInitialAddWindowLocation = (
   baseDownloadFolder: string,
   rememberLastUsedDownloadDirectory: boolean,
