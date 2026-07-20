@@ -23,6 +23,12 @@ const downloadLifecycleGenerations = new Map<string, bigint>();
 const queueReorderPromises = new Map<string, Promise<void>>();
 const queueStartPromises = new Map<string, Promise<string[]>>();
 const queueControlGenerations = new Map<string, number>();
+type DownloadLifecycleOperation = {
+  kind: string;
+  promise: Promise<unknown>;
+};
+const downloadLifecycleOperations = new Map<string, DownloadLifecycleOperation>();
+const preemptDispatch = ['dispatch'] as const;
 let pendingStartupResume: Promise<void> | null = null;
 
 type DownloadControlIntent = 'pause' | 'resume';
@@ -46,6 +52,49 @@ export const downloadControlIntentFor = (id: string): DownloadControlIntent | un
 
 export const clearDownloadControlIntents = (): void => {
   downloadControlIntents.clear();
+};
+
+const runDownloadLifecycleOperation = <T>(
+  id: string,
+  kind: string,
+  operation: () => Promise<T>,
+  coalesce = true,
+  preemptKinds: readonly string[] = []
+): Promise<T> => {
+  const current = downloadLifecycleOperations.get(id);
+  if (coalesce && current?.kind === kind) {
+    return current.promise as Promise<T>;
+  }
+
+  const operationPromise = current && !preemptKinds.includes(current.kind)
+    ? current.promise.catch(() => undefined).then(operation)
+    : operation();
+  const trackedOperation = operationPromise.finally(() => {
+    if (downloadLifecycleOperations.get(id)?.promise === trackedOperation) {
+      downloadLifecycleOperations.delete(id);
+    }
+  });
+  downloadLifecycleOperations.set(id, { kind, promise: trackedOperation });
+  return trackedOperation;
+};
+
+const runDownloadLifecycleOperations = <T>(
+  ids: string[],
+  kind: string,
+  operation: () => Promise<T>
+): Promise<T> => {
+  const orderedIds = [...new Set(ids)].sort();
+  const runNext = (index: number): Promise<T> => {
+    if (index === orderedIds.length) return operation();
+    return runDownloadLifecycleOperation(
+      orderedIds[index],
+      kind,
+      () => runNext(index + 1),
+      false,
+      preemptDispatch
+    );
+  };
+  return runNext(0);
 };
 
 const waitForPendingStartupResume = async (): Promise<void> => {
@@ -193,7 +242,7 @@ const speedLimitForDispatch = (
   return normalizeSpeedLimitForBackend(globalSpeedLimit);
 };
 
-export async function dispatchItem(id: string, proxyOverride?: string | null): Promise<boolean> {
+async function dispatchItemInternal(id: string, proxyOverride?: string | null): Promise<boolean> {
   await waitForPendingStartupResume();
   if (backendDispatchPromises.has(id)) return backendDispatchPromises.get(id)!;
 
@@ -205,6 +254,7 @@ export async function dispatchItem(id: string, proxyOverride?: string | null): P
       const item = state.downloads.find(d => d.id === id);
       if (!item) return false;
       if (state.backendRegisteredIds.has(id)) return true;
+      if (!['ready', 'staged', 'failed', 'queued'].includes(item.status)) return false;
       lifecycleGeneration = currentDownloadLifecycle(id);
 
       const settings = useSettingsStore.getState();
@@ -302,6 +352,18 @@ export async function dispatchItem(id: string, proxyOverride?: string | null): P
 
   backendDispatchPromises.set(id, promise);
   return promise;
+}
+
+export function dispatchItem(id: string, proxyOverride?: string | null): Promise<boolean> {
+  const current = downloadLifecycleOperations.get(id);
+  if (current && current.kind !== 'dispatch') {
+    return current.promise.then(() => false, () => false);
+  }
+  return runDownloadLifecycleOperation(
+    id,
+    'dispatch',
+    () => dispatchItemInternal(id, proxyOverride)
+  );
 }
 
 export const normalizeCustomProxy = (host: string, port: number): string | null => {
@@ -889,7 +951,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     }
     return false;
   },
-  applyProperties: async (id, updates) => {
+  applyProperties: (id, updates) => runDownloadLifecycleOperation(id, 'properties', async () => {
     await waitForPendingStartupResume();
     const wasDispatching = await invalidateAndWaitForDispatch(id);
     const state = get();
@@ -916,7 +978,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
       }
       state.updateDownload(id, updates);
       if (isRegistered || wasDispatching) {
-        const dispatched = await dispatchItem(id);
+        const dispatched = await dispatchItemInternal(id);
         if (dispatched) {
           state.updateDownload(id, { hasBeenDispatched: true });
         } else {
@@ -935,7 +997,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
       }
       state.updateDownload(id, updates);
     }
-  },
+  }, false, preemptDispatch),
   updateDownload: (id, updates) => {
     set((state) => ({
       downloads: state.downloads.map(d => {
@@ -959,7 +1021,10 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
       syncSystemIntegrations();
     }
   },
-  removeDownload: async (id, deleteFile = false, preserveResumable = false) => {
+  removeDownload: (id, deleteFile = false, preserveResumable = false) => runDownloadLifecycleOperation(
+    id,
+    `remove:${deleteFile}:${preserveResumable}`,
+    async () => {
     await waitForPendingStartupResume();
     clearDownloadControlIntent(id);
     const { pendingDispatch } = await invalidateDispatch(id);
@@ -986,8 +1051,11 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     useDownloadProgressStore.getState().clearDownloadProgress(id);
     info(`Download ${id} removed`);
     syncSystemIntegrations();
-  },
-  pauseDownload: async (id) => {
+    },
+    true,
+    preemptDispatch
+  ),
+  pauseDownload: (id) => runDownloadLifecycleOperation(id, 'pause', async () => {
     await waitForPendingStartupResume();
     if (!get().downloads.some(download => download.id === id)) return;
     setDownloadControlIntent(id, 'pause');
@@ -1007,8 +1075,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     } finally {
       clearDownloadControlIntent(id, 'pause');
     }
-  },
-  redownload: async (id) => {
+  }, true, preemptDispatch),
+  redownload: (id) => runDownloadLifecycleOperation(id, 'redownload', async () => {
     await waitForPendingStartupResume();
     const targetItem = get().downloads.find(d => d.id === id);
     if (!targetItem) {
@@ -1049,7 +1117,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
       dateAdded: new Date().toISOString()
     });
 
-    if (!await dispatchItem(id)) {
+    if (!await dispatchItemInternal(id)) {
       console.error("Failed to enqueue redownload");
       get().updateDownload(id, { status: 'failed' });
       clearDownloadControlIntent(id, 'resume');
@@ -1057,8 +1125,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
       get().updateDownload(id, { hasBeenDispatched: true });
       info(`Download ${id} redownloaded (queued)`);
     }
-  },
-  resumeDownload: async (id) => {
+  }, true, preemptDispatch),
+  resumeDownload: (id) => runDownloadLifecycleOperation(id, 'resume', async () => {
     await waitForPendingStartupResume();
     const targetItem = get().downloads.find(d => d.id === id);
     if (!targetItem) return false;
@@ -1067,7 +1135,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
     try {
       if (targetItem.status === 'ready' || targetItem.status === 'staged') {
         get().updateDownload(id, { status: 'queued', hasBeenDispatched: true });
-        if (await dispatchItem(id)) {
+        if (await dispatchItemInternal(id)) {
           return true;
         }
         get().updateDownload(id, { status: targetItem.status });
@@ -1098,7 +1166,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
         // lifecycle. Advance and cancel the old generation before dispatching
         // so QueueManager does not reject the legitimate user retry as stale.
         await invalidateAndWaitForDispatch(id);
-        dispatchSucceeded = await dispatchItem(id);
+        dispatchSucceeded = await dispatchItemInternal(id);
       }
 
       if (dispatchSucceeded) {
@@ -1115,7 +1183,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
       clearDownloadControlIntent(id, 'resume');
       return false;
     }
-  },
+  }, true, preemptDispatch),
   startQueue: (queueId) => {
     const requestedGeneration = currentQueueControlGeneration(queueId);
     const previousOperation = queueStartPromises.get(queueId) ?? Promise.resolve([]);
@@ -1282,46 +1350,49 @@ export const useDownloadStore = create<DownloadState>((set, get) => ({
   },
   assignToQueue: async (ids, queueId) => {
     await waitForPendingStartupResume();
-    const selectedIds = new Set(ids);
-    const selected = get().downloads.filter(item => selectedIds.has(item.id));
-    const locked = selected.find(item => isActiveDownloadStatus(item.status) && item.status !== 'queued');
-    if (locked) {
-      throw new Error(i18n.t($ => $.downloadTable.pauseBeforeMove, { file: locked.fileName }));
-    }
+    const lockedIds = ids.filter(id => get().downloads.some(item => item.id === id));
+    return runDownloadLifecycleOperations(lockedIds, 'assign-to-queue', async () => {
+      const selectedIds = new Set(ids);
+      const selected = get().downloads.filter(item => selectedIds.has(item.id));
+      const locked = selected.find(item => isActiveDownloadStatus(item.status) && item.status !== 'queued');
+      if (locked) {
+        throw new Error(i18n.t($ => $.downloadTable.pauseBeforeMove, { file: locked.fileName }));
+      }
 
-    const movableSelected = selected.filter(item => item.status !== 'completed');
-    const movableIds = new Set(movableSelected.map(item => item.id));
-    await Promise.all(movableSelected.map(item => invalidateAndWaitForDispatch(item.id)));
+      const movableSelected = selected.filter(item => item.status !== 'completed');
+      const movableIds = new Set(movableSelected.map(item => item.id));
+      await Promise.all(movableSelected.map(item => invalidateAndWaitForDispatch(item.id)));
 
-    for (const item of get().downloads.filter(item => movableIds.has(item.id))) {
-      if (!get().backendRegisteredIds.has(item.id)) continue;
-      // The UI can still say queued while a dispatch has already reached
-      // Aria2/media. Detach through the backend lifecycle owner for every
-      // registered item; remove_from_queue only handles the pending list.
-      await invoke('detach_download_for_reconfigure', { id: item.id });
-      get().unregisterBackendIds([item.id]);
-      set(state => ({ pendingOrder: state.pendingOrder.filter(value => value !== item.id) }));
-    }
+      for (const item of get().downloads.filter(item => movableIds.has(item.id))) {
+        if (!get().backendRegisteredIds.has(item.id)) continue;
+        // The UI can still say queued while a dispatch has already reached
+        // Aria2/media. Detach through the backend lifecycle owner for every
+        // registered item; remove_from_queue only handles the pending list.
+        await invoke('detach_download_for_reconfigure', { id: item.id });
+        get().unregisterBackendIds([item.id]);
+        set(state => ({ pendingOrder: state.pendingOrder.filter(value => value !== item.id) }));
+      }
 
-    const queueItems = get().downloads.filter(item =>
-      !movableIds.has(item.id) &&
-      (item.queueId || MAIN_QUEUE_ID) === queueId
-    );
-    const maxPos = queueItems.reduce((max, d) => Math.max(max, d.queuePosition ?? 0), -1);
-    const nextPosition = maxPos + 1;
-    set(state => ({
-      downloads: state.downloads.map(item =>
-        movableIds.has(item.id) && item.status !== 'completed'
-          ? {
-              ...item,
-              queueId,
-              queuePosition: nextPosition + movableSelected.findIndex(selectedItem => selectedItem.id === item.id),
-              status: 'staged' as const,
-              hasBeenDispatched: false
-            }
-          : item
-      )
-    }));
+      const queueItems = get().downloads.filter(item =>
+        !movableIds.has(item.id) &&
+        (item.queueId || MAIN_QUEUE_ID) === queueId
+      );
+      const maxPos = queueItems.reduce((max, d) => Math.max(max, d.queuePosition ?? 0), -1);
+      const nextPosition = maxPos + 1;
+      set(state => ({
+        downloads: state.downloads.map(item =>
+          movableIds.has(item.id) && item.status !== 'completed'
+            ? {
+                ...item,
+                queueId,
+                queuePosition: nextPosition + movableSelected.findIndex(selectedItem => selectedItem.id === item.id),
+                status: 'staged' as const,
+                hasBeenDispatched: false
+              }
+            : item
+        )
+      }));
+    });
   },
   addQueue: (name) => {
     const normalizedName = name.trim();

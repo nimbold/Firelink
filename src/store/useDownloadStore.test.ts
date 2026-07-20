@@ -608,6 +608,48 @@ describe('useDownloadStore', () => {
     expect(useDownloadStore.getState().backendRegisteredIds.has('resume-generation')).toBe(true); // Re-registered by dispatchItem
   });
 
+  it('coalesces duplicate resume actions while the backend transition is in flight', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'resume-double-submit',
+        url: 'http://test1',
+        fileName: 'f1',
+        destination: '/tmp',
+        status: 'paused',
+        category: 'Other',
+        dateAdded: '',
+        hasBeenDispatched: true
+      }] as any[],
+      backendRegisteredIds: new Set(['resume-double-submit'])
+    });
+
+    let releaseResume!: () => void;
+    const resumeReleased = new Promise<void>(resolve => {
+      releaseResume = resolve;
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'resume_download') {
+        await resumeReleased;
+        return true;
+      }
+      return undefined;
+    });
+
+    const first = useDownloadStore.getState().resumeDownload('resume-double-submit');
+    await vi.waitFor(() => {
+      expect(vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) => command === 'resume_download'))
+        .toHaveLength(1);
+    });
+    const second = useDownloadStore.getState().resumeDownload('resume-double-submit');
+
+    expect(second).toBe(first);
+    releaseResume();
+    await Promise.all([first, second]);
+    expect(
+      vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) => command === 'resume_download')
+    ).toHaveLength(1);
+  });
+
   it('does not re-enqueue when the existing resume RPC fails', async () => {
     useDownloadStore.setState({
       downloads: [
@@ -1183,6 +1225,48 @@ describe('useDownloadStore', () => {
     expect(
       vi.mocked(ipc.invokeCommand).mock.calls.some(call => call[0] === 'enqueue_download')
     ).toBe(false);
+  });
+
+  it('coalesces duplicate redownloads and serializes a destructive removal behind them', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'redownload-double-submit',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        destination: '/tmp',
+        status: 'paused',
+        category: 'Other',
+        dateAdded: ''
+      }] as any[]
+    });
+
+    let releaseRedownloadRemoval!: () => void;
+    const redownloadRemovalReleased = new Promise<void>(resolve => {
+      releaseRedownloadRemoval = resolve;
+    });
+    let removeCallCount = 0;
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'remove_download') {
+        removeCallCount += 1;
+        if (removeCallCount === 1) await redownloadRemovalReleased;
+        return undefined;
+      }
+      if (cmd === 'get_pending_order') return [];
+      return undefined;
+    });
+
+    const first = useDownloadStore.getState().redownload('redownload-double-submit');
+    await vi.waitFor(() => expect(removeCallCount).toBe(1));
+    const second = useDownloadStore.getState().redownload('redownload-double-submit');
+    const remove = useDownloadStore.getState().removeDownload('redownload-double-submit');
+
+    expect(second).toBe(first);
+    expect(removeCallCount).toBe(1);
+    releaseRedownloadRemoval();
+    await first;
+    await remove;
+    expect(removeCallCount).toBe(2);
+    expect(useDownloadStore.getState().downloads).toEqual([]);
   });
 
   it('starts and pauses all items regardless of legacy missing queue ids', async () => {
