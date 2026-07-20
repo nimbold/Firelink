@@ -1089,7 +1089,7 @@ fn parse_media_progress_line(line: &str) -> Option<MediaProgress> {
             None
         } else {
             progress_json_string(&progress, "_total_bytes_str")
-                .or_else(|| exact_total.map(|total| crate::download::format_size(total)))
+                .or_else(|| exact_total.map(crate::download::format_size))
         };
 
         return Some(MediaProgress {
