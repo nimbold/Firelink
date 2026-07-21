@@ -18,8 +18,13 @@ CROSS_PLATFORM_CHECKLIST.md
 Cross-platform-checklist-gemini.MD
 YouTube_media_download_handoff.md
 Release_checklist.md
+Release Checklist/
+RC Read-only/
+RC Read_only/
 
 # Frontend output and logs
+.agents/
+release_notes.md
 node_modules/
 dist/
 dist-ssr/

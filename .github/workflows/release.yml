@@ -44,6 +44,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Verify release version
+        run: node scripts/verify-release-version.js
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

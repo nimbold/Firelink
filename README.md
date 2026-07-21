@@ -5,7 +5,7 @@
 
   **A fast, focused desktop download manager for macOS, Windows, and Linux.**
 
-  [![Version](https://img.shields.io/badge/version-1.1.1-6f42c1?style=flat-square)](https://github.com/nimbold/Firelink/releases)
+  [![Version](https://img.shields.io/badge/version-1.1.2-6f42c1?style=flat-square)](https://github.com/nimbold/Firelink/releases)
   [![macOS](https://img.shields.io/badge/macOS-111111?style=flat-square&logo=apple&logoColor=white)](#platforms)
   [![Windows](.github/badges/windows.svg)](#platforms)
   [![Linux](https://img.shields.io/badge/Linux-FCC624?style=flat-square&logo=linux&logoColor=black)](#platforms)
@@ -37,9 +37,9 @@ Firelink is a cross-platform desktop download manager for direct transfers, brow
 
 It combines a Rust/Tauri backend with a React and TypeScript interface. Bundled aria2, yt-dlp, FFmpeg, Deno, and SQLite support the download and media workflows.
 
-The current desktop release is **1.1.1**, paired with Firelink Companion **2.0.5**.
+The current desktop release is **1.1.2**, paired with Firelink Companion **2.0.5**.
 
-This release adds YouTube playlist downloads, live connection controls, clipboard capture, and clearer byte-level progress. It also improves slow-transfer recovery, authenticated browser captures, and startup consent handling.
+This patch release hardens download lifecycle handling, localization, and packaged release checks.
 
 ## Features
 
@@ -107,7 +107,7 @@ What it adds:
 
 Install the extension, open Firelink, then pair it from **Settings -> Integrations**. Firefox users can install it from Mozilla Add-ons. Chromium users can load `firelink-chromium.zip` from the [extension releases](https://github.com/nimbold/Firelink-Extension/releases) with the [manual Chromium instructions](https://github.com/nimbold/Firelink-Extension#manual-chromium-installation).
 
-Use the latest [Firelink Companion release](https://github.com/nimbold/Firelink-Extension/releases) with Firelink 1.1.1. The source is in the [Firelink-Extension repository](https://github.com/nimbold/Firelink-Extension), which this repo vendors as the `Extensions/Browser` submodule.
+Use the latest [Firelink Companion release](https://github.com/nimbold/Firelink-Extension/releases) with Firelink 1.1.2. The source is in the [Firelink-Extension repository](https://github.com/nimbold/Firelink-Extension), which this repo vendors as the `Extensions/Browser` submodule.
 
 ## Platforms
 

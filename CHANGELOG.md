@@ -5,6 +5,23 @@ All notable changes to Firelink will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-07-21
+
+This patch release hardens download lifecycle handling, localization, and packaged release checks.
+
+### New
+- Add localized desktop UI coverage for Persian, Hebrew, Russian, Ukrainian, and Simplified Chinese.
+- Add optional batch folders and safer reuse of unfinished downloads with matching filenames.
+
+### Improved
+- Make pause, resume, remove, redownload, queue, scheduler, and settings actions safer when operations overlap.
+- Improve first-open navigation, RTL layout, browser-cookie recovery, and download metadata handling.
+- Strengthen packaged engine, Windows portable, Linux package, and release-asset verification.
+
+### Fixed
+- Prevent stale or duplicate lifecycle work from deleting or resurrecting the wrong download.
+- Keep missed completion events, localized state, and browser handoffs from leaving misleading UI state.
+
 ## [1.1.1] - 2026-07-17
 
 This patch release focuses on transfer reliability, browser captures, and easier download control.

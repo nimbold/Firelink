@@ -1,6 +1,6 @@
 [package]
 name = "firelink"
-version = "1.1.1"
+version = "1.1.2"
 description = "A fast cross-platform desktop download manager powered by Rust and Tauri"
 authors = ["NimBold"]
 edition = "2021"
