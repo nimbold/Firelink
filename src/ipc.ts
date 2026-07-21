@@ -40,7 +40,8 @@ type CommandMap = {
   resume_download: { args: { id: string }; result: boolean };
   remove_download: { args: { id: string; deleteAssets: boolean; preserveResumable?: boolean }; result: void };
   detach_download_for_reconfigure: { args: { id: string }; result: void };
-  update_dock_badge: { args: { count: number }; result: void };
+  begin_dock_badge_session: { args: undefined; result: number };
+  update_dock_badge: { args: { count: number; generation: number; session: number }; result: void };
   get_platform_info: { args: undefined; result: PlatformInfo };
   approve_download_root: { args: { path: string }; result: string };
   set_prevent_sleep: { args: { prevent: boolean }; result: void };

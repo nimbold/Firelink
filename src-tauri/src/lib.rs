@@ -1520,23 +1520,81 @@ async fn cleanup_media_artifacts(out_path: &std::path::Path, remove_primary: boo
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if !name.starts_with(base_name) && !name.starts_with(base_stem) {
-            continue;
-        }
-        let yt_dlp_format_fragment = name
-            .strip_prefix(base_stem)
-            .and_then(|suffix| suffix.strip_prefix(".f"))
-            .and_then(|suffix| suffix.chars().next())
-            .is_some_and(|ch| ch.is_ascii_digit());
-        let looks_like_media_temp = name.contains(".part")
-            || name.contains(".ytdl")
-            || name.contains(".temp")
-            || name.contains(".tmp")
-            || yt_dlp_format_fragment;
-        if looks_like_media_temp {
+        if is_media_artifact_name(name, base_name, base_stem) {
             remove_file_best_effort_with_retry(&path).await;
         }
     }
+}
+
+fn is_media_artifact_name(name: &str, base_name: &str, base_stem: &str) -> bool {
+    let suffix = name.strip_prefix(base_name).or_else(|| {
+        (base_stem != base_name)
+            .then(|| name.strip_prefix(base_stem))
+            .flatten()
+    });
+    let Some(suffix) = suffix else {
+        return false;
+    };
+
+    if matches!(suffix, ".part" | ".ytdl" | ".temp" | ".tmp") {
+        return true;
+    }
+
+    for marker in [".part", ".ytdl", ".temp", ".tmp"] {
+        if let Some(extension) = suffix.strip_suffix(marker) {
+            if is_known_media_extension(extension.strip_prefix('.').unwrap_or(extension)) {
+                return true;
+            }
+        }
+    }
+
+    let Some(format_suffix) = suffix.strip_prefix(".f") else {
+        return false;
+    };
+    let Some((format_id, extension)) = format_suffix.split_once('.') else {
+        return false;
+    };
+    if format_id.is_empty() || !format_id.chars().all(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+
+    let extension = [".part", ".ytdl", ".temp", ".tmp"]
+        .iter()
+        .find_map(|marker| extension.strip_suffix(marker))
+        .unwrap_or(extension);
+
+    is_known_media_extension(extension)
+}
+
+fn is_known_media_extension(extension: &str) -> bool {
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "3gp"
+            | "aac"
+            | "ass"
+            | "avi"
+            | "flac"
+            | "flv"
+            | "jpg"
+            | "jpeg"
+            | "m4a"
+            | "m4v"
+            | "mka"
+            | "mkv"
+            | "mov"
+            | "mp3"
+            | "mp4"
+            | "oga"
+            | "ogg"
+            | "opus"
+            | "srt"
+            | "ts"
+            | "wav"
+            | "webm"
+            | "webp"
+            | "wmv"
+            | "vtt"
+    )
 }
 
 fn sanitize_ytdlp_config_value(value: &str) -> String {
@@ -5095,16 +5153,50 @@ async fn wait_for_aria2_stopped(port: u16, secret: &str, gid: &str) -> Result<()
     ))
 }
 
+static NEXT_DOCK_BADGE_SESSION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+fn should_apply_dock_badge_update(
+    current_session: u64,
+    current_generation: u64,
+    session: u64,
+    generation: u64,
+) -> bool {
+    session > current_session || (session == current_session && generation >= current_generation)
+}
+
+#[tauri::command]
+fn begin_dock_badge_session() -> u64 {
+    NEXT_DOCK_BADGE_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 #[tauri::command]
 #[allow(unused_variables)]
-fn update_dock_badge(app_handle: tauri::AppHandle, count: i32) {
+fn update_dock_badge(
+    app_handle: tauri::AppHandle,
+    count: i32,
+    generation: u64,
+    session: u64,
+) {
     #[cfg(target_os = "macos")]
     {
         use objc::runtime::Object;
         use objc::{class, msg_send, sel, sel_impl};
         use std::ffi::CString;
+        use std::sync::{Mutex, OnceLock};
+
+        static LAST_DOCK_BADGE_STATE: OnceLock<Mutex<(u64, u64)>> = OnceLock::new();
 
         let _ = app_handle.run_on_main_thread(move || {
+            let state = LAST_DOCK_BADGE_STATE.get_or_init(|| Mutex::new((0, 0)));
+            let Ok(mut state) = state.lock() else {
+                return;
+            };
+            if !should_apply_dock_badge_update(state.0, state.1, session, generation) {
+                return;
+            }
+            *state = (session, generation);
+            drop(state);
             unsafe {
             let app_class = class!(NSApplication);
             let app: *mut Object = msg_send![app_class, sharedApplication];
@@ -6489,7 +6581,9 @@ mod tests {
         normalize_speed_limit_for_aria2,
         parse_firelink_deep_link, parse_ffmpeg_version, parse_media_progress_line,
         redact_log_line, redact_log_line_for_output, sanitize_ytdlp_config_value,
-        has_resumable_download_assets, should_cleanup_media_artifacts_after_failure,
+        has_resumable_download_assets, is_media_artifact_name,
+        should_cleanup_media_artifacts_after_failure,
+        should_apply_dock_badge_update,
         should_retry_without_browser_cookies,
         retry_metadata_with_cookies, should_retry_metadata_with_cookies,
         should_send_metadata_credentials, collect_log_files, FirelinkDeepLink,
@@ -7272,6 +7366,29 @@ mod tests {
             0,
             3
         ));
+    }
+
+    #[test]
+    fn media_cleanup_requires_exact_artifact_boundaries() {
+        assert!(is_media_artifact_name("video.mp4.part", "video.mp4", "video"));
+        assert!(is_media_artifact_name("video.mp4.tmp", "video.mp4", "video"));
+        assert!(is_media_artifact_name("video.f137.mp4", "video.mp4", "video"));
+        assert!(is_media_artifact_name("video.f137.mp4.part", "video.mp4", "video"));
+        assert!(is_media_artifact_name("video.vtt.part", "video.mp4", "video"));
+        assert!(is_media_artifact_name("video.jpg.tmp", "video.mp4", "video"));
+        assert!(!is_media_artifact_name("video.part1.rar", "video.mp4", "video"));
+        assert!(!is_media_artifact_name("video.mp4.part1.rar", "video.mp4", "video"));
+        assert!(!is_media_artifact_name("videography.mp4.part", "video.mp4", "video"));
+        assert!(!is_media_artifact_name("video.f1-backup.tar.gz", "video.mp4", "video"));
+        assert!(!is_media_artifact_name("video.f1.backup", "video.mp4", "video"));
+    }
+
+    #[test]
+    fn dock_badge_updates_reject_stale_sessions_and_generations() {
+        assert!(should_apply_dock_badge_update(1, 99, 2, 1));
+        assert!(should_apply_dock_badge_update(2, 1, 2, 2));
+        assert!(!should_apply_dock_badge_update(2, 2, 2, 1));
+        assert!(!should_apply_dock_badge_update(2, 2, 1, 99));
     }
 
     #[test]
@@ -9035,7 +9152,7 @@ pub fn run() {
  get_engine_status, get_aria2_engine_status, get_ytdlp_engine_status, get_ffmpeg_engine_status,
  get_deno_engine_status, test_ytdlp, test_aria2c, test_ffmpeg, test_deno,
  pause_download, resume_download, fetch_metadata, fetch_media_metadata, fetch_media_playlist_metadata,
-            update_dock_badge, get_platform_info, approve_download_root, set_prevent_sleep, get_free_space, perform_system_action,
+            begin_dock_badge_session, update_dock_badge, get_platform_info, approve_download_root, set_prevent_sleep, get_free_space, perform_system_action,
             ack_schedule_trigger,
             check_automation_permission, request_automation_permission, open_automation_settings,
             set_keychain_password, get_keychain_password, delete_keychain_password,

@@ -14,6 +14,7 @@ import {
   resolveCategoryDestination
 } from '../utils/downloadLocations';
 import { canPauseDownload, canStartDownload } from '../utils/downloadActions';
+import { updateDockBadge } from '../utils/dockBadge';
 import i18n from '../i18n';
 
 export type { DownloadCategory } from '../utils/downloads';
@@ -487,7 +488,7 @@ export const getSiteLogin = (url: string, settings: ReturnType<typeof useSetting
 const syncSystemIntegrations = () => {
   const settings = useSettingsStore.getState();
   const activeCount = useDownloadStore.getState().downloads.filter(d => isTransferActiveStatus(d.status)).length;
-  invoke('update_dock_badge', { count: settings.showDockBadge ? activeCount : 0 }).catch(() => {});
+  updateDockBadge(settings.showDockBadge ? activeCount : 0).catch(() => {});
 };
 
 const effectiveDestinationForItem = async (

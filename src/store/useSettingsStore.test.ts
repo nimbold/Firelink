@@ -37,6 +37,19 @@ describe('useSettingsStore global speed limit persistence', () => {
   });
 });
 
+describe('useSettingsStore dock badge synchronization', () => {
+  it('increments the badge sync version for every toggle without issuing out-of-band clears', () => {
+    vi.clearAllMocks();
+    const initialVersion = useSettingsStore.getState().dockBadgeSyncVersion;
+
+    useSettingsStore.getState().setShowDockBadge(false);
+    useSettingsStore.getState().setShowDockBadge(true);
+
+    expect(useSettingsStore.getState().dockBadgeSyncVersion).toBe(initialVersion + 2);
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('update_dock_badge', { count: 0 });
+  });
+});
+
 describe('useSettingsStore credential-store startup flow', () => {
   beforeEach(() => {
     vi.clearAllMocks();

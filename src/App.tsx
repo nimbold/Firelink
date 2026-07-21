@@ -13,6 +13,7 @@ import { isPermissionGranted, requestPermission, sendNotification } from '@tauri
 import { WindowControls } from "./components/WindowControls";
 import { useToast } from "./contexts/ToastContext";
 import { setLogStreamActive } from './utils/logger';
+import { updateDockBadge } from './utils/dockBadge';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { getPlatformInfo, shouldUseCustomWindowControls, usePlatformInfo } from './utils/platform';
 import {
@@ -207,6 +208,7 @@ function App() {
   const autoAddClipboardLinks = useSettingsStore(state => state.autoAddClipboardLinks);
   const showNotifications = useSettingsStore(state => state.showNotifications);
   const showDockBadge = useSettingsStore(state => state.showDockBadge);
+  const dockBadgeSyncVersion = useSettingsStore(state => state.dockBadgeSyncVersion);
   const showMenuBarIcon = useSettingsStore(state => state.showMenuBarIcon);
   const extensionPairingToken = useSettingsStore(state => state.extensionPairingToken);
   const showKeychainModal = useSettingsStore(state => state.showKeychainModal);
@@ -689,9 +691,9 @@ function App() {
 
   useEffect(() => {
     if (platform.os === 'macos') {
-      invoke('update_dock_badge', { count: showDockBadge ? activeDownloadCount : 0 }).catch(() => {});
+      updateDockBadge(showDockBadge ? activeDownloadCount : 0).catch(() => {});
     }
-  }, [platform.os, showDockBadge, activeDownloadCount]);
+  }, [platform.os, showDockBadge, dockBadgeSyncVersion, activeDownloadCount]);
 
   useEffect(() => {
     invoke('set_prevent_sleep', {

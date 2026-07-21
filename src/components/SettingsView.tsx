@@ -92,6 +92,22 @@ const upsertEngineStatus = (items: EngineStatusItem[], item: EngineStatusItem) =
   return next;
 };
 
+const commitBoundedIntegerInput = (
+  raw: string,
+  fallback: number,
+  min: number,
+  max: number,
+  setValue: (value: number) => void,
+  setDraft: (value: string) => void
+) => {
+  const parsed = Number(raw);
+  const next = Number.isFinite(parsed)
+    ? Math.min(max, Math.max(min, Math.trunc(parsed)))
+    : fallback;
+  setValue(next);
+  setDraft(String(next));
+};
+
 const USER_AGENT_SUGGESTIONS = [
   {
     label: 'Chrome (Windows)',
@@ -293,6 +309,25 @@ const engineRunId = useRef(0);
   const [appVersion, setAppVersion] = useState('');
   const [extensionServerPort, setExtensionServerPort] = useState<number | null>(null);
   const [systemProxyStatus, setSystemProxyStatus] = useState<SystemProxyStatus>('idle');
+  const [perServerConnectionsInput, setPerServerConnectionsInput] = useState(
+    () => String(settings.perServerConnections)
+  );
+  const [maxConcurrentDownloadsInput, setMaxConcurrentDownloadsInput] = useState(
+    () => String(settings.maxConcurrentDownloads)
+  );
+  const [proxyPortInput, setProxyPortInput] = useState(() => String(settings.proxyPort));
+
+  useEffect(() => {
+    setPerServerConnectionsInput(String(settings.perServerConnections));
+  }, [settings.perServerConnections]);
+
+  useEffect(() => {
+    setMaxConcurrentDownloadsInput(String(settings.maxConcurrentDownloads));
+  }, [settings.maxConcurrentDownloads]);
+
+  useEffect(() => {
+    setProxyPortInput(String(settings.proxyPort));
+  }, [settings.proxyPort]);
 
   // Local state for adding site login
   const [loginPattern, setLoginPattern] = useState('');
@@ -710,13 +745,22 @@ runEngineChecks(false);
                   </div>
                   <input
                     type="number" min="1" max="16"
-                    value={settings.perServerConnections}
-                    onChange={(e) => settings.setPerServerConnections(Number(e.target.value))}
-                    onBlur={(e) => {
-                      const val = Number(e.target.value);
-                      if (val < 1) settings.setPerServerConnections(1);
-                      if (val > 16) settings.setPerServerConnections(16);
+                    value={perServerConnectionsInput}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setPerServerConnectionsInput(value);
+                      if (value !== '' && Number.isFinite(Number(value))) {
+                        settings.setPerServerConnections(Number(value));
+                      }
                     }}
+                    onBlur={(e) => commitBoundedIntegerInput(
+                      e.target.value,
+                      settings.perServerConnections,
+                      1,
+                      16,
+                      settings.setPerServerConnections,
+                      setPerServerConnectionsInput
+                    )}
                     className="app-control w-24 text-center"
                   />
                 </div>
@@ -727,13 +771,22 @@ runEngineChecks(false);
                   </div>
                   <input
                     type="number" min="1" max="12"
-                    value={settings.maxConcurrentDownloads}
-                    onChange={(e) => settings.setMaxConcurrentDownloads(Number(e.target.value))}
-                    onBlur={(e) => {
-                      const val = Number(e.target.value);
-                      if (val < 1) settings.setMaxConcurrentDownloads(1);
-                      if (val > 12) settings.setMaxConcurrentDownloads(12);
+                    value={maxConcurrentDownloadsInput}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setMaxConcurrentDownloadsInput(value);
+                      if (value !== '' && Number.isFinite(Number(value))) {
+                        settings.setMaxConcurrentDownloads(Number(value));
+                      }
                     }}
+                    onBlur={(e) => commitBoundedIntegerInput(
+                      e.target.value,
+                      settings.maxConcurrentDownloads,
+                      1,
+                      12,
+                      settings.setMaxConcurrentDownloads,
+                      setMaxConcurrentDownloadsInput
+                    )}
                     className="app-control w-24 text-center"
                   />
                 </div>
@@ -985,8 +1038,22 @@ runEngineChecks(false);
                       </div>
                       <input
                         type="number" min="1" max="65535"
-                        value={settings.proxyPort}
-                        onChange={(e) => settings.setProxyPort(Number(e.target.value))}
+                        value={proxyPortInput}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setProxyPortInput(value);
+                          if (value !== '' && Number.isFinite(Number(value))) {
+                            settings.setProxyPort(Number(value));
+                          }
+                        }}
+                        onBlur={(e) => commitBoundedIntegerInput(
+                          e.target.value,
+                          settings.proxyPort,
+                          1,
+                          65535,
+                          settings.setProxyPort,
+                          setProxyPortInput
+                        )}
                         className="app-control settings-port-input text-center"
                       />
                     </div>

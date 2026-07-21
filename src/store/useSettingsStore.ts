@@ -203,6 +203,8 @@ export interface SettingsState {
   appFontSize: AppFontSize;
   listRowDensity: ListRowDensity;
   showDockBadge: boolean;
+  /** Forces the App-level badge effect to run for every toggle request. */
+  dockBadgeSyncVersion: number;
   showMenuBarIcon: boolean;
   proxyMode: ProxyMode;
   proxyHost: string;
@@ -320,6 +322,7 @@ export const useSettingsStore = create<SettingsState>()(
       appFontSize: 'standard',
       listRowDensity: 'standard',
       showDockBadge: true,
+      dockBadgeSyncVersion: 0,
       showMenuBarIcon: true,
       proxyMode: 'none',
       proxyHost: '',
@@ -392,8 +395,10 @@ export const useSettingsStore = create<SettingsState>()(
       setAppFontSize: (appFontSize) => set({ appFontSize }),
       setListRowDensity: (listRowDensity) => set({ listRowDensity }),
       setShowDockBadge: (showDockBadge) => {
-        set({ showDockBadge });
-        if (!showDockBadge) invoke('update_dock_badge', { count: 0 }).catch(console.error);
+        set(state => ({
+          showDockBadge,
+          dockBadgeSyncVersion: state.dockBadgeSyncVersion + 1
+        }));
       },
       setShowMenuBarIcon: (showMenuBarIcon) => set({ showMenuBarIcon }),
       setProxyMode: (proxyMode) => set({ proxyMode }),
