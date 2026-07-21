@@ -130,7 +130,7 @@ export default function SchedulerView() {
       addToast({ message: t($ => $.scheduler.validationQueue), variant: 'error', isActionable: true });
       return;
     }
-    if (draft.enabled && draft.stopTimeEnabled && minuteOfDay(draft.stopTime) <= minuteOfDay(draft.startTime)) {
+    if (draft.enabled && draft.stopTimeEnabled && minuteOfDay(draft.stopTime) === minuteOfDay(draft.startTime)) {
       addToast({ message: t($ => $.scheduler.validationStopTime), variant: 'error', isActionable: true });
       return;
     }

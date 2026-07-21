@@ -1,5 +1,5 @@
 use crate::ipc::{DownloadStateEvent, DownloadStatus, QueueDirection};
-use crate::retry::{backoff_and_emit, is_transient_network_error, BackoffOutcome};
+use crate::retry::{backoff_and_emit, is_transient_network_error, BackoffOutcome, MAX_RETRIES};
 use log;
 use serde::Deserialize;
 use serde_json;
@@ -1600,7 +1600,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
 }
 
 fn automatic_retry_limit(max_tries: Option<i32>) -> usize {
-    max_tries.unwrap_or(0).max(0) as usize
+    max_tries.unwrap_or(MAX_RETRIES as i32).max(0) as usize
 }
 
 fn aria2_attempt_limit(max_tries: Option<i32>) -> u32 {
@@ -1977,8 +1977,9 @@ impl SidecarSpawner for ProductionSpawner {
                 }
             }
             Err(e) => {
-                log::error!("aria2 addUri [{}] failed: {}", id, e);
-                Err(format!("aria2 addUri failed: {e}"))
+                let safe_error = crate::redact_sensitive_text(&e);
+                log::error!("aria2 addUri [{}] failed: {}", id, safe_error);
+                Err(format!("aria2 addUri failed: {safe_error}"))
             }
         }
     }
@@ -2287,5 +2288,12 @@ mod tests {
     fn aria2_internal_attempts_do_not_multiply_firelink_retry_budget() {
         assert_eq!(aria2_attempt_limit(Some(0)), 1);
         assert_eq!(aria2_attempt_limit(Some(10)), 1);
+    }
+
+    #[test]
+    fn omitted_retry_limit_uses_the_shared_default_but_zero_stays_explicit() {
+        assert_eq!(automatic_retry_limit(None), MAX_RETRIES);
+        assert_eq!(automatic_retry_limit(Some(0)), 0);
+        assert_eq!(automatic_retry_limit(Some(2)), 2);
     }
 }

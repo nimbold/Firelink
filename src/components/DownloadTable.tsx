@@ -30,7 +30,27 @@ interface DownloadTableProps {
 }
 
 const DEFAULT_COLUMN_WIDTHS = [340, 100, 220, 100, 80, 170];
+const COLUMN_MINIMUMS = [0, 58, 92, 58, 48, 112];
 const COLUMN_WIDTHS_STORAGE_KEY = 'firelink-download-column-widths';
+
+const normalizeColumnWidths = (value: unknown): number[] => {
+  if (!Array.isArray(value) || value.length !== DEFAULT_COLUMN_WIDTHS.length) {
+    return DEFAULT_COLUMN_WIDTHS;
+  }
+  return value.map((width, index) =>
+    typeof width === 'number' && Number.isFinite(width)
+      ? Math.max(COLUMN_MINIMUMS[index], width)
+      : DEFAULT_COLUMN_WIDTHS[index]
+  );
+};
+
+const persistColumnWidths = (widths: number[]): void => {
+  try {
+    window.localStorage.setItem(COLUMN_WIDTHS_STORAGE_KEY, JSON.stringify(widths));
+  } catch {
+    // Local storage can be unavailable in restricted WebView contexts.
+  }
+};
 
 export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   const { t } = useTranslation();
@@ -54,6 +74,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   const [lastSelectedId, setLastSelectedId] = useState<string | null>(null);
   const [sortConfig, setSortConfig] = useState<DownloadSortConfig>({ column: 'Date Added', direction: 'desc' });
   const [queueSortConfig, setQueueSortConfig] = useState<DownloadSortConfig | null>(null);
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
   const selectedIdsRef = useRef(selectedIds);
   const lastSelectedIdRef = useRef(lastSelectedId);
   const sortedDownloadsRef = useRef<DownloadItem[]>([]);
@@ -62,38 +83,56 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   const [columnWidths, setColumnWidths] = useState(() => {
     try {
       const stored = JSON.parse(window.localStorage.getItem(COLUMN_WIDTHS_STORAGE_KEY) || 'null');
-      return Array.isArray(stored) &&
-        stored.length === DEFAULT_COLUMN_WIDTHS.length &&
-        stored.every(value => typeof value === 'number' && Number.isFinite(value))
-        ? stored
-        : DEFAULT_COLUMN_WIDTHS;
+      return normalizeColumnWidths(stored);
     } catch {
       return DEFAULT_COLUMN_WIDTHS;
     }
   });
-  const columnMinimums = [0, 58, 92, 58, 48, 112];
-  const tableGridTemplate = columnWidths.map((width, index) => `minmax(${columnMinimums[index]}px, ${width}fr)`).join(' ');
+  const columnWidthsRef = useRef(columnWidths);
+  columnWidthsRef.current = columnWidths;
+  const normalizedColumnWidths = columnWidths.map((width, index) =>
+    Math.max(COLUMN_MINIMUMS[index], width)
+  );
+  const tableGridTemplate = [
+    ...normalizedColumnWidths.slice(0, -1).map(width => `${width}px`),
+    'minmax(0, 1fr)',
+    `${normalizedColumnWidths[normalizedColumnWidths.length - 1]}px`
+  ].join(' ');
+  const tableMinWidth = normalizedColumnWidths.reduce(
+    (total, width) => total + width,
+    0
+  );
 
   const startColumnResize = (index: number, event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
+    resizeCleanupRef.current?.();
     const startX = event.clientX;
     const startWidth = columnWidths[index];
 
     const handlePointerMove = (moveEvent: PointerEvent) => {
-      const nextWidth = Math.max(columnMinimums[index], startWidth + moveEvent.clientX - startX);
-      setColumnWidths(widths => widths.map((width, columnIndex) => columnIndex === index ? nextWidth : width));
+      const nextWidth = Math.max(COLUMN_MINIMUMS[index], startWidth + moveEvent.clientX - startX);
+      setColumnWidths(widths => {
+        const nextWidths = widths.map((width, columnIndex) => columnIndex === index ? nextWidth : width);
+        columnWidthsRef.current = nextWidths;
+        return nextWidths;
+      });
     };
 
     const handlePointerUp = () => {
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
+      persistColumnWidths(columnWidthsRef.current);
       document.body.classList.remove('is-resizing');
+      resizeCleanupRef.current = null;
     };
 
+    resizeCleanupRef.current = handlePointerUp;
     document.body.classList.add('is-resizing');
     window.addEventListener('pointermove', handlePointerMove);
     window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerUp);
   };
 
   useEffect(() => {
@@ -109,9 +148,9 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     };
   }, []);
 
-  useEffect(() => {
-    window.localStorage.setItem(COLUMN_WIDTHS_STORAGE_KEY, JSON.stringify(columnWidths));
-  }, [columnWidths]);
+  useEffect(() => () => {
+    resizeCleanupRef.current?.();
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -539,7 +578,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
 
       <div className="downloads-table flex-1 flex flex-col">
         <div className="download-table-scroll">
-          <div className="download-table-header" style={{ gridTemplateColumns: tableGridTemplate }}>
+          <div className="download-table-header" style={{ gridTemplateColumns: tableGridTemplate, minWidth: tableMinWidth }}>
             {[
               { key: 'File Name' as const, label: t($ => $.downloadTable.headers.fileName) },
               { key: 'Size' as const, label: t($ => $.downloadTable.headers.size) },
@@ -569,7 +608,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
             ))}
           </div>
 
-          <div className="download-table-body">
+          <div className="download-table-body" style={{ minWidth: tableMinWidth }}>
             <div className="download-table-list" ref={animationParent}>
               {sortedDownloads.length === 0 ? (
                 <div className="downloads-empty-state">
@@ -609,6 +648,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                       queueIndex={queuePositionsByDownloadId.get(d.id)?.index ?? -1}
                       queueLength={queuePositionsByDownloadId.get(d.id)?.length ?? 0}
                       tableGridTemplate={tableGridTemplate}
+                      tableMinWidth={tableMinWidth}
                       setContextMenu={handleContextMenu}
                       handlePause={handlePause}
                       handleResume={handleResume}

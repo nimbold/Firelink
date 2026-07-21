@@ -443,7 +443,7 @@ fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload
             (!value.is_empty() && value.chars().count() <= 512).then_some(value)
         });
     // A multi-URL handoff has no per-URL cookie scope. Keep ordinary
-    // request headers, but drop Cookie headers and the dedicated cookie field
+    // request headers, but drop credential-bearing headers and the dedicated cookie field
     // so a legacy or untrusted caller cannot reuse one session across hosts.
     let headers = normalize_headers(payload.headers, payload.media || urls.len() > 1);
     let cookie_scopes = if !payload.media && urls.len() == 1 {
@@ -548,7 +548,17 @@ fn normalize_headers(headers: Option<String>, media: bool) -> Option<String> {
         .lines()
         .filter(|line| {
             line.split_once(':')
-                .map(|(name, _)| !name.trim().eq_ignore_ascii_case("cookie"))
+                .map(|(name, _)| {
+                    !matches!(
+                        name.trim().to_ascii_lowercase().as_str(),
+                        "authorization"
+                            | "cookie"
+                            | "cookie2"
+                            | "proxy-authorization"
+                            | "set-cookie"
+                            | "set-cookie2"
+                    )
+                })
                 .unwrap_or(true)
         })
         .collect::<Vec<_>>()
@@ -881,7 +891,7 @@ mod tests {
             silent: false,
             filename: None,
             headers: Some(format!(
-                "Cookie: stale={};\nUser-Agent: Firefox",
+                "Cookie: stale={};\nCookie2: stale=1\nAuthorization: Bearer stale\nProxy-Authorization: Basic stale\nSet-Cookie: stale=1\nSet-Cookie2: stale=1\nUser-Agent: Firefox",
                 "x".repeat(64 * 1024)
             )),
             cookies: Some(format!("large={}", "x".repeat(64 * 1024))),

@@ -562,7 +562,6 @@ runEngineChecks(false);
       });
       if (base && typeof base === 'string') {
         const approvedBase = await settings.approveDownloadRoot(base);
-        settings.setBaseDownloadFolder(approvedBase);
         try {
           if (settings.categorySubfoldersEnabled) {
             const safeSubfolders = Object.fromEntries(
@@ -586,6 +585,7 @@ runEngineChecks(false);
           showToast(t($ => $.settings.locations.baseFolderCreateFailed, { detail: String(e) }), 'warning');
           return;
         }
+        settings.setBaseDownloadFolder(approvedBase);
         showToast(t($ => $.settings.locations.baseFolderUpdated), 'success');
       }
     } catch (e) {

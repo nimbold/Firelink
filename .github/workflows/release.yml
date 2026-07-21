@@ -123,7 +123,8 @@ jobs:
           if (-not $installer) { throw "Windows NSIS installer artifact was not produced." }
           $extractRoot = "$env:RUNNER_TEMP/firelink-installer"
           Remove-Item -Recurse -Force $extractRoot -ErrorAction SilentlyContinue
-          7z x $installer.FullName "-o$extractRoot" -y
+          & 7z x $installer.FullName "-o$extractRoot" -y
+          if ($LASTEXITCODE -ne 0) { throw "7z failed to extract the Windows installer payload (exit code $LASTEXITCODE)." }
           node scripts/verify-binaries.js --search-root "$extractRoot" --target ${{ matrix.target }}
 
           $portableRoot = "$env:RUNNER_TEMP/firelink-portable-payload"
@@ -249,11 +250,12 @@ jobs:
             local pattern="$1"
             local destination="$2"
             local source
-            source="$(find release-assets -maxdepth 1 -type f -name "$pattern" -print -quit)"
-            if [[ -z "$source" ]]; then
-              echo "::error::Missing release asset matching $pattern"
+            mapfile -d '' -t matches < <(find release-assets -maxdepth 1 -type f -name "$pattern" -print0)
+            if (( ${#matches[@]} != 1 )); then
+              echo "::error::Expected exactly one release asset matching $pattern, found ${#matches[@]}"
               exit 1
             fi
+            source="${matches[0]}"
             mv "$source" "release-assets/$destination"
           }
 

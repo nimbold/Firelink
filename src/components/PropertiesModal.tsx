@@ -453,7 +453,7 @@ export const PropertiesModal = () => {
                  )}
 
                  <label className="text-xs text-text-muted text-right">{t($ => $.properties.cookies)}</label>
-                 <input type="text" value={cookies} onChange={e=>setCookies(e.target.value)} disabled={transferLocked} placeholder={t($ => $.properties.cookies)} className="bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-accent disabled:opacity-50" />
+                 <input type="password" value={cookies} onChange={e=>setCookies(e.target.value)} disabled={transferLocked} autoComplete="off" placeholder={t($ => $.properties.cookies)} className="bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-accent disabled:opacity-50" />
                  
                  <div className="col-span-2 mt-2">
                    <label className="block text-xs text-text-muted mb-1.5">{t($ => $.properties.headers)}</label>

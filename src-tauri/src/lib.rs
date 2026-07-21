@@ -1912,6 +1912,8 @@ async fn fetch_metadata(
         let mut current_res = match head_req.send().await {
             Ok(response) => response,
             Err(head_error) => build_get_range().send().await.map_err(|get_error| {
+                let head_error = crate::redact_sensitive_text(&head_error.to_string());
+                let get_error = crate::redact_sensitive_text(&get_error.to_string());
                 format!(
                     "HEAD metadata request failed ({head_error}); ranged GET fallback failed ({get_error})"
                 )
@@ -2814,6 +2816,9 @@ fn approve_download_root(app_handle: tauri::AppHandle, path: String) -> Result<S
     let resolved = resolve_path(path.trim(), &app_handle);
     if !resolved.is_absolute() {
         return Err("Download root must be an absolute path".to_string());
+    }
+    if crate::path_has_symlink_component(&resolved) {
+        return Err("Download root may not contain symlink components".to_string());
     }
     let canonical = std::fs::canonicalize(&resolved)
         .map_err(|error| format!("Failed to resolve download root: {error}"))?;
@@ -3892,7 +3897,9 @@ pub(crate) async fn start_media_download_internal(
     // user-installed tools, or platform-specific executable aliases.
     let trusted_path = crate::platform::trusted_system_path()?;
 
-    let max_retries = max_tries.unwrap_or(0).max(0) as usize;
+    let max_retries = max_tries
+        .unwrap_or(crate::retry::MAX_RETRIES as i32)
+        .max(0) as usize;
     let mut strike = 0_usize;
     let mut effective_cookie_source = cookie_source.clone();
     let mut browser_cookie_fallback_used = false;

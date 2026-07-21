@@ -16,6 +16,7 @@ interface DownloadItemProps {
   queueIndex: number;
   queueLength: number;
   tableGridTemplate: string;
+  tableMinWidth: number;
   setContextMenu: (menu: { x: number; y: number; id: string }) => void;
   handlePause: (id: string, skipConfirm?: boolean) => void;
   handleResume: (item: DownloadItemType) => void;
@@ -31,6 +32,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   queueIndex,
   queueLength,
   tableGridTemplate,
+  tableMinWidth,
   setContextMenu,
   handlePause,
   handleResume,
@@ -84,7 +86,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   return (
     <div
       className={`download-row group cursor-default relative ${index % 2 !== 0 ? 'striped' : ''} ${isSelected ? 'is-selected' : ''}`}
-      style={{ gridTemplateColumns: tableGridTemplate }}
+      style={{ gridTemplateColumns: tableGridTemplate, minWidth: tableMinWidth }}
       onClick={(e) => onClick(e, download)}
       onContextMenu={(e) => {
         e.preventDefault();

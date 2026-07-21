@@ -230,11 +230,11 @@ export const AddDownloadsModal = () => {
   const closeModalFromDismissAction = useCallback(() => {
     if (isSubmitting || isSubmittingRef.current || showKeychainModal) return;
     const hasPendingInput = Boolean(
-      urls.trim() || pendingAddUrls.trim() || parsedItems.length || headers.trim() || cookies.trim()
+      urls.trim() || pendingAddUrls.trim() || parsedItems.some(item => item.selected !== false) || headers.trim() || cookies.trim()
     );
     if (hasPendingInput && !window.confirm(t($ => $.addDownloads.discardSetup))) return;
     toggleAddModal(false);
-  }, [cookies, headers, isSubmitting, parsedItems.length, pendingAddUrls, showKeychainModal, toggleAddModal, urls]);
+  }, [cookies, headers, isSubmitting, parsedItems, pendingAddUrls, showKeychainModal, toggleAddModal, urls]);
 
   useEffect(() => {
     if (!isAddModalOpen) {
@@ -1802,13 +1802,14 @@ export const AddDownloadsModal = () => {
                     <div>
                       <label className="block text-[10px] uppercase font-bold tracking-wider text-text-muted mb-1">{t($ => $.addDownloads.cookies)}</label>
                       <input
-                        type="text"
+                        type="password"
                         value={cookies}
                         onChange={e => {
                           cookiesManuallyEditedRef.current = true;
                           setCookies(e.target.value);
                         }}
                         placeholder={t($ => $.addDownloads.cookiePlaceholder)}
+                        autoComplete="off"
                         className="add-download-control w-full px-3 py-1.5 text-xs font-mono"
                         aria-label={t($ => $.addDownloads.cookies)}
                       />

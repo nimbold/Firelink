@@ -209,12 +209,21 @@ export class SystemProxyResolutionError extends Error {
 const isSystemProxyConfigurationError = (error: unknown): boolean =>
   error instanceof SystemProxyResolutionError;
 
-const stripCookieHeaders = (value: string | null | undefined): string =>
+const stripSensitiveMediaHeaders = (value: string | null | undefined): string =>
   (value || '')
     .split(/\r?\n/)
     .filter(line => {
       const separator = line.indexOf(':');
-      return separator < 0 || line.slice(0, separator).trim().toLowerCase() !== 'cookie';
+      if (separator < 0) return true;
+      const name = line.slice(0, separator).trim().toLowerCase();
+      return ![
+        'authorization',
+        'cookie',
+        'cookie2',
+        'proxy-authorization',
+        'set-cookie',
+        'set-cookie2'
+      ].includes(name);
     })
     .join('\n')
     .trim();
@@ -1035,7 +1044,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     // extension builds; ordinary captured downloads retain their cookies.
     const cookies = request.media === true ? null : request.cookies;
     const headers = request.media === true
-      ? stripCookieHeaders(request.headers) || null
+      ? stripSensitiveMediaHeaders(request.headers) || null
       : request.headers;
 
     get().openAddModalWithUrls(

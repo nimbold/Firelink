@@ -1879,7 +1879,7 @@ describe('useDownloadStore', () => {
       referer: 'https://adult.example/watch/123',
       silent: false,
       filename: null,
-      headers: `Cookie: stale=${'x'.repeat(64 * 1024)}\nUser-Agent: Firefox Test`,
+      headers: `Cookie: stale=${'x'.repeat(64 * 1024)}\nCookie2: stale=1\nAuthorization: Bearer stale\nProxy-Authorization: Basic stale\nSet-Cookie: stale=1\nSet-Cookie2: stale=1\nUser-Agent: Firefox Test`,
       cookies: `oversized=${'x'.repeat(64 * 1024)}`,
       cookie_scopes: null,
       media: true,
