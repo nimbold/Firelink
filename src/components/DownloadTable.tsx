@@ -4,7 +4,11 @@ import { useToast } from '../contexts/ToastContext';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { SidebarFilter } from './Sidebar';
 import { useAutoAnimate } from '@formkit/auto-animate/react';
-import { Play, Pause, Plus, FileText, Image as ImageIcon, Music, Film, Box, Archive, FileQuestion, ArrowDownCircle, Command, ChevronRight, ChevronUp, ChevronDown } from 'lucide-react';
+import {
+  Play, Pause, Plus, FileText, Image as ImageIcon, Music, Film, Box, Archive, FileQuestion,
+  ArrowDownCircle, Command, ChevronRight, ChevronUp, ChevronDown, MoreHorizontal,
+  AlignLeft, AlignCenter, AlignRight, GripVertical
+} from 'lucide-react';
 import { DownloadItem as DownloadItemComponent } from './DownloadItem';
 import { invokeCommand as invoke } from '../ipc';
 import {
@@ -24,25 +28,26 @@ import {
   type DownloadSortColumn,
   type DownloadSortConfig
 } from '../utils/downloadTableSorting';
+import {
+  COLUMN_ALIGNMENTS_STORAGE_KEY,
+  COLUMN_ALIGNMENT_JUSTIFY,
+  COLUMN_MINIMUMS,
+  COLUMN_ORDER_STORAGE_KEY,
+  COLUMN_WIDTHS_STORAGE_KEY,
+  DEFAULT_COLUMN_ALIGNMENTS,
+  DEFAULT_COLUMN_ORDER,
+  DEFAULT_COLUMN_WIDTHS,
+  columnIndex,
+  normalizeColumnAlignments,
+  normalizeColumnOrder,
+  normalizeColumnWidths,
+  type DownloadColumnAlignment,
+  type DownloadTableColumnKey
+} from '../utils/downloadTableColumns';
 
 interface DownloadTableProps {
   filter: SidebarFilter;
 }
-
-const DEFAULT_COLUMN_WIDTHS = [340, 100, 220, 100, 80, 170];
-const COLUMN_MINIMUMS = [0, 58, 92, 58, 48, 112];
-const COLUMN_WIDTHS_STORAGE_KEY = 'firelink-download-column-widths';
-
-const normalizeColumnWidths = (value: unknown): number[] => {
-  if (!Array.isArray(value) || value.length !== DEFAULT_COLUMN_WIDTHS.length) {
-    return DEFAULT_COLUMN_WIDTHS;
-  }
-  return value.map((width, index) =>
-    typeof width === 'number' && Number.isFinite(width)
-      ? Math.max(COLUMN_MINIMUMS[index], width)
-      : DEFAULT_COLUMN_WIDTHS[index]
-  );
-};
 
 const persistColumnWidths = (widths: number[]): void => {
   try {
@@ -51,6 +56,39 @@ const persistColumnWidths = (widths: number[]): void => {
     // Local storage can be unavailable in restricted WebView contexts.
   }
 };
+
+const persistColumnOrder = (order: DownloadTableColumnKey[]): void => {
+  try {
+    window.localStorage.setItem(COLUMN_ORDER_STORAGE_KEY, JSON.stringify(order));
+  } catch {
+    // Local storage can be unavailable in restricted WebView contexts.
+  }
+};
+
+const persistColumnAlignments = (alignments: Record<DownloadTableColumnKey, DownloadColumnAlignment>): void => {
+  try {
+    window.localStorage.setItem(COLUMN_ALIGNMENTS_STORAGE_KEY, JSON.stringify(alignments));
+  } catch {
+    // Local storage can be unavailable in restricted WebView contexts.
+  }
+};
+
+interface ColumnDragState {
+  key: DownloadTableColumnKey;
+  startX: number;
+  pointerX: number;
+  offsetX: number;
+  top: number;
+  width: number;
+  dropIndex: number;
+  markerX: number;
+}
+
+interface ColumnMenuState {
+  key: DownloadTableColumnKey;
+  x: number;
+  y: number;
+}
 
 export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   const { t } = useTranslation();
@@ -75,6 +113,17 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   const [sortConfig, setSortConfig] = useState<DownloadSortConfig>({ column: 'Date Added', direction: 'desc' });
   const [queueSortConfig, setQueueSortConfig] = useState<DownloadSortConfig | null>(null);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
+  const dragGestureRef = useRef<{
+    key: DownloadTableColumnKey;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    active: boolean;
+  } | null>(null);
+  const headerElementsRef = useRef(new Map<DownloadTableColumnKey, HTMLDivElement>());
+  const columnDragStateRef = useRef<ColumnDragState | null>(null);
+  const columnDropFlashTimerRef = useRef<number | null>(null);
+  const suppressHeaderClickRef = useRef(false);
   const selectedIdsRef = useRef(selectedIds);
   const lastSelectedIdRef = useRef(lastSelectedId);
   const sortedDownloadsRef = useRef<DownloadItem[]>([]);
@@ -85,60 +134,237 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
       const stored = JSON.parse(window.localStorage.getItem(COLUMN_WIDTHS_STORAGE_KEY) || 'null');
       return normalizeColumnWidths(stored);
     } catch {
-      return DEFAULT_COLUMN_WIDTHS;
+      return [...DEFAULT_COLUMN_WIDTHS];
     }
   });
+  const [columnOrder, setColumnOrder] = useState<DownloadTableColumnKey[]>(() => {
+    try {
+      return normalizeColumnOrder(JSON.parse(window.localStorage.getItem(COLUMN_ORDER_STORAGE_KEY) || 'null'));
+    } catch {
+      return [...DEFAULT_COLUMN_ORDER];
+    }
+  });
+  const [columnAlignments, setColumnAlignments] = useState(() => {
+    try {
+      return normalizeColumnAlignments(JSON.parse(window.localStorage.getItem(COLUMN_ALIGNMENTS_STORAGE_KEY) || 'null'));
+    } catch {
+      return { ...DEFAULT_COLUMN_ALIGNMENTS };
+    }
+  });
+  const [columnDragState, setColumnDragState] = useState<ColumnDragState | null>(null);
+  const [columnMenu, setColumnMenu] = useState<ColumnMenuState | null>(null);
+  const [columnDropFlashKey, setColumnDropFlashKey] = useState<DownloadTableColumnKey | null>(null);
   const columnWidthsRef = useRef(columnWidths);
   columnWidthsRef.current = columnWidths;
   const normalizedColumnWidths = columnWidths.map((width, index) =>
     Math.max(COLUMN_MINIMUMS[index], width)
   );
+  const orderedColumns = useMemo(() => columnOrder, [columnOrder]);
+  const orderedColumnWidths = orderedColumns.map(key => normalizedColumnWidths[columnIndex(key)]);
   const tableGridTemplate = [
-    ...normalizedColumnWidths.slice(0, -1).map(width => `${width}px`),
+    ...orderedColumnWidths.slice(0, -1).map(width => `${width}px`),
     'minmax(0, 1fr)',
-    `${normalizedColumnWidths[normalizedColumnWidths.length - 1]}px`
+    `${orderedColumnWidths[orderedColumnWidths.length - 1]}px`
   ].join(' ');
   const tableMinWidth = normalizedColumnWidths.reduce(
     (total, width) => total + width,
     0
   );
 
-  const startColumnResize = (index: number, event: React.PointerEvent<HTMLDivElement>) => {
+  const updateColumnDragState = (next: ColumnDragState | null) => {
+    columnDragStateRef.current = next;
+    setColumnDragState(next);
+  };
+
+  const getColumnDropPosition = (key: DownloadTableColumnKey, pointerX: number) => {
+    const remainingColumns = orderedColumns.filter(columnKey => columnKey !== key);
+    const targetIndex = remainingColumns.findIndex(columnKey => {
+      const element = headerElementsRef.current.get(columnKey);
+      if (!element) return false;
+      const rect = element.getBoundingClientRect();
+      return pointerX < rect.left + rect.width / 2;
+    });
+    const dropIndex = targetIndex === -1 ? remainingColumns.length : targetIndex;
+    const markerElement = dropIndex < remainingColumns.length
+      ? headerElementsRef.current.get(remainingColumns[dropIndex])
+      : headerElementsRef.current.get(remainingColumns[remainingColumns.length - 1]);
+    const markerRect = markerElement?.getBoundingClientRect();
+    const markerX = markerRect
+      ? dropIndex < remainingColumns.length ? markerRect.left : markerRect.right
+      : pointerX;
+    return { dropIndex, markerX };
+  };
+
+  const handleColumnPointerDown = (key: DownloadTableColumnKey, event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    if (event.target instanceof Element && event.target.closest('.column-resize-handle, .download-column-options')) return;
+
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragGestureRef.current = {
+      key,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      active: false,
+    };
+  };
+
+  const handleColumnPointerMove = (key: DownloadTableColumnKey, event: React.PointerEvent<HTMLDivElement>) => {
+    const gesture = dragGestureRef.current;
+    if (!gesture || gesture.key !== key || gesture.pointerId !== event.pointerId) return;
+
+    const distance = Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY);
+    if (!gesture.active) {
+      if (distance < 5) return;
+      gesture.active = true;
+      suppressHeaderClickRef.current = true;
+      const rect = event.currentTarget.getBoundingClientRect();
+      const { dropIndex, markerX } = getColumnDropPosition(key, event.clientX);
+      updateColumnDragState({
+        key,
+        startX: gesture.startX,
+        pointerX: event.clientX,
+        offsetX: event.clientX - rect.left,
+        top: rect.top,
+        width: rect.width,
+        dropIndex,
+        markerX,
+      });
+    } else {
+      const current = columnDragStateRef.current;
+      if (!current) return;
+      const { dropIndex, markerX } = getColumnDropPosition(key, event.clientX);
+      updateColumnDragState({
+        ...current,
+        pointerX: event.clientX,
+        dropIndex,
+        markerX,
+      });
+    }
+
+    event.preventDefault();
+  };
+
+  const finishColumnDrag = (key: DownloadTableColumnKey, event: React.PointerEvent<HTMLDivElement>, cancelled = false) => {
+    const gesture = dragGestureRef.current;
+    if (!gesture || gesture.key !== key || gesture.pointerId !== event.pointerId) return;
+
+    const current = columnDragStateRef.current;
+    dragGestureRef.current = null;
+    updateColumnDragState(null);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (cancelled || !gesture.active || !current) {
+      suppressHeaderClickRef.current = false;
+      return;
+    }
+    window.setTimeout(() => {
+      suppressHeaderClickRef.current = false;
+    }, 0);
+
+    const remainingColumns = orderedColumns.filter(columnKey => columnKey !== key);
+    const nextOrder = [...remainingColumns];
+    nextOrder.splice(current.dropIndex, 0, key);
+    if (nextOrder.join('|') === orderedColumns.join('|')) return;
+
+    setColumnOrder(nextOrder);
+    persistColumnOrder(nextOrder);
+    if (columnDropFlashTimerRef.current !== null) {
+      window.clearTimeout(columnDropFlashTimerRef.current);
+    }
+    setColumnDropFlashKey(key);
+    columnDropFlashTimerRef.current = window.setTimeout(() => {
+      setColumnDropFlashKey(null);
+      columnDropFlashTimerRef.current = null;
+    }, 260);
+  };
+
+  const startColumnResize = (key: DownloadTableColumnKey, event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
     resizeCleanupRef.current?.();
+    const index = columnIndex(key);
     const startX = event.clientX;
-    const startWidth = columnWidths[index];
+    const startWidth = columnWidthsRef.current[index];
 
     const handlePointerMove = (moveEvent: PointerEvent) => {
       const nextWidth = Math.max(COLUMN_MINIMUMS[index], startWidth + moveEvent.clientX - startX);
-      setColumnWidths(widths => {
-        const nextWidths = widths.map((width, columnIndex) => columnIndex === index ? nextWidth : width);
-        columnWidthsRef.current = nextWidths;
-        return nextWidths;
-      });
+      const nextWidths = columnWidthsRef.current.map((width, columnIndex) =>
+        columnIndex === index ? nextWidth : width
+      );
+      columnWidthsRef.current = nextWidths;
+      setColumnWidths(nextWidths);
     };
 
     const handlePointerUp = () => {
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
       window.removeEventListener('pointercancel', handlePointerUp);
+      window.removeEventListener('blur', handlePointerUp);
+      document.removeEventListener('visibilitychange', handlePointerUp);
       persistColumnWidths(columnWidthsRef.current);
-      document.body.classList.remove('is-resizing');
+      document.body.classList.remove('is-column-resizing');
       resizeCleanupRef.current = null;
     };
 
     resizeCleanupRef.current = handlePointerUp;
-    document.body.classList.add('is-resizing');
+    document.body.classList.add('is-column-resizing');
     window.addEventListener('pointermove', handlePointerMove);
     window.addEventListener('pointerup', handlePointerUp);
     window.addEventListener('pointercancel', handlePointerUp);
+    window.addEventListener('blur', handlePointerUp);
+    document.addEventListener('visibilitychange', handlePointerUp);
+  };
+
+  const openColumnMenu = (key: DownloadTableColumnKey, x: number, y: number) => {
+    const menuWidth = 188;
+    const menuHeight = 220;
+    const maxX = Math.max(8, window.innerWidth - menuWidth - 8);
+    const maxY = Math.max(8, window.innerHeight - menuHeight - 8);
+    setContextMenu(null);
+    setColumnMenu({
+      key,
+      x: Math.min(Math.max(8, x), maxX),
+      y: Math.min(Math.max(8, y), maxY),
+    });
+  };
+
+  const setColumnAlignment = (alignment: DownloadColumnAlignment) => {
+    if (!columnMenu) return;
+    const key = columnMenu.key;
+    setColumnAlignments(current => {
+      const next = { ...current, [key]: alignment };
+      persistColumnAlignments(next);
+      return next;
+    });
+    setColumnMenu(null);
+  };
+
+  const resetColumnLayout = () => {
+    const widths = [...DEFAULT_COLUMN_WIDTHS];
+    const order = [...DEFAULT_COLUMN_ORDER];
+    const alignments = { ...DEFAULT_COLUMN_ALIGNMENTS };
+    setColumnWidths(widths);
+    columnWidthsRef.current = widths;
+    setColumnOrder(order);
+    setColumnAlignments(alignments);
+    persistColumnWidths(widths);
+    persistColumnOrder(order);
+    persistColumnAlignments(alignments);
+    setColumnMenu(null);
   };
 
   useEffect(() => {
-    const handleCloseMenu = () => setContextMenu(null);
+    const handleCloseMenu = () => {
+      setContextMenu(null);
+      setColumnMenu(null);
+    };
     const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setContextMenu(null);
+      if (event.key === 'Escape') {
+        setContextMenu(null);
+        setColumnMenu(null);
+      }
     };
     window.addEventListener('click', handleCloseMenu);
     window.addEventListener('keydown', handleEscape);
@@ -150,6 +376,26 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
 
   useEffect(() => () => {
     resizeCleanupRef.current?.();
+    if (columnDropFlashTimerRef.current !== null) {
+      window.clearTimeout(columnDropFlashTimerRef.current);
+    }
+  }, []);
+
+  useEffect(() => {
+    const cancelColumnDrag = () => {
+      if (!dragGestureRef.current) return;
+      dragGestureRef.current = null;
+      columnDragStateRef.current = null;
+      setColumnDragState(null);
+      suppressHeaderClickRef.current = false;
+    };
+
+    window.addEventListener('blur', cancelColumnDrag);
+    document.addEventListener('visibilitychange', cancelColumnDrag);
+    return () => {
+      window.removeEventListener('blur', cancelColumnDrag);
+      document.removeEventListener('visibilitychange', cancelColumnDrag);
+    };
   }, []);
 
   useEffect(() => {
@@ -363,6 +609,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
       setSelectedIds(new Set([menu.id]));
       setLastSelectedId(menu.id);
     }
+    setColumnMenu(null);
     setContextMenu(menu);
   }, []);
 
@@ -513,6 +760,19 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     }
   }, []);
 
+  const columnDefinitions: Array<{ key: DownloadTableColumnKey; label: string }> = [
+    { key: 'File Name', label: t($ => $.downloadTable.headers.fileName) },
+    { key: 'Size', label: t($ => $.downloadTable.headers.size) },
+    { key: 'Status', label: t($ => $.downloadTable.headers.status) },
+    { key: 'Speed', label: t($ => $.downloadTable.headers.speed) },
+    { key: 'ETA', label: t($ => $.downloadTable.headers.eta) },
+    { key: 'Date Added', label: t($ => $.downloadTable.headers.dateAdded) },
+  ];
+  const columnLabels = new Map(columnDefinitions.map(column => [column.key, column.label]));
+  const columnAlignmentStyle = (key: DownloadTableColumnKey): React.CSSProperties => ({
+    '--column-justify': COLUMN_ALIGNMENT_JUSTIFY[columnAlignments[key]],
+  } as React.CSSProperties);
+
   return (
     <div className="downloads-view flex-1 flex flex-col h-full min-w-0">
       <div
@@ -578,35 +838,109 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
 
       <div className="downloads-table flex-1 flex flex-col">
         <div className="download-table-scroll">
-          <div className="download-table-header" style={{ gridTemplateColumns: tableGridTemplate, minWidth: tableMinWidth }}>
-            {[
-              { key: 'File Name' as const, label: t($ => $.downloadTable.headers.fileName) },
-              { key: 'Size' as const, label: t($ => $.downloadTable.headers.size) },
-              { key: 'Status' as const, label: t($ => $.downloadTable.headers.status) },
-              { key: 'Speed' as const, label: t($ => $.downloadTable.headers.speed) },
-              { key: 'ETA' as const, label: t($ => $.downloadTable.headers.eta) },
-              { key: 'Date Added' as const, label: t($ => $.downloadTable.headers.dateAdded) },
-            ].map(({ key, label }, index) => (
-              <div 
-                key={key}
-                className={`${index === 5 ? 'download-cell-right' : ''} cursor-pointer hover:text-text-primary transition-colors flex items-center justify-between`}
-                onClick={() => handleSort(key)}
-              >
-                <div className="flex items-center gap-1 w-full h-full select-none">
-                  <span>{label}</span>
-                  {(isQueueFilter ? queueSortConfig : sortConfig)?.column === key && (
-                    (isQueueFilter ? queueSortConfig : sortConfig)?.direction === 'asc'
-                      ? <ChevronUp size={14} />
-                      : <ChevronDown size={14} />
-                  )}
-                </div>
+          <div
+            className={`download-table-header ${columnDragState ? 'is-column-dragging' : ''}`}
+            style={{ gridTemplateColumns: tableGridTemplate, minWidth: tableMinWidth }}
+          >
+            {orderedColumns.map(key => {
+              const label = columnLabels.get(key) ?? key;
+              const activeSort = isQueueFilter ? queueSortConfig : sortConfig;
+              const isDragging = columnDragState?.key === key;
+              const isDropFlashing = columnDropFlashKey === key;
+              return (
                 <div
-                  className="column-resize-handle"
-                  onPointerDown={(event) => startColumnResize(index, event)}
-                />
-              </div>
-            ))}
+                  key={key}
+                  ref={element => {
+                    if (element) headerElementsRef.current.set(key, element);
+                    else headerElementsRef.current.delete(key);
+                  }}
+                  data-column-key={key}
+                  role="columnheader"
+                  aria-sort={activeSort?.column === key
+                    ? activeSort.direction === 'asc' ? 'ascending' : 'descending'
+                    : 'none'}
+                  className={`download-column-header group ${isDragging ? 'is-dragging' : ''} ${isDropFlashing ? 'is-drop-flashing' : ''}`}
+                  style={columnAlignmentStyle(key)}
+                  onContextMenu={event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    openColumnMenu(key, event.clientX, event.clientY);
+                  }}
+                  onPointerDown={event => handleColumnPointerDown(key, event)}
+                  onPointerMove={event => handleColumnPointerMove(key, event)}
+                  onPointerUp={event => finishColumnDrag(key, event)}
+                  onPointerCancel={event => finishColumnDrag(key, event, true)}
+                  onLostPointerCapture={event => finishColumnDrag(key, event, true)}
+                >
+                  <button
+                    type="button"
+                    className="download-column-header-content"
+                    onClick={event => {
+                      event.stopPropagation();
+                      if (suppressHeaderClickRef.current) {
+                        suppressHeaderClickRef.current = false;
+                        return;
+                      }
+                      handleSort(key);
+                    }}
+                    title={t($ => $.downloadTable.columnOptions.dragToReorder)}
+                  >
+                    <span>{label}</span>
+                    {activeSort?.column === key && (
+                      activeSort.direction === 'asc'
+                        ? <ChevronUp size={14} aria-hidden="true" />
+                        : <ChevronDown size={14} aria-hidden="true" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    className="download-column-options"
+                    aria-label={t($ => $.downloadTable.columnOptions.open, { column: label })}
+                    title={t($ => $.downloadTable.columnOptions.open, { column: label })}
+                    onPointerDown={event => event.stopPropagation()}
+                    onClick={event => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      openColumnMenu(key, rect.left, rect.bottom + 6);
+                    }}
+                  >
+                    <MoreHorizontal size={14} aria-hidden="true" />
+                  </button>
+                  <div
+                    className="column-resize-handle"
+                    aria-hidden="true"
+                    onPointerDown={event => {
+                      event.stopPropagation();
+                      startColumnResize(key, event);
+                    }}
+                  />
+                </div>
+              );
+            })}
           </div>
+
+          {columnDragState && (
+            <>
+              <div
+                className="download-column-drop-marker"
+                style={{ top: columnDragState.top, left: columnDragState.markerX }}
+                aria-hidden="true"
+              />
+              <div
+                className="download-column-drag-preview"
+                style={{
+                  top: columnDragState.top,
+                  left: columnDragState.pointerX - columnDragState.offsetX,
+                  width: columnDragState.width,
+                }}
+                aria-hidden="true"
+              >
+                <GripVertical size={14} />
+                <span>{columnLabels.get(columnDragState.key) ?? columnDragState.key}</span>
+              </div>
+            </>
+          )}
 
           <div className="download-table-body" style={{ minWidth: tableMinWidth }}>
             <div className="download-table-list" ref={animationParent}>
@@ -647,6 +981,8 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                       index={index}
                       queueIndex={queuePositionsByDownloadId.get(d.id)?.index ?? -1}
                       queueLength={queuePositionsByDownloadId.get(d.id)?.length ?? 0}
+                      columnOrder={orderedColumns}
+                      columnAlignments={columnAlignments}
                       tableGridTemplate={tableGridTemplate}
                       tableMinWidth={tableMinWidth}
                       setContextMenu={handleContextMenu}
@@ -666,14 +1002,56 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
         </div>
       </div>
 
+      {columnMenu && (
+        <div
+          role="menu"
+          className="download-column-menu app-modal fixed z-50 min-w-[188px] overflow-hidden py-1.5 text-[12px] font-medium text-text-primary"
+          style={{ top: columnMenu.y, left: columnMenu.x }}
+          onClick={event => event.stopPropagation()}
+        >
+          <div className="download-column-menu-title px-3 py-1.5 text-text-muted">
+            {columnLabels.get(columnMenu.key) ?? columnMenu.key}
+          </div>
+          <div className="download-column-menu-label px-3 pb-1 text-[10px] uppercase tracking-[0.12em] text-text-muted">
+            {t($ => $.downloadTable.columnOptions.alignContent)}
+          </div>
+          {([
+            ['left', AlignLeft],
+            ['center', AlignCenter],
+            ['right', AlignRight],
+          ] as const).map(([alignment, Icon]) => (
+            <button
+              key={alignment}
+              type="button"
+              role="menuitemradio"
+              aria-checked={columnAlignments[columnMenu.key] === alignment}
+              className="download-column-menu-item flex w-full items-center gap-2 px-3 py-1.5 text-start hover:bg-item-hover"
+              onClick={() => setColumnAlignment(alignment)}
+            >
+              <Icon size={14} aria-hidden="true" />
+              <span>{t($ => $.downloadTable.columnOptions[alignment])}</span>
+            </button>
+          ))}
+          <div className="my-1 h-px bg-border-color" />
+          <button
+            type="button"
+            className="download-column-menu-item flex w-full items-center gap-2 px-3 py-1.5 text-start hover:bg-item-hover"
+            onClick={resetColumnLayout}
+          >
+            <GripVertical size={14} aria-hidden="true" />
+            <span>{t($ => $.downloadTable.columnOptions.resetLayout)}</span>
+          </button>
+        </div>
+      )}
+
       {/* Floating Context Menu */}
       {contextMenu && contextItem && (
         <div
           role="menu"
           className="app-modal fixed z-50 min-w-[180px] overflow-visible py-1.5 text-[12px] font-medium text-text-primary"
           style={{
-             top: Math.min(contextMenu.y, window.innerHeight - 300),
-             left: Math.min(contextMenu.x, window.innerWidth - 200)
+             top: Math.min(Math.max(8, contextMenu.y), Math.max(8, window.innerHeight - 300)),
+             left: Math.min(Math.max(8, contextMenu.x), Math.max(8, window.innerWidth - 200))
           }}
           onClick={(e) => e.stopPropagation()}
         >

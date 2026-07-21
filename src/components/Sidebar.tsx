@@ -241,7 +241,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
 
     if (isRenaming) {
       return (
-        <div className="flex items-center px-2.5 py-1 rounded-lg mb-0.5 bg-item-hover">
+        <div className="sidebar-queue-editor flex items-center px-2.5 py-1 rounded-lg mb-0.5 bg-item-hover">
           <List className="w-4 h-4 me-2 text-text-secondary" strokeWidth={2} />
           <input
             ref={renameInputRef}
@@ -369,7 +369,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             <QueueItem key={queue.id} queue={queue} />
           ))}
           {isAddingQueue ? (
-            <div className="flex items-center px-3.5 py-1.5 rounded-lg bg-item-hover mb-1">
+            <div className="sidebar-queue-editor flex items-center px-3.5 py-1.5 rounded-lg bg-item-hover mb-1">
               <Plus className="w-4 h-4 me-2 text-text-secondary shrink-0" strokeWidth={2} />
               <input
                 ref={addInputRef}
@@ -403,7 +403,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
                 setIsAddingQueue(true);
                 setNewQueueName('');
               }}
-              className="flex w-full items-center px-3.5 py-1.5 rounded-lg text-[13px] text-text-muted hover:bg-item-hover hover:text-text-secondary cursor-default transition-colors mb-1"
+              className="sidebar-add-queue-button flex w-full items-center px-3.5 py-1.5 rounded-lg text-[13px] text-text-muted hover:bg-item-hover hover:text-text-secondary cursor-default transition-colors mb-1"
             >
               <Plus className="w-4 h-4 me-2 shrink-0" strokeWidth={2} />
               <span className="truncate">{t($ => $.actions.addNewQueue)}</span>
