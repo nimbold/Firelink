@@ -15,6 +15,12 @@ use ts_rs::TS;
 /// Default capacity when no setting is read yet.
 pub const DEFAULT_MAX_CONCURRENT: usize = 3;
 pub const MEDIA_RUN_CANCELLED: &str = "__firelink_media_run_cancelled__";
+pub const DOWNLOAD_CONNECTIONS_MIN: i32 = 1;
+pub const DOWNLOAD_CONNECTIONS_MAX: i32 = 16;
+
+pub fn clamp_download_connections(connections: i32) -> i32 {
+    connections.clamp(DOWNLOAD_CONNECTIONS_MIN, DOWNLOAD_CONNECTIONS_MAX)
+}
 
 type Aria2ControlLocks = Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>;
 
@@ -481,6 +487,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .await
             .get(id)
             .and_then(|payload| payload.connections)
+            .map(clamp_download_connections)
     }
 
     pub fn set_aria2_global_speed_limit(&self, limit: Option<String>) {
@@ -1670,7 +1677,11 @@ enum BoundedRangeSupport {
 }
 
 async fn effective_aria2_connections(id: &str, payload: &SpawnPayload) -> i32 {
-    let requested = payload.connections.unwrap_or(1).max(1);
+    let requested = clamp_download_connections(
+        payload
+            .connections
+            .unwrap_or(DOWNLOAD_CONNECTIONS_MIN),
+    );
     if requested <= 1 {
         return requested;
     }
@@ -1876,7 +1887,7 @@ fn apply_aria2_connection_options(
     options: &mut serde_json::Map<String, serde_json::Value>,
     connections: i32,
 ) {
-    let connections = connections.max(1);
+    let connections = clamp_download_connections(connections);
     options.insert(
         "split".to_string(),
         serde_json::json!(connections.to_string()),
@@ -2272,6 +2283,19 @@ mod tests {
         assert_eq!(
             options.get("max-connection-per-server"),
             Some(&serde_json::json!("1"))
+        );
+    }
+
+    #[test]
+    fn aria2_connection_options_clamp_untrusted_connection_counts() {
+        let mut options = serde_json::Map::new();
+
+        apply_aria2_connection_options(&mut options, i32::MAX);
+
+        assert_eq!(options.get("split"), Some(&serde_json::json!("16")));
+        assert_eq!(
+            options.get("max-connection-per-server"),
+            Some(&serde_json::json!("16"))
         );
     }
 

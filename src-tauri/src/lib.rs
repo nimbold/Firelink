@@ -2061,13 +2061,10 @@ const MEDIA_METADATA_TIMEOUT: Duration = Duration::from_secs(55);
 const MEDIA_METADATA_CACHE_MAX_ENTRIES: usize = 128;
 const FILE_METADATA_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_SHELL_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
-const MEDIA_CONNECTIONS_MIN: i32 = 1;
-const MEDIA_CONNECTIONS_MAX: i32 = 16;
-
 fn normalize_media_connections(connections: Option<i32>) -> i32 {
-    connections
-        .unwrap_or(MEDIA_CONNECTIONS_MAX)
-        .clamp(MEDIA_CONNECTIONS_MIN, MEDIA_CONNECTIONS_MAX)
+    crate::queue::clamp_download_connections(
+        connections.unwrap_or(crate::queue::DOWNLOAD_CONNECTIONS_MAX),
+    )
 }
 
 struct ShellCommandOutput {
