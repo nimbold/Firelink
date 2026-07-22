@@ -37,7 +37,6 @@ import {
   DEFAULT_COLUMN_ALIGNMENTS,
   DEFAULT_COLUMN_ORDER,
   DEFAULT_COLUMN_WIDTHS,
-  DOWNLOAD_ACTIONS_COLUMN_WIDTH,
   buildColumnGridTemplate,
   columnIndex,
   getColumnGridColumn,
@@ -188,7 +187,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   const tableGridTemplate = buildColumnGridTemplate(orderedColumns, normalizedColumnWidths);
   const tableMinWidth = normalizedColumnWidths.reduce(
     (total, width) => total + width,
-    DOWNLOAD_ACTIONS_COLUMN_WIDTH
+    0
   );
   const tableMinWidthWithPadding = 'calc(' + tableMinWidth + 'px + var(--download-row-padding-x) + var(--download-row-padding-x))';
   const downloadsViewRef = useRef<HTMLDivElement>(null);

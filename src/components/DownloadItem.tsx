@@ -11,6 +11,8 @@ import {
 } from '../utils/downloadProgress';
 import {
   COLUMN_ALIGNMENT_JUSTIFY,
+  DOWNLOAD_ACTIONS_COLUMN_WIDTH,
+  DOWNLOAD_ACTIONS_VIEWPORT_INSET,
   getColumnGridColumn,
   type DownloadColumnAlignment,
   type DownloadTableColumnKey
@@ -53,6 +55,81 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
 }) => {
   const { t } = useTranslation();
   const liveProgress = useDownloadProgressStore(state => state.progressMap[download.id]);
+  const rowRef = React.useRef<HTMLDivElement>(null);
+  const [isRowHovered, setIsRowHovered] = React.useState(false);
+  const [isRowFocused, setIsRowFocused] = React.useState(false);
+  const [actionPosition, setActionPosition] = React.useState<React.CSSProperties | undefined>();
+  const isActionVisible = isRowHovered || isRowFocused;
+
+  const updateActionPosition = React.useCallback(() => {
+    const row = rowRef.current;
+    const view = row?.closest<HTMLElement>('.downloads-view');
+    if (!row || !view) return;
+
+    const horizontalViewport = row.closest<HTMLElement>('.download-table-scroll') ?? view;
+    const verticalViewport = row.closest<HTMLElement>('.download-table-list') ?? view;
+    const rowRect = row.getBoundingClientRect();
+    const horizontalViewportRect = horizontalViewport.getBoundingClientRect();
+    const verticalViewportRect = verticalViewport.getBoundingClientRect();
+    const viewportTolerance = 1;
+    const visibleTop = Math.max(rowRect.top, verticalViewportRect.top);
+    const visibleBottom = Math.min(rowRect.bottom, verticalViewportRect.bottom);
+    const visibleHeight = Math.max(0, visibleBottom - visibleTop);
+    const isVisible = visibleHeight > viewportTolerance;
+    const actionHeight = Math.min(rowRect.height, visibleHeight);
+    const nextPosition: React.CSSProperties = {
+      top: visibleTop,
+      right: Math.max(0, window.innerWidth - horizontalViewportRect.right) + DOWNLOAD_ACTIONS_VIEWPORT_INSET,
+      height: actionHeight,
+      overflow: actionHeight < rowRect.height ? 'hidden' : 'visible',
+      visibility: isVisible ? 'visible' : 'hidden',
+    };
+
+    setActionPosition(previous => (
+      previous?.top === nextPosition.top &&
+      previous?.right === nextPosition.right &&
+      previous?.height === nextPosition.height &&
+      previous?.overflow === nextPosition.overflow &&
+      previous?.visibility === nextPosition.visibility
+        ? previous
+        : nextPosition
+    ));
+  }, []);
+
+  React.useEffect(() => {
+    if (!isActionVisible) return;
+
+    let frame = 0;
+    const schedulePositionUpdate = () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        updateActionPosition();
+      });
+    };
+
+    const row = rowRef.current;
+    const view = row?.closest<HTMLElement>('.downloads-view');
+    const horizontalViewport = row?.closest<HTMLElement>('.download-table-scroll');
+    const verticalViewport = row?.closest<HTMLElement>('.download-table-list');
+    const resizeObserver = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(schedulePositionUpdate);
+
+    updateActionPosition();
+    window.addEventListener('resize', schedulePositionUpdate);
+    window.addEventListener('scroll', schedulePositionUpdate, true);
+    [row, view, horizontalViewport, verticalViewport].forEach(element => {
+      if (element) resizeObserver?.observe(element);
+    });
+
+    return () => {
+      window.removeEventListener('resize', schedulePositionUpdate);
+      window.removeEventListener('scroll', schedulePositionUpdate, true);
+      resizeObserver?.disconnect();
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [isActionVisible, updateActionPosition]);
 
   const displayFraction = download.status === 'downloading'
     ? liveProgress?.fraction ?? download.fraction ?? 0
@@ -139,12 +216,15 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     Status: (
       <div
         className="download-column-cell download-status-cell"
+        data-column-alignment={columnAlignments.Status}
         style={columnStyle('Status')}
       >
         {download.status === 'completed' ? (
-          <span className="download-cell-content download-status download-status-completed" title={downloadStatusLabel}>
-            {downloadStatusLabel}
-          </span>
+          <div className="download-cell-content download-status-content download-status-content-static">
+            <span className="download-status download-status-completed" title={downloadStatusLabel}>
+              {downloadStatusLabel}
+            </span>
+          </div>
         ) : (
           <div className="download-cell-content download-status-content">
             <div className="download-progress-track">
@@ -226,7 +306,11 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
 
   const rowActions = (
     <div
-      className="download-row-actions hidden group-hover:flex items-center gap-0.5"
+      className="download-row-actions items-center gap-0.5"
+      style={{
+        ...actionPosition,
+        width: `${DOWNLOAD_ACTIONS_COLUMN_WIDTH}px`,
+      }}
       onClick={(e) => e.stopPropagation()}
       onDoubleClick={(e) => e.stopPropagation()}
     >
@@ -275,8 +359,30 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
 
   return (
     <div
-      className={`download-row group cursor-default relative ${index % 2 !== 0 ? 'striped' : ''} ${isSelected ? 'is-selected' : ''}`}
+      ref={rowRef}
+      className={`download-row group cursor-default relative ${isActionVisible ? 'has-visible-actions' : ''} ${index % 2 !== 0 ? 'striped' : ''} ${isSelected ? 'is-selected' : ''}`}
       style={{ gridTemplateColumns: tableGridTemplate, minWidth: tableMinWidth }}
+      tabIndex={0}
+      onMouseEnter={() => {
+        setIsRowHovered(true);
+        updateActionPosition();
+      }}
+      onMouseLeave={event => {
+        const nextTarget = event.relatedTarget;
+        if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+          setIsRowHovered(false);
+        }
+      }}
+      onFocus={() => {
+        setIsRowFocused(true);
+        updateActionPosition();
+      }}
+      onBlur={event => {
+        const nextTarget = event.relatedTarget;
+        if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+          setIsRowFocused(false);
+        }
+      }}
       onClick={(e) => onClick(e, download)}
       onContextMenu={(e) => {
         e.preventDefault();

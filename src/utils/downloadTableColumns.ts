@@ -14,7 +14,10 @@ export const DEFAULT_COLUMN_ORDER = [
 
 export const DEFAULT_COLUMN_WIDTHS = [340, 100, 220, 100, 80, 170] as const;
 export const COLUMN_MINIMUMS = [160, 58, 92, 58, 48, 144] as const;
-export const DOWNLOAD_ACTIONS_COLUMN_WIDTH = 32;
+// Width of the fixed action rail shown while hovering a row.
+export const DOWNLOAD_ACTIONS_COLUMN_WIDTH = 120;
+// Keep the fixed rail clear of the viewport edge and horizontal scrollbar.
+export const DOWNLOAD_ACTIONS_VIEWPORT_INSET = 8;
 
 export const COLUMN_WIDTHS_STORAGE_KEY = 'firelink-download-column-widths';
 export const COLUMN_ORDER_STORAGE_KEY = 'firelink-download-column-order';
@@ -99,7 +102,6 @@ export const buildColumnGridTemplate = (
     ...orderedWidths.slice(0, -1).map(width => `${width}px`),
     'minmax(0, 1fr)',
     `${orderedWidths[orderedWidths.length - 1]}px`,
-    `${DOWNLOAD_ACTIONS_COLUMN_WIDTH}px`,
   ].join(' ');
 };
 

@@ -54,9 +54,9 @@ describe('download table column preferences', () => {
     expect(normalizeColumnAlignments(null)).toEqual(DEFAULT_COLUMN_ALIGNMENTS);
   });
 
-  it('keeps user widths fixed while reserving a shared trailing spacer track', () => {
+  it('keeps user widths fixed while reserving a shared spacer before the final column', () => {
     expect(buildColumnGridTemplate([...DEFAULT_COLUMN_ORDER], [...DEFAULT_COLUMN_WIDTHS])).toBe(
-      '340px 100px 220px 100px 80px minmax(0, 1fr) 170px 32px'
+      '340px 100px 220px 100px 80px minmax(0, 1fr) 170px'
     );
     expect(getColumnGridColumn('Date Added', [...DEFAULT_COLUMN_ORDER])).toBe('7');
     expect(getColumnGridColumn('Date Added', ['Date Added', ...DEFAULT_COLUMN_ORDER.slice(0, -1)])).toBeUndefined();
