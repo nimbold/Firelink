@@ -666,12 +666,20 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     addToast({ message: `${message}: ${detail}`, variant: 'error', isActionable: true });
   }, [addToast]);
 
+  const queueRowsById = (list: HTMLDivElement): Map<string, HTMLElement> => {
+    const rows = new Map<string, HTMLElement>();
+    for (const element of Array.from(list.children)) {
+      if (!(element instanceof HTMLElement)) continue;
+      const id = element.dataset.downloadId;
+      if (id) rows.set(id, element);
+    }
+    return rows;
+  };
+
   const queueRowForId = (id: string): HTMLElement | null => {
     const list = queueListElementRef.current;
     if (!list) return null;
-    return Array.from(list.children).find(element =>
-      element instanceof HTMLElement && element.dataset.downloadId === id
-    ) as HTMLElement | undefined || null;
+    return queueRowsById(list).get(id) || null;
   };
 
   const queueDropPosition = (
@@ -682,10 +690,13 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     const list = queueListElementRef.current;
     if (!list || items.length === 0) return { targetIndex: 0, markerTop: 0 };
     const listRect = list.getBoundingClientRect();
+    // Build the DOM index once per pointer update. Looking up each row by
+    // scanning list.children inside the loop made large queue drags O(n^2).
+    const rowsById = queueRowsById(list);
     let boundaryIndex = items.length;
     let markerTop = 0;
     for (let index = 0; index < items.length; index += 1) {
-      const row = queueRowForId(items[index].id);
+      const row = rowsById.get(items[index].id);
       if (!row) continue;
       const rect = row.getBoundingClientRect();
       if (clientY < rect.top + rect.height / 2) {
