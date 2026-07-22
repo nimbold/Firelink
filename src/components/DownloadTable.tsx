@@ -314,6 +314,18 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
       if (distance < 5) return;
       gesture.active = true;
       suppressHeaderClickRef.current = true;
+      const captureTarget = columnDragCaptureTargetRef.current;
+      if (captureTarget) {
+        try {
+          // Delay capture until the gesture is a real drag. A click on the
+          // sortable header button must retain its original target so the
+          // browser can dispatch the button click normally.
+          captureTarget.setPointerCapture(pointerId);
+        } catch {
+          // Window listeners below still handle browsers that reject capture
+          // after the pointer has already been cancelled.
+        }
+      }
       const target = columnDragTargetRef.current;
       const rect = target?.getBoundingClientRect();
       if (!rect) return;
@@ -372,16 +384,6 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     columnDragTargetRef.current = target;
     columnDragCaptureTargetRef.current = captureTarget;
     columnDragCapturePointerIdRef.current = pointerId;
-    if (captureTarget) {
-      try {
-        // Capture on the stable grid parent, never on a column that is
-        // structurally moved during the live reorder.
-        captureTarget.setPointerCapture(pointerId);
-      } catch {
-        // Window listeners below still handle browsers that reject capture
-        // after the pointer has already been cancelled.
-      }
-    }
     columnDragLayoutRef.current = null;
     dragGestureRef.current = {
       key,
