@@ -5,22 +5,36 @@ All notable changes to Firelink will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.2] - 2026-07-21
+## [1.2.0] - 2026-07-22
 
-This patch release hardens download lifecycle handling, localization, and packaged release checks.
+This release makes everyday download management easier to organize, review, and trust across the desktop app and browser extension.
 
-### New
-- Add localized desktop UI coverage for Persian, Hebrew, Russian, Ukrainian, and Simplified Chinese.
-- Add optional batch folders and safer reuse of unfinished downloads with matching filenames.
+### New features
 
-### Improved
-- Make pause, resume, remove, redownload, queue, scheduler, and settings actions safer when operations overlap.
-- Improve first-open navigation, RTL layout, browser-cookie recovery, and download metadata handling.
-- Strengthen packaged engine, Windows portable, Linux package, and release-asset verification.
+- **Localized desktop interface** for Persian, Hebrew, Russian, Ukrainian, and Simplified Chinese, including RTL layouts. These translations are currently produced with help from LLMs and need user review; please report corrections so they can improve.
+- **Customizable download table** with selectable columns, drag-to-reorder controls, sorting, clearer size alignment, and better bulk actions.
+- **Optional batch folders** for multi-link downloads, addressing [#27](https://github.com/nimbold/Firelink/issues/27). Firelink can suggest an editable folder name from the page title or common filename while keeping the existing category-based behavior as the default.
+- **Remember the last Add-window directory**, with an opt-in setting so users remain in control of where it applies.
+- **Per-download connection controls** for normal and media transfers, with the active aria2 connection count shown in the download table.
+- **Latest Firelink Companion 2.0.6** in the `Extensions/Browser` submodule, including selected-link batch context and safer automatic capture recovery.
 
-### Fixed
-- Prevent stale or duplicate lifecycle work from deleting or resurrecting the wrong download.
-- Keep missed completion events, localized state, and browser handoffs from leaving misleading UI state.
+### Improvements
+
+- Make pause, resume, retry, remove, redownload, queue, scheduler, and settings actions safer when several operations overlap or background events arrive late.
+- Reuse unfinished downloads when their filenames match, while reducing the chance of stale state creating duplicate or misleading rows.
+- Improve first-open navigation, lazy page loading, table layout, drag interactions, sorting, and window-control placement.
+- Improve RTL behavior while keeping the download table's physical file columns readable.
+- Handle locked browser cookie databases more gracefully and keep browser metadata and authenticated captures on the correct path.
+- Enforce startup consent before accessing saved credentials and make keychain-related startup behavior more predictable.
+- Refresh dependencies and bundled engines, and strengthen checks for macOS, Windows portable, Linux packages, release assets, and release version identity.
+- Refine localized wording, including Persian status labels.
+
+### Fixes
+
+- Prevent stale lifecycle work, duplicate terminal events, and overlapping controls from deleting, reviving, or leaving the wrong download in a misleading state.
+- Keep missed completion events and connection-limit updates from leaving a finished or active download visually stuck.
+- Bound backend connection counts so user-selected limits are respected instead of allowing overlapping settings to exceed them.
+- Keep extension handoffs in the Add window and make selected-link batches retain their page context for folder suggestions.
 
 ## [1.1.1] - 2026-07-17
 
