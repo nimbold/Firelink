@@ -217,8 +217,15 @@ export const PropertiesModal = () => {
     item.status === 'processing' ||
     item.status === 'retrying';
   const connectionStatus = (() => {
-    if (item.isMedia) return t($ => $.properties.connectionsUnavailable);
     if (!connectionTelemetryActive) return String(configuredConnections);
+    // yt-dlp exposes the configured fragment limit through Firelink, but its
+    // progress stream does not expose a reliable active-worker count. Keep
+    // the selected limit visible without presenting it as an active count.
+    if (item.isMedia) {
+      return t($ => $.properties.connectionCountUnknown, {
+        total: configuredConnections,
+      });
+    }
     if (typeof observedActiveConnections === 'number') {
       return t($ => $.properties.connectionCount, {
         active: observedActiveConnections,
