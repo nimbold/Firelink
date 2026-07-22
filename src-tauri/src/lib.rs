@@ -2948,6 +2948,11 @@ pub struct AppState {
     pub queue_manager: Arc<queue::QueueManager>,
 }
 
+#[derive(Default)]
+struct MainWindowRestoreState {
+    requested: AtomicBool,
+}
+
 const KEYCHAIN_CONSENT_REQUIRED_ERROR: &str =
     "Credential-store access requires explicit user consent";
 const KEYCHAIN_GRANT_IN_PROGRESS_ERROR: &str =
@@ -3139,10 +3144,24 @@ fn parse_firelink_deep_link(deep_link: &url::Url) -> FirelinkDeepLink {
 }
 
 fn restore_main_window(app_handle: &tauri::AppHandle) {
-    if let Some(window) = app_handle.get_webview_window("main") {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+    let Some(window) = app_handle.get_webview_window("main") else {
+        if let Some(state) = app_handle.try_state::<MainWindowRestoreState>() {
+            state.requested.store(true, Ordering::Release);
+        }
+        return;
+    };
+
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+fn restore_pending_main_window(app_handle: &tauri::AppHandle) {
+    if app_handle
+        .try_state::<MainWindowRestoreState>()
+        .is_some_and(|state| state.requested.swap(false, Ordering::AcqRel))
+    {
+        restore_main_window(app_handle);
     }
 }
 
@@ -8583,12 +8602,9 @@ pub fn run() {
     let aria2_port_clone = Arc::clone(&aria2_port);
     let aria2_secret = uuid::Uuid::new_v4().to_string();
     tauri::Builder::default()
+        .manage(MainWindowRestoreState::default())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                window.show().unwrap();
-                window.set_focus().unwrap();
-            }
+            restore_main_window(app);
         }))
         .plugin(tauri_plugin_deep_link::init())
         .manage(Aria2DaemonGuard::new())
@@ -8627,6 +8643,13 @@ pub fn run() {
             log::info!("==========================");
             build_main_tray(app.handle())
                 .map_err(|error| format!("failed to create tray menu: {error}"))?;
+            #[cfg(target_os = "macos")]
+            {
+                let app_menu = tauri::menu::Menu::default(app.handle())
+                    .map_err(|error| format!("failed to create application menu: {error}"))?;
+                app.set_menu(app_menu)
+                    .map_err(|error| format!("failed to install application menu: {error}"))?;
+            }
 
             let database = crate::db::init(&storage_layout)
                 .map_err(|error| format!("failed to initialize persistence: {error}"))?;
@@ -8718,6 +8741,7 @@ pub fn run() {
             main_window_builder
                 .build()
                 .map_err(|error| format!("failed to create main window: {error}"))?;
+            restore_pending_main_window(app.handle());
 
             #[cfg(target_os = "windows")]
             if let Some(window) = app.get_webview_window("main") {
@@ -9257,11 +9281,21 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            if let tauri::RunEvent::ExitRequested { .. } = event {
+        .run(|app_handle, event| match event {
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } => {
+                if !has_visible_windows {
+                    restore_main_window(app_handle);
+                }
+            }
+            tauri::RunEvent::ExitRequested { .. } => {
                 let state = app_handle.state::<AppState>();
                 let _ = state.extension_server_shutdown.send(true);
             }
+            _ => {}
         });
 }
 mod db;
