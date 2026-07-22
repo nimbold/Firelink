@@ -1927,6 +1927,7 @@ html[data-list-density="relaxed"] {
   min-width: 0;
   overflow: hidden;
   padding-inline: var(--download-column-padding-x);
+  padding-right: calc(var(--download-column-padding-x) + 22px);
   cursor: grab;
   transition: background-color 120ms ease, opacity 120ms ease, box-shadow 120ms ease;
 }
@@ -1937,7 +1938,6 @@ html[data-list-density="relaxed"] {
 
 .download-column-header.is-dragging {
   opacity: 0;
-  pointer-events: none;
 }
 
 .download-column-header.is-drop-flashing {
@@ -2126,10 +2126,6 @@ html[data-list-density="relaxed"] .download-ghost-row {
   overflow: hidden;
 }
 
-.download-row:hover .download-column-cell--trailing .download-cell-content {
-  visibility: hidden;
-}
-
 .download-file-cell {
   direction: ltr;
   text-align: left;
@@ -2205,17 +2201,13 @@ html[data-list-density="relaxed"] .download-ghost-row {
 }
 
 .download-row-actions {
-  position: absolute;
-  top: 50%;
-  right: var(--download-row-padding-x);
-  left: auto;
+  grid-column: 8;
+  align-self: stretch;
+  align-items: center;
+  justify-content: flex-end;
   z-index: 2;
-  transform: translateY(-50%);
-  padding-inline-start: 4px;
-  border-radius: 6px;
-  background: hsl(var(--surface-overlay) / 0.94);
   max-width: 100%;
-  padding-inline: 4px;
+  padding: 0;
 }
 
 .download-column-menu {

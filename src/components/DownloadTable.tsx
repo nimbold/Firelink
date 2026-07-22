@@ -37,6 +37,7 @@ import {
   DEFAULT_COLUMN_ALIGNMENTS,
   DEFAULT_COLUMN_ORDER,
   DEFAULT_COLUMN_WIDTHS,
+  DOWNLOAD_ACTIONS_COLUMN_WIDTH,
   buildColumnGridTemplate,
   columnIndex,
   getColumnGridColumn,
@@ -92,6 +93,11 @@ interface ColumnMenuState {
   y: number;
 }
 
+interface ColumnLayoutBounds {
+  left: number;
+  right: number;
+}
+
 export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   const { t } = useTranslation();
   const { downloads, queues, assignToQueue, openDeleteModal, redownload, moveInQueue } = useDownloadStore();
@@ -110,7 +116,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const [animationParent] = useAutoAnimate<HTMLDivElement>();
-  const [headerAnimationParent] = useAutoAnimate<HTMLDivElement>({
+  const [headerAnimationParent, setHeaderAnimationEnabled] = useAutoAnimate<HTMLDivElement>({
     duration: 140,
     easing: 'ease-out',
   });
@@ -128,8 +134,17 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   } | null>(null);
   const headerElementsRef = useRef(new Map<DownloadTableColumnKey, HTMLDivElement>());
   const headerContainerRef = useRef<HTMLDivElement>(null);
+  const headerRef = useCallback((element: HTMLDivElement | null) => {
+    headerContainerRef.current = element;
+    headerAnimationParent(element);
+  }, [headerAnimationParent]);
   const columnDragStateRef = useRef<ColumnDragState | null>(null);
   const columnDragOrderRef = useRef<DownloadTableColumnKey[] | null>(null);
+  const columnDragLayoutRef = useRef<Map<DownloadTableColumnKey, ColumnLayoutBounds> | null>(null);
+  const columnDragTargetRef = useRef<HTMLDivElement | null>(null);
+  const columnDragCaptureTargetRef = useRef<HTMLDivElement | null>(null);
+  const columnDragCapturePointerIdRef = useRef<number | null>(null);
+  const columnDragCleanupRef = useRef<(() => void) | null>(null);
   const columnDropFlashTimerRef = useRef<number | null>(null);
   const suppressHeaderClickRef = useRef(false);
   const selectedIdsRef = useRef(selectedIds);
@@ -166,17 +181,14 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   const [, setMenuViewportVersion] = useState(0);
   const columnWidthsRef = useRef(columnWidths);
   const columnOrderRef = useRef(columnOrder);
-  columnWidthsRef.current = columnWidths;
-  columnOrderRef.current = columnOrder;
-  columnDragOrderRef.current = columnDragOrder;
-  const normalizedColumnWidths = columnWidths.map((width, index) =>
+  const normalizedColumnWidths = columnWidthsRef.current.map((width, index) =>
     Math.max(COLUMN_MINIMUMS[index], width)
   );
-  const orderedColumns = columnDragOrder ?? columnOrder;
+  const orderedColumns = columnDragOrderRef.current ?? columnDragOrder ?? columnOrder;
   const tableGridTemplate = buildColumnGridTemplate(orderedColumns, normalizedColumnWidths);
   const tableMinWidth = normalizedColumnWidths.reduce(
     (total, width) => total + width,
-    0
+    DOWNLOAD_ACTIONS_COLUMN_WIDTH
   );
   const tableMinWidthWithPadding = 'calc(' + tableMinWidth + 'px + var(--download-row-padding-x) + var(--download-row-padding-x))';
   const downloadsViewRef = useRef<HTMLDivElement>(null);
@@ -212,6 +224,15 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     };
   };
 
+  const captureColumnLayout = (order: DownloadTableColumnKey[]) => {
+    const layout = new Map<DownloadTableColumnKey, ColumnLayoutBounds>();
+    for (const key of order) {
+      const element = headerElementsRef.current.get(key);
+      if (element) layout.set(key, getColumnLayoutBounds(element));
+    }
+    return layout;
+  };
+
   const getColumnDropPosition = (
     key: DownloadTableColumnKey,
     pointerX: number,
@@ -221,7 +242,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     const targetIndex = remainingColumns.findIndex(columnKey => {
       const element = headerElementsRef.current.get(columnKey);
       if (!element) return false;
-      const bounds = getColumnLayoutBounds(element);
+      const bounds = columnDragLayoutRef.current?.get(columnKey) ?? getColumnLayoutBounds(element);
       return pointerX < bounds.left + (bounds.right - bounds.left) / 2;
     });
     const dropIndex = targetIndex === -1 ? remainingColumns.length : targetIndex;
@@ -235,78 +256,26 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     return { dropIndex, markerX };
   };
 
-  const handleColumnPointerDown = (key: DownloadTableColumnKey, event: React.PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
-    if (event.target instanceof Element && event.target.closest('.column-resize-handle, .download-column-options')) return;
-
-    event.currentTarget.setPointerCapture(event.pointerId);
-    dragGestureRef.current = {
-      key,
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      active: false,
-    };
-  };
-
-  const handleColumnPointerMove = (key: DownloadTableColumnKey, event: React.PointerEvent<HTMLDivElement>) => {
+  const finishColumnDrag = (key: DownloadTableColumnKey, pointerId: number, cancelled = false) => {
     const gesture = dragGestureRef.current;
-    if (!gesture || gesture.key !== key || gesture.pointerId !== event.pointerId) return;
-
-    const distance = Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY);
-    if (!gesture.active) {
-      if (distance < 5) return;
-      gesture.active = true;
-      suppressHeaderClickRef.current = true;
-      const rect = event.currentTarget.getBoundingClientRect();
-      const currentOrder = columnOrderRef.current;
-      columnDragOrderRef.current = [...currentOrder];
-      setColumnDragOrder([...currentOrder]);
-      const { dropIndex, markerX } = getColumnDropPosition(key, event.clientX, currentOrder);
-      updateColumnDragState({
-        key,
-        startX: gesture.startX,
-        pointerX: event.clientX,
-        offsetX: event.clientX - rect.left,
-        top: rect.top,
-        width: rect.width,
-        dropIndex,
-        markerX,
-      });
-    } else {
-      const current = columnDragStateRef.current;
-      if (!current) return;
-      const currentOrder = columnDragOrderRef.current ?? columnOrderRef.current;
-      const { dropIndex, markerX } = getColumnDropPosition(key, event.clientX, currentOrder);
-      const nextOrder = reorderColumn(currentOrder, key, dropIndex);
-      const orderChanged = nextOrder.some((columnKey, index) => columnKey !== currentOrder[index]);
-      if (orderChanged) {
-        columnDragOrderRef.current = nextOrder;
-        setColumnDragOrder(nextOrder);
-      }
-      updateColumnDragState({
-        ...current,
-        pointerX: event.clientX,
-        dropIndex: nextOrder.indexOf(key),
-        markerX,
-      });
-    }
-
-    event.preventDefault();
-  };
-
-  const finishColumnDrag = (key: DownloadTableColumnKey, event: React.PointerEvent<HTMLDivElement>, cancelled = false) => {
-    const gesture = dragGestureRef.current;
-    if (!gesture || gesture.key !== key || gesture.pointerId !== event.pointerId) return;
+    if (!gesture || gesture.key !== key || gesture.pointerId !== pointerId) return;
 
     const current = columnDragStateRef.current;
-    dragGestureRef.current = null;
-    updateColumnDragState(null);
     const nextOrder = columnDragOrderRef.current ?? columnOrderRef.current;
+    const captureTarget = columnDragCaptureTargetRef.current;
+    dragGestureRef.current = null;
+    columnDragTargetRef.current = null;
+    columnDragCaptureTargetRef.current = null;
+    columnDragCapturePointerIdRef.current = null;
     columnDragOrderRef.current = null;
+    columnDragLayoutRef.current = null;
+    columnDragCleanupRef.current?.();
+    columnDragCleanupRef.current = null;
+    updateColumnDragState(null);
     setColumnDragOrder(null);
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
+    setHeaderAnimationEnabled(true);
+    if (captureTarget?.hasPointerCapture(pointerId)) {
+      captureTarget.releasePointerCapture(pointerId);
     }
     if (cancelled || !gesture.active || !current) {
       suppressHeaderClickRef.current = false;
@@ -318,6 +287,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
 
     if (nextOrder.join('|') === columnOrderRef.current.join('|')) return;
 
+    columnOrderRef.current = nextOrder;
     setColumnOrder(nextOrder);
     persistColumnOrder(nextOrder);
     if (columnDropFlashTimerRef.current !== null) {
@@ -328,6 +298,134 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
       setColumnDropFlashKey(null);
       columnDropFlashTimerRef.current = null;
     }, 260);
+  };
+
+  const handleColumnPointerMove = (
+    key: DownloadTableColumnKey,
+    pointerId: number,
+    clientX: number,
+    clientY: number,
+    preventDefault?: () => void
+  ) => {
+    const gesture = dragGestureRef.current;
+    if (!gesture || gesture.key !== key || gesture.pointerId !== pointerId) return;
+
+    const distance = Math.hypot(clientX - gesture.startX, clientY - gesture.startY);
+    if (!gesture.active) {
+      if (distance < 5) return;
+      gesture.active = true;
+      suppressHeaderClickRef.current = true;
+      const target = columnDragTargetRef.current;
+      const rect = target?.getBoundingClientRect();
+      if (!rect) return;
+      // The header children are reordered in the live grid while dragging.
+      // AutoAnimate's MutationObserver must not animate the same structural
+      // changes that drive pointer hit-testing; it is restored on completion.
+      setHeaderAnimationEnabled(false);
+      const currentOrder = columnOrderRef.current;
+      columnDragLayoutRef.current = captureColumnLayout(currentOrder);
+      columnDragOrderRef.current = [...currentOrder];
+      setColumnDragOrder([...currentOrder]);
+      const { dropIndex, markerX } = getColumnDropPosition(key, clientX, currentOrder);
+      updateColumnDragState({
+        key,
+        startX: gesture.startX,
+        pointerX: clientX,
+        offsetX: clientX - rect.left,
+        top: rect.top,
+        width: rect.width,
+        dropIndex,
+        markerX,
+      });
+    } else {
+      const current = columnDragStateRef.current;
+      if (!current) return;
+      const currentOrder = columnDragOrderRef.current ?? columnOrderRef.current;
+      const { dropIndex, markerX } = getColumnDropPosition(key, clientX, currentOrder);
+      const nextOrder = reorderColumn(currentOrder, key, dropIndex);
+      const orderChanged = nextOrder.some((columnKey, index) => columnKey !== currentOrder[index]);
+      if (orderChanged) {
+        columnDragOrderRef.current = nextOrder;
+        setColumnDragOrder(nextOrder);
+      }
+      updateColumnDragState({
+        ...current,
+        pointerX: clientX,
+        dropIndex: nextOrder.indexOf(key),
+        markerX,
+      });
+    }
+
+    preventDefault?.();
+  };
+
+  const handleColumnPointerDown = (key: DownloadTableColumnKey, event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    if (event.target instanceof Element && event.target.closest('.column-resize-handle, .download-column-options')) return;
+
+    const existingGesture = dragGestureRef.current;
+    if (existingGesture) {
+      finishColumnDrag(existingGesture.key, existingGesture.pointerId, true);
+    }
+    const target = event.currentTarget;
+    const pointerId = event.pointerId;
+    const captureTarget = headerContainerRef.current;
+    columnDragTargetRef.current = target;
+    columnDragCaptureTargetRef.current = captureTarget;
+    columnDragCapturePointerIdRef.current = pointerId;
+    if (captureTarget) {
+      try {
+        // Capture on the stable grid parent, never on a column that is
+        // structurally moved during the live reorder.
+        captureTarget.setPointerCapture(pointerId);
+      } catch {
+        // Window listeners below still handle browsers that reject capture
+        // after the pointer has already been cancelled.
+      }
+    }
+    columnDragLayoutRef.current = null;
+    dragGestureRef.current = {
+      key,
+      pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      active: false,
+    };
+    const pointerMove = (pointerEvent: PointerEvent) => {
+      if (pointerEvent.pointerId !== pointerId) return;
+      handleColumnPointerMove(
+        key,
+        pointerEvent.pointerId,
+        pointerEvent.clientX,
+        pointerEvent.clientY,
+        () => pointerEvent.preventDefault()
+      );
+    };
+    const pointerUp = (pointerEvent: PointerEvent) => {
+      if (pointerEvent.pointerId === pointerId) {
+        finishColumnDrag(key, pointerEvent.pointerId);
+      }
+    };
+    const pointerCancel = (pointerEvent: PointerEvent) => {
+      if (pointerEvent.pointerId === pointerId) {
+        finishColumnDrag(key, pointerEvent.pointerId, true);
+      }
+    };
+    const lostPointerCapture = (pointerEvent: PointerEvent) => {
+      if (pointerEvent.pointerId === pointerId) {
+        finishColumnDrag(key, pointerEvent.pointerId, true);
+      }
+    };
+    window.addEventListener('pointermove', pointerMove);
+    window.addEventListener('pointerup', pointerUp);
+    window.addEventListener('pointercancel', pointerCancel);
+    captureTarget?.addEventListener('lostpointercapture', lostPointerCapture);
+    columnDragCleanupRef.current = () => {
+      window.removeEventListener('pointermove', pointerMove);
+      window.removeEventListener('pointerup', pointerUp);
+      window.removeEventListener('pointercancel', pointerCancel);
+      captureTarget?.removeEventListener('lostpointercapture', lostPointerCapture);
+    };
   };
 
   const startColumnResize = (key: DownloadTableColumnKey, event: React.PointerEvent<HTMLDivElement>) => {
@@ -411,6 +509,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     const alignments = { ...DEFAULT_COLUMN_ALIGNMENTS };
     setColumnWidths(widths);
     columnWidthsRef.current = widths;
+    columnOrderRef.current = order;
     setColumnOrder(order);
     setColumnAlignments(alignments);
     persistColumnWidths(widths);
@@ -440,6 +539,16 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
 
   useEffect(() => () => {
     resizeCleanupRef.current?.();
+    columnDragCleanupRef.current?.();
+    columnDragCleanupRef.current = null;
+    const captureTarget = columnDragCaptureTargetRef.current;
+    const capturePointerId = columnDragCapturePointerIdRef.current;
+    columnDragTargetRef.current = null;
+    columnDragCaptureTargetRef.current = null;
+    columnDragCapturePointerIdRef.current = null;
+    if (captureTarget && capturePointerId !== null && captureTarget.hasPointerCapture(capturePointerId)) {
+      captureTarget.releasePointerCapture(capturePointerId);
+    }
     if (columnDropFlashTimerRef.current !== null) {
       window.clearTimeout(columnDropFlashTimerRef.current);
     }
@@ -448,9 +557,21 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   useEffect(() => {
     const cancelColumnDrag = () => {
       if (!dragGestureRef.current) return;
+      columnDragCleanupRef.current?.();
+      columnDragCleanupRef.current = null;
+      const captureTarget = columnDragCaptureTargetRef.current;
+      const capturePointerId = columnDragCapturePointerIdRef.current;
+      columnDragTargetRef.current = null;
+      columnDragCaptureTargetRef.current = null;
+      columnDragCapturePointerIdRef.current = null;
+      if (captureTarget && capturePointerId !== null && captureTarget.hasPointerCapture(capturePointerId)) {
+        captureTarget.releasePointerCapture(capturePointerId);
+      }
       dragGestureRef.current = null;
       columnDragStateRef.current = null;
       columnDragOrderRef.current = null;
+      columnDragLayoutRef.current = null;
+      setHeaderAnimationEnabled(true);
       setColumnDragState(null);
       setColumnDragOrder(null);
       suppressHeaderClickRef.current = false;
@@ -923,10 +1044,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
       <div className="downloads-table flex-1 flex flex-col">
         <div className="download-table-scroll">
           <div
-            ref={element => {
-              headerContainerRef.current = element;
-              headerAnimationParent(element);
-            }}
+            ref={headerRef}
             className={`download-table-header ${columnDragState ? 'is-column-dragging' : ''}`}
             style={{ gridTemplateColumns: tableGridTemplate, minWidth: tableMinWidthWithPadding }}
           >
@@ -958,10 +1076,6 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                     openColumnMenu(key, event.clientX, event.clientY);
                   }}
                   onPointerDown={event => handleColumnPointerDown(key, event)}
-                  onPointerMove={event => handleColumnPointerMove(key, event)}
-                  onPointerUp={event => finishColumnDrag(key, event)}
-                  onPointerCancel={event => finishColumnDrag(key, event, true)}
-                  onLostPointerCapture={event => finishColumnDrag(key, event, true)}
                 >
                   <button
                     type="button"

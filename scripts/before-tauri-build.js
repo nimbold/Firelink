@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -40,6 +41,14 @@ function runNpmScript(script) {
 
   run('npm', ['run', script]);
 }
+
+// A packaged Tauri artifact must have its own consent identity. A source or
+// commit fingerprint cannot distinguish two fresh signed/package builds made
+// from the same checkout, which would let an updated binary silently reuse the
+// previous binary's credential-store approval. Keep any configured identity
+// as useful provenance, but always add the artifact nonce.
+const configuredBuildId = process.env.VITE_BUILD_ID?.trim();
+process.env.VITE_BUILD_ID = `${configuredBuildId || 'artifact'}-${randomUUID()}`;
 
 run(process.execPath, ['scripts/stage-engines.js']);
 run(process.execPath, ['scripts/verify-binaries.js', '--staged']);

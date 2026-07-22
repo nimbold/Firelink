@@ -3,6 +3,7 @@ import { schedulerCompletionState } from './utils/schedulerCompletion';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Sidebar, SidebarFilter } from "./components/Sidebar";
 import { DownloadTable } from "./components/DownloadTable";
+import { KeychainPermissionModal } from './components/KeychainPermissionModal';
 import { extractValidDownloadUrls } from './utils/url';
 import { readClipboardDownloadUrls } from './utils/clipboard';
 import { listenEvent as listen, invokeCommand as invoke } from "./ipc";
@@ -52,10 +53,6 @@ const PropertiesModal = lazy(() => import('./components/PropertiesModal').then(m
 const DeleteConfirmationModal = lazy(() => import('./components/DeleteConfirmationModal').then(module => ({
   default: module.DeleteConfirmationModal,
 })));
-const KeychainPermissionModal = lazy(() => import('./components/KeychainPermissionModal').then(module => ({
-  default: module.KeychainPermissionModal,
-})));
-
 const preloadPageChunks = async () => {
   for (const load of pageChunkLoaders) {
     try {
@@ -500,14 +497,17 @@ function App() {
         let changed = false;
         if (deferKeychainHydration) {
           settings.setKeychainAccessReady(false);
+          if (showKeychainPrompt) {
+            // Commit the explanation before the harmless session-token IPC so
+            // a slow startup cannot leave the user facing an unexplained
+            // credential-store request.
+            settings.setShowKeychainModal(true);
+          }
           // This token is already owned by the backend and does not access
           // the OS credential store. Render our explanation before any native
           // Keychain/Credential Manager prompt can be user-triggered.
           await settings.hydrateSessionPairingToken(isStartupActive);
           if (!active) return;
-          if (showKeychainPrompt) {
-            settings.setShowKeychainModal(true);
-          }
         } else {
           // The backend keeps credential-store access disabled for every new
           // process. Arm it only after the persisted startup decision has

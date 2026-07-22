@@ -18,9 +18,10 @@ export type KeychainAccessReadiness = {
 };
 
 // The semantic app version can remain unchanged across release-candidate and
-// packaging rebuilds. Use the build identity so an updated binary cannot skip
-// Firelink's explanation and invoke the OS prompt directly. The policy epoch
-// remains only as a safe fallback for builds created outside the Git checkout.
+// packaging rebuilds. The Tauri packaging hook appends a fresh artifact nonce
+// to the build identity, so replacing the binary cannot skip Firelink's
+// explanation and invoke the OS prompt directly. The policy epoch remains
+// only as a safe fallback for builds created outside the Git checkout.
 const KEYCHAIN_CONSENT_POLICY_VERSION = '2';
 const buildId = typeof import.meta.env.VITE_BUILD_ID === 'string'
   ? import.meta.env.VITE_BUILD_ID.trim()

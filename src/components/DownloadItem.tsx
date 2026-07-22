@@ -98,13 +98,10 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     gridColumn: getColumnGridColumn(key, columnOrder),
   } as React.CSSProperties);
 
-  const trailingColumnClass = (key: DownloadTableColumnKey) =>
-    key === columnOrder[columnOrder.length - 1] ? 'download-column-cell--trailing' : '';
-
   const cells: Record<DownloadTableColumnKey, React.ReactNode> = {
     'File Name': (
       <div
-        className={`download-column-cell download-file-cell download-column-file-name ${trailingColumnClass('File Name')}`}
+        className="download-column-cell download-file-cell download-column-file-name"
         style={columnStyle('File Name')}
       >
         <div className="download-cell-content">
@@ -119,7 +116,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     ),
     Size: (
       <div
-        className={`download-column-cell download-cell-truncate download-size-cell tabular-nums ${trailingColumnClass('Size')}`}
+        className="download-column-cell download-cell-truncate download-size-cell tabular-nums"
         style={columnStyle('Size')}
         title={hasDownloadedAmount ? downloadedSizeLabel : completedSizeLabel}
         aria-label={hasDownloadedAmount ? downloadedSizeLabel : completedSizeLabel}
@@ -141,7 +138,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     ),
     Status: (
       <div
-        className={`download-column-cell download-status-cell ${trailingColumnClass('Status')}`}
+        className="download-column-cell download-status-cell"
         style={columnStyle('Status')}
       >
         {download.status === 'completed' ? (
@@ -202,21 +199,21 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
       </div>
     ),
     Speed: (
-      <div className={`download-column-cell download-cell-truncate ${trailingColumnClass('Speed')}`} style={columnStyle('Speed')}>
+      <div className="download-column-cell download-cell-truncate" style={columnStyle('Speed')}>
         <span className="download-cell-content tabular-nums" title={displaySpeed}>
           {displaySpeed}
         </span>
       </div>
     ),
     ETA: (
-      <div className={`download-column-cell download-cell-truncate ${trailingColumnClass('ETA')}`} style={columnStyle('ETA')}>
+      <div className="download-column-cell download-cell-truncate" style={columnStyle('ETA')}>
         <span className="download-cell-content tabular-nums" title={displayEta}>
           {displayEta}
         </span>
       </div>
     ),
     'Date Added': (
-      <div className={`download-column-cell download-cell-right download-column-date-added ${trailingColumnClass('Date Added')}`} style={columnStyle('Date Added')}>
+      <div className="download-column-cell download-cell-right download-column-date-added" style={columnStyle('Date Added')}>
         <span
           className="download-cell-content download-date-value tabular-nums"
           title={download.dateAdded ? new Date(download.dateAdded).toLocaleDateString() : '-'}
