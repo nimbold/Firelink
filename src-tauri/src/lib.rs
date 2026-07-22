@@ -2953,6 +2953,9 @@ struct MainWindowRestoreState {
     requested: AtomicBool,
 }
 
+#[cfg(target_os = "macos")]
+const MAIN_WINDOW_MINIMIZE_MENU_ID: &str = "main_window_minimize";
+
 const KEYCHAIN_CONSENT_REQUIRED_ERROR: &str =
     "Credential-store access requires explicit user consent";
 const KEYCHAIN_GRANT_IN_PROGRESS_ERROR: &str =
@@ -8645,8 +8648,45 @@ pub fn run() {
                 .map_err(|error| format!("failed to create tray menu: {error}"))?;
             #[cfg(target_os = "macos")]
             {
+                use tauri::menu::{MenuItem, WINDOW_SUBMENU_ID};
+
                 let app_menu = tauri::menu::Menu::default(app.handle())
                     .map_err(|error| format!("failed to create application menu: {error}"))?;
+                let minimize_item = MenuItem::with_id(
+                    app.handle(),
+                    MAIN_WINDOW_MINIMIZE_MENU_ID,
+                    "Minimize",
+                    true,
+                    Some("CmdOrCtrl+M"),
+                )
+                .map_err(|error| format!("failed to create minimize menu item: {error}"))?;
+                let window_menu = app_menu
+                    .get(WINDOW_SUBMENU_ID)
+                    .and_then(|item| item.as_submenu().cloned())
+                    .ok_or_else(|| "application Window menu is missing".to_string())?;
+                if window_menu
+                    .remove_at(0)
+                    .map_err(|error| {
+                        format!("failed to replace native minimize menu item: {error}")
+                    })?
+                    .is_none()
+                {
+                    return Err(
+                        "application Window menu has no minimize item"
+                            .to_string()
+                            .into(),
+                    );
+                }
+                window_menu
+                    .insert(&minimize_item, 0)
+                    .map_err(|error| format!("failed to install minimize menu item: {error}"))?;
+                app.on_menu_event(|app, event| {
+                    if event.id.as_ref() == MAIN_WINDOW_MINIMIZE_MENU_ID {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.minimize();
+                        }
+                    }
+                });
                 app.set_menu(app_menu)
                     .map_err(|error| format!("failed to install application menu: {error}"))?;
             }
