@@ -13,6 +13,12 @@ use tokio::time::timeout;
 struct CountingSpawner {
     add_uri_calls: AtomicUsize,
     media_calls: AtomicUsize,
+    speed_limit_calls: AtomicUsize,
+    last_speed_limit: std::sync::Mutex<Option<String>>,
+    add_speed_limits: std::sync::Mutex<Vec<Option<String>>>,
+    block_speed_limit: std::sync::atomic::AtomicBool,
+    speed_limit_started: tokio::sync::Notify,
+    speed_limit_release: tokio::sync::Notify,
 }
 
 struct DelayedAria2Spawner {
@@ -102,6 +108,12 @@ impl CountingSpawner {
         Self {
             add_uri_calls: AtomicUsize::new(0),
             media_calls: AtomicUsize::new(0),
+            speed_limit_calls: AtomicUsize::new(0),
+            last_speed_limit: std::sync::Mutex::new(None),
+            add_speed_limits: std::sync::Mutex::new(Vec::new()),
+            block_speed_limit: std::sync::atomic::AtomicBool::new(false),
+            speed_limit_started: tokio::sync::Notify::new(),
+            speed_limit_release: tokio::sync::Notify::new(),
         }
     }
 }
@@ -133,11 +145,31 @@ impl SidecarSpawner for RefreshOutcomeSpawner {
 
 #[async_trait::async_trait]
 impl firelink_lib::queue::SidecarSpawner for CountingSpawner {
-    async fn add_uri(&self, _id: &str, _payload: &SpawnPayload) -> Result<String, String> {
+    async fn add_uri(&self, _id: &str, payload: &SpawnPayload) -> Result<String, String> {
         self.add_uri_calls.fetch_add(1, Ordering::SeqCst);
+        self.add_speed_limits
+            .lock()
+            .unwrap()
+            .push(payload.speed_limit.clone());
         Ok(format!("gid-{}", self.add_uri_calls.load(Ordering::SeqCst)))
     }
     async fn remove_uri(&self, _gid: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn set_download_speed_limit(
+        &self,
+        _gid: &str,
+        limit: Option<&str>,
+    ) -> Result<(), String> {
+        self.speed_limit_calls.fetch_add(1, Ordering::SeqCst);
+        *self.last_speed_limit.lock().unwrap() = limit.map(str::to_string);
+        if self
+            .block_speed_limit
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.speed_limit_started.notify_one();
+            self.speed_limit_release.notified().await;
+        }
         Ok(())
     }
     async fn run_media(&self, _id: &str, _payload: &SpawnPayload, _generation: u64) -> Result<(), String> {
@@ -256,6 +288,188 @@ async fn ensure_aria2_permit_does_not_double_acquire() {
 
     mgr.release_permit("a").await;
     assert_eq!(mgr.available_permits(), 2);
+}
+
+#[tokio::test]
+async fn live_aria2_speed_limit_updates_the_current_gid_and_payload() {
+    let (manager, spawner) = make_manager(1);
+    let manager = Arc::new(manager);
+    let mut task = aria2_task("speed-limit");
+    task.payload.speed_limit = Some("1M".to_string());
+    manager.push(task).await.unwrap();
+
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if manager.aria2_gid_for_download("speed-limit").is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("aria2 dispatch should register a gid");
+
+    manager
+        .set_aria2_download_speed_limit("speed-limit", Some("512K".to_string()))
+        .await
+        .unwrap();
+    assert_eq!(spawner.speed_limit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        spawner.last_speed_limit.lock().unwrap().as_deref(),
+        Some("512K")
+    );
+    assert!(manager.aria2_speed_limited("speed-limit").await);
+
+    manager
+        .set_aria2_download_speed_limit("speed-limit", None)
+        .await
+        .unwrap();
+    assert_eq!(spawner.speed_limit_calls.load(Ordering::SeqCst), 2);
+    assert!(spawner.last_speed_limit.lock().unwrap().is_none());
+    assert!(!manager.aria2_speed_limited("speed-limit").await);
+
+    manager
+        .apply_completion(
+            "speed-limit",
+            firelink_lib::queue::PendingOutcome::Complete,
+        )
+        .await;
+    dispatcher.abort();
+}
+
+#[tokio::test]
+async fn live_aria2_speed_limit_rejects_invalid_and_non_active_requests() {
+    let (manager, spawner) = make_manager(1);
+    assert!(manager
+        .set_aria2_download_speed_limit("missing", Some("not-a-rate".to_string()))
+        .await
+        .is_err());
+    assert!(manager
+        .set_aria2_download_speed_limit("missing", Some("512K".to_string()))
+        .await
+        .is_err());
+    assert_eq!(spawner.speed_limit_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn live_aria2_speed_limit_does_not_update_payload_after_gid_replacement() {
+    let (manager, spawner) = make_manager(1);
+    let manager = Arc::new(manager);
+    let mut task = aria2_task("speed-stale");
+    task.payload.speed_limit = Some("1M".to_string());
+    manager.push(task).await.unwrap();
+
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if manager.aria2_gid_for_download("speed-stale").is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("aria2 dispatch should register a gid");
+
+    spawner
+        .block_speed_limit
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let started = spawner.speed_limit_started.notified();
+    let setter = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move {
+            manager
+                .set_aria2_download_speed_limit("speed-stale", Some("512K".to_string()))
+                .await
+        })
+    };
+    timeout(Duration::from_secs(1), started)
+        .await
+        .expect("speed RPC should start");
+
+    manager
+        .remember_gid("speed-stale".to_string(), "gid-replaced".to_string())
+        .await;
+    spawner.speed_limit_release.notify_one();
+    assert!(setter.await.unwrap().is_err());
+    assert!(manager.aria2_speed_limited("speed-stale").await);
+
+    manager
+        .apply_completion(
+            "speed-stale",
+            firelink_lib::queue::PendingOutcome::Complete,
+        )
+        .await;
+    dispatcher.abort();
+}
+
+#[tokio::test]
+async fn retry_readds_aria2_with_the_latest_live_speed_limit() {
+    use firelink_lib::queue::PendingOutcome;
+
+    let (mgr, spawner) = make_manager(1);
+    let manager = Arc::new(mgr);
+    let mut task = aria2_task("speed-retry");
+    task.payload.max_tries = Some(1);
+    task.payload.speed_limit = Some("1M".to_string());
+    manager.push(task).await.unwrap();
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if spawner.add_uri_calls.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial aria2 add should run");
+    manager
+        .handle_aria2_event(
+            "gid-1",
+            PendingOutcome::Error(
+                "aria2 error code 1: Failed to receive data, cause: protocol error".to_string(),
+            ),
+        )
+        .await;
+    manager
+        .set_aria2_download_speed_limit("speed-retry", Some("512K".to_string()))
+        .await
+        .unwrap();
+
+    timeout(Duration::from_secs(4), async {
+        loop {
+            if spawner.add_uri_calls.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("retry should re-add after backoff");
+    assert_eq!(
+        spawner.add_speed_limits.lock().unwrap().as_slice(),
+        &[Some("1M".to_string()), Some("512K".to_string())]
+    );
+
+    manager
+        .handle_aria2_event(
+            "gid-2",
+            PendingOutcome::Error("permanent failure".to_string()),
+        )
+        .await;
+    dispatcher.abort();
 }
 
 #[tokio::test]

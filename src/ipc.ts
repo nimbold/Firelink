@@ -48,6 +48,7 @@ type CommandMap = {
   perform_system_action: { args: { action: PostQueueAction }; result: void };
   ack_schedule_trigger: { args: { action: 'start' | 'stop'; key: string }; result: void };
   set_concurrent_limit: { args: { limit: number }; result: void };
+  set_download_speed_limit: { args: { id: string; limit: string | null }; result: void };
   set_global_speed_limit: { args: { limit: string | null }; result: void };
   request_automation_permission: { args: undefined; result: void };
   check_automation_permission: { args: undefined; result: void };

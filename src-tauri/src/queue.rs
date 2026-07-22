@@ -165,6 +165,17 @@ pub trait SidecarSpawner: Send + Sync + 'static {
         Err("aria2 connection refresh is unavailable".to_string())
     }
 
+    /// Change one active aria2 transfer's runtime download cap. Media
+    /// runners intentionally keep the default implementation: yt-dlp reads
+    /// its limit only when the process starts.
+    async fn set_download_speed_limit(
+        &self,
+        _gid: &str,
+        _limit: Option<&str>,
+    ) -> Result<(), String> {
+        Err("live aria2 speed limits are unavailable".to_string())
+    }
+
     /// Run a media download to completion. The permit is parked for the full
     /// duration; release is handled by QueueManager on the runner's exit.
     async fn run_media(
@@ -542,6 +553,68 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .and_then(|payload| payload.speed_limit.as_deref())
             .and_then(crate::normalize_speed_limit_for_aria2)
             .is_some()
+    }
+
+    /// Change an active aria2 transfer's speed cap without replacing its GID
+    /// or queue permit. The per-download control lock and post-RPC ownership
+    /// check make a late response harmless if terminal cleanup or a retry
+    /// transition wins the lifecycle race.
+    pub async fn set_aria2_download_speed_limit(
+        &self,
+        id: &str,
+        limit: Option<String>,
+    ) -> Result<(), String> {
+        let normalized_limit = match limit.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(raw) => Some(
+                crate::normalize_speed_limit_for_aria2(raw)
+                    .ok_or_else(|| "invalid download speed limit".to_string())?,
+            ),
+        };
+        let _control_guard = self.acquire_aria2_control(id).await;
+
+        if !self.is_registered(id).await
+            || !matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
+        {
+            return Err("download is not an active aria2 transfer".to_string());
+        }
+        let gid = self
+            .aria2_gid_for_download(id)
+            .ok_or_else(|| "active aria2 transfer has no gid".to_string())?;
+        let expected_mapping = self
+            .aria2_gid_mapping(&gid)
+            .ok_or_else(|| "active aria2 transfer has no current gid mapping".to_string())?;
+        if expected_mapping.id != id {
+            return Err("aria2 gid belongs to another download".to_string());
+        }
+        if !self
+            .is_aria2_control_epoch_current(id, expected_mapping.epoch)
+            .await
+        {
+            return Err("active aria2 transfer has a stale control epoch".to_string());
+        }
+
+        self.spawner
+            .set_download_speed_limit(&gid, normalized_limit.as_deref())
+            .await?;
+
+        let still_current = self.is_registered(id).await
+            && matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
+            && self
+                .is_aria2_control_epoch_current(id, expected_mapping.epoch)
+                .await
+            && self.is_current_aria2_gid_mapping(&gid, &expected_mapping)
+            && self.aria2_gid_for_download(id).as_deref() == Some(gid.as_str());
+        if !still_current {
+            return Err("download lifecycle changed while setting speed limit".to_string());
+        }
+
+        let mut payloads = self.aria2_payloads.lock().await;
+        let payload = payloads
+            .get_mut(id)
+            .ok_or_else(|| "active aria2 transfer payload is unavailable".to_string())?;
+        payload.speed_limit = normalized_limit;
+        Ok(())
     }
 
     /// Pop the next task, or None if empty.
@@ -1441,22 +1514,38 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 return;
             }
 
-            if !this.active_permits.lock().await.contains_key(&id_for_task)
+            // Serialize the payload snapshot and addUri with live speed
+            // changes. Without this guard, a speed update could change the
+            // old GID and payload just before this worker re-added a new GID
+            // from a stale clone, silently losing the user's limit.
+            let control_guard = this.acquire_aria2_control(&id_for_task).await;
+            let stale_before_add = !this.active_permits.lock().await.contains_key(&id_for_task)
                 || this.is_aria2_retry_cancelled(&id_for_task).await
                 || !this
                     .is_aria2_control_epoch_current(&id_for_task, retry_epoch)
                     .await
                 || !this.is_registered(&id_for_task).await
-                || this.aria2_gid_for_download(&id_for_task).as_deref() != Some(retry_gid.as_str())
-            {
+                || this.aria2_gid_for_download(&id_for_task).as_deref() != Some(retry_gid.as_str());
+            let current_payload = this.aria2_payloads.lock().await.get(&id_for_task).cloned();
+            let Some(current_payload) = current_payload else {
+                drop(control_guard);
+                this.finish_aria2_retry(&id_for_task, &retry_gid, retry_epoch)
+                    .await;
+                return;
+            };
+            if stale_before_add {
+                drop(control_guard);
                 this.finish_aria2_retry(&id_for_task, &retry_gid, retry_epoch)
                     .await;
                 return;
             }
 
-            match this.spawner.add_uri(&id_for_task, &payload).await {
+            match this
+                .spawner
+                .add_uri(&id_for_task, &current_payload)
+                .await
+            {
                 Ok(new_gid) => {
-                    let control_guard = this.acquire_aria2_control(&id_for_task).await;
                     let stale = this.is_aria2_retry_cancelled(&id_for_task).await
                         || !this
                             .is_aria2_control_epoch_current(&id_for_task, retry_epoch)
@@ -1505,7 +1594,6 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     }
                 }
                 Err(retry_error) => {
-                    let control_guard = this.acquire_aria2_control(&id_for_task).await;
                     let stale = this.is_aria2_retry_cancelled(&id_for_task).await
                         || !this
                             .is_aria2_control_epoch_current(&id_for_task, retry_epoch)
@@ -2106,6 +2194,30 @@ impl SidecarSpawner for ProductionSpawner {
                 "aria2.forceRemove returned unexpected gid {returned_gid}, expected {gid}"
             )),
             None => Err("aria2.forceRemove returned a non-string result".to_string()),
+        }
+    }
+
+    async fn set_download_speed_limit(
+        &self,
+        gid: &str,
+        limit: Option<&str>,
+    ) -> Result<(), String> {
+        let state = self.app_handle.state::<crate::AppState>();
+        let limit = limit.unwrap_or("0");
+        let result = crate::rpc_call(
+            state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+            &state.aria2_secret,
+            "aria2.changeOption",
+            serde_json::json!([gid, {"max-download-limit": limit}]),
+        )
+        .await
+        .map_err(|error| format!("aria2 changeOption failed for gid {gid}: {error}"))?;
+        match result.as_str() {
+            Some("OK") => Ok(()),
+            Some(value) => Err(format!(
+                "aria2.changeOption returned unexpected result {value} for gid {gid}"
+            )),
+            None => Err("aria2.changeOption returned a non-string result".to_string()),
         }
     }
 
