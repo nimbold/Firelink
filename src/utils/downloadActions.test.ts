@@ -3,6 +3,7 @@ import {
   canPauseDownload,
   canRedownload,
   canStartDownload,
+  getPauseResumeAction,
   isIdentityLocked,
   isTransferLocked,
   startActionLabel,
@@ -25,6 +26,18 @@ describe('download action policy', () => {
     expect(canRedownload('failed')).toBe(true);
     expect(canRedownload('paused')).toBe(true);
     expect(canRedownload('downloading')).toBe(false);
+  });
+
+  it('only exposes pause or resume for the details-view toggle', () => {
+    expect(getPauseResumeAction('queued')).toBe('pause');
+    expect(getPauseResumeAction('downloading')).toBe('pause');
+    expect(getPauseResumeAction('processing')).toBe('pause');
+    expect(getPauseResumeAction('retrying')).toBe('pause');
+    expect(getPauseResumeAction('paused')).toBe('resume');
+
+    for (const status of ['ready', 'staged', 'completed', 'failed'] as const) {
+      expect(getPauseResumeAction(status)).toBeNull();
+    }
   });
 
   it('provides consistent labels and edit locks', () => {

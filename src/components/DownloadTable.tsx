@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useDownloadStore, DownloadItem, MAIN_QUEUE_ID } from '../store/useDownloadStore';
+import { useDownloadProgressStore } from '../store/downloadProgressStore';
 import { useToast } from '../contexts/ToastContext';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { SidebarFilter } from './Sidebar';
@@ -21,6 +22,8 @@ import {
   canStartDownload
 } from '../utils/downloadActions';
 import { isActiveDownloadStatus, isTransferActiveStatus } from '../utils/downloads';
+import { formatDownloadBytes } from '../utils/downloadProgress';
+import { summarizeDownloads } from '../utils/downloadSummary';
 import { readClipboardDownloadUrls } from '../utils/clipboard';
 import { useTranslation } from 'react-i18next';
 import {
@@ -100,6 +103,7 @@ interface ColumnLayoutBounds {
 export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   const { t } = useTranslation();
   const { downloads, queues, assignToQueue, openDeleteModal, redownload, moveInQueue } = useDownloadStore();
+  const progressMap = useDownloadProgressStore(state => state.progressMap);
   const { addToast } = useToast();
   const isMac = navigator.userAgent.includes('Mac');
   const [isReadingClipboard, setIsReadingClipboard] = useState(false);
@@ -718,6 +722,26 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     : sortDownloads(filteredDownloads, isQueueFilter ? queueSortConfig! : sortConfig),
     [filteredDownloads, isQueueFilter, queueSortConfig, sortConfig]);
 
+  const selectedDownloads = useMemo(
+    () => filteredDownloads.filter(download => selectedIds.has(download.id)),
+    [filteredDownloads, selectedIds]
+  );
+  const summaryDownloads = selectedDownloads.length > 0 ? selectedDownloads : filteredDownloads;
+  const downloadSummary = useMemo(
+    () => summarizeDownloads(summaryDownloads, progressMap),
+    [summaryDownloads, progressMap]
+  );
+  const summaryScopeLabel = selectedDownloads.length > 0
+    ? t($ => $.downloadTable.summary.selected, { count: downloadSummary.itemCount })
+    : t($ => $.downloadTable.summary.items, { count: downloadSummary.itemCount });
+  const formatSummaryBytes = (value: number | null, isEstimated = false): string => {
+    if (value === null) return t($ => $.downloadTable.summary.unknown);
+    const formatted = formatDownloadBytes(value);
+    return isEstimated
+      ? t($ => $.downloadTable.summary.estimated, { value: formatted })
+      : formatted;
+  };
+
   // Each row used to derive this by filtering and sorting the complete store
   // independently. That made a 1000-entry playlist perform O(n^2 log n) work
   // on every download update. Compute the same queue membership once and pass
@@ -1039,6 +1063,21 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
         <div className="downloads-title">
           {getFilterTitle()}
           <span className="downloads-count">{sortedDownloads.length}</span>
+        </div>
+        <div className="downloads-summary">
+          <span className="downloads-summary-scope">{summaryScopeLabel}</span>
+          <span className="downloads-summary-metric">
+            <span className="downloads-summary-label">{t($ => $.downloadTable.summary.downloaded)}</span>
+            <span className="downloads-summary-value">{formatSummaryBytes(downloadSummary.downloadedBytes)}</span>
+          </span>
+          <span className="downloads-summary-metric">
+            <span className="downloads-summary-label">{t($ => $.downloadTable.summary.remaining)}</span>
+            <span className="downloads-summary-value">{formatSummaryBytes(downloadSummary.remainingBytes, downloadSummary.remainingIsEstimated)}</span>
+          </span>
+          <span className="downloads-summary-metric">
+            <span className="downloads-summary-label">{t($ => $.downloadTable.summary.active)}</span>
+            <span className="downloads-summary-value">{downloadSummary.activeCount}</span>
+          </span>
         </div>
       </div>
 

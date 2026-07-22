@@ -7,6 +7,7 @@ import { ChevronDown, ChevronRight, FolderPlus, Info, CheckCircle, AlertCircle, 
 import { open } from '@tauri-apps/plugin-dialog';
 import { resolveCategoryDestination } from '../utils/downloadLocations';
 import {
+  getPauseResumeAction,
   isIdentityLocked as getIdentityLocked,
   isTransferLocked as getTransferLocked
 } from '../utils/downloadActions';
@@ -79,6 +80,7 @@ export const PropertiesModal = () => {
   const [mirrors, setMirrors] = useState('');
 
   const [errorMessage, setErrorMessage] = useState('');
+  const [isPauseResumePending, setIsPauseResumePending] = useState(false);
 
   useEffect(() => {
     if (selectedPropertiesDownloadId) {
@@ -205,6 +207,38 @@ export const PropertiesModal = () => {
     }
   };
 
+  const handlePauseResume = async () => {
+    const currentItem = useDownloadStore.getState().downloads.find(download => download.id === item.id);
+    const action = currentItem ? getPauseResumeAction(currentItem.status) : null;
+    if (!currentItem || !action || isPauseResumePending) return;
+
+    if (action === 'pause' && currentItem.resumable === false) {
+      const confirmPause = window.confirm(t($ => $.downloadTable.nonResumableOne));
+      if (!confirmPause) return;
+    }
+
+    setErrorMessage('');
+    setIsPauseResumePending(true);
+    try {
+      if (action === 'pause') {
+        await useDownloadStore.getState().pauseDownload(currentItem.id);
+      } else {
+        const resumed = await useDownloadStore.getState().resumeDownload(currentItem.id);
+        if (!resumed) {
+          throw new Error(t($ => $.downloadTable.backendRejectedStart));
+        }
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const message = action === 'pause'
+        ? t($ => $.downloadTable.pauseFailed)
+        : t($ => $.downloadTable.resumeFailed, { fileName: currentItem.fileName });
+      setErrorMessage(t($ => $.downloadTable.interactionError, { message, detail }));
+    } finally {
+      setIsPauseResumePending(false);
+    }
+  };
+
   const identityLocked = getIdentityLocked(item.status);
   const transferLocked = getTransferLocked(item.status);
   const configuredConnections = resolveDownloadConnections(item.connections, perServerConnections);
@@ -262,6 +296,11 @@ export const PropertiesModal = () => {
     return value === 'Unknown' ? t($ => $.addDownloads.unknown) : value;
   })();
   const statusLabel = t($ => $.downloads.status[item.status]);
+  const pauseResumeAction = getPauseResumeAction(item.status);
+  const pauseResumeLabel = pauseResumeAction === 'pause'
+    ? t($ => $.downloadTable.pause)
+    : t($ => $.downloadTable.resume);
+  const PauseResumeIcon = pauseResumeAction === 'pause' ? Pause : Play;
   const sizeDescription = sizeDisplay.totalIsEstimate
     ? t($ => $.downloads.size.downloadedOfApproximate, {
       downloaded: sizeDisplay.downloaded ?? '',
@@ -513,12 +552,27 @@ export const PropertiesModal = () => {
           </div>
           <div className="flex gap-2">
             <button 
+              type="button"
               onClick={() => setSelectedPropertiesDownloadId(null)} 
               className="app-button px-4 text-xs"
             >
               {t($ => $.properties.cancel)}
             </button>
+            {pauseResumeAction && (
+              <button
+                type="button"
+                onClick={() => void handlePauseResume()}
+                disabled={isPauseResumePending}
+                aria-label={pauseResumeLabel}
+                title={pauseResumeLabel}
+                className={`app-button px-4 text-xs ${isPauseResumePending ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
+                <PauseResumeIcon size={14} fill="currentColor" />
+                {pauseResumeLabel}
+              </button>
+            )}
             <button 
+              type="button"
               onClick={handleSave} 
               disabled={transferLocked}
               className={`app-button app-button-primary px-4 text-xs ${transferLocked ? 'opacity-50 cursor-not-allowed' : ''}`}

@@ -1805,9 +1805,11 @@ html[data-list-density="relaxed"] {
   }
 
   .downloads-content-header {
-    height: 58px;
+    min-height: 58px;
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 16px;
     padding: 0 16px;
     background: hsl(var(--main-bg));
   }
@@ -1835,6 +1837,40 @@ html[data-list-density="relaxed"] {
     font-weight: 700;
     color: hsl(var(--text-secondary));
     background: hsl(var(--item-hover));
+  }
+
+  .downloads-summary {
+    min-width: 0;
+    flex: 1 1 360px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    color: hsl(var(--text-secondary));
+    font-size: 11px;
+    line-height: 1.25;
+  }
+
+  .downloads-summary-scope {
+    color: hsl(var(--text-primary));
+    font-weight: 650;
+  }
+
+  .downloads-summary-metric {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4px;
+    white-space: nowrap;
+  }
+
+  .downloads-summary-label {
+    color: hsl(var(--text-muted));
+  }
+
+  .downloads-summary-value {
+    color: hsl(var(--text-secondary));
+    font-variant-numeric: tabular-nums;
   }
 
   .downloads-table {

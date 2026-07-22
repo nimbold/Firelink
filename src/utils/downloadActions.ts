@@ -26,6 +26,14 @@ export const canStartDownload = (status: DownloadStatus): boolean =>
 export const canPauseDownload = (status: DownloadStatus): boolean =>
   PAUSABLE_STATUSES.has(status);
 
+export type PauseResumeAction = 'pause' | 'resume';
+
+export const getPauseResumeAction = (status: DownloadStatus): PauseResumeAction | null => {
+  if (canPauseDownload(status)) return 'pause';
+  if (status === 'paused') return 'resume';
+  return null;
+};
+
 export const canRedownload = (status: DownloadStatus): boolean =>
   REDOWNLOADABLE_STATUSES.has(status);
 
