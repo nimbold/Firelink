@@ -21,6 +21,11 @@ import {
 import { normalizeSpeedLimitForBackend } from '../utils/downloads';
 import i18n from '../i18n';
 import { isAppLocalePreference, type AppLocalePreference } from '../i18n/locales';
+import {
+  DEFAULT_CALENDAR_PREFERENCE,
+  isCalendarPreference,
+  type CalendarPreference
+} from '../utils/dateTime';
 
 let settingsQueue: Promise<void> = Promise.resolve();
 let pairingTokenHydrationRequest: Promise<PairingTokenHydration> | null = null;
@@ -155,6 +160,7 @@ const tauriStorage: StateStorage = {
 export type {
   ActiveView,
   AppFontSize,
+  CalendarPreference,
   ListRowDensity,
   MediaCookieSource,
   PostQueueAction,
@@ -169,6 +175,7 @@ export type SidebarPosition = 'auto' | 'left' | 'right';
 
 export interface SettingsState {
   theme: Theme;
+  calendarPreference: CalendarPreference;
   language: AppLocalePreference;
   baseDownloadFolder: string;
   categorySubfoldersEnabled: boolean;
@@ -224,6 +231,7 @@ export interface SettingsState {
   showKeychainModal: boolean;
 
   setTheme: (theme: Theme) => void;
+  setCalendarPreference: (calendarPreference: CalendarPreference) => void;
   setLanguage: (language: AppLocalePreference) => void;
   setBaseDownloadFolder: (path: string) => void;
   approveDownloadRoot: (path: string) => Promise<string>;
@@ -280,6 +288,7 @@ export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
       theme: 'system',
+      calendarPreference: DEFAULT_CALENDAR_PREFERENCE,
       language: 'system',
       baseDownloadFolder: '~/Downloads',
       categorySubfoldersEnabled: true,
@@ -342,6 +351,10 @@ export const useSettingsStore = create<SettingsState>()(
       showKeychainModal: false,
 
       setTheme: (theme) => { info('Settings updated: theme'); set({ theme }); },
+      setCalendarPreference: (calendarPreference) => {
+        info('Settings updated: calendarPreference');
+        set({ calendarPreference });
+      },
       setLanguage: (language) => { info('Settings updated: language'); set({ language }); },
       setBaseDownloadFolder: (path) => {
         info('Settings updated: baseDownloadFolder');
@@ -512,7 +525,7 @@ export const useSettingsStore = create<SettingsState>()(
     {
       name: 'firelink-settings',
       storage: createJSONStorage(() => tauriStorage),
-      version: 5,
+      version: 6,
       migrate: (persistedState) => {
         if (!persistedState || typeof persistedState !== 'object') {
           return persistedState as SettingsState;
@@ -548,6 +561,7 @@ export const useSettingsStore = create<SettingsState>()(
       },
       partialize: (state): PersistedSettingsSnapshot => ({
         theme: state.theme,
+        calendarPreference: state.calendarPreference,
         language: state.language,
         baseDownloadFolder: state.baseDownloadFolder,
         categorySubfoldersEnabled: state.categorySubfoldersEnabled,
@@ -608,6 +622,9 @@ export const useSettingsStore = create<SettingsState>()(
           theme: isAllowedSetting(THEME_VALUES, persisted.theme)
             ? persisted.theme
             : currentState.theme,
+          calendarPreference: isCalendarPreference(persisted.calendarPreference)
+            ? persisted.calendarPreference
+            : currentState.calendarPreference,
           language: isAppLocalePreference(persisted.language)
             ? persisted.language
             : currentState.language,

@@ -4,6 +4,8 @@ import { Play, Pause, MoreVertical, Clock, ArrowUp, ArrowDown, GripVertical } fr
 import type { DownloadItem as DownloadItemType } from '../bindings/DownloadItem';
 import { canPauseDownload, canStartDownload } from '../utils/downloadActions';
 import { useTranslation } from 'react-i18next';
+import { useSettingsStore } from '../store/useSettingsStore';
+import { formatDateTime } from '../utils/dateTime';
 import {
   downloadProgressColorClass,
   formatDownloadTotal,
@@ -59,7 +61,8 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   onQueueDragStart,
   onClick,
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const calendarPreference = useSettingsStore(state => state.calendarPreference);
   const liveProgress = useDownloadProgressStore(state => state.progressMap[download.id]);
   const rowRef = React.useRef<HTMLDivElement>(null);
   const [isRowHovered, setIsRowHovered] = React.useState(false);
@@ -71,6 +74,12 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     const normalized = download.mediaQuality.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
     return normalized.length > 0 && normalized.length <= 48 ? normalized : undefined;
   })();
+  const dateAddedLabel = download.dateAdded
+    ? formatDateTime(download.dateAdded, {
+        locale: i18n.language,
+        calendar: calendarPreference
+      })
+    : '-';
 
   const updateActionPosition = React.useCallback(() => {
     const row = rowRef.current;
@@ -327,9 +336,9 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
       <div className="download-column-cell download-cell-right download-column-date-added" style={columnStyle('Date Added')}>
         <span
           className="download-cell-content download-date-value tabular-nums"
-          title={download.dateAdded ? new Date(download.dateAdded).toLocaleDateString() : '-'}
+          title={dateAddedLabel}
         >
-          {download.dateAdded ? new Date(download.dateAdded).toLocaleDateString() : '-'}
+          {dateAddedLabel}
         </span>
       </div>
     ),

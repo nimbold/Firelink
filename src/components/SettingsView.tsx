@@ -693,6 +693,11 @@ runEngineChecks(false);
     { value: 'uk', label: t($ => $.settings.lookAndFeel.languageUkrainian) },
     { value: 'ru', label: t($ => $.settings.lookAndFeel.languageRussian) },
   ] as const;
+  const calendarOptions = [
+    { value: 'gregorian', label: t($ => $.settings.lookAndFeel.calendarGregorian) },
+    { value: 'persian', label: t($ => $.settings.lookAndFeel.calendarPersian) },
+    { value: 'hebrew', label: t($ => $.settings.lookAndFeel.calendarHebrew) },
+  ] as const;
 
   const TabButton = ({ type, icon: Icon, label }: { type: SettingsTab; icon: typeof Download; label: string }) => {
     const active = activeTab === type;
@@ -866,6 +871,21 @@ runEngineChecks(false);
                     className="app-control w-48"
                   >
                     {languageOptions.map(option => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="mac-settings-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.lookAndFeel.calendar)}</span>
+                    <small>{t($ => $.settings.lookAndFeel.calendarDescription)}</small>
+                  </div>
+                  <select
+                    value={settings.calendarPreference}
+                    onChange={(event) => settings.setCalendarPreference(event.target.value as typeof settings.calendarPreference)}
+                    className="app-control w-48"
+                  >
+                    {calendarOptions.map(option => (
                       <option key={option.value} value={option.value}>{option.label}</option>
                     ))}
                   </select>

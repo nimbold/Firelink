@@ -1,6 +1,6 @@
 use crate::ipc::{
-    AppFontSize, ListRowDensity, MediaCookieSource, PersistedSettings, PostQueueAction, ProxyMode,
-    SchedulerSettings, SettingsTab, Theme,
+    AppFontSize, CalendarPreference, ListRowDensity, MediaCookieSource, PersistedSettings,
+    PostQueueAction, ProxyMode, SchedulerSettings, SettingsTab, Theme,
 };
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -197,6 +197,7 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
         "language",
         &["system", "en", "zh-CN", "he", "fa", "uk", "ru"],
     );
+    sanitize_allowed_string(state, "calendarPreference", &["gregorian", "persian", "hebrew"]);
     sanitize_allowed_string(state, "sidebarPosition", &["auto", "left", "right"]);
     sanitize_allowed_string(state, "appFontSize", &["small", "standard", "large"]);
     sanitize_allowed_string(state, "listRowDensity", &["compact", "standard", "relaxed"]);
@@ -416,6 +417,7 @@ fn derived_location_path(base: &str, subfolder: &str) -> String {
 fn default_settings() -> PersistedSettings {
     PersistedSettings {
         theme: Theme::System,
+        calendar_preference: CalendarPreference::Gregorian,
         language: "system".to_string(),
         base_download_folder: "~/Downloads".to_string(),
         category_subfolders_enabled: true,
@@ -703,6 +705,7 @@ mod tests {
                 "perServerConnections": 5,
                 "showNotifications": "yes",
                 "theme": "not-a-theme",
+                "calendarPreference": "lunar",
                 "siteLogins": [{"id": "valid", "urlPattern": "example.com", "username": "user"}, {"id": 3}]
             },
             "version": 3
@@ -715,6 +718,10 @@ mod tests {
         assert_eq!(settings.per_server_connections, 5);
         assert!(settings.show_notifications);
         assert!(matches!(settings.theme, crate::ipc::Theme::System));
+        assert!(matches!(
+            settings.calendar_preference,
+            crate::ipc::CalendarPreference::Gregorian
+        ));
         assert_eq!(settings.site_logins.len(), 1);
         assert_eq!(settings.site_logins[0].id, "valid");
     }

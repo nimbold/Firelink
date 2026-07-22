@@ -205,6 +205,21 @@ pub enum Theme {
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../src/bindings/")]
+pub enum CalendarPreference {
+    Gregorian,
+    Persian,
+    Hebrew,
+}
+
+impl Default for CalendarPreference {
+    fn default() -> Self {
+        Self::Gregorian
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub enum ActiveView {
     Downloads,
     Settings,
@@ -267,6 +282,8 @@ pub struct SchedulerSettings {
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct PersistedSettings {
     pub theme: Theme,
+    #[serde(default)]
+    pub calendar_preference: CalendarPreference,
     #[serde(default = "default_language_preference")]
     pub language: String,
     pub base_download_folder: String,

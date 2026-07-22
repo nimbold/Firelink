@@ -21,6 +21,24 @@ describe('last used download directory preference', () => {
   });
 });
 
+describe('calendar preference', () => {
+  it('keeps Gregorian as the default and persists explicit calendar choices', async () => {
+    vi.clearAllMocks();
+    useSettingsStore.setState({ calendarPreference: 'gregorian' });
+    expect(useSettingsStore.getState().calendarPreference).toBe('gregorian');
+
+    useSettingsStore.getState().setCalendarPreference('persian');
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(useSettingsStore.getState().calendarPreference).toBe('persian');
+    const save = vi.mocked(ipc.invokeCommand).mock.calls
+      .filter(([command]) => command === 'db_save_settings')
+      .slice(-1)[0];
+    expect(save).toBeDefined();
+    expect(JSON.parse((save?.[1] as { data: string }).data).state.calendarPreference).toBe('persian');
+  });
+});
+
 describe('useSettingsStore global speed limit persistence', () => {
   beforeEach(() => {
     vi.clearAllMocks();

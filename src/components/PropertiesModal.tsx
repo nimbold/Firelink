@@ -18,19 +18,25 @@ import {
 } from '../utils/downloadProgress';
 import { resolveDownloadConnections } from '../utils/downloads';
 import { useTranslation } from 'react-i18next';
+import { formatDateTime, type CalendarPreference } from '../utils/dateTime';
 
 type LoginMode = 'matching' | 'custom' | 'none';
 
-const formatLastTry = (value?: string): string => {
+const formatLastTry = (
+  value: string | undefined,
+  locale: string,
+  calendar: CalendarPreference
+): string => {
   if (!value) return '-';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? '-'
-    : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  return formatDateTime(value, {
+    locale,
+    calendar,
+    options: { dateStyle: 'medium', timeStyle: 'short' }
+  });
 };
 
 export const PropertiesModal = () => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const categoryLabel = (category: string) => {
     switch (category) {
       case 'Musics': return t($ => $.navigation.categories.musics);
@@ -55,7 +61,7 @@ export const PropertiesModal = () => {
       : undefined
   ));
 
-  const { baseDownloadFolder, perServerConnections } = useSettingsStore();
+  const { baseDownloadFolder, perServerConnections, calendarPreference } = useSettingsStore();
 
   // Form states
   const [url, setUrl] = useState('');
@@ -373,9 +379,9 @@ export const PropertiesModal = () => {
               <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium shrink-0 whitespace-nowrap">{t($ => $.properties.connections)}</span><span className="text-text-secondary truncate whitespace-nowrap" title={item.connections !== undefined ? t($ => $.properties.savedTooltip) : t($ => $.properties.defaultTooltip)}><bdi>{connectionStatus}</bdi></span></div>
               <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[60px] shrink-0">{t($ => $.properties.speedCap)}</span><span className="text-text-secondary truncate">{item.speedLimit || '-'}</span></div>
               <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[55px] shrink-0">{t($ => $.properties.category)}</span><span className="text-text-secondary truncate">{categoryLabel(item.category)}</span></div>
-            <div className="flex gap-1.5"><span className="text-text-muted font-medium w-[50px]">{t($ => $.properties.lastTry)}</span><span className="text-text-secondary truncate">{formatLastTry(item.lastTry)}</span></div>
+            <div className="flex gap-1.5"><span className="text-text-muted font-medium w-[50px]">{t($ => $.properties.lastTry)}</span><span className="text-text-secondary truncate">{formatLastTry(item.lastTry, i18n.language, calendarPreference)}</span></div>
             
-              <div className="flex gap-1.5 col-span-2"><span className="text-text-muted font-medium w-[90px]">{t($ => $.properties.dateAdded)}</span><span className="text-text-secondary truncate">{new Date(item.dateAdded).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</span></div>
+              <div className="flex gap-1.5 col-span-2"><span className="text-text-muted font-medium w-[90px]">{t($ => $.properties.dateAdded)}</span><span className="text-text-secondary truncate">{formatDateTime(item.dateAdded, { locale: i18n.language, calendar: calendarPreference, options: { dateStyle: 'medium', timeStyle: 'short' } })}</span></div>
               <div className="flex gap-1.5 col-span-2"><span className="text-text-muted font-medium w-[70px]">{t($ => $.properties.destination)}</span><span className="text-text-secondary truncate" title={saveLocation}>{saveLocation || baseDownloadFolder}</span></div>
             {item.lastError && (item.status === 'failed' || item.status === 'retrying') && (
               <div className="flex gap-1.5 col-span-4 min-w-0">

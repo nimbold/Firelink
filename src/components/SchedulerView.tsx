@@ -11,6 +11,7 @@ import { WindowDragRegion } from './WindowDragRegion';
 import { useToast } from '../contexts/ToastContext';
 import { usePlatformInfo } from '../utils/platform';
 import { useTranslation } from 'react-i18next';
+import { formatDateTime } from '../utils/dateTime';
 
 const days = [
   { value: 0, key: 'su' },
@@ -54,9 +55,10 @@ function nextScheduledRun(settings: SchedulerSettings): Date | 'disabled' | 'non
 }
 
 export default function SchedulerView() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const savedSettings = useSettingsStore(state => state.scheduler);
   const schedulerRunning = useSettingsStore(state => state.schedulerRunning);
+  const calendarPreference = useSettingsStore(state => state.calendarPreference);
   const setScheduler = useSettingsStore(state => state.setScheduler);
   const queues = useDownloadStore(state => state.queues);
   const [draft, setDraft] = useState<SchedulerSettings>(savedSettings);
@@ -75,14 +77,18 @@ export default function SchedulerView() {
     const scheduledRun = nextScheduledRun(draft);
     if (scheduledRun === 'disabled') return t($ => $.scheduler.disabled);
     if (scheduledRun === 'none') return t($ => $.scheduler.noScheduledDay);
-    return scheduledRun.toLocaleString(undefined, {
-      weekday: 'short',
-      month: 'short',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit'
+    return formatDateTime(scheduledRun, {
+      locale: i18n.language,
+      calendar: calendarPreference,
+      options: {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit'
+      }
     });
-  }, [draft, t]);
+  }, [calendarPreference, draft, i18n.language, t]);
   const hasUnsavedChanges = useMemo(
     () => JSON.stringify(draft) !== JSON.stringify(savedSettings),
     [draft, savedSettings]
