@@ -18,7 +18,7 @@ pub const MEDIA_RUN_CANCELLED: &str = "__firelink_media_run_cancelled__";
 
 type Aria2ControlLocks = Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Aria2GidMapping {
     pub id: String,
     pub epoch: u64,
@@ -1111,6 +1111,22 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .find_map(|(gid, mapping)| (mapping.id == id).then(|| gid.clone()))
     }
 
+    /// Capture the GID ownership token used by the poller. The mapping's
+    /// epoch must still be current when an asynchronous status snapshot is
+    /// emitted; otherwise a late response from an older GID can be attributed
+    /// to a newer lifecycle for the same download id.
+    pub fn aria2_gid_mapping(&self, gid: &str) -> Option<Aria2GidMapping> {
+        self.aria2_gids.read().unwrap().get(gid).cloned()
+    }
+
+    pub fn is_current_aria2_gid_mapping(
+        &self,
+        gid: &str,
+        expected: &Aria2GidMapping,
+    ) -> bool {
+        self.aria2_gid_mapping(gid).as_ref() == Some(expected)
+    }
+
     pub fn aria2_gid_mappings(&self) -> Vec<(String, String)> {
         self.aria2_gids
             .read()
@@ -1854,6 +1870,30 @@ pub struct ProductionSpawner {
     app_handle: AppHandle<tauri::Wry>,
 }
 
+const ARIA2_MIN_SPLIT_SIZE: &str = "1M";
+
+fn apply_aria2_connection_options(
+    options: &mut serde_json::Map<String, serde_json::Value>,
+    connections: i32,
+) {
+    let connections = connections.max(1);
+    options.insert(
+        "split".to_string(),
+        serde_json::json!(connections.to_string()),
+    );
+    options.insert(
+        "max-connection-per-server".to_string(),
+        serde_json::json!(connections.to_string()),
+    );
+    // aria2's 20M default suppresses segmentation for files smaller than
+    // 40M. Keep the requested connection count useful for ordinary release
+    // assets while retaining a 1M lower bound to avoid tiny range requests.
+    options.insert(
+        "min-split-size".to_string(),
+        serde_json::json!(ARIA2_MIN_SPLIT_SIZE),
+    );
+}
+
 impl ProductionSpawner {
     pub fn new(app_handle: AppHandle<tauri::Wry>) -> Self {
         Self { app_handle }
@@ -1909,11 +1949,7 @@ impl SidecarSpawner for ProductionSpawner {
             crate::download_ownership::canonical_download_filename(&payload.filename);
         options.insert("out".to_string(), serde_json::json!(safe_filename));
         let conn = effective_aria2_connections(id, payload).await;
-        options.insert("split".to_string(), serde_json::json!(conn.to_string()));
-        options.insert(
-            "max-connection-per-server".to_string(),
-            serde_json::json!(conn.to_string()),
-        );
+        apply_aria2_connection_options(&mut options, conn);
         let mt = aria2_attempt_limit(payload.max_tries);
         options.insert("max-tries".to_string(), serde_json::json!(mt.to_string()));
         options.insert("retry-wait".to_string(), serde_json::json!("2"));
@@ -2207,6 +2243,36 @@ impl EnqueueItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aria2_connection_options_enable_requested_ranges_for_small_release_assets() {
+        let mut options = serde_json::Map::new();
+
+        apply_aria2_connection_options(&mut options, 16);
+
+        assert_eq!(options.get("split"), Some(&serde_json::json!("16")));
+        assert_eq!(
+            options.get("max-connection-per-server"),
+            Some(&serde_json::json!("16"))
+        );
+        assert_eq!(
+            options.get("min-split-size"),
+            Some(&serde_json::json!("1M"))
+        );
+    }
+
+    #[test]
+    fn aria2_connection_options_never_emit_zero_connections() {
+        let mut options = serde_json::Map::new();
+
+        apply_aria2_connection_options(&mut options, 0);
+
+        assert_eq!(options.get("split"), Some(&serde_json::json!("1")));
+        assert_eq!(
+            options.get("max-connection-per-server"),
+            Some(&serde_json::json!("1"))
+        );
+    }
 
     #[test]
     fn bounded_range_probe_accepts_exact_requested_byte() {

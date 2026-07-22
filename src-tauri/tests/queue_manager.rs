@@ -358,6 +358,32 @@ async fn resumed_gid_rebinds_to_the_new_control_epoch() {
 }
 
 #[tokio::test]
+async fn gid_mapping_snapshot_is_invalid_after_epoch_or_gid_replacement() {
+    let (mgr, _spawner) = make_manager(1);
+
+    mgr.remember_gid("snapshot".to_string(), "gid-old".to_string())
+        .await;
+    let old_mapping = mgr
+        .aria2_gid_mapping("gid-old")
+        .expect("the first gid should be mapped");
+    assert!(mgr.is_current_aria2_gid_mapping("gid-old", &old_mapping));
+
+    let resume_epoch = mgr.next_aria2_control_epoch("snapshot").await;
+    assert!(mgr
+        .rebind_aria2_gid_epoch("snapshot", "gid-old", resume_epoch)
+        .await);
+    assert!(!mgr.is_current_aria2_gid_mapping("gid-old", &old_mapping));
+
+    mgr.remember_gid("snapshot".to_string(), "gid-new".to_string())
+        .await;
+    assert!(mgr.aria2_gid_mapping("gid-old").is_none());
+    let new_mapping = mgr
+        .aria2_gid_mapping("gid-new")
+        .expect("the replacement gid should be mapped");
+    assert!(mgr.is_current_aria2_gid_mapping("gid-new", &new_mapping));
+}
+
+#[tokio::test]
 async fn forgetting_aria2_gid_clears_mapping_without_releasing_twice() {
     let (mgr, _spawner) = make_manager(1);
     let permit = mgr.acquire_permit().await;

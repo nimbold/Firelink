@@ -1464,6 +1464,8 @@ fn emit_media_progress(
                 downloaded_bytes,
                 total_bytes,
                 total_is_estimate,
+                active_connections: None,
+                requested_connections: None,
             },
         );
         state.last_progress_at = now;
@@ -2988,6 +2990,10 @@ pub struct DownloadProgressEvent {
     total_bytes: Option<f64>,
     #[ts(optional)]
     total_is_estimate: Option<bool>,
+    #[ts(optional)]
+    active_connections: Option<i32>,
+    #[ts(optional)]
+    requested_connections: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -4100,6 +4106,8 @@ pub(crate) async fn start_media_download_internal(
                                         downloaded_bytes: None,
                                         total_bytes: None,
                                         total_is_estimate: Some(false),
+                                        active_connections: None,
+                                        requested_connections: None,
                                     });
                                 }
                                 let lower = line.to_lowercase();
@@ -4171,6 +4179,8 @@ pub(crate) async fn start_media_download_internal(
                                             downloaded_bytes: Some(metadata.len() as f64),
                                             total_bytes: Some(metadata.len() as f64),
                                             total_is_estimate: Some(false),
+                                            active_connections: None,
+                                            requested_connections: None,
                                         });
                                     }
                                 }
@@ -6598,11 +6608,33 @@ mod tests {
         MediaProgressEmitterState, MediaSpeedSampler, MEDIA_PROGRESS_PREFIX,
         observe_aria2_connections, observe_aria2_connections_with_epoch,
         Aria2ConnectionObservation, Aria2ConnectionSample, Aria2RecoveryReason,
+        aria2_active_connection_count,
         parse_media_playlist_metadata,
         validate_enqueue_url, validate_enqueue_uris,
     };
     use serde_json::json;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn aria2_active_connection_count_uses_only_nonnegative_daemon_values() {
+        assert_eq!(
+            aria2_active_connection_count(&json!({"connections": "16"})),
+            16
+        );
+        assert_eq!(
+            aria2_active_connection_count(&json!({"connections": 16})),
+            16
+        );
+        assert_eq!(
+            aria2_active_connection_count(&json!({"connections": "-1"})),
+            0
+        );
+        assert_eq!(
+            aria2_active_connection_count(&json!({"connections": -1})),
+            0
+        );
+        assert_eq!(aria2_active_connection_count(&json!({})), 0);
+    }
 
     #[tokio::test]
     async fn enqueue_url_validation_blocks_local_http_but_preserves_ftp() {
@@ -8312,6 +8344,19 @@ struct Aria2ConnectionSample<'a> {
     now: Instant,
 }
 
+fn aria2_active_connection_count(status_info: &serde_json::Value) -> i32 {
+    status_info
+        .get("connections")
+        .and_then(|value| {
+            value
+                .as_str()
+                .and_then(|value| value.parse::<i32>().ok())
+                .or_else(|| value.as_i64().and_then(|value| i32::try_from(value).ok()))
+        })
+        .filter(|value| *value >= 0)
+        .unwrap_or(0)
+}
+
 const ARIA2_CONNECTION_RECOVERY_DELAY: Duration = Duration::from_secs(30);
 const ARIA2_CONNECTION_RECOVERY_COOLDOWN: Duration = Duration::from_secs(45);
 const ARIA2_MIN_REMAINING_FOR_CONNECTION_RECOVERY: u64 = 1024 * 1024;
@@ -8928,28 +8973,39 @@ pub fn run() {
                             let mut seen_gids = HashSet::new();
                             for status_info in active_arr {
                                 let gid = status_info.get("gid").and_then(|s| s.as_str()).unwrap_or("");
-                                let id = poll_mgr
-                                    .aria2_gids
-                                    .read()
-                                    .unwrap()
-                                    .get(gid)
-                                    .map(|mapping| mapping.id.clone());
-                                if let Some(id) = id {
-                                    seen_ids.insert(id.clone());
-                                    seen_gids.insert(gid.to_string());
+                                let Some(mapping) = poll_mgr.aria2_gid_mapping(gid) else {
+                                    continue;
+                                };
+                                let id = mapping.id.clone();
+                                {
                                     let status = status_info.get("status").and_then(|value| value.as_str()).unwrap_or("");
                                     let total = status_info.get("totalLength").and_then(|s| s.as_str()).unwrap_or("0").parse::<u64>().unwrap_or(0);
                                     let completed = status_info.get("completedLength").and_then(|s| s.as_str()).unwrap_or("0").parse::<u64>().unwrap_or(0);
                                     let speed_bytes = status_info.get("downloadSpeed").and_then(|s| s.as_str()).unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-                                    let active_connections = status_info.get("connections").and_then(|s| s.as_str()).unwrap_or("0").parse::<i32>().unwrap_or(0);
+                                    let active_connections =
+                                        aria2_active_connection_count(status_info);
                                     let requested_connections = poll_mgr
                                         .aria2_requested_connections(&id)
                                         .await
                                         .unwrap_or(1)
                                         .max(1);
                                     let speed_limited = poll_mgr.aria2_speed_limited(&id).await;
-                                    let control_epoch =
-                                        poll_mgr.current_aria2_control_epoch(&id).await;
+                                    let control_epoch = mapping.epoch;
+                                    // The status snapshot and the requested
+                                    // connection lookup both await. A pause,
+                                    // retry, or same-GID resume may replace the
+                                    // mapping while those awaits are in
+                                    // flight. Only emit telemetry if this
+                                    // snapshot still owns the same GID epoch.
+                                    if !poll_mgr.is_current_aria2_gid_mapping(gid, &mapping)
+                                        || !poll_mgr
+                                            .is_aria2_control_epoch_current(&id, control_epoch)
+                                            .await
+                                    {
+                                        continue;
+                                    }
+                                    seen_ids.insert(id.clone());
+                                    seen_gids.insert(gid.to_string());
                                     let now = Instant::now();
                                     let observation = observations.entry(id.clone()).or_default();
                                     let recovery_reason = observe_aria2_connections_with_epoch(
@@ -8992,6 +9048,8 @@ pub fn run() {
                                         downloaded_bytes: Some(completed as f64),
                                         total_bytes: (total > 0).then_some(total as f64),
                                         total_is_estimate: Some(false),
+                                        active_connections: Some(active_connections),
+                                        requested_connections: Some(requested_connections),
                                     });
 
                                     if let Some(reason) = recovery_reason {

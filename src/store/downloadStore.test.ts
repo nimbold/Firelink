@@ -90,6 +90,40 @@ describe('useDownloadProgressStore', () => {
     release();
   });
 
+  it('keeps Aria2 connection telemetry from the live progress event', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'connection-telemetry',
+        url: 'https://github.com/example/release.zip',
+        fileName: 'release.zip',
+        status: 'downloading',
+        category: 'Compressed',
+        dateAdded: ''
+      }]
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-progress']({ payload: {
+      id: 'connection-telemetry',
+      fraction: 0.2,
+      speed: '3 MB/s',
+      eta: '10s',
+      size: '38 MB',
+      size_is_final: false,
+      active_connections: 16,
+      requested_connections: 16
+    } });
+
+    expect(useDownloadProgressStore.getState().progressMap['connection-telemetry'])
+      .toMatchObject({ active_connections: 16, requested_connections: 16 });
+    release();
+  });
+
   it('clears progress when events arrive after a download row was removed', async () => {
     const handlers: Record<string, (event: any) => void> = {};
     vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {

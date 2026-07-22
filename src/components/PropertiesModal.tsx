@@ -207,6 +207,32 @@ export const PropertiesModal = () => {
 
   const identityLocked = getIdentityLocked(item.status);
   const transferLocked = getTransferLocked(item.status);
+  const configuredConnections = resolveDownloadConnections(item.connections, perServerConnections);
+  const observedConnectionTotal = Math.max(
+    1,
+    liveProgress?.requested_connections ?? configuredConnections
+  );
+  const observedActiveConnections = liveProgress?.active_connections;
+  const connectionTelemetryActive = item.status === 'downloading' ||
+    item.status === 'processing' ||
+    item.status === 'retrying';
+  const connectionStatus = (() => {
+    if (item.isMedia) return t($ => $.properties.connectionsUnavailable);
+    if (!connectionTelemetryActive) return String(configuredConnections);
+    if (typeof observedActiveConnections === 'number') {
+      return t($ => $.properties.connectionCount, {
+        active: observedActiveConnections,
+        total: observedConnectionTotal,
+      });
+    }
+    if (item.status === 'downloading') {
+      return t($ => $.properties.connectionCountUnknown, { total: observedConnectionTotal });
+    }
+    return t($ => $.properties.connectionCount, {
+      active: 0,
+      total: observedConnectionTotal,
+    });
+  })();
   const displayedFraction = item.status === 'completed'
     ? 1
     : liveProgress?.fraction ?? item.fraction ?? 0;
@@ -298,7 +324,7 @@ export const PropertiesModal = () => {
               <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[40px] shrink-0">{t($ => $.properties.speed)}</span><span className="text-text-secondary truncate">{displayedSpeed}</span></div>
               <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[30px] shrink-0">{t($ => $.properties.eta)}</span><span className="text-text-secondary truncate">{displayedEta}</span></div>
 
-              <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[90px] shrink-0">{t($ => $.properties.connections)}</span><span className="text-text-secondary truncate" title={item.connections !== undefined ? t($ => $.properties.savedTooltip) : t($ => $.properties.defaultTooltip)}>{resolveDownloadConnections(item.connections, perServerConnections)}{item.connections !== undefined ? t($ => $.properties.saved) : t($ => $.properties.defaultValue)}</span></div>
+              <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[90px] shrink-0">{t($ => $.properties.connections)}</span><span className="text-text-secondary truncate" title={item.connections !== undefined ? t($ => $.properties.savedTooltip) : t($ => $.properties.defaultTooltip)}><bdi>{connectionStatus}</bdi>{item.connections !== undefined ? t($ => $.properties.saved) : t($ => $.properties.defaultValue)}</span></div>
               <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[60px] shrink-0">{t($ => $.properties.speedCap)}</span><span className="text-text-secondary truncate">{item.speedLimit || '-'}</span></div>
               <div className="flex gap-1.5 min-w-0"><span className="text-text-muted font-medium w-[55px] shrink-0">{t($ => $.properties.category)}</span><span className="text-text-secondary truncate">{categoryLabel(item.category)}</span></div>
             <div className="flex gap-1.5"><span className="text-text-muted font-medium w-[50px]">{t($ => $.properties.lastTry)}</span><span className="text-text-secondary truncate">{formatLastTry(item.lastTry)}</span></div>
@@ -352,6 +378,7 @@ export const PropertiesModal = () => {
               <div className="flex items-center gap-2">
                 <input type="number" value={connections} min={1} max={16} onChange={e=>{ setConnections(Number(e.target.value)); setConnectionsDirty(true); }} disabled={transferLocked} className="w-16 bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-50" />
                 <span className="text-xs text-text-muted">{t($ => $.properties.perFile)}</span>
+                <span className="text-xs text-text-secondary font-mono" aria-live="polite"><bdi>{connectionStatus}</bdi></span>
                 {!transferLocked && item.connections !== undefined && item.connections !== perServerConnections && (
                   <button
                     type="button"
