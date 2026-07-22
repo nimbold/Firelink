@@ -2061,6 +2061,14 @@ const MEDIA_METADATA_TIMEOUT: Duration = Duration::from_secs(55);
 const MEDIA_METADATA_CACHE_MAX_ENTRIES: usize = 128;
 const FILE_METADATA_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_SHELL_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+const MEDIA_CONNECTIONS_MIN: i32 = 1;
+const MEDIA_CONNECTIONS_MAX: i32 = 16;
+
+fn normalize_media_connections(connections: Option<i32>) -> i32 {
+    connections
+        .unwrap_or(MEDIA_CONNECTIONS_MAX)
+        .clamp(MEDIA_CONNECTIONS_MIN, MEDIA_CONNECTIONS_MAX)
+}
 
 struct ShellCommandOutput {
     status_code: Option<i32>,
@@ -3821,6 +3829,7 @@ pub(crate) async fn start_media_download_internal(
     destination: String,
     filename: String,
     format_selector: Option<String>,
+    connections: Option<i32>,
     cookie_source: Option<String>,
     speed_limit: Option<String>,
     username: Option<String>,
@@ -3906,6 +3915,7 @@ pub(crate) async fn start_media_download_internal(
     let max_retries = max_tries
         .unwrap_or(crate::retry::MAX_RETRIES as i32)
         .max(0) as usize;
+    let concurrent_fragments = normalize_media_connections(connections);
     let mut strike = 0_usize;
     let mut effective_cookie_source = cookie_source.clone();
     let mut browser_cookie_fallback_used = false;
@@ -3938,7 +3948,7 @@ pub(crate) async fn start_media_download_internal(
             .arg("--js-runtimes")
             .arg(format!("deno:{}", deno_path.to_string_lossy()))
             .arg("--concurrent-fragments")
-            .arg("4")
+            .arg(concurrent_fragments.to_string())
             .arg("--no-warnings")
             // Playlist expansion is owned by Firelink. Every persisted media
             // row must remain a single-video lifecycle, even when yt-dlp's
@@ -6610,6 +6620,7 @@ mod tests {
         Aria2ConnectionObservation, Aria2ConnectionSample, Aria2RecoveryReason,
         aria2_active_connection_count,
         parse_media_playlist_metadata,
+        normalize_media_connections,
         validate_enqueue_url, validate_enqueue_uris,
     };
     use serde_json::json;
@@ -6634,6 +6645,16 @@ mod tests {
             0
         );
         assert_eq!(aria2_active_connection_count(&json!({})), 0);
+    }
+
+    #[test]
+    fn normalize_media_connections_uses_safe_user_selected_range() {
+        assert_eq!(normalize_media_connections(Some(16)), 16);
+        assert_eq!(normalize_media_connections(Some(7)), 7);
+        assert_eq!(normalize_media_connections(None), 16);
+        assert_eq!(normalize_media_connections(Some(0)), 1);
+        assert_eq!(normalize_media_connections(Some(-4)), 1);
+        assert_eq!(normalize_media_connections(Some(99)), 16);
     }
 
     #[tokio::test]

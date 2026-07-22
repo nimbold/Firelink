@@ -2141,6 +2141,7 @@ impl SidecarSpawner for ProductionSpawner {
                 payload.destination.clone(),
                 payload.filename.clone(),
                 payload.format_selector.clone(),
+                payload.connections,
                 payload.cookie_source.clone(),
                 payload.speed_limit.clone(),
                 payload.username.clone(),
