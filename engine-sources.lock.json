@@ -13,9 +13,9 @@
         "sha256": "60343461ac5fe3a31f4ef12667f2946bb852e20655c8610aeb7e751e87f7df3a"
       },
       "ffmpeg": {
-        "version": "8.1.2-22-g94138f6973",
-        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-19-13-12/ffmpeg-n8.1.2-22-g94138f6973-win64-gpl-8.1.zip",
-        "sha256": "9db2860af5d1c536ed7fcb7ed84fa4ef80d188d1396d1cdf8cad180137510f3f"
+        "version": "8.1.2-29-g703dcc25b9",
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-21-13-38/ffmpeg-n8.1.2-29-g703dcc25b9-win64-gpl-8.1.zip",
+        "sha256": "ebf57e8b1a10b176b88c3cbc66e68a4aed472cf47520b0fbf003e892fb3be642"
       },
       "aria2c": {
         "version": "1.37.0",
@@ -35,9 +35,9 @@
         "sha256": "8101865641cbede56f08ad19c0a67a87df84bce127fee0d3e3e1f7467717ffa6"
       },
       "ffmpeg": {
-        "version": "8.1.2-22-g94138f6973",
-        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-19-13-12/ffmpeg-n8.1.2-22-g94138f6973-linux64-gpl-8.1.tar.xz",
-        "sha256": "166375e7f8b1f6963949a61a83ffffe858eba742f6326180b8ff3bc58b205c72"
+        "version": "8.1.2-29-g703dcc25b9",
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-21-13-38/ffmpeg-n8.1.2-29-g703dcc25b9-linux64-gpl-8.1.tar.xz",
+        "sha256": "c6c54589dd3443fb86b441351218d1f0e0cba8221134c3d2e7e3eda80e984747"
       },
       "aria2c": {
         "version": "1.37.0",
