@@ -5650,11 +5650,18 @@ async fn move_many_in_queue(
     ids: Vec<String>,
     queue_id: String,
     direction: crate::ipc::QueueDirection,
+    target_index: Option<usize>,
 ) -> Result<Vec<String>, AppError> {
-    Ok(state
-        .queue_manager
-        .move_many_in_queue(&ids, &queue_id, direction)
-        .await)
+    Ok(match target_index {
+        Some(target_index) => state
+            .queue_manager
+            .move_many_in_queue_to(&ids, &queue_id, target_index)
+            .await,
+        None => state
+            .queue_manager
+            .move_many_in_queue(&ids, &queue_id, direction)
+            .await,
+    })
 }
 
 #[tauri::command]

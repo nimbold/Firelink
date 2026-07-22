@@ -1575,6 +1575,52 @@ describe('useDownloadStore', () => {
     expect(new Set(positions).size).toBe(4);
   });
 
+  it('translates a drag target around staged rows before the atomic backend move', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'a', status: 'queued', queueId: 'drag-queue', queuePosition: 0 },
+        { id: 'staged', status: 'staged', queueId: 'drag-queue', queuePosition: 1 },
+        { id: 'b', status: 'queued', queueId: 'drag-queue', queuePosition: 2 },
+        { id: 'c', status: 'queued', queueId: 'drag-queue', queuePosition: 3 }
+      ] as any[],
+      backendRegisteredIds: new Set(['a', 'b', 'c']),
+      pendingOrder: ['a', 'b', 'c']
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'move_many_in_queue') return ['c', 'a', 'b'];
+      if (command === 'get_pending_order') return ['c', 'a', 'b'];
+      return undefined;
+    });
+
+    await useDownloadStore.getState().moveManyInQueueToPosition('c', 'drag-queue', 0);
+
+    expect(vi.mocked(ipc.invokeCommand)).toHaveBeenCalledWith('move_many_in_queue', {
+      ids: ['c'],
+      queueId: 'drag-queue',
+      direction: 'up',
+      targetIndex: 0
+    });
+    expect(useDownloadStore.getState().downloads.map(item => item.id).sort()).toEqual(['a', 'b', 'c', 'staged']);
+    expect(useDownloadStore.getState().downloads.find(item => item.id === 'c')?.queuePosition).toBe(0);
+    expect(useDownloadStore.getState().downloads.find(item => item.id === 'staged')?.queuePosition).toBe(2);
+  });
+
+  it('rolls back a failed drag move and rejects so the UI can report the failure', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'first', status: 'queued', queueId: 'rollback-queue', queuePosition: 0 },
+        { id: 'second', status: 'queued', queueId: 'rollback-queue', queuePosition: 1 }
+      ] as any[],
+      backendRegisteredIds: new Set(['first', 'second'])
+    });
+    vi.mocked(ipc.invokeCommand).mockRejectedValue(new Error('backend unavailable'));
+
+    await expect(
+      useDownloadStore.getState().moveManyInQueueToPosition('second', 'rollback-queue', 0)
+    ).rejects.toThrow('backend unavailable');
+    expect(useDownloadStore.getState().downloads.map(item => item.queuePosition)).toEqual([0, 1]);
+  });
+
   it('detaches a registered queued item through the backend before reassigning it', async () => {
     useDownloadStore.setState({
       downloads: [{

@@ -49,6 +49,9 @@ import {
   type DownloadColumnAlignment,
   type DownloadTableColumnKey
 } from '../utils/downloadTableColumns';
+import {
+  targetIndexForBoundary
+} from '../utils/queueOrdering';
 
 interface DownloadTableProps {
   filter: SidebarFilter;
@@ -100,9 +103,28 @@ interface ColumnLayoutBounds {
   right: number;
 }
 
+interface QueueDragState {
+  pointerId: number;
+  sourceId: string;
+  queueId: string;
+  ids: string[];
+  startY: number;
+  active: boolean;
+  targetIndex: number;
+  markerTop: number;
+}
+
 export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   const { t } = useTranslation();
-  const { downloads, queues, assignToQueue, openDeleteModal, redownload, moveInQueue } = useDownloadStore();
+  const {
+    downloads,
+    queues,
+    assignToQueue,
+    openDeleteModal,
+    redownload,
+    moveInQueue,
+    moveManyInQueueToPosition
+  } = useDownloadStore();
   const progressMap = useDownloadProgressStore(state => state.progressMap);
   const { addToast } = useToast();
   const isMac = navigator.userAgent.includes('Mac');
@@ -153,6 +175,11 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   const selectedIdsRef = useRef(selectedIds);
   const lastSelectedIdRef = useRef(lastSelectedId);
   const sortedDownloadsRef = useRef<DownloadItem[]>([]);
+  const queueListElementRef = useRef<HTMLDivElement | null>(null);
+  const queueReorderableDownloadsRef = useRef<DownloadItem[]>([]);
+  const queueDragStateRef = useRef<QueueDragState | null>(null);
+  const queueDragCleanupRef = useRef<(() => void) | null>(null);
+  const [queueDragState, setQueueDragState] = useState<QueueDragState | null>(null);
   selectedIdsRef.current = selectedIds;
   lastSelectedIdRef.current = lastSelectedId;
   const [columnWidths, setColumnWidths] = useState(() => {
@@ -195,6 +222,10 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   );
   const tableMinWidthWithPadding = 'calc(' + tableMinWidth + 'px + var(--download-row-padding-x) + var(--download-row-padding-x))';
   const downloadsViewRef = useRef<HTMLDivElement>(null);
+  const queueListRef = useCallback((element: HTMLDivElement | null) => {
+    queueListElementRef.current = element;
+    animationParent(element);
+  }, [animationParent]);
 
   const updateColumnDragState = (next: ColumnDragState | null) => {
     columnDragStateRef.current = next;
@@ -545,7 +576,10 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   useEffect(() => () => {
     resizeCleanupRef.current?.();
     columnDragCleanupRef.current?.();
+    queueDragCleanupRef.current?.();
     columnDragCleanupRef.current = null;
+    queueDragCleanupRef.current = null;
+    queueDragStateRef.current = null;
     const captureTarget = columnDragCaptureTargetRef.current;
     const capturePointerId = columnDragCapturePointerIdRef.current;
     columnDragTargetRef.current = null;
@@ -631,6 +665,140 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     const detail = error instanceof Error ? error.message : String(error);
     addToast({ message: `${message}: ${detail}`, variant: 'error', isActionable: true });
   }, [addToast]);
+
+  const queueRowForId = (id: string): HTMLElement | null => {
+    const list = queueListElementRef.current;
+    if (!list) return null;
+    return Array.from(list.children).find(element =>
+      element instanceof HTMLElement && element.dataset.downloadId === id
+    ) as HTMLElement | undefined || null;
+  };
+
+  const queueDropPosition = (
+    clientY: number,
+    items: DownloadItem[],
+    selectedIds: ReadonlySet<string>
+  ): { targetIndex: number; markerTop: number } => {
+    const list = queueListElementRef.current;
+    if (!list || items.length === 0) return { targetIndex: 0, markerTop: 0 };
+    const listRect = list.getBoundingClientRect();
+    let boundaryIndex = items.length;
+    let markerTop = 0;
+    for (let index = 0; index < items.length; index += 1) {
+      const row = queueRowForId(items[index].id);
+      if (!row) continue;
+      const rect = row.getBoundingClientRect();
+      if (clientY < rect.top + rect.height / 2) {
+        boundaryIndex = index;
+        markerTop = rect.top - listRect.top + list.scrollTop;
+        break;
+      }
+      markerTop = rect.bottom - listRect.top + list.scrollTop;
+    }
+    return {
+      targetIndex: targetIndexForBoundary(items, selectedIds, boundaryIndex),
+      markerTop: Math.max(0, markerTop)
+    };
+  };
+
+  const finishQueueDrag = (cancelled = false) => {
+    const current = queueDragStateRef.current;
+    if (!current) return;
+    queueDragCleanupRef.current?.();
+    queueDragCleanupRef.current = null;
+    queueDragStateRef.current = null;
+    setQueueDragState(null);
+
+    if (!cancelled && current.active) {
+      void moveManyInQueueToPosition(current.ids, current.queueId, current.targetIndex)
+        .catch(error => showInteractionError(t($ => $.downloadTable.queueReorderFailed), error));
+    }
+
+    window.requestAnimationFrame(() => {
+      queueRowForId(current.sourceId)?.focus({ preventScroll: true });
+    });
+  };
+
+  const handleQueueDragStart = (
+    id: string,
+    event: React.PointerEvent<HTMLButtonElement>
+  ) => {
+    if (!queueReorderingEnabled || event.button !== 0) return;
+    const currentDownloads = useDownloadStore.getState().downloads;
+    const source = currentDownloads.find(download => download.id === id);
+    if (!source) return;
+
+    const reorderableById = new Map(
+      queueReorderableDownloadsRef.current.map(download => [download.id, download])
+    );
+    if (!reorderableById.has(id)) return;
+
+    const currentSelectedIds = selectedIdsRef.current;
+    const ids = (currentSelectedIds.has(id) ? Array.from(currentSelectedIds) : [id])
+      .filter(selectedId => {
+        const selected = reorderableById.get(selectedId);
+        return selected && (selected.queueId || MAIN_QUEUE_ID) === (source.queueId || MAIN_QUEUE_ID);
+      });
+    if (!ids.includes(id)) return;
+
+    if (!currentSelectedIds.has(id)) {
+      setSelectedIds(new Set([id]));
+      setLastSelectedId(id);
+    }
+
+    queueDragCleanupRef.current?.();
+    const queueId = source.queueId || MAIN_QUEUE_ID;
+    const selectedIdSet = new Set(ids);
+    const initialItems = queueReorderableDownloadsRef.current
+      .filter(download => (download.queueId || MAIN_QUEUE_ID) === queueId);
+    const initialPosition = queueDropPosition(event.clientY, initialItems, selectedIdSet);
+    const initialState: QueueDragState = {
+      pointerId: event.pointerId,
+      sourceId: id,
+      queueId,
+      ids,
+      startY: event.clientY,
+      active: false,
+      ...initialPosition
+    };
+    queueDragStateRef.current = initialState;
+    setQueueDragState(initialState);
+
+    const pointerMove = (pointerEvent: PointerEvent) => {
+      if (pointerEvent.pointerId !== event.pointerId) return;
+      const drag = queueDragStateRef.current;
+      if (!drag) return;
+      const distance = Math.abs(pointerEvent.clientY - drag.startY);
+      if (!drag.active && distance < 5) return;
+
+      const items = queueReorderableDownloadsRef.current
+        .filter(download => (download.queueId || MAIN_QUEUE_ID) === drag.queueId);
+      const nextPosition = queueDropPosition(pointerEvent.clientY, items, new Set(drag.ids));
+      const nextState = { ...drag, ...nextPosition, active: true };
+      queueDragStateRef.current = nextState;
+      setQueueDragState(nextState);
+      pointerEvent.preventDefault();
+    };
+    const pointerUp = (pointerEvent: PointerEvent) => {
+      if (pointerEvent.pointerId === event.pointerId) finishQueueDrag();
+    };
+    const pointerCancel = (pointerEvent: PointerEvent) => {
+      if (pointerEvent.pointerId === event.pointerId) finishQueueDrag(true);
+    };
+    const cancel = () => finishQueueDrag(true);
+    window.addEventListener('pointermove', pointerMove);
+    window.addEventListener('pointerup', pointerUp);
+    window.addEventListener('pointercancel', pointerCancel);
+    window.addEventListener('blur', cancel);
+    document.addEventListener('visibilitychange', cancel);
+    queueDragCleanupRef.current = () => {
+      window.removeEventListener('pointermove', pointerMove);
+      window.removeEventListener('pointerup', pointerUp);
+      window.removeEventListener('pointercancel', pointerCancel);
+      window.removeEventListener('blur', cancel);
+      document.removeEventListener('visibilitychange', cancel);
+    };
+  };
 
   const getDownloadPath = useCallback(async (item: DownloadItem) => {
     const fileName = item.fileName?.trim();
@@ -721,6 +889,38 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
       })
     : sortDownloads(filteredDownloads, isQueueFilter ? queueSortConfig! : sortConfig),
     [filteredDownloads, isQueueFilter, queueSortConfig, sortConfig]);
+
+  const queueReorderingEnabled = isQueueFilter && !queueSortConfig;
+  const queueReorderableDownloads = useMemo(
+    () => queueReorderingEnabled
+      ? sortedDownloads.filter(download =>
+          download.status !== 'completed' &&
+          !(isActiveDownloadStatus(download.status) && download.status !== 'queued')
+        )
+      : [],
+    [queueReorderingEnabled, sortedDownloads]
+  );
+  const queueReorderableIds = useMemo(
+    () => new Set(queueReorderableDownloads.map(download => download.id)),
+    [queueReorderableDownloads]
+  );
+  queueReorderableDownloadsRef.current = queueReorderableDownloads;
+
+  useEffect(() => {
+    const current = queueDragStateRef.current;
+    if (!current) return;
+    const currentQueueIds = new Set(
+      queueReorderableDownloads
+        .filter(download => (download.queueId || MAIN_QUEUE_ID) === current.queueId)
+        .map(download => download.id)
+    );
+    if (
+      !queueReorderingEnabled ||
+      current.ids.some(id => !currentQueueIds.has(id))
+    ) {
+      finishQueueDrag(true);
+    }
+  }, [queueReorderableDownloads, queueReorderingEnabled]);
 
   const selectedDownloads = useMemo(
     () => filteredDownloads.filter(download => selectedIds.has(download.id)),
@@ -1063,6 +1263,11 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
         <div className="downloads-title">
           {getFilterTitle()}
           <span className="downloads-count">{sortedDownloads.length}</span>
+          {queueReorderingEnabled && queueReorderableDownloads.length > 0 ? (
+            <span className="downloads-queue-reorder-hint">
+              {t($ => $.downloadTable.queueReorderHint)}
+            </span>
+          ) : null}
         </div>
         <div className="downloads-summary">
           <span className="downloads-summary-scope">{summaryScopeLabel}</span>
@@ -1188,7 +1393,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
           )}
 
           <div className="download-table-body" style={{ minWidth: tableMinWidthWithPadding }}>
-            <div className="download-table-list" ref={animationParent}>
+            <div className="download-table-list" ref={queueListRef}>
               {sortedDownloads.length === 0 ? (
                 <div className="downloads-empty-state">
                   <ArrowDownCircle aria-hidden="true" />
@@ -1235,10 +1440,20 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                       handleResume={handleResume}
                       getCategoryIcon={getCategoryIcon}
                       isSelected={selectedIds.has(d.id)}
+                      isQueueReorderable={queueReorderableIds.has(d.id)}
+                      isQueueDragSource={Boolean(queueDragState?.active && queueDragState.ids.includes(d.id))}
                       onMoveInQueue={handleMoveInQueue}
+                      onQueueDragStart={handleQueueDragStart}
                       onClick={handleItemClick}
                     />
                   ))}
+                  {queueDragState?.active ? (
+                    <div
+                      className="download-queue-drop-marker"
+                      style={{ top: `${queueDragState.markerTop}px` }}
+                      aria-hidden="true"
+                    />
+                  ) : null}
                   <div className="flex-1 min-h-0 bg-transparent pointer-events-none" />
                 </>
               )}

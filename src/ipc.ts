@@ -98,7 +98,7 @@ type CommandMap = {
   cancel_enqueue_generation: { args: { id: string; generation: string }; result: void };
   enqueue_many: { args: { items: EnqueueItem[] }; result: import('./bindings/EnqueueResult').EnqueueResult[] };
   move_in_queue: { args: { id: string; queueId: string; direction: 'up' | 'down' }; result: string[] };
-  move_many_in_queue: { args: { ids: string[]; queueId: string; direction: 'up' | 'down' }; result: string[] };
+  move_many_in_queue: { args: { ids: string[]; queueId: string; direction: 'up' | 'down'; targetIndex?: number }; result: string[] };
   remove_from_queue: { args: { id: string }; result: boolean };
 };
 

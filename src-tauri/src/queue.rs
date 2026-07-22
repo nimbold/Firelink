@@ -22,6 +22,34 @@ pub fn clamp_download_connections(connections: i32) -> i32 {
     connections.clamp(DOWNLOAD_CONNECTIONS_MIN, DOWNLOAD_CONNECTIONS_MAX)
 }
 
+fn reorder_selected_queue_tasks(
+    queue_tasks: &[QueuedTask],
+    ids: &[String],
+    target_index: usize,
+) -> Option<Vec<QueuedTask>> {
+    let selected_ids = ids.iter().collect::<HashSet<_>>();
+    let selected_tasks = queue_tasks
+        .iter()
+        .filter(|task| selected_ids.contains(&task.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if selected_tasks.is_empty() {
+        return None;
+    }
+
+    let unselected_tasks = queue_tasks
+        .iter()
+        .filter(|task| !selected_ids.contains(&task.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let insert_index = target_index.min(unselected_tasks.len());
+    let mut reordered = Vec::with_capacity(queue_tasks.len());
+    reordered.extend_from_slice(&unselected_tasks[..insert_index]);
+    reordered.extend(selected_tasks);
+    reordered.extend_from_slice(&unselected_tasks[insert_index..]);
+    Some(reordered)
+}
+
 type Aria2ControlLocks = Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1591,15 +1619,47 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     .saturating_add(1)
                     .min(unselected_tasks.len()),
             };
-            let mut reordered = Vec::with_capacity(queue_tasks.len());
-            reordered.extend_from_slice(&unselected_tasks[..insert_index]);
-            reordered.extend(selected_tasks);
-            reordered.extend_from_slice(&unselected_tasks[insert_index..]);
+            let reordered = reorder_selected_queue_tasks(&queue_tasks, ids, insert_index)
+                .expect("selected queue tasks were present");
 
             for (queue_index, pending_index) in queue_positions.iter().enumerate() {
                 pending[*pending_index] = reordered[queue_index].clone();
             }
         }
+        pending
+            .iter()
+            .filter(|task| task.queue_id == queue_id)
+            .map(|task| task.id.clone())
+            .collect()
+    }
+
+    /// Atomically place a selected block at an insertion index among the
+    /// unselected tasks in one queue. This is the drag/drop counterpart to
+    /// move_many_in_queue; the index is clamped at the backend boundary so a
+    /// stale pointer position cannot create an invalid queue state.
+    pub async fn move_many_in_queue_to(
+        &self,
+        ids: &[String],
+        queue_id: &str,
+        target_index: usize,
+    ) -> Vec<String> {
+        let mut pending = self.pending.lock().await;
+        let queue_positions = pending
+            .iter()
+            .enumerate()
+            .filter_map(|(index, task)| (task.queue_id == queue_id).then_some(index))
+            .collect::<Vec<_>>();
+        let queue_tasks = queue_positions
+            .iter()
+            .map(|index| pending[*index].clone())
+            .collect::<Vec<_>>();
+
+        if let Some(reordered) = reorder_selected_queue_tasks(&queue_tasks, ids, target_index) {
+            for (queue_index, pending_index) in queue_positions.iter().enumerate() {
+                pending[*pending_index] = reordered[queue_index].clone();
+            }
+        }
+
         pending
             .iter()
             .filter(|task| task.queue_id == queue_id)

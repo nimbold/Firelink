@@ -33,12 +33,15 @@ import { localeDirection, localePluralVariant, resolveAppLocale } from '../i18n/
 import {
   canSubmitMetadataRows,
   appendRequestUrlsAfterVersion,
+  commonMediaQualitiesForRows,
   mediaFileNameForSelectedFormat,
+  mediaQualityForRow,
   mediaFormatSelectorForRow,
   metadataSummaryState,
   playlistFilePrefix,
   reconcileDownloadRows,
   refreshFailedMetadataRows,
+  selectExactMediaQuality,
   updateRowIfCurrent,
   type AddDownloadDraftRow
 } from '../utils/addDownloadMetadata';
@@ -519,6 +522,7 @@ export const AddDownloadsModal = () => {
                 const isApproximate = !exactBytes && approxBytes > 0;
                 return {
                   name: `${quality} ${container}`,
+                  quality,
                   ext: f.ext,
                   bytes,
                   isApproximate,
@@ -1187,6 +1191,7 @@ export const AddDownloadsModal = () => {
           isMedia: item.isMedia,
           resumable: item.resumable,
           mediaFormatSelector: formatSelector,
+          mediaQuality: mediaQualityForRow(item),
           size: item.size || (item.sizeBytes ? formatBytes(item.sizeBytes) : undefined),
           sizeBytes: item.sizeBytes
         }, action);
@@ -1285,6 +1290,14 @@ export const AddDownloadsModal = () => {
   };
 
   const selectedItems = parsedItems.filter(item => item.selected !== false);
+  const selectedReadyMediaItems = selectedItems.filter(item =>
+    item.isMedia && item.status === 'ready' && Boolean(item.formats?.length)
+  );
+  const bulkQualityOptions = commonMediaQualitiesForRows(selectedReadyMediaItems);
+  const applyBulkMediaQuality = (quality: string) => {
+    const selectedIds = selectedReadyMediaItems.map(item => item.id);
+    setParsedItems(items => selectExactMediaQuality(items, selectedIds, quality));
+  };
   const allRowsSelected = parsedItems.length > 0 && selectedItems.length === parsedItems.length;
   const requiredBytes = selectedItems.reduce((acc, item) => acc + (item.sizeBytes || 0), 0);
   const hasApproximateSize = selectedItems.some(item =>
@@ -1524,7 +1537,14 @@ export const AddDownloadsModal = () => {
                               aria-label={t($ => $.addDownloads.selectItem, { file: item.file })}
                               className="me-2 shrink-0 accent-purple-500"
                             />
-                            <div className="flex-[2] text-text-primary font-medium truncate pe-2" title={item.file}>{item.file}</div>
+                            <div className="flex-[2] min-w-0 flex items-center gap-2 text-text-primary font-medium truncate pe-2" title={item.file}>
+                              <span className="truncate">{item.file}</span>
+                              {item.isMedia && item.status === 'ready' && mediaQualityForRow(item) ? (
+                                <span className="add-download-quality-chip shrink-0" title={t($ => $.addDownloads.quality)}>
+                                  {mediaQualityForRow(item)}
+                                </span>
+                              ) : null}
+                            </div>
                             <div className={`flex-1 font-mono ${item.status === 'loading' ? 'text-text-muted/50' : 'text-text-muted'}`}>{item.size || t($ => $.addDownloads.unknown)}</div>
                             <div className={`flex-[1.5] font-medium ${item.status === 'metadata-error' || item.status === 'invalid' ? 'text-red-500' : item.status === 'loading' ? 'text-orange-400' : 'text-blue-500'}`}>
                               {item.status === 'loading' ? (
@@ -1553,6 +1573,34 @@ export const AddDownloadsModal = () => {
           {/* Right Column: Settings */}
           <div className="add-download-settings w-[45%] flex flex-col overflow-y-auto">
             <div className="p-6 space-y-5">
+
+              {selectedReadyMediaItems.length > 1 ? (
+                <section className="add-download-section add-download-media-section relative overflow-hidden p-4">
+                  <div className="flex flex-col gap-1.5 relative z-10">
+                    <label className="text-[10px] uppercase font-bold tracking-wider text-text-muted">
+                      {t($ => $.addDownloads.applyQualityToSelected)}
+                    </label>
+                    {bulkQualityOptions.length > 0 ? (
+                      <div className="flex flex-wrap gap-1.5" role="group" aria-label={t($ => $.addDownloads.applyQualityToSelected)}>
+                        {bulkQualityOptions.map(quality => (
+                          <button
+                            key={quality}
+                            type="button"
+                            onClick={() => applyBulkMediaQuality(quality)}
+                            className="add-download-quality-chip add-download-quality-chip-button"
+                          >
+                            {quality}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-[10px] text-text-muted">
+                        {t($ => $.addDownloads.noCommonQuality)}
+                      </span>
+                    )}
+                  </div>
+                </section>
+              ) : null}
 
               {/* Media Format (Dynamic) */}
               {selectedItemIndex !== null && parsedItems[selectedItemIndex]?.isMedia && (

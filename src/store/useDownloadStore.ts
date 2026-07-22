@@ -15,6 +15,10 @@ import {
 } from '../utils/downloadLocations';
 import { canPauseDownload, canStartDownload } from '../utils/downloadActions';
 import { updateDockBadge } from '../utils/dockBadge';
+import {
+  moveSelectedBlockToIndex,
+  targetIndexForDesiredOrder
+} from '../utils/queueOrdering';
 import i18n from '../i18n';
 
 export type { DownloadCategory } from '../utils/downloads';
@@ -659,6 +663,7 @@ interface DownloadState {
   unregisterBackendIds: (ids: string[]) => void;
   applyProperties: (id: string, updates: Partial<DownloadItem>) => Promise<void>;
   moveInQueue: (ids: string | string[], direction: 'up' | 'down') => Promise<void>;
+  moveManyInQueueToPosition: (ids: string | string[], queueId: string, targetIndex: number) => Promise<void>;
   removeFromQueue: (id: string) => Promise<void>;
   isAddModalOpen: boolean;
   pendingAddUrls: string;
@@ -894,6 +899,84 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             ? { ...download, queuePosition: previousPositions.get(download.id) }
             : download)
         }));
+      }
+    });
+    const trackedOperation = operation.finally(() => {
+      if (queueReorderPromises.get(queueId) === trackedOperation) {
+        queueReorderPromises.delete(queueId);
+      }
+    });
+    queueReorderPromises.set(queueId, trackedOperation);
+    return trackedOperation;
+  },
+  moveManyInQueueToPosition: (idOrIds, queueId, targetIndex) => {
+    const ids = Array.isArray(idOrIds) ? idOrIds : [idOrIds];
+    if (ids.length === 0) return Promise.resolve();
+
+    // Dragging must be one serialized, atomic queue operation. This prevents
+    // a second drag or a keyboard move from calculating against stale order
+    // while the backend is still applying the first drop.
+    const previousOperation = queueReorderPromises.get(queueId) ?? Promise.resolve();
+    const operation = previousOperation.catch(() => undefined).then(async () => {
+      const allDownloads = get().downloads;
+      const queueItems = queueItemsForReordering(allDownloads, queueId);
+      const selectedItems = queueItems.filter(item => ids.includes(item.id));
+      if (selectedItems.length === 0) return;
+
+      const selectedIds = new Set(selectedItems.map(item => item.id));
+      const previousPositions = new Map([
+        ...activeQueueItems(allDownloads, queueId),
+        ...queueItems
+      ].map(item => [item.id, item.queuePosition]));
+      const reordered = moveSelectedBlockToIndex(queueItems, selectedIds, targetIndex);
+      set(state => ({ downloads: applyQueueOrder(state.downloads, queueId, reordered) }));
+
+      const registeredIdsToMove = selectedItems
+        .filter(item => get().backendRegisteredIds.has(item.id))
+        .map(item => item.id);
+      if (registeredIdsToMove.length === 0) return;
+
+      // Staged rows are deliberately not registered with the backend. Convert
+      // the desired local order to a registered-only target before IPC so a
+      // staged row never shifts the backend insertion index.
+      const registeredItems = queueItems.filter(item => get().backendRegisteredIds.has(item.id));
+      const registeredSelectedIds = new Set(registeredIdsToMove);
+      const registeredDesiredOrder = reordered.filter(item => get().backendRegisteredIds.has(item.id));
+      const backendTargetIndex = targetIndexForDesiredOrder(
+        registeredItems,
+        registeredSelectedIds,
+        registeredDesiredOrder
+      );
+
+      try {
+        const order = await invoke('move_many_in_queue', {
+          ids: registeredIdsToMove,
+          queueId,
+          direction: 'up',
+          targetIndex: backendTargetIndex
+        }) as string[];
+        if (Array.isArray(order)) {
+          const globalOrder = await invoke('get_pending_order', { queueId: null })
+            .catch(() => null) as string[] | null;
+          set(state => ({
+            pendingOrder: Array.isArray(globalOrder)
+              ? globalOrder
+              : [
+                  ...state.pendingOrder.filter(id => !order.includes(id)),
+                  ...order
+                ]
+          }));
+        }
+      } catch (error) {
+        console.error("Failed to move queue block to position:", error);
+        // The backend operation is atomic. Restore only queue positions so a
+        // progress/state event received while the RPC was in flight survives.
+        set(state => ({
+          downloads: state.downloads.map(download => previousPositions.has(download.id)
+            ? { ...download, queuePosition: previousPositions.get(download.id) }
+            : download)
+        }));
+        throw error;
       }
     });
     const trackedOperation = operation.finally(() => {

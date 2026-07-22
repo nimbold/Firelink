@@ -726,6 +726,33 @@ html[data-list-density="relaxed"] {
     box-shadow: inset 3px 0 0 hsl(272 74% 62% / 0.9);
   }
 
+  .add-download-quality-chip,
+  .download-quality-chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 18px;
+    padding: 1px 6px;
+    border: 1px solid hsl(272 74% 62% / 0.32);
+    border-radius: 999px;
+    background: hsl(272 74% 58% / 0.12);
+    color: hsl(272 74% 62%);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: 0.01em;
+  }
+
+  .add-download-quality-chip-button {
+    cursor: pointer;
+    transition: background-color 100ms ease, border-color 100ms ease;
+  }
+
+  .add-download-quality-chip-button:hover,
+  .add-download-quality-chip-button:focus-visible {
+    border-color: hsl(272 74% 62% / 0.72);
+    background: hsl(272 74% 58% / 0.24);
+  }
+
   .add-download-select {
     appearance: auto;
     cursor: default;
@@ -1933,6 +1960,15 @@ html[data-list-density="relaxed"] {
   font-weight: 600;
 }
 
+.downloads-queue-reorder-hint {
+  max-width: 340px;
+  color: hsl(var(--text-muted));
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.25;
+  letter-spacing: 0;
+}
+
 .download-table-scroll {
   flex: 1;
   display: flex;
@@ -2103,12 +2139,25 @@ body.is-column-resizing .column-resize-handle:hover::after {
   }
 
 .download-table-list {
+  position: relative;
   height: 100%;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
+}
+
+.download-queue-drop-marker {
+  position: absolute;
+  inset-inline: 0;
+  z-index: 8;
+  height: 2px;
+  pointer-events: none;
+  border-radius: 999px;
+  background: hsl(var(--accent-color));
+  box-shadow: 0 0 0 1px hsl(var(--accent-color) / 0.18), 0 0 8px hsl(var(--accent-color) / 0.55);
+  transform: translateY(-1px);
 }
 
 .download-row {
@@ -2160,6 +2209,30 @@ html[data-list-density="relaxed"] .download-ghost-row {
 
 .download-row.is-selected:hover {
   background: hsl(var(--accent-color) / 0.32) !important;
+}
+
+.download-row.is-queue-drag-source {
+  opacity: 0.48;
+}
+
+.download-queue-drag-handle {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 22px;
+  margin-inline-start: -4px;
+  color: hsl(var(--text-muted));
+  cursor: grab;
+  touch-action: none;
+}
+
+.download-queue-drag-handle:hover,
+.download-queue-drag-handle:focus-visible {
+  color: hsl(var(--text-primary));
+  background: hsl(var(--item-hover));
+}
+
+.download-queue-drag-handle:active {
+  cursor: grabbing;
 }
 
 .download-row:focus-visible {

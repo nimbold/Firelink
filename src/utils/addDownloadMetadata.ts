@@ -11,6 +11,7 @@ export type MetadataStatus = 'loading' | 'ready' | 'metadata-error' | 'invalid';
 
 export interface AddMediaFormat {
   name: string;
+  quality?: string;
   selector: string;
   ext: string;
   formatLabel: string;
@@ -329,6 +330,73 @@ export const mediaFormatSelectorForRow = (
     return undefined;
   }
   return row.formats?.[row.selectedFormat]?.selector;
+};
+
+const normalizeMediaQualityLabel = (value: string | undefined): string => {
+  const normalized = value
+    ?.replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return normalized && normalized.length <= 48 ? normalized : '';
+};
+
+export const mediaQualityForFormat = (
+  format: Pick<AddMediaFormat, 'quality' | 'name' | 'type' | 'formatLabel' | 'ext'>
+): string => {
+  const explicitQuality = normalizeMediaQualityLabel(format.quality);
+  if (explicitQuality) return explicitQuality;
+
+  const nameQuality = normalizeMediaQualityLabel(format.name.trim().split(/\s+/)[0]);
+  if (nameQuality) return nameQuality;
+
+  const label = normalizeMediaQualityLabel(format.formatLabel);
+  return label || normalizeMediaQualityLabel(format.type) || normalizeMediaQualityLabel(format.ext.toUpperCase()) || 'Media';
+};
+
+export const mediaQualityForRow = (
+  row: Pick<AddDownloadDraftRow, 'isMedia' | 'status' | 'formats' | 'selectedFormat'>
+): string | undefined => {
+  if (!row.isMedia || row.status !== 'ready' || row.selectedFormat === undefined) return undefined;
+  const format = row.formats?.[row.selectedFormat];
+  return format ? mediaQualityForFormat(format) : undefined;
+};
+
+export const commonMediaQualitiesForRows = (
+  rows: ReadonlyArray<Pick<AddDownloadDraftRow, 'isMedia' | 'status' | 'formats'>>
+): string[] => {
+  const readyMediaRows = rows.filter(row => row.isMedia && row.status === 'ready' && row.formats?.length);
+  if (readyMediaRows.length < 2) return [];
+
+  const firstQualities = Array.from(new Set(
+    readyMediaRows[0].formats!.map(mediaQualityForFormat)
+  ));
+  return firstQualities.filter(quality => readyMediaRows.every(row =>
+    row.formats!.some(format => mediaQualityForFormat(format) === quality)
+  ));
+};
+
+export const selectExactMediaQuality = (
+  rows: AddDownloadDraftRow[],
+  selectedIds: ReadonlySet<string> | readonly string[],
+  quality: string
+): AddDownloadDraftRow[] => {
+  const selected = selectedIds instanceof Set ? selectedIds : new Set(selectedIds);
+  return rows.map(row => {
+    if (!selected.has(row.id) || !row.isMedia || row.status !== 'ready' || !row.formats) return row;
+    const selectedFormat = row.formats.findIndex(format => mediaQualityForFormat(format) === quality);
+    if (selectedFormat === -1) return row;
+    const format = row.formats[selectedFormat];
+    return {
+      ...row,
+      selectedFormat,
+      size: format.bytes ? format.detail : undefined,
+      sizeBytes: format.bytes || undefined,
+      file: mediaFileNameForSelectedFormat(row.file, {
+        formats: row.formats,
+        selectedFormat
+      })
+    };
+  });
 };
 
 export const mediaFileNameForSelectedFormat = (

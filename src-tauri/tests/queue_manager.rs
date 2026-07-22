@@ -1248,6 +1248,33 @@ async fn multi_move_reorders_selected_items_as_one_atomic_block() {
 }
 
 #[tokio::test]
+async fn target_move_reorders_a_selected_block_and_clamps_the_target() {
+    use firelink_lib::ipc::QueueDirection;
+
+    let (mgr, _spawner) = make_manager(3);
+    for id in ["a", "b", "c", "d", "e"] {
+        mgr.push(sample_task(id)).await.unwrap();
+    }
+
+    let selected = vec!["b".to_string(), "d".to_string()];
+    assert_eq!(
+        mgr.move_many_in_queue_to(&selected, "main", 1).await,
+        vec!["a", "b", "d", "c", "e"]
+    );
+    assert_eq!(
+        mgr.move_many_in_queue_to(&selected, "main", usize::MAX).await,
+        vec!["a", "c", "e", "b", "d"]
+    );
+
+    // The original direction API remains unchanged for keyboard/button moves.
+    assert_eq!(
+        mgr.move_many_in_queue(&selected, "main", QueueDirection::Up)
+            .await,
+        vec!["a", "c", "b", "d", "e"]
+    );
+}
+
+#[tokio::test]
 async fn moving_one_queue_does_not_reorder_another_queue() {
     use firelink_lib::ipc::QueueDirection;
 

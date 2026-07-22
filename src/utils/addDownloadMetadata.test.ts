@@ -2,13 +2,16 @@ import { describe, expect, it } from 'vitest';
 import {
   appendRequestUrlsAfterVersion,
   canSubmitMetadataRows,
+  commonMediaQualitiesForRows,
   mediaFormatSelectorForRow,
   mediaFileNameForSelectedFormat,
+  mediaQualityForRow,
   metadataSummaryMessage,
   isYouTubePlaylistUrl,
   playlistFilePrefix,
   reconcileDownloadRows,
   refreshFailedMetadataRows,
+  selectExactMediaQuality,
   updateRowIfCurrent,
   type AddDownloadDraftRow
 } from './addDownloadMetadata';
@@ -537,6 +540,52 @@ describe('add download metadata workflow', () => {
     expect(metadataSummaryMessage([
       row({ status: 'invalid' })
     ])).toContain('Correct or remove 1 invalid URL');
+  });
+
+  it('offers only qualities shared by every selected ready media row', () => {
+    const formats = (qualities: string[]) => qualities.map((quality, index) => ({
+      name: `${quality} MP4`,
+      quality,
+      selector: `${quality}-${index}`,
+      ext: 'mp4',
+      formatLabel: quality,
+      detail: '10 MB',
+      type: 'Video',
+      bytes: 10
+    }));
+    const rows = [
+      row({ id: 'one', isMedia: true, formats: formats(['1080p', '720p']), selectedFormat: 0 }),
+      row({ id: 'two', isMedia: true, formats: formats(['720p', '480p']), selectedFormat: 0 })
+    ];
+
+    expect(commonMediaQualitiesForRows(rows)).toEqual(['720p']);
+    expect(mediaQualityForRow(rows[0])).toBe('1080p');
+  });
+
+  it('applies an exact bulk quality without falling back to a higher or lower stream', () => {
+    const mediaRow = row({
+      id: 'media',
+      file: 'clip.mp4',
+      isMedia: true,
+      formats: [{
+        name: '1080p MP4',
+        quality: '1080p',
+        selector: '1080',
+        ext: 'mp4',
+        formatLabel: '1080p',
+        detail: '10 MB',
+        type: 'Video',
+        bytes: 10
+      }],
+      selectedFormat: 0
+    });
+
+    const unchanged = selectExactMediaQuality([mediaRow], ['media'], '720p');
+    expect(unchanged[0]).toBe(mediaRow);
+    expect(selectExactMediaQuality([mediaRow], ['media'], '1080p')[0]).toMatchObject({
+      selectedFormat: 0,
+      file: 'clip.mp4'
+    });
   });
 
   it('uses few forms for Russian and Ukrainian metadata summaries', async () => {

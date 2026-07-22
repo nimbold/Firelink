@@ -121,6 +121,8 @@ pub struct DownloadItem {
     #[ts(optional)]
     pub media_format_selector: Option<String>,
     #[ts(optional)]
+    pub media_quality: Option<String>,
+    #[ts(optional)]
     pub queue_id: Option<String>,
     #[ts(optional)]
     pub queue_position: Option<i32>,
