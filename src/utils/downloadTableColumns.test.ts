@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_COLUMN_ALIGNMENTS,
   DEFAULT_COLUMN_ORDER,
+  DEFAULT_COLUMN_WIDTHS,
+  buildColumnGridTemplate,
+  getColumnGridColumn,
   normalizeColumnAlignments,
   normalizeColumnOrder,
   normalizeColumnWidths,
@@ -26,7 +29,7 @@ describe('download table column preferences', () => {
       220,
       80,
       80,
-      140,
+      144,
     ]);
 
     expect(normalizeColumnWidths([0, 100, 220, 100, 80, 170])[0]).toBe(160);
@@ -49,5 +52,14 @@ describe('download table column preferences', () => {
   it('restores the default order for malformed persisted data', () => {
     expect(normalizeColumnOrder(null)).toEqual([...DEFAULT_COLUMN_ORDER]);
     expect(normalizeColumnAlignments(null)).toEqual(DEFAULT_COLUMN_ALIGNMENTS);
+  });
+
+  it('keeps user widths fixed while reserving a shared trailing spacer track', () => {
+    expect(buildColumnGridTemplate([...DEFAULT_COLUMN_ORDER], [...DEFAULT_COLUMN_WIDTHS])).toBe(
+      '340px 100px 220px 100px 80px minmax(0, 1fr) 170px'
+    );
+    expect(getColumnGridColumn('Date Added', [...DEFAULT_COLUMN_ORDER])).toBe('7');
+    expect(getColumnGridColumn('Date Added', ['Date Added', ...DEFAULT_COLUMN_ORDER.slice(0, -1)])).toBeUndefined();
+    expect(getColumnGridColumn('ETA', ['Date Added', 'File Name', 'Size', 'Status', 'Speed', 'ETA'])).toBe('7');
   });
 });

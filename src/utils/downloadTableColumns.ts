@@ -13,7 +13,7 @@ export const DEFAULT_COLUMN_ORDER = [
 ] as const satisfies readonly DownloadTableColumnKey[];
 
 export const DEFAULT_COLUMN_WIDTHS = [340, 100, 220, 100, 80, 170] as const;
-export const COLUMN_MINIMUMS = [160, 58, 92, 58, 48, 112] as const;
+export const COLUMN_MINIMUMS = [160, 58, 92, 58, 48, 144] as const;
 
 export const COLUMN_WIDTHS_STORAGE_KEY = 'firelink-download-column-widths';
 export const COLUMN_ORDER_STORAGE_KEY = 'firelink-download-column-order';
@@ -87,3 +87,23 @@ export const normalizeColumnAlignments = (value: unknown): Record<DownloadTableC
 
 export const columnIndex = (key: DownloadTableColumnKey): number =>
   DEFAULT_COLUMN_ORDER.indexOf(key);
+
+export const buildColumnGridTemplate = (
+  order: DownloadTableColumnKey[],
+  widths: number[]
+): string => {
+  const normalizedWidths = normalizeColumnWidths(widths);
+  const orderedWidths = order.map(key => normalizedWidths[columnIndex(key)]);
+  return [
+    ...orderedWidths.slice(0, -1).map(width => `${width}px`),
+    'minmax(0, 1fr)',
+    `${orderedWidths[orderedWidths.length - 1]}px`,
+  ].join(' ');
+};
+
+export const getColumnGridColumn = (
+  key: DownloadTableColumnKey,
+  order: DownloadTableColumnKey[]
+): string | undefined => key === order[order.length - 1]
+  ? `${order.length + 1}`
+  : undefined;

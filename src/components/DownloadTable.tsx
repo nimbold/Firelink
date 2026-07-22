@@ -37,7 +37,9 @@ import {
   DEFAULT_COLUMN_ALIGNMENTS,
   DEFAULT_COLUMN_ORDER,
   DEFAULT_COLUMN_WIDTHS,
+  buildColumnGridTemplate,
   columnIndex,
+  getColumnGridColumn,
   normalizeColumnAlignments,
   normalizeColumnOrder,
   normalizeColumnWidths,
@@ -108,6 +110,10 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const [animationParent] = useAutoAnimate<HTMLDivElement>();
+  const [headerAnimationParent] = useAutoAnimate<HTMLDivElement>({
+    duration: 140,
+    easing: 'ease-out',
+  });
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [lastSelectedId, setLastSelectedId] = useState<string | null>(null);
   const [sortConfig, setSortConfig] = useState<DownloadSortConfig>({ column: 'Date Added', direction: 'desc' });
@@ -121,7 +127,9 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     active: boolean;
   } | null>(null);
   const headerElementsRef = useRef(new Map<DownloadTableColumnKey, HTMLDivElement>());
+  const headerContainerRef = useRef<HTMLDivElement>(null);
   const columnDragStateRef = useRef<ColumnDragState | null>(null);
+  const columnDragOrderRef = useRef<DownloadTableColumnKey[] | null>(null);
   const columnDropFlashTimerRef = useRef<number | null>(null);
   const suppressHeaderClickRef = useRef(false);
   const selectedIdsRef = useRef(selectedIds);
@@ -152,45 +160,77 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     }
   });
   const [columnDragState, setColumnDragState] = useState<ColumnDragState | null>(null);
+  const [columnDragOrder, setColumnDragOrder] = useState<DownloadTableColumnKey[] | null>(null);
   const [columnMenu, setColumnMenu] = useState<ColumnMenuState | null>(null);
   const [columnDropFlashKey, setColumnDropFlashKey] = useState<DownloadTableColumnKey | null>(null);
+  const [, setMenuViewportVersion] = useState(0);
   const columnWidthsRef = useRef(columnWidths);
+  const columnOrderRef = useRef(columnOrder);
   columnWidthsRef.current = columnWidths;
+  columnOrderRef.current = columnOrder;
+  columnDragOrderRef.current = columnDragOrder;
   const normalizedColumnWidths = columnWidths.map((width, index) =>
     Math.max(COLUMN_MINIMUMS[index], width)
   );
-  const orderedColumns = useMemo(() => columnOrder, [columnOrder]);
-  const orderedColumnWidths = orderedColumns.map(key => normalizedColumnWidths[columnIndex(key)]);
-  const tableGridTemplate = [
-    ...orderedColumnWidths.slice(0, -1).map(width => `${width}px`),
-    'minmax(0, 1fr)',
-    `${orderedColumnWidths[orderedColumnWidths.length - 1]}px`
-  ].join(' ');
+  const orderedColumns = columnDragOrder ?? columnOrder;
+  const tableGridTemplate = buildColumnGridTemplate(orderedColumns, normalizedColumnWidths);
   const tableMinWidth = normalizedColumnWidths.reduce(
     (total, width) => total + width,
     0
   );
+  const tableMinWidthWithPadding = 'calc(' + tableMinWidth + 'px + var(--download-row-padding-x) + var(--download-row-padding-x))';
+  const downloadsViewRef = useRef<HTMLDivElement>(null);
 
   const updateColumnDragState = (next: ColumnDragState | null) => {
     columnDragStateRef.current = next;
     setColumnDragState(next);
   };
 
-  const getColumnDropPosition = (key: DownloadTableColumnKey, pointerX: number) => {
-    const remainingColumns = orderedColumns.filter(columnKey => columnKey !== key);
+  const reorderColumn = (
+    order: DownloadTableColumnKey[],
+    key: DownloadTableColumnKey,
+    dropIndex: number
+  ): DownloadTableColumnKey[] => {
+    const remainingColumns = order.filter(columnKey => columnKey !== key);
+    remainingColumns.splice(dropIndex, 0, key);
+    return remainingColumns;
+  };
+
+  const getColumnLayoutBounds = (element: HTMLDivElement) => {
+    // AutoAnimate transforms the visual box; offsetLeft/offsetWidth retain the
+    // stable grid geometry needed for hit-testing during a live reorder.
+    const container = headerContainerRef.current;
+    if (!container) {
+      const rect = element.getBoundingClientRect();
+      return { left: rect.left, right: rect.right };
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    return {
+      left: containerRect.left + element.offsetLeft,
+      right: containerRect.left + element.offsetLeft + element.offsetWidth,
+    };
+  };
+
+  const getColumnDropPosition = (
+    key: DownloadTableColumnKey,
+    pointerX: number,
+    order: DownloadTableColumnKey[] = columnDragOrderRef.current ?? columnOrderRef.current
+  ) => {
+    const remainingColumns = order.filter(columnKey => columnKey !== key);
     const targetIndex = remainingColumns.findIndex(columnKey => {
       const element = headerElementsRef.current.get(columnKey);
       if (!element) return false;
-      const rect = element.getBoundingClientRect();
-      return pointerX < rect.left + rect.width / 2;
+      const bounds = getColumnLayoutBounds(element);
+      return pointerX < bounds.left + (bounds.right - bounds.left) / 2;
     });
     const dropIndex = targetIndex === -1 ? remainingColumns.length : targetIndex;
     const markerElement = dropIndex < remainingColumns.length
       ? headerElementsRef.current.get(remainingColumns[dropIndex])
       : headerElementsRef.current.get(remainingColumns[remainingColumns.length - 1]);
-    const markerRect = markerElement?.getBoundingClientRect();
-    const markerX = markerRect
-      ? dropIndex < remainingColumns.length ? markerRect.left : markerRect.right
+    const markerBounds = markerElement ? getColumnLayoutBounds(markerElement) : null;
+    const markerX = markerBounds
+      ? dropIndex < remainingColumns.length ? markerBounds.left : markerBounds.right
       : pointerX;
     return { dropIndex, markerX };
   };
@@ -219,7 +259,10 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
       gesture.active = true;
       suppressHeaderClickRef.current = true;
       const rect = event.currentTarget.getBoundingClientRect();
-      const { dropIndex, markerX } = getColumnDropPosition(key, event.clientX);
+      const currentOrder = columnOrderRef.current;
+      columnDragOrderRef.current = [...currentOrder];
+      setColumnDragOrder([...currentOrder]);
+      const { dropIndex, markerX } = getColumnDropPosition(key, event.clientX, currentOrder);
       updateColumnDragState({
         key,
         startX: gesture.startX,
@@ -233,11 +276,18 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     } else {
       const current = columnDragStateRef.current;
       if (!current) return;
-      const { dropIndex, markerX } = getColumnDropPosition(key, event.clientX);
+      const currentOrder = columnDragOrderRef.current ?? columnOrderRef.current;
+      const { dropIndex, markerX } = getColumnDropPosition(key, event.clientX, currentOrder);
+      const nextOrder = reorderColumn(currentOrder, key, dropIndex);
+      const orderChanged = nextOrder.some((columnKey, index) => columnKey !== currentOrder[index]);
+      if (orderChanged) {
+        columnDragOrderRef.current = nextOrder;
+        setColumnDragOrder(nextOrder);
+      }
       updateColumnDragState({
         ...current,
         pointerX: event.clientX,
-        dropIndex,
+        dropIndex: nextOrder.indexOf(key),
         markerX,
       });
     }
@@ -252,6 +302,9 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     const current = columnDragStateRef.current;
     dragGestureRef.current = null;
     updateColumnDragState(null);
+    const nextOrder = columnDragOrderRef.current ?? columnOrderRef.current;
+    columnDragOrderRef.current = null;
+    setColumnDragOrder(null);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
@@ -263,10 +316,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
       suppressHeaderClickRef.current = false;
     }, 0);
 
-    const remainingColumns = orderedColumns.filter(columnKey => columnKey !== key);
-    const nextOrder = [...remainingColumns];
-    nextOrder.splice(current.dropIndex, 0, key);
-    if (nextOrder.join('|') === orderedColumns.join('|')) return;
+    if (nextOrder.join('|') === columnOrderRef.current.join('|')) return;
 
     setColumnOrder(nextOrder);
     persistColumnOrder(nextOrder);
@@ -317,16 +367,30 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     document.addEventListener('visibilitychange', handlePointerUp);
   };
 
+  const clampMenuPosition = useCallback((x: number, y: number, menuWidth: number, menuHeight: number) => {
+    const workspaceRect = downloadsViewRef.current?.getBoundingClientRect();
+    const minX = Math.max(8, (workspaceRect?.left ?? 0) + 8);
+    const minY = Math.max(8, (workspaceRect?.top ?? 0) + 8);
+    const maxX = Math.max(minX, Math.min(
+      window.innerWidth - menuWidth - 8,
+      (workspaceRect?.right ?? window.innerWidth) - menuWidth - 8
+    ));
+    const maxY = Math.max(minY, Math.min(
+      window.innerHeight - menuHeight - 8,
+      (workspaceRect?.bottom ?? window.innerHeight) - menuHeight - 8
+    ));
+    return {
+      x: Math.min(Math.max(minX, x), maxX),
+      y: Math.min(Math.max(minY, y), maxY),
+    };
+  }, []);
+
   const openColumnMenu = (key: DownloadTableColumnKey, x: number, y: number) => {
-    const menuWidth = 188;
-    const menuHeight = 220;
-    const maxX = Math.max(8, window.innerWidth - menuWidth - 8);
-    const maxY = Math.max(8, window.innerHeight - menuHeight - 8);
+    const position = clampMenuPosition(x, y, 188, 220);
     setContextMenu(null);
     setColumnMenu({
       key,
-      x: Math.min(Math.max(8, x), maxX),
-      y: Math.min(Math.max(8, y), maxY),
+      ...position,
     });
   };
 
@@ -386,17 +450,28 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
       if (!dragGestureRef.current) return;
       dragGestureRef.current = null;
       columnDragStateRef.current = null;
+      columnDragOrderRef.current = null;
       setColumnDragState(null);
+      setColumnDragOrder(null);
       suppressHeaderClickRef.current = false;
     };
 
     window.addEventListener('blur', cancelColumnDrag);
+    window.addEventListener('resize', cancelColumnDrag);
     document.addEventListener('visibilitychange', cancelColumnDrag);
     return () => {
       window.removeEventListener('blur', cancelColumnDrag);
+      window.removeEventListener('resize', cancelColumnDrag);
       document.removeEventListener('visibilitychange', cancelColumnDrag);
     };
   }, []);
+
+  useEffect(() => {
+    if (!columnMenu && !contextMenu) return;
+    const updateMenuViewport = () => setMenuViewportVersion(version => version + 1);
+    window.addEventListener('resize', updateMenuViewport);
+    return () => window.removeEventListener('resize', updateMenuViewport);
+  }, [columnMenu, contextMenu]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -610,8 +685,11 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
       setLastSelectedId(menu.id);
     }
     setColumnMenu(null);
-    setContextMenu(menu);
-  }, []);
+    setContextMenu({
+      ...menu,
+      ...clampMenuPosition(menu.x, menu.y, 200, 300),
+    });
+  }, [clampMenuPosition]);
 
   const handleMoveInQueue = useCallback((id: string, direction: 'up' | 'down') => {
     const ids = selectedIdsRef.current.has(id)
@@ -772,9 +850,15 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   const columnAlignmentStyle = (key: DownloadTableColumnKey): React.CSSProperties => ({
     '--column-justify': COLUMN_ALIGNMENT_JUSTIFY[columnAlignments[key]],
   } as React.CSSProperties);
+  const columnMenuPosition = columnMenu
+    ? clampMenuPosition(columnMenu.x, columnMenu.y, 188, 220)
+    : null;
+  const contextMenuPosition = contextMenu
+    ? clampMenuPosition(contextMenu.x, contextMenu.y, 200, 300)
+    : null;
 
   return (
-    <div className="downloads-view flex-1 flex flex-col h-full min-w-0">
+    <div ref={downloadsViewRef} className="downloads-view flex-1 flex flex-col h-full min-w-0">
       <div
         className="main-titlebar"
         data-tauri-drag-region
@@ -839,8 +923,12 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
       <div className="downloads-table flex-1 flex flex-col">
         <div className="download-table-scroll">
           <div
+            ref={element => {
+              headerContainerRef.current = element;
+              headerAnimationParent(element);
+            }}
             className={`download-table-header ${columnDragState ? 'is-column-dragging' : ''}`}
-            style={{ gridTemplateColumns: tableGridTemplate, minWidth: tableMinWidth }}
+            style={{ gridTemplateColumns: tableGridTemplate, minWidth: tableMinWidthWithPadding }}
           >
             {orderedColumns.map(key => {
               const label = columnLabels.get(key) ?? key;
@@ -860,7 +948,10 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                     ? activeSort.direction === 'asc' ? 'ascending' : 'descending'
                     : 'none'}
                   className={`download-column-header group ${isDragging ? 'is-dragging' : ''} ${isDropFlashing ? 'is-drop-flashing' : ''}`}
-                  style={columnAlignmentStyle(key)}
+                  style={{
+                    ...columnAlignmentStyle(key),
+                    gridColumn: getColumnGridColumn(key, orderedColumns),
+                  }}
                   onContextMenu={event => {
                     event.preventDefault();
                     event.stopPropagation();
@@ -942,7 +1033,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
             </>
           )}
 
-          <div className="download-table-body" style={{ minWidth: tableMinWidth }}>
+          <div className="download-table-body" style={{ minWidth: tableMinWidthWithPadding }}>
             <div className="download-table-list" ref={animationParent}>
               {sortedDownloads.length === 0 ? (
                 <div className="downloads-empty-state">
@@ -984,7 +1075,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                       columnOrder={orderedColumns}
                       columnAlignments={columnAlignments}
                       tableGridTemplate={tableGridTemplate}
-                      tableMinWidth={tableMinWidth}
+                      tableMinWidth={tableMinWidthWithPadding}
                       setContextMenu={handleContextMenu}
                       handlePause={handlePause}
                       handleResume={handleResume}
@@ -1006,7 +1097,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
         <div
           role="menu"
           className="download-column-menu app-modal fixed z-50 min-w-[188px] overflow-hidden py-1.5 text-[12px] font-medium text-text-primary"
-          style={{ top: columnMenu.y, left: columnMenu.x }}
+          style={{ top: columnMenuPosition?.y, left: columnMenuPosition?.x }}
           onClick={event => event.stopPropagation()}
         >
           <div className="download-column-menu-title px-3 py-1.5 text-text-muted">
@@ -1050,8 +1141,8 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
           role="menu"
           className="app-modal fixed z-50 min-w-[180px] overflow-visible py-1.5 text-[12px] font-medium text-text-primary"
           style={{
-             top: Math.min(Math.max(8, contextMenu.y), Math.max(8, window.innerHeight - 300)),
-             left: Math.min(Math.max(8, contextMenu.x), Math.max(8, window.innerWidth - 200))
+             top: contextMenuPosition?.y,
+             left: contextMenuPosition?.x,
           }}
           onClick={(e) => e.stopPropagation()}
         >
