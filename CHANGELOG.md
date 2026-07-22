@@ -11,20 +11,20 @@ This release makes everyday download management easier to organize, review, and 
 
 ### New features
 
-- **Localized desktop interface** for Persian, Hebrew, Russian, Ukrainian, and Simplified Chinese, including RTL layouts. These translations are currently produced with help from LLMs and need user review; please report corrections so they can improve.
+- **Localized desktop interface** for Persian, Hebrew, Russian, Ukrainian, and Simplified Chinese, responding to the Chinese-language request in [#17](https://github.com/nimbold/Firelink/issues/17). These translations are currently produced with help from LLMs and need user review; please report corrections so they can improve.
 - **Customizable download table** with selectable columns, drag-to-reorder controls, sorting, clearer size alignment, and better bulk actions.
 - **Optional batch folders** for multi-link downloads, addressing [#27](https://github.com/nimbold/Firelink/issues/27). Firelink can suggest an editable folder name from the page title or common filename while keeping the existing category-based behavior as the default.
-- **Remember the last Add-window directory**, with an opt-in setting so users remain in control of where it applies.
-- **Per-download connection controls** for normal and media transfers, with the active aria2 connection count shown in the download table.
+- **Remember the last Add-window directory**, with an opt-in setting so users remain in control of where it applies, addressing [#23](https://github.com/nimbold/Firelink/issues/23).
+- **Per-download connection controls** for normal and media transfers, with the active aria2 connection count shown in the download table. This also follows the connection-setting report in [#20](https://github.com/nimbold/Firelink/issues/20).
 - **Latest Firelink Companion 2.0.6** in the `Extensions/Browser` submodule, including selected-link batch context and safer automatic capture recovery.
 
 ### Improvements
 
 - Make pause, resume, retry, remove, redownload, queue, scheduler, and settings actions safer when several operations overlap or background events arrive late.
-- Reuse unfinished downloads when their filenames match, while reducing the chance of stale state creating duplicate or misleading rows.
+- Reuse unfinished downloads when their filenames match, addressing [#26](https://github.com/nimbold/Firelink/issues/26), while reducing the chance of stale state creating duplicate or misleading rows.
 - Improve first-open navigation, lazy page loading, table layout, drag interactions, sorting, and window-control placement.
 - Improve RTL behavior while keeping the download table's physical file columns readable.
-- Handle locked browser cookie databases more gracefully and keep browser metadata and authenticated captures on the correct path.
+- Handle locked browser cookie databases more gracefully and keep browser metadata and authenticated captures on the correct path, addressing the media reports in [#22](https://github.com/nimbold/Firelink/issues/22) and [#24](https://github.com/nimbold/Firelink/issues/24).
 - Enforce startup consent before accessing saved credentials and make keychain-related startup behavior more predictable.
 - Refresh dependencies and bundled engines, and strengthen checks for macOS, Windows portable, Linux packages, release assets, and release version identity.
 - Refine localized wording, including Persian status labels.
