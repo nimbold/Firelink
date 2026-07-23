@@ -223,8 +223,55 @@
   --color-surface-overlay: hsl(var(--surface-overlay));
   --color-bg-context-menu: hsl(var(--surface-overlay));
 
-  /* Apple System Fonts */
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+  /*
+   * Keep the default platform UI stack, and let each locale contribute a
+   * script-aware fallback. Optional custom families are bundled locally so
+   * the Tauri app remains usable offline.
+   */
+  --font-locale-fallback: sans-serif;
+  --font-stack-system: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, var(--font-locale-fallback), "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+  --font-stack-inter: "Inter Variable", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, var(--font-locale-fallback), "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+  --font-stack-outfit: "Outfit Variable", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, var(--font-locale-fallback), "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+  --font-stack-serif: Georgia, "Times New Roman", var(--font-locale-fallback), serif;
+  --font-stack-monospace: ui-monospace, "SF Mono", Monaco, "Cascadia Code", "Fira Code", "JetBrains Mono", var(--font-locale-fallback), monospace;
+  --font-sans: var(--font-stack-system);
+}
+
+html[lang="fa"] {
+  --font-locale-fallback: "Vazirmatn", "Noto Sans Arabic", "Segoe UI", Tahoma, Arial, sans-serif;
+}
+
+html[lang="he"] {
+  --font-locale-fallback: "Arial Hebrew", "Noto Sans Hebrew", "Segoe UI", Arial, sans-serif;
+}
+
+html[lang="zh-CN"] {
+  --font-locale-fallback: "PingFang SC", "Microsoft YaHei UI", "Noto Sans CJK SC", "Noto Sans SC", sans-serif;
+}
+
+html[lang="ru"],
+html[lang="uk"] {
+  --font-locale-fallback: "Segoe UI", "Noto Sans", Roboto, Arial, sans-serif;
+}
+
+html[data-font-family="system"] {
+  --font-sans: var(--font-stack-system);
+}
+
+html[data-font-family="inter"] {
+  --font-sans: var(--font-stack-inter);
+}
+
+html[data-font-family="outfit"] {
+  --font-sans: var(--font-stack-outfit);
+}
+
+html[data-font-family="serif"] {
+  --font-sans: var(--font-stack-serif);
+}
+
+html[data-font-family="monospace"] {
+  --font-sans: var(--font-stack-monospace);
 }
 
 @layer base {

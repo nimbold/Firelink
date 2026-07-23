@@ -1,6 +1,7 @@
 use crate::ipc::{
-    AppFontSize, CalendarPreference, ListRowDensity, MediaCookieSource, PersistedSettings,
-    PostQueueAction, ProxyMode, SchedulerSettings, SettingsTab, Theme, WindowControlStyle,
+    AppFontSize, CalendarPreference, FontFamily, ListRowDensity, MediaCookieSource,
+    PersistedSettings, PostQueueAction, ProxyMode, SchedulerSettings, SettingsTab, Theme,
+    WindowControlStyle,
 };
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -191,6 +192,11 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
         state,
         "theme",
         &["system", "light", "dark", "dracula", "nord"],
+    );
+    sanitize_allowed_string(
+        state,
+        "fontFamily",
+        &["system", "inter", "outfit", "serif", "monospace"],
     );
     sanitize_allowed_string(
         state,
@@ -422,6 +428,7 @@ fn derived_location_path(base: &str, subfolder: &str) -> String {
 fn default_settings() -> PersistedSettings {
     PersistedSettings {
         theme: Theme::System,
+        font_family: FontFamily::System,
         window_control_style: WindowControlStyle::Auto,
         calendar_preference: CalendarPreference::Gregorian,
         language: "system".to_string(),
@@ -478,7 +485,7 @@ fn default_settings() -> PersistedSettings {
 
 #[cfg(test)]
 mod tests {
-    use crate::ipc::WindowControlStyle;
+    use crate::ipc::{FontFamily, WindowControlStyle};
     use super::{
         decode_stored_settings, default_settings, preserve_portable_pairing_token,
         preserve_scheduler_runtime_keys,
@@ -683,6 +690,18 @@ mod tests {
         let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
 
         assert_eq!(settings.sidebar_position, "auto");
+    }
+
+    #[test]
+    fn invalid_font_family_uses_system_font() {
+        let stored = json!({
+            "state": {"fontFamily": "comic-sans"},
+            "version": 5
+        });
+
+        let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
+
+        assert!(matches!(settings.font_family, FontFamily::System));
     }
 
     #[test]

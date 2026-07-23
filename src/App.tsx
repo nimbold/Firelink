@@ -194,6 +194,7 @@ function App() {
   const sidebarPosition = useSettingsStore(state => state.sidebarPosition);
   const toggleSidebar = useSettingsStore(state => state.toggleSidebar);
   const activeView = useSettingsStore(state => state.activeView);
+  const fontFamily = useSettingsStore(state => state.fontFamily);
   const appFontSize = useSettingsStore(state => state.appFontSize);
   const listRowDensity = useSettingsStore(state => state.listRowDensity);
 
@@ -648,6 +649,10 @@ function App() {
       });
     });
   }, [addToast, coreReady, showKeychainModal]);
+
+  useEffect(() => {
+    window.document.documentElement.setAttribute('data-font-family', fontFamily);
+  }, [fontFamily]);
 
   useEffect(() => {
     window.document.documentElement.setAttribute('data-font-size', appFontSize);

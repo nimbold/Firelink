@@ -94,6 +94,8 @@ describe('translation catalogs', () => {
       'settings.integrations.chromiumZip',
       'settings.lookAndFeel.dracula',
       'settings.lookAndFeel.nord',
+      'settings.lookAndFeel.fontFamilyInter',
+      'settings.lookAndFeel.fontFamilyOutfit',
       'settings.lookAndFeel.windowControlStyleWindows',
       'settings.lookAndFeel.windowControlStyleGnome',
       'settings.network.chromeWindows',

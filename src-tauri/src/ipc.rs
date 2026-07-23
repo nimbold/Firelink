@@ -217,6 +217,23 @@ pub enum Theme {
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../src/bindings/")]
+pub enum FontFamily {
+    System,
+    Inter,
+    Outfit,
+    Serif,
+    Monospace,
+}
+
+impl Default for FontFamily {
+    fn default() -> Self {
+        Self::System
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub enum WindowControlStyle {
     Auto,
     Macos,
@@ -311,6 +328,8 @@ pub struct SchedulerSettings {
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct PersistedSettings {
     pub theme: Theme,
+    #[serde(default)]
+    pub font_family: FontFamily,
     #[serde(default)]
     pub window_control_style: WindowControlStyle,
     #[serde(default)]

@@ -4,6 +4,7 @@ import { invokeCommand as invoke } from '../ipc';
 import { info } from '../utils/logger';
 import type { ActiveView } from '../bindings/ActiveView';
 import type { AppFontSize } from '../bindings/AppFontSize';
+import type { FontFamily } from '../bindings/FontFamily';
 import type { ListRowDensity } from '../bindings/ListRowDensity';
 import type { MediaCookieSource } from '../bindings/MediaCookieSource';
 import type { PostQueueAction } from '../bindings/PostQueueAction';
@@ -74,6 +75,7 @@ const notifySettingsPersistenceError = () => {
 };
 
 const THEME_VALUES = ['system', 'light', 'dark', 'dracula', 'nord'] as const;
+const FONT_FAMILY_VALUES = ['system', 'inter', 'outfit', 'serif', 'monospace'] as const;
 const WINDOW_CONTROL_STYLE_VALUES = ['auto', 'macos', 'windows', 'gnome', 'minimal'] as const;
 const APP_FONT_SIZE_VALUES = ['small', 'standard', 'large'] as const;
 const LIST_ROW_DENSITY_VALUES = ['compact', 'standard', 'relaxed'] as const;
@@ -162,6 +164,7 @@ const tauriStorage: StateStorage = {
 export type {
   ActiveView,
   AppFontSize,
+  FontFamily,
   CalendarPreference,
   ListRowDensity,
   MediaCookieSource,
@@ -178,6 +181,7 @@ export type SidebarPosition = 'auto' | 'left' | 'right';
 
 export interface SettingsState {
   theme: Theme;
+  fontFamily: FontFamily;
   windowControlStyle: WindowControlStyle;
   calendarPreference: CalendarPreference;
   language: AppLocalePreference;
@@ -235,6 +239,7 @@ export interface SettingsState {
   showKeychainModal: boolean;
 
   setTheme: (theme: Theme) => void;
+  setFontFamily: (fontFamily: FontFamily) => void;
   setWindowControlStyle: (style: WindowControlStyle) => void;
   setCalendarPreference: (calendarPreference: CalendarPreference) => void;
   setLanguage: (language: AppLocalePreference) => void;
@@ -293,6 +298,7 @@ export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
       theme: 'system',
+      fontFamily: 'system',
       windowControlStyle: 'auto',
       calendarPreference: DEFAULT_CALENDAR_PREFERENCE,
       language: 'system',
@@ -357,6 +363,10 @@ export const useSettingsStore = create<SettingsState>()(
       showKeychainModal: false,
 
       setTheme: (theme) => { info('Settings updated: theme'); set({ theme }); },
+      setFontFamily: (fontFamily) => {
+        info('Settings updated: fontFamily');
+        set({ fontFamily });
+      },
       setWindowControlStyle: (windowControlStyle) => {
         info('Settings updated: windowControlStyle');
         set({ windowControlStyle });
@@ -571,6 +581,7 @@ export const useSettingsStore = create<SettingsState>()(
       },
       partialize: (state): PersistedSettingsSnapshot => ({
         theme: state.theme,
+        fontFamily: state.fontFamily,
         windowControlStyle: state.windowControlStyle,
         calendarPreference: state.calendarPreference,
         language: state.language,
@@ -633,6 +644,9 @@ export const useSettingsStore = create<SettingsState>()(
           theme: isAllowedSetting(THEME_VALUES, persisted.theme)
             ? persisted.theme
             : currentState.theme,
+          fontFamily: isAllowedSetting(FONT_FAMILY_VALUES, persisted.fontFamily)
+            ? persisted.fontFamily
+            : currentState.fontFamily,
           windowControlStyle: isAllowedSetting(WINDOW_CONTROL_STYLE_VALUES, persisted.windowControlStyle)
             ? persisted.windowControlStyle
             : currentState.windowControlStyle,

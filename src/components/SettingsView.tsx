@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState, useEffect } from 'react';
 import {
   type AppFontSize,
+  type FontFamily,
   type ListRowDensity,
   type SidebarPosition,
   type WindowControlStyle,
@@ -706,6 +707,13 @@ runEngineChecks(false);
     { value: 'gnome', label: t($ => $.settings.lookAndFeel.windowControlStyleGnome) },
     { value: 'minimal', label: t($ => $.settings.lookAndFeel.windowControlStyleMinimal) },
   ];
+  const fontFamilyOptions: Array<{ value: FontFamily; label: string }> = [
+    { value: 'system', label: t($ => $.settings.lookAndFeel.fontFamilySystem) },
+    { value: 'inter', label: t($ => $.settings.lookAndFeel.fontFamilyInter) },
+    { value: 'outfit', label: t($ => $.settings.lookAndFeel.fontFamilyOutfit) },
+    { value: 'serif', label: t($ => $.settings.lookAndFeel.fontFamilySerif) },
+    { value: 'monospace', label: t($ => $.settings.lookAndFeel.fontFamilyMonospace) },
+  ];
 
   const TabButton = ({ type, icon: Icon, label }: { type: SettingsTab; icon: typeof Download; label: string }) => {
     const active = activeTab === type;
@@ -903,6 +911,21 @@ runEngineChecks(false);
 
               <h2 className="settings-section-title">{t($ => $.settings.lookAndFeel.display)}</h2>
               <div className="mac-settings-group">
+                <div className="mac-settings-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.lookAndFeel.fontFamily)}</span>
+                    <small>{t($ => $.settings.lookAndFeel.fontFamilyDescription)}</small>
+                  </div>
+                  <select
+                    value={settings.fontFamily}
+                    onChange={(event) => settings.setFontFamily(event.target.value as FontFamily)}
+                    className="app-control w-60"
+                  >
+                    {fontFamilyOptions.map(option => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </div>
                 <div className="mac-settings-row">
                   <div className="settings-row-label">
                     <span>{t($ => $.settings.lookAndFeel.fontSize)}</span>
