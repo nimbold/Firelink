@@ -14,6 +14,7 @@ use ts_rs::TS;
 
 /// Default capacity when no setting is read yet.
 pub const DEFAULT_MAX_CONCURRENT: usize = 3;
+pub const MAX_QUEUE_CONCURRENT: usize = 12;
 pub const MEDIA_RUN_CANCELLED: &str = "__firelink_media_run_cancelled__";
 pub const DOWNLOAD_CONNECTIONS_MIN: i32 = 1;
 pub const DOWNLOAD_CONNECTIONS_MAX: i32 = 16;
@@ -122,6 +123,13 @@ pub struct QueuedTask {
     pub lifecycle_generation: u64,
 }
 
+#[derive(Debug, Clone)]
+struct QueuePermitOwnership {
+    queue_id: String,
+    lifecycle_generation: u64,
+    active: bool,
+}
+
 /// Args mirroring start_download / start_media_download. Kept untyped-loose
 /// (String/Option) to match the existing command signatures exactly.
 #[derive(Debug, Clone, Default)]
@@ -197,6 +205,19 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
     active_permits: Mutex<HashMap<String, OwnedSemaphorePermit>>,
     active_permit_generations: Mutex<HashMap<String, u64>>,
     active_kinds: Mutex<HashMap<String, TaskKind>>,
+    /// Queue overrides are stored only for queues with an explicit limit.
+    /// Missing entries inherit the global target capacity.
+    queue_limits: Mutex<HashMap<String, usize>>,
+    /// One entry represents either a queued dispatch reservation or an active
+    /// transfer. Keeping both phases in one map makes queue-slot ownership
+    /// exactly-once across the async addUri handoff.
+    queue_permit_ownership: Mutex<HashMap<String, QueuePermitOwnership>>,
+    /// Serializes queue-slot selection with global permit acquisition and
+    /// ownership transitions.
+    admission_gate: Mutex<()>,
+    /// Last queue selected by the dispatcher. Selection starts after this
+    /// queue when multiple queues have eligible work.
+    dispatch_cursor: Mutex<Option<String>>,
     target_capacity: AtomicUsize,
     slots_to_retire: AtomicUsize,
     notify: Notify,
@@ -275,6 +296,10 @@ impl<R: tauri::Runtime> QueueManager<R> {
             active_permits: Mutex::new(HashMap::new()),
             active_permit_generations: Mutex::new(HashMap::new()),
             active_kinds: Mutex::new(HashMap::new()),
+            queue_limits: Mutex::new(HashMap::new()),
+            queue_permit_ownership: Mutex::new(HashMap::new()),
+            admission_gate: Mutex::new(()),
+            dispatch_cursor: Mutex::new(None),
             target_capacity: AtomicUsize::new(capacity),
             slots_to_retire: AtomicUsize::new(0),
             notify: Notify::new(),
@@ -315,6 +340,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         // Epoch checks remain the authoritative guard; removing this marker
         // prevents terminal downloads from accumulating cancellation entries.
         self.aria2_retry_cancelled.lock().await.remove(id);
+        self.notify.notify_waiters();
     }
 
     pub async fn is_registered(&self, id: &str) -> bool {
@@ -461,6 +487,38 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// internal/test callers and still gets replay protection at generation 0.
     pub async fn push(&self, task: QueuedTask) -> Result<(), String> {
         self.push_with_generation(task, 0).await
+    }
+
+    /// Replace the explicit per-queue concurrency overrides. A missing queue
+    /// entry inherits the global limit; every effective queue limit is capped
+    /// by the global target at admission time.
+    pub async fn replace_queue_limits(
+        &self,
+        limits: Vec<(String, Option<usize>)>,
+    ) -> Result<(), String> {
+        let mut next = HashMap::with_capacity(limits.len());
+        for (queue_id, limit) in limits {
+            let queue_id = queue_id.trim();
+            if queue_id.is_empty() {
+                return Err("Queue id cannot be empty".to_string());
+            }
+            if next.contains_key(queue_id) {
+                return Err(format!("Duplicate queue id '{queue_id}'"));
+            }
+            if let Some(limit) = limit {
+                if !(1..=MAX_QUEUE_CONCURRENT).contains(&limit) {
+                    return Err(format!(
+                        "Queue concurrency must be between 1 and {MAX_QUEUE_CONCURRENT}"
+                    ));
+                }
+                next.insert(queue_id.to_string(), limit);
+            }
+        }
+
+        let _admission_gate = self.admission_gate.lock().await;
+        *self.queue_limits.lock().await = next;
+        self.notify.notify_waiters();
+        Ok(())
     }
 
     pub async fn next_aria2_control_epoch(&self, id: &str) -> u64 {
@@ -627,6 +685,17 @@ impl<R: tauri::Runtime> QueueManager<R> {
         self.semaphore.clone().acquire_owned().await.ok()
     }
 
+    fn try_acquire_permit_after_retirement(&self) -> Option<OwnedSemaphorePermit> {
+        loop {
+            let permit = self.semaphore.clone().try_acquire_owned().ok()?;
+            if self.retire_slot_if_needed() {
+                permit.forget();
+                continue;
+            }
+            return Some(permit);
+        }
+    }
+
     async fn acquire_permit_after_retirement(&self) -> Option<OwnedSemaphorePermit> {
         loop {
             let permit = self.acquire_permit().await?;
@@ -645,6 +714,37 @@ impl<R: tauri::Runtime> QueueManager<R> {
         self.acquire_permit_after_retirement().await
     }
 
+    /// Acquire and reserve both the global slot and a queue slot for a resume
+    /// that may still be outside the per-download control lock. The reservation
+    /// is generation-stamped so a concurrent pause cannot be overwritten by a
+    /// late resume worker.
+    pub async fn acquire_aria2_permit_candidate_for_queue(
+        &self,
+        id: &str,
+        queue_id: &str,
+        lifecycle_generation: u64,
+    ) -> Option<OwnedSemaphorePermit> {
+        loop {
+            if !self.is_registered_generation(id, lifecycle_generation).await {
+                return None;
+            }
+            let notified = self.notify.notified();
+            if let Some(permit) = self
+                .try_reserve_queue_slot(id, queue_id, lifecycle_generation)
+                .await
+            {
+                if self.is_registered_generation(id, lifecycle_generation).await {
+                    return Some(permit);
+                }
+                self.release_queue_reservation_for_generation(id, lifecycle_generation)
+                    .await;
+                drop(permit);
+                return None;
+            }
+            notified.await;
+        }
+    }
+
     fn retire_slot_if_needed(&self) -> bool {
         let mut debt = self.slots_to_retire.load(Ordering::Relaxed);
         while debt > 0 {
@@ -661,12 +761,180 @@ impl<R: tauri::Runtime> QueueManager<R> {
         false
     }
 
+    async fn try_reserve_queue_slot(
+        &self,
+        id: &str,
+        queue_id: &str,
+        lifecycle_generation: u64,
+    ) -> Option<OwnedSemaphorePermit> {
+        let _admission_gate = self.admission_gate.lock().await;
+        let mut ownership = self.queue_permit_ownership.lock().await;
+        if ownership.contains_key(id)
+            || self.active_permits.lock().await.contains_key(id)
+        {
+            return None;
+        }
+
+        let global_target = self.target_capacity.load(Ordering::Relaxed);
+        let queue_limit = self
+            .queue_limits
+            .lock()
+            .await
+            .get(queue_id)
+            .copied()
+            .unwrap_or(global_target)
+            .min(global_target);
+        let queue_active = ownership
+            .values()
+            .filter(|active| active.queue_id == queue_id)
+            .count();
+        if queue_active >= queue_limit {
+            return None;
+        }
+
+        let permit = self.try_acquire_permit_after_retirement()?;
+        ownership.insert(
+            id.to_string(),
+            QueuePermitOwnership {
+                queue_id: queue_id.to_string(),
+                lifecycle_generation,
+                active: false,
+            },
+        );
+        Some(permit)
+    }
+
+    async fn release_queue_reservation_for_generation(&self, id: &str, generation: u64) {
+        let _admission_gate = self.admission_gate.lock().await;
+        let removed = self
+            .queue_permit_ownership
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|ownership| {
+                ownership.lifecycle_generation == generation && !ownership.active
+            });
+        if removed {
+            self.queue_permit_ownership.lock().await.remove(id);
+            self.notify.notify_waiters();
+        }
+    }
+
+    async fn activate_admitted_permit(
+        &self,
+        id: &str,
+        lifecycle_generation: u64,
+        permit: OwnedSemaphorePermit,
+    ) -> bool {
+        let _admission_gate = self.admission_gate.lock().await;
+        let mut ownership = self.queue_permit_ownership.lock().await;
+        let owned = ownership
+            .get(id)
+            .is_some_and(|entry| entry.lifecycle_generation == lifecycle_generation && !entry.active);
+        let active_already_owned = self.active_permits.lock().await.contains_key(id);
+        if !owned || active_already_owned {
+            if owned {
+                ownership.remove(id);
+                self.notify.notify_waiters();
+            }
+            return false;
+        }
+        if let Some(entry) = ownership.get_mut(id) {
+            entry.active = true;
+        }
+        drop(ownership);
+        self.active_permits.lock().await.insert(id.to_string(), permit);
+        self.active_permit_generations
+            .lock()
+            .await
+            .insert(id.to_string(), lifecycle_generation);
+        true
+    }
+
+    async fn try_admit_next_task(&self) -> Option<(OwnedSemaphorePermit, QueuedTask)> {
+        let _admission_gate = self.admission_gate.lock().await;
+        let mut pending = self.pending.lock().await;
+        if pending.is_empty() {
+            return None;
+        }
+
+        let ownership = self.queue_permit_ownership.lock().await;
+        let mut queue_ids = Vec::new();
+        let mut seen = HashSet::new();
+        for task in pending.iter() {
+            if !ownership.contains_key(&task.id) && seen.insert(task.queue_id.clone()) {
+                queue_ids.push(task.queue_id.clone());
+            }
+        }
+        if queue_ids.is_empty() {
+            return None;
+        }
+
+        let cursor = self.dispatch_cursor.lock().await.clone();
+        let start = cursor
+            .as_ref()
+            .and_then(|queue_id| queue_ids.iter().position(|candidate| candidate == queue_id))
+            .map_or(0, |position| (position + 1) % queue_ids.len());
+        let global_target = self.target_capacity.load(Ordering::Relaxed);
+        let queue_limits = self.queue_limits.lock().await;
+        let selected_queue = (0..queue_ids.len()).find_map(|offset| {
+            let queue_id = &queue_ids[(start + offset) % queue_ids.len()];
+            let queue_limit = queue_limits
+                .get(queue_id)
+                .copied()
+                .unwrap_or(global_target)
+                .min(global_target);
+            let active = ownership
+                .values()
+                .filter(|active| active.queue_id == *queue_id)
+                .count();
+            (active < queue_limit).then_some(queue_id.clone())
+        })?;
+        let task_index = pending
+            .iter()
+            .position(|task| task.queue_id == selected_queue && !ownership.contains_key(&task.id))?;
+        drop(queue_limits);
+        drop(ownership);
+
+        let permit = self.try_acquire_permit_after_retirement()?;
+        let task = pending.remove(task_index)?;
+        self.queue_permit_ownership.lock().await.insert(
+            task.id.clone(),
+            QueuePermitOwnership {
+                queue_id: selected_queue.clone(),
+                lifecycle_generation: task.lifecycle_generation,
+                active: false,
+            },
+        );
+        *self.dispatch_cursor.lock().await = Some(selected_queue);
+        Some((permit, task))
+    }
+
     /// Park an already-acquired permit under `id`.
     pub async fn park_permit(&self, id: &str, permit: OwnedSemaphorePermit) {
+        self.park_permit_for_queue(id, "main", 0, permit).await;
+    }
+
+    async fn park_permit_for_queue(
+        &self,
+        id: &str,
+        queue_id: &str,
+        lifecycle_generation: u64,
+        permit: OwnedSemaphorePermit,
+    ) {
+        let _admission_gate = self.admission_gate.lock().await;
         self.active_permits
             .lock()
             .await
             .insert(id.to_string(), permit);
+        self.queue_permit_ownership.lock().await.insert(
+            id.to_string(),
+            QueuePermitOwnership {
+                queue_id: queue_id.to_string(),
+                lifecycle_generation,
+                active: true,
+            },
+        );
     }
 
     /// Park a candidate only when no newer lifecycle has already claimed the
@@ -676,12 +944,72 @@ impl<R: tauri::Runtime> QueueManager<R> {
         id: &str,
         permit: OwnedSemaphorePermit,
     ) -> bool {
+        self.park_aria2_permit_if_missing_for_queue(id, "main", 0, permit)
+            .await
+    }
+
+    /// Activate a queue-aware resume reservation. The caller owns the permit
+    /// while it revalidates the lifecycle under the per-download control lock.
+    pub async fn park_aria2_permit_if_missing_for_queue(
+        &self,
+        id: &str,
+        queue_id: &str,
+        lifecycle_generation: u64,
+        permit: OwnedSemaphorePermit,
+    ) -> bool {
+        let _admission_gate = self.admission_gate.lock().await;
+        let registered_generation = self
+            .registered_lifecycle_generations
+            .lock()
+            .await
+            .get(id)
+            .copied();
+        let mut ownership = self.queue_permit_ownership.lock().await;
+        let has_matching_reservation = ownership.get(id).is_some_and(|entry| {
+            entry.queue_id == queue_id
+                && entry.lifecycle_generation == lifecycle_generation
+                && !entry.active
+                && (registered_generation == Some(lifecycle_generation)
+                    || (registered_generation.is_none() && lifecycle_generation == 0))
+        });
+        if ownership.contains_key(id) && !has_matching_reservation {
+            let remove_reservation = ownership
+                .get(id)
+                .is_some_and(|entry| entry.lifecycle_generation == lifecycle_generation && !entry.active);
+            if remove_reservation {
+                ownership.remove(id);
+                self.notify.notify_waiters();
+            }
+            return false;
+        }
+        if ownership.get(id).is_none()
+            && registered_generation.is_some_and(|current| current != lifecycle_generation)
+        {
+            return false;
+        }
         let mut permits = self.active_permits.lock().await;
         if permits.contains_key(id) {
             return false;
         }
         permits.insert(id.to_string(), permit);
         drop(permits);
+        if let Some(entry) = ownership.get_mut(id) {
+            entry.active = true;
+        } else {
+            ownership.insert(
+                id.to_string(),
+                QueuePermitOwnership {
+                    queue_id: queue_id.to_string(),
+                    lifecycle_generation,
+                    active: true,
+                },
+            );
+        }
+        drop(ownership);
+        self.active_permit_generations
+            .lock()
+            .await
+            .insert(id.to_string(), lifecycle_generation);
         self.active_kinds
             .lock()
             .await
@@ -689,11 +1017,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
         true
     }
 
-    async fn tag_permit_generation(&self, id: &str, generation: u64) {
-        self.active_permit_generations
-            .lock()
-            .await
-            .insert(id.to_string(), generation);
+    pub async fn release_aria2_permit_candidate(&self, id: &str, lifecycle_generation: u64) {
+        self.release_queue_reservation_for_generation(id, lifecycle_generation)
+            .await;
     }
 
     pub async fn active_kind(&self, id: &str) -> Option<TaskKind> {
@@ -704,52 +1030,84 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// when this call acquired and parked the permit, false when one was
     /// already parked.
     pub async fn ensure_aria2_permit(&self, id: &str) -> bool {
-        if self.active_permits.lock().await.contains_key(id) {
-            return false;
-        }
+        self.ensure_aria2_permit_for_queue(id, "main").await
+    }
 
-        let permit = match self.acquire_permit_after_retirement().await {
-            Some(p) => p,
-            None => return false,
-        };
-        let mut permits = self.active_permits.lock().await;
-        if permits.contains_key(id) {
-            drop(permits);
-            drop(permit);
-            return false;
+    /// Ensure a paused or externally recovered aria2 transfer owns one global
+    /// permit and one slot in its queue. This waits without holding a
+    /// per-download control lock and wakes on either kind of capacity change.
+    pub async fn ensure_aria2_permit_for_queue(&self, id: &str, queue_id: &str) -> bool {
+        loop {
+            if self.has_active_permit(id).await
+                || self.queue_permit_ownership.lock().await.contains_key(id)
+            {
+                return false;
+            }
+            let notified = self.notify.notified();
+            let generation = self
+                .registered_lifecycle_generation(id)
+                .await
+                .unwrap_or_default();
+            if let Some(permit) = self
+                .try_reserve_queue_slot(id, queue_id, generation)
+                .await
+            {
+                if self.park_aria2_permit_if_missing_for_queue(
+                    id,
+                    queue_id,
+                    generation,
+                    permit,
+                )
+                .await
+                {
+                    self.active_kinds
+                        .lock()
+                        .await
+                        .insert(id.to_string(), TaskKind::Aria2);
+                    return true;
+                }
+                return false;
+            }
+            notified.await;
         }
-        permits.insert(id.to_string(), permit);
-        drop(permits);
-        self.active_kinds
-            .lock()
-            .await
-            .insert(id.to_string(), TaskKind::Aria2);
-        true
     }
 
     pub async fn release_permit(&self, id: &str) {
+        let _admission_gate = self.admission_gate.lock().await;
+        let queue_removed = self.queue_permit_ownership.lock().await.remove(id).is_some();
         let removed = self.active_permits.lock().await.remove(id).is_some();
         self.active_permit_generations.lock().await.remove(id);
         self.active_kinds.lock().await.remove(id);
-        if removed {
-            self.notify.notify_one();
+        if removed || queue_removed {
+            self.notify.notify_waiters();
         }
     }
 
     async fn release_permit_for_generation(&self, id: &str, generation: u64) {
+        let _admission_gate = self.admission_gate.lock().await;
         let removed = {
             let mut permits = self.active_permits.lock().await;
             let mut generations = self.active_permit_generations.lock().await;
-            if generations.get(id).copied() == Some(generation) {
+            let queue_owned = self
+                .queue_permit_ownership
+                .lock()
+                .await
+                .get(id)
+                .is_some_and(|ownership| ownership.lifecycle_generation == generation);
+            if queue_owned || generations.get(id).copied() == Some(generation) {
                 generations.remove(id);
-                permits.remove(id).is_some()
+                let active_removed = permits.remove(id).is_some();
+                if queue_owned {
+                    self.queue_permit_ownership.lock().await.remove(id);
+                }
+                active_removed || queue_owned
             } else {
                 false
             }
         };
         if removed {
             self.active_kinds.lock().await.remove(id);
-            self.notify.notify_one();
+            self.notify.notify_waiters();
         }
     }
 
@@ -821,10 +1179,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
             if delta > 0 {
                 self.semaphore.add_permits(delta);
             }
-            self.notify.notify_one();
+            self.notify.notify_waiters();
         } else {
             let delta = prev_target - new_target;
             self.slots_to_retire.fetch_add(delta, Ordering::Relaxed);
+            self.notify.notify_waiters();
         }
     }
 
@@ -834,29 +1193,20 @@ impl<R: tauri::Runtime> QueueManager<R> {
     }
 
     /// The long-running dispatcher. One instance is spawned in setup().
-    /// Idle-parks on Notify; CAS-honors retirement debt; re-pops under lock.
+    /// It scans for a queue with capacity before reserving the global slot, so
+    /// a saturated front queue cannot block later eligible queues.
     pub async fn run_dispatcher(self: Arc<Self>) {
         loop {
-            // (1) Idle-park: avoid busy-spin when pending is empty.
-            if self.pending.lock().await.is_empty() {
-                self.notify.notified().await;
-                continue;
+            let notified = self.notify.notified();
+            if let Some((permit, task)) = self.try_admit_next_task().await {
+                Arc::clone(&self).dispatch_one(permit, task).await;
+            } else {
+                // This covers both an empty pending list and the case where
+                // all queue/global capacity is occupied. The notification
+                // future is created before inspection to close the lost-wake
+                // window without polling or sleeping.
+                notified.await;
             }
-            // (2) Acquire a slot.
-            let permit = match self.acquire_permit_after_retirement().await {
-                Some(p) => p,
-                None => break, // Semaphore closed, exit dispatcher
-            };
-            // (4) Re-pop under lock — guards against racing removals between
-            //     waking from Notify and acquiring the permit.
-            let task = match self.pending.lock().await.pop_front() {
-                Some(t) => t,
-                None => {
-                    drop(permit);
-                    continue;
-                }
-            };
-            Arc::clone(&self).dispatch_one(permit, task).await;
         }
     }
 
@@ -872,16 +1222,23 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .is_registered_generation(&id, lifecycle_generation)
             .await
         {
+            self.release_queue_reservation_for_generation(&id, lifecycle_generation)
+                .await;
             drop(control_guard);
             drop(permit);
             return;
         }
 
-        // Park the permit BEFORE spawning. Uniform parking:
+        // Activate the reservation BEFORE spawning. Uniform parking:
         // aria2's RPC returns instantly, so the permit must outlive the
         // dispatch_one call. Media runners release on exit.
-        self.park_permit(&id, permit).await;
-        self.tag_permit_generation(&id, lifecycle_generation).await;
+        if !self
+            .activate_admitted_permit(&id, lifecycle_generation, permit)
+            .await
+        {
+            drop(control_guard);
+            return;
+        }
         self.active_kinds
             .lock()
             .await

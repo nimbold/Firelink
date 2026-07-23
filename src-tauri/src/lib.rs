@@ -4498,7 +4498,12 @@ async fn resume_download(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: String,
+    queue_id: String,
 ) -> Result<bool, String> {
+    let queue_id = queue_id.trim().to_string();
+    if queue_id.is_empty() {
+        return Err("Queue id cannot be empty".to_string());
+    }
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     let Some(gid) = state.queue_manager.aria2_gid_for_download(&id) else {
         log::info!(
@@ -4521,6 +4526,11 @@ async fn resume_download(
     match status.as_str() {
         "paused" => {
             let control_epoch = state.queue_manager.next_aria2_control_epoch(&id).await;
+            let lifecycle_generation = state
+                .queue_manager
+                .registered_lifecycle_generation(&id)
+                .await
+                .unwrap_or_default();
             state.queue_manager.allow_aria2_retries(&id).await;
             state.queue_manager.reset_aria2_retry_strikes(&id).await;
             use tauri::Emitter;
@@ -4542,7 +4552,13 @@ async fn resume_download(
                 let permit_candidate = if had_permit {
                     None
                 } else {
-                    queue_manager.acquire_aria2_permit_candidate().await
+                    queue_manager
+                        .acquire_aria2_permit_candidate_for_queue(
+                            &id_clone,
+                            &queue_id,
+                            lifecycle_generation,
+                        )
+                        .await
                 };
                 if permit_candidate.is_none() && !had_permit {
                     return;
@@ -4557,12 +4573,22 @@ async fn resume_download(
                         != Some(gid_clone.as_str())
                     || !queue_manager.is_registered(&id_clone).await
                 {
+                    if permit_candidate.is_some() {
+                        queue_manager
+                            .release_aria2_permit_candidate(&id_clone, lifecycle_generation)
+                            .await;
+                    }
                     return;
                 }
                 if !queue_manager
                     .rebind_aria2_gid_epoch(&id_clone, &gid_clone, control_epoch)
                     .await
                 {
+                    if permit_candidate.is_some() {
+                        queue_manager
+                            .release_aria2_permit_candidate(&id_clone, lifecycle_generation)
+                            .await;
+                    }
                     log::warn!(
                         "aria2 resume [{}]: gid {} disappeared before lifecycle rebind",
                         id_clone,
@@ -4572,7 +4598,12 @@ async fn resume_download(
                 }
                 if let Some(permit) = permit_candidate {
                     let _ = queue_manager
-                        .park_aria2_permit_if_missing(&id_clone, permit)
+                        .park_aria2_permit_if_missing_for_queue(
+                            &id_clone,
+                            &queue_id,
+                            lifecycle_generation,
+                            permit,
+                        )
                         .await;
                 }
                 let _ = app_handle_clone.emit(
@@ -4702,47 +4733,82 @@ async fn resume_download(
         }
         "active" | "waiting" => {
             let resume_epoch = state.queue_manager.current_aria2_control_epoch(&id).await;
+            let lifecycle_generation = state
+                .queue_manager
+                .registered_lifecycle_generation(&id)
+                .await
+                .unwrap_or_default();
             drop(control_guard);
             state.queue_manager.allow_aria2_retries(&id).await;
-            let had_permit = state.queue_manager.has_active_permit(&id).await;
-            let permit_candidate = if had_permit {
-                None
-            } else {
-                state.queue_manager.acquire_aria2_permit_candidate().await
-            };
-            if permit_candidate.is_none() && !had_permit {
-                return Ok(true);
-            }
-            let _control_guard = state.queue_manager.acquire_aria2_control(&id).await;
-            let still_current = state.queue_manager.is_registered(&id).await
-                && !state.queue_manager.is_aria2_retry_cancelled(&id).await
-                && state
-                    .queue_manager
-                    .is_aria2_control_epoch_current(&id, resume_epoch)
-                    .await
-                && state.queue_manager.aria2_gid_for_download(&id).as_deref() == Some(gid.as_str());
-            if still_current {
+            let queue_manager = state.queue_manager.clone();
+            let id_clone = id.clone();
+            let gid_clone = gid.clone();
+            let queue_id_clone = queue_id.clone();
+            let app_handle_clone = app_handle.clone();
+            let status_for_log = status.to_string();
+            tauri::async_runtime::spawn(async move {
+                let had_permit = queue_manager.has_active_permit(&id_clone).await;
+                let permit_candidate = if had_permit {
+                    None
+                } else {
+                    queue_manager
+                        .acquire_aria2_permit_candidate_for_queue(
+                            &id_clone,
+                            &queue_id_clone,
+                            lifecycle_generation,
+                        )
+                        .await
+                };
+                let had_permit_candidate = permit_candidate.is_some();
+                if permit_candidate.is_none() && !had_permit {
+                    return;
+                }
+
+                let _control_guard = queue_manager.acquire_aria2_control(&id_clone).await;
+                let still_current = queue_manager.is_registered(&id_clone).await
+                    && !queue_manager.is_aria2_retry_cancelled(&id_clone).await
+                    && queue_manager
+                        .is_aria2_control_epoch_current(&id_clone, resume_epoch)
+                        .await
+                    && queue_manager.aria2_gid_for_download(&id_clone).as_deref()
+                        == Some(gid_clone.as_str());
+                if !still_current {
+                    if had_permit_candidate {
+                        queue_manager
+                            .release_aria2_permit_candidate(&id_clone, lifecycle_generation)
+                            .await;
+                    }
+                    return;
+                }
+
                 if let Some(permit) = permit_candidate {
-                    let _ = state
-                        .queue_manager
-                        .park_aria2_permit_if_missing(&id, permit)
+                    let parked = queue_manager
+                        .park_aria2_permit_if_missing_for_queue(
+                            &id_clone,
+                            &queue_id_clone,
+                            lifecycle_generation,
+                            permit,
+                        )
                         .await;
+                    if !parked && !queue_manager.has_active_permit(&id_clone).await {
+                        return;
+                    }
                 }
                 log::info!(
                     "aria2 resume [{}]: gid {} already {}; no duplicate job created",
-                    id,
-                    gid,
-                    status
+                    id_clone,
+                    gid_clone,
+                    status_for_log
                 );
                 use tauri::Emitter;
-                let _ = app_handle.emit(
+                let _ = app_handle_clone.emit(
                     "download-state",
                     crate::ipc::DownloadStateEvent::new(
-                        id,
+                        &id_clone,
                         crate::ipc::DownloadStatus::Downloading,
                     ),
                 );
-            }
+            });
             Ok(true)
         }
         "complete" | "error" | "removed" => {
@@ -5685,6 +5751,22 @@ async fn set_concurrent_limit(
 ) -> Result<(), String> {
     state.queue_manager.set_capacity(limit.clamp(1, 12));
     Ok(())
+}
+
+#[tauri::command]
+async fn set_queue_concurrency_limits(
+    state: tauri::State<'_, AppState>,
+    limits: Vec<crate::ipc::QueueConcurrencyConfig>,
+) -> Result<(), String> {
+    state
+        .queue_manager
+        .replace_queue_limits(
+            limits
+                .into_iter()
+                .map(|limit| (limit.id, limit.max_concurrent))
+                .collect(),
+        )
+        .await
 }
 
 #[tauri::command]
@@ -9327,7 +9409,7 @@ pub fn run() {
             authorize_keychain_access,
             acknowledge_pairing_token_change,
             check_file_exists, toggle_tray_icon, set_extension_pairing_token,
-            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_download_speed_limit, set_global_speed_limit, remove_download,
+            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_global_speed_limit, remove_download,
             detach_download_for_reconfigure,
             enqueue_download, enqueue_many, cancel_enqueue_generation, move_in_queue, move_many_in_queue, remove_from_queue, get_pending_order,
             commands::reveal_in_file_manager, commands::open_downloaded_file,

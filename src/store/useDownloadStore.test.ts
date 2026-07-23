@@ -267,6 +267,166 @@ describe('useDownloadStore', () => {
     expect(useDownloadStore.getState().renameQueue('queue-a', '')).toBe(false);
   });
 
+  it('persists a queue concurrency override only after backend synchronization', async () => {
+    useDownloadStore.setState({
+      queues: [
+        { id: 'main', name: 'Main Queue', isMain: true },
+        { id: 'queue-a', name: 'Downloads', isMain: false }
+      ]
+    });
+    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
+
+    await useDownloadStore.getState().setQueueConcurrency('queue-a', 2);
+
+    expect(useDownloadStore.getState().queues).toEqual([
+      { id: 'main', name: 'Main Queue', isMain: true },
+      { id: 'queue-a', name: 'Downloads', isMain: false, maxConcurrent: 2 }
+    ]);
+    expect(vi.mocked(ipc.invokeCommand)).toHaveBeenCalledWith(
+      'set_queue_concurrency_limits',
+      {
+        limits: [
+          { id: 'main', maxConcurrent: null },
+          { id: 'queue-a', maxConcurrent: 2 }
+        ]
+      }
+    );
+  });
+
+  it('retains the previous queue concurrency after backend synchronization fails', async () => {
+    useDownloadStore.setState({
+      queues: [
+        { id: 'main', name: 'Main Queue', isMain: true },
+        { id: 'queue-a', name: 'Downloads', isMain: false, maxConcurrent: 2 }
+      ]
+    });
+    vi.mocked(ipc.invokeCommand).mockRejectedValue(new Error('backend unavailable'));
+
+    await expect(useDownloadStore.getState().setQueueConcurrency('queue-a', 3))
+      .rejects.toThrow('backend unavailable');
+    expect(useDownloadStore.getState().queues[1].maxConcurrent).toBe(2);
+  });
+
+  it('rebases queue concurrency updates when queue state changes during IPC', async () => {
+    useDownloadStore.setState({
+      queues: [
+        { id: 'main', name: 'Main Queue', isMain: true },
+        { id: 'queue-a', name: 'Downloads', isMain: false }
+      ]
+    });
+    let releaseFirstSync!: () => void;
+    const firstSyncReleased = new Promise<void>(resolve => { releaseFirstSync = resolve; });
+    let syncCalls = 0;
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
+      if (command === 'set_queue_concurrency_limits') {
+        syncCalls += 1;
+        if (syncCalls === 1) await firstSyncReleased;
+      }
+      return undefined;
+    });
+
+    const update = useDownloadStore.getState().setQueueConcurrency('queue-a', 3);
+    await vi.waitFor(() => expect(syncCalls).toBe(1));
+    useDownloadStore.setState(state => ({
+      queues: state.queues.filter(queue => queue.id !== 'queue-a')
+    }));
+    releaseFirstSync();
+
+    await expect(update).rejects.toThrow('Queue no longer exists.');
+    expect(useDownloadStore.getState().queues).toEqual([
+      { id: 'main', name: 'Main Queue', isMain: true }
+    ]);
+    expect(syncCalls).toBe(2);
+    const configCalls = vi.mocked(ipc.invokeCommand).mock.calls
+      .filter(([command]) => command === 'set_queue_concurrency_limits');
+    expect(configCalls[1]).toEqual([
+      'set_queue_concurrency_limits',
+      { limits: [{ id: 'main', maxConcurrent: null }] }
+    ]);
+  });
+
+  it('updates an active normal download after applying a live speed limit', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'live-speed',
+        status: 'downloading',
+        isMedia: false,
+        speedLimit: '512K'
+      }] as any[]
+    });
+    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
+
+    await useDownloadStore.getState().setDownloadSpeedLimit('live-speed', '2M');
+
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('set_download_speed_limit', {
+      id: 'live-speed',
+      limit: '2M'
+    });
+    expect(useDownloadStore.getState().downloads[0].speedLimit).toBe('2M');
+
+    await useDownloadStore.getState().setDownloadSpeedLimit('live-speed', null);
+    const speedLimitCalls = vi.mocked(ipc.invokeCommand).mock.calls
+      .filter(([command]) => command === 'set_download_speed_limit');
+    expect(speedLimitCalls[speedLimitCalls.length - 1]).toEqual(['set_download_speed_limit', {
+      id: 'live-speed',
+      limit: null
+    }]);
+    expect(useDownloadStore.getState().downloads[0].speedLimit).toBeUndefined();
+  });
+
+  it('rejects live speed changes for media and inactive downloads', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'media-speed', status: 'downloading', isMedia: true, speedLimit: '1M' },
+        { id: 'paused-speed', status: 'paused', isMedia: false, speedLimit: '1M' }
+      ] as any[]
+    });
+
+    await expect(useDownloadStore.getState().setDownloadSpeedLimit('media-speed', '2M'))
+      .rejects.toThrow('media downloads');
+    await expect(useDownloadStore.getState().setDownloadSpeedLimit('paused-speed', '2M'))
+      .rejects.toThrow('active download');
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('set_download_speed_limit', expect.anything());
+  });
+
+  it('keeps the prior live speed limit when the backend rejects the update', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'live-speed-failure',
+        status: 'downloading',
+        isMedia: false,
+        speedLimit: '512K'
+      }] as any[]
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
+      if (command === 'set_download_speed_limit') throw new Error('aria2 unavailable');
+      return undefined;
+    });
+
+    await expect(useDownloadStore.getState().setDownloadSpeedLimit('live-speed-failure', '2M'))
+      .rejects.toThrow('aria2 unavailable');
+    expect(useDownloadStore.getState().downloads[0].speedLimit).toBe('512K');
+  });
+
+  it('coalesces duplicate live speed updates for one download', async () => {
+    useDownloadStore.setState({
+      downloads: [{ id: 'live-speed-duplicate', status: 'downloading', isMedia: false }] as any[]
+    });
+    let releaseBackend!: () => void;
+    const backendFinished = new Promise<void>(resolve => { releaseBackend = resolve; });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async () => backendFinished);
+
+    const first = useDownloadStore.getState().setDownloadSpeedLimit('live-speed-duplicate', '2M');
+    const second = useDownloadStore.getState().setDownloadSpeedLimit('live-speed-duplicate', '3M');
+    expect(second).toBe(first);
+    releaseBackend();
+    await first;
+
+    expect(vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) => command === 'set_download_speed_limit'))
+      .toHaveLength(1);
+    expect(useDownloadStore.getState().downloads[0].speedLimit).toBe('2M');
+  });
+
   it('normalizes malformed persisted queues around one canonical main queue', () => {
     expect(normalizePersistedQueues([
       { id: 'custom-a', name: ' Downloads ', isMain: false },
@@ -284,6 +444,47 @@ describe('useDownloadStore', () => {
     expect(normalizePersistedQueueState([
       { id: 'legacy-main', name: 'Primary', isMain: true }
     ]).queueIdRemap.get('legacy-main')).toBe('00000000-0000-0000-0000-000000000001');
+  });
+
+  it('keeps only valid persisted queue concurrency overrides', () => {
+    expect(normalizePersistedQueues([
+      { id: 'main', name: 'Main', isMain: true, maxConcurrent: 4 },
+      { id: 'valid', name: 'Valid', isMain: false, maxConcurrent: 12 },
+      { id: 'zero', name: 'Zero', isMain: false, maxConcurrent: 0 },
+      { id: 'large', name: 'Large', isMain: false, maxConcurrent: 13 },
+      { id: 'null', name: 'Null', isMain: false, maxConcurrent: null }
+    ])).toEqual([
+      { id: '00000000-0000-0000-0000-000000000001', name: 'Main', isMain: true, maxConcurrent: 4 },
+      { id: 'valid', name: 'Valid', isMain: false, maxConcurrent: 12 },
+      { id: 'zero', name: 'Zero', isMain: false },
+      { id: 'large', name: 'Large', isMain: false },
+      { id: 'null', name: 'Null', isMain: false }
+    ]);
+  });
+
+  it('synchronizes normalized queue limits before startup resume can run', async () => {
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'db_get_all_queues') {
+        return [
+          JSON.stringify({ id: 'main', name: 'Main', isMain: true, maxConcurrent: 4 }),
+          JSON.stringify({ id: 'queue-a', name: 'Queue A', isMain: false, maxConcurrent: 0 })
+        ];
+      }
+      if (cmd === 'db_get_all_downloads') return [];
+      return undefined;
+    });
+
+    await useDownloadStore.getState().initDB();
+
+    expect(vi.mocked(ipc.invokeCommand)).toHaveBeenCalledWith(
+      'set_queue_concurrency_limits',
+      {
+        limits: [
+          { id: '00000000-0000-0000-0000-000000000001', maxConcurrent: 4 },
+          { id: 'queue-a', maxConcurrent: null }
+        ]
+      }
+    );
   });
 
   it('remaps persisted downloads when queue records are malformed or missing', async () => {
@@ -731,6 +932,10 @@ describe('useDownloadStore', () => {
     const calls = vi.mocked(ipc.invokeCommand).mock.calls;
     expect(calls.some(c => c[0] === 'resume_download')).toBe(true);
     expect(calls.some(c => c[0] === 'enqueue_download')).toBe(true);
+    expect(calls.find(c => c[0] === 'resume_download')?.[1]).toEqual({
+      id: 'resume-generation',
+      queueId: 'MAIN'
+    });
     expect(enqueueGeneration).toBe('1');
     expect(useDownloadStore.getState().downloads[0].lastTry).toEqual(expect.any(String));
     expect(useDownloadStore.getState().backendRegisteredIds.has('resume-generation')).toBe(true); // Re-registered by dispatchItem

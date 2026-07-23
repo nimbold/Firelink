@@ -72,6 +72,8 @@ export const PropertiesModal = () => {
   
   const [speedLimitEnabled, setSpeedLimitEnabled] = useState(false);
   const [speedLimitValue, setSpeedLimitValue] = useState('1024'); // KiB/s
+  const [liveSpeedLimitValue, setLiveSpeedLimitValue] = useState('');
+  const [isLiveSpeedLimitPending, setIsLiveSpeedLimitPending] = useState(false);
 
   const [loginMode, setLoginMode] = useState<LoginMode>('matching');
   const [username, setUsername] = useState('');
@@ -142,6 +144,11 @@ export const PropertiesModal = () => {
       }
     }
   }, [selectedPropertiesDownloadId, setSelectedPropertiesDownloadId]);
+
+  useEffect(() => {
+    const activeLimit = item?.speedLimit?.trim();
+    setLiveSpeedLimitValue(activeLimit && activeLimit !== '0' ? activeLimit : '');
+  }, [item?.speedLimit, selectedPropertiesDownloadId]);
 
   useEffect(() => {
     if (!selectedPropertiesDownloadId || connectionsDirty) return;
@@ -245,8 +252,27 @@ export const PropertiesModal = () => {
     }
   };
 
+  const handleLiveSpeedLimit = async (limit: string | null) => {
+    if (isLiveSpeedLimitPending || item.isMedia || !['downloading', 'retrying'].includes(item.status)) return;
+
+    setErrorMessage('');
+    setIsLiveSpeedLimitPending(true);
+    try {
+      await useDownloadStore.getState().setDownloadSpeedLimit(item.id, limit);
+      if (limit === null) setLiveSpeedLimitValue('');
+    } catch (error) {
+      setErrorMessage(t($ => $.properties.liveSpeedLimitFailed, {
+        detail: error instanceof Error ? error.message : String(error)
+      }));
+    } finally {
+      setIsLiveSpeedLimitPending(false);
+    }
+  };
+
   const identityLocked = getIdentityLocked(item.status);
   const transferLocked = getTransferLocked(item.status);
+  const liveSpeedLimitAvailable = !item.isMedia && ['downloading', 'retrying'].includes(item.status);
+  const liveSpeedLimitUnavailable = item.isMedia && ['downloading', 'processing', 'retrying'].includes(item.status);
   const configuredConnections = resolveDownloadConnections(item.connections, perServerConnections);
   const observedConnectionTotal = Math.max(
     1,
@@ -458,6 +484,53 @@ export const PropertiesModal = () => {
                   </div>
                 )}
               </div>
+              {(liveSpeedLimitAvailable || liveSpeedLimitUnavailable) && (
+                <div className="col-start-2 rounded-md border border-border-modal/60 bg-border-color/20 p-3 space-y-2">
+                  {liveSpeedLimitAvailable ? (
+                    <>
+                      <label htmlFor="live-speed-limit" className="block text-xs font-medium text-text-primary">
+                        {t($ => $.properties.liveSpeedLimit)}
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          id="live-speed-limit"
+                          type="text"
+                          inputMode="decimal"
+                          value={liveSpeedLimitValue}
+                          onChange={event => setLiveSpeedLimitValue(event.currentTarget.value)}
+                          placeholder={t($ => $.properties.liveSpeedLimitPlaceholder)}
+                          disabled={isLiveSpeedLimitPending}
+                          aria-describedby="live-speed-limit-hint"
+                          className="w-28 bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-50"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => void handleLiveSpeedLimit(liveSpeedLimitValue)}
+                          disabled={isLiveSpeedLimitPending}
+                          className="app-button app-button-primary px-3 text-xs disabled:opacity-50"
+                        >
+                          {t($ => $.properties.liveSpeedLimitApply)}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleLiveSpeedLimit(null)}
+                          disabled={isLiveSpeedLimitPending || !liveSpeedLimitValue}
+                          className="app-button px-3 text-xs disabled:opacity-50"
+                        >
+                          {t($ => $.properties.liveSpeedLimitClear)}
+                        </button>
+                      </div>
+                      <p id="live-speed-limit-hint" className="text-[11px] text-text-muted">
+                        {t($ => $.properties.liveSpeedLimitHint)}
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-[11px] text-text-muted">
+                      {t($ => $.properties.liveSpeedLimitUnavailable)}
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           </section>
 

@@ -28,6 +28,7 @@ const downloadLifecycleGenerations = new Map<string, bigint>();
 const queueReorderPromises = new Map<string, Promise<void>>();
 const queueStartPromises = new Map<string, Promise<string[]>>();
 const queueControlGenerations = new Map<string, number>();
+let queueConfigurationQueue: Promise<void> = Promise.resolve();
 type DownloadLifecycleOperation = {
   kind: string;
   promise: Promise<unknown>;
@@ -585,18 +586,39 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
 export type { DownloadStatus };
 export const MAIN_QUEUE_ID = '00000000-0000-0000-0000-000000000001';
 const DEFAULT_MAIN_QUEUE_NAME = 'Main Queue';
+const MAX_QUEUE_CONCURRENT = 12;
 
 const queueNameKey = (name: string): string => name.trim().toLowerCase();
 
-export const normalizePersistedQueueState = (queues: Queue[]) => {
+const normalizeQueueConcurrency = (value: unknown): number | undefined => {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return undefined;
+  return value >= 1 && value <= MAX_QUEUE_CONCURRENT ? value : undefined;
+};
+
+type PersistedQueue = Omit<Queue, 'maxConcurrent'> & {
+  maxConcurrent?: number | null;
+};
+
+const queueWithNormalizedConcurrency = (queue: PersistedQueue): Queue => {
+  const maxConcurrent = normalizeQueueConcurrency(queue.maxConcurrent);
+  return maxConcurrent === undefined
+    ? { id: queue.id, name: queue.name, isMain: queue.isMain }
+    : { id: queue.id, name: queue.name, isMain: queue.isMain, maxConcurrent };
+};
+
+export const normalizePersistedQueueState = (queues: PersistedQueue[]) => {
   const validQueues = queues.filter(queue =>
     queue && typeof queue.id === 'string' && typeof queue.name === 'string'
-  );
+  ).map(queueWithNormalizedConcurrency);
   const persistedMain = validQueues.find(queue => queue.id === MAIN_QUEUE_ID)
     || validQueues.find(queue => queue.isMain);
   const persistedMainId = persistedMain?.id.trim();
   const mainName = persistedMain?.name.trim() || DEFAULT_MAIN_QUEUE_NAME;
-  const normalized: Queue[] = [{ id: MAIN_QUEUE_ID, name: mainName, isMain: true }];
+  const normalizedMain: Queue = { id: MAIN_QUEUE_ID, name: mainName, isMain: true };
+  if (persistedMain?.maxConcurrent !== undefined) {
+    normalizedMain.maxConcurrent = persistedMain.maxConcurrent;
+  }
+  const normalized: Queue[] = [normalizedMain];
   const seenIds = new Set([MAIN_QUEUE_ID]);
   const seenNames = new Set([queueNameKey(mainName)]);
   const queueIdRemap = new Map<string, string>();
@@ -620,14 +642,36 @@ export const normalizePersistedQueueState = (queues: Queue[]) => {
     }
     seenIds.add(id);
     seenNames.add(queueNameKey(name));
-    normalized.push({ id, name, isMain: false });
+    const normalizedQueue = { id, name, isMain: false } as Queue;
+    if (queue.maxConcurrent !== undefined) {
+      const maxConcurrent = normalizeQueueConcurrency(queue.maxConcurrent);
+      if (maxConcurrent !== undefined) normalizedQueue.maxConcurrent = maxConcurrent;
+    }
+    normalized.push(normalizedQueue);
   }
 
   return { queues: normalized, queueIdRemap };
 };
 
-export const normalizePersistedQueues = (queues: Queue[]): Queue[] =>
+export const normalizePersistedQueues = (queues: PersistedQueue[]): Queue[] =>
   normalizePersistedQueueState(queues).queues;
+
+const synchronizeQueueConcurrencyLimits = async (queues: Queue[]): Promise<void> => {
+  await invoke('set_queue_concurrency_limits', {
+    limits: queues.map(queue => ({
+      id: queue.id,
+      maxConcurrent: queue.maxConcurrent ?? null
+    }))
+  });
+};
+
+const sameQueueConcurrencyConfig = (left: Queue[], right: Queue[]): boolean =>
+  left.length === right.length && left.every((queue, index) => {
+    const other = right[index];
+    return other !== undefined
+      && queue.id === other.id
+      && (queue.maxConcurrent ?? null) === (other.maxConcurrent ?? null);
+  });
 
 export type { DownloadItem, Queue };
 export type ExtensionDownloadRequest = ExtensionDownload;
@@ -706,6 +750,8 @@ interface DownloadState {
   startAll: () => Promise<number>;
   pauseAll: () => Promise<number>;
   assignToQueue: (ids: string[], queueId: string) => Promise<void>;
+  setDownloadSpeedLimit: (id: string, limit: string | null) => Promise<void>;
+  setQueueConcurrency: (id: string, maxConcurrent: number | null) => Promise<void>;
   addQueue: (name: string) => boolean;
   renameQueue: (id: string, name: string) => boolean;
   removeQueue: (id: string) => Promise<void>;
@@ -794,7 +840,10 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         lastTry: new Date().toISOString()
       });
 
-      const resumedExisting = await invoke('resume_download', { id });
+      const resumedExisting = await invoke('resume_download', {
+        id,
+        queueId: targetItem.queueId || MAIN_QUEUE_ID
+      });
 
       let dispatchSucceeded = resumedExisting;
       if (!dispatchSucceeded) {
@@ -1551,6 +1600,79 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       }));
     });
   },
+  setDownloadSpeedLimit: (id, limit) => runDownloadLifecycleOperation(
+    id,
+    'speed-limit',
+    async () => {
+      await waitForPendingStartupResume();
+      const item = get().downloads.find(download => download.id === id);
+      if (!item) throw new Error('Download no longer exists.');
+      if (item.isMedia) {
+        throw new Error('Live speed control is unavailable for media downloads.');
+      }
+      if (!['downloading', 'retrying'].includes(item.status)) {
+        throw new Error('Live speed control requires an active download.');
+      }
+
+      const trimmed = limit?.trim() || '';
+      const normalizedLimit = trimmed
+        ? normalizeSpeedLimitForBackend(trimmed)
+        : null;
+      if (trimmed && normalizedLimit === null) {
+        throw new Error('Enter a valid speed limit.');
+      }
+
+      await invoke('set_download_speed_limit', {
+        id,
+        limit: normalizedLimit
+      });
+      if (get().downloads.some(download => download.id === id)) {
+        get().updateDownload(id, { speedLimit: normalizedLimit ?? undefined });
+      }
+    },
+    true,
+    preemptDispatch
+  ),
+  setQueueConcurrency: (id, maxConcurrent) => {
+    const operation = queueConfigurationQueue.then(async () => {
+      if (
+        maxConcurrent !== null
+        && (!Number.isInteger(maxConcurrent) || maxConcurrent < 1 || maxConcurrent > MAX_QUEUE_CONCURRENT)
+      ) {
+        throw new Error('Queue concurrency must be between 1 and 12.');
+      }
+      const currentQueues = get().queues;
+      if (!currentQueues.some(queue => queue.id === id)) {
+        throw new Error('Queue no longer exists.');
+      }
+      const nextQueues = currentQueues.map(queue =>
+        queue.id === id
+          ? maxConcurrent === null
+            ? { id: queue.id, name: queue.name, isMain: queue.isMain }
+            : { ...queue, maxConcurrent }
+          : queue
+      );
+      await synchronizeQueueConcurrencyLimits(nextQueues);
+      const latestQueues = get().queues;
+      if (!latestQueues.some(queue => queue.id === id)) {
+        await synchronizeQueueConcurrencyLimits(latestQueues);
+        throw new Error('Queue no longer exists.');
+      }
+      const rebasedQueues = latestQueues.map(queue =>
+        queue.id === id
+          ? maxConcurrent === null
+            ? { id: queue.id, name: queue.name, isMain: queue.isMain }
+            : { ...queue, maxConcurrent }
+          : queue
+      );
+      if (!sameQueueConcurrencyConfig(nextQueues, rebasedQueues)) {
+        await synchronizeQueueConcurrencyLimits(rebasedQueues);
+      }
+      set({ queues: rebasedQueues });
+    });
+    queueConfigurationQueue = operation.then(() => undefined, () => undefined);
+    return operation;
+  },
   addQueue: (name) => {
     const normalizedName = name.trim();
     if (!normalizedName) return false;
@@ -1772,7 +1894,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     try {
       const persistedQueues = (await invoke('db_get_all_queues')).flatMap(value => {
         try {
-          return [JSON.parse(value) as Queue];
+          return [JSON.parse(value) as PersistedQueue];
         } catch {
           console.warn('Skipping malformed persisted queue record during startup');
           return [];
@@ -1796,6 +1918,11 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
           ? normalizeQueuePositions(downloads)
           : state.downloads
       }));
+
+      // The backend dispatcher is live before the frontend finishes startup.
+      // Synchronize the normalized queue policy before any saved download is
+      // allowed to claim a permit.
+      await synchronizeQueueConcurrencyLimits(queues);
       
       // Reset interrupted active downloads to queued.
       set((state) => ({

@@ -783,6 +783,245 @@ async fn aria2_resume_waits_for_shrunk_capacity() {
         .expect("resume task should not panic"));
 }
 
+#[tokio::test]
+async fn dispatcher_skips_a_full_front_queue_for_later_eligible_work() {
+    let (manager, spawner) = make_manager(2);
+    let manager = Arc::new(manager);
+    manager
+        .replace_queue_limits(vec![
+            ("queue-a".to_string(), Some(1)),
+            ("queue-b".to_string(), Some(1)),
+        ])
+        .await
+        .unwrap();
+
+    manager.push(aria2_task_in_queue("a1", "queue-a")).await.unwrap();
+    manager.push(aria2_task_in_queue("a2", "queue-a")).await.unwrap();
+    manager.push(aria2_task_in_queue("b1", "queue-b")).await.unwrap();
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if spawner.add_uri_calls.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("later eligible queue should dispatch");
+    assert!(manager.aria2_gid_for_download("a1").is_some());
+    assert!(manager.aria2_gid_for_download("b1").is_some());
+    assert!(manager.aria2_gid_for_download("a2").is_none());
+
+    dispatcher.abort();
+}
+
+#[tokio::test]
+async fn dispatcher_rotates_eligible_queues_without_starving_later_work() {
+    let (manager, spawner) = make_manager(1);
+    let manager = Arc::new(manager);
+    manager
+        .replace_queue_limits(vec![
+            ("queue-a".to_string(), Some(1)),
+            ("queue-b".to_string(), Some(1)),
+        ])
+        .await
+        .unwrap();
+    manager.push(aria2_task_in_queue("a1", "queue-a")).await.unwrap();
+    manager.push(aria2_task_in_queue("a2", "queue-a")).await.unwrap();
+    manager.push(aria2_task_in_queue("b1", "queue-b")).await.unwrap();
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+
+    timeout(Duration::from_secs(1), async {
+        while spawner.add_uri_calls.load(Ordering::SeqCst) < 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first queue task should dispatch");
+    manager.release_permit("a1").await;
+
+    timeout(Duration::from_secs(1), async {
+        while manager.aria2_gid_for_download("b1").is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("later queue should be selected before another task from queue-a");
+    assert!(manager.aria2_gid_for_download("a2").is_none());
+
+    dispatcher.abort();
+}
+
+#[tokio::test]
+async fn queue_limit_increase_wakes_waiting_work_and_decrease_keeps_active_tasks() {
+    let (manager, spawner) = make_manager(3);
+    let manager = Arc::new(manager);
+    manager
+        .replace_queue_limits(vec![("queue-a".to_string(), Some(2))])
+        .await
+        .unwrap();
+    for id in ["a1", "a2", "a3"] {
+        manager.push(aria2_task_in_queue(id, "queue-a")).await.unwrap();
+    }
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+
+    timeout(Duration::from_secs(1), async {
+        while spawner.add_uri_calls.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("queue override should allow two active transfers");
+    manager
+        .replace_queue_limits(vec![("queue-a".to_string(), Some(1))])
+        .await
+        .unwrap();
+    assert_eq!(spawner.add_uri_calls.load(Ordering::SeqCst), 2);
+
+    manager.release_permit("a1").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        spawner.add_uri_calls.load(Ordering::SeqCst),
+        2,
+        "reducing a queue limit must not admit work while one active transfer remains"
+    );
+
+    manager.release_permit("a2").await;
+    timeout(Duration::from_secs(1), async {
+        while spawner.add_uri_calls.load(Ordering::SeqCst) < 3 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("queue work should resume after active count falls below the reduced limit");
+
+    dispatcher.abort();
+}
+
+#[tokio::test]
+async fn queue_overrides_never_exceed_the_global_ceiling() {
+    let (manager, spawner) = make_manager(2);
+    let manager = Arc::new(manager);
+    manager
+        .replace_queue_limits(vec![
+            ("queue-a".to_string(), Some(12)),
+            ("queue-b".to_string(), Some(12)),
+        ])
+        .await
+        .unwrap();
+    for (id, queue_id) in [
+        ("a1", "queue-a"),
+        ("a2", "queue-a"),
+        ("b1", "queue-b"),
+        ("b2", "queue-b"),
+    ] {
+        manager.push(aria2_task_in_queue(id, queue_id)).await.unwrap();
+    }
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(spawner.add_uri_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(manager.available_permits(), 0);
+
+    dispatcher.abort();
+}
+
+#[tokio::test]
+async fn queue_limit_configuration_rejects_malformed_input() {
+    let (manager, _spawner) = make_manager(2);
+    assert!(manager
+        .replace_queue_limits(vec![(String::new(), Some(1))])
+        .await
+        .is_err());
+    assert!(manager
+        .replace_queue_limits(vec![("queue-a".to_string(), Some(0))])
+        .await
+        .is_err());
+    assert!(manager
+        .replace_queue_limits(vec![
+            ("queue-a".to_string(), Some(1)),
+            ("queue-a".to_string(), None),
+        ])
+        .await
+        .is_err());
+    manager
+        .replace_queue_limits(vec![("queue-a".to_string(), None)])
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn stale_queue_resume_reservation_is_removed_when_activation_fails() {
+    let (manager, _spawner) = make_manager(1);
+    let previous = manager
+        .reserve_enqueue_generation("candidate", 1)
+        .await
+        .unwrap();
+    assert!(previous.is_none());
+    let candidate = manager
+        .acquire_aria2_permit_candidate_for_queue("candidate", "queue-a", 1)
+        .await
+        .expect("candidate should reserve the queue slot");
+
+    manager.release_registered_id("candidate").await;
+    assert!(!manager
+        .park_aria2_permit_if_missing_for_queue("candidate", "queue-a", 1, candidate)
+        .await);
+    assert_eq!(manager.available_permits(), 1);
+
+    assert!(manager.ensure_aria2_permit_for_queue("replacement", "queue-a").await);
+    manager.release_permit("replacement").await;
+}
+
+#[tokio::test]
+async fn duplicate_pending_id_cannot_replace_an_existing_queue_ownership() {
+    let (manager, spawner) = make_manager(2);
+    let manager = Arc::new(manager);
+    manager
+        .replace_queue_limits(vec![
+            ("queue-a".to_string(), Some(1)),
+            ("queue-b".to_string(), Some(1)),
+        ])
+        .await
+        .unwrap();
+    assert!(manager
+        .ensure_aria2_permit_for_queue("duplicate", "queue-b")
+        .await);
+    manager
+        .reserve_enqueue_generation("duplicate", 1)
+        .await
+        .unwrap();
+    manager
+        .commit_reserved_enqueue(aria2_task_in_queue("duplicate", "queue-a"), 1)
+        .await
+        .unwrap();
+
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert_eq!(spawner.add_uri_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(manager.available_permits(), 1);
+    manager.release_permit("duplicate").await;
+    dispatcher.abort();
+}
+
 fn aria2_task(id: &str) -> QueuedTask {
     QueuedTask {
         id: id.to_string(),
@@ -791,6 +1030,12 @@ fn aria2_task(id: &str) -> QueuedTask {
         lifecycle_generation: 0,
         payload: SpawnPayload::default(),
     }
+}
+
+fn aria2_task_in_queue(id: &str, queue_id: &str) -> QueuedTask {
+    let mut task = aria2_task(id);
+    task.queue_id = queue_id.to_string();
+    task
 }
 
 fn media_task(id: &str) -> QueuedTask {

@@ -16,6 +16,7 @@ import type { PairingTokenHydration } from './bindings/PairingTokenHydration';
 import type { EnqueueItem } from './bindings/EnqueueItem';
 import type { EnqueueAccepted } from './bindings/EnqueueAccepted';
 import type { PlatformInfo } from './bindings/PlatformInfo';
+import type { QueueConcurrencyConfig } from './bindings/QueueConcurrencyConfig';
 
 type CommandMap = {
   fetch_metadata: {
@@ -37,7 +38,7 @@ type CommandMap = {
   reveal_in_file_manager: { args: { path: string }; result: void };
   open_downloaded_file: { args: { path: string }; result: void };
   pause_download: { args: { id: string }; result: void };
-  resume_download: { args: { id: string }; result: boolean };
+  resume_download: { args: { id: string; queueId: string }; result: boolean };
   remove_download: { args: { id: string; deleteAssets: boolean; preserveResumable?: boolean }; result: void };
   detach_download_for_reconfigure: { args: { id: string }; result: void };
   begin_dock_badge_session: { args: undefined; result: number };
@@ -48,6 +49,7 @@ type CommandMap = {
   perform_system_action: { args: { action: PostQueueAction }; result: void };
   ack_schedule_trigger: { args: { action: 'start' | 'stop'; key: string }; result: void };
   set_concurrent_limit: { args: { limit: number }; result: void };
+  set_queue_concurrency_limits: { args: { limits: QueueConcurrencyConfig[] }; result: void };
   set_download_speed_limit: { args: { id: string; limit: string | null }; result: void };
   set_global_speed_limit: { args: { limit: string | null }; result: void };
   request_automation_permission: { args: undefined; result: void };

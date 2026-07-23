@@ -70,6 +70,18 @@ pub struct Queue {
     pub id: String,
     pub name: String,
     pub is_main: bool,
+    #[serde(default)]
+    #[ts(optional)]
+    pub max_concurrent: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct QueueConcurrencyConfig {
+    pub id: String,
+    #[serde(default)]
+    pub max_concurrent: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]

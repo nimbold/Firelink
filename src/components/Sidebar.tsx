@@ -22,7 +22,7 @@ interface SidebarProps {
 
 export const Sidebar: React.FC<SidebarProps> = (props) => {
   const { selectedFilter, onSelectFilter } = props;
-  const { downloads, queues, addQueue, renameQueue, removeQueue, startQueue, pauseQueue } = useDownloadStore();
+  const { downloads, queues, addQueue, renameQueue, removeQueue, startQueue, pauseQueue, setQueueConcurrency } = useDownloadStore();
   const { activeView, setActiveView, toggleSidebar } = useSettingsStore();
   const { addToast } = useToast();
   const { t } = useTranslation();
@@ -475,6 +475,45 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             <Pause size={14} className="me-2 text-text-secondary" />
             {t($ => $.actions.pauseQueue)}
           </button>
+          {(() => {
+            const queue = queues.find(candidate => candidate.id === contextMenu.id);
+            if (!queue) return null;
+            return (
+              <div
+                role="group"
+                aria-labelledby="queue-concurrency-label"
+                className="px-3 py-2 text-[12px] text-text-secondary"
+                onClick={event => event.stopPropagation()}
+              >
+                <label id="queue-concurrency-label" htmlFor="queue-concurrency-select" className="block mb-1">
+                  {t($ => $.sidebar.queueConcurrency)}
+                </label>
+                <select
+                  id="queue-concurrency-select"
+                  aria-label={t($ => $.sidebar.queueConcurrency)}
+                  value={queue.maxConcurrent?.toString() ?? ''}
+                  className="w-full rounded border border-border-color bg-bg-context-menu px-1.5 py-1 text-[12px] text-text-primary outline-none focus:border-accent"
+                  onChange={event => {
+                    const value = event.currentTarget.value === ''
+                      ? null
+                      : Number(event.currentTarget.value);
+                    void setQueueConcurrency(queue.id, value).catch(error => {
+                      addToast({
+                        message: t($ => $.sidebar.queueConcurrencyFailed, { detail: String(error) }),
+                        variant: 'error',
+                        isActionable: true
+                      });
+                    });
+                  }}
+                >
+                  <option value="">{t($ => $.sidebar.queueConcurrencyGlobal)}</option>
+                  {Array.from({ length: 12 }, (_, index) => index + 1).map(value => (
+                    <option key={value} value={value}>{value}</option>
+                  ))}
+                </select>
+              </div>
+            );
+          })()}
           <div className="h-px bg-border-color my-1 mx-2" />
           <button
             className="w-full text-start px-3 py-1.5 flex items-center hover:bg-item-hover"
