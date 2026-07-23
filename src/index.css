@@ -1721,7 +1721,8 @@ html[data-list-density="relaxed"] {
   z-index: 60;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  direction: ltr;
+  gap: 9px;
   -webkit-app-region: no-drag;
   pointer-events: auto;
 }
@@ -1734,6 +1735,7 @@ html[data-list-density="relaxed"] {
 .window-controls--right {
   left: auto;
   right: 22px;
+  flex-direction: row-reverse;
 }
 
 .window-control {
