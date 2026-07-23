@@ -2,7 +2,7 @@ import { initMediaDomains, isActiveDownloadStatus, isTransferActiveStatus } from
 import { schedulerCompletionState } from './utils/schedulerCompletion';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Sidebar, SidebarFilter } from "./components/Sidebar";
-import { DownloadTable } from "./components/DownloadTable";
+import { DownloadTable, type DownloadTableStatusSummary } from "./components/DownloadTable";
 import { KeychainPermissionModal } from './components/KeychainPermissionModal';
 import { extractValidDownloadUrls } from './utils/url';
 import { readClipboardDownloadUrls } from './utils/clipboard';
@@ -28,6 +28,7 @@ import { PanelLeft } from 'lucide-react';
 import { isTrustedFirelinkReleaseUrl } from './utils/releaseUrls';
 import { changeAppLocale, localeDirection, resolveAppLocale, syncDocumentLocale } from './i18n';
 import { useTranslation } from 'react-i18next';
+import { formatDownloadBytes } from './utils/downloadProgress';
 
 const loadSettingsView = () => import('./components/SettingsView');
 const loadSchedulerView = () => import('./components/SchedulerView');
@@ -166,6 +167,7 @@ function App() {
   const { i18n, t } = useTranslation();
   const platform = usePlatformInfo();
   const [filter, setFilter] = useState<SidebarFilter>('all');
+  const [downloadTableSummary, setDownloadTableSummary] = useState<DownloadTableStatusSummary | null>(null);
   const [coreReady, setCoreReady] = useState(false);
   const [keychainConsentVersion, setKeychainConsentVersion] = useState('');
 
@@ -218,6 +220,16 @@ function App() {
     download.status === 'queued' || download.status === 'staged'
   ).length;
   const doneCount = downloads.filter(download => download.status === 'completed').length;
+  const handleDownloadTableSummaryChange = useCallback((summary: DownloadTableStatusSummary | null) => {
+    setDownloadTableSummary(summary);
+  }, []);
+  const formatStatusSummaryBytes = (value: number | null, isEstimated = false): string => {
+    if (value === null) return t($ => $.downloadTable.summary.unknown);
+    const formatted = formatDownloadBytes(value);
+    return isEstimated
+      ? t($ => $.downloadTable.summary.estimated, { value: formatted })
+      : formatted;
+  };
   const schedulerRunning = useSettingsStore(state => state.schedulerRunning);
   const schedulerActiveDownloadIds = useSettingsStore(state => state.schedulerActiveDownloadIds);
   const pendingPostActionTimer = useRef<number | null>(null);
@@ -1062,7 +1074,12 @@ function App() {
         )}
         <div className="flex-1 flex flex-col overflow-hidden relative">
           <Suspense fallback={<PageLoadingFallback />}>
-            {activeView === 'downloads' && <DownloadTable filter={filter} />}
+            {activeView === 'downloads' && (
+              <DownloadTable
+                filter={filter}
+                onSummaryChange={handleDownloadTableSummaryChange}
+              />
+            )}
             {activeView === 'settings' && <SettingsView />}
             {activeView === 'scheduler' && <SchedulerView />}
             {activeView === 'speedLimiter' && <SpeedLimiterView />}
@@ -1073,6 +1090,21 @@ function App() {
         {/* Status Bar */}
         <div className="app-statusbar px-[14px] flex items-center justify-between text-text-muted shrink-0">
           <span>{t($ => $.status.ready)}</span>
+          {activeView === 'downloads' && downloadTableSummary ? (
+            <div className="app-statusbar-summary" dir="ltr" aria-live="polite">
+              <span className="app-statusbar-summary-metric">
+                <span dir="auto">{t($ => $.downloadTable.summary.downloaded)}</span>
+                <strong dir="auto">{formatStatusSummaryBytes(downloadTableSummary.summary.downloadedBytes)}</strong>
+              </span>
+              <span className="app-statusbar-summary-metric">
+                <span dir="auto">{t($ => $.downloadTable.summary.remaining)}</span>
+                <strong dir="auto">{formatStatusSummaryBytes(
+                  downloadTableSummary.summary.remainingBytes,
+                  downloadTableSummary.summary.remainingIsEstimated
+                )}</strong>
+              </span>
+            </div>
+          ) : null}
           <div className="flex gap-3 tabular-nums">
             <span>{t($ => $.status.active, { count: activeDownloadCount })}</span>
             <span>{t($ => $.status.queued, { count: queuedCount })}</span>

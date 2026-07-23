@@ -1158,11 +1158,45 @@ html[data-list-density="relaxed"] {
   }
 
   .app-statusbar {
+    position: relative;
     height: 26px;
     font-size: 10px;
     background: hsl(var(--statusbar-bg));
     border-top: 1px solid hsl(var(--border-color));
     box-shadow: none;
+  }
+
+  .app-statusbar-summary {
+    position: absolute;
+    left: 50%;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: min(52%, 560px);
+    overflow: hidden;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    font-size: 10px;
+    line-height: 1;
+    pointer-events: none;
+  }
+
+  .app-statusbar-summary-metric {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .app-statusbar-summary-metric > span {
+    color: hsl(var(--text-muted));
+  }
+
+  .app-statusbar-summary-metric > strong {
+    overflow: hidden;
+    color: hsl(var(--text-secondary));
+    font-variant-numeric: tabular-nums;
+    text-overflow: ellipsis;
   }
 
   .sidebar-nav-item {
@@ -1866,38 +1900,39 @@ html[data-list-density="relaxed"] {
     background: hsl(var(--item-hover));
   }
 
-  .downloads-summary {
+  .downloads-header-actions {
     min-width: 0;
-    flex: 1 1 360px;
     display: flex;
     align-items: center;
-    justify-content: flex-end;
-    flex-wrap: wrap;
-    gap: 4px 12px;
-    color: hsl(var(--text-secondary));
-    font-size: 11px;
-    line-height: 1.25;
+    gap: 10px;
+    margin-inline-start: auto;
   }
 
-  .downloads-summary-scope {
+  .downloads-selection-status {
     color: hsl(var(--text-primary));
+    font-size: 11px;
     font-weight: 650;
-  }
-
-  .downloads-summary-metric {
-    display: inline-flex;
-    align-items: baseline;
-    gap: 4px;
     white-space: nowrap;
   }
 
-  .downloads-summary-label {
-    color: hsl(var(--text-muted));
+  .downloads-queue-priority-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 1px;
+    padding: 1px;
+    border: 1px solid hsl(var(--border-color));
+    border-radius: 7px;
+    background: hsl(var(--statusbar-bg) / 0.7);
   }
 
-  .downloads-summary-value {
+  .downloads-queue-priority-controls .app-icon-button {
     color: hsl(var(--text-secondary));
-    font-variant-numeric: tabular-nums;
+  }
+
+  .downloads-queue-priority-controls .app-icon-button:hover:not(:disabled),
+  .downloads-queue-priority-controls .app-icon-button:focus-visible {
+    color: hsl(var(--accent-color));
+    background: hsl(var(--accent-color) / 0.14);
   }
 
   .downloads-table {
@@ -1961,12 +1996,52 @@ html[data-list-density="relaxed"] {
 }
 
 .downloads-queue-reorder-hint {
-  max-width: 340px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 420px;
+  overflow: hidden;
   color: hsl(var(--text-muted));
   font-size: 10px;
   font-weight: 500;
-  line-height: 1.25;
+  line-height: 1;
   letter-spacing: 0;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.downloads-queue-reorder-hint > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.downloads-queue-reorder-shortcut {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 3px;
+  direction: ltr;
+  color: hsl(var(--text-muted));
+}
+
+.downloads-queue-reorder-shortcut kbd {
+  min-width: 16px;
+  height: 17px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid hsl(var(--border-color));
+  border-bottom-color: hsl(var(--border-color) / 0.72);
+  border-radius: 4px;
+  background: hsl(var(--item-hover));
+  color: hsl(var(--text-secondary));
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 650;
+  line-height: 1;
 }
 
 .download-table-scroll {
@@ -2215,23 +2290,12 @@ html[data-list-density="relaxed"] .download-ghost-row {
   opacity: 0.48;
 }
 
-.download-queue-drag-handle {
-  flex: 0 0 auto;
-  width: 20px;
-  height: 22px;
-  margin-inline-start: -4px;
-  color: hsl(var(--text-muted));
+.download-row.is-queue-reorderable {
   cursor: grab;
   touch-action: none;
 }
 
-.download-queue-drag-handle:hover,
-.download-queue-drag-handle:focus-visible {
-  color: hsl(var(--text-primary));
-  background: hsl(var(--item-hover));
-}
-
-.download-queue-drag-handle:active {
+.download-row.is-queue-reorderable:active {
   cursor: grabbing;
 }
 

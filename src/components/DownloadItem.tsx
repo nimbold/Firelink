@@ -1,6 +1,6 @@
 import React from 'react';
 import { useDownloadProgressStore } from '../store/downloadProgressStore';
-import { Play, Pause, MoreVertical, Clock, ArrowUp, ArrowDown, GripVertical } from 'lucide-react';
+import { Play, Pause, MoreVertical, Clock } from 'lucide-react';
 import type { DownloadItem as DownloadItemType } from '../bindings/DownloadItem';
 import { canPauseDownload, canStartDownload } from '../utils/downloadActions';
 import { useTranslation } from 'react-i18next';
@@ -24,7 +24,6 @@ interface DownloadItemProps {
   download: DownloadItemType;
   index: number;
   queueIndex: number;
-  queueLength: number;
   columnOrder: DownloadTableColumnKey[];
   columnAlignments: Record<DownloadTableColumnKey, DownloadColumnAlignment>;
   tableGridTemplate: string;
@@ -37,7 +36,7 @@ interface DownloadItemProps {
   isQueueReorderable: boolean;
   isQueueDragSource: boolean;
   onMoveInQueue: (id: string, direction: 'up' | 'down') => void;
-  onQueueDragStart: (id: string, event: React.PointerEvent<HTMLButtonElement>) => void;
+  onQueueDragStart: (id: string, event: React.PointerEvent<HTMLDivElement>) => void;
   onClick: (e: React.MouseEvent, item: DownloadItemType) => void;
 }
 
@@ -45,7 +44,6 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   download,
   index,
   queueIndex,
-  queueLength,
   columnOrder,
   columnAlignments,
   tableGridTemplate,
@@ -202,21 +200,6 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
         style={columnStyle('File Name')}
       >
         <div className="download-cell-content">
-          {isQueueReorderable ? (
-            <button
-              type="button"
-              className="download-queue-drag-handle app-icon-button"
-              aria-label={t($ => $.downloadTable.queueDragHandle, { fileName: download.fileName })}
-              title={t($ => $.downloadTable.queueDragHandle, { fileName: download.fileName })}
-              onPointerDown={event => {
-                event.stopPropagation();
-                onQueueDragStart(download.id, event);
-              }}
-              onClick={event => event.stopPropagation()}
-            >
-              <GripVertical size={13} aria-hidden="true" />
-            </button>
-          ) : null}
           <span className="shrink-0 text-text-muted">
             {getCategoryIcon(download.category)}
           </span>
@@ -354,26 +337,6 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
       onClick={(e) => e.stopPropagation()}
       onDoubleClick={(e) => e.stopPropagation()}
     >
-      {isQueueReorderable && queueIndex !== -1 && (
-        <>
-          <button
-            onClick={() => onMoveInQueue(download.id, 'up')}
-            disabled={queueIndex === 0}
-            className="app-icon-button h-7 w-7 disabled:opacity-40"
-            title={t($ => $.downloads.actions.moveUp)}
-          >
-            <ArrowUp size={14} />
-          </button>
-          <button
-            onClick={() => onMoveInQueue(download.id, 'down')}
-            disabled={queueIndex === queueLength - 1}
-            className="app-icon-button h-7 w-7 disabled:opacity-40"
-            title={t($ => $.downloads.actions.moveDown)}
-          >
-            <ArrowDown size={14} />
-          </button>
-        </>
-      )}
       {canPauseDownload(download.status) && (
         <button onClick={() => handlePause(download.id)} className="app-icon-button h-7 w-7" title={t($ => $.downloads.actions.pause)}>
           <Pause size={14} fill="currentColor" />
@@ -401,7 +364,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     <div
       ref={rowRef}
       data-download-id={download.id}
-      className={`download-row group cursor-default relative ${isActionVisible ? 'has-visible-actions' : ''} ${index % 2 !== 0 ? 'striped' : ''} ${isSelected ? 'is-selected' : ''} ${isQueueDragSource ? 'is-queue-drag-source' : ''}`}
+      className={`download-row group cursor-default relative ${isActionVisible ? 'has-visible-actions' : ''} ${index % 2 !== 0 ? 'striped' : ''} ${isSelected ? 'is-selected' : ''} ${isQueueReorderable ? 'is-queue-reorderable' : ''} ${isQueueDragSource ? 'is-queue-drag-source' : ''}`}
       style={{ gridTemplateColumns: tableGridTemplate, minWidth: tableMinWidth }}
       tabIndex={0}
       onMouseEnter={() => {
@@ -423,6 +386,9 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
         if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
           setIsRowFocused(false);
         }
+      }}
+      onPointerDown={event => {
+        if (isQueueReorderable) onQueueDragStart(download.id, event);
       }}
       onClick={(e) => onClick(e, download)}
       onKeyDown={event => {

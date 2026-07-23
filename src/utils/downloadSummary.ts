@@ -42,11 +42,13 @@ const effectiveByteState = (
   const totalBytes = usesStoredMediaTotal
     ? usableBytes(download.totalBytes)
     : usableBytes(progress?.total_bytes) ?? usableBytes(download.totalBytes);
-  const downloadedBytes =
-    usableBytes(progress?.downloaded_bytes) ??
-    usableBytes(download.downloadedBytes) ??
-    (download.status === 'completed' ? totalBytes : undefined) ??
-    (canInferNoDownloadedBytes(download) ? 0 : undefined);
+  const downloadedBytes = download.status === 'completed'
+    ? usableBytes(download.downloadedBytes) ??
+      usableBytes(progress?.downloaded_bytes) ??
+      totalBytes
+    : usableBytes(progress?.downloaded_bytes) ??
+      usableBytes(download.downloadedBytes) ??
+      (canInferNoDownloadedBytes(download) ? 0 : undefined);
   const totalIsEstimate = usesStoredMediaTotal
     ? storedTotalIsEstimate
     : (progress?.total_is_estimate ?? storedTotalIsEstimate) === true;
@@ -87,6 +89,13 @@ export const summarizeDownloads = (
       } else {
         downloadedKnown = false;
       }
+    }
+
+    if (download.status === 'completed') {
+      // A completed row is terminal even when a delayed progress event still
+      // carries an old partial denominator. Never expose that stale value as
+      // remaining work in the aggregate status bar.
+      continue;
     }
 
     if (

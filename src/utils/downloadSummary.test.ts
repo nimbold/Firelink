@@ -37,6 +37,27 @@ describe('download summaries', () => {
     });
   });
 
+  it('treats completed downloads as having no remaining bytes despite stale progress', () => {
+    expect(summarizeDownloads([
+      item('done', {
+        status: 'completed',
+        totalBytes: 40 * 1024 ** 2,
+        downloadedBytes: 40 * 1024 ** 2,
+      }),
+    ], {
+      done: progress('done', {
+        downloaded_bytes: 40 * 1024 ** 2 - 555 * 1024,
+        total_bytes: 555 * 1024,
+      }),
+    })).toEqual({
+      itemCount: 1,
+      activeCount: 0,
+      downloadedBytes: 40 * 1024 ** 2,
+      remainingBytes: 0,
+      remainingIsEstimated: false,
+    });
+  });
+
   it('does not present partial byte totals as complete aggregates', () => {
     expect(summarizeDownloads([
       item('known', { totalBytes: 100, downloadedBytes: 20 }),

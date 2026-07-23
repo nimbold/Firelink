@@ -15,7 +15,7 @@ export const DEFAULT_COLUMN_ORDER = [
 export const DEFAULT_COLUMN_WIDTHS = [340, 100, 220, 100, 80, 170] as const;
 export const COLUMN_MINIMUMS = [160, 58, 92, 58, 48, 144] as const;
 // Width of the fixed action rail shown while hovering a row.
-export const DOWNLOAD_ACTIONS_COLUMN_WIDTH = 120;
+export const DOWNLOAD_ACTIONS_COLUMN_WIDTH = 84;
 // Keep the fixed rail clear of the viewport edge and horizontal scrollbar.
 export const DOWNLOAD_ACTIONS_VIEWPORT_INSET = 8;
 

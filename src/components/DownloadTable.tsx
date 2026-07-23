@@ -7,7 +7,7 @@ import { SidebarFilter } from './Sidebar';
 import { useAutoAnimate } from '@formkit/auto-animate/react';
 import {
   Play, Pause, Plus, FileText, Image as ImageIcon, Music, Film, Box, Archive, FileQuestion,
-  ArrowDownCircle, Command, ChevronRight, ChevronUp, ChevronDown, MoreHorizontal,
+  ArrowDownCircle, ArrowUp, ArrowDown, Command, ChevronRight, ChevronUp, ChevronDown, MoreHorizontal,
   AlignLeft, AlignCenter, AlignRight, GripVertical
 } from 'lucide-react';
 import { DownloadItem as DownloadItemComponent } from './DownloadItem';
@@ -22,8 +22,7 @@ import {
   canStartDownload
 } from '../utils/downloadActions';
 import { isActiveDownloadStatus, isTransferActiveStatus } from '../utils/downloads';
-import { formatDownloadBytes } from '../utils/downloadProgress';
-import { summarizeDownloads } from '../utils/downloadSummary';
+import { summarizeDownloads, type DownloadSummary } from '../utils/downloadSummary';
 import { readClipboardDownloadUrls } from '../utils/clipboard';
 import { useTranslation } from 'react-i18next';
 import {
@@ -50,11 +49,17 @@ import {
   type DownloadTableColumnKey
 } from '../utils/downloadTableColumns';
 import {
+  moveSelectedBlockToIndex,
   targetIndexForBoundary
 } from '../utils/queueOrdering';
 
+export interface DownloadTableStatusSummary {
+  summary: DownloadSummary;
+}
+
 interface DownloadTableProps {
   filter: SidebarFilter;
+  onSummaryChange?: (summary: DownloadTableStatusSummary | null) => void;
 }
 
 const persistColumnWidths = (widths: number[]): void => {
@@ -108,13 +113,14 @@ interface QueueDragState {
   sourceId: string;
   queueId: string;
   ids: string[];
+  startX: number;
   startY: number;
   active: boolean;
   targetIndex: number;
   markerTop: number;
 }
 
-export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
+export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryChange }) => {
   const { t } = useTranslation();
   const {
     downloads,
@@ -177,9 +183,17 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   const sortedDownloadsRef = useRef<DownloadItem[]>([]);
   const queueListElementRef = useRef<HTMLDivElement | null>(null);
   const queueReorderableDownloadsRef = useRef<DownloadItem[]>([]);
+  const queueDragItemsRef = useRef<DownloadItem[]>([]);
+  const queueDragBaseItemsRef = useRef<DownloadItem[]>([]);
   const queueDragStateRef = useRef<QueueDragState | null>(null);
   const queueDragCleanupRef = useRef<(() => void) | null>(null);
+  const queueDragCaptureTargetRef = useRef<HTMLElement | null>(null);
+  const queueDragCapturePointerIdRef = useRef<number | null>(null);
+  const queueDragPreviewOrderRef = useRef<string[] | null>(null);
+  const queueReorderPendingCountRef = useRef(0);
+  const suppressQueueClickRef = useRef(false);
   const [queueDragState, setQueueDragState] = useState<QueueDragState | null>(null);
+  const [queueDragPreviewOrder, setQueueDragPreviewOrder] = useState<string[] | null>(null);
   selectedIdsRef.current = selectedIds;
   lastSelectedIdRef.current = lastSelectedId;
   const [columnWidths, setColumnWidths] = useState(() => {
@@ -580,6 +594,13 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     columnDragCleanupRef.current = null;
     queueDragCleanupRef.current = null;
     queueDragStateRef.current = null;
+    const queueCaptureTarget = queueDragCaptureTargetRef.current;
+    const queueCapturePointerId = queueDragCapturePointerIdRef.current;
+    queueDragCaptureTargetRef.current = null;
+    queueDragCapturePointerIdRef.current = null;
+    if (queueCaptureTarget && queueCapturePointerId !== null && queueCaptureTarget.hasPointerCapture(queueCapturePointerId)) {
+      queueCaptureTarget.releasePointerCapture(queueCapturePointerId);
+    }
     const captureTarget = columnDragCaptureTargetRef.current;
     const capturePointerId = columnDragCapturePointerIdRef.current;
     columnDragTargetRef.current = null;
@@ -712,17 +733,62 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     };
   };
 
+  const clearQueueDragPreview = () => {
+    queueDragPreviewOrderRef.current = null;
+    queueDragBaseItemsRef.current = [];
+    queueDragItemsRef.current = queueReorderableDownloadsRef.current;
+    setQueueDragPreviewOrder(null);
+  };
+
+  const releaseQueuePointerCapture = () => {
+    const captureTarget = queueDragCaptureTargetRef.current;
+    const capturePointerId = queueDragCapturePointerIdRef.current;
+    queueDragCaptureTargetRef.current = null;
+    queueDragCapturePointerIdRef.current = null;
+    if (captureTarget && capturePointerId !== null && captureTarget.hasPointerCapture(capturePointerId)) {
+      captureTarget.releasePointerCapture(capturePointerId);
+    }
+  };
+
+  const trackQueueReorderOperation = (operation: Promise<void>): Promise<void> => {
+    queueReorderPendingCountRef.current += 1;
+    return operation.finally(() => {
+      queueReorderPendingCountRef.current = Math.max(0, queueReorderPendingCountRef.current - 1);
+    });
+  };
+
   const finishQueueDrag = (cancelled = false) => {
     const current = queueDragStateRef.current;
     if (!current) return;
     queueDragCleanupRef.current?.();
     queueDragCleanupRef.current = null;
+    releaseQueuePointerCapture();
     queueDragStateRef.current = null;
     setQueueDragState(null);
+    if (current.active) {
+      suppressQueueClickRef.current = true;
+      window.setTimeout(() => {
+        suppressQueueClickRef.current = false;
+      }, 0);
+    }
 
     if (!cancelled && current.active) {
-      void moveManyInQueueToPosition(current.ids, current.queueId, current.targetIndex)
-        .catch(error => showInteractionError(t($ => $.downloadTable.queueReorderFailed), error));
+      const committedPreviewOrder = queueDragPreviewOrderRef.current;
+      const reorderOperation = trackQueueReorderOperation(
+        moveManyInQueueToPosition(current.ids, current.queueId, current.targetIndex)
+      );
+      void reorderOperation
+        .catch(error => showInteractionError(t($ => $.downloadTable.queueReorderFailed), error))
+        .finally(() => {
+          // Keep the optimistic order visible until the store has accepted or
+          // rolled back the atomic backend move. A second drag must own its
+          // own preview and cannot be cleared by this completion callback.
+          if (queueDragPreviewOrderRef.current === committedPreviewOrder) {
+            clearQueueDragPreview();
+          }
+        });
+    } else {
+      clearQueueDragPreview();
     }
 
     window.requestAnimationFrame(() => {
@@ -732,9 +798,21 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
 
   const handleQueueDragStart = (
     id: string,
-    event: React.PointerEvent<HTMLButtonElement>
+    event: React.PointerEvent<HTMLDivElement>
   ) => {
-    if (!queueReorderingEnabled || event.button !== 0) return;
+    if (
+      !queueReorderingEnabled ||
+      event.button !== 0 ||
+      queueDragStateRef.current ||
+      queueDragPreviewOrderRef.current ||
+      queueReorderPendingCountRef.current > 0
+    ) return;
+    if (
+      event.target instanceof Element &&
+      event.target.closest('button, a, input, textarea, select, [role="menu"], .download-row-actions')
+    ) {
+      return;
+    }
     const currentDownloads = useDownloadStore.getState().downloads;
     const source = currentDownloads.find(download => download.id === id);
     if (!source) return;
@@ -758,33 +836,57 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     }
 
     queueDragCleanupRef.current?.();
+    clearQueueDragPreview();
     const queueId = source.queueId || MAIN_QUEUE_ID;
     const selectedIdSet = new Set(ids);
-    const initialItems = queueReorderableDownloadsRef.current
+    const initialItems = queueDragItemsRef.current
       .filter(download => (download.queueId || MAIN_QUEUE_ID) === queueId);
+    queueDragBaseItemsRef.current = initialItems;
     const initialPosition = queueDropPosition(event.clientY, initialItems, selectedIdSet);
     const initialState: QueueDragState = {
       pointerId: event.pointerId,
       sourceId: id,
       queueId,
       ids,
+      startX: event.clientX,
       startY: event.clientY,
       active: false,
       ...initialPosition
     };
     queueDragStateRef.current = initialState;
     setQueueDragState(initialState);
+    queueDragCaptureTargetRef.current = event.currentTarget;
+    queueDragCapturePointerIdRef.current = event.pointerId;
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // The pointer may have been cancelled between pointerdown and capture.
+      // Window-level listeners remain the best-effort cleanup fallback.
+    }
 
     const pointerMove = (pointerEvent: PointerEvent) => {
       if (pointerEvent.pointerId !== event.pointerId) return;
       const drag = queueDragStateRef.current;
       if (!drag) return;
-      const distance = Math.abs(pointerEvent.clientY - drag.startY);
+      const distance = Math.hypot(
+        pointerEvent.clientX - drag.startX,
+        pointerEvent.clientY - drag.startY
+      );
       if (!drag.active && distance < 5) return;
 
-      const items = queueReorderableDownloadsRef.current
+      const items = queueDragItemsRef.current
         .filter(download => (download.queueId || MAIN_QUEUE_ID) === drag.queueId);
+      const baseItems = queueDragBaseItemsRef.current;
       const nextPosition = queueDropPosition(pointerEvent.clientY, items, new Set(drag.ids));
+      const previewItems = moveSelectedBlockToIndex(
+        baseItems,
+        new Set(drag.ids),
+        nextPosition.targetIndex
+      );
+      queueDragItemsRef.current = previewItems;
+      queueDragPreviewOrderRef.current = previewItems.map(item => item.id);
+      setQueueDragPreviewOrder(queueDragPreviewOrderRef.current);
+      suppressQueueClickRef.current = true;
       const nextState = { ...drag, ...nextPosition, active: true };
       queueDragStateRef.current = nextState;
       setQueueDragState(nextState);
@@ -796,18 +898,21 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     const pointerCancel = (pointerEvent: PointerEvent) => {
       if (pointerEvent.pointerId === event.pointerId) finishQueueDrag(true);
     };
+    const lostPointerCapture = () => finishQueueDrag(true);
     const cancel = () => finishQueueDrag(true);
     window.addEventListener('pointermove', pointerMove);
     window.addEventListener('pointerup', pointerUp);
     window.addEventListener('pointercancel', pointerCancel);
     window.addEventListener('blur', cancel);
     document.addEventListener('visibilitychange', cancel);
+    event.currentTarget.addEventListener('lostpointercapture', lostPointerCapture);
     queueDragCleanupRef.current = () => {
       window.removeEventListener('pointermove', pointerMove);
       window.removeEventListener('pointerup', pointerUp);
       window.removeEventListener('pointercancel', pointerCancel);
       window.removeEventListener('blur', cancel);
       document.removeEventListener('visibilitychange', cancel);
+      event.currentTarget.removeEventListener('lostpointercapture', lostPointerCapture);
     };
   };
 
@@ -917,6 +1022,22 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   );
   queueReorderableDownloadsRef.current = queueReorderableDownloads;
 
+  const renderedDownloads = useMemo(() => {
+    if (!queueDragPreviewOrder || !queueReorderingEnabled) return sortedDownloads;
+
+    const previewRank = new Map(queueDragPreviewOrder.map((id, index) => [id, index]));
+    const previewItems = [...queueReorderableDownloads].sort((left, right) =>
+      (previewRank.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
+      (previewRank.get(right.id) ?? Number.MAX_SAFE_INTEGER)
+    );
+    let previewIndex = 0;
+    return sortedDownloads.map(download => queueReorderableIds.has(download.id)
+      ? previewItems[previewIndex++] ?? download
+      : download
+    );
+  }, [queueDragPreviewOrder, queueReorderableDownloads, queueReorderableIds, queueReorderingEnabled, sortedDownloads]);
+  queueDragItemsRef.current = renderedDownloads.filter(download => queueReorderableIds.has(download.id));
+
   useEffect(() => {
     const current = queueDragStateRef.current;
     if (!current) return;
@@ -942,16 +1063,25 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     () => summarizeDownloads(summaryDownloads, progressMap),
     [summaryDownloads, progressMap]
   );
-  const summaryScopeLabel = selectedDownloads.length > 0
-    ? t($ => $.downloadTable.summary.selected, { count: downloadSummary.itemCount })
-    : t($ => $.downloadTable.summary.items, { count: downloadSummary.itemCount });
-  const formatSummaryBytes = (value: number | null, isEstimated = false): string => {
-    if (value === null) return t($ => $.downloadTable.summary.unknown);
-    const formatted = formatDownloadBytes(value);
-    return isEstimated
-      ? t($ => $.downloadTable.summary.estimated, { value: formatted })
-      : formatted;
-  };
+  const selectedQueueItems = useMemo(
+    () => queueReorderableDownloads.filter(download => selectedIds.has(download.id)),
+    [queueReorderableDownloads, selectedIds]
+  );
+  const selectedQueueIndices = selectedQueueItems
+    .map(item => queueReorderableDownloads.findIndex(candidate => candidate.id === item.id));
+  const canMoveSelectedUp = selectedQueueIndices.length > 0 && Math.min(...selectedQueueIndices) > 0;
+  const canMoveSelectedDown = selectedQueueIndices.length > 0 &&
+    Math.max(...selectedQueueIndices) < queueReorderableDownloads.length - 1;
+  const queueReorderPending = queueDragState !== null ||
+    queueDragPreviewOrder !== null;
+
+  useEffect(() => {
+    onSummaryChange?.({
+      summary: downloadSummary,
+    });
+  }, [downloadSummary, onSummaryChange]);
+
+  useEffect(() => () => onSummaryChange?.(null), [onSummaryChange]);
 
   // Each row used to derive this by filtering and sorting the complete store
   // independently. That made a 1000-entry playlist perform O(n^2 log n) work
@@ -983,8 +1113,13 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
         positions.set(download.id, { index, length: queueItems.length });
       });
     }
+    if (queueDragPreviewOrder && queueReorderingEnabled) {
+      queueDragPreviewOrder.forEach((id, index) => {
+        positions.set(id, { index, length: queueDragPreviewOrder.length });
+      });
+    }
     return positions;
-  }, [downloads]);
+  }, [downloads, queueDragPreviewOrder, queueReorderingEnabled]);
   sortedDownloadsRef.current = sortedDownloads;
 
   useEffect(() => {
@@ -1000,6 +1135,10 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
     setQueueSortConfig(null);
   }, [filter, isQueueFilter]);
   const handleItemClick = useCallback((e: React.MouseEvent, item: DownloadItem) => {
+    if (suppressQueueClickRef.current) {
+      suppressQueueClickRef.current = false;
+      return;
+    }
     if (e.detail === 2) {
       handleDownloadDoubleClick(item);
       return;
@@ -1049,10 +1188,22 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
   }, [clampMenuPosition]);
 
   const handleMoveInQueue = useCallback((id: string, direction: 'up' | 'down') => {
+    if (
+      queueDragStateRef.current ||
+      queueDragPreviewOrderRef.current
+    ) return;
     const ids = selectedIdsRef.current.has(id)
       ? Array.from(selectedIdsRef.current)
       : id;
-    void moveInQueue(ids, direction);
+    void trackQueueReorderOperation(moveInQueue(ids, direction));
+  }, [moveInQueue]);
+
+  const moveSelectedQueueItems = useCallback((ids: string[], direction: 'up' | 'down') => {
+    if (
+      queueDragStateRef.current ||
+      queueDragPreviewOrderRef.current
+    ) return;
+    void trackQueueReorderOperation(moveInQueue(ids, direction));
   }, [moveInQueue]);
 
   const handleSort = (column: DownloadSortColumn) => {
@@ -1275,25 +1426,55 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
           {getFilterTitle()}
           <span className="downloads-count">{sortedDownloads.length}</span>
           {queueReorderingEnabled && queueReorderableDownloads.length > 0 ? (
-            <span className="downloads-queue-reorder-hint">
-              {t($ => $.downloadTable.queueReorderHint)}
+            <span className="downloads-queue-reorder-hint" title={t($ => $.downloadTable.queueReorderShortcut, { key: isMac ? 'Option' : 'Alt' })}>
+              <span>{t($ => $.downloadTable.queueReorderHint)}</span>
+              <span
+                className="downloads-queue-reorder-shortcut"
+                aria-label={t($ => $.downloadTable.queueReorderShortcut, { key: isMac ? 'Option' : 'Alt' })}
+              >
+                <kbd>{isMac ? 'Option' : 'Alt'}</kbd>
+                <span aria-hidden="true">+</span>
+                <kbd>↑</kbd>
+                <span aria-hidden="true">/</span>
+                <kbd>↓</kbd>
+              </span>
             </span>
           ) : null}
         </div>
-        <div className="downloads-summary">
-          <span className="downloads-summary-scope">{summaryScopeLabel}</span>
-          <span className="downloads-summary-metric">
-            <span className="downloads-summary-label">{t($ => $.downloadTable.summary.downloaded)}</span>
-            <span className="downloads-summary-value">{formatSummaryBytes(downloadSummary.downloadedBytes)}</span>
-          </span>
-          <span className="downloads-summary-metric">
-            <span className="downloads-summary-label">{t($ => $.downloadTable.summary.remaining)}</span>
-            <span className="downloads-summary-value">{formatSummaryBytes(downloadSummary.remainingBytes, downloadSummary.remainingIsEstimated)}</span>
-          </span>
-          <span className="downloads-summary-metric">
-            <span className="downloads-summary-label">{t($ => $.downloadTable.summary.active)}</span>
-            <span className="downloads-summary-value">{downloadSummary.activeCount}</span>
-          </span>
+        <div className="downloads-header-actions">
+          {selectedDownloads.length > 0 ? (
+            <span className="downloads-selection-status">
+              {t($ => $.downloadTable.summary.selected, { count: selectedDownloads.length })}
+            </span>
+          ) : null}
+          {queueReorderingEnabled && queueReorderableDownloads.length > 0 ? (
+            <div
+              className="downloads-queue-priority-controls"
+              role="group"
+              aria-label={t($ => $.downloadTable.queuePriorityControls)}
+            >
+              <button
+                type="button"
+                className="app-icon-button h-7 w-7"
+                disabled={queueReorderPending || !canMoveSelectedUp}
+                aria-label={t($ => $.downloads.actions.moveUp)}
+                title={t($ => $.downloads.actions.moveUp)}
+                onClick={() => moveSelectedQueueItems(selectedQueueItems.map(item => item.id), 'up')}
+              >
+                <ArrowUp size={14} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className="app-icon-button h-7 w-7"
+                disabled={queueReorderPending || !canMoveSelectedDown}
+                aria-label={t($ => $.downloads.actions.moveDown)}
+                title={t($ => $.downloads.actions.moveDown)}
+                onClick={() => moveSelectedQueueItems(selectedQueueItems.map(item => item.id), 'down')}
+              >
+                <ArrowDown size={14} aria-hidden="true" />
+              </button>
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -1435,13 +1616,12 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter }) => {
                 </div>
               ) : (
                 <>
-                  {sortedDownloads.map((d, index) => (
+                  {renderedDownloads.map((d, index) => (
                     <DownloadItemComponent
                       key={d.id}
                       download={d}
                       index={index}
                       queueIndex={queuePositionsByDownloadId.get(d.id)?.index ?? -1}
-                      queueLength={queuePositionsByDownloadId.get(d.id)?.length ?? 0}
                       columnOrder={orderedColumns}
                       columnAlignments={columnAlignments}
                       tableGridTemplate={tableGridTemplate}
