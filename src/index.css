@@ -1860,6 +1860,12 @@ html[data-list-density="relaxed"] {
   filter: brightness(0.9);
 }
 
+/* Keep the smaller macOS traffic lights centered on the same lower titlebar
+   line as the larger caption-button presets. */
+.window-controls--style-macos {
+  top: 27px;
+}
+
 /* GNOME/Adwaita header-bar treatment: compact, borderless icon buttons. */
 .window-controls--style-gnome {
   top: 18px;
@@ -1898,7 +1904,7 @@ html[data-list-density="relaxed"] {
 
 /* Minimal keeps the compact footprint while removing colored circles. */
 .window-controls--style-minimal {
-  top: 18px;
+  top: 23px;
   gap: 4px;
 }
 
