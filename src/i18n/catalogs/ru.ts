@@ -380,7 +380,7 @@ const ru = {
     clickToAdd: 'Нажмите кнопку',
     addButtonOr: 'или',
     toAddDownloads: 'чтобы добавить загрузки',
-    queueReorderHint: 'Перетаскивайте строки, чтобы изменить порядок',
+    queueReorderHint: 'Перетаскивайте строки, чтобы изменить порядок, или используйте горячие клавиши:',
     queueReorderShortcut: '{{key}} + стрелка вверх/вниз перемещает сфокусированную строку',
     queuePriorityControls: 'Переместить выбранные загрузки в очереди',
     queueDragHandle: 'Перетащите {{fileName}} для изменения порядка',

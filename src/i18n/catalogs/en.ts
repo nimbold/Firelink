@@ -380,7 +380,7 @@ const common = {
     clickToAdd: 'Click',
     addButtonOr: 'button or',
     toAddDownloads: 'to add downloads',
-    queueReorderHint: 'Drag rows to reorder',
+    queueReorderHint: 'Drag rows to reorder or use the hotkeys:',
     queueReorderShortcut: '{{key}} + Arrow Up/Down moves the focused row',
     queuePriorityControls: 'Move selected downloads in the queue',
     queueDragHandle: 'Drag {{fileName}} to reorder',

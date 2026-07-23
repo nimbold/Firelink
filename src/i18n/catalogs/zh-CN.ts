@@ -380,7 +380,7 @@ const zhCN = {
     clickToAdd: '点击',
     addButtonOr: '按钮或',
     toAddDownloads: '来添加下载',
-    queueReorderHint: '拖动行以调整顺序',
+    queueReorderHint: '拖动行调整顺序，或使用快捷键：',
     queueReorderShortcut: '{{key}} + 上/下箭头可移动当前行',
     queuePriorityControls: '移动队列中选中的下载',
     queueDragHandle: '拖动 {{fileName}} 调整顺序',

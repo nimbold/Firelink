@@ -380,7 +380,7 @@ const uk = {
     clickToAdd: 'Натисніть',
     addButtonOr: 'або',
     toAddDownloads: 'щоб додати завантаження',
-    queueReorderHint: 'Перетягуйте рядки, щоб змінити порядок',
+    queueReorderHint: 'Перетягуйте рядки, щоб змінити порядок, або використовуйте гарячі клавіші:',
     queueReorderShortcut: '{{key}} + стрілка вгору/вниз переміщує сфокусований рядок',
     queuePriorityControls: 'Перемістити вибрані завантаження в черзі',
     queueDragHandle: 'Перетягніть {{fileName}}, щоб змінити порядок',

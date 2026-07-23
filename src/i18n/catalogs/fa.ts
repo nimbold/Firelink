@@ -380,7 +380,7 @@ const fa = {
     clickToAdd: 'برای افزودن دانلودها، روی',
     addButtonOr: 'یا',
     toAddDownloads: 'کلیک کنید',
-    queueReorderHint: 'ردیف‌ها را بکشید تا مرتب شوند',
+    queueReorderHint: 'ردیف‌ها را بکشید تا مرتب شوند یا از کلیدهای میانبر استفاده کنید:',
     queueReorderShortcut: '{{key}} + فلش بالا/پایین ردیف انتخاب‌شده را جابه‌جا می‌کند',
     queuePriorityControls: 'جابه‌جایی دانلودهای انتخاب‌شده در صف',
     queueDragHandle: 'کشیدن {{fileName}} برای جابه‌جایی',

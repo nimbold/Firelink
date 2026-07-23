@@ -380,7 +380,7 @@ const he = {
     clickToAdd: 'לחץ על לחצן',
     addButtonOr: 'או',
     toAddDownloads: 'כדי להוסיף הורדות',
-    queueReorderHint: 'גררו שורות כדי לשנות את הסדר',
+    queueReorderHint: 'גררו שורות כדי לשנות את הסדר או השתמשו במקשי הקיצור:',
     queueReorderShortcut: '{{key}} + חץ למעלה/למטה מזיז את השורה הממוקדת',
     queuePriorityControls: 'הזזת ההורדות שנבחרו בתור',
     queueDragHandle: 'גררו את {{fileName}} כדי לשנות את הסדר',
