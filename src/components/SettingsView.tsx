@@ -3,6 +3,7 @@ import {
   type AppFontSize,
   type ListRowDensity,
   type SidebarPosition,
+  type WindowControlStyle,
   type SettingsState,
   SettingsTab,
   runSettingsPersistenceTransaction,
@@ -698,6 +699,13 @@ runEngineChecks(false);
     { value: 'persian', label: t($ => $.settings.lookAndFeel.calendarPersian) },
     { value: 'hebrew', label: t($ => $.settings.lookAndFeel.calendarHebrew) },
   ] as const;
+  const windowControlStyleOptions: Array<{ value: WindowControlStyle; label: string }> = [
+    { value: 'auto', label: t($ => $.settings.lookAndFeel.windowControlStyleAutomatic) },
+    { value: 'macos', label: t($ => $.settings.lookAndFeel.windowControlStyleMacos) },
+    { value: 'windows', label: t($ => $.settings.lookAndFeel.windowControlStyleWindows) },
+    { value: 'gnome', label: t($ => $.settings.lookAndFeel.windowControlStyleGnome) },
+    { value: 'minimal', label: t($ => $.settings.lookAndFeel.windowControlStyleMinimal) },
+  ];
 
   const TabButton = ({ type, icon: Icon, label }: { type: SettingsTab; icon: typeof Download; label: string }) => {
     const active = activeTab === type;
@@ -903,6 +911,25 @@ runEngineChecks(false);
                     <option value="auto">{t($ => $.settings.lookAndFeel.sidebarPositionAutomatic)}</option>
                     <option value="left">{t($ => $.settings.lookAndFeel.sidebarPositionLeft)}</option>
                     <option value="right">{t($ => $.settings.lookAndFeel.sidebarPositionRight)}</option>
+                  </select>
+                </div>
+              </div>
+
+              <h2 className="settings-section-title">{t($ => $.settings.lookAndFeel.windowControls)}</h2>
+              <div className="mac-settings-group">
+                <div className="mac-settings-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.lookAndFeel.windowControlStyle)}</span>
+                    <small>{t($ => $.settings.lookAndFeel.windowControlsDescription)}</small>
+                  </div>
+                  <select
+                    value={settings.windowControlStyle}
+                    onChange={(event) => settings.setWindowControlStyle(event.target.value as WindowControlStyle)}
+                    className="app-control w-48"
+                  >
+                    {windowControlStyleOptions.map(option => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
                   </select>
                 </div>
               </div>

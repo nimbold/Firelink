@@ -20,6 +20,7 @@ import { setLogStreamActive } from './utils/logger';
 import { updateDockBadge } from './utils/dockBadge';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { getPlatformInfo, shouldUseCustomWindowControls, usePlatformInfo } from './utils/platform';
+import { resolveWindowControlStyle } from './utils/windowControlStyle';
 import {
   getKeychainAccessReady,
   getKeychainConsentVersion,
@@ -187,6 +188,7 @@ function App() {
   });
 
   const theme = useSettingsStore(state => state.theme);
+  const windowControlStylePreference = useSettingsStore(state => state.windowControlStyle);
   const languagePreference = useSettingsStore(state => state.language);
   const isSidebarVisible = useSettingsStore(state => state.isSidebarVisible);
   const sidebarPosition = useSettingsStore(state => state.sidebarPosition);
@@ -246,6 +248,7 @@ function App() {
   const { addToast, removeToast } = useToast();
   const isMacUserAgent = navigator.userAgent.includes('Mac');
   const usesCustomWindowControls = shouldUseCustomWindowControls(platform.os, navigator.userAgent);
+  const windowControlStyle = resolveWindowControlStyle(windowControlStylePreference, platform.os, navigator.userAgent);
   const isRtl = localeDirection(resolveAppLocale(i18n.language)) === 'rtl';
   const isSidebarOnRight = sidebarPosition === 'right' || (sidebarPosition === 'auto' && isRtl);
   // Keep dialogs out of the titlebar area while platform detection is still
@@ -1021,7 +1024,10 @@ function App() {
       hasWindowChrome ? 'app-shell--window-chrome' : ''
     }`}>
       {usesCustomWindowControls && (
-        <WindowControls side={isSidebarOnRight ? 'right' : 'left'} />
+        <WindowControls
+          side={isSidebarOnRight ? 'right' : 'left'}
+          controlStyle={windowControlStyle}
+        />
       )}
       <div
         className={`app-sidebar-shell relative z-20 shrink-0 transition-all duration-300 ease-[cubic-bezier(0.2,0.8,0.2,1)] ${

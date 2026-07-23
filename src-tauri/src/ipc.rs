@@ -217,6 +217,23 @@ pub enum Theme {
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../src/bindings/")]
+pub enum WindowControlStyle {
+    Auto,
+    Macos,
+    Windows,
+    Gnome,
+    Minimal,
+}
+
+impl Default for WindowControlStyle {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub enum CalendarPreference {
     Gregorian,
     Persian,
@@ -294,6 +311,8 @@ pub struct SchedulerSettings {
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct PersistedSettings {
     pub theme: Theme,
+    #[serde(default)]
+    pub window_control_style: WindowControlStyle,
     #[serde(default)]
     pub calendar_preference: CalendarPreference,
     #[serde(default = "default_language_preference")]

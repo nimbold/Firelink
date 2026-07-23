@@ -14,6 +14,7 @@ import type { SchedulerSettings } from '../bindings/SchedulerSettings';
 import type { SettingsTab } from '../bindings/SettingsTab';
 import type { SiteLogin } from '../bindings/SiteLogin';
 import type { Theme } from '../bindings/Theme';
+import type { WindowControlStyle } from '../bindings/WindowControlStyle';
 import {
   DEFAULT_CATEGORY_SUBFOLDERS,
   normalizeDownloadLocationSettings
@@ -73,6 +74,7 @@ const notifySettingsPersistenceError = () => {
 };
 
 const THEME_VALUES = ['system', 'light', 'dark', 'dracula', 'nord'] as const;
+const WINDOW_CONTROL_STYLE_VALUES = ['auto', 'macos', 'windows', 'gnome', 'minimal'] as const;
 const APP_FONT_SIZE_VALUES = ['small', 'standard', 'large'] as const;
 const LIST_ROW_DENSITY_VALUES = ['compact', 'standard', 'relaxed'] as const;
 const SIDEBAR_POSITION_VALUES = ['auto', 'left', 'right'] as const;
@@ -168,13 +170,15 @@ export type {
   SchedulerSettings,
   SettingsTab,
   SiteLogin,
-  Theme
+  Theme,
+  WindowControlStyle
 };
 
 export type SidebarPosition = 'auto' | 'left' | 'right';
 
 export interface SettingsState {
   theme: Theme;
+  windowControlStyle: WindowControlStyle;
   calendarPreference: CalendarPreference;
   language: AppLocalePreference;
   baseDownloadFolder: string;
@@ -231,6 +235,7 @@ export interface SettingsState {
   showKeychainModal: boolean;
 
   setTheme: (theme: Theme) => void;
+  setWindowControlStyle: (style: WindowControlStyle) => void;
   setCalendarPreference: (calendarPreference: CalendarPreference) => void;
   setLanguage: (language: AppLocalePreference) => void;
   setBaseDownloadFolder: (path: string) => void;
@@ -288,6 +293,7 @@ export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
       theme: 'system',
+      windowControlStyle: 'auto',
       calendarPreference: DEFAULT_CALENDAR_PREFERENCE,
       language: 'system',
       baseDownloadFolder: '~/Downloads',
@@ -351,6 +357,10 @@ export const useSettingsStore = create<SettingsState>()(
       showKeychainModal: false,
 
       setTheme: (theme) => { info('Settings updated: theme'); set({ theme }); },
+      setWindowControlStyle: (windowControlStyle) => {
+        info('Settings updated: windowControlStyle');
+        set({ windowControlStyle });
+      },
       setCalendarPreference: (calendarPreference) => {
         info('Settings updated: calendarPreference');
         set({ calendarPreference });
@@ -561,6 +571,7 @@ export const useSettingsStore = create<SettingsState>()(
       },
       partialize: (state): PersistedSettingsSnapshot => ({
         theme: state.theme,
+        windowControlStyle: state.windowControlStyle,
         calendarPreference: state.calendarPreference,
         language: state.language,
         baseDownloadFolder: state.baseDownloadFolder,
@@ -622,6 +633,9 @@ export const useSettingsStore = create<SettingsState>()(
           theme: isAllowedSetting(THEME_VALUES, persisted.theme)
             ? persisted.theme
             : currentState.theme,
+          windowControlStyle: isAllowedSetting(WINDOW_CONTROL_STYLE_VALUES, persisted.windowControlStyle)
+            ? persisted.windowControlStyle
+            : currentState.windowControlStyle,
           calendarPreference: isCalendarPreference(persisted.calendarPreference)
             ? persisted.calendarPreference
             : currentState.calendarPreference,

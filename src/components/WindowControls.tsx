@@ -2,6 +2,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Maximize2, Minus, X } from 'lucide-react';
 import type { PointerEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { ResolvedWindowControlStyle } from '../utils/windowControlStyle';
 
 const appWindow = getCurrentWindow();
 
@@ -11,14 +12,15 @@ const stopTitlebarDrag = (event: PointerEvent<HTMLButtonElement>) => {
 
 interface WindowControlsProps {
   side: 'left' | 'right';
+  controlStyle: ResolvedWindowControlStyle;
 }
 
-export function WindowControls({ side }: WindowControlsProps) {
+export function WindowControls({ side, controlStyle }: WindowControlsProps) {
   const { t } = useTranslation();
 
   return (
     <div
-      className={`window-controls window-controls--${side}`}
+      className={`window-controls window-controls--${side} window-controls--style-${controlStyle}`}
       aria-label={t($ => $.window.controls)}
     >
       <button

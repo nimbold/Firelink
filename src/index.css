@@ -1783,6 +1783,106 @@ html[data-list-density="relaxed"] {
   filter: brightness(0.9);
 }
 
+/* Windows 11 caption-button treatment: full-width hit targets, neutral
+   glyphs, and the conventional minimize/maximize/close order. */
+.window-controls--style-windows {
+  top: 10px;
+  gap: 0;
+  flex-direction: row;
+}
+
+.window-controls--style-windows .window-control {
+  width: 46px;
+  height: 32px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: hsl(var(--text-primary) / 0.84);
+  order: initial;
+}
+
+.window-controls--style-windows .window-control.minimize {
+  order: 1;
+}
+
+.window-controls--style-windows .window-control.maximize {
+  order: 2;
+}
+
+.window-controls--style-windows .window-control.close {
+  order: 3;
+}
+
+.window-controls--style-windows .window-control:hover {
+  color: hsl(var(--text-primary));
+  background: hsl(var(--item-hover));
+  filter: none;
+}
+
+.window-controls--style-windows .window-control.close:hover {
+  color: white;
+  background: #c42b1c;
+}
+
+.window-controls--style-windows .window-control:active {
+  transform: none;
+  filter: brightness(0.9);
+}
+
+/* GNOME/Adwaita header-bar treatment: compact, borderless icon buttons. */
+.window-controls--style-gnome {
+  top: 10px;
+  gap: 4px;
+}
+
+.window-controls--style-gnome .window-control,
+.window-controls--style-minimal .window-control {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: hsl(var(--text-primary) / 0.84);
+}
+
+.window-controls--style-gnome .window-control {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+}
+
+.window-controls--style-gnome .window-control:hover,
+.window-controls--style-minimal .window-control:hover {
+  color: hsl(var(--text-primary));
+  background: hsl(var(--item-hover));
+  filter: none;
+}
+
+.window-controls--style-gnome .window-control.close,
+.window-controls--style-gnome .window-control.minimize,
+.window-controls--style-gnome .window-control.maximize,
+.window-controls--style-minimal .window-control.close,
+.window-controls--style-minimal .window-control.minimize,
+.window-controls--style-minimal .window-control.maximize {
+  background: transparent;
+}
+
+/* Minimal keeps the compact footprint while removing colored circles. */
+.window-controls--style-minimal {
+  top: 15px;
+  gap: 4px;
+}
+
+.window-controls--style-minimal .window-control {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+}
+
+.window-controls--style-minimal .window-control:active,
+.window-controls--style-gnome .window-control:active {
+  filter: none;
+}
+
 .main-titlebar {
   height: 52px;
   display: flex;
