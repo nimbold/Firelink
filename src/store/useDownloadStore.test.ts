@@ -1780,6 +1780,22 @@ describe('useDownloadStore', () => {
     expect(new Set(positions).size).toBe(4);
   });
 
+  it('rolls back and rejects a failed keyboard or header queue move', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'first', status: 'queued', queueId: 'move-failure-queue', queuePosition: 0 },
+        { id: 'second', status: 'queued', queueId: 'move-failure-queue', queuePosition: 1 }
+      ] as any[],
+      backendRegisteredIds: new Set(['second'])
+    });
+    vi.mocked(ipc.invokeCommand).mockRejectedValue(new Error('backend unavailable'));
+
+    await expect(
+      useDownloadStore.getState().moveInQueue('second', 'up')
+    ).rejects.toThrow('backend unavailable');
+    expect(useDownloadStore.getState().downloads.map(item => item.queuePosition)).toEqual([0, 1]);
+  });
+
   it('translates a drag target around staged rows before the atomic backend move', async () => {
     useDownloadStore.setState({
       downloads: [

@@ -745,8 +745,15 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     const capturePointerId = queueDragCapturePointerIdRef.current;
     queueDragCaptureTargetRef.current = null;
     queueDragCapturePointerIdRef.current = null;
-    if (captureTarget && capturePointerId !== null && captureTarget.hasPointerCapture(capturePointerId)) {
-      captureTarget.releasePointerCapture(capturePointerId);
+    if (!captureTarget || capturePointerId === null) return;
+    try {
+      if (captureTarget.hasPointerCapture(capturePointerId)) {
+        captureTarget.releasePointerCapture(capturePointerId);
+      }
+    } catch (error) {
+      // A row can be removed or its WebView can lose the pointer between the
+      // terminal event and cleanup. Listener/state cleanup must still finish.
+      console.warn('Failed to release queue pointer capture:', error);
     }
   };
 
@@ -760,11 +767,17 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   const finishQueueDrag = (cancelled = false) => {
     const current = queueDragStateRef.current;
     if (!current) return;
-    queueDragCleanupRef.current?.();
+    const cleanup = queueDragCleanupRef.current;
     queueDragCleanupRef.current = null;
-    releaseQueuePointerCapture();
-    queueDragStateRef.current = null;
-    setQueueDragState(null);
+    try {
+      cleanup?.();
+    } catch (error) {
+      console.error('Failed to clean up queue drag listeners:', error);
+    } finally {
+      releaseQueuePointerCapture();
+      queueDragStateRef.current = null;
+      setQueueDragState(null);
+    }
     if (current.active) {
       suppressQueueClickRef.current = true;
       window.setTimeout(() => {
@@ -800,6 +813,8 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     id: string,
     event: React.PointerEvent<HTMLDivElement>
   ) => {
+    const captureTarget = event.currentTarget;
+    const pointerId = event.pointerId;
     if (
       !queueReorderingEnabled ||
       event.button !== 0 ||
@@ -855,17 +870,17 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     };
     queueDragStateRef.current = initialState;
     setQueueDragState(initialState);
-    queueDragCaptureTargetRef.current = event.currentTarget;
-    queueDragCapturePointerIdRef.current = event.pointerId;
+    queueDragCaptureTargetRef.current = captureTarget;
+    queueDragCapturePointerIdRef.current = pointerId;
     try {
-      event.currentTarget.setPointerCapture(event.pointerId);
+      captureTarget.setPointerCapture(pointerId);
     } catch {
       // The pointer may have been cancelled between pointerdown and capture.
       // Window-level listeners remain the best-effort cleanup fallback.
     }
 
     const pointerMove = (pointerEvent: PointerEvent) => {
-      if (pointerEvent.pointerId !== event.pointerId) return;
+      if (pointerEvent.pointerId !== pointerId) return;
       const drag = queueDragStateRef.current;
       if (!drag) return;
       const distance = Math.hypot(
@@ -893,10 +908,10 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       pointerEvent.preventDefault();
     };
     const pointerUp = (pointerEvent: PointerEvent) => {
-      if (pointerEvent.pointerId === event.pointerId) finishQueueDrag();
+      if (pointerEvent.pointerId === pointerId) finishQueueDrag();
     };
     const pointerCancel = (pointerEvent: PointerEvent) => {
-      if (pointerEvent.pointerId === event.pointerId) finishQueueDrag(true);
+      if (pointerEvent.pointerId === pointerId) finishQueueDrag(true);
     };
     const lostPointerCapture = () => finishQueueDrag(true);
     const cancel = () => finishQueueDrag(true);
@@ -905,14 +920,14 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     window.addEventListener('pointercancel', pointerCancel);
     window.addEventListener('blur', cancel);
     document.addEventListener('visibilitychange', cancel);
-    event.currentTarget.addEventListener('lostpointercapture', lostPointerCapture);
+    captureTarget.addEventListener('lostpointercapture', lostPointerCapture);
     queueDragCleanupRef.current = () => {
       window.removeEventListener('pointermove', pointerMove);
       window.removeEventListener('pointerup', pointerUp);
       window.removeEventListener('pointercancel', pointerCancel);
       window.removeEventListener('blur', cancel);
       document.removeEventListener('visibilitychange', cancel);
-      event.currentTarget.removeEventListener('lostpointercapture', lostPointerCapture);
+      captureTarget.removeEventListener('lostpointercapture', lostPointerCapture);
     };
   };
 
@@ -1192,19 +1207,31 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       queueDragStateRef.current ||
       queueDragPreviewOrderRef.current
     ) return;
+    const currentQueueItems = queueReorderableDownloadsRef.current;
+    const source = currentQueueItems.find(item => item.id === id);
+    if (!source) return;
+    const sourceQueueId = source.queueId || MAIN_QUEUE_ID;
+    const currentQueueIds = new Set(
+      currentQueueItems
+        .filter(item => (item.queueId || MAIN_QUEUE_ID) === sourceQueueId)
+        .map(item => item.id)
+    );
     const ids = selectedIdsRef.current.has(id)
-      ? Array.from(selectedIdsRef.current)
-      : id;
-    void trackQueueReorderOperation(moveInQueue(ids, direction));
-  }, [moveInQueue]);
+      ? Array.from(selectedIdsRef.current).filter(selectedId => currentQueueIds.has(selectedId))
+      : [id];
+    if (ids.length === 0) return;
+    void trackQueueReorderOperation(moveInQueue(ids, direction))
+      .catch(error => showInteractionError(t($ => $.downloadTable.queueReorderFailed), error));
+  }, [moveInQueue, showInteractionError, t]);
 
   const moveSelectedQueueItems = useCallback((ids: string[], direction: 'up' | 'down') => {
     if (
       queueDragStateRef.current ||
       queueDragPreviewOrderRef.current
     ) return;
-    void trackQueueReorderOperation(moveInQueue(ids, direction));
-  }, [moveInQueue]);
+    void trackQueueReorderOperation(moveInQueue(ids, direction))
+      .catch(error => showInteractionError(t($ => $.downloadTable.queueReorderFailed), error));
+  }, [moveInQueue, showInteractionError, t]);
 
   const handleSort = (column: DownloadSortColumn) => {
     const update = (current: DownloadSortConfig | null): DownloadSortConfig =>
@@ -1449,13 +1476,13 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
           ) : null}
           {queueReorderingEnabled && queueReorderableDownloads.length > 0 ? (
             <div
-              className="downloads-queue-priority-controls"
+              className="main-control-group downloads-queue-priority-controls"
               role="group"
               aria-label={t($ => $.downloadTable.queuePriorityControls)}
             >
               <button
                 type="button"
-                className="app-icon-button h-7 w-7"
+                className="main-control-button"
                 disabled={queueReorderPending || !canMoveSelectedUp}
                 aria-label={t($ => $.downloads.actions.moveUp)}
                 title={t($ => $.downloads.actions.moveUp)}
@@ -1465,7 +1492,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
               </button>
               <button
                 type="button"
-                className="app-icon-button h-7 w-7"
+                className="main-control-button"
                 disabled={queueReorderPending || !canMoveSelectedDown}
                 aria-label={t($ => $.downloads.actions.moveDown)}
                 title={t($ => $.downloads.actions.moveDown)}

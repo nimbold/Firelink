@@ -948,6 +948,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             ? { ...download, queuePosition: previousPositions.get(download.id) }
             : download)
         }));
+        throw error;
       }
     });
     const trackedOperation = operation.finally(() => {

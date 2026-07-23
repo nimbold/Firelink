@@ -1915,26 +1915,6 @@ html[data-list-density="relaxed"] {
     white-space: nowrap;
   }
 
-  .downloads-queue-priority-controls {
-    display: inline-flex;
-    align-items: center;
-    gap: 1px;
-    padding: 1px;
-    border: 1px solid hsl(var(--border-color));
-    border-radius: 7px;
-    background: hsl(var(--statusbar-bg) / 0.7);
-  }
-
-  .downloads-queue-priority-controls .app-icon-button {
-    color: hsl(var(--text-secondary));
-  }
-
-  .downloads-queue-priority-controls .app-icon-button:hover:not(:disabled),
-  .downloads-queue-priority-controls .app-icon-button:focus-visible {
-    color: hsl(var(--accent-color));
-    background: hsl(var(--accent-color) / 0.14);
-  }
-
   .downloads-table {
     flex: 1;
     min-height: 0;
