@@ -1784,11 +1784,12 @@ html[data-list-density="relaxed"] {
 }
 
 /* Windows 11 caption-button treatment: full-width hit targets, neutral
-   glyphs, and the conventional minimize/maximize/close order. */
+   glyphs, side-aware close placement, and rounded outer corners. */
 .window-controls--style-windows {
-  top: 10px;
+  top: 18px;
   gap: 0;
   flex-direction: row;
+  border-radius: 10px;
 }
 
 .window-controls--style-windows .window-control {
@@ -1803,15 +1804,44 @@ html[data-list-density="relaxed"] {
 }
 
 .window-controls--style-windows .window-control.minimize {
-  order: 1;
-}
-
-.window-controls--style-windows .window-control.maximize {
   order: 2;
 }
 
-.window-controls--style-windows .window-control.close {
+.window-controls--style-windows .window-control.maximize {
   order: 3;
+}
+
+.window-controls--style-windows .window-control.close {
+  order: 1;
+}
+
+/* Keep the close action at the outer top corner on either sidebar side. */
+.window-controls--right.window-controls--style-windows .window-control.minimize {
+  order: 1;
+}
+
+.window-controls--right.window-controls--style-windows .window-control.maximize {
+  order: 2;
+}
+
+.window-controls--right.window-controls--style-windows .window-control.close {
+  order: 3;
+}
+
+.window-controls--left.window-controls--style-windows .window-control.close {
+  border-radius: 10px 0 0 10px;
+}
+
+.window-controls--left.window-controls--style-windows .window-control.maximize {
+  border-radius: 0 10px 10px 0;
+}
+
+.window-controls--right.window-controls--style-windows .window-control.minimize {
+  border-radius: 10px 0 0 10px;
+}
+
+.window-controls--right.window-controls--style-windows .window-control.close {
+  border-radius: 0 10px 10px 0;
 }
 
 .window-controls--style-windows .window-control:hover {
