@@ -1862,7 +1862,7 @@ html[data-list-density="relaxed"] {
 
 /* GNOME/Adwaita header-bar treatment: compact, borderless icon buttons. */
 .window-controls--style-gnome {
-  top: 10px;
+  top: 18px;
   gap: 4px;
 }
 
@@ -1898,7 +1898,7 @@ html[data-list-density="relaxed"] {
 
 /* Minimal keeps the compact footprint while removing colored circles. */
 .window-controls--style-minimal {
-  top: 15px;
+  top: 18px;
   gap: 4px;
 }
 
