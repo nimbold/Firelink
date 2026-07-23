@@ -75,7 +75,17 @@ const notifySettingsPersistenceError = () => {
 };
 
 const THEME_VALUES = ['system', 'light', 'dark', 'dracula', 'nord'] as const;
-const FONT_FAMILY_VALUES = ['system', 'inter', 'outfit', 'serif', 'monospace'] as const;
+const FONT_FAMILY_VALUES = [
+  'system',
+  'inter',
+  'outfit',
+  'vazirmatn',
+  'noto-sans-hebrew',
+  'noto-sans-sc',
+  'roboto',
+  'serif',
+  'monospace',
+] as const;
 const WINDOW_CONTROL_STYLE_VALUES = ['auto', 'macos', 'windows', 'gnome', 'minimal'] as const;
 const APP_FONT_SIZE_VALUES = ['small', 'standard', 'large'] as const;
 const LIST_ROW_DENSITY_VALUES = ['compact', 'standard', 'relaxed'] as const;

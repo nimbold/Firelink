@@ -215,12 +215,16 @@ pub enum Theme {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub enum FontFamily {
     System,
     Inter,
     Outfit,
+    Vazirmatn,
+    NotoSansHebrew,
+    NotoSansSc,
+    Roboto,
     Serif,
     Monospace,
 }

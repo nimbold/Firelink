@@ -232,21 +232,25 @@
   --font-stack-system: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, var(--font-locale-fallback), "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
   --font-stack-inter: "Inter Variable", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, var(--font-locale-fallback), "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
   --font-stack-outfit: "Outfit Variable", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, var(--font-locale-fallback), "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+  --font-stack-vazirmatn: "Vazirmatn Variable", var(--font-stack-system);
+  --font-stack-noto-sans-hebrew: "Noto Sans Hebrew Variable", var(--font-stack-system);
+  --font-stack-noto-sans-sc: "Noto Sans SC Variable", var(--font-stack-system);
+  --font-stack-roboto: "Roboto Variable", var(--font-stack-system);
   --font-stack-serif: Georgia, "Times New Roman", var(--font-locale-fallback), serif;
   --font-stack-monospace: ui-monospace, "SF Mono", Monaco, "Cascadia Code", "Fira Code", "JetBrains Mono", var(--font-locale-fallback), monospace;
   --font-sans: var(--font-stack-system);
 }
 
 html[lang="fa"] {
-  --font-locale-fallback: "Vazirmatn", "Noto Sans Arabic", "Segoe UI", Tahoma, Arial, sans-serif;
+  --font-locale-fallback: "Geeza Pro", "Noto Sans Arabic", "Segoe UI", Tahoma, Arial, sans-serif;
 }
 
 html[lang="he"] {
-  --font-locale-fallback: "Arial Hebrew", "Noto Sans Hebrew", "Segoe UI", Arial, sans-serif;
+  --font-locale-fallback: "Arial Hebrew", "Segoe UI", Arial, sans-serif;
 }
 
 html[lang="zh-CN"] {
-  --font-locale-fallback: "PingFang SC", "Microsoft YaHei UI", "Noto Sans CJK SC", "Noto Sans SC", sans-serif;
+  --font-locale-fallback: "PingFang SC", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif;
 }
 
 html[lang="ru"],
@@ -264,6 +268,22 @@ html[data-font-family="inter"] {
 
 html[data-font-family="outfit"] {
   --font-sans: var(--font-stack-outfit);
+}
+
+html[data-font-family="vazirmatn"] {
+  --font-sans: var(--font-stack-vazirmatn);
+}
+
+html[data-font-family="noto-sans-hebrew"] {
+  --font-sans: var(--font-stack-noto-sans-hebrew);
+}
+
+html[data-font-family="noto-sans-sc"] {
+  --font-sans: var(--font-stack-noto-sans-sc);
+}
+
+html[data-font-family="roboto"] {
+  --font-sans: var(--font-stack-roboto);
 }
 
 html[data-font-family="serif"] {

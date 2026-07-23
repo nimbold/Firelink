@@ -196,7 +196,17 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
     sanitize_allowed_string(
         state,
         "fontFamily",
-        &["system", "inter", "outfit", "serif", "monospace"],
+        &[
+            "system",
+            "inter",
+            "outfit",
+            "vazirmatn",
+            "noto-sans-hebrew",
+            "noto-sans-sc",
+            "roboto",
+            "serif",
+            "monospace",
+        ],
     );
     sanitize_allowed_string(
         state,
@@ -702,6 +712,20 @@ mod tests {
         let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
 
         assert!(matches!(settings.font_family, FontFamily::System));
+    }
+
+    #[test]
+    fn curated_font_families_are_preserved() {
+        for value in ["vazirmatn", "noto-sans-hebrew", "noto-sans-sc", "roboto"] {
+            let stored = json!({
+                "state": {"fontFamily": value},
+                "version": 5
+            });
+
+            let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
+
+            assert_eq!(serde_json::to_value(settings.font_family).unwrap(), json!(value));
+        }
     }
 
     #[test]

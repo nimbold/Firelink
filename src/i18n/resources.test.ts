@@ -96,6 +96,7 @@ describe('translation catalogs', () => {
       'settings.lookAndFeel.nord',
       'settings.lookAndFeel.fontFamilyInter',
       'settings.lookAndFeel.fontFamilyOutfit',
+      'settings.lookAndFeel.fontFamilyRoboto',
       'settings.lookAndFeel.windowControlStyleWindows',
       'settings.lookAndFeel.windowControlStyleGnome',
       'settings.network.chromeWindows',

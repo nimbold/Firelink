@@ -711,6 +711,10 @@ runEngineChecks(false);
     { value: 'system', label: t($ => $.settings.lookAndFeel.fontFamilySystem) },
     { value: 'inter', label: t($ => $.settings.lookAndFeel.fontFamilyInter) },
     { value: 'outfit', label: t($ => $.settings.lookAndFeel.fontFamilyOutfit) },
+    { value: 'vazirmatn', label: t($ => $.settings.lookAndFeel.fontFamilyVazirmatn) },
+    { value: 'noto-sans-hebrew', label: t($ => $.settings.lookAndFeel.fontFamilyNotoSansHebrew) },
+    { value: 'noto-sans-sc', label: t($ => $.settings.lookAndFeel.fontFamilyNotoSansSc) },
+    { value: 'roboto', label: t($ => $.settings.lookAndFeel.fontFamilyRoboto) },
     { value: 'serif', label: t($ => $.settings.lookAndFeel.fontFamilySerif) },
     { value: 'monospace', label: t($ => $.settings.lookAndFeel.fontFamilyMonospace) },
   ];

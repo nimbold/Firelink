@@ -4,6 +4,21 @@ Firelink distributes separate executable tools. Firelink's MIT license does not 
 
 Exact versions, target hashes, sources, and build descriptions are pinned in `engines.lock.json`.
 
+## Bundled fonts
+
+Firelink bundles variable WOFF2 web fonts through Fontsource. Each font is
+licensed under the SIL Open Font License, Version 1.1. The corresponding
+license and author information are available from the linked project sources.
+
+- Inter: <https://github.com/rsms/inter>
+- Outfit: <https://github.com/Outfitio/Outfit-Fonts>
+- Roboto: <https://github.com/googlefonts/roboto-classic>
+- Vazirmatn: <https://github.com/rastikerdar/vazirmatn>
+- Noto Sans Hebrew: <https://github.com/notofonts/hebrew>
+- Noto Sans SC: <https://github.com/notofonts/noto-cjk>
+
+Fontsource distribution: <https://github.com/fontsource/font-files>
+
 ## aria2
 
 - Project: <https://aria2.github.io/>
