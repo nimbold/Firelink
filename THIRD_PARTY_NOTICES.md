@@ -19,6 +19,8 @@ license and author information are available from the linked project sources.
 
 Fontsource distribution: <https://github.com/fontsource/font-files>
 
+License text: <https://openfontlicense.org/open-font-license-official-text/>
+
 ## aria2
 
 - Project: <https://aria2.github.io/>
