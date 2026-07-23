@@ -13,6 +13,11 @@ describe('queue ordering', () => {
       .toEqual(['a', 'b', 'd', 'c']);
   });
 
+  it('moves a selected block to the end for a downward drop', () => {
+    expect(moveSelectedBlockToIndex(items, ['b', 'c'], 2).map(item => item.id))
+      .toEqual(['a', 'd', 'b', 'c']);
+  });
+
   it('translates pointer boundaries after selected rows are removed', () => {
     expect(targetIndexForBoundary(items, ['b', 'd'], 2)).toBe(1);
     expect(targetIndexForBoundary(items, ['b', 'd'], 3)).toBe(2);

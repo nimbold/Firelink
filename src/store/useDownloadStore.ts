@@ -707,7 +707,12 @@ interface DownloadState {
   unregisterBackendIds: (ids: string[]) => void;
   applyProperties: (id: string, updates: Partial<DownloadItem>) => Promise<void>;
   moveInQueue: (ids: string | string[], direction: 'up' | 'down') => Promise<void>;
-  moveManyInQueueToPosition: (ids: string | string[], queueId: string, targetIndex: number) => Promise<void>;
+  moveManyInQueueToPosition: (
+    ids: string | string[],
+    queueId: string,
+    targetIndex: number,
+    beforeId?: string | null
+  ) => Promise<void>;
   removeFromQueue: (id: string) => Promise<void>;
   isAddModalOpen: boolean;
   pendingAddUrls: string;
@@ -959,7 +964,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     queueReorderPromises.set(queueId, trackedOperation);
     return trackedOperation;
   },
-  moveManyInQueueToPosition: (idOrIds, queueId, targetIndex) => {
+  moveManyInQueueToPosition: (idOrIds, queueId, targetIndex, beforeId) => {
     const ids = Array.isArray(idOrIds) ? idOrIds : [idOrIds];
     if (ids.length === 0) return Promise.resolve();
 
@@ -978,7 +983,14 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         ...activeQueueItems(allDownloads, queueId),
         ...queueItems
       ].map(item => [item.id, item.queuePosition]));
-      const reordered = moveSelectedBlockToIndex(queueItems, selectedIds, targetIndex);
+      const unselectedItems = queueItems.filter(item => !selectedIds.has(item.id));
+      const anchoredTargetIndex = beforeId
+        ? unselectedItems.findIndex(item => item.id === beforeId)
+        : -1;
+      const resolvedTargetIndex = anchoredTargetIndex >= 0
+        ? anchoredTargetIndex
+        : Math.max(0, Math.min(targetIndex, unselectedItems.length));
+      const reordered = moveSelectedBlockToIndex(queueItems, selectedIds, resolvedTargetIndex);
       set(state => ({ downloads: applyQueueOrder(state.downloads, queueId, reordered) }));
 
       const registeredIdsToMove = selectedItems

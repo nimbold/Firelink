@@ -1826,6 +1826,40 @@ describe('useDownloadStore', () => {
     expect(useDownloadStore.getState().downloads.find(item => item.id === 'staged')?.queuePosition).toBe(2);
   });
 
+  it('keeps a drag anchored when the queue changes before its serialized operation runs', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'a', status: 'queued', queueId: 'concurrent-drag-queue', queuePosition: 0 },
+        { id: 'b', status: 'queued', queueId: 'concurrent-drag-queue', queuePosition: 1 },
+        { id: 'c', status: 'queued', queueId: 'concurrent-drag-queue', queuePosition: 2 }
+      ] as any[],
+      backendRegisteredIds: new Set()
+    });
+
+    const operation = useDownloadStore.getState().moveManyInQueueToPosition(
+      'b',
+      'concurrent-drag-queue',
+      2,
+      'c'
+    );
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'a', status: 'queued', queueId: 'concurrent-drag-queue', queuePosition: 0 },
+        { id: 'b', status: 'queued', queueId: 'concurrent-drag-queue', queuePosition: 1 },
+        { id: 'new', status: 'queued', queueId: 'concurrent-drag-queue', queuePosition: 2 },
+        { id: 'c', status: 'queued', queueId: 'concurrent-drag-queue', queuePosition: 3 }
+      ] as any[]
+    });
+
+    await operation;
+
+    expect(useDownloadStore.getState().downloads
+      .filter(item => item.queueId === 'concurrent-drag-queue')
+      .sort((left, right) => (left.queuePosition ?? 0) - (right.queuePosition ?? 0))
+      .map(item => item.id)
+    ).toEqual(['a', 'new', 'b', 'c']);
+  });
+
   it('rolls back a failed drag move and rejects so the UI can report the failure', async () => {
     useDownloadStore.setState({
       downloads: [

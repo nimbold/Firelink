@@ -49,8 +49,7 @@ import {
   type DownloadTableColumnKey
 } from '../utils/downloadTableColumns';
 import {
-  moveSelectedBlockToIndex,
-  targetIndexForBoundary
+  moveSelectedBlockToIndex
 } from '../utils/queueOrdering';
 
 export interface DownloadTableStatusSummary {
@@ -115,9 +114,23 @@ interface QueueDragState {
   ids: string[];
   startX: number;
   startY: number;
+  pointerY: number;
+  pointerOffsetY: number;
   active: boolean;
   targetIndex: number;
   markerTop: number;
+}
+
+interface QueueDragRowGeometry {
+  top: number;
+  height: number;
+  space: number;
+}
+
+interface QueueDragGeometry {
+  listTop: number;
+  scrollTop: number;
+  rows: Map<string, QueueDragRowGeometry>;
 }
 
 export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryChange }) => {
@@ -146,7 +159,10 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   }, []);
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; id: string } | null>(null);
-  const [animationParent] = useAutoAnimate<HTMLDivElement>();
+  const [animationParent] = useAutoAnimate<HTMLDivElement>({
+    duration: 120,
+    easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)',
+  });
   const [headerAnimationParent, setHeaderAnimationEnabled] = useAutoAnimate<HTMLDivElement>({
     duration: 140,
     easing: 'ease-out',
@@ -190,10 +206,22 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   const queueDragCaptureTargetRef = useRef<HTMLElement | null>(null);
   const queueDragCapturePointerIdRef = useRef<number | null>(null);
   const queueDragPreviewOrderRef = useRef<string[] | null>(null);
+  const queueDragGeometryRef = useRef<QueueDragGeometry | null>(null);
   const queueReorderPendingCountRef = useRef(0);
   const suppressQueueClickRef = useRef(false);
   const [queueDragState, setQueueDragState] = useState<QueueDragState | null>(null);
   const [queueDragPreviewOrder, setQueueDragPreviewOrder] = useState<string[] | null>(null);
+
+  useEffect(() => {
+    const className = 'is-queue-dragging';
+    if (queueDragState?.active) {
+      document.body.classList.add(className);
+    } else {
+      document.body.classList.remove(className);
+    }
+    return () => document.body.classList.remove(className);
+  }, [queueDragState?.active]);
+
   selectedIdsRef.current = selectedIds;
   lastSelectedIdRef.current = lastSelectedId;
   const [columnWidths, setColumnWidths] = useState(() => {
@@ -590,7 +618,11 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   useEffect(() => () => {
     resizeCleanupRef.current?.();
     columnDragCleanupRef.current?.();
-    queueDragCleanupRef.current?.();
+    try {
+      queueDragCleanupRef.current?.();
+    } catch (error) {
+      console.error('Failed to clean up queue drag listeners during unmount:', error);
+    }
     columnDragCleanupRef.current = null;
     queueDragCleanupRef.current = null;
     queueDragStateRef.current = null;
@@ -598,8 +630,12 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     const queueCapturePointerId = queueDragCapturePointerIdRef.current;
     queueDragCaptureTargetRef.current = null;
     queueDragCapturePointerIdRef.current = null;
-    if (queueCaptureTarget && queueCapturePointerId !== null && queueCaptureTarget.hasPointerCapture(queueCapturePointerId)) {
-      queueCaptureTarget.releasePointerCapture(queueCapturePointerId);
+    try {
+      if (queueCaptureTarget && queueCapturePointerId !== null && queueCaptureTarget.hasPointerCapture(queueCapturePointerId)) {
+        queueCaptureTarget.releasePointerCapture(queueCapturePointerId);
+      }
+    } catch (error) {
+      console.warn('Failed to release queue pointer capture during unmount:', error);
     }
     const captureTarget = columnDragCaptureTargetRef.current;
     const capturePointerId = columnDragCapturePointerIdRef.current;
@@ -703,6 +739,35 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     return queueRowsById(list).get(id) || null;
   };
 
+  const captureQueueDragGeometry = (items: DownloadItem[]): QueueDragGeometry | null => {
+    const list = queueListElementRef.current;
+    if (!list) return null;
+
+    const listRect = list.getBoundingClientRect();
+    const rowsById = queueRowsById(list);
+    const rows = new Map<string, QueueDragRowGeometry>();
+    for (const item of items) {
+      const row = rowsById.get(item.id);
+      if (!row) continue;
+
+      const rect = row.getBoundingClientRect();
+      const styles = window.getComputedStyle(row);
+      const marginTop = Number.parseFloat(styles.marginTop) || 0;
+      const marginBottom = Number.parseFloat(styles.marginBottom) || 0;
+      rows.set(item.id, {
+        top: rect.top,
+        height: rect.height,
+        space: rect.height + marginTop + marginBottom,
+      });
+    }
+
+    return {
+      listTop: listRect.top,
+      scrollTop: list.scrollTop,
+      rows,
+    };
+  };
+
   const queueDropPosition = (
     clientY: number,
     items: DownloadItem[],
@@ -711,33 +776,54 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     const list = queueListElementRef.current;
     if (!list || items.length === 0) return { targetIndex: 0, markerTop: 0 };
     const listRect = list.getBoundingClientRect();
-    // Build the DOM index once per pointer update. Looking up each row by
-    // scanning list.children inside the loop made large queue drags O(n^2).
-    const rowsById = queueRowsById(list);
-    let boundaryIndex = items.length;
+    const geometry = queueDragGeometryRef.current;
+    if (!geometry) return { targetIndex: 0, markerTop: 0 };
+
+    // Hit-test against the geometry captured before the preview starts. The
+    // rendered rows may be in the middle of an AutoAnimate FLIP transition;
+    // their transformed client rects are visual output, not stable drop slots.
+    // Keeping the logical slots immutable prevents marker jitter and makes
+    // upward and downward drops use the same coordinate system. The pointer
+    // is compared with the original row centers so a drag started in a row
+    // does not immediately jump past that row when its space is removed.
+    const scrollDelta = list.scrollTop - geometry.scrollTop;
+    let selectedSpaceBefore = 0;
+    let remainingIndex = 0;
     let markerTop = 0;
-    for (let index = 0; index < items.length; index += 1) {
-      const row = rowsById.get(items[index].id);
+    for (const item of items) {
+      const row = geometry.rows.get(item.id);
       if (!row) continue;
-      const rect = row.getBoundingClientRect();
-      if (clientY < rect.top + rect.height / 2) {
-        boundaryIndex = index;
-        markerTop = rect.top - listRect.top + list.scrollTop;
+      const markerSlotTop = row.top - geometry.listTop + geometry.scrollTop - selectedSpaceBefore;
+      const rowTop = listRect.top + row.top - geometry.listTop - scrollDelta;
+      if (clientY < rowTop + row.height / 2) {
+        markerTop = markerSlotTop;
         break;
       }
-      markerTop = rect.bottom - listRect.top + list.scrollTop;
+
+      if (selectedIds.has(item.id)) {
+        // Before and after a selected row are the same logical insertion slot
+        // once that row is removed from the list.
+        markerTop = markerSlotTop;
+        selectedSpaceBefore += row.space;
+      } else {
+        markerTop = markerSlotTop + row.height;
+        remainingIndex += 1;
+      }
     }
     return {
-      targetIndex: targetIndexForBoundary(items, selectedIds, boundaryIndex),
+      targetIndex: remainingIndex,
       markerTop: Math.max(0, markerTop)
     };
   };
 
   const clearQueueDragPreview = () => {
     queueDragPreviewOrderRef.current = null;
+    queueDragGeometryRef.current = null;
     queueDragBaseItemsRef.current = [];
     queueDragItemsRef.current = queueReorderableDownloadsRef.current;
-    setQueueDragPreviewOrder(null);
+    if (isMountedRef.current) {
+      setQueueDragPreviewOrder(null);
+    }
   };
 
   const releaseQueuePointerCapture = () => {
@@ -757,11 +843,26 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     }
   };
 
-  const trackQueueReorderOperation = (operation: Promise<void>): Promise<void> => {
+  const trackQueueReorderOperation = (operation: () => Promise<void>): Promise<void> => {
     queueReorderPendingCountRef.current += 1;
-    return operation.finally(() => {
-      queueReorderPendingCountRef.current = Math.max(0, queueReorderPendingCountRef.current - 1);
+    return Promise.resolve()
+      .then(operation)
+      .finally(() => {
+        queueReorderPendingCountRef.current = Math.max(0, queueReorderPendingCountRef.current - 1);
+      });
+  };
+
+  const queueDragBeforeId = (
+    previewOrder: string[] | null,
+    selectedIds: ReadonlySet<string>
+  ): string | null => {
+    if (!previewOrder) return null;
+    let lastSelectedIndex = -1;
+    previewOrder.forEach((id, index) => {
+      if (selectedIds.has(id)) lastSelectedIndex = index;
     });
+    if (lastSelectedIndex === -1) return null;
+    return previewOrder.slice(lastSelectedIndex + 1).find(id => !selectedIds.has(id)) ?? null;
   };
 
   const finishQueueDrag = (cancelled = false) => {
@@ -769,14 +870,16 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     if (!current) return;
     const cleanup = queueDragCleanupRef.current;
     queueDragCleanupRef.current = null;
+    queueDragStateRef.current = null;
+    if (isMountedRef.current) {
+      setQueueDragState(null);
+    }
     try {
       cleanup?.();
     } catch (error) {
       console.error('Failed to clean up queue drag listeners:', error);
     } finally {
       releaseQueuePointerCapture();
-      queueDragStateRef.current = null;
-      setQueueDragState(null);
     }
     if (current.active) {
       suppressQueueClickRef.current = true;
@@ -787,8 +890,17 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
 
     if (!cancelled && current.active) {
       const committedPreviewOrder = queueDragPreviewOrderRef.current;
+      const targetBeforeId = queueDragBeforeId(
+        committedPreviewOrder,
+        new Set(current.ids)
+      );
       const reorderOperation = trackQueueReorderOperation(
-        moveManyInQueueToPosition(current.ids, current.queueId, current.targetIndex)
+        () => moveManyInQueueToPosition(
+          current.ids,
+          current.queueId,
+          current.targetIndex,
+          targetBeforeId
+        )
       );
       void reorderOperation
         .catch(error => showInteractionError(t($ => $.downloadTable.queueReorderFailed), error))
@@ -805,6 +917,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     }
 
     window.requestAnimationFrame(() => {
+      if (!isMountedRef.current) return;
       queueRowForId(current.sourceId)?.focus({ preventScroll: true });
     });
   };
@@ -813,11 +926,18 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     id: string,
     event: React.PointerEvent<HTMLDivElement>
   ) => {
-    const captureTarget = event.currentTarget;
+    // Keep pointer capture on the persistent list instead of the row being
+    // reordered. React moves row nodes during the live preview; a row-owned
+    // capture can be lost when that node changes position in the DOM.
+    const captureTarget = queueListElementRef.current ?? event.currentTarget;
     const pointerId = event.pointerId;
     if (
       !queueReorderingEnabled ||
       event.button !== 0 ||
+      event.shiftKey ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.altKey ||
       queueDragStateRef.current ||
       queueDragPreviewOrderRef.current ||
       queueReorderPendingCountRef.current > 0
@@ -854,9 +974,11 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     clearQueueDragPreview();
     const queueId = source.queueId || MAIN_QUEUE_ID;
     const selectedIdSet = new Set(ids);
+    const sourceRect = event.currentTarget.getBoundingClientRect();
     const initialItems = queueDragItemsRef.current
       .filter(download => (download.queueId || MAIN_QUEUE_ID) === queueId);
     queueDragBaseItemsRef.current = initialItems;
+    queueDragGeometryRef.current = captureQueueDragGeometry(initialItems);
     const initialPosition = queueDropPosition(event.clientY, initialItems, selectedIdSet);
     const initialState: QueueDragState = {
       pointerId: event.pointerId,
@@ -865,6 +987,8 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       ids,
       startX: event.clientX,
       startY: event.clientY,
+      pointerY: event.clientY,
+      pointerOffsetY: event.clientY - sourceRect.top,
       active: false,
       ...initialPosition
     };
@@ -879,39 +1003,91 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       // Window-level listeners remain the best-effort cleanup fallback.
     }
 
-    const pointerMove = (pointerEvent: PointerEvent) => {
-      if (pointerEvent.pointerId !== pointerId) return;
+    let pointerMoveFrame: number | null = null;
+    let pendingPointerPosition: { clientX: number; clientY: number } | null = null;
+
+    const applyPointerMove = (clientX: number, clientY: number) => {
       const drag = queueDragStateRef.current;
       if (!drag) return;
       const distance = Math.hypot(
-        pointerEvent.clientX - drag.startX,
-        pointerEvent.clientY - drag.startY
+        clientX - drag.startX,
+        clientY - drag.startY
       );
       if (!drag.active && distance < 5) return;
 
-      const items = queueDragItemsRef.current
-        .filter(download => (download.queueId || MAIN_QUEUE_ID) === drag.queueId);
       const baseItems = queueDragBaseItemsRef.current;
-      const nextPosition = queueDropPosition(pointerEvent.clientY, items, new Set(drag.ids));
+      const selectedIdSet = new Set(drag.ids);
+      const nextPosition = queueDropPosition(clientY, baseItems, selectedIdSet);
       const previewItems = moveSelectedBlockToIndex(
         baseItems,
-        new Set(drag.ids),
+        selectedIdSet,
         nextPosition.targetIndex
       );
-      queueDragItemsRef.current = previewItems;
-      queueDragPreviewOrderRef.current = previewItems.map(item => item.id);
-      setQueueDragPreviewOrder(queueDragPreviewOrderRef.current);
+      const nextPreviewOrder = previewItems.map(item => item.id);
+      const currentPreviewOrder = queueDragPreviewOrderRef.current;
+      const previewChanged = currentPreviewOrder === null ||
+        currentPreviewOrder.length !== nextPreviewOrder.length ||
+        currentPreviewOrder.some((itemId, index) => itemId !== nextPreviewOrder[index]);
+      if (previewChanged) {
+        queueDragItemsRef.current = previewItems;
+        queueDragPreviewOrderRef.current = nextPreviewOrder;
+        setQueueDragPreviewOrder(nextPreviewOrder);
+      }
       suppressQueueClickRef.current = true;
-      const nextState = { ...drag, ...nextPosition, active: true };
-      queueDragStateRef.current = nextState;
-      setQueueDragState(nextState);
+      if (
+        !drag.active ||
+        previewChanged ||
+        nextPosition.markerTop !== drag.markerTop ||
+        clientY !== drag.pointerY
+      ) {
+        const nextState = { ...drag, ...nextPosition, active: true };
+        nextState.pointerY = clientY;
+        queueDragStateRef.current = nextState;
+        setQueueDragState(nextState);
+      }
+    };
+
+    const flushPointerMove = () => {
+      if (pointerMoveFrame !== null) {
+        window.cancelAnimationFrame(pointerMoveFrame);
+        pointerMoveFrame = null;
+      }
+      const pending = pendingPointerPosition;
+      pendingPointerPosition = null;
+      if (pending) applyPointerMove(pending.clientX, pending.clientY);
+    };
+
+    const pointerMove = (pointerEvent: PointerEvent) => {
+      if (pointerEvent.pointerId !== pointerId) return;
+      pendingPointerPosition = {
+        clientX: pointerEvent.clientX,
+        clientY: pointerEvent.clientY,
+      };
       pointerEvent.preventDefault();
+      if (pointerMoveFrame === null) {
+        pointerMoveFrame = window.requestAnimationFrame(() => {
+          pointerMoveFrame = null;
+          const pending = pendingPointerPosition;
+          pendingPointerPosition = null;
+          if (pending) applyPointerMove(pending.clientX, pending.clientY);
+        });
+      }
     };
     const pointerUp = (pointerEvent: PointerEvent) => {
-      if (pointerEvent.pointerId === pointerId) finishQueueDrag();
+      if (pointerEvent.pointerId === pointerId) {
+        flushPointerMove();
+        finishQueueDrag();
+      }
     };
     const pointerCancel = (pointerEvent: PointerEvent) => {
-      if (pointerEvent.pointerId === pointerId) finishQueueDrag(true);
+      if (pointerEvent.pointerId === pointerId) {
+        pendingPointerPosition = null;
+        if (pointerMoveFrame !== null) {
+          window.cancelAnimationFrame(pointerMoveFrame);
+          pointerMoveFrame = null;
+        }
+        finishQueueDrag(true);
+      }
     };
     const lostPointerCapture = () => finishQueueDrag(true);
     const cancel = () => finishQueueDrag(true);
@@ -922,6 +1098,11 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     document.addEventListener('visibilitychange', cancel);
     captureTarget.addEventListener('lostpointercapture', lostPointerCapture);
     queueDragCleanupRef.current = () => {
+      pendingPointerPosition = null;
+      if (pointerMoveFrame !== null) {
+        window.cancelAnimationFrame(pointerMoveFrame);
+        pointerMoveFrame = null;
+      }
       window.removeEventListener('pointermove', pointerMove);
       window.removeEventListener('pointerup', pointerUp);
       window.removeEventListener('pointercancel', pointerCancel);
@@ -1220,7 +1401,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       ? Array.from(selectedIdsRef.current).filter(selectedId => currentQueueIds.has(selectedId))
       : [id];
     if (ids.length === 0) return;
-    void trackQueueReorderOperation(moveInQueue(ids, direction))
+    void trackQueueReorderOperation(() => moveInQueue(ids, direction))
       .catch(error => showInteractionError(t($ => $.downloadTable.queueReorderFailed), error));
   }, [moveInQueue, showInteractionError, t]);
 
@@ -1229,7 +1410,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       queueDragStateRef.current ||
       queueDragPreviewOrderRef.current
     ) return;
-    void trackQueueReorderOperation(moveInQueue(ids, direction))
+    void trackQueueReorderOperation(() => moveInQueue(ids, direction))
       .catch(error => showInteractionError(t($ => $.downloadTable.queueReorderFailed), error));
   }, [moveInQueue, showInteractionError, t]);
 
@@ -1391,6 +1572,21 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   const contextMenuPosition = contextMenu
     ? clampMenuPosition(contextMenu.x, contextMenu.y, 200, 300)
     : null;
+  const queueDragPreviewItem = queueDragState?.active
+    ? queueDragState.ids
+      .map(id => queueReorderableDownloads.find(download => download.id === id))
+      .find((download): download is DownloadItem => Boolean(download))
+    : null;
+  const queueDragPreviewTop = (() => {
+    if (!queueDragState?.active) return 0;
+    const list = queueListElementRef.current;
+    if (!list) return 0;
+    const listRect = list.getBoundingClientRect();
+    return Math.max(
+      0,
+      queueDragState.pointerY - listRect.top + list.scrollTop - queueDragState.pointerOffsetY
+    );
+  })();
 
   return (
     <div ref={downloadsViewRef} className="downloads-view flex-1 flex flex-col h-full min-w-0">
@@ -1665,6 +1861,25 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
                       onClick={handleItemClick}
                     />
                   ))}
+                  {queueDragState?.active && queueDragPreviewItem ? (
+                    <div
+                      className="download-queue-drag-preview"
+                      style={{ top: `${queueDragPreviewTop}px` }}
+                      aria-hidden="true"
+                    >
+                      <span className="download-queue-drag-preview-icon">
+                        {getCategoryIcon(queueDragPreviewItem.category)}
+                      </span>
+                      <span className="download-queue-drag-preview-name">
+                        {queueDragPreviewItem.fileName}
+                      </span>
+                      {queueDragState.ids.length > 1 ? (
+                        <span className="download-queue-drag-preview-count">
+                          +{queueDragState.ids.length - 1}
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {queueDragState?.active ? (
                     <div
                       className="download-queue-drop-marker"

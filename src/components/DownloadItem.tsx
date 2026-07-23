@@ -388,7 +388,18 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
         }
       }}
       onPointerDown={event => {
-        if (isQueueReorderable) onQueueDragStart(download.id, event);
+        // Modifier clicks belong to selection. Starting a row drag first can
+        // capture the pointer and suppress the click that applies Cmd/Ctrl or
+        // Shift selection.
+        if (
+          isQueueReorderable &&
+          !event.shiftKey &&
+          !event.metaKey &&
+          !event.ctrlKey &&
+          !event.altKey
+        ) {
+          onQueueDragStart(download.id, event);
+        }
       }}
       onClick={(e) => onClick(e, download)}
       onKeyDown={event => {
