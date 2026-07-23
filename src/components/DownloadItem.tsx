@@ -22,7 +22,6 @@ import {
 
 interface DownloadItemProps {
   download: DownloadItemType;
-  index: number;
   queueIndex: number;
   columnOrder: DownloadTableColumnKey[];
   columnAlignments: Record<DownloadTableColumnKey, DownloadColumnAlignment>;
@@ -42,7 +41,6 @@ interface DownloadItemProps {
 
 export const DownloadItem = React.memo<DownloadItemProps>(({
   download,
-  index,
   queueIndex,
   columnOrder,
   columnAlignments,
@@ -364,8 +362,8 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     <div
       ref={rowRef}
       data-download-id={download.id}
-      className={`download-row group cursor-default relative ${isActionVisible ? 'has-visible-actions' : ''} ${index % 2 !== 0 ? 'striped' : ''} ${isSelected ? 'is-selected' : ''} ${isQueueReorderable ? 'is-queue-reorderable' : ''} ${isQueueDragSource ? 'is-queue-drag-source' : ''}`}
-      style={{ gridTemplateColumns: tableGridTemplate, minWidth: tableMinWidth }}
+      className={`download-row group cursor-default relative ${isActionVisible ? 'has-visible-actions' : ''} ${isSelected ? 'is-selected' : ''} ${isQueueReorderable ? 'is-queue-reorderable' : ''} ${isQueueDragSource ? 'is-queue-drag-source' : ''}`}
+      style={{ minWidth: tableMinWidth }}
       tabIndex={0}
       onMouseEnter={() => {
         setIsRowHovered(true);
@@ -421,9 +419,14 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
         setContextMenu({ x: e.clientX, y: e.clientY, id: download.id });
       }}
     >
-      {columnOrder.map(columnKey => (
-        <React.Fragment key={columnKey}>{cells[columnKey]}</React.Fragment>
-      ))}
+      <div
+        className="download-row-motion"
+        style={{ gridTemplateColumns: tableGridTemplate, minWidth: tableMinWidth }}
+      >
+        {columnOrder.map(columnKey => (
+          <React.Fragment key={columnKey}>{cells[columnKey]}</React.Fragment>
+        ))}
+      </div>
       {rowActions}
     </div>
   );

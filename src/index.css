@@ -2207,6 +2207,13 @@ body.is-column-resizing .column-resize-handle:hover::after {
   flex-direction: column;
 }
 
+.download-table-list-content {
+  display: flex;
+  flex: 1 0 100%;
+  min-height: 100%;
+  flex-direction: column;
+}
+
 .download-queue-drop-marker {
   position: absolute;
   inset-inline: 0;
@@ -2240,7 +2247,6 @@ body.is-column-resizing .column-resize-handle:hover::after {
   font-size: var(--download-row-font-size);
   pointer-events: none;
   transform: translateZ(0);
-  transition: top 70ms linear;
   will-change: top;
 }
 
@@ -2271,17 +2277,28 @@ body.is-column-resizing .column-resize-handle:hover::after {
 .download-row {
   flex: 0 0 var(--download-row-height);
   height: var(--download-row-height);
-  display: grid;
-  align-items: center;
   width: 100%;
-  padding: 0 var(--download-row-padding-x);
   margin: var(--download-row-margin) 0;
   border-radius: 6px;
   color: hsl(var(--text-primary));
   font-size: var(--download-row-font-size);
-  overflow: hidden;
+  overflow: visible;
   user-select: none;
   -webkit-user-select: none;
+}
+
+.download-row-motion {
+  display: grid;
+  align-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 0 var(--download-row-padding-x);
+  border-radius: inherit;
+  color: inherit;
+  font-size: inherit;
+  overflow: hidden;
+  user-select: inherit;
+  -webkit-user-select: inherit;
 }
 
 html[data-list-density="compact"] .download-row,
@@ -2296,26 +2313,28 @@ html[data-list-density="relaxed"] .download-ghost-row {
   margin-block: var(--download-row-margin);
 }
 
-.download-row > div {
+.download-row-motion > div {
   min-width: 0;
   overflow: hidden;
   padding-inline: var(--download-column-padding-x);
 }
 
-.download-row > div:first-child {
+.download-row-motion > div:first-child {
   padding-inline-start: 0;
 }
 
-.download-row > .download-status-cell {
+.download-row-motion > .download-status-cell {
   padding-inline: 8px;
 }
 
-.download-row.is-selected {
+.download-row.is-selected,
+.download-row.is-selected .download-row-motion {
   background: hsl(var(--accent-color) / 0.26) !important;
   box-shadow: inset 0 0 0 1px hsl(var(--accent-color) / 0.28);
 }
 
-.download-row.is-selected:hover {
+.download-row.is-selected:hover,
+.download-row.is-selected:hover .download-row-motion {
   background: hsl(var(--accent-color) / 0.32) !important;
 }
 
@@ -2334,6 +2353,11 @@ html[data-list-density="relaxed"] .download-ghost-row {
   cursor: grabbing;
 }
 
+.download-table-list-content > .download-row:nth-child(even),
+.download-table-list-content > .download-row:nth-child(even) .download-row-motion {
+  background: hsl(var(--stripe-bg));
+}
+
 body.is-queue-dragging,
 body.is-queue-dragging * {
   cursor: grabbing !important;
@@ -2344,9 +2368,10 @@ body.is-queue-dragging * {
   outline-offset: -1px;
 }
 
-  .download-row:hover {
-    background: hsl(var(--item-hover));
-  }
+.download-row:hover,
+.download-row:hover .download-row-motion {
+  background: hsl(var(--item-hover));
+}
 
 .download-column-cell {
   display: flex;

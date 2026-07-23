@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from 'react';
 import { useDownloadStore, DownloadItem, MAIN_QUEUE_ID } from '../store/useDownloadStore';
 import { useDownloadProgressStore } from '../store/downloadProgressStore';
 import { useToast } from '../contexts/ToastContext';
@@ -85,6 +85,9 @@ const persistColumnAlignments = (alignments: Record<DownloadTableColumnKey, Down
   }
 };
 
+const QUEUE_ROW_REORDER_DURATION = 180;
+const QUEUE_ROW_REORDER_EASING = 'cubic-bezier(0.2, 0.8, 0.2, 1)';
+
 interface ColumnDragState {
   key: DownloadTableColumnKey;
   startX: number;
@@ -159,10 +162,6 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   }, []);
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; id: string } | null>(null);
-  const [animationParent] = useAutoAnimate<HTMLDivElement>({
-    duration: 120,
-    easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)',
-  });
   const [headerAnimationParent, setHeaderAnimationEnabled] = useAutoAnimate<HTMLDivElement>({
     duration: 140,
     easing: 'ease-out',
@@ -198,6 +197,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   const lastSelectedIdRef = useRef(lastSelectedId);
   const sortedDownloadsRef = useRef<DownloadItem[]>([]);
   const queueListElementRef = useRef<HTMLDivElement | null>(null);
+  const queueRowsContainerElementRef = useRef<HTMLDivElement | null>(null);
   const queueReorderableDownloadsRef = useRef<DownloadItem[]>([]);
   const queueDragItemsRef = useRef<DownloadItem[]>([]);
   const queueDragBaseItemsRef = useRef<DownloadItem[]>([]);
@@ -207,6 +207,13 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   const queueDragCapturePointerIdRef = useRef<number | null>(null);
   const queueDragPreviewOrderRef = useRef<string[] | null>(null);
   const queueDragGeometryRef = useRef<QueueDragGeometry | null>(null);
+  const queueDragPreviewElementRef = useRef<HTMLDivElement | null>(null);
+  const queueRowTopsRef = useRef(new Map<string, number>());
+  const queueRowHeightsRef = useRef(new Map<string, number>());
+  const queueRowAnimationFrameRef = useRef<number | null>(null);
+  const queueRowAnimationTimerRef = useRef<number | null>(null);
+  const queueRowAnimationActiveRef = useRef(false);
+  const queueRowAnimationGenerationRef = useRef(0);
   const queueReorderPendingCountRef = useRef(0);
   const suppressQueueClickRef = useRef(false);
   const [queueDragState, setQueueDragState] = useState<QueueDragState | null>(null);
@@ -266,8 +273,10 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   const downloadsViewRef = useRef<HTMLDivElement>(null);
   const queueListRef = useCallback((element: HTMLDivElement | null) => {
     queueListElementRef.current = element;
-    animationParent(element);
-  }, [animationParent]);
+  }, []);
+  const queueRowsContainerRef = useCallback((element: HTMLDivElement | null) => {
+    queueRowsContainerElementRef.current = element;
+  }, []);
 
   const updateColumnDragState = (next: ColumnDragState | null) => {
     columnDragStateRef.current = next;
@@ -725,7 +734,9 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
 
   const queueRowsById = (list: HTMLDivElement): Map<string, HTMLElement> => {
     const rows = new Map<string, HTMLElement>();
-    for (const element of Array.from(list.children)) {
+    const rowsContainer = queueRowsContainerElementRef.current;
+    if (!rowsContainer || !list.contains(rowsContainer)) return rows;
+    for (const element of Array.from(rowsContainer.children)) {
       if (!(element instanceof HTMLElement)) continue;
       const id = element.dataset.downloadId;
       if (id) rows.set(id, element);
@@ -775,13 +786,12 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   ): { targetIndex: number; markerTop: number } => {
     const list = queueListElementRef.current;
     if (!list || items.length === 0) return { targetIndex: 0, markerTop: 0 };
-    const listRect = list.getBoundingClientRect();
     const geometry = queueDragGeometryRef.current;
     if (!geometry) return { targetIndex: 0, markerTop: 0 };
 
     // Hit-test against the geometry captured before the preview starts. The
-    // rendered rows may be in the middle of an AutoAnimate FLIP transition;
-    // their transformed client rects are visual output, not stable drop slots.
+    // Rendered rows may be in the middle of a FLIP transition; their
+    // transformed client rects are visual output, not stable drop slots.
     // Keeping the logical slots immutable prevents marker jitter and makes
     // upward and downward drops use the same coordinate system. The pointer
     // is compared with the original row centers so a drag started in a row
@@ -794,7 +804,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       const row = geometry.rows.get(item.id);
       if (!row) continue;
       const markerSlotTop = row.top - geometry.listTop + geometry.scrollTop - selectedSpaceBefore;
-      const rowTop = listRect.top + row.top - geometry.listTop - scrollDelta;
+      const rowTop = row.top - scrollDelta;
       if (clientY < rowTop + row.height / 2) {
         markerTop = markerSlotTop;
         break;
@@ -814,6 +824,23 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       targetIndex: remainingIndex,
       markerTop: Math.max(0, markerTop)
     };
+  };
+
+  const queueDragPreviewTopForPointer = (pointerY: number): number => {
+    const list = queueListElementRef.current;
+    const geometry = queueDragGeometryRef.current;
+    const drag = queueDragStateRef.current;
+    if (!list || !geometry || !drag) return 0;
+    return Math.max(
+      0,
+      pointerY - geometry.listTop + list.scrollTop - drag.pointerOffsetY
+    );
+  };
+
+  const updateQueueDragPreviewPosition = (pointerY: number) => {
+    const preview = queueDragPreviewElementRef.current;
+    if (!preview) return;
+    preview.style.top = `${queueDragPreviewTopForPointer(pointerY)}px`;
   };
 
   const clearQueueDragPreview = () => {
@@ -1017,6 +1044,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
 
       const baseItems = queueDragBaseItemsRef.current;
       const selectedIdSet = new Set(drag.ids);
+      queueDragStateRef.current = { ...drag, pointerY: clientY };
       const nextPosition = queueDropPosition(clientY, baseItems, selectedIdSet);
       const previewItems = moveSelectedBlockToIndex(
         baseItems,
@@ -1034,13 +1062,13 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
         setQueueDragPreviewOrder(nextPreviewOrder);
       }
       suppressQueueClickRef.current = true;
+      updateQueueDragPreviewPosition(clientY);
       if (
         !drag.active ||
         previewChanged ||
-        nextPosition.markerTop !== drag.markerTop ||
-        clientY !== drag.pointerY
+        nextPosition.markerTop !== drag.markerTop
       ) {
-        const nextState = { ...drag, ...nextPosition, active: true };
+        const nextState = { ...queueDragStateRef.current, ...nextPosition, active: true };
         nextState.pointerY = clientY;
         queueDragStateRef.current = nextState;
         setQueueDragState(nextState);
@@ -1111,6 +1139,15 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       captureTarget.removeEventListener('lostpointercapture', lostPointerCapture);
     };
   };
+
+  // The implementation closes over the current drag helpers, while rows need
+  // a stable prop so React.memo can keep the entire queue from rerendering on
+  // every pointer frame.
+  const queueDragStartHandlerRef = useRef(handleQueueDragStart);
+  queueDragStartHandlerRef.current = handleQueueDragStart;
+  const stableHandleQueueDragStart = useCallback((id: string, event: React.PointerEvent<HTMLDivElement>) => {
+    queueDragStartHandlerRef.current(id, event);
+  }, []);
 
   const getDownloadPath = useCallback(async (item: DownloadItem) => {
     const fileName = item.fileName?.trim();
@@ -1234,6 +1271,152 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   }, [queueDragPreviewOrder, queueReorderableDownloads, queueReorderableIds, queueReorderingEnabled, sortedDownloads]);
   queueDragItemsRef.current = renderedDownloads.filter(download => queueReorderableIds.has(download.id));
 
+  const queueRowOrderKey = useMemo(
+    () => renderedDownloads.map(download => download.id).join('\u0001'),
+    [renderedDownloads]
+  );
+
+  useLayoutEffect(() => {
+    const container = queueRowsContainerElementRef.current;
+    const scrollContainer = queueListElementRef.current;
+    if (!container || !scrollContainer) return;
+
+    const measureRows = () => {
+      const rows = new Map<string, { element: HTMLElement; motionElement: HTMLElement; top: number; height: number }>();
+      const scrollContainerTop = scrollContainer.getBoundingClientRect().top;
+      const scrollTop = scrollContainer.scrollTop;
+      for (const child of Array.from(container.children)) {
+        if (!(child instanceof HTMLElement)) continue;
+        const id = child.dataset.downloadId;
+        const motionElement = Array.from(child.children).find(element =>
+          element instanceof HTMLElement && element.classList.contains('download-row-motion')
+        );
+        if (!id || !(motionElement instanceof HTMLElement)) continue;
+        const rowRect = child.getBoundingClientRect();
+        const motionRect = motionElement.getBoundingClientRect();
+        rows.set(id, {
+          element: child,
+          motionElement,
+          top: motionRect.top - scrollContainerTop + scrollTop,
+          height: rowRect.height,
+        });
+      }
+      return rows;
+    };
+
+    const currentRows = measureRows();
+    const previousTops = queueRowTopsRef.current;
+    const previousHeights = queueRowHeightsRef.current;
+    const wasAnimating = queueRowAnimationActiveRef.current;
+    const layoutChanged = Array.from(currentRows).some(([id, row]) => {
+      const previousHeight = previousHeights.get(id);
+      return previousHeight !== undefined && Math.abs(previousHeight - row.height) > 0.5;
+    });
+    const generation = ++queueRowAnimationGenerationRef.current;
+
+    if (queueRowAnimationFrameRef.current !== null) {
+      window.cancelAnimationFrame(queueRowAnimationFrameRef.current);
+      queueRowAnimationFrameRef.current = null;
+    }
+    if (queueRowAnimationTimerRef.current !== null) {
+      window.clearTimeout(queueRowAnimationTimerRef.current);
+      queueRowAnimationTimerRef.current = null;
+    }
+
+    const startTops = new Map<string, number>();
+    for (const [id, row] of currentRows) {
+      startTops.set(
+        id,
+        wasAnimating || layoutChanged ? row.top : previousTops.get(id) ?? row.top
+      );
+      row.motionElement.style.transition = 'none';
+      row.motionElement.style.transform = '';
+    }
+
+    const finalRows = measureRows();
+    queueRowTopsRef.current = new Map(
+      Array.from(finalRows, ([id, row]) => [id, row.top])
+    );
+    queueRowHeightsRef.current = new Map(
+      Array.from(finalRows, ([id, row]) => [id, row.height])
+    );
+    queueRowAnimationActiveRef.current = false;
+
+    const movedRows = Array.from(finalRows).flatMap(([id, row]) => {
+      const deltaY = (startTops.get(id) ?? row.top) - row.top;
+      return Math.abs(deltaY) > 0.5 ? [{ element: row.motionElement, deltaY }] : [];
+    });
+    if (movedRows.length === 0) return;
+
+    const prefersReducedMotion = typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (prefersReducedMotion) return;
+
+    for (const { element, deltaY } of movedRows) {
+      element.style.willChange = 'transform';
+      element.style.transform = `translate3d(0, ${deltaY}px, 0)`;
+    }
+    // Force the inverse transforms to be committed before releasing them on
+    // the next frame. This keeps the FLIP animation independent of React's
+    // render timing and avoids a layout read during pointer movement.
+    void container.offsetHeight;
+
+    queueRowAnimationActiveRef.current = true;
+    queueRowAnimationFrameRef.current = window.requestAnimationFrame(() => {
+      queueRowAnimationFrameRef.current = null;
+      if (queueRowAnimationGenerationRef.current !== generation) return;
+      for (const { element } of movedRows) {
+        element.style.transition = `transform ${QUEUE_ROW_REORDER_DURATION}ms ${QUEUE_ROW_REORDER_EASING}`;
+        element.style.transform = 'translate3d(0, 0, 0)';
+      }
+    });
+    queueRowAnimationTimerRef.current = window.setTimeout(() => {
+      queueRowAnimationTimerRef.current = null;
+      if (queueRowAnimationGenerationRef.current !== generation) return;
+      queueRowAnimationActiveRef.current = false;
+      for (const { element } of movedRows) {
+        element.style.removeProperty('transition');
+        element.style.removeProperty('transform');
+        element.style.removeProperty('will-change');
+      }
+    }, QUEUE_ROW_REORDER_DURATION + 60);
+  }, [queueRowOrderKey]);
+
+  useLayoutEffect(() => {
+    if (!queueDragState?.active) return;
+    // The preview follows the pointer imperatively so high-frequency pointer
+    // movement does not rerender every row. Keep React renders caused by
+    // progress or other download updates from overwriting that live position
+    // with an older pointerY value.
+    updateQueueDragPreviewPosition(queueDragState.pointerY);
+  }, [queueDragState?.active]);
+
+  useEffect(() => () => {
+    queueRowAnimationGenerationRef.current += 1;
+    if (queueRowAnimationFrameRef.current !== null) {
+      window.cancelAnimationFrame(queueRowAnimationFrameRef.current);
+    }
+    if (queueRowAnimationTimerRef.current !== null) {
+      window.clearTimeout(queueRowAnimationTimerRef.current);
+    }
+    const container = queueRowsContainerElementRef.current;
+    if (container) {
+      for (const child of Array.from(container.children)) {
+        if (!(child instanceof HTMLElement) || !child.dataset.downloadId) continue;
+        const motionElement = Array.from(child.children).find(element =>
+          element instanceof HTMLElement && element.classList.contains('download-row-motion')
+        );
+        if (!(motionElement instanceof HTMLElement)) continue;
+        motionElement.style.removeProperty('transition');
+        motionElement.style.removeProperty('transform');
+        motionElement.style.removeProperty('will-change');
+      }
+    }
+    queueRowAnimationActiveRef.current = false;
+    queueRowTopsRef.current.clear();
+    queueRowHeightsRef.current.clear();
+  }, []);
+
   useEffect(() => {
     const current = queueDragStateRef.current;
     if (!current) return;
@@ -1309,13 +1492,13 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
         positions.set(download.id, { index, length: queueItems.length });
       });
     }
-    if (queueDragPreviewOrder && queueReorderingEnabled) {
+    if (queueDragPreviewOrder && queueReorderingEnabled && !queueDragState?.active) {
       queueDragPreviewOrder.forEach((id, index) => {
         positions.set(id, { index, length: queueDragPreviewOrder.length });
       });
     }
     return positions;
-  }, [downloads, queueDragPreviewOrder, queueReorderingEnabled]);
+  }, [downloads, queueDragPreviewOrder, queueDragState?.active, queueReorderingEnabled]);
   sortedDownloadsRef.current = sortedDownloads;
 
   useEffect(() => {
@@ -1577,17 +1760,6 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       .map(id => queueReorderableDownloads.find(download => download.id === id))
       .find((download): download is DownloadItem => Boolean(download))
     : null;
-  const queueDragPreviewTop = (() => {
-    if (!queueDragState?.active) return 0;
-    const list = queueListElementRef.current;
-    if (!list) return 0;
-    const listRect = list.getBoundingClientRect();
-    return Math.max(
-      0,
-      queueDragState.pointerY - listRect.top + list.scrollTop - queueDragState.pointerOffsetY
-    );
-  })();
-
   return (
     <div ref={downloadsViewRef} className="downloads-view flex-1 flex flex-col h-full min-w-0">
       <div
@@ -1809,87 +1981,88 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
 
           <div className="download-table-body" style={{ minWidth: tableMinWidthWithPadding }}>
             <div className="download-table-list" ref={queueListRef}>
-              {sortedDownloads.length === 0 ? (
-                <div className="downloads-empty-state">
-                  <ArrowDownCircle aria-hidden="true" />
-                  <div className="downloads-empty-title">
-                    {isQueueFilter ? t($ => $.downloadTable.queueEmpty) : filter === 'completed' ? t($ => $.downloadTable.noCompletedDownloads) : t($ => $.downloadTable.noDownloads)}
-                  </div>
-                  <div className="downloads-empty-description flex items-center justify-center mt-2.5 text-[13px] text-text-muted">
-                    {isQueueFilter ? (
-                      t($ => $.downloadTable.queueEmptyDescription)
-                    ) : filter === 'completed' ? (
-                      t($ => $.downloadTable.completedDescription)
-                    ) : (
-                      <>
-                        {t($ => $.downloadTable.clickToAdd)} <Plus size={15} className="text-accent stroke-[3] mx-1.5" /> {t($ => $.downloadTable.addButtonOr)}
-                        <span className="flex items-center mx-1.5">
-                          <span className="flex items-center justify-center px-1.5 py-0.5 bg-item-hover rounded border border-border-color shadow-sm min-w-[22px] min-h-[22px]">
-                            {isMac ? <Command size={12} strokeWidth={2.5} className="text-text-primary" /> : <span className="text-[10px] font-bold text-text-primary">Ctrl</span>}
-                          </span>
-                          <span className="text-accent font-bold mx-1.5 text-[14px]">+</span>
-                          <span className="flex items-center justify-center px-1.5 py-0.5 bg-item-hover rounded border border-border-color shadow-sm min-w-[22px] min-h-[22px]">
-                            <span className="text-[11px] font-bold text-text-primary">V</span>
-                          </span>
-                        </span>
-                        {t($ => $.downloadTable.toAddDownloads)}
-                      </>
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <>
-                  {renderedDownloads.map((d, index) => (
-                    <DownloadItemComponent
-                      key={d.id}
-                      download={d}
-                      index={index}
-                      queueIndex={queuePositionsByDownloadId.get(d.id)?.index ?? -1}
-                      columnOrder={orderedColumns}
-                      columnAlignments={columnAlignments}
-                      tableGridTemplate={tableGridTemplate}
-                      tableMinWidth={tableMinWidthWithPadding}
-                      setContextMenu={handleContextMenu}
-                      handlePause={handlePause}
-                      handleResume={handleResume}
-                      getCategoryIcon={getCategoryIcon}
-                      isSelected={selectedIds.has(d.id)}
-                      isQueueReorderable={queueReorderableIds.has(d.id)}
-                      isQueueDragSource={Boolean(queueDragState?.active && queueDragState.ids.includes(d.id))}
-                      onMoveInQueue={handleMoveInQueue}
-                      onQueueDragStart={handleQueueDragStart}
-                      onClick={handleItemClick}
-                    />
-                  ))}
-                  {queueDragState?.active && queueDragPreviewItem ? (
-                    <div
-                      className="download-queue-drag-preview"
-                      style={{ top: `${queueDragPreviewTop}px` }}
-                      aria-hidden="true"
-                    >
-                      <span className="download-queue-drag-preview-icon">
-                        {getCategoryIcon(queueDragPreviewItem.category)}
-                      </span>
-                      <span className="download-queue-drag-preview-name">
-                        {queueDragPreviewItem.fileName}
-                      </span>
-                      {queueDragState.ids.length > 1 ? (
-                        <span className="download-queue-drag-preview-count">
-                          +{queueDragState.ids.length - 1}
-                        </span>
-                      ) : null}
+              <div className="download-table-list-content" ref={queueRowsContainerRef}>
+                {sortedDownloads.length === 0 ? (
+                  <div className="downloads-empty-state">
+                    <ArrowDownCircle aria-hidden="true" />
+                    <div className="downloads-empty-title">
+                      {isQueueFilter ? t($ => $.downloadTable.queueEmpty) : filter === 'completed' ? t($ => $.downloadTable.noCompletedDownloads) : t($ => $.downloadTable.noDownloads)}
                     </div>
+                    <div className="downloads-empty-description flex items-center justify-center mt-2.5 text-[13px] text-text-muted">
+                      {isQueueFilter ? (
+                        t($ => $.downloadTable.queueEmptyDescription)
+                      ) : filter === 'completed' ? (
+                        t($ => $.downloadTable.completedDescription)
+                      ) : (
+                        <>
+                          {t($ => $.downloadTable.clickToAdd)} <Plus size={15} className="text-accent stroke-[3] mx-1.5" /> {t($ => $.downloadTable.addButtonOr)}
+                          <span className="flex items-center mx-1.5">
+                            <span className="flex items-center justify-center px-1.5 py-0.5 bg-item-hover rounded border border-border-color shadow-sm min-w-[22px] min-h-[22px]">
+                              {isMac ? <Command size={12} strokeWidth={2.5} className="text-text-primary" /> : <span className="text-[10px] font-bold text-text-primary">Ctrl</span>}
+                            </span>
+                            <span className="text-accent font-bold mx-1.5 text-[14px]">+</span>
+                            <span className="flex items-center justify-center px-1.5 py-0.5 bg-item-hover rounded border border-border-color shadow-sm min-w-[22px] min-h-[22px]">
+                              <span className="text-[11px] font-bold text-text-primary">V</span>
+                            </span>
+                          </span>
+                          {t($ => $.downloadTable.toAddDownloads)}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    {renderedDownloads.map(d => (
+                      <DownloadItemComponent
+                        key={d.id}
+                        download={d}
+                        queueIndex={queuePositionsByDownloadId.get(d.id)?.index ?? -1}
+                        columnOrder={orderedColumns}
+                        columnAlignments={columnAlignments}
+                        tableGridTemplate={tableGridTemplate}
+                        tableMinWidth={tableMinWidthWithPadding}
+                        setContextMenu={handleContextMenu}
+                        handlePause={handlePause}
+                        handleResume={handleResume}
+                        getCategoryIcon={getCategoryIcon}
+                        isSelected={selectedIds.has(d.id)}
+                        isQueueReorderable={queueReorderableIds.has(d.id)}
+                        isQueueDragSource={Boolean(queueDragState?.active && queueDragState.ids.includes(d.id))}
+                        onMoveInQueue={handleMoveInQueue}
+                        onQueueDragStart={stableHandleQueueDragStart}
+                        onClick={handleItemClick}
+                      />
+                    ))}
+                    <div className="flex-1 min-h-0 bg-transparent pointer-events-none" />
+                  </>
+                )}
+              </div>
+              {queueDragState?.active && queueDragPreviewItem ? (
+                <div
+                  ref={queueDragPreviewElementRef}
+                  className="download-queue-drag-preview"
+                  aria-hidden="true"
+                >
+                  <span className="download-queue-drag-preview-icon">
+                    {getCategoryIcon(queueDragPreviewItem.category)}
+                  </span>
+                  <span className="download-queue-drag-preview-name">
+                    {queueDragPreviewItem.fileName}
+                  </span>
+                  {queueDragState.ids.length > 1 ? (
+                    <span className="download-queue-drag-preview-count">
+                      +{queueDragState.ids.length - 1}
+                    </span>
                   ) : null}
-                  {queueDragState?.active ? (
-                    <div
-                      className="download-queue-drop-marker"
-                      style={{ top: `${queueDragState.markerTop}px` }}
-                      aria-hidden="true"
-                    />
-                  ) : null}
-                  <div className="flex-1 min-h-0 bg-transparent pointer-events-none" />
-                </>
-              )}
+                </div>
+              ) : null}
+              {queueDragState?.active ? (
+                <div
+                  className="download-queue-drop-marker"
+                  style={{ top: `${queueDragState.markerTop}px` }}
+                  aria-hidden="true"
+                />
+              ) : null}
             </div>
           </div>
         </div>
