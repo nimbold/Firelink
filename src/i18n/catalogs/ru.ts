@@ -580,6 +580,8 @@ const ru = {
     },
     lookAndFeel: {
       language: 'Язык',
+      languageAndRegion: 'Язык и регион',
+      layout: 'Компоновка',
       languageDescription: 'Выберите язык интерфейса Firelink.',
       sidebarPosition: 'Положение боковой панели',
       sidebarPositionDescription: 'Выберите, где отображается боковая панель. В автоматическом режиме следует направлению интерфейса.',

@@ -580,6 +580,8 @@ const uk = {
     },
     lookAndFeel: {
       language: 'Мова',
+      languageAndRegion: 'Мова й регіон',
+      layout: 'Компонування',
       languageDescription: 'Виберіть мову інтерфейсу Firelink.',
       sidebarPosition: 'Положення бічної панелі',
       sidebarPositionDescription: 'Виберіть, де відображати бічну панель. Автоматичний режим враховує напрямок інтерфейсу.',

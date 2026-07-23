@@ -866,74 +866,6 @@ runEngineChecks(false);
           {/* Look & Feel Pane */}
           {activeTab === 'lookandfeel' && (
             <div className="settings-pane max-w-[720px]">
-              <h2 className="settings-section-title">{t($ => $.settings.lookAndFeel.language)}</h2>
-              <div className="mac-settings-group">
-                <div className="mac-settings-row">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.lookAndFeel.language)}</span>
-                    <small>{t($ => $.settings.lookAndFeel.languageDescription)}</small>
-                  </div>
-                  <select
-                    value={settings.language}
-                    onChange={(event) => settings.setLanguage(event.target.value as typeof settings.language)}
-                    className="app-control w-48"
-                  >
-                    {languageOptions.map(option => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="mac-settings-row">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.lookAndFeel.calendar)}</span>
-                    <small>{t($ => $.settings.lookAndFeel.calendarDescription)}</small>
-                  </div>
-                  <select
-                    value={settings.calendarPreference}
-                    onChange={(event) => settings.setCalendarPreference(event.target.value as typeof settings.calendarPreference)}
-                    className="app-control w-48"
-                  >
-                    {calendarOptions.map(option => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="mac-settings-row">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.lookAndFeel.sidebarPosition)}</span>
-                    <small>{t($ => $.settings.lookAndFeel.sidebarPositionDescription)}</small>
-                  </div>
-                  <select
-                    value={settings.sidebarPosition}
-                    onChange={(event) => settings.setSidebarPosition(event.target.value as SidebarPosition)}
-                    className="app-control w-48"
-                  >
-                    <option value="auto">{t($ => $.settings.lookAndFeel.sidebarPositionAutomatic)}</option>
-                    <option value="left">{t($ => $.settings.lookAndFeel.sidebarPositionLeft)}</option>
-                    <option value="right">{t($ => $.settings.lookAndFeel.sidebarPositionRight)}</option>
-                  </select>
-                </div>
-              </div>
-
-              <h2 className="settings-section-title">{t($ => $.settings.lookAndFeel.windowControls)}</h2>
-              <div className="mac-settings-group">
-                <div className="mac-settings-row">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.lookAndFeel.windowControlStyle)}</span>
-                    <small>{t($ => $.settings.lookAndFeel.windowControlsDescription)}</small>
-                  </div>
-                  <select
-                    value={settings.windowControlStyle}
-                    onChange={(event) => settings.setWindowControlStyle(event.target.value as WindowControlStyle)}
-                    className="app-control w-48"
-                  >
-                    {windowControlStyleOptions.map(option => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
               <h2 className="settings-section-title">{t($ => $.settings.lookAndFeel.appTheme)}</h2>
               <div className="mac-settings-group">
                 <div className="mac-settings-row settings-choice-row">
@@ -999,6 +931,78 @@ runEngineChecks(false);
                     <option value="compact">{t($ => $.settings.lookAndFeel.compact)}</option>
                     <option value="standard">{t($ => $.settings.lookAndFeel.comfortable)}</option>
                     <option value="relaxed">{t($ => $.settings.lookAndFeel.relaxed)}</option>
+                  </select>
+                </div>
+              </div>
+
+              <h2 className="settings-section-title">{t($ => $.settings.lookAndFeel.languageAndRegion)}</h2>
+              <div className="mac-settings-group">
+                <div className="mac-settings-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.lookAndFeel.language)}</span>
+                    <small>{t($ => $.settings.lookAndFeel.languageDescription)}</small>
+                  </div>
+                  <select
+                    value={settings.language}
+                    onChange={(event) => settings.setLanguage(event.target.value as typeof settings.language)}
+                    className="app-control w-60"
+                  >
+                    {languageOptions.map(option => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="mac-settings-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.lookAndFeel.calendar)}</span>
+                    <small>{t($ => $.settings.lookAndFeel.calendarDescription)}</small>
+                  </div>
+                  <select
+                    value={settings.calendarPreference}
+                    onChange={(event) => settings.setCalendarPreference(event.target.value as typeof settings.calendarPreference)}
+                    className="app-control w-60"
+                  >
+                    {calendarOptions.map(option => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <h2 className="settings-section-title">{t($ => $.settings.lookAndFeel.windowControls)}</h2>
+              <div className="mac-settings-group">
+                <div className="mac-settings-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.lookAndFeel.windowControlStyle)}</span>
+                    <small>{t($ => $.settings.lookAndFeel.windowControlsDescription)}</small>
+                  </div>
+                  <select
+                    value={settings.windowControlStyle}
+                    onChange={(event) => settings.setWindowControlStyle(event.target.value as WindowControlStyle)}
+                    className="app-control w-60"
+                  >
+                    {windowControlStyleOptions.map(option => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <h2 className="settings-section-title">{t($ => $.settings.lookAndFeel.layout)}</h2>
+              <div className="mac-settings-group">
+                <div className="mac-settings-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.lookAndFeel.sidebarPosition)}</span>
+                    <small>{t($ => $.settings.lookAndFeel.sidebarPositionDescription)}</small>
+                  </div>
+                  <select
+                    value={settings.sidebarPosition}
+                    onChange={(event) => settings.setSidebarPosition(event.target.value as SidebarPosition)}
+                    className="app-control w-60"
+                  >
+                    <option value="auto">{t($ => $.settings.lookAndFeel.sidebarPositionAutomatic)}</option>
+                    <option value="left">{t($ => $.settings.lookAndFeel.sidebarPositionLeft)}</option>
+                    <option value="right">{t($ => $.settings.lookAndFeel.sidebarPositionRight)}</option>
                   </select>
                 </div>
               </div>

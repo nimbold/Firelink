@@ -580,6 +580,8 @@ const common = {
     },
     lookAndFeel: {
       language: 'Language',
+      languageAndRegion: 'Language & region',
+      layout: 'Layout',
       languageDescription: 'Choose the Firelink interface language.',
       sidebarPosition: 'Sidebar position',
       sidebarPositionDescription: 'Choose where the sidebar appears. Automatic follows the interface direction.',

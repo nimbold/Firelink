@@ -580,6 +580,8 @@ const he = {
     },
     lookAndFeel: {
       language: 'שפה',
+      languageAndRegion: 'שפה ואזור',
+      layout: 'פריסה',
       languageDescription: 'בחר את שפת הממשק של Firelink.',
       sidebarPosition: 'מיקום סרגל הצד',
       sidebarPositionDescription: 'בחר היכן יופיע סרגל הצד. מצב אוטומטי עוקב אחר כיוון הממשק.',

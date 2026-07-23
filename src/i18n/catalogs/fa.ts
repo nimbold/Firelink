@@ -580,6 +580,8 @@ const fa = {
     },
     lookAndFeel: {
       language: 'زبان',
+      languageAndRegion: 'زبان و منطقه',
+      layout: 'چیدمان',
       languageDescription: 'زبان رابط Firelink را انتخاب کنید.',
       sidebarPosition: 'جایگاه نوار کناری',
       sidebarPositionDescription: 'مشخص کنید نوار کناری کجا نمایش داده شود. حالت خودکار از جهت رابط کاربری پیروی می‌کند.',
