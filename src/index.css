@@ -11,7 +11,7 @@
   --item-hover: 0 0% 0% / 0.05;
   --item-selected: 211 100% 50%;
   --accent-color: 211 100% 50%;
-  --stripe-bg: 0 0% 0% / 0.04;
+  --stripe-bg: 0 0% 0% / 0.035;
 
   --text-primary: 0 0% 10%;
   --text-secondary: 0 0% 40%;
@@ -54,7 +54,7 @@
   --item-hover: 0 0% 0% / 0.05;
   --item-selected: 211 100% 50%;
   --accent-color: 211 100% 50%;
-  --stripe-bg: 0 0% 0% / 0.04;
+  --stripe-bg: 0 0% 0% / 0.035;
   --text-primary: 0 0% 10%;
   --text-secondary: 0 0% 40%;
   --text-muted: 0 0% 55%;
@@ -84,7 +84,7 @@
   --item-hover: 0 0% 100% / 0.07;
   --item-selected: 211 100% 56%;
   --accent-color: 211 100% 56%;
-  --stripe-bg: 0 0% 100% / 0.04;
+  --stripe-bg: 0 0% 100% / 0.025;
   --text-primary: 0 0% 91%;
   --text-secondary: 0 0% 75%;
   --text-muted: 0 0% 50%;
@@ -128,7 +128,7 @@
   --item-hover: 326 100% 74% / 0.10;
   --item-selected: 326 100% 74%;
   --accent-color: 326 100% 74%;
-  --stripe-bg: 0 0% 100% / 0.04;
+  --stripe-bg: 0 0% 100% / 0.025;
   --text-primary: 60 30% 96%;
   --text-secondary: 228 14% 74%;
   --text-muted: 229 12% 58%;
@@ -172,7 +172,7 @@
   --item-hover: 193 43% 67% / 0.12;
   --item-selected: 193 43% 67%;
   --accent-color: 193 43% 67%;
-  --stripe-bg: 0 0% 100% / 0.04;
+  --stripe-bg: 0 0% 100% / 0.025;
   --text-primary: 218 27% 92%;
   --text-secondary: 219 28% 80%;
   --text-muted: 218 17% 63%;
@@ -498,8 +498,9 @@ html[data-list-density="relaxed"] {
   }
 
   .app-modal-backdrop {
-    background: hsl(0 0% 0% / 0.2);
-    animation: fade-in 150ms ease-out;
+    /* Keep the scrim animation from applying opacity to the modal subtree. */
+    background-color: hsl(0 0% 0% / 0.2);
+    animation: modal-backdrop-in 150ms ease-out;
     overflow: auto;
     padding: 16px;
   }
@@ -2327,13 +2328,11 @@ html[data-list-density="relaxed"] .download-ghost-row {
   padding-inline: 8px;
 }
 
-.download-row.is-selected,
 .download-row.is-selected .download-row-motion {
   background: hsl(var(--accent-color) / 0.26) !important;
   box-shadow: inset 0 0 0 1px hsl(var(--accent-color) / 0.28);
 }
 
-.download-row.is-selected:hover,
 .download-row.is-selected:hover .download-row-motion {
   background: hsl(var(--accent-color) / 0.32) !important;
 }
@@ -2353,7 +2352,6 @@ html[data-list-density="relaxed"] .download-ghost-row {
   cursor: grabbing;
 }
 
-.download-table-list-content > .download-row:nth-child(even),
 .download-table-list-content > .download-row:nth-child(even) .download-row-motion {
   background: hsl(var(--stripe-bg));
 }
@@ -2368,7 +2366,6 @@ body.is-queue-dragging * {
   outline-offset: -1px;
 }
 
-.download-row:hover,
 .download-row:hover .download-row-motion {
   background: hsl(var(--item-hover));
 }
@@ -2843,6 +2840,11 @@ html[dir="rtl"] .download-context-menu-chevron {
 @keyframes fade-in {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+
+@keyframes modal-backdrop-in {
+  from { background-color: hsl(0 0% 0% / 0); }
+  to { background-color: hsl(0 0% 0% / 0.2); }
 }
 
 @keyframes pulse-progress {

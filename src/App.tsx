@@ -3,6 +3,9 @@ import { schedulerCompletionState } from './utils/schedulerCompletion';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Sidebar, SidebarFilter } from "./components/Sidebar";
 import { DownloadTable, type DownloadTableStatusSummary } from "./components/DownloadTable";
+// Keep the primary Add action eager so the modal cannot disappear behind a
+// null Suspense fallback while its development chunk is being transformed.
+import { AddDownloadsModal } from './components/AddDownloadsModal';
 import { KeychainPermissionModal } from './components/KeychainPermissionModal';
 import { extractValidDownloadUrls } from './utils/url';
 import { readClipboardDownloadUrls } from './utils/clipboard';
@@ -45,9 +48,6 @@ const SettingsView = lazy(loadSettingsView);
 const SchedulerView = lazy(loadSchedulerView);
 const SpeedLimiterView = lazy(loadSpeedLimiterView);
 const LogsView = lazy(loadLogsView);
-const AddDownloadsModal = lazy(() => import('./components/AddDownloadsModal').then(module => ({
-  default: module.AddDownloadsModal,
-})));
 const PropertiesModal = lazy(() => import('./components/PropertiesModal').then(module => ({
   default: module.PropertiesModal,
 })));
@@ -1113,8 +1113,9 @@ function App() {
         </div>
       </div>
       
+      {isAddModalOpen && <AddDownloadsModal />}
+
       <Suspense fallback={null}>
-        {isAddModalOpen && <AddDownloadsModal />}
         {selectedPropertiesDownloadId !== null && <PropertiesModal />}
         {isDeleteModalOpen && <DeleteConfirmationModal />}
         {showKeychainModal && <KeychainPermissionModal consentVersion={keychainConsentVersion} />}
