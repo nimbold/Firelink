@@ -4,6 +4,7 @@ import {
   DEFAULT_COLUMN_ORDER,
   DEFAULT_COLUMN_WIDTHS,
   buildColumnGridTemplate,
+  getDownloadActionPosition,
   getColumnGridColumn,
   normalizeColumnAlignments,
   normalizeColumnOrder,
@@ -54,12 +55,43 @@ describe('download table column preferences', () => {
     expect(normalizeColumnAlignments(null)).toEqual(DEFAULT_COLUMN_ALIGNMENTS);
   });
 
-  it('keeps user widths fixed while reserving a shared spacer before the final column', () => {
+  it('keeps every data column fixed while reserving a flexible fill track after them', () => {
     expect(buildColumnGridTemplate([...DEFAULT_COLUMN_ORDER], [...DEFAULT_COLUMN_WIDTHS])).toBe(
-      '340px 100px 220px 100px 80px minmax(0, 1fr) 170px'
+      '340px 100px 220px 100px 80px 170px minmax(0, 1fr)'
     );
-    expect(getColumnGridColumn('Date Added', [...DEFAULT_COLUMN_ORDER])).toBe('7');
+    expect(getColumnGridColumn('Date Added', [...DEFAULT_COLUMN_ORDER])).toBe('6');
     expect(getColumnGridColumn('Date Added', ['Date Added', ...DEFAULT_COLUMN_ORDER.slice(0, -1)])).toBeUndefined();
-    expect(getColumnGridColumn('ETA', ['Date Added', 'File Name', 'Size', 'Status', 'Speed', 'ETA'])).toBe('7');
+    expect(getColumnGridColumn('ETA', ['Date Added', 'File Name', 'Size', 'Status', 'Speed', 'ETA'])).toBe('6');
+  });
+
+  it('keeps row actions inside the visible row edge while preserving viewport anchoring for clipped rows', () => {
+    const viewport = { top: 0, right: 800, bottom: 600, left: 0 };
+    expect(getDownloadActionPosition(
+      { top: 40, right: 1000, bottom: 72, left: -200 },
+      viewport,
+      viewport,
+      800
+    )).toMatchObject({
+      right: 8,
+      height: 30,
+      visibility: 'visible',
+    });
+
+    expect(getDownloadActionPosition(
+      { top: 40, right: 400, bottom: 72, left: 100 },
+      viewport,
+      viewport,
+      800
+    )).toMatchObject({
+      right: 408,
+      visibility: 'visible',
+    });
+
+    expect(getDownloadActionPosition(
+      { top: 40, right: -20, bottom: 72, left: -300 },
+      viewport,
+      viewport,
+      800
+    ).visibility).toBe('hidden');
   });
 });

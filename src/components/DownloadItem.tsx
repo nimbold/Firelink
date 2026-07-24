@@ -14,7 +14,7 @@ import {
 import {
   COLUMN_ALIGNMENT_JUSTIFY,
   DOWNLOAD_ACTIONS_COLUMN_WIDTH,
-  DOWNLOAD_ACTIONS_VIEWPORT_INSET,
+  getDownloadActionPosition,
   getColumnGridColumn,
   type DownloadColumnAlignment,
   type DownloadTableColumnKey
@@ -64,7 +64,8 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   const [isRowHovered, setIsRowHovered] = React.useState(false);
   const [isRowFocused, setIsRowFocused] = React.useState(false);
   const [actionPosition, setActionPosition] = React.useState<React.CSSProperties | undefined>();
-  const isActionVisible = isRowHovered || isRowFocused;
+  const hasRowActions = download.status !== 'completed';
+  const isActionVisible = hasRowActions && (isRowHovered || isRowFocused);
   const mediaQualityLabel = (() => {
     if (!download.isMedia || typeof download.mediaQuality !== 'string') return undefined;
     const normalized = download.mediaQuality.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -87,19 +88,12 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     const rowRect = row.getBoundingClientRect();
     const horizontalViewportRect = horizontalViewport.getBoundingClientRect();
     const verticalViewportRect = verticalViewport.getBoundingClientRect();
-    const viewportTolerance = 1;
-    const visibleTop = Math.max(rowRect.top, verticalViewportRect.top);
-    const visibleBottom = Math.min(rowRect.bottom, verticalViewportRect.bottom);
-    const visibleHeight = Math.max(0, visibleBottom - visibleTop);
-    const isVisible = visibleHeight > viewportTolerance;
-    const actionHeight = Math.min(rowRect.height, visibleHeight);
-    const nextPosition: React.CSSProperties = {
-      top: visibleTop,
-      right: Math.max(0, window.innerWidth - horizontalViewportRect.right) + DOWNLOAD_ACTIONS_VIEWPORT_INSET,
-      height: actionHeight,
-      overflow: actionHeight < rowRect.height ? 'hidden' : 'visible',
-      visibility: isVisible ? 'visible' : 'hidden',
-    };
+    const nextPosition = getDownloadActionPosition(
+      rowRect,
+      horizontalViewportRect,
+      verticalViewportRect,
+      window.innerWidth
+    );
 
     setActionPosition(previous => (
       previous?.top === nextPosition.top &&
@@ -115,11 +109,11 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   React.useEffect(() => {
     if (!isActionVisible) return;
 
-    let frame = 0;
+    let frame: number | null = null;
     const schedulePositionUpdate = () => {
-      if (frame) window.cancelAnimationFrame(frame);
+      if (frame !== null) window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
-        frame = 0;
+        frame = null;
         updateActionPosition();
       });
     };
@@ -143,7 +137,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
       window.removeEventListener('resize', schedulePositionUpdate);
       window.removeEventListener('scroll', schedulePositionUpdate, true);
       resizeObserver?.disconnect();
-      if (frame) window.cancelAnimationFrame(frame);
+      if (frame !== null) window.cancelAnimationFrame(frame);
     };
   }, [isActionVisible, updateActionPosition]);
 
@@ -325,11 +319,12 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     ),
   };
 
-  const rowActions = (
+  const rowActions = hasRowActions ? (
     <div
       className="download-row-actions items-center gap-0.5"
       style={{
         ...actionPosition,
+        visibility: isActionVisible && actionPosition?.visibility === 'visible' ? 'visible' : 'hidden',
         width: `${DOWNLOAD_ACTIONS_COLUMN_WIDTH}px`,
       }}
       onClick={(e) => e.stopPropagation()}
@@ -356,7 +351,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
         <MoreVertical size={14} />
       </button>
     </div>
-  );
+  ) : null;
 
   return (
     <div
@@ -367,7 +362,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
       tabIndex={0}
       onMouseEnter={() => {
         setIsRowHovered(true);
-        updateActionPosition();
+        if (hasRowActions) updateActionPosition();
       }}
       onMouseLeave={event => {
         const nextTarget = event.relatedTarget;
@@ -377,7 +372,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
       }}
       onFocus={() => {
         setIsRowFocused(true);
-        updateActionPosition();
+        if (hasRowActions) updateActionPosition();
       }}
       onBlur={event => {
         const nextTarget = event.relatedTarget;

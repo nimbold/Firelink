@@ -2789,16 +2789,18 @@ body.is-queue-dragging * {
 
 .download-row-actions {
   position: fixed;
-  right: 0;
   display: flex;
-  align-self: stretch;
   align-items: center;
   justify-content: flex-end;
   z-index: 2;
   max-width: 100%;
   min-width: 0;
-  padding: 0;
-  background: transparent;
+  padding: 0 2px;
+  border: 1px solid hsl(var(--border-color) / 0.88);
+  border-radius: 6px;
+  background: hsl(var(--surface-raised));
+  box-shadow: 0 1px 2px hsl(var(--shadow-color));
+  visibility: hidden;
   opacity: 0;
   pointer-events: none;
   transition: opacity 120ms ease;
@@ -2807,11 +2809,6 @@ body.is-queue-dragging * {
 .download-row.has-visible-actions .download-row-actions {
   opacity: 1;
   pointer-events: auto;
-}
-
-.download-row > .download-row-actions {
-  overflow: visible;
-  padding: 0;
 }
 
 .download-row-actions .app-icon-button,

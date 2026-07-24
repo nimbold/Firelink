@@ -14,10 +14,53 @@ export const DEFAULT_COLUMN_ORDER = [
 
 export const DEFAULT_COLUMN_WIDTHS = [340, 100, 220, 100, 80, 170] as const;
 export const COLUMN_MINIMUMS = [160, 58, 92, 58, 48, 144] as const;
-// Width of the fixed action rail shown while hovering a row.
-export const DOWNLOAD_ACTIONS_COLUMN_WIDTH = 84;
-// Keep the fixed rail clear of the viewport edge and horizontal scrollbar.
+// Width of the compact action rail shown while hovering or focusing a row.
+export const DOWNLOAD_ACTIONS_COLUMN_WIDTH = 64;
+// Keep the viewport-anchored rail clear of the window edge and scrollbar.
 export const DOWNLOAD_ACTIONS_VIEWPORT_INSET = 8;
+export const DOWNLOAD_ACTIONS_MAX_HEIGHT = 30;
+export const DOWNLOAD_ACTIONS_VIEWPORT_TOLERANCE = 1;
+
+export interface DownloadActionViewportRect {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+export interface DownloadActionPosition {
+  top: number;
+  right: number;
+  height: number;
+  overflow: 'hidden' | 'visible';
+  visibility: 'hidden' | 'visible';
+}
+
+export const getDownloadActionPosition = (
+  rowRect: DownloadActionViewportRect,
+  horizontalViewportRect: DownloadActionViewportRect,
+  verticalViewportRect: DownloadActionViewportRect,
+  windowWidth: number
+): DownloadActionPosition => {
+  const visibleTop = Math.max(rowRect.top, verticalViewportRect.top);
+  const visibleBottom = Math.min(rowRect.bottom, verticalViewportRect.bottom);
+  const visibleHeight = Math.max(0, visibleBottom - visibleTop);
+  const visibleLeft = Math.max(rowRect.left, horizontalViewportRect.left);
+  const visibleRight = Math.min(rowRect.right, horizontalViewportRect.right);
+  const visibleWidth = Math.max(0, visibleRight - visibleLeft);
+  const isVisible = visibleHeight > DOWNLOAD_ACTIONS_VIEWPORT_TOLERANCE &&
+    visibleWidth > DOWNLOAD_ACTIONS_VIEWPORT_TOLERANCE;
+  const actionHeight = Math.min(DOWNLOAD_ACTIONS_MAX_HEIGHT, rowRect.bottom - rowRect.top, visibleHeight);
+  const actionRightEdge = Math.min(rowRect.right, horizontalViewportRect.right);
+
+  return {
+    top: visibleTop + Math.max(0, (visibleHeight - actionHeight) / 2),
+    right: Math.max(0, windowWidth - actionRightEdge) + DOWNLOAD_ACTIONS_VIEWPORT_INSET,
+    height: actionHeight,
+    overflow: actionHeight < rowRect.bottom - rowRect.top ? 'hidden' : 'visible',
+    visibility: isVisible ? 'visible' : 'hidden',
+  };
+};
 
 export const COLUMN_WIDTHS_STORAGE_KEY = 'firelink-download-column-widths';
 export const COLUMN_ORDER_STORAGE_KEY = 'firelink-download-column-order';
@@ -99,9 +142,8 @@ export const buildColumnGridTemplate = (
   const normalizedWidths = normalizeColumnWidths(widths);
   const orderedWidths = order.map(key => normalizedWidths[columnIndex(key)]);
   return [
-    ...orderedWidths.slice(0, -1).map(width => `${width}px`),
+    ...orderedWidths.map(width => `${width}px`),
     'minmax(0, 1fr)',
-    `${orderedWidths[orderedWidths.length - 1]}px`,
   ].join(' ');
 };
 
@@ -109,5 +151,5 @@ export const getColumnGridColumn = (
   key: DownloadTableColumnKey,
   order: DownloadTableColumnKey[]
 ): string | undefined => key === order[order.length - 1]
-  ? `${order.length + 1}`
+  ? `${order.length}`
   : undefined;
