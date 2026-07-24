@@ -7108,6 +7108,296 @@ mod tests {
     }
 
     #[test]
+    fn partial_connection_pool_collapse_recovers_after_degraded_throughput() {
+        let start = Instant::now();
+        let mut observation = Aria2ConnectionObservation::default();
+
+        for offset in 0..3 {
+            observe_aria2_connections(
+                &mut observation,
+                "gid-1",
+                "active",
+                100 * 1024 * 1024,
+                (10 + offset) * 1024 * 1024,
+                10.0 * 1024.0 * 1024.0,
+                16,
+                16,
+                false,
+                start + Duration::from_secs(offset),
+            );
+        }
+
+        assert_eq!(
+            observe_aria2_connections(
+                &mut observation,
+                "gid-1",
+                "active",
+                100 * 1024 * 1024,
+                13 * 1024 * 1024,
+                2.4 * 1024.0 * 1024.0,
+                12,
+                16,
+                false,
+                start + Duration::from_secs(31),
+            ),
+            None,
+            "the first partial collapse sample starts the degradation timer"
+        );
+        assert_eq!(
+            observe_aria2_connections(
+                &mut observation,
+                "gid-1",
+                "active",
+                100 * 1024 * 1024,
+                14 * 1024 * 1024,
+                2.4 * 1024.0 * 1024.0,
+                12,
+                16,
+                false,
+                start + Duration::from_secs(62),
+            ),
+            Some(Aria2RecoveryReason::ConnectionPoolCollapse)
+        );
+    }
+
+    #[test]
+    fn partial_connection_pool_collapse_stays_quiet_while_speed_limited() {
+        let start = Instant::now();
+        let mut observation = Aria2ConnectionObservation::default();
+
+        for offset in 0..3 {
+            observe_aria2_connections(
+                &mut observation,
+                "gid-1",
+                "active",
+                100 * 1024 * 1024,
+                (10 + offset) * 1024 * 1024,
+                1024.0 * 1024.0,
+                16,
+                16,
+                true,
+                start + Duration::from_secs(offset),
+            );
+        }
+
+        assert_eq!(
+            observe_aria2_connections(
+                &mut observation,
+                "gid-1",
+                "active",
+                100 * 1024 * 1024,
+                13 * 1024 * 1024,
+                1024.0 * 1024.0,
+                12,
+                16,
+                true,
+                start + Duration::from_secs(31),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn partial_connection_pool_recovery_is_bounded_until_a_healthy_window() {
+        let start = Instant::now();
+        let mut observation = Aria2ConnectionObservation::default();
+
+        for offset in 0..3 {
+            observe_aria2_connections(
+                &mut observation,
+                "gid-1",
+                "active",
+                100 * 1024 * 1024,
+                (10 + offset) * 1024 * 1024,
+                10.0 * 1024.0 * 1024.0,
+                16,
+                16,
+                false,
+                start + Duration::from_secs(offset),
+            );
+        }
+
+        let partial_sample = |observation: &mut Aria2ConnectionObservation, now: u64| {
+            observe_aria2_connections(
+                observation,
+                "gid-1",
+                "active",
+                100 * 1024 * 1024,
+                13 * 1024 * 1024 + now * 1024,
+                2.4 * 1024.0 * 1024.0,
+                12,
+                16,
+                false,
+                start + Duration::from_secs(now),
+            )
+        };
+
+        assert_eq!(partial_sample(&mut observation, 31), None);
+        assert_eq!(
+            partial_sample(&mut observation, 62),
+            Some(Aria2RecoveryReason::ConnectionPoolCollapse)
+        );
+        assert_eq!(
+            partial_sample(&mut observation, 108),
+            Some(Aria2RecoveryReason::ConnectionPoolCollapse)
+        );
+        assert_eq!(
+            partial_sample(&mut observation, 154),
+            Some(Aria2RecoveryReason::ConnectionPoolCollapse)
+        );
+        assert_eq!(partial_sample(&mut observation, 200), None);
+        assert_eq!(
+            partial_sample(&mut observation, 246),
+            None,
+            "the fourth failed recovery must be suppressed"
+        );
+        assert_eq!(
+            partial_sample(&mut observation, 292),
+            None
+        );
+
+        for offset in 1..=3 {
+            assert_eq!(
+                observe_aria2_connections(
+                    &mut observation,
+                    "gid-1",
+                    "active",
+                    100 * 1024 * 1024,
+                    (20 + offset) * 1024 * 1024,
+                    10.0 * 1024.0 * 1024.0,
+                    16,
+                    16,
+                    false,
+                    start + Duration::from_secs(292 + offset),
+                ),
+                None
+            );
+        }
+
+        assert_eq!(
+            observe_aria2_connections(
+                &mut observation,
+                "gid-1",
+                "active",
+                100 * 1024 * 1024,
+                24 * 1024 * 1024,
+                2.4 * 1024.0 * 1024.0,
+                12,
+                16,
+                false,
+                start + Duration::from_secs(338),
+            ),
+            None,
+            "a healthy window resets the recovery budget before the next degraded sample"
+        );
+        assert_eq!(
+            observe_aria2_connections(
+                &mut observation,
+                "gid-1",
+                "active",
+                100 * 1024 * 1024,
+                25 * 1024 * 1024,
+                2.4 * 1024.0 * 1024.0,
+                12,
+                16,
+                false,
+                start + Duration::from_secs(369),
+            ),
+            Some(Aria2RecoveryReason::ConnectionPoolCollapse)
+        );
+    }
+
+    #[test]
+    fn partial_connection_pool_zero_progress_uses_zero_progress_recovery() {
+        let start = Instant::now();
+        let mut observation = Aria2ConnectionObservation::default();
+
+        for offset in 0..3 {
+            observe_aria2_connections(
+                &mut observation,
+                "gid-1",
+                "active",
+                100 * 1024 * 1024,
+                (10 + offset) * 1024 * 1024,
+                10.0 * 1024.0 * 1024.0,
+                16,
+                16,
+                false,
+                start + Duration::from_secs(offset),
+            );
+        }
+
+        assert_eq!(
+            observe_aria2_connections(
+                &mut observation,
+                "gid-1",
+                "active",
+                100 * 1024 * 1024,
+                12 * 1024 * 1024,
+                0.0,
+                12,
+                16,
+                false,
+                start + Duration::from_secs(31),
+            ),
+            None
+        );
+        assert_eq!(
+            observe_aria2_connections(
+                &mut observation,
+                "gid-1",
+                "active",
+                100 * 1024 * 1024,
+                12 * 1024 * 1024,
+                0.0,
+                12,
+                16,
+                false,
+                start + Duration::from_secs(62),
+            ),
+            Some(Aria2RecoveryReason::ZeroProgress)
+        );
+    }
+
+    #[test]
+    fn one_connection_recovery_requires_a_healthy_multi_connection_baseline() {
+        let start = Instant::now();
+        let mut observation = Aria2ConnectionObservation::default();
+
+        observe_aria2_connections(
+            &mut observation,
+            "gid-1",
+            "active",
+            100 * 1024 * 1024,
+            10 * 1024 * 1024,
+            10.0 * 1024.0 * 1024.0,
+            16,
+            16,
+            false,
+            start,
+        );
+
+        for (offset, completed) in [(31, 11), (62, 12)] {
+            assert_eq!(
+                observe_aria2_connections(
+                    &mut observation,
+                    "gid-1",
+                    "active",
+                    100 * 1024 * 1024,
+                    completed * 1024 * 1024,
+                    128.0 * 1024.0,
+                    1,
+                    16,
+                    false,
+                    start + Duration::from_secs(offset),
+                ),
+                None,
+                "one transient multi-connection sample must not arm pool recovery"
+            );
+        }
+    }
+
+    #[test]
     fn one_startup_spike_does_not_arm_slow_recovery() {
         let start = Instant::now();
         let mut observation = Aria2ConnectionObservation::default();
@@ -8465,6 +8755,8 @@ struct Aria2ConnectionObservation {
     control_epoch: u64,
     saw_multiple_connections: bool,
     healthy_speed_samples: u8,
+    healthy_samples_since_recovery: u8,
+    recovery_attempts: u8,
     degraded_since: Option<Instant>,
     no_progress_since: Option<Instant>,
     last_refreshed_at: Option<Instant>,
@@ -8503,7 +8795,9 @@ const ARIA2_CONNECTION_RECOVERY_COOLDOWN: Duration = Duration::from_secs(45);
 const ARIA2_MIN_REMAINING_FOR_CONNECTION_RECOVERY: u64 = 1024 * 1024;
 const ARIA2_MIN_PEAK_SPEED_FOR_DEGRADED_RECOVERY: f64 = 64.0 * 1024.0;
 const ARIA2_DEGRADED_SPEED_FRACTION: f64 = 0.20;
+const ARIA2_CONNECTION_POOL_DEGRADED_FRACTION: f64 = 0.75;
 const ARIA2_MIN_HEALTHY_SPEED_SAMPLES: u8 = 3;
+const ARIA2_MAX_CONSECUTIVE_RECOVERY_ATTEMPTS: u8 = 3;
 
 #[cfg(test)]
 // Keep the test scenarios explicit while the production path uses the typed sample.
@@ -8584,10 +8878,10 @@ fn observe_aria2_connections_with_epoch(
         let multi_connection_candidate = requested_connections > 1
             && remaining >= ARIA2_MIN_REMAINING_FOR_CONNECTION_RECOVERY;
         if multi_connection_candidate {
-            if active_connections > 1
+            let healthy_connection_sample = active_connections > 1
                 && speed_bytes >= ARIA2_MIN_PEAK_SPEED_FOR_DEGRADED_RECOVERY
-                && speed_bytes >= observation.peak_speed_bytes * 0.5
-            {
+                && speed_bytes >= observation.peak_speed_bytes * 0.5;
+            if healthy_connection_sample {
                 observation.healthy_speed_samples = observation
                     .healthy_speed_samples
                     .saturating_add(1);
@@ -8599,12 +8893,48 @@ fn observe_aria2_connections_with_epoch(
                     >= ARIA2_MIN_PEAK_SPEED_FOR_DEGRADED_RECOVERY
                 && speed_bytes > 0.0
                 && speed_bytes < observation.peak_speed_bytes * ARIA2_DEGRADED_SPEED_FRACTION;
-            if slow_throughput {
+            let partial_connection_pool_collapse = !speed_limited
+                && observation.saw_multiple_connections
+                && observation.healthy_speed_samples >= ARIA2_MIN_HEALTHY_SPEED_SAMPLES
+                && requested_connections >= 4
+                && (active_connections as f64)
+                    <= (requested_connections as f64) * ARIA2_CONNECTION_POOL_DEGRADED_FRACTION
+                && observation.peak_speed_bytes >= ARIA2_MIN_PEAK_SPEED_FOR_DEGRADED_RECOVERY
+                && speed_bytes > 0.0
+                && speed_bytes < observation.peak_speed_bytes * 0.5;
+            let connection_pool_collapse = !speed_limited
+                && observation.saw_multiple_connections
+                && observation.healthy_speed_samples >= ARIA2_MIN_HEALTHY_SPEED_SAMPLES
+                && (active_connections <= 1 || partial_connection_pool_collapse);
+            if observation.recovery_attempts > 0 {
+                if !speed_limited
+                    && healthy_connection_sample
+                    && !slow_throughput
+                    && !connection_pool_collapse
+                {
+                    observation.healthy_samples_since_recovery = observation
+                        .healthy_samples_since_recovery
+                        .saturating_add(1);
+                    if observation.healthy_samples_since_recovery
+                        >= ARIA2_MIN_HEALTHY_SPEED_SAMPLES
+                    {
+                        observation.recovery_attempts = 0;
+                        observation.healthy_samples_since_recovery = 0;
+                    }
+                } else {
+                    observation.healthy_samples_since_recovery = 0;
+                }
+            }
+            if slow_throughput || connection_pool_collapse {
                 let degraded_since = observation.degraded_since.get_or_insert(now);
                 if now.duration_since(*degraded_since) >= ARIA2_CONNECTION_RECOVERY_DELAY
                     && reason.is_none()
                 {
-                    reason = Some(Aria2RecoveryReason::SlowThroughput);
+                    reason = Some(if slow_throughput {
+                        Aria2RecoveryReason::SlowThroughput
+                    } else {
+                        Aria2RecoveryReason::ConnectionPoolCollapse
+                    });
                 }
             } else {
                 observation.degraded_since = None;
@@ -8612,13 +8942,6 @@ fn observe_aria2_connections_with_epoch(
 
             if active_connections > 1 {
                 observation.saw_multiple_connections = true;
-            } else if !speed_limited && observation.saw_multiple_connections {
-                let degraded_since = observation.degraded_since.get_or_insert(now);
-                if now.duration_since(*degraded_since) >= ARIA2_CONNECTION_RECOVERY_DELAY
-                    && reason.is_none()
-                {
-                    reason = Some(Aria2RecoveryReason::ConnectionPoolCollapse);
-                }
             }
         } else {
             observation.degraded_since = None;
@@ -8632,15 +8955,18 @@ fn observe_aria2_connections_with_epoch(
 
     let recovery_allowed = observation.last_refreshed_at.is_none_or(|last| {
         now.duration_since(last) >= ARIA2_CONNECTION_RECOVERY_COOLDOWN
-    });
+    }) && observation.recovery_attempts < ARIA2_MAX_CONSECUTIVE_RECOVERY_ATTEMPTS;
     if !recovery_allowed {
         return None;
     }
 
     if let Some(reason) = reason {
         observation.last_refreshed_at = Some(now);
+        observation.recovery_attempts = observation.recovery_attempts.saturating_add(1);
+        observation.healthy_samples_since_recovery = 0;
         // Start a fresh observation window after every attempt. This permits
-        // repeated healing while preventing a refresh loop every poll tick.
+        // bounded repeated healing while preventing a refresh loop every poll
+        // tick or indefinitely repeating against a host-side connection cap.
         match reason {
             Aria2RecoveryReason::ZeroProgress => observation.no_progress_since = Some(now),
             Aria2RecoveryReason::SlowThroughput

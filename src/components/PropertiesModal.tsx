@@ -471,27 +471,44 @@ export const PropertiesModal = () => {
                 {t($ => $.properties.savedPerDownload)}
               </div>
               
-              <label className="text-xs text-text-muted text-right">{t($ => $.properties.speed)}</label>
-              <div className="flex items-center gap-3">
-                <label className="flex items-center gap-2 text-xs text-text-primary">
-                      <input type="checkbox" checked={speedLimitEnabled} onChange={e => setSpeedLimitEnabled(e.target.checked)} disabled={transferLocked} className="rounded border-border-modal text-blue-500 focus:ring-blue-500/20 bg-bg-input disabled:opacity-50" />
+              <label className="text-xs text-text-muted text-right">{t($ => $.properties.speedCap)}</label>
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="inline-flex min-h-7 items-center gap-2 rounded-md border border-border-modal bg-bg-input px-2.5 py-1.5 text-xs text-text-primary">
+                  <input
+                    type="checkbox"
+                    checked={speedLimitEnabled}
+                    onChange={e => setSpeedLimitEnabled(e.target.checked)}
+                    disabled={transferLocked}
+                    className="accent-accent disabled:opacity-50"
+                  />
                   {t($ => $.properties.limit)}
                 </label>
                 {speedLimitEnabled && (
                   <div className="flex items-center gap-2">
-                          <input type="number" value={speedLimitValue} min={1} step={128} onChange={e=>setSpeedLimitValue(e.target.value)} disabled={transferLocked} className="w-20 bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-50" />
+                    <input
+                      type="number"
+                      value={speedLimitValue}
+                      min={1}
+                      step={128}
+                      onChange={e => setSpeedLimitValue(e.target.value)}
+                      disabled={transferLocked}
+                      className="app-control w-24 px-2.5 py-1.5 text-end text-xs font-mono disabled:opacity-50"
+                    />
                     <span className="text-xs text-text-muted">KiB/s</span>
                   </div>
                 )}
               </div>
+              <div className="col-start-2 text-[11px] text-text-muted">
+                {t($ => $.properties.savedPerDownload)}
+              </div>
               {(liveSpeedLimitAvailable || liveSpeedLimitUnavailable) && (
-                <div className="col-start-2 rounded-md border border-border-modal/60 bg-border-color/20 p-3 space-y-2">
+                <div className="col-start-2 rounded-lg border border-border-modal bg-bg-input/30 p-3 space-y-2">
                   {liveSpeedLimitAvailable ? (
                     <>
-                      <label htmlFor="live-speed-limit" className="block text-xs font-medium text-text-primary">
+                      <label htmlFor="live-speed-limit" className="block text-xs font-semibold text-text-primary">
                         {t($ => $.properties.liveSpeedLimit)}
                       </label>
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <input
                           id="live-speed-limit"
                           type="text"
@@ -501,7 +518,7 @@ export const PropertiesModal = () => {
                           placeholder={t($ => $.properties.liveSpeedLimitPlaceholder)}
                           disabled={isLiveSpeedLimitPending}
                           aria-describedby="live-speed-limit-hint"
-                          className="w-28 bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-50"
+                          className="app-control w-32 px-2.5 py-1.5 text-xs font-mono disabled:opacity-50"
                         />
                         <button
                           type="button"
