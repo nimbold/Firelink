@@ -33,17 +33,22 @@ import { localeDirection, localePluralVariant, resolveAppLocale } from '../i18n/
 import {
   canSubmitMetadataRows,
   appendRequestUrlsAfterVersion,
+  commonMediaFormatsForRows,
   commonMediaQualitiesForRows,
   mediaFileNameForSelectedFormat,
+  mediaFormatForFormat,
+  mediaQualityForFormat,
   mediaQualityForRow,
+  mediaTypeForFormat,
   mediaFormatSelectorForRow,
   metadataSummaryState,
   playlistFilePrefix,
   reconcileDownloadRows,
   refreshFailedMetadataRows,
-  selectExactMediaQuality,
+  selectExactMediaSelection,
   updateRowIfCurrent,
-  type AddDownloadDraftRow
+  type AddDownloadDraftRow,
+  type MediaSelection
 } from '../utils/addDownloadMetadata';
 
 const formatBytes = (bytes: number) => {
@@ -189,6 +194,9 @@ export const AddDownloadsModal = () => {
   const [password, setPassword] = useState('');
 
   const [advancedExpanded, setAdvancedExpanded] = useState(false);
+  const [playlistQualityExpanded, setPlaylistQualityExpanded] = useState(true);
+  const playlistMediaSelectionsRef = useRef(new Map<string, MediaSelection>());
+  const [playlistMediaTypeSelections, setPlaylistMediaTypeSelections] = useState<Record<string, MediaSelection['mediaType']>>({});
   const [checksumEnabled, setChecksumEnabled] = useState(false);
   const [checksumAlgo, setChecksumAlgo] = useState('SHA-256');
   const [checksumValue, setChecksumValue] = useState('');
@@ -248,6 +256,9 @@ export const AddDownloadsModal = () => {
       setPlaylistExpansions({});
       playlistRequestsRef.current.clear();
       latestPlaylistRequestRef.current.clear();
+      playlistMediaSelectionsRef.current.clear();
+      setPlaylistMediaTypeSelections({});
+      setPlaylistQualityExpanded(true);
       return;
     }
 
@@ -276,6 +287,9 @@ export const AddDownloadsModal = () => {
     metadataRequestsRef.current.clear();
     playlistRequestsRef.current.clear();
     latestPlaylistRequestRef.current.clear();
+    playlistMediaSelectionsRef.current.clear();
+    setPlaylistMediaTypeSelections({});
+    setPlaylistQualityExpanded(true);
     setSelectedItemIndex(null);
     setPendingUseSharedDestination(false);
     setPendingDestinationOverrides({});
@@ -325,6 +339,8 @@ export const AddDownloadsModal = () => {
     // arrives instead of reusing entries extracted under stale cookies.
     setPlaylistExpansions({});
     latestPlaylistRequestRef.current.clear();
+    playlistMediaSelectionsRef.current.clear();
+    setPlaylistMediaTypeSelections({});
     setUrls(current => appendRequestUrlsAfterVersion(
       current,
       pendingAddRequestContexts,
@@ -386,6 +402,17 @@ export const AddDownloadsModal = () => {
         latestPlaylistRequestRef.current.delete(sourceUrl);
       }
     }
+    for (const sourceUrl of playlistMediaSelectionsRef.current.keys()) {
+      if (!activeUrls.has(sourceUrl)) {
+        playlistMediaSelectionsRef.current.delete(sourceUrl);
+      }
+    }
+    setPlaylistMediaTypeSelections(current => {
+      const retained = Object.fromEntries(
+        Object.entries(current).filter(([sourceUrl]) => activeUrls.has(sourceUrl))
+      );
+      return Object.keys(retained).length === Object.keys(current).length ? current : retained;
+    });
     setPlaylistExpansions(current => {
       const retained = Object.fromEntries(
         Object.entries(current).filter(([sourceUrl]) => activeUrls.has(sourceUrl))
@@ -532,6 +559,26 @@ export const AddDownloadsModal = () => {
                   type: quality.toLowerCase().includes('audio') ? 'Audio' : 'Video'
                 };
               });
+              const requestedSelection = row.playlistSourceUrl
+                ? playlistMediaSelectionsRef.current.get(row.playlistSourceUrl)
+                : undefined;
+              const requestedFormatIndex = requestedSelection
+                ? mappedFormats.findIndex(format =>
+                    mediaTypeForFormat(format) === requestedSelection.mediaType
+                    && mediaFormatForFormat(format) === requestedSelection.format
+                    && mediaQualityForFormat(format) === requestedSelection.quality
+                  )
+                : -1;
+              const fallbackFormatIndex = requestedSelection
+                ? mappedFormats.findIndex(format =>
+                    mediaTypeForFormat(format) === requestedSelection.mediaType
+                    && mediaQualityForFormat(format) === requestedSelection.quality
+                  )
+                : -1;
+              const selectedFormatIndex = requestedFormatIndex >= 0
+                ? requestedFormatIndex
+                : fallbackFormatIndex >= 0 ? fallbackFormatIndex : 0;
+              const selectedFormat = mappedFormats[selectedFormatIndex];
               setParsedItems(current => updateRowIfCurrent(
                 current,
                 row.id,
@@ -541,13 +588,13 @@ export const AddDownloadsModal = () => {
                   ...currentRow,
                   downloadUrl: row.sourceUrl,
                   file: canonicalizeDownloadFileName(
-                    `${playlistFilePrefix(row.playlistIndex, row.playlistCount)}${mediaData.title}.${mediaData.formats[0].ext}`
+                    `${playlistFilePrefix(row.playlistIndex, row.playlistCount)}${mediaData.title}.${selectedFormat.ext}`
                   ),
-                  size: mappedFormats[0].bytes ? mappedFormats[0].detail : undefined,
-                  sizeBytes: mappedFormats[0].bytes || undefined,
+                  size: selectedFormat.bytes ? selectedFormat.detail : undefined,
+                  sizeBytes: selectedFormat.bytes || undefined,
                   status: 'ready',
                   formats: mappedFormats,
-                  selectedFormat: 0,
+                  selectedFormat: selectedFormatIndex,
                   playlistError: undefined
                 })
               ));
@@ -1267,11 +1314,23 @@ export const AddDownloadsModal = () => {
     });
   };
 
+  const clearPlaylistMediaSelection = (sourceUrl: string | undefined) => {
+    if (!sourceUrl) return;
+    playlistMediaSelectionsRef.current.delete(sourceUrl);
+    setPlaylistMediaTypeSelections(current => {
+      if (!(sourceUrl in current)) return current;
+      const next = { ...current };
+      delete next[sourceUrl];
+      return next;
+    });
+  };
+
   const selectMediaFormat = (index: number) => {
     if (selectedItemIndex === null) return;
     const selectedItem = parsedItems[selectedItemIndex];
     const format = selectedItem?.formats?.[index];
     if (!selectedItem || !format) return;
+    clearPlaylistMediaSelection(selectedItem.playlistSourceUrl);
 
     setParsedItems(items => items.map((item, itemIndex) =>
       itemIndex === selectedItemIndex
@@ -1290,13 +1349,119 @@ export const AddDownloadsModal = () => {
   };
 
   const selectedItems = parsedItems.filter(item => item.selected !== false);
-  const selectedReadyMediaItems = selectedItems.filter(item =>
+  const selectedItem = selectedItemIndex === null ? undefined : parsedItems[selectedItemIndex];
+  const selectedPlaylistSourceUrl = selectedItem?.playlistSourceUrl;
+  const selectedPlaylistRows = selectedPlaylistSourceUrl
+    ? parsedItems.filter(item => item.playlistSourceUrl === selectedPlaylistSourceUrl && item.selected !== false)
+    : [];
+  const selectedPlaylistReadyRows = selectedPlaylistRows.filter(item =>
     item.isMedia && item.status === 'ready' && Boolean(item.formats?.length)
   );
-  const bulkQualityOptions = commonMediaQualitiesForRows(selectedReadyMediaItems);
-  const applyBulkMediaQuality = (quality: string) => {
-    const selectedIds = selectedReadyMediaItems.map(item => item.id);
-    setParsedItems(items => selectExactMediaQuality(items, selectedIds, quality));
+  const selectedPlaylistFormatObject = selectedItem?.formats?.[selectedItem.selectedFormat ?? -1]
+    || selectedPlaylistReadyRows[0]?.formats?.[selectedPlaylistReadyRows[0].selectedFormat ?? -1];
+  const detectedPlaylistMediaType = selectedPlaylistFormatObject
+    ? mediaTypeForFormat(selectedPlaylistFormatObject)
+    : 'Video';
+  const playlistVideoFormatOptions = commonMediaFormatsForRows(selectedPlaylistRows, 'Video');
+  const playlistAudioFormatOptions = commonMediaFormatsForRows(selectedPlaylistRows, 'Audio');
+  const requestedPlaylistMediaType = selectedPlaylistSourceUrl
+    ? playlistMediaTypeSelections[selectedPlaylistSourceUrl]
+    : undefined;
+  const selectedPlaylistMediaType = requestedPlaylistMediaType === 'Audio' && playlistAudioFormatOptions.length > 0
+    ? 'Audio'
+      : requestedPlaylistMediaType === 'Video' && playlistVideoFormatOptions.length > 0
+      ? 'Video'
+      : detectedPlaylistMediaType === 'Audio' && playlistAudioFormatOptions.length > 0
+        ? 'Audio'
+        : playlistVideoFormatOptions.length > 0 ? 'Video' : 'Audio';
+  const playlistFormatOptions = selectedPlaylistMediaType === 'Audio'
+    ? playlistAudioFormatOptions
+    : playlistVideoFormatOptions;
+  const hasPlaylistFormatOptions = playlistVideoFormatOptions.length > 0
+    || playlistAudioFormatOptions.length > 0;
+  const currentPlaylistFormat = selectedPlaylistFormatObject
+    ? mediaFormatForFormat(selectedPlaylistFormatObject)
+    : undefined;
+  const selectedPlaylistFormat = currentPlaylistFormat && playlistFormatOptions.includes(currentPlaylistFormat)
+    ? currentPlaylistFormat
+    : playlistFormatOptions[0];
+  const playlistQualityOptions = selectedPlaylistFormat
+    ? commonMediaQualitiesForRows(
+        selectedPlaylistRows,
+        selectedPlaylistMediaType,
+        selectedPlaylistFormat
+      )
+    : [];
+  const playlistSelectionForRow = (row: AddDownloadDraftRow): MediaSelection | undefined => {
+    const format = row.formats?.[row.selectedFormat ?? -1];
+    return format ? {
+      mediaType: mediaTypeForFormat(format),
+      format: mediaFormatForFormat(format),
+      quality: mediaQualityForFormat(format)
+    } : undefined;
+  };
+  const appliedPlaylistSelection = selectedPlaylistReadyRows.length > 0
+    ? (() => {
+        const firstSelection = playlistSelectionForRow(selectedPlaylistReadyRows[0]);
+        return firstSelection && selectedPlaylistReadyRows.every(row => {
+          const selection = playlistSelectionForRow(row);
+          return selection?.mediaType === firstSelection.mediaType
+            && selection.format === firstSelection.format
+            && selection.quality === firstSelection.quality;
+        })
+          ? firstSelection
+          : undefined;
+      })()
+    : undefined;
+  const appliedPlaylistFormat = selectedPlaylistReadyRows.length > 0
+    ? (() => {
+        const firstSelection = playlistSelectionForRow(selectedPlaylistReadyRows[0]);
+        return firstSelection
+          && firstSelection.mediaType === selectedPlaylistMediaType
+          && selectedPlaylistReadyRows.every(row => {
+            const selection = playlistSelectionForRow(row);
+            return selection?.mediaType === selectedPlaylistMediaType
+              && selection.format === firstSelection.format;
+          })
+          ? firstSelection.format
+          : undefined;
+      })()
+    : undefined;
+  const applyPlaylistMediaSelection = (selection: MediaSelection) => {
+    if (!selectedPlaylistSourceUrl) return;
+    playlistMediaSelectionsRef.current.set(selectedPlaylistSourceUrl, selection);
+    setPlaylistMediaTypeSelections(current => ({
+      ...current,
+      [selectedPlaylistSourceUrl]: selection.mediaType
+    }));
+    const selectedIds = selectedPlaylistReadyRows.map(item => item.id);
+    setParsedItems(items => selectExactMediaSelection(items, selectedIds, selection));
+  };
+  const applyPlaylistMediaQuality = (quality: string) => {
+    if (!selectedPlaylistFormat) return;
+    applyPlaylistMediaSelection({
+      mediaType: selectedPlaylistMediaType,
+      format: selectedPlaylistFormat,
+      quality
+    });
+  };
+  const applyPlaylistMediaFormat = (format: string) => {
+    const qualityOptions = commonMediaQualitiesForRows(
+      selectedPlaylistRows,
+      selectedPlaylistMediaType,
+      format
+    );
+    const currentQuality = appliedPlaylistSelection?.quality
+      || mediaQualityForRow(selectedPlaylistReadyRows[0]);
+    const quality = currentQuality && qualityOptions.includes(currentQuality)
+      ? currentQuality
+      : qualityOptions[0];
+    if (!quality) return;
+    applyPlaylistMediaSelection({
+      mediaType: selectedPlaylistMediaType,
+      format,
+      quality
+    });
   };
   const allRowsSelected = parsedItems.length > 0 && selectedItems.length === parsedItems.length;
   const requiredBytes = selectedItems.reduce((acc, item) => acc + (item.sizeBytes || 0), 0);
@@ -1574,34 +1739,6 @@ export const AddDownloadsModal = () => {
           <div className="add-download-settings w-[45%] flex flex-col overflow-y-auto">
             <div className="p-6 space-y-5">
 
-              {selectedReadyMediaItems.length > 1 ? (
-                <section className="add-download-section add-download-media-section relative overflow-hidden p-4">
-                  <div className="flex flex-col gap-1.5 relative z-10">
-                    <label className="text-[10px] uppercase font-bold tracking-wider text-text-muted">
-                      {t($ => $.addDownloads.applyQualityToSelected)}
-                    </label>
-                    {bulkQualityOptions.length > 0 ? (
-                      <div className="flex flex-wrap gap-1.5" role="group" aria-label={t($ => $.addDownloads.applyQualityToSelected)}>
-                        {bulkQualityOptions.map(quality => (
-                          <button
-                            key={quality}
-                            type="button"
-                            onClick={() => applyBulkMediaQuality(quality)}
-                            className="add-download-quality-chip add-download-quality-chip-button"
-                          >
-                            {quality}
-                          </button>
-                        ))}
-                      </div>
-                    ) : (
-                      <span className="text-[10px] text-text-muted">
-                        {t($ => $.addDownloads.noCommonQuality)}
-                      </span>
-                    )}
-                  </div>
-                </section>
-              ) : null}
-
               {/* Media Format (Dynamic) */}
               {selectedItemIndex !== null && parsedItems[selectedItemIndex]?.isMedia && (
                 <section className="add-download-section add-download-media-section relative overflow-hidden p-4">
@@ -1660,12 +1797,131 @@ export const AddDownloadsModal = () => {
                         })}
                       </div>
                     </div>
-                  </div>
+                    </div>
                   ) : (
                     <div className="flex flex-col items-center justify-center py-4 relative z-10">
                       <span className="text-xs text-red-400 font-medium">{t($ => $.addDownloads.metadataUnavailable)}</span>
                     </div>
                   )}
+
+                  {selectedPlaylistSourceUrl && selectedPlaylistReadyRows.length > 0 ? (
+                    <div className="add-download-playlist-quality relative z-10">
+                      <button
+                        type="button"
+                        className="add-download-playlist-quality-toggle"
+                        aria-expanded={playlistQualityExpanded}
+                        onClick={() => setPlaylistQualityExpanded(expanded => !expanded)}
+                      >
+                        <span className="min-w-0 text-start">
+                          <span className="block text-xs font-semibold text-text-primary">
+                            {t($ => $.addDownloads.playlistQuality)}
+                          </span>
+                          <span className="mt-0.5 block text-[10px] text-text-muted">
+                            {t($ => $.addDownloads.playlistQualitySelected, {
+                              selected: selectedPlaylistRows.length,
+                              total: parsedItems.filter(item => item.playlistSourceUrl === selectedPlaylistSourceUrl).length
+                            })}
+                          </span>
+                        </span>
+                        {playlistQualityExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+                      </button>
+
+                      {playlistQualityExpanded ? (
+                        hasPlaylistFormatOptions ? (
+                          <>
+                            {playlistVideoFormatOptions.length > 0 && playlistAudioFormatOptions.length > 0 ? (
+                              <div className="add-download-playlist-media-type" role="tablist" aria-label={t($ => $.addDownloads.mediaFormat)}>
+                                <button
+                                  type="button"
+                                  role="tab"
+                                  aria-selected={selectedPlaylistMediaType === 'Video'}
+                                  onClick={() => selectedPlaylistSourceUrl && setPlaylistMediaTypeSelections(current => ({
+                                    ...current,
+                                    [selectedPlaylistSourceUrl]: 'Video'
+                                  }))}
+                                  className={`add-download-playlist-media-type-option ${selectedPlaylistMediaType === 'Video' ? 'is-selected' : ''}`}
+                                >
+                                  <Film size={13} /> {t($ => $.addDownloads.video)}
+                                </button>
+                                <button
+                                  type="button"
+                                  role="tab"
+                                  aria-selected={selectedPlaylistMediaType === 'Audio'}
+                                  onClick={() => selectedPlaylistSourceUrl && setPlaylistMediaTypeSelections(current => ({
+                                    ...current,
+                                    [selectedPlaylistSourceUrl]: 'Audio'
+                                  }))}
+                                  className={`add-download-playlist-media-type-option ${selectedPlaylistMediaType === 'Audio' ? 'is-selected' : ''}`}
+                                >
+                                  <Music size={13} /> {t($ => $.addDownloads.audio)}
+                                </button>
+                              </div>
+                            ) : null}
+
+                            <div className="add-download-playlist-quality-options mt-2">
+                              <div className="add-download-playlist-quality-column">
+                                <div className="add-download-playlist-quality-label">{t($ => $.addDownloads.quality)}</div>
+                                {playlistQualityOptions.length > 0 ? (
+                                  <div className="add-download-playlist-quality-list" role="radiogroup" aria-label={t($ => $.addDownloads.quality)}>
+                                    {playlistQualityOptions.map(quality => {
+                                      const isApplied = appliedPlaylistSelection?.mediaType === selectedPlaylistMediaType
+                                        && appliedPlaylistSelection.format === selectedPlaylistFormat
+                                        && appliedPlaylistSelection.quality === quality;
+                                      return (
+                                        <button
+                                          key={quality}
+                                          type="button"
+                                          role="radio"
+                                          aria-checked={isApplied}
+                                          onClick={() => applyPlaylistMediaQuality(quality)}
+                                          className={`add-download-quality-option ${isApplied ? 'is-selected' : ''}`}
+                                        >
+                                          <span className="add-download-quality-option-radio" aria-hidden="true" />
+                                          <span className="flex-1 text-start">{quality}</span>
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                ) : (
+                                  <span className="text-[10px] text-text-muted">
+                                    {t($ => $.addDownloads.noCommonQuality)}
+                                  </span>
+                                )}
+                              </div>
+
+                              {playlistFormatOptions.length > 0 ? (
+                                <div className="add-download-playlist-quality-column">
+                                  <div className="add-download-playlist-quality-label">{t($ => $.addDownloads.format)}</div>
+                                  <div className="add-download-playlist-quality-list" role="radiogroup" aria-label={t($ => $.addDownloads.format)}>
+                                    {playlistFormatOptions.map(format => {
+                                      const isApplied = appliedPlaylistFormat === format;
+                                      return (
+                                        <button
+                                          key={format}
+                                          type="button"
+                                          role="radio"
+                                          aria-checked={isApplied}
+                                          onClick={() => applyPlaylistMediaFormat(format)}
+                                          className={`add-download-quality-option ${isApplied ? 'is-selected' : ''}`}
+                                        >
+                                          <span className="add-download-quality-option-radio" aria-hidden="true" />
+                                          <span className="flex-1 text-start font-mono">{format}</span>
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              ) : null}
+                            </div>
+                          </>
+                        ) : (
+                          <div className="px-3 py-2 text-[10px] text-text-muted">
+                            {t($ => $.addDownloads.noCommonFormat)}
+                          </div>
+                        )
+                      ) : null}
+                    </div>
+                  ) : null}
                 </section>
               )}
 

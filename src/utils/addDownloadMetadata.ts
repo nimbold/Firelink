@@ -21,6 +21,14 @@ export interface AddMediaFormat {
   isApproximate?: boolean;
 }
 
+export type MediaType = 'Audio' | 'Video';
+
+export interface MediaSelection {
+  mediaType: MediaType;
+  format: string;
+  quality: string;
+}
+
 export interface AddDownloadDraftRow {
   id: string;
   sourceUrl: string;
@@ -353,6 +361,14 @@ export const mediaQualityForFormat = (
   return label || normalizeMediaQualityLabel(format.type) || normalizeMediaQualityLabel(format.ext.toUpperCase()) || 'Media';
 };
 
+export const mediaTypeForFormat = (
+  format: Pick<AddMediaFormat, 'type'>
+): MediaType => format.type.toLowerCase().includes('audio') ? 'Audio' : 'Video';
+
+export const mediaFormatForFormat = (
+  format: Pick<AddMediaFormat, 'ext'>
+): string => normalizeMediaQualityLabel(format.ext.replace(/^\.+/, '').toUpperCase()) || 'MEDIA';
+
 export const mediaQualityForRow = (
   row: Pick<AddDownloadDraftRow, 'isMedia' | 'status' | 'formats' | 'selectedFormat'>
 ): string | undefined => {
@@ -362,17 +378,45 @@ export const mediaQualityForRow = (
 };
 
 export const commonMediaQualitiesForRows = (
-  rows: ReadonlyArray<Pick<AddDownloadDraftRow, 'isMedia' | 'status' | 'formats'>>
+  rows: ReadonlyArray<Pick<AddDownloadDraftRow, 'isMedia' | 'status' | 'formats'>>,
+  mediaType?: MediaType,
+  mediaFormat?: string
 ): string[] => {
   const readyMediaRows = rows.filter(row => row.isMedia && row.status === 'ready' && row.formats?.length);
-  if (readyMediaRows.length < 2) return [];
+  if (readyMediaRows.length < 1) return [];
+
+  const matches = (format: AddMediaFormat) =>
+    (!mediaType || mediaTypeForFormat(format) === mediaType)
+    && (!mediaFormat || mediaFormatForFormat(format) === mediaFormat);
 
   const firstQualities = Array.from(new Set(
-    readyMediaRows[0].formats!.map(mediaQualityForFormat)
+    readyMediaRows[0].formats!.filter(matches).map(mediaQualityForFormat)
   ));
   return firstQualities.filter(quality => readyMediaRows.every(row =>
-    row.formats!.some(format => mediaQualityForFormat(format) === quality)
+    row.formats!.some(format => matches(format) && mediaQualityForFormat(format) === quality)
   ));
+};
+
+export const commonMediaFormatsForRows = (
+  rows: ReadonlyArray<Pick<AddDownloadDraftRow, 'isMedia' | 'status' | 'formats'>>,
+  mediaType: MediaType
+): string[] => {
+  const readyMediaRows = rows.filter(row => row.isMedia && row.status === 'ready' && row.formats?.length);
+  if (readyMediaRows.length < 1) return [];
+
+  const firstFormats = Array.from(new Set(
+    readyMediaRows[0].formats!
+      .filter(format => mediaTypeForFormat(format) === mediaType)
+      .map(mediaFormatForFormat)
+  ));
+  return firstFormats.filter(mediaFormat =>
+    readyMediaRows.every(row =>
+      row.formats!.some(format =>
+        mediaTypeForFormat(format) === mediaType && mediaFormatForFormat(format) === mediaFormat
+      )
+    )
+    && commonMediaQualitiesForRows(readyMediaRows, mediaType, mediaFormat).length > 0
+  );
 };
 
 export const selectExactMediaQuality = (
@@ -384,6 +428,34 @@ export const selectExactMediaQuality = (
   return rows.map(row => {
     if (!selected.has(row.id) || !row.isMedia || row.status !== 'ready' || !row.formats) return row;
     const selectedFormat = row.formats.findIndex(format => mediaQualityForFormat(format) === quality);
+    if (selectedFormat === -1) return row;
+    const format = row.formats[selectedFormat];
+    return {
+      ...row,
+      selectedFormat,
+      size: format.bytes ? format.detail : undefined,
+      sizeBytes: format.bytes || undefined,
+      file: mediaFileNameForSelectedFormat(row.file, {
+        formats: row.formats,
+        selectedFormat
+      })
+    };
+  });
+};
+
+export const selectExactMediaSelection = (
+  rows: AddDownloadDraftRow[],
+  selectedIds: ReadonlySet<string> | readonly string[],
+  selection: MediaSelection
+): AddDownloadDraftRow[] => {
+  const selected = selectedIds instanceof Set ? selectedIds : new Set(selectedIds);
+  return rows.map(row => {
+    if (!selected.has(row.id) || !row.isMedia || row.status !== 'ready' || !row.formats) return row;
+    const selectedFormat = row.formats.findIndex(format =>
+      mediaTypeForFormat(format) === selection.mediaType
+      && mediaFormatForFormat(format) === selection.format
+      && mediaQualityForFormat(format) === selection.quality
+    );
     if (selectedFormat === -1) return row;
     const format = row.formats[selectedFormat];
     return {

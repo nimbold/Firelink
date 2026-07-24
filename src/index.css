@@ -794,6 +794,147 @@ html[data-list-density="relaxed"] {
     box-shadow: inset 3px 0 0 hsl(272 74% 62% / 0.9);
   }
 
+  .add-download-playlist-quality {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid hsl(var(--border-modal));
+  }
+
+  .add-download-playlist-quality-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    gap: 10px;
+    padding: 7px 8px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    color: hsl(var(--text-primary));
+    text-align: start;
+    transition: background-color 100ms ease, border-color 100ms ease;
+  }
+
+  .add-download-playlist-quality-toggle:hover {
+    border-color: hsl(var(--border-modal));
+    background: hsl(var(--item-hover));
+  }
+
+  .add-download-playlist-quality-options {
+    display: grid;
+    grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.85fr);
+    gap: 12px;
+  }
+
+  .add-download-playlist-media-type {
+    display: inline-flex;
+    gap: 2px;
+    margin-top: 8px;
+    padding: 2px;
+    border: 1px solid hsl(var(--border-modal));
+    border-radius: 7px;
+    background: hsl(var(--bg-input) / 0.52);
+  }
+
+  .add-download-playlist-media-type-option {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 26px;
+    gap: 5px;
+    padding: 3px 9px;
+    border-radius: 5px;
+    color: hsl(var(--text-muted));
+    font-size: 11px;
+    font-weight: 650;
+    transition: background-color 100ms ease, color 100ms ease, box-shadow 100ms ease;
+  }
+
+  .add-download-playlist-media-type-option:hover {
+    color: hsl(var(--text-primary));
+  }
+
+  .add-download-playlist-media-type-option:focus-visible {
+    outline: 2px solid hsl(var(--accent-color) / 0.62);
+    outline-offset: 1px;
+  }
+
+  .add-download-playlist-media-type-option.is-selected {
+    background: hsl(var(--surface-raised) / 0.9);
+    box-shadow: 0 1px 2px hsl(var(--shadow-color) / 0.35);
+    color: hsl(var(--text-primary));
+  }
+
+  .add-download-playlist-quality-column {
+    min-width: 0;
+  }
+
+  .add-download-playlist-quality-label {
+    margin-bottom: 5px;
+    color: hsl(var(--text-muted));
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    line-height: 1.2;
+    text-transform: uppercase;
+  }
+
+  .add-download-playlist-quality-list {
+    display: flex;
+    flex-direction: column;
+    max-height: 166px;
+    gap: 3px;
+    overflow-y: auto;
+    padding-inline-end: 2px;
+  }
+
+  .add-download-playlist-quality-toggle:focus-visible,
+  .add-download-quality-option:focus-visible {
+    outline: 2px solid hsl(var(--accent-color) / 0.62);
+    outline-offset: 1px;
+  }
+
+  .add-download-quality-option {
+    display: flex;
+    align-items: center;
+    min-height: 32px;
+    gap: 9px;
+    padding: 6px 9px;
+    border: 1px solid hsl(var(--border-modal));
+    border-radius: 7px;
+    background: hsl(var(--bg-input) / 0.68);
+    color: hsl(var(--text-secondary));
+    font-size: 12px;
+    text-align: start;
+    transition: background-color 100ms ease, border-color 100ms ease, color 100ms ease;
+  }
+
+  .add-download-quality-option:hover {
+    border-color: hsl(var(--text-muted) / 0.58);
+    background: hsl(var(--item-hover));
+    color: hsl(var(--text-primary));
+  }
+
+  .add-download-quality-option.is-selected {
+    border-color: hsl(var(--accent-color) / 0.48);
+    background: hsl(var(--accent-color) / 0.1);
+    color: hsl(var(--text-primary));
+  }
+
+  .add-download-quality-option-radio {
+    flex: 0 0 auto;
+    width: 14px;
+    height: 14px;
+    border: 1px solid hsl(var(--text-muted) / 0.72);
+    border-radius: 50%;
+    background: transparent;
+  }
+
+  .add-download-quality-option.is-selected .add-download-quality-option-radio {
+    border-color: hsl(var(--accent-color));
+    background: hsl(var(--accent-color));
+    box-shadow: inset 0 0 0 3px hsl(var(--bg-input));
+  }
+
   .add-download-quality-chip,
   .download-quality-chip {
     display: inline-flex;
@@ -808,17 +949,6 @@ html[data-list-density="relaxed"] {
     font-weight: 700;
     line-height: 1.2;
     letter-spacing: 0.01em;
-  }
-
-  .add-download-quality-chip-button {
-    cursor: pointer;
-    transition: background-color 100ms ease, border-color 100ms ease;
-  }
-
-  .add-download-quality-chip-button:hover,
-  .add-download-quality-chip-button:focus-visible {
-    border-color: hsl(272 74% 62% / 0.72);
-    background: hsl(272 74% 58% / 0.24);
   }
 
   .add-download-select {

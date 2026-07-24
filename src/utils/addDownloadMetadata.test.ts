@@ -1,16 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import {
   appendRequestUrlsAfterVersion,
+  commonMediaFormatsForRows,
   canSubmitMetadataRows,
   commonMediaQualitiesForRows,
   mediaFormatSelectorForRow,
   mediaFileNameForSelectedFormat,
+  mediaFormatForFormat,
   mediaQualityForRow,
+  mediaTypeForFormat,
   metadataSummaryMessage,
   isYouTubePlaylistUrl,
   playlistFilePrefix,
   reconcileDownloadRows,
   refreshFailedMetadataRows,
+  selectExactMediaSelection,
   selectExactMediaQuality,
   updateRowIfCurrent,
   type AddDownloadDraftRow
@@ -560,6 +564,156 @@ describe('add download metadata workflow', () => {
 
     expect(commonMediaQualitiesForRows(rows)).toEqual(['720p']);
     expect(mediaQualityForRow(rows[0])).toBe('1080p');
+  });
+
+  it('keeps playlist choices available when one ready row remains selected', () => {
+    const formats = [
+      {
+        name: '720p MP4',
+        quality: '720p',
+        selector: '720',
+        ext: 'mp4',
+        formatLabel: 'MP4 • H.264',
+        detail: '10 MB',
+        type: 'Video',
+        bytes: 10
+      },
+      {
+        name: 'Audio only M4A',
+        quality: 'Audio only',
+        selector: 'audio',
+        ext: 'm4a',
+        formatLabel: 'M4A • AAC',
+        detail: '4 MB',
+        type: 'Audio',
+        bytes: 4
+      }
+    ];
+    const selectedRow = row({ isMedia: true, formats, selectedFormat: 0 });
+
+    expect(commonMediaFormatsForRows([selectedRow], 'Video')).toEqual(['MP4']);
+    expect(commonMediaQualitiesForRows([selectedRow], 'Video', 'MP4')).toEqual(['720p']);
+    expect(commonMediaFormatsForRows([selectedRow], 'Audio')).toEqual(['M4A']);
+    expect(commonMediaQualitiesForRows([selectedRow], 'Audio', 'M4A')).toEqual(['Audio only']);
+  });
+
+  it('does not offer a shared format when its qualities do not overlap', () => {
+    const format = (quality: string, id: string) => [{
+      name: `${quality} MP4`,
+      quality,
+      selector: id,
+      ext: 'mp4',
+      formatLabel: 'MP4 • H.264',
+      detail: '10 MB',
+      type: 'Video',
+      bytes: 10
+    }];
+    const rows = [
+      row({ id: 'one', isMedia: true, formats: format('1080p', 'one'), selectedFormat: 0 }),
+      row({ id: 'two', isMedia: true, formats: format('720p', 'two'), selectedFormat: 0 })
+    ];
+
+    expect(commonMediaFormatsForRows(rows, 'Video')).toEqual([]);
+  });
+
+  it('filters playlist choices by media type and format', () => {
+    const formats = (qualities: string[], idPrefix: string) => [
+      ...qualities.flatMap((quality, index) => [
+        {
+          name: `${quality} MKV`,
+          quality,
+          selector: `${idPrefix}-mkv-${index}`,
+          ext: 'mkv',
+          formatLabel: 'MKV • H.264',
+          detail: '10 MB',
+          type: 'Video',
+          bytes: 10
+        },
+        {
+          name: `${quality} MP4`,
+          quality,
+          selector: `${idPrefix}-mp4-${index}`,
+          ext: 'mp4',
+          formatLabel: 'MP4 • H.264',
+          detail: '10 MB',
+          type: 'Video',
+          bytes: 10
+        }
+      ]),
+      {
+        name: 'Audio only M4A',
+        quality: 'Audio only',
+        selector: `${idPrefix}-m4a`,
+        ext: 'm4a',
+        formatLabel: 'M4A • AAC',
+        detail: '4 MB',
+        type: 'Audio',
+        bytes: 4
+      },
+      {
+        name: 'Audio only WEBM',
+        quality: 'Audio only',
+        selector: `${idPrefix}-webm`,
+        ext: 'webm',
+        formatLabel: 'WEBM • Opus',
+        detail: '4 MB',
+        type: 'Audio',
+        bytes: 4
+      }
+    ];
+    const rows = [
+      row({ id: 'one', isMedia: true, formats: formats(['1080p', '720p'], 'one'), selectedFormat: 0 }),
+      row({ id: 'two', isMedia: true, formats: formats(['720p', '480p'], 'two'), selectedFormat: 0 })
+    ];
+
+    expect(commonMediaFormatsForRows(rows, 'Video')).toEqual(['MKV', 'MP4']);
+    expect(commonMediaQualitiesForRows(rows, 'Video', 'MP4')).toEqual(['720p']);
+    expect(commonMediaFormatsForRows(rows, 'Audio')).toEqual(['M4A', 'WEBM']);
+    expect(commonMediaQualitiesForRows(rows, 'Audio', 'M4A')).toEqual(['Audio only']);
+    expect(mediaTypeForFormat(rows[0].formats![4])).toBe('Audio');
+    expect(mediaFormatForFormat(rows[0].formats![4])).toBe('M4A');
+  });
+
+  it('applies an exact playlist media selection without falling back to another format', () => {
+    const formats = (id: string) => [
+      {
+        name: '720p MKV',
+        quality: '720p',
+        selector: `${id}-mkv`,
+        ext: 'mkv',
+        formatLabel: 'MKV • H.264',
+        detail: '10 MB',
+        type: 'Video',
+        bytes: 10
+      },
+      {
+        name: '720p MP4',
+        quality: '720p',
+        selector: `${id}-mp4`,
+        ext: 'mp4',
+        formatLabel: 'MP4 • H.264',
+        detail: '9 MB',
+        type: 'Video',
+        bytes: 9
+      }
+    ];
+    const rows = [
+      row({ id: 'one', isMedia: true, file: 'one.mkv', formats: formats('one'), selectedFormat: 0 }),
+      row({ id: 'two', isMedia: true, file: 'two.mkv', formats: formats('two'), selectedFormat: 0 })
+    ];
+
+    const selected = selectExactMediaSelection(rows, ['one', 'two'], {
+      mediaType: 'Video',
+      format: 'MP4',
+      quality: '720p'
+    });
+    expect(selected[0]).toMatchObject({ selectedFormat: 1, file: 'one.mp4' });
+    expect(selected[1]).toMatchObject({ selectedFormat: 1, file: 'two.mp4' });
+    expect(selectExactMediaSelection(rows, ['one', 'two'], {
+      mediaType: 'Video',
+      format: 'WEBM',
+      quality: '720p'
+    })).toEqual(rows);
   });
 
   it('applies an exact bulk quality without falling back to a higher or lower stream', () => {
