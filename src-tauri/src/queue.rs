@@ -1,4 +1,5 @@
 use crate::ipc::{DownloadStateEvent, DownloadStatus, QueueDirection};
+use crate::power::PowerManager;
 use crate::retry::{backoff_and_emit, is_transient_network_error, BackoffOutcome, MAX_RETRIES};
 use log;
 use serde::Deserialize;
@@ -8,6 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 use ts_rs::TS;
@@ -102,6 +104,20 @@ pub enum Aria2RefreshOutcome {
     Complete,
 }
 
+/// Result of rebuilding an aria2 job while retaining its partial file and
+/// queue permit. `Refresh` is the compatibility path for test/alternate
+/// spawners that do not own aria2's addUri options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Aria2RecreateOutcome {
+    NewGid(String),
+    Complete,
+    Refresh,
+    /// The old daemon job is gone and the replacement could not be created.
+    /// The queue manager must retire the stale mapping and surface a paused
+    /// lifecycle so the next user resume can enqueue a fresh job.
+    Unavailable(String),
+}
+
 /// What kind of sidecar a queued task spawns. Drives which runner the
 /// dispatcher invokes.
 #[derive(Debug, Clone)]
@@ -171,6 +187,19 @@ pub trait SidecarSpawner: Send + Sync + 'static {
     /// unpause; test spawners can leave this unsupported.
     async fn refresh_uri(&self, _gid: &str) -> Result<Aria2RefreshOutcome, String> {
         Err("aria2 connection refresh is unavailable".to_string())
+    }
+
+    /// Rebuild an active aria2 job with the current payload/options. The
+    /// partial file remains resumable because the production addUri path uses
+    /// continue + always-resume. Alternate spawners may return `Refresh` to
+    /// retain the older same-GID pause/unpause behavior.
+    async fn recreate_uri(
+        &self,
+        _id: &str,
+        _gid: &str,
+        _payload: &SpawnPayload,
+    ) -> Result<Aria2RecreateOutcome, String> {
+        Ok(Aria2RecreateOutcome::Refresh)
     }
 
     /// Change one active aria2 transfer's runtime download cap. Media
@@ -267,6 +296,9 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
     /// resume tasks capture this and abort when a later pause/remove wins.
     aria2_control_epochs: Mutex<HashMap<String, u64>>,
 
+    /// Backend-owned power policy and active-transfer accounting.
+    power_manager: Arc<PowerManager>,
+
     spawner: Arc<dyn SidecarSpawner>,
     app_handle: AppHandle<R>,
 }
@@ -316,9 +348,37 @@ impl<R: tauri::Runtime> QueueManager<R> {
             aria2_control_locks: Arc::new(StdMutex::new(HashMap::new())),
             aria2_gid_state: Mutex::new(()),
             aria2_control_epochs: Mutex::new(HashMap::new()),
+            power_manager: PowerManager::new(),
             spawner,
             app_handle,
         }
+    }
+
+    pub fn power_manager(&self) -> Arc<PowerManager> {
+        Arc::clone(&self.power_manager)
+    }
+
+    pub fn activate_power_management(&self) -> Result<(), String> {
+        self.power_manager.activate()
+    }
+
+    pub fn set_power_preferences(
+        &self,
+        prevent_system_sleep: bool,
+        prevent_display_sleep: bool,
+    ) -> Result<(), String> {
+        self.power_manager
+            .set_preferences(prevent_system_sleep, prevent_display_sleep)
+    }
+
+    pub fn set_system_sleep_prevention(&self, enabled: bool) -> Result<(), String> {
+        self.power_manager.set_system_prevention(enabled)
+    }
+
+    async fn sync_power_activity(&self) {
+        let active_transfers = self.active_permits.lock().await.len();
+        self.power_manager
+            .set_active_transfer_count(active_transfers);
     }
 
     /// Current pending order, as id list. Returned by move_in_queue.
@@ -848,6 +908,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .lock()
             .await
             .insert(id.to_string(), lifecycle_generation);
+        self.sync_power_activity().await;
         true
     }
 
@@ -935,6 +996,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 active: true,
             },
         );
+        self.sync_power_activity().await;
     }
 
     /// Park a candidate only when no newer lifecycle has already claimed the
@@ -1014,6 +1076,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .lock()
             .await
             .insert(id.to_string(), TaskKind::Aria2);
+        self.sync_power_activity().await;
         true
     }
 
@@ -1081,6 +1144,10 @@ impl<R: tauri::Runtime> QueueManager<R> {
         if removed || queue_removed {
             self.notify.notify_waiters();
         }
+        drop(_admission_gate);
+        if removed {
+            self.sync_power_activity().await;
+        }
     }
 
     async fn release_permit_for_generation(&self, id: &str, generation: u64) {
@@ -1108,6 +1175,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
         if removed {
             self.active_kinds.lock().await.remove(id);
             self.notify.notify_waiters();
+            drop(_admission_gate);
+            self.sync_power_activity().await;
         }
     }
 
@@ -1550,6 +1619,42 @@ impl<R: tauri::Runtime> QueueManager<R> {
         self.ignore_aria2_gid_locked(gid).await;
     }
 
+    async fn remove_stale_aria2_gid(&self, id: &str, gid: &str) {
+        const MAX_ATTEMPTS: usize = 3;
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.spawner.remove_uri(gid).await {
+                Ok(()) => {
+                    log::info!(
+                        "aria2 lifecycle cleanup [{}]: removed stale replacement gid {} on attempt {}",
+                        id,
+                        gid,
+                        attempt
+                    );
+                    return;
+                }
+                Err(error) if attempt < MAX_ATTEMPTS => {
+                    log::warn!(
+                        "aria2 lifecycle cleanup [{}]: failed to remove stale replacement gid {} on attempt {}: {}; retrying",
+                        id,
+                        gid,
+                        attempt,
+                        error
+                    );
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => {
+                    log::error!(
+                        "aria2 lifecycle cleanup [{}]: stale replacement gid {} could not be removed after {} attempts: {}",
+                        id,
+                        gid,
+                        MAX_ATTEMPTS,
+                        error
+                    );
+                }
+            }
+        }
+    }
+
     async fn ignore_aria2_gid_locked(&self, gid: &str) {
         const MAX_IGNORED_GIDS: usize = 1024;
         let mut ignored = self.aria2_ignored_gids.lock().await;
@@ -1613,7 +1718,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// persistent connection-pool collapse or a true zero-progress stall.
     /// The observed epoch must still own the GID before the refresh can act.
     pub async fn refresh_aria2_connections(
-        &self,
+        self: &Arc<Self>,
         id: &str,
         gid: &str,
         observed_epoch: u64,
@@ -1621,13 +1726,90 @@ impl<R: tauri::Runtime> QueueManager<R> {
         let _control_guard = self.acquire_aria2_control(id).await;
         if self.aria2_gid_for_download(id).as_deref() != Some(gid)
             || !self.is_registered(id).await
+            || !self.has_active_permit(id).await
             || self.is_aria2_retry_cancelled(id).await
             || !self.is_aria2_control_epoch_current(id, observed_epoch).await
         {
             return Ok(());
         }
 
-        let outcome = self.spawner.refresh_uri(gid).await?;
+        let payload = self.aria2_payloads.lock().await.get(id).cloned();
+        let recreation = if let Some(payload) = payload.as_ref() {
+            self.spawner.recreate_uri(id, gid, payload).await?
+        } else {
+            // Older persisted rows may briefly reach recovery before their
+            // payload has been rebuilt. Keep the current lifecycle intact and
+            // use the non-destructive fallback until the payload is present.
+            Aria2RecreateOutcome::Refresh
+        };
+
+        if let Aria2RecreateOutcome::NewGid(new_gid) = recreation {
+            if new_gid.trim().is_empty() || new_gid == gid {
+                return Err(format!(
+                    "aria2 connection recovery returned an invalid replacement gid for {gid}"
+                ));
+            }
+
+            let still_current = self.is_registered(id).await
+                && !self.is_aria2_retry_cancelled(id).await
+                && self.is_aria2_control_epoch_current(id, observed_epoch).await
+                && self.aria2_gid_for_download(id).as_deref() == Some(gid);
+            if !still_current {
+                self.ignore_aria2_gid(&new_gid).await;
+                drop(_control_guard);
+                self.remove_stale_aria2_gid(id, &new_gid).await;
+                log::info!(
+                    "aria2 connection recovery [{}]: replacement gid {} became stale before rebind",
+                    id,
+                    new_gid
+                );
+                return Ok(());
+            }
+
+            let buffered_outcome = self.remember_gid(id.to_string(), new_gid.clone()).await;
+            log::info!(
+                "aria2 connection recovery [{}]: recreated gid {} from {} while retaining the lifecycle permit",
+                id,
+                new_gid,
+                gid
+            );
+            drop(_control_guard);
+            if let Some(outcome) = buffered_outcome {
+                self.handle_aria2_event(&new_gid, outcome).await;
+            }
+            return Ok(());
+        }
+
+        let outcome = match recreation {
+            Aria2RecreateOutcome::Complete => Aria2RefreshOutcome::Complete,
+            Aria2RecreateOutcome::Refresh => self.spawner.refresh_uri(gid).await?,
+            Aria2RecreateOutcome::Unavailable(error) => {
+                let still_current = self.is_registered(id).await
+                    && self.has_active_permit(id).await
+                    && !self.is_aria2_retry_cancelled(id).await
+                    && self.is_aria2_control_epoch_current(id, observed_epoch).await
+                    && self.aria2_gid_for_download(id).as_deref() == Some(gid);
+                if !still_current {
+                    return Ok(());
+                }
+
+                self.next_aria2_control_epoch(id).await;
+                self.cancel_aria2_retries(id).await;
+                self.clear_aria2_retry_state(id).await;
+                self.forget_aria2_gid(id).await;
+                self.release_registered_id(id).await;
+                self.release_permit(id).await;
+                self.emit_state(id, DownloadStatus::Paused);
+                log::warn!(
+                    "aria2 connection recovery [{}]: replacement job unavailable; retired stale gid {} and paused the download: {}",
+                    id,
+                    gid,
+                    error
+                );
+                return Ok(());
+            }
+            Aria2RecreateOutcome::NewGid(_) => unreachable!("replacement gid handled above"),
+        };
 
         let still_current = self.is_registered(id).await
             && !self.is_aria2_retry_cancelled(id).await
@@ -2592,6 +2774,116 @@ impl SidecarSpawner for ProductionSpawner {
                 "aria2.changeOption returned unexpected result {value} for gid {gid}"
             )),
             None => Err("aria2.changeOption returned a non-string result".to_string()),
+        }
+    }
+
+    async fn recreate_uri(
+        &self,
+        id: &str,
+        gid: &str,
+        payload: &SpawnPayload,
+    ) -> Result<Aria2RecreateOutcome, String> {
+        let state = self.app_handle.state::<crate::AppState>();
+        let port = state.aria2_port.load(std::sync::atomic::Ordering::Relaxed);
+        let secret = &state.aria2_secret;
+
+        let status = match crate::aria2_download_status(port, secret, gid).await {
+            Ok(status) => Some(status),
+            Err(error) if crate::aria2_gid_not_found(&error) => {
+                log::warn!(
+                    "aria2 connection recovery [{}]: gid {} is already absent; rebuilding from the saved payload",
+                    id,
+                    gid
+                );
+                None
+            }
+            Err(error) => return Err(error),
+        };
+
+        if let Some(status) = status {
+            match status.as_str() {
+                "complete" => return Ok(Aria2RecreateOutcome::Complete),
+                "active" | "waiting" => {
+                    let pause_result = crate::rpc_call(
+                        port,
+                        secret,
+                        "aria2.forcePause",
+                        serde_json::json!([gid]),
+                    )
+                    .await;
+                    if let Err(error) = pause_result {
+                        match crate::aria2_download_status(port, secret, gid).await {
+                            Ok(status) if status == "paused" => {
+                                log::warn!(
+                                    "aria2 connection recovery [{}]: forcePause for gid {} returned an error after the daemon paused it: {}",
+                                    id,
+                                    gid,
+                                    error
+                                );
+                            }
+                            Ok(status) if status == "complete" => {
+                                return Ok(Aria2RecreateOutcome::Complete);
+                            }
+                            Ok(status) => {
+                                return Err(format!(
+                                    "failed to pause aria2 gid {gid} before recreation: {error}; daemon reports {status}"
+                                ));
+                            }
+                            Err(status_error) => {
+                                return Err(format!(
+                                    "failed to pause aria2 gid {gid} before recreation: {error}; status verification failed: {status_error}"
+                                ));
+                            }
+                        }
+                    }
+                }
+                "paused" => {}
+                "removed" => {}
+                other => {
+                    return Err(format!(
+                        "cannot recreate aria2 gid {gid} from daemon state {other}"
+                    ));
+                }
+            }
+        }
+
+        let remove_result = crate::rpc_call(
+            port,
+            secret,
+            "aria2.forceRemove",
+            serde_json::json!([gid]),
+        )
+        .await;
+        let remove_error = match remove_result {
+            Ok(result) => crate::ensure_aria2_gid_result("forceRemove", gid, &result)
+                .err()
+                .map(|error| error.to_string()),
+            Err(error) if crate::aria2_gid_not_found(&error) => None,
+            Err(error) => Some(error.to_string()),
+        };
+        if let Some(error) = remove_error {
+            match crate::aria2_download_status(port, secret, gid).await {
+                Ok(status) if status == "complete" => {
+                    return Ok(Aria2RecreateOutcome::Complete);
+                }
+                Ok(status) if status == "removed" => {}
+                Ok(status) => {
+                    return Err(format!(
+                        "failed to remove aria2 gid {gid} before recreation: {error}; daemon reports {status}"
+                    ));
+                }
+                Err(status_error) if crate::aria2_gid_not_found(&status_error) => {}
+                Err(status_error) => {
+                    return Err(format!(
+                        "failed to remove aria2 gid {gid} before recreation: {error}; status verification failed: {status_error}"
+                    ));
+                }
+            }
+        }
+
+        match self.add_uri(id, payload).await {
+            Ok(new_gid) => Ok(Aria2RecreateOutcome::NewGid(new_gid)),
+            Err(error) => Ok(Aria2RecreateOutcome::Unavailable(error)),
         }
     }
 

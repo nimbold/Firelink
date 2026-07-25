@@ -738,6 +738,8 @@ const common = {
       title: 'Power Management',
       preventSleep: 'Prevent system sleep while downloads are active',
       preventSleepDescription: 'The display may still turn off. Firelink only keeps the device awake enough to complete active transfers.',
+      preventDisplaySleep: 'Keep the display awake while downloads are active',
+      preventDisplaySleepDescription: 'Optional and separate from system-sleep prevention. The display will remain on until active transfers finish.',
     },
     engine: {
       title: 'Media Downloader & Engines',

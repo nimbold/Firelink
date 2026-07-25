@@ -46,6 +46,10 @@ type CommandMap = {
   get_platform_info: { args: undefined; result: PlatformInfo };
   approve_download_root: { args: { path: string }; result: string };
   set_prevent_sleep: { args: { prevent: boolean }; result: void };
+  set_power_preferences: {
+    args: { preventSystemSleep: boolean; preventDisplaySleep: boolean };
+    result: void;
+  };
   perform_system_action: { args: { action: PostQueueAction }; result: void };
   ack_schedule_trigger: { args: { action: 'start' | 'stop'; key: string }; result: void };
   set_concurrent_limit: { args: { limit: number }; result: void };

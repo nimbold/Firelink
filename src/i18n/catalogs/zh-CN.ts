@@ -738,6 +738,8 @@ const zhCN = {
       title: '电源管理',
       preventSleep: '下载活动时阻止系统睡眠',
       preventSleepDescription: '显示器可能仍会关闭。Firelink 仅保持设备唤醒足以完成活动的传输。',
+      preventDisplaySleep: '下载活动时保持显示器唤醒',
+      preventDisplaySleepDescription: '这是与阻止系统睡眠分开的可选设置。活动传输完成前，显示器将保持开启。',
     },
     engine: {
       title: '媒体下载器和引擎',

@@ -1,6 +1,6 @@
 use firelink_lib::queue::{
-    Aria2RefreshOutcome, QueueManager, QueuedTask, SidecarSpawner, SpawnPayload, TaskKind,
-    MEDIA_RUN_CANCELLED,
+    Aria2RecreateOutcome, Aria2RefreshOutcome, QueueManager, QueuedTask, SidecarSpawner,
+    SpawnPayload, TaskKind, MEDIA_RUN_CANCELLED,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -42,6 +42,34 @@ struct FailFirstAria2Spawner {
 struct RefreshOutcomeSpawner {
     outcome: Aria2RefreshOutcome,
     refresh_calls: AtomicUsize,
+}
+
+struct RecreateSpawner {
+    recreate_calls: AtomicUsize,
+    remove_calls: AtomicUsize,
+    recreate_started: tokio::sync::Notify,
+    release_recreate: tokio::sync::Notify,
+    block_recreate: std::sync::atomic::AtomicBool,
+    outcome: std::sync::Mutex<Aria2RecreateOutcome>,
+}
+
+impl RecreateSpawner {
+    fn new(block_recreate: bool) -> Self {
+        Self {
+            recreate_calls: AtomicUsize::new(0),
+            remove_calls: AtomicUsize::new(0),
+            recreate_started: tokio::sync::Notify::new(),
+            release_recreate: tokio::sync::Notify::new(),
+            block_recreate: std::sync::atomic::AtomicBool::new(block_recreate),
+            outcome: std::sync::Mutex::new(Aria2RecreateOutcome::NewGid(
+                "gid-recreate-new".to_string(),
+            )),
+        }
+    }
+
+    fn set_outcome(&self, outcome: Aria2RecreateOutcome) {
+        *self.outcome.lock().unwrap() = outcome;
+    }
 }
 
 impl FailFirstAria2Spawner {
@@ -194,6 +222,42 @@ impl SidecarSpawner for RefreshOutcomeSpawner {
 }
 
 #[async_trait::async_trait]
+impl SidecarSpawner for RecreateSpawner {
+    async fn add_uri(&self, _id: &str, _payload: &SpawnPayload) -> Result<String, String> {
+        Ok("gid-recreate-old".to_string())
+    }
+
+    async fn remove_uri(&self, gid: &str) -> Result<(), String> {
+        assert_eq!(gid, "gid-recreate-new");
+        self.remove_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn recreate_uri(
+        &self,
+        _id: &str,
+        _gid: &str,
+        _payload: &SpawnPayload,
+    ) -> Result<Aria2RecreateOutcome, String> {
+        self.recreate_calls.fetch_add(1, Ordering::SeqCst);
+        self.recreate_started.notify_one();
+        if self.block_recreate.load(Ordering::SeqCst) {
+            self.release_recreate.notified().await;
+        }
+        Ok(self.outcome.lock().unwrap().clone())
+    }
+
+    async fn run_media(
+        &self,
+        _id: &str,
+        _payload: &SpawnPayload,
+        _generation: u64,
+    ) -> Result<(), String> {
+        unreachable!("media is not used by recreation tests")
+    }
+}
+
+#[async_trait::async_trait]
 impl firelink_lib::queue::SidecarSpawner for CountingSpawner {
     async fn add_uri(&self, _id: &str, payload: &SpawnPayload) -> Result<String, String> {
         self.add_uri_calls.fetch_add(1, Ordering::SeqCst);
@@ -338,6 +402,25 @@ async fn ensure_aria2_permit_does_not_double_acquire() {
 
     mgr.release_permit("a").await;
     assert_eq!(mgr.available_permits(), 2);
+}
+
+#[tokio::test]
+async fn backend_power_activity_follows_active_permits_not_queue_reservations() {
+    let (mgr, _spawner) = make_manager(2);
+    assert_eq!(mgr.power_manager().active_transfer_count(), 0);
+
+    let reservation = mgr
+        .reserve_enqueue_generation("queued", 1)
+        .await
+        .expect("queue reservation should succeed");
+    assert_eq!(mgr.power_manager().active_transfer_count(), 0);
+    mgr.rollback_enqueue_reservation("queued", 1, reservation)
+        .await;
+
+    assert!(mgr.ensure_aria2_permit("active").await);
+    assert_eq!(mgr.power_manager().active_transfer_count(), 1);
+    mgr.release_permit("active").await;
+    assert_eq!(mgr.power_manager().active_transfer_count(), 0);
 }
 
 #[tokio::test]
@@ -1264,11 +1347,11 @@ async fn failed_refresh_that_leaves_gid_paused_releases_permit_but_keeps_resume_
         outcome: Aria2RefreshOutcome::Paused,
         refresh_calls: AtomicUsize::new(0),
     });
-    let manager = QueueManager::test_new(
+    let manager = Arc::new(QueueManager::test_new(
         app.handle().clone(),
         1,
         Arc::clone(&spawner) as Arc<dyn SidecarSpawner>,
-    );
+    ));
     manager.push(aria2_task("refresh-paused")).await.unwrap();
     assert!(manager.ensure_aria2_permit("refresh-paused").await);
     manager
@@ -1292,6 +1375,159 @@ async fn failed_refresh_that_leaves_gid_paused_releases_permit_but_keeps_resume_
 }
 
 #[tokio::test]
+async fn connection_recovery_recreates_gid_without_releasing_transfer_permit() {
+    let app = mock_builder()
+        .build(mock_context(noop_assets()))
+        .expect("mock app");
+    let spawner = Arc::new(RecreateSpawner::new(false));
+    let manager = Arc::new(QueueManager::test_new(
+        app.handle().clone(),
+        1,
+        Arc::clone(&spawner) as Arc<dyn SidecarSpawner>,
+    ));
+    manager.push(aria2_task("recreate")).await.unwrap();
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if manager.aria2_gid_for_download("recreate").as_deref() == Some("gid-recreate-old") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial gid should be mapped");
+
+    let epoch = manager.current_aria2_control_epoch("recreate").await;
+    manager
+        .refresh_aria2_connections("recreate", "gid-recreate-old", epoch)
+        .await
+        .unwrap();
+
+    assert_eq!(spawner.recreate_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        manager.aria2_gid_for_download("recreate").as_deref(),
+        Some("gid-recreate-new")
+    );
+    assert!(manager.has_active_permit("recreate").await);
+    assert_eq!(manager.available_permits(), 0);
+
+    manager.release_permit("recreate").await;
+    dispatcher.abort();
+}
+
+#[tokio::test]
+async fn stale_recreated_gid_is_removed_without_rebinding_or_leaking_permit() {
+    let app = mock_builder()
+        .build(mock_context(noop_assets()))
+        .expect("mock app");
+    let spawner = Arc::new(RecreateSpawner::new(true));
+    let manager = Arc::new(QueueManager::test_new(
+        app.handle().clone(),
+        1,
+        Arc::clone(&spawner) as Arc<dyn SidecarSpawner>,
+    ));
+    manager.push(aria2_task("recreate-stale")).await.unwrap();
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if manager.aria2_gid_for_download("recreate-stale").as_deref()
+                == Some("gid-recreate-old")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial gid should be mapped");
+
+    let epoch = manager.current_aria2_control_epoch("recreate-stale").await;
+    let refresh = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move {
+            manager
+                .refresh_aria2_connections("recreate-stale", "gid-recreate-old", epoch)
+                .await
+        })
+    };
+    timeout(Duration::from_secs(1), spawner.recreate_started.notified())
+        .await
+        .expect("recreation should reach its async boundary");
+    manager.next_aria2_control_epoch("recreate-stale").await;
+    spawner.release_recreate.notify_one();
+    refresh.await.unwrap().unwrap();
+
+    assert_eq!(spawner.remove_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        manager.aria2_gid_for_download("recreate-stale").as_deref(),
+        Some("gid-recreate-old")
+    );
+    assert!(manager.has_active_permit("recreate-stale").await);
+    assert_eq!(manager.available_permits(), 0);
+
+    manager.release_permit("recreate-stale").await;
+    dispatcher.abort();
+}
+
+#[tokio::test]
+async fn unavailable_recreated_gid_retires_stale_lifecycle_for_manual_resume() {
+    let app = mock_builder()
+        .build(mock_context(noop_assets()))
+        .expect("mock app");
+    let spawner = Arc::new(RecreateSpawner::new(false));
+    spawner.set_outcome(Aria2RecreateOutcome::Unavailable(
+        "aria2.addUri unavailable".to_string(),
+    ));
+    let manager = Arc::new(QueueManager::test_new(
+        app.handle().clone(),
+        1,
+        Arc::clone(&spawner) as Arc<dyn SidecarSpawner>,
+    ));
+    manager.push(aria2_task("recreate-unavailable")).await.unwrap();
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if manager
+                .aria2_gid_for_download("recreate-unavailable")
+                .as_deref()
+                == Some("gid-recreate-old")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial gid should be mapped");
+
+    let epoch = manager.current_aria2_control_epoch("recreate-unavailable").await;
+    manager
+        .refresh_aria2_connections("recreate-unavailable", "gid-recreate-old", epoch)
+        .await
+        .unwrap();
+
+    assert_eq!(manager.aria2_gid_for_download("recreate-unavailable"), None);
+    assert!(!manager.has_active_permit("recreate-unavailable").await);
+    assert!(!manager.is_registered("recreate-unavailable").await);
+    assert_eq!(manager.available_permits(), 1);
+
+    dispatcher.abort();
+}
+
+#[tokio::test]
 async fn stale_refresh_observation_cannot_touch_a_newer_control_epoch() {
     let app = mock_builder()
         .build(mock_context(noop_assets()))
@@ -1300,11 +1536,11 @@ async fn stale_refresh_observation_cannot_touch_a_newer_control_epoch() {
         outcome: Aria2RefreshOutcome::Resumed,
         refresh_calls: AtomicUsize::new(0),
     });
-    let manager = QueueManager::test_new(
+    let manager = Arc::new(QueueManager::test_new(
         app.handle().clone(),
         1,
         Arc::clone(&spawner) as Arc<dyn SidecarSpawner>,
-    );
+    ));
     manager.push(aria2_task("refresh-stale")).await.unwrap();
     assert!(manager.ensure_aria2_permit("refresh-stale").await);
     manager

@@ -2911,6 +2911,7 @@ pub mod error;
 #[allow(dead_code)]
 pub mod ipc;
 mod parity;
+mod power;
 mod platform;
 pub mod queue;
 pub mod process;
@@ -2943,7 +2944,7 @@ pub struct AppState {
     pub aria2_port: std::sync::Arc<std::sync::atomic::AtomicU16>,
     pub aria2_secret: String,
     pub media_semaphore: Arc<tokio::sync::Semaphore>,
-    pub sleep_preventer: Arc<Mutex<Option<SleepPreventer>>>,
+    pub power_manager: Arc<power::PowerManager>,
     pub scheduler_settings: Arc<RwLock<Option<crate::ipc::PersistedSettings>>>,
     pub queue_manager: Arc<queue::QueueManager>,
 }
@@ -5150,6 +5151,33 @@ async fn reconcile_aria2_downloads(app_handle: &tauri::AppHandle) {
                     gid,
                     error
                 );
+                if aria2_gid_not_found(&error)
+                    && state.queue_manager.has_active_permit(&id).await
+                    && state
+                        .queue_manager
+                        .aria2_gid_mapping(&gid)
+                        .is_some_and(|mapping| mapping.id == id)
+                {
+                    if let Some(mapping) = state.queue_manager.aria2_gid_mapping(&gid) {
+                        log::warn!(
+                            "aria2 reconnect reconciliation [{}]: mapped gid {} is missing; attempting payload recovery",
+                            id,
+                            gid
+                        );
+                        if let Err(recovery_error) = state
+                            .queue_manager
+                            .refresh_aria2_connections(&id, &gid, mapping.epoch)
+                            .await
+                        {
+                            log::warn!(
+                                "aria2 reconnect reconciliation [{}]: payload recovery for missing gid {} failed: {}",
+                                id,
+                                gid,
+                                recovery_error
+                            );
+                        }
+                    }
+                }
                 continue;
             }
         };
@@ -5222,7 +5250,7 @@ fn aria2_daemon_process_exited(app_handle: &tauri::AppHandle) -> bool {
     }
 }
 
-fn aria2_gid_not_found(error: &str) -> bool {
+pub(crate) fn aria2_gid_not_found(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     lower.contains("gid") && lower.contains("not found")
 }
@@ -5339,115 +5367,20 @@ fn get_platform_info(state: tauri::State<'_, AppState>) -> crate::ipc::PlatformI
     }
 }
 
-#[cfg(target_os = "macos")]
-mod macos_sleep {
-    use std::ffi::c_void;
-    #[allow(clippy::duplicated_attributes)]
-    #[link(name = "IOKit", kind = "framework")]
-    #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
-        pub fn IOPMAssertionCreateWithDescription(
-            AssertionType: *const c_void,
-            Name: *const c_void,
-            Details: *const c_void,
-            HumanReadableReason: *const c_void,
-            LocalizationBundlePath: *const c_void,
-            Timeout: f64,
-            TimeoutAction: *const c_void,
-            AssertionID: *mut u32,
-        ) -> i32;
-        pub fn IOPMAssertionRelease(AssertionID: u32) -> i32;
-        pub fn CFStringCreateWithCString(
-            alloc: *const c_void,
-            cStr: *const i8,
-            encoding: u32,
-        ) -> *const c_void;
-        pub fn CFRelease(arg: *const c_void);
-    }
-}
-
-pub enum SleepPreventer {
-    #[cfg(target_os = "macos")]
-    Mac { system_sleep_id: u32, network_client_id: u32 },
-    #[cfg(not(target_os = "macos"))]
-    Other(keepawake::KeepAwake),
-}
-
-impl Drop for SleepPreventer {
-    fn drop(&mut self) {
-        #[cfg(target_os = "macos")]
-        {
-            let SleepPreventer::Mac { system_sleep_id, network_client_id } = self;
-            unsafe {
-                macos_sleep::IOPMAssertionRelease(*system_sleep_id);
-                macos_sleep::IOPMAssertionRelease(*network_client_id);
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn create_sleep_preventer() -> Result<SleepPreventer, String> {
-    use std::ffi::CString;
-    use std::ptr::null;
-    unsafe {
-        let create_cf_string = |s: &str| -> *const std::ffi::c_void {
-            let cstr = CString::new(s).unwrap();
-            macos_sleep::CFStringCreateWithCString(null(), cstr.as_ptr(), 0x08000100)
-        };
-
-        let type_sys = create_cf_string("PreventSystemSleep");
-        let type_net = create_cf_string("NetworkClientActive");
-        let name = create_cf_string("Firelink active download");
-
-        let mut sys_id: u32 = 0;
-        let mut net_id: u32 = 0;
-
-        let res1 = macos_sleep::IOPMAssertionCreateWithDescription(
-            type_sys, name, null(), null(), null(), 0.0, null(), &mut sys_id
-        );
-        let res2 = macos_sleep::IOPMAssertionCreateWithDescription(
-            type_net, name, null(), null(), null(), 0.0, null(), &mut net_id
-        );
-
-        macos_sleep::CFRelease(type_sys);
-        macos_sleep::CFRelease(type_net);
-        macos_sleep::CFRelease(name);
-
-        if res1 == 0 && res2 == 0 {
-            Ok(SleepPreventer::Mac { system_sleep_id: sys_id, network_client_id: net_id })
-        } else {
-            if res1 == 0 { macos_sleep::IOPMAssertionRelease(sys_id); }
-            if res2 == 0 { macos_sleep::IOPMAssertionRelease(net_id); }
-            Err("Failed to create macOS sleep assertions".to_string())
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn create_sleep_preventer() -> Result<SleepPreventer, String> {
-    keepawake::Builder::default()
-        .idle(true)
-        .reason("Firelink active download")
-        .create()
-        .map(SleepPreventer::Other)
-        .map_err(|error| format!("failed to prevent system sleep: {error}"))
+#[tauri::command]
+fn set_prevent_sleep(state: tauri::State<'_, AppState>, prevent: bool) -> Result<(), String> {
+    state.power_manager.set_system_prevention(prevent)
 }
 
 #[tauri::command]
-fn set_prevent_sleep(state: tauri::State<'_, AppState>, prevent: bool) -> Result<(), String> {
-    let mut current_preventer = state
-        .sleep_preventer
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if prevent {
-        if current_preventer.is_none() {
-            *current_preventer = Some(create_sleep_preventer()?);
-        }
-    } else {
-        *current_preventer = None;
-    }
-    Ok(())
+fn set_power_preferences(
+    state: tauri::State<'_, AppState>,
+    prevent_system_sleep: bool,
+    prevent_display_sleep: bool,
+) -> Result<(), String> {
+    state
+        .power_manager
+        .set_preferences(prevent_system_sleep, prevent_display_sleep)
 }
 
 pub(crate) fn execute_system_action(action: crate::ipc::PostQueueAction) -> Result<(), String> {
@@ -6273,8 +6206,16 @@ fn db_save_settings(
     };
     crate::db::save_settings(&connection, &merged)?;
     let decoded = crate::settings::decode_stored_settings(&serde_json::Value::String(merged))?;
+    let prevent_system_sleep = decoded.prevents_sleep_while_downloading;
+    let prevent_display_sleep = decoded.prevents_display_sleep_while_downloading;
     if let Ok(mut cached) = app_state.scheduler_settings.write() {
         *cached = Some(decoded);
+    }
+    if let Err(error) = app_state
+        .power_manager
+        .set_preferences(prevent_system_sleep, prevent_display_sleep)
+    {
+        log::warn!("power: saved settings applied with an OS assertion error: {error}");
     }
     Ok(())
 }
@@ -7030,6 +6971,60 @@ mod tests {
         assert_eq!(observation.control_epoch, 2);
         assert!(!observation.saw_multiple_connections);
         assert_eq!(observation.healthy_speed_samples, 0);
+    }
+
+    #[test]
+    fn aria2_recovery_budget_survives_same_epoch_gid_replacement() {
+        let mut observation = Aria2ConnectionObservation {
+            gid: "gid-old".to_string(),
+            control_epoch: 7,
+            recovery_attempts: 2,
+            ..Default::default()
+        };
+        let now = Instant::now();
+
+        assert_eq!(
+            observe_aria2_connections_with_epoch(
+                &mut observation,
+                Aria2ConnectionSample {
+                    gid: "gid-new",
+                    control_epoch: 7,
+                    status: "active",
+                    total: 100,
+                    completed: 10,
+                    speed_bytes: 1024.0,
+                    active_connections: 16,
+                    requested_connections: 16,
+                    speed_limited: false,
+                    now,
+                },
+            ),
+            None
+        );
+        assert_eq!(
+            observation.recovery_attempts, 2,
+            "a fresh gid in the same lifecycle must not reset the bounded recovery budget"
+        );
+
+        observe_aria2_connections_with_epoch(
+            &mut observation,
+            Aria2ConnectionSample {
+                gid: "gid-new-lifecycle",
+                control_epoch: 8,
+                status: "active",
+                total: 100,
+                completed: 10,
+                speed_bytes: 1024.0,
+                active_connections: 16,
+                requested_connections: 16,
+                speed_limited: false,
+                now: now + Duration::from_secs(1),
+            },
+        );
+        assert_eq!(
+            observation.recovery_attempts, 0,
+            "a genuinely new lifecycle may start with a fresh recovery budget"
+        );
     }
 
     #[test]
@@ -8848,10 +8843,14 @@ fn observe_aria2_connections_with_epoch(
         now,
     } = sample;
     if observation.gid != gid || observation.control_epoch != control_epoch {
+        let preserved_recovery_attempts = (observation.control_epoch == control_epoch)
+            .then_some(observation.recovery_attempts)
+            .unwrap_or_default();
         *observation = Aria2ConnectionObservation {
             gid: gid.to_string(),
             control_epoch,
             last_completed: completed,
+            recovery_attempts: preserved_recovery_attempts,
             ..Default::default()
         };
     }
@@ -9173,6 +9172,13 @@ pub fn run() {
             let scheduler_settings = Arc::new(RwLock::new(persisted_settings.clone()));
 
             let queue_manager = Arc::new(queue::QueueManager::new(app.handle().clone(), max_concurrent));
+            let power_manager = queue_manager.power_manager();
+            if let Some(settings) = persisted_settings.as_ref() {
+                let _ = power_manager.set_preferences(
+                    settings.prevents_sleep_while_downloading,
+                    settings.prevents_display_sleep_while_downloading,
+                );
+            }
             let initial_global_speed_limit = persisted_settings
                 .as_ref()
                 .and_then(|settings| normalize_speed_limit_for_aria2(&settings.global_speed_limit));
@@ -9197,10 +9203,14 @@ pub fn run() {
                 aria2_port: aria2_port.clone(),
                 aria2_secret: aria2_secret.clone(),
                 media_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
-                sleep_preventer: Arc::new(Mutex::new(None)),
+                power_manager: Arc::clone(&power_manager),
                 scheduler_settings: Arc::clone(&scheduler_settings),
                 queue_manager,
             });
+
+            if let Err(error) = power_manager.activate() {
+                log::error!("power: failed to activate backend power management: {error}");
+            }
 
             // Build the window only after all command state is registered. This
             // prevents the frontend from racing startup and invoking IPC before
@@ -9464,6 +9474,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(1000));
                 let mut observations: HashMap<String, Aria2ConnectionObservation> = HashMap::new();
+                let mut missing_gid_recovery_at: HashMap<String, Instant> = HashMap::new();
                 loop {
                     interval.tick().await;
                     // Terminal cleanup removes a download's GID mapping. Do
@@ -9475,6 +9486,7 @@ pub fn run() {
                         .map(|(_, id)| id)
                         .collect();
                     observations.retain(|id, _| mapped_ids.contains(id));
+                    missing_gid_recovery_at.retain(|id, _| mapped_ids.contains(id));
                     let params = serde_json::json!([["gid", "status", "totalLength", "completedLength", "downloadSpeed", "connections", "errorMessage"]]);
                     if let Ok(active_list) = rpc_call(poll_port.load(std::sync::atomic::Ordering::Relaxed), &poll_secret, "aria2.tellActive", params).await {
                         if let Some(active_arr) = active_list.as_array() {
@@ -9612,6 +9624,49 @@ pub fn run() {
                                             gid,
                                             error
                                         );
+                                        let recovery_allowed = missing_gid_recovery_at
+                                            .get(&id)
+                                            .is_none_or(|last_attempt| {
+                                                last_attempt.elapsed()
+                                                    >= Duration::from_secs(5)
+                                            });
+                                        if crate::aria2_gid_not_found(&error)
+                                            && recovery_allowed
+                                            && poll_mgr.has_active_permit(&id).await
+                                        {
+                                            if let Some(mapping) = poll_mgr
+                                                .aria2_gid_mapping(&gid)
+                                                .filter(|mapping| mapping.id == id)
+                                            {
+                                                missing_gid_recovery_at
+                                                    .insert(id.clone(), Instant::now());
+                                                log::warn!(
+                                                    "aria2 poller reconciliation [{}]: mapped gid {} is missing; attempting payload recovery",
+                                                    id,
+                                                    gid
+                                                );
+                                                match poll_mgr
+                                                    .refresh_aria2_connections(
+                                                        &id,
+                                                        &gid,
+                                                        mapping.epoch,
+                                                    )
+                                                    .await
+                                                {
+                                                    Ok(()) => {
+                                                        missing_gid_recovery_at.remove(&id);
+                                                    }
+                                                    Err(recovery_error) => {
+                                                        log::warn!(
+                                                            "aria2 poller reconciliation [{}]: payload recovery for missing gid {} failed: {}",
+                                                            id,
+                                                            gid,
+                                                            recovery_error
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
                                         continue;
                                     }
                                 };
@@ -9726,7 +9781,7 @@ pub fn run() {
  get_engine_status, get_aria2_engine_status, get_ytdlp_engine_status, get_ffmpeg_engine_status,
  get_deno_engine_status, test_ytdlp, test_aria2c, test_ffmpeg, test_deno,
  pause_download, resume_download, fetch_metadata, fetch_media_metadata, fetch_media_playlist_metadata,
-            begin_dock_badge_session, update_dock_badge, get_platform_info, approve_download_root, set_prevent_sleep, get_free_space, perform_system_action,
+            begin_dock_badge_session, update_dock_badge, get_platform_info, approve_download_root, set_prevent_sleep, set_power_preferences, get_free_space, perform_system_action,
             ack_schedule_trigger,
             check_automation_permission, request_automation_permission, open_automation_settings,
             set_keychain_password, get_keychain_password, delete_keychain_password,

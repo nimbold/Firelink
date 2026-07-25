@@ -101,6 +101,7 @@ const PageLoadingFallback = () => {
 
 let automaticUpdateCheckStarted = false;
 const processingScheduleKeys = new Set<string>();
+let powerPreferencesSync: Promise<void> = Promise.resolve();
 
 const waitForSettingsHydration = (): Promise<void> => {
   if (useSettingsStore.persist.hasHydrated()) return Promise.resolve();
@@ -245,6 +246,9 @@ function App() {
   >>([]);
   const maxConcurrentDownloads = useSettingsStore(state => state.maxConcurrentDownloads);
   const preventsSleepWhileDownloading = useSettingsStore(state => state.preventsSleepWhileDownloading);
+  const preventsDisplaySleepWhileDownloading = useSettingsStore(
+    state => state.preventsDisplaySleepWhileDownloading
+  );
   const activeTransferCount = downloads.filter(download => isTransferActiveStatus(download.status)).length;
   const { addToast, removeToast } = useToast();
   const isMacUserAgent = navigator.userAgent.includes('Mac');
@@ -716,17 +720,34 @@ function App() {
   }, [platform.os, showDockBadge, dockBadgeSyncVersion, activeDownloadCount]);
 
   useEffect(() => {
-    invoke('set_prevent_sleep', {
-      prevent: preventsSleepWhileDownloading && activeTransferCount > 0
-    }).catch(error => {
-      console.error('Failed to update sleep prevention:', error);
-      addToast({
-        message: t($ => $.app.sleepPreventionFailed, { detail: String(error) }),
-        variant: 'error',
-        isActionable: true
-      });
-    });
-  }, [addToast, preventsSleepWhileDownloading, activeTransferCount]);
+    const sync = () => {
+      powerPreferencesSync = powerPreferencesSync
+        .catch(() => undefined)
+        .then(() => invoke('set_power_preferences', {
+          preventSystemSleep: preventsSleepWhileDownloading,
+          preventDisplaySleep: preventsDisplaySleepWhileDownloading
+        }))
+        .catch(error => {
+          console.error('Failed to update power prevention:', error);
+          addToast({
+            message: t($ => $.app.sleepPreventionFailed, { detail: String(error) }),
+            variant: 'error',
+            isActionable: true
+          });
+        });
+    };
+
+    if (useSettingsStore.persist.hasHydrated()) {
+      sync();
+      return;
+    }
+    return useSettingsStore.persist.onFinishHydration(sync);
+  }, [
+    addToast,
+    preventsDisplaySleepWhileDownloading,
+    preventsSleepWhileDownloading,
+    t
+  ]);
 
   useEffect(() => {
     invoke('toggle_tray_icon', { show: showMenuBarIcon }).catch(console.error);

@@ -486,6 +486,7 @@ fn default_settings() -> PersistedSettings {
         ask_where_to_save_each_file: false,
         remember_last_used_download_directory: false,
         prevents_sleep_while_downloading: true,
+        prevents_display_sleep_while_downloading: false,
         media_cookie_source: MediaCookieSource::default(),
         site_logins: Vec::new(),
         auto_check_updates: true,

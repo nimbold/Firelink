@@ -237,6 +237,7 @@ export interface SettingsState {
   customUserAgent: string;
   askWhereToSaveEachFile: boolean;
   preventsSleepWhileDownloading: boolean;
+  preventsDisplaySleepWhileDownloading: boolean;
   mediaCookieSource: MediaCookieSource;
   siteLogins: SiteLogin[];
   extensionPairingToken: string;
@@ -286,6 +287,7 @@ export interface SettingsState {
   setCustomUserAgent: (userAgent: string) => void;
   setAskWhereToSaveEachFile: (ask: boolean) => void;
   setPreventsSleepWhileDownloading: (prevent: boolean) => void;
+  setPreventsDisplaySleepWhileDownloading: (prevent: boolean) => void;
   setMediaCookieSource: (source: MediaCookieSource) => void;
   setRememberLastUsedDownloadDirectory: (enabled: boolean) => void;
   setLastUsedDownloadDirectory: (path: string) => void;
@@ -361,6 +363,7 @@ export const useSettingsStore = create<SettingsState>()(
       customUserAgent: '',
       askWhereToSaveEachFile: false,
       preventsSleepWhileDownloading: true,
+      preventsDisplaySleepWhileDownloading: false,
       mediaCookieSource: 'none',
       siteLogins: [],
       extensionPairingToken: '',
@@ -456,6 +459,10 @@ export const useSettingsStore = create<SettingsState>()(
       setPreventsSleepWhileDownloading: (preventsSleepWhileDownloading) => {
         info('Settings updated: preventsSleepWhileDownloading');
         set({ preventsSleepWhileDownloading });
+      },
+      setPreventsDisplaySleepWhileDownloading: (preventsDisplaySleepWhileDownloading) => {
+        info('Settings updated: preventsDisplaySleepWhileDownloading');
+        set({ preventsDisplaySleepWhileDownloading });
       },
       setMediaCookieSource: (mediaCookieSource) => { info('Settings updated: mediaCookieSource'); set({ mediaCookieSource }); },
       setRememberLastUsedDownloadDirectory: (rememberLastUsedDownloadDirectory) => {
@@ -631,6 +638,7 @@ export const useSettingsStore = create<SettingsState>()(
         customUserAgent: state.customUserAgent,
         askWhereToSaveEachFile: state.askWhereToSaveEachFile,
         preventsSleepWhileDownloading: state.preventsSleepWhileDownloading,
+        preventsDisplaySleepWhileDownloading: state.preventsDisplaySleepWhileDownloading,
         mediaCookieSource: state.mediaCookieSource,
         siteLogins: state.siteLogins,
         keychainAccessGranted: state.keychainAccessGranted,
@@ -703,6 +711,10 @@ export const useSettingsStore = create<SettingsState>()(
           preventsSleepWhileDownloading: persistedBoolean(
             persisted.preventsSleepWhileDownloading,
             currentState.preventsSleepWhileDownloading
+          ),
+          preventsDisplaySleepWhileDownloading: persistedBoolean(
+            persisted.preventsDisplaySleepWhileDownloading,
+            currentState.preventsDisplaySleepWhileDownloading
           ),
           keychainAccessGranted: persistedBoolean(
             persisted.keychainAccessGranted,

@@ -378,6 +378,8 @@ pub struct PersistedSettings {
     pub ask_where_to_save_each_file: bool,
     pub remember_last_used_download_directory: bool,
     pub prevents_sleep_while_downloading: bool,
+    #[serde(default)]
+    pub prevents_display_sleep_while_downloading: bool,
     pub media_cookie_source: MediaCookieSource,
     pub site_logins: Vec<SiteLogin>,
     pub auto_check_updates: bool,

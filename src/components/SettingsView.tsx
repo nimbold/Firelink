@@ -1475,6 +1475,19 @@ runEngineChecks(false);
                   <p className="text-text-muted text-xs mt-0.5">{t($ => $.settings.power.preventSleepDescription)}</p>
                 </div>
               </label>
+
+              <label className="flex items-start gap-3 cursor-default select-none text-[13px] text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={settings.preventsDisplaySleepWhileDownloading}
+                  onChange={(e) => settings.setPreventsDisplaySleepWhileDownloading(e.target.checked)}
+                  className="mt-0.5 rounded accent-accent"
+                />
+                <div>
+                  <p className="font-semibold text-text-primary">{t($ => $.settings.power.preventDisplaySleep)}</p>
+                  <p className="text-text-muted text-xs mt-0.5">{t($ => $.settings.power.preventDisplaySleepDescription)}</p>
+                </div>
+              </label>
             </div>
           )}
 
