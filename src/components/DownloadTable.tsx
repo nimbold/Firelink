@@ -4,7 +4,6 @@ import { useDownloadProgressStore } from '../store/downloadProgressStore';
 import { useToast } from '../contexts/ToastContext';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { SidebarFilter } from './Sidebar';
-import { useAutoAnimate } from '@formkit/auto-animate/react';
 import {
   Play, Pause, Plus, FileText, Image as ImageIcon, Music, Film, Box, Archive, FileQuestion,
   ArrowDownCircle, ArrowUp, ArrowDown, Command, ChevronRight, ChevronUp, ChevronDown, MoreHorizontal,
@@ -87,6 +86,8 @@ const persistColumnAlignments = (alignments: Record<DownloadTableColumnKey, Down
 
 const QUEUE_ROW_REORDER_DURATION = 180;
 const QUEUE_ROW_REORDER_EASING = 'cubic-bezier(0.2, 0.8, 0.2, 1)';
+const COLUMN_REORDER_DURATION = QUEUE_ROW_REORDER_DURATION;
+const COLUMN_REORDER_EASING = QUEUE_ROW_REORDER_EASING;
 
 interface ColumnDragState {
   key: DownloadTableColumnKey;
@@ -136,6 +137,11 @@ interface QueueDragGeometry {
   rows: Map<string, QueueDragRowGeometry>;
 }
 
+interface ColumnMotionLayout {
+  element: HTMLElement;
+  left: number;
+}
+
 export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryChange }) => {
   const { t } = useTranslation();
   const {
@@ -162,10 +168,6 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   }, []);
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; id: string } | null>(null);
-  const [headerAnimationParent, setHeaderAnimationEnabled] = useAutoAnimate<HTMLDivElement>({
-    duration: 140,
-    easing: 'ease-out',
-  });
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [lastSelectedId, setLastSelectedId] = useState<string | null>(null);
   const [sortConfig, setSortConfig] = useState<DownloadSortConfig>({ column: 'Date Added', direction: 'desc' });
@@ -182,8 +184,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   const headerContainerRef = useRef<HTMLDivElement>(null);
   const headerRef = useCallback((element: HTMLDivElement | null) => {
     headerContainerRef.current = element;
-    headerAnimationParent(element);
-  }, [headerAnimationParent]);
+  }, []);
   const columnDragStateRef = useRef<ColumnDragState | null>(null);
   const columnDragOrderRef = useRef<DownloadTableColumnKey[] | null>(null);
   const columnDragLayoutRef = useRef<Map<DownloadTableColumnKey, ColumnLayoutBounds> | null>(null);
@@ -192,6 +193,11 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   const columnDragCapturePointerIdRef = useRef<number | null>(null);
   const columnDragCleanupRef = useRef<(() => void) | null>(null);
   const columnDropFlashTimerRef = useRef<number | null>(null);
+  const columnMotionFirstRef = useRef<ColumnMotionLayout[] | null>(null);
+  const columnMotionElementsRef = useRef(new Set<HTMLElement>());
+  const columnMotionFrameRef = useRef<number | null>(null);
+  const columnMotionTimerRef = useRef<number | null>(null);
+  const columnMotionGenerationRef = useRef(0);
   const suppressHeaderClickRef = useRef(false);
   const selectedIdsRef = useRef(selectedIds);
   const lastSelectedIdRef = useRef(lastSelectedId);
@@ -264,6 +270,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     Math.max(COLUMN_MINIMUMS[index], width)
   );
   const orderedColumns = columnDragOrderRef.current ?? columnDragOrder ?? columnOrder;
+  const columnMotionOrderKey = orderedColumns.join('\u0001');
   const tableGridTemplate = buildColumnGridTemplate(orderedColumns, normalizedColumnWidths);
   const tableMinWidth = normalizedColumnWidths.reduce(
     (total, width) => total + width,
@@ -277,6 +284,121 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   const queueRowsContainerRef = useCallback((element: HTMLDivElement | null) => {
     queueRowsContainerElementRef.current = element;
   }, []);
+
+  const captureColumnMotionLayout = (): ColumnMotionLayout[] => {
+    const header = headerContainerRef.current;
+    const body = queueRowsContainerElementRef.current;
+    const verticalViewport = queueListElementRef.current?.getBoundingClientRect();
+    const headerElements = header
+      ? Array.from(header.children).filter(
+          (element): element is HTMLElement => element instanceof HTMLElement && Boolean(element.dataset.columnKey)
+        )
+      : [];
+    const bodyElements: HTMLElement[] = [];
+    if (body) {
+      for (const row of Array.from(body.children)) {
+        if (!(row instanceof HTMLElement) || !row.dataset.downloadId) continue;
+        if (verticalViewport) {
+          const rowRect = row.getBoundingClientRect();
+          if (rowRect.bottom < verticalViewport.top || rowRect.top > verticalViewport.bottom) continue;
+        }
+        const motionElement = row.querySelector<HTMLElement>('.download-row-motion');
+        if (!motionElement) continue;
+        bodyElements.push(...Array.from(motionElement.children).filter(
+          (element): element is HTMLElement => element instanceof HTMLElement && Boolean(element.dataset.columnKey)
+        ));
+      }
+    }
+
+    return [...headerElements, ...bodyElements].map(element => ({
+      element,
+      left: element.getBoundingClientRect().left,
+    }));
+  };
+
+  const clearColumnMotionStyles = () => {
+    columnMotionGenerationRef.current += 1;
+    if (columnMotionFrameRef.current !== null) {
+      window.cancelAnimationFrame(columnMotionFrameRef.current);
+      columnMotionFrameRef.current = null;
+    }
+    if (columnMotionTimerRef.current !== null) {
+      window.clearTimeout(columnMotionTimerRef.current);
+      columnMotionTimerRef.current = null;
+    }
+    for (const element of columnMotionElementsRef.current) {
+      element.style.removeProperty('transition');
+      element.style.removeProperty('transform');
+      element.style.removeProperty('will-change');
+    }
+    columnMotionElementsRef.current.clear();
+  };
+
+  const prepareColumnMotion = () => {
+    const prefersReducedMotion = typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (prefersReducedMotion) {
+      clearColumnMotionStyles();
+      columnMotionFirstRef.current = null;
+      return;
+    }
+
+    // Capture the visual position before cancelling an in-flight transition.
+    // The next FLIP pass can then continue from what the user actually sees
+    // instead of snapping back to the previous logical grid position.
+    const first = captureColumnMotionLayout();
+    clearColumnMotionStyles();
+    columnMotionFirstRef.current = first;
+  };
+
+  useLayoutEffect(() => {
+    const first = columnMotionFirstRef.current;
+    columnMotionFirstRef.current = null;
+    if (!first || first.length === 0) return;
+
+    const prefersReducedMotion = typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (prefersReducedMotion) return;
+
+    const moved = first.flatMap(({ element, left }) => {
+      if (!element.isConnected) return [];
+      const deltaX = left - element.getBoundingClientRect().left;
+      return Math.abs(deltaX) > 0.5 ? [{ element, deltaX }] : [];
+    });
+    if (moved.length === 0) return;
+
+    const generation = ++columnMotionGenerationRef.current;
+    for (const { element, deltaX } of moved) {
+      columnMotionElementsRef.current.add(element);
+      element.style.willChange = 'transform';
+      element.style.transition = 'none';
+      element.style.transform = `translate3d(${deltaX}px, 0, 0)`;
+    }
+    // Commit the inverse transforms before releasing them on the next frame so
+    // React's grid reflow becomes a smooth physical-LTR motion for headers and
+    // every visible row cell alike.
+    void headerContainerRef.current?.offsetHeight;
+    void queueRowsContainerElementRef.current?.offsetHeight;
+
+    columnMotionFrameRef.current = window.requestAnimationFrame(() => {
+      columnMotionFrameRef.current = null;
+      if (columnMotionGenerationRef.current !== generation) return;
+      for (const { element } of moved) {
+        element.style.transition = `transform ${COLUMN_REORDER_DURATION}ms ${COLUMN_REORDER_EASING}`;
+        element.style.transform = 'translate3d(0, 0, 0)';
+      }
+    });
+    columnMotionTimerRef.current = window.setTimeout(() => {
+      columnMotionTimerRef.current = null;
+      if (columnMotionGenerationRef.current !== generation) return;
+      for (const { element } of moved) {
+        element.style.removeProperty('transition');
+        element.style.removeProperty('transform');
+        element.style.removeProperty('will-change');
+        columnMotionElementsRef.current.delete(element);
+      }
+    }, COLUMN_REORDER_DURATION + 60);
+  }, [columnMotionOrderKey]);
 
   const updateColumnDragState = (next: ColumnDragState | null) => {
     columnDragStateRef.current = next;
@@ -294,8 +416,8 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   };
 
   const getColumnLayoutBounds = (element: HTMLDivElement) => {
-    // AutoAnimate transforms the visual box; offsetLeft/offsetWidth retain the
-    // stable grid geometry needed for hit-testing during a live reorder.
+    // CSS FLIP transforms affect the visual box; offsetLeft/offsetWidth retain
+    // the stable grid geometry needed for hit-testing during a live reorder.
     const container = headerContainerRef.current;
     if (!container) {
       const rect = element.getBoundingClientRect();
@@ -348,6 +470,10 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     const current = columnDragStateRef.current;
     const nextOrder = columnDragOrderRef.current ?? columnOrderRef.current;
     const captureTarget = columnDragCaptureTargetRef.current;
+    const shouldAnimateCancel = cancelled && gesture.active && Boolean(current);
+    if (shouldAnimateCancel) {
+      prepareColumnMotion();
+    }
     dragGestureRef.current = null;
     columnDragTargetRef.current = null;
     columnDragCaptureTargetRef.current = null;
@@ -358,7 +484,6 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     columnDragCleanupRef.current = null;
     updateColumnDragState(null);
     setColumnDragOrder(null);
-    setHeaderAnimationEnabled(true);
     if (captureTarget?.hasPointerCapture(pointerId)) {
       captureTarget.releasePointerCapture(pointerId);
     }
@@ -416,9 +541,8 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       const rect = target?.getBoundingClientRect();
       if (!rect) return;
       // The header children are reordered in the live grid while dragging.
-      // AutoAnimate's MutationObserver must not animate the same structural
-      // changes that drive pointer hit-testing; it is restored on completion.
-      setHeaderAnimationEnabled(false);
+      // The custom FLIP pass animates the visual boxes while offset geometry
+      // remains stable for pointer hit-testing.
       const currentOrder = columnOrderRef.current;
       columnDragLayoutRef.current = captureColumnLayout(currentOrder);
       columnDragOrderRef.current = [...currentOrder];
@@ -442,6 +566,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       const nextOrder = reorderColumn(currentOrder, key, dropIndex);
       const orderChanged = nextOrder.some((columnKey, index) => columnKey !== currentOrder[index]);
       if (orderChanged) {
+        prepareColumnMotion();
         columnDragOrderRef.current = nextOrder;
         setColumnDragOrder(nextOrder);
       }
@@ -594,6 +719,9 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     const widths = [...DEFAULT_COLUMN_WIDTHS];
     const order = [...DEFAULT_COLUMN_ORDER];
     const alignments = { ...DEFAULT_COLUMN_ALIGNMENTS };
+    if (order.join('|') !== columnOrderRef.current.join('|')) {
+      prepareColumnMotion();
+    }
     setColumnWidths(widths);
     columnWidthsRef.current = widths;
     columnOrderRef.current = order;
@@ -627,6 +755,8 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   useEffect(() => () => {
     resizeCleanupRef.current?.();
     columnDragCleanupRef.current?.();
+    columnMotionFirstRef.current = null;
+    clearColumnMotionStyles();
     try {
       queueDragCleanupRef.current?.();
     } catch (error) {
@@ -661,7 +791,11 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
 
   useEffect(() => {
     const cancelColumnDrag = () => {
-      if (!dragGestureRef.current) return;
+      const gesture = dragGestureRef.current;
+      if (!gesture) return;
+      if (gesture.active && columnDragStateRef.current) {
+        prepareColumnMotion();
+      }
       columnDragCleanupRef.current?.();
       columnDragCleanupRef.current = null;
       const captureTarget = columnDragCaptureTargetRef.current;
@@ -676,7 +810,6 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       columnDragStateRef.current = null;
       columnDragOrderRef.current = null;
       columnDragLayoutRef.current = null;
-      setHeaderAnimationEnabled(true);
       setColumnDragState(null);
       setColumnDragOrder(null);
       suppressHeaderClickRef.current = false;
