@@ -2395,6 +2395,7 @@ pub struct ProductionSpawner {
 }
 
 const ARIA2_MIN_SPLIT_SIZE: &str = "1M";
+const ARIA2_STREAM_PIECE_SELECTOR: &str = "inorder";
 
 fn apply_aria2_connection_options(
     options: &mut serde_json::Map<String, serde_json::Value>,
@@ -2415,6 +2416,14 @@ fn apply_aria2_connection_options(
     options.insert(
         "min-split-size".to_string(),
         serde_json::json!(ARIA2_MIN_SPLIT_SIZE),
+    );
+    // Aria2's default selector deliberately reduces the number of established
+    // connections over time. Keep a segmented HTTP transfer replenishing its
+    // requested ranges so a healthy host does not degrade from (for example)
+    // 16 active connections to one or two after early pieces finish.
+    options.insert(
+        "stream-piece-selector".to_string(),
+        serde_json::json!(ARIA2_STREAM_PIECE_SELECTOR),
     );
 }
 
@@ -2807,6 +2816,10 @@ mod tests {
         assert_eq!(
             options.get("min-split-size"),
             Some(&serde_json::json!("1M"))
+        );
+        assert_eq!(
+            options.get("stream-piece-selector"),
+            Some(&serde_json::json!("inorder"))
         );
     }
 
