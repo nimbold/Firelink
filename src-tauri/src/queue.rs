@@ -1199,7 +1199,15 @@ impl<R: tauri::Runtime> QueueManager<R> {
         loop {
             let notified = self.notify.notified();
             if let Some((permit, task)) = self.try_admit_next_task().await {
-                Arc::clone(&self).dispatch_one(permit, task).await;
+                // Admission owns the global and per-queue reservation before
+                // this task is spawned. Keep the dispatcher free to admit
+                // other work while an Aria2 addUri call is retrying or a
+                // control RPC is slow; dispatch_one retains the reservation
+                // until that lifecycle reaches its own terminal path.
+                let manager = Arc::clone(&self);
+                tauri::async_runtime::spawn(async move {
+                    manager.dispatch_one(permit, task).await;
+                });
             } else {
                 // This covers both an empty pending list and the case where
                 // all queue/global capacity is occupied. The notification

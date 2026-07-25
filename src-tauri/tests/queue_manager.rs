@@ -27,6 +27,13 @@ struct DelayedAria2Spawner {
     remove_uri_calls: AtomicUsize,
 }
 
+struct BlockingAria2Spawner {
+    first_started: tokio::sync::Notify,
+    second_started: tokio::sync::Notify,
+    release_first: tokio::sync::Notify,
+    add_uri_calls: AtomicUsize,
+}
+
 struct FailFirstAria2Spawner {
     add_uri_calls: AtomicUsize,
     fail_first: std::sync::atomic::AtomicBool,
@@ -53,6 +60,49 @@ impl DelayedAria2Spawner {
             add_uri_calls: AtomicUsize::new(0),
             remove_uri_calls: AtomicUsize::new(0),
         }
+    }
+}
+
+impl BlockingAria2Spawner {
+    fn new() -> Self {
+        Self {
+            first_started: tokio::sync::Notify::new(),
+            second_started: tokio::sync::Notify::new(),
+            release_first: tokio::sync::Notify::new(),
+            add_uri_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SidecarSpawner for BlockingAria2Spawner {
+    async fn add_uri(&self, _id: &str, _payload: &SpawnPayload) -> Result<String, String> {
+        let call = self.add_uri_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        match call {
+            1 => {
+                self.first_started.notify_one();
+                self.release_first.notified().await;
+                Ok("gid-first".to_string())
+            }
+            2 => {
+                self.second_started.notify_one();
+                Ok("gid-second".to_string())
+            }
+            _ => Ok(format!("gid-{call}")),
+        }
+    }
+
+    async fn remove_uri(&self, _gid: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn run_media(
+        &self,
+        _id: &str,
+        _payload: &SpawnPayload,
+        _generation: u64,
+    ) -> Result<(), String> {
+        unreachable!("media is not used by blocking aria2 tests")
     }
 }
 
@@ -816,6 +866,47 @@ async fn dispatcher_skips_a_full_front_queue_for_later_eligible_work() {
     assert!(manager.aria2_gid_for_download("a1").is_some());
     assert!(manager.aria2_gid_for_download("b1").is_some());
     assert!(manager.aria2_gid_for_download("a2").is_none());
+
+    dispatcher.abort();
+}
+
+#[tokio::test]
+async fn dispatcher_admits_next_task_while_first_add_uri_is_blocked() {
+    let app = mock_builder()
+        .build(mock_context(noop_assets()))
+        .expect("mock app");
+    let spawner = Arc::new(BlockingAria2Spawner::new());
+    let manager = Arc::new(QueueManager::test_new(
+        app.handle().clone(),
+        2,
+        spawner.clone(),
+    ));
+    manager.push(aria2_task("blocked-first")).await.unwrap();
+    manager.push(aria2_task("admitted-second")).await.unwrap();
+
+    let first_started = spawner.first_started.notified();
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+    timeout(Duration::from_secs(1), first_started)
+        .await
+        .expect("the first addUri should start");
+
+    timeout(Duration::from_secs(1), spawner.second_started.notified())
+        .await
+        .expect("a blocked addUri must not serialize admission of the next task");
+
+    spawner.release_first.notify_one();
+    timeout(Duration::from_secs(1), async {
+        while manager.aria2_gid_for_download("blocked-first").is_none()
+            || manager.aria2_gid_for_download("admitted-second").is_none()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both admitted tasks should finish dispatching");
 
     dispatcher.abort();
 }
