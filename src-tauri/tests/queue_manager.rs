@@ -918,7 +918,7 @@ async fn aria2_resume_waits_for_shrunk_capacity() {
 
 #[tokio::test]
 async fn dispatcher_skips_a_full_front_queue_for_later_eligible_work() {
-    let (manager, spawner) = make_manager(2);
+    let (manager, _spawner) = make_manager(2);
     let manager = Arc::new(manager);
     manager
         .replace_queue_limits(vec![
@@ -937,15 +937,14 @@ async fn dispatcher_skips_a_full_front_queue_for_later_eligible_work() {
     };
 
     timeout(Duration::from_secs(1), async {
-        loop {
-            if spawner.add_uri_calls.load(Ordering::SeqCst) == 2 {
-                break;
-            }
+        while manager.aria2_gid_for_download("a1").is_none()
+            || manager.aria2_gid_for_download("b1").is_none()
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("later eligible queue should dispatch");
+    .expect("both eligible queues should finish dispatching");
     assert!(manager.aria2_gid_for_download("a1").is_some());
     assert!(manager.aria2_gid_for_download("b1").is_some());
     assert!(manager.aria2_gid_for_download("a2").is_none());
