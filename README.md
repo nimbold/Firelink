@@ -74,7 +74,10 @@ All packages include aria2, yt-dlp, FFmpeg, Deno, and SQLite support. No separat
 
 Captured links open Firelink's Add window for review before they are started or queued.
 
-[![Install from Firefox Add-ons](https://img.shields.io/badge/Install%20from-Firefox%20Add--ons-FF7139?style=for-the-badge&logo=firefox-browser&logoColor=white)](https://addons.mozilla.org/en-US/firefox/addon/firelink-companion/)
+<p>
+  <a href="https://addons.mozilla.org/en-US/firefox/addon/firelink-companion/"><img src="https://img.shields.io/badge/Install%20from-Firefox%20Add--ons-FF7139?style=for-the-badge&logo=firefox-browser&logoColor=white" alt="Install from Firefox Add-ons" /></a>&nbsp;&nbsp;
+  <a href="https://github.com/nimbold/Firelink-Extension#manual-chromium-installation"><img src="https://img.shields.io/badge/Manual%20install-Chromium-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Manual install for Chromium browsers" /></a>
+</p>
 
 See the [Companion README](https://github.com/nimbold/Firelink-Extension#readme) for browser installation, pairing, and privacy details.
 
