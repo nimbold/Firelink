@@ -118,6 +118,10 @@ pub enum Aria2RecreateOutcome {
     Unavailable(String),
 }
 
+fn aria2_recovery_should_rebuild_after_pause_error(status: &str) -> bool {
+    status == "removed"
+}
+
 /// What kind of sidecar a queued task spawns. Drives which runner the
 /// dispatcher invokes.
 #[derive(Debug, Clone)]
@@ -2824,6 +2828,16 @@ impl SidecarSpawner for ProductionSpawner {
                             Ok(status) if status == "complete" => {
                                 return Ok(Aria2RecreateOutcome::Complete);
                             }
+                            Ok(status)
+                                if aria2_recovery_should_rebuild_after_pause_error(&status) =>
+                            {
+                                log::warn!(
+                                    "aria2 connection recovery [{}]: gid {} disappeared after forcePause failed; rebuilding from the saved payload: {}",
+                                    id,
+                                    gid,
+                                    error
+                                );
+                            }
                             Ok(status) => {
                                 return Err(format!(
                                     "failed to pause aria2 gid {gid} before recreation: {error}; daemon reports {status}"
@@ -3126,6 +3140,13 @@ mod tests {
             options.get("max-connection-per-server"),
             Some(&serde_json::json!("1"))
         );
+    }
+
+    #[test]
+    fn aria2_recovery_rebuilds_when_force_pause_races_with_removal() {
+        assert!(aria2_recovery_should_rebuild_after_pause_error("removed"));
+        assert!(!aria2_recovery_should_rebuild_after_pause_error("paused"));
+        assert!(!aria2_recovery_should_rebuild_after_pause_error("active"));
     }
 
     #[test]

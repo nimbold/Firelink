@@ -4598,7 +4598,7 @@ async fn resume_download(
                     return;
                 }
                 if let Some(permit) = permit_candidate {
-                    let _ = queue_manager
+                    let parked = queue_manager
                         .park_aria2_permit_if_missing_for_queue(
                             &id_clone,
                             &queue_id,
@@ -4606,6 +4606,14 @@ async fn resume_download(
                             permit,
                         )
                         .await;
+                    if !parked {
+                        log::warn!(
+                            "aria2 resume [{}]: permit ownership was not established before unpause; leaving gid {} paused",
+                            id_clone,
+                            gid_clone
+                        );
+                        return;
+                    }
                 }
                 let _ = app_handle_clone.emit(
                     "download-state",
