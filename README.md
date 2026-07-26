@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="src/assets/app-icon.png" alt="Firelink app icon" width="128" height="128" />
+</p>
+
 # Firelink
 
 > A fast, focused desktop download manager for macOS, Windows, and Linux.
