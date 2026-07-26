@@ -203,7 +203,7 @@ const ru = {
       none: 'Ничего не делать',
       sleep: 'Спящий режим',
       restart: 'Перезагрузка',
-      shutdown: 'Завершение работы',
+      shutdown: 'Выключение',
     },
   },
   properties: {
