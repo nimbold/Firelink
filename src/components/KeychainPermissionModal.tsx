@@ -21,8 +21,14 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
   const platform = usePlatformInfo();
   const [isGranting, setIsGranting] = useState(false);
   const [grantRequestPending, setGrantRequestPending] = useState(false);
+  const [grantRequestTimedOut, setGrantRequestTimedOut] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const isMountedRef = useRef(true);
   const grantRequestRef = useRef<Promise<PairingTokenHydration> | null>(null);
+
+  useEffect(() => () => {
+    isMountedRef.current = false;
+  }, []);
 
   useEffect(() => {
     if (!showKeychainModal || isGranting || grantRequestPending) return;
@@ -68,6 +74,7 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
     // launch a second OS prompt while the first one is still outstanding.
     if (grantRequestRef.current) return;
     setIsGranting(true);
+    setGrantRequestTimedOut(false);
     setError(null);
 
     let timeoutId: number | undefined;
@@ -95,11 +102,17 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
     void grantRequest.then(
       () => {
         if (grantRequestRef.current === grantRequest) grantRequestRef.current = null;
-        setGrantRequestPending(false);
+        if (isMountedRef.current) {
+          setGrantRequestPending(false);
+          setGrantRequestTimedOut(false);
+        }
       },
       () => {
         if (grantRequestRef.current === grantRequest) grantRequestRef.current = null;
-        setGrantRequestPending(false);
+        if (isMountedRef.current) {
+          setGrantRequestPending(false);
+          setGrantRequestTimedOut(false);
+        }
       }
     );
     // A native credential-store call cannot be cancelled by the webview. Keep
@@ -112,19 +125,24 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
         grantRequest,
         new Promise<never>((_, reject) => {
           timeoutId = window.setTimeout(
-            () => reject(new Error(t($ => $.keychain.timeout))),
+            () => {
+              if (isMountedRef.current) setGrantRequestTimedOut(true);
+              reject(new Error(t($ => $.keychain.timeout)));
+            },
             KEYCHAIN_GRANT_TIMEOUT_MS
           );
         })
       ]);
       if (!(await applyPersistentGrant(result))) {
-        setError(result.error || t($ => $.keychain.unavailable, { store: siteCredentialStoreName }));
+        if (isMountedRef.current) {
+          setError(result.error || t($ => $.keychain.unavailable, { store: siteCredentialStoreName }));
+        }
       }
     } catch (e: any) {
-      setError(e.toString());
+      if (isMountedRef.current) setError(e.toString());
     } finally {
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
-      setIsGranting(false);
+      if (isMountedRef.current) setIsGranting(false);
     }
   };
 
@@ -148,6 +166,7 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
       }}
       role="dialog"
       aria-modal="true"
+      aria-labelledby="keychain-permission-title"
     >
       <div
         className="window-safe-modal bg-bg-modal rounded-xl w-full max-w-md overflow-hidden flex flex-col shadow-2xl border border-border-modal scale-in"
@@ -157,7 +176,7 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
           <div className="p-2 bg-blue-500/10 rounded-full items-center justify-center">
             <KeyRound size={20} className="text-blue-500" />
           </div>
-          <h2 className="text-lg font-semibold text-text-primary m-0">{t($ => $.keychain.title)}</h2>
+          <h2 id="keychain-permission-title" className="text-lg font-semibold text-text-primary m-0">{t($ => $.keychain.title)}</h2>
         </div>
 
         <div className="px-5 py-6 flex-1 min-h-0 overflow-y-auto text-sm text-text-secondary leading-relaxed space-y-4">
@@ -198,16 +217,18 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
 
         <div className="px-5 py-4 border-t border-border-modal flex justify-end gap-3 bg-bg-modal-accent">
           <button
+            type="button"
             onClick={handleLater}
-            disabled={isGranting || grantRequestPending}
-            className="px-4 py-2 rounded-lg text-sm font-medium transition-colors text-text-secondary hover:bg-item-hover hover:text-text-primary disabled:opacity-50"
+            disabled={isGranting || (grantRequestPending && !grantRequestTimedOut)}
+            className="keychain-modal-action px-4 py-2 rounded-lg text-sm font-medium text-text-secondary hover:bg-item-hover hover:text-text-primary disabled:opacity-50"
           >
             {t($ => $.keychain.later)}
           </button>
           <button
+            type="button"
             onClick={handleGrant}
             disabled={isGranting || grantRequestPending}
-            className="px-4 py-2 rounded-lg text-sm font-medium transition-colors bg-accent text-accent-foreground hover:bg-accent/90 disabled:opacity-50"
+            className="keychain-modal-action px-4 py-2 rounded-lg text-sm font-medium bg-accent text-accent-foreground hover:bg-accent/90 disabled:opacity-50"
           >
             {isGranting || grantRequestPending ? t($ => $.keychain.enabling) : grantLabel}
           </button>

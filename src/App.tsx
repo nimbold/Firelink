@@ -417,6 +417,101 @@ function App() {
         unlistenDownload = null;
       };
 
+      // Establish the consent barrier before registering listeners or loading
+      // persisted downloads. Those later startup steps can cause user-facing
+      // work to begin; the explanation must already be committed before any
+      // path is allowed to reach the credential store.
+      await waitForSettingsHydration();
+      if (!active) return;
+      const [currentAppVersion, currentPlatform] = await Promise.all([
+        getVersion().catch(() => ''),
+        getPlatformInfo().catch(() => null)
+      ]);
+      if (!active) return;
+      const currentKeychainConsentVersion = getKeychainConsentVersion(currentAppVersion);
+      setKeychainConsentVersion(currentKeychainConsentVersion);
+
+      try {
+        const settings = useSettingsStore.getState();
+        const isStartupActive = () => active;
+        const { deferKeychainHydration, showKeychainPrompt } = getKeychainStartupDecision({
+          portable: currentPlatform?.portable === true,
+          appVersion: currentKeychainConsentVersion,
+          approvedVersion: settings.keychainAccessVersion,
+          accessGranted: settings.keychainAccessGranted,
+          promptDismissed: settings.keychainPromptDismissed
+        });
+        let changed = false;
+        if (deferKeychainHydration) {
+          settings.setKeychainAccessReady(false);
+          if (showKeychainPrompt) settings.setShowKeychainModal(true);
+          await settings.hydrateSessionPairingToken(isStartupActive);
+          if (!active) return;
+        } else {
+          await invoke('authorize_keychain_access');
+          if (!active) return;
+          changed = await settings.hydratePairingToken(isStartupActive);
+          if (!active) return;
+          const currentSettings = useSettingsStore.getState();
+          settings.setKeychainAccessReady(getKeychainAccessReady({
+            portable: currentPlatform?.portable === true,
+            accessGranted: currentSettings.keychainAccessGranted,
+            persistent: currentSettings.isPairingTokenPersistent
+          }));
+        }
+        if (changed) {
+          addToast({
+            variant: 'warning',
+            isActionable: true,
+            message: (
+              <div className="flex flex-col gap-2">
+                <p>{t($ => $.app.extensionDisconnected)}</p>
+                <div className="flex gap-2 justify-end">
+                  <button
+                    type="button"
+                    className="app-button px-2 py-1 bg-surface-raised border border-border-color rounded"
+                    onClick={async () => {
+                      const token = useSettingsStore.getState().extensionPairingToken;
+                      try {
+                        if (token) await navigator.clipboard.writeText(token);
+                        acknowledgePairingTokenChange();
+                      } catch (error) {
+                        addToast({
+                          message: t($ => $.app.copyTokenFailed, { detail: String(error) }),
+                          variant: 'error',
+                          isActionable: true
+                        });
+                      }
+                    }}
+                  >
+                    {t($ => $.app.copyToken)}
+                  </button>
+                  <button
+                    type="button"
+                    className="app-button px-2 py-1 bg-surface-raised border border-border-color rounded"
+                    onClick={() => {
+                      const settings = useSettingsStore.getState();
+                      settings.setActiveSettingsTab('integrations');
+                      settings.setActiveView('settings');
+                      acknowledgePairingTokenChange();
+                    }}
+                  >
+                    {t($ => $.app.integrations)}
+                  </button>
+                </div>
+              </div>
+            )
+          });
+        }
+      } catch (error) {
+        console.error('Failed to hydrate extension pairing token:', error);
+        addToast({
+          message: t($ => $.app.credentialPersistenceFailed, { detail: String(error) }),
+          variant: 'error',
+          isActionable: true
+        });
+      }
+
       try {
         unlistenDownload = await initDownloadListener();
         unlistenTerminalState = await listen('download-state', (event) => {
@@ -479,7 +574,20 @@ function App() {
           cleanupListeners = null;
           return;
         }
+      } catch (error) {
+        disposeListeners();
+        cleanupListeners = null;
+        if (!active) return;
+        console.error('Failed to initialize Firelink listeners:', error);
+        addToast({
+          message: t($ => $.app.initializeDownloadsFailed, { detail: String(error) }),
+          variant: 'error',
+          isActionable: true
+        });
+        return;
+      }
 
+      try {
         await initializeDownloadState();
         if (!active) return;
       } catch (error) {
@@ -493,110 +601,6 @@ function App() {
           isActionable: true
         });
         return;
-      }
-
-      const [currentAppVersion, currentPlatform] = await Promise.all([
-        getVersion().catch(() => ''),
-        getPlatformInfo().catch(() => null)
-      ]);
-      if (!active) return;
-      const currentKeychainConsentVersion = getKeychainConsentVersion(currentAppVersion);
-      setKeychainConsentVersion(currentKeychainConsentVersion);
-
-      try {
-        const settings = useSettingsStore.getState();
-        const isStartupActive = () => active;
-        const { deferKeychainHydration, showKeychainPrompt } = getKeychainStartupDecision({
-          portable: currentPlatform?.portable === true,
-          appVersion: currentKeychainConsentVersion,
-          approvedVersion: settings.keychainAccessVersion,
-          accessGranted: settings.keychainAccessGranted,
-          promptDismissed: settings.keychainPromptDismissed
-        });
-
-        let changed = false;
-        if (deferKeychainHydration) {
-          settings.setKeychainAccessReady(false);
-          if (showKeychainPrompt) {
-            // Commit the explanation before the harmless session-token IPC so
-            // a slow startup cannot leave the user facing an unexplained
-            // credential-store request.
-            settings.setShowKeychainModal(true);
-          }
-          // This token is already owned by the backend and does not access
-          // the OS credential store. Render our explanation before any native
-          // Keychain/Credential Manager prompt can be user-triggered.
-          await settings.hydrateSessionPairingToken(isStartupActive);
-          if (!active) return;
-        } else {
-          // The backend keeps credential-store access disabled for every new
-          // process. Arm it only after the persisted startup decision has
-          // confirmed that this build was already approved; the hydrate call
-          // below is then the first operation allowed to touch the OS store.
-          await invoke('authorize_keychain_access');
-          if (!active) return;
-          changed = await settings.hydratePairingToken(isStartupActive);
-          if (!active) return;
-          const currentSettings = useSettingsStore.getState();
-          settings.setKeychainAccessReady(getKeychainAccessReady({
-            portable: currentPlatform?.portable === true,
-            accessGranted: currentSettings.keychainAccessGranted,
-            persistent: currentSettings.isPairingTokenPersistent
-          }));
-        }
-        if (changed) {
-          addToast({
-            variant: 'warning',
-            isActionable: true,
-            message: (
-              <div className="flex flex-col gap-2">
-                <p>{t($ => $.app.extensionDisconnected)}</p>
-                <div className="flex gap-2 justify-end">
-                  <button
-                    type="button"
-                    className="app-button px-2 py-1 bg-surface-raised border border-border-color rounded"
-                    onClick={async () => {
-                      const token = useSettingsStore.getState().extensionPairingToken;
-                      try {
-                        if (token) {
-                          await navigator.clipboard.writeText(token);
-                        }
-                        acknowledgePairingTokenChange();
-                      } catch (error) {
-                        addToast({
-                          message: t($ => $.app.copyTokenFailed, { detail: String(error) }),
-                          variant: 'error',
-                          isActionable: true
-                        });
-                      }
-                    }}
-                  >
-                    {t($ => $.app.copyToken)}
-                  </button>
-                  <button
-                    type="button"
-                    className="app-button px-2 py-1 bg-surface-raised border border-border-color rounded"
-                    onClick={() => {
-                      const settings = useSettingsStore.getState();
-                      settings.setActiveSettingsTab('integrations');
-                      settings.setActiveView('settings');
-                      acknowledgePairingTokenChange();
-                    }}
-                  >
-                    {t($ => $.app.integrations)}
-                  </button>
-                </div>
-              </div>
-            )
-          });
-        }
-      } catch (error) {
-        console.error('Failed to hydrate extension pairing token:', error);
-        addToast({
-          message: t($ => $.app.credentialPersistenceFailed, { detail: String(error) }),
-          variant: 'error',
-          isActionable: true
-        });
       }
 
       if (!active) return;

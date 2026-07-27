@@ -25,7 +25,7 @@
   --surface-overlay: 0 0% 100% / 0.95;
   --shadow-color: 220 10% 20% / 0.1;
   --sidebar-shell-bg: 0 0% 92%;
-  --sidebar-panel-bg: 0 0% 93%;
+  --sidebar-panel-bg: 0 0% 96%;
   --workspace-bg: 0 0% 98%;
   --statusbar-bg: 0 0% 96%;
   --status-completed: 136 62% 48%;
@@ -69,7 +69,7 @@
   --surface-overlay: 0 0% 100% / 0.95;
   --shadow-color: 220 10% 20% / 0.1;
   --sidebar-shell-bg: 0 0% 92%;
-  --sidebar-panel-bg: 0 0% 93%;
+  --sidebar-panel-bg: 0 0% 96%;
   --workspace-bg: 0 0% 98%;
   --statusbar-bg: 0 0% 96%;
   --sidebar-border: 0 0% 0% / 0.18;
@@ -103,7 +103,7 @@
   --status-queued: 38 95% 55%;
   --status-retrying: 50 100% 60%;
   --sidebar-shell-bg: 0 0% 11%;
-  --sidebar-panel-bg: 0 0% 13%;
+  --sidebar-panel-bg: 0 0% 11%;
   --workspace-bg: 0 0% 11%;
   --statusbar-bg: 0 0% 11%;
   --sidebar-border: 0 0% 100% / 0.11;
@@ -148,7 +148,7 @@
   --status-queued: 38 95% 60%;
   --status-retrying: 50 100% 65%;
   --sidebar-shell-bg: 231 15% 15%;
-  --sidebar-panel-bg: 232 14% 23%;
+  --sidebar-panel-bg: 231 15% 16%;
   --workspace-bg: 231 15% 18%;
   --statusbar-bg: 231 15% 16%;
   --sidebar-border: 326 100% 74% / 0.16;
@@ -193,7 +193,7 @@
   --status-queued: 40 71% 60%;
   --status-retrying: 50 85% 55%;
   --sidebar-shell-bg: 220 18% 18%;
-  --sidebar-panel-bg: 220 17% 27%;
+  --sidebar-panel-bg: 220 18% 19%;
   --workspace-bg: 220 16% 22%;
   --statusbar-bg: 220 18% 19%;
   --sidebar-border: 193 43% 67% / 0.16;
@@ -529,6 +529,35 @@ html[data-list-density="relaxed"] {
   .app-button:active:not(:disabled) {
     background: hsl(var(--border-color));
     transform: scale(0.96);
+  }
+
+  .keychain-modal-action {
+    transition:
+      background-color 100ms ease,
+      border-color 100ms ease,
+      box-shadow 100ms ease,
+      color 100ms ease,
+      transform 70ms ease,
+      opacity 100ms ease;
+  }
+
+  .keychain-modal-action:active:not(:disabled) {
+    transform: scale(0.96);
+  }
+
+  .keychain-modal-action:focus-visible {
+    outline: 2px solid hsl(var(--accent-color) / 0.7);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .keychain-modal-action {
+      transition: none;
+    }
+
+    .keychain-modal-action:active:not(:disabled) {
+      transform: none;
+    }
   }
 
   .app-button-primary {
@@ -1486,6 +1515,11 @@ html[data-list-density="relaxed"] {
     border-radius: 8px;
     font-size: 12px;
     margin-bottom: 0;
+  }
+
+  .sidebar-settings-button:not([data-active="true"]):hover {
+    background: hsl(var(--sidebar-hover));
+    color: hsl(var(--text-primary));
   }
 
   .sidebar-section-label {
