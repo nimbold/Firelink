@@ -740,10 +740,9 @@ runEngineChecks(false);
 
   return (
     <div className="settings-view flex-1 flex flex-col relative h-full overflow-hidden">
-        <WindowDragRegion />
-
         {/* SwiftUI SettingsPaneContainer-style horizontal tab strip */}
         <div className="settings-toolbar">
+          <WindowDragRegion />
           <div className={`settings-tab-strip flex items-stretch gap-1 ${
             isSidebarOnRight ? 'settings-tab-strip--sidebar-right' : ''
           }`}>

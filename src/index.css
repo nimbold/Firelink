@@ -1245,7 +1245,7 @@ html[data-list-density="relaxed"] {
   .app-sidebar-shell {
     padding-block: 10px;
     padding-inline-start: 10px;
-    background: transparent;
+    background: hsl(var(--statusbar-bg));
   }
 
   .app-sidebar-shell--left {
@@ -1592,6 +1592,7 @@ html[data-list-density="relaxed"] {
 
   .settings-toolbar {
     border-bottom: 1px solid hsl(var(--border-color));
+    background: hsl(var(--statusbar-bg));
   }
 
   .settings-tab-strip {
