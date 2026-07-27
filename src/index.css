@@ -1280,6 +1280,7 @@ html[data-list-density="relaxed"] {
   }
 
   .app-sidebar-shell {
+    position: relative;
     padding-block: 10px;
     padding-inline-start: 10px;
     background: hsl(var(--statusbar-bg));
@@ -1293,6 +1294,26 @@ html[data-list-density="relaxed"] {
     order: 2;
     padding-inline-start: 0;
     padding-inline-end: 10px;
+  }
+
+  /* Keep the rounded depth cue in the stable sidebar layer. Keeping it on the
+     shell avoids stale compositing when the sibling workspace swaps pages. */
+  .app-sidebar-shell::after {
+    content: '';
+    position: absolute;
+    top: 10px;
+    bottom: 10px;
+    inset-inline-start: 10px;
+    inset-inline-end: 0;
+    pointer-events: none;
+    border-radius: var(--window-corner-radius);
+    box-shadow: 2px 0 12px hsl(0 0% 0% / 0.14);
+  }
+
+  .app-sidebar-shell--right::after {
+    inset-inline-start: 0;
+    inset-inline-end: 10px;
+    box-shadow: -2px 0 12px hsl(0 0% 0% / 0.14);
   }
 
   .sidebar-resize-handle {
@@ -1344,8 +1365,21 @@ html[data-list-density="relaxed"] {
     border-radius: var(--window-corner-radius);
 
     box-shadow:
-      inset 0 1px 0 hsl(0 0% 100% / 0.045),
-      2px 0 10px hsl(0 0% 0% / 0.20);
+      inset 0 1px 0 hsl(0 0% 100% / 0.045);
+  }
+
+  /* A regular material gives the sidebar depth while keeping the content
+     readable across themes. The opaque declaration above remains the
+     fallback for platforms without backdrop-filter support. */
+  @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .app-sidebar-panel {
+      background: hsl(var(--sidebar-panel-bg) / 0.86);
+      backdrop-filter: blur(22px) saturate(1.12);
+      -webkit-backdrop-filter: blur(22px) saturate(1.12);
+      box-shadow:
+        inset 0 1px 0 hsl(0 0% 100% / 0.08),
+        inset 0 -1px 0 hsl(0 0% 0% / 0.05);
+    }
   }
 
 
@@ -3360,12 +3394,6 @@ html[dir="rtl"] .font-mono,
 html[dir="rtl"] input[type="number"] {
   direction: ltr;
   unicode-bidi: isolate;
-}
-
-.app-sidebar-shell--right .app-sidebar-panel {
-  box-shadow:
-    inset 0 1px 0 hsl(0 0% 100% / 0.045),
-    -2px 0 10px hsl(0 0% 0% / 0.20);
 }
 
 .app-sidebar-shell--left .app-sidebar-panel {
