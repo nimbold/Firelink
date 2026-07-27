@@ -292,6 +292,7 @@ const common = {
     enableFromSettings: 'You can enable storage anytime from Settings > Integrations.',
     later: 'Later',
     enabling: 'Enabling...',
+    waitingForPrompt: 'Waiting for system prompt…',
     timeout: 'Credential storage request timed out. You can select Later and try again.',
     unavailable: '{{store}} is unavailable.',
     accessRequired: 'Grant credential-store access before regenerating the pairing token.',

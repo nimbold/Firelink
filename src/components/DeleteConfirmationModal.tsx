@@ -2,12 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { useDownloadStore } from '../store/useDownloadStore';
 import { AlertTriangle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
 
 export const DeleteConfirmationModal: React.FC = () => {
   const { t } = useTranslation();
   const { deleteModalState, closeDeleteModal, removeDownload } = useDownloadStore();
   const [errorMessage, setErrorMessage] = useState('');
   const [isRemoving, setIsRemoving] = useState(false);
+  const modalRef = useModalFocus(deleteModalState.isOpen);
 
   useEffect(() => {
     if (deleteModalState.isOpen) {
@@ -19,7 +21,10 @@ export const DeleteConfirmationModal: React.FC = () => {
   useEffect(() => {
     if (!deleteModalState.isOpen || isRemoving) return;
     const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') closeDeleteModal();
+      if (event.key === 'Escape' && isTopmostModal(modalRef.current)) {
+        event.preventDefault();
+        closeDeleteModal();
+      }
     };
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
@@ -70,22 +75,26 @@ export const DeleteConfirmationModal: React.FC = () => {
 
   return (
     <div
-      className="app-modal-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      className="app-modal-backdrop fixed inset-0 z-50 flex items-center justify-center"
       onClick={(event) => {
         if (event.target === event.currentTarget && !isRemoving) handleCancel();
       }}
       role="dialog"
       aria-modal="true"
+      aria-labelledby="remove-download-title"
     >
       <div
-        className="window-safe-modal bg-bg-modal rounded-xl w-full max-w-md overflow-hidden flex flex-col shadow-2xl border border-border-modal scale-in"
+        ref={modalRef}
+        tabIndex={-1}
+        data-modal-surface="true"
+        className="app-modal keychain-modal flex w-full max-w-md flex-col overflow-hidden text-sm"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="px-5 py-4 border-b border-border-modal flex items-center gap-3">
           <div className="p-2 bg-red-500/10 rounded-full flex items-center justify-center">
             <AlertTriangle size={20} className="text-red-400" />
           </div>
-          <h2 className="text-lg font-semibold text-text-primary m-0">{t($ => $.dialogs.removeDownload.title)}</h2>
+          <h2 id="remove-download-title" className="text-lg font-semibold text-text-primary m-0">{t($ => $.dialogs.removeDownload.title)}</h2>
         </div>
 
         <div className="px-5 py-6 flex-1 text-sm text-text-secondary leading-relaxed">

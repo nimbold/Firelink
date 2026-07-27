@@ -50,6 +50,7 @@ import {
   type AddDownloadDraftRow,
   type MediaSelection
 } from '../utils/addDownloadMetadata';
+import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
 
 const formatBytes = (bytes: number) => {
   const k = 1024;
@@ -165,6 +166,7 @@ export const AddDownloadsModal = () => {
 
   const [conflicts, setConflicts] = useState<DuplicateConflict[]>([]);
   const [showingDuplicates, setShowingDuplicates] = useState(false);
+  const modalRef = useModalFocus(isAddModalOpen);
   const [pendingAction, setPendingAction] = useState<AddDownloadAction>({ type: 'start-now' });
   const [pendingUseSharedDestination, setPendingUseSharedDestination] = useState(false);
   const [pendingDestinationOverrides, setPendingDestinationOverrides] = useState<Record<number, string>>({});
@@ -363,7 +365,9 @@ export const AddDownloadsModal = () => {
     if (!isAddModalOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
+      if (!isTopmostModal(modalRef.current)) return;
       if (showKeychainModal) return;
+      event.preventDefault();
       if (showingDuplicates) {
         setShowingDuplicates(false);
       } else if (isQueueMenuOpen) {
@@ -1583,8 +1587,14 @@ export const AddDownloadsModal = () => {
       }}
       role="dialog"
       aria-modal="true"
+      aria-labelledby="add-downloads-modal-title"
     >
-      <div className="app-modal add-download-modal flex flex-col overflow-hidden text-sm">
+      <div
+        ref={modalRef}
+        tabIndex={-1}
+        data-modal-surface="true"
+        className="app-modal add-download-modal flex flex-col overflow-hidden text-sm"
+      >
 
         {/* Main Content Split */}
         <div className="flex flex-1 min-h-0 overflow-hidden">
@@ -1597,7 +1607,7 @@ export const AddDownloadsModal = () => {
                 <div className="flex items-center justify-between">
                   <div className="add-download-section-title flex items-center gap-2">
                     <Link size={16} className="text-blue-500" />
-                    {t($ => $.addDownloads.downloadLinks)}
+                    <span id="add-downloads-modal-title">{t($ => $.addDownloads.downloadLinks)}</span>
                   </div>
                 </div>
                 <textarea

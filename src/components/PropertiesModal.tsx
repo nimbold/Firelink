@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useDownloadStore, DownloadItem } from '../store/useDownloadStore';
 import { useDownloadProgressStore } from '../store/downloadProgressStore';
 import { useShallow } from 'zustand/react/shallow';
@@ -19,6 +19,7 @@ import {
 import { resolveDownloadConnections } from '../utils/downloads';
 import { useTranslation } from 'react-i18next';
 import { formatDateTime, type CalendarPreference } from '../utils/dateTime';
+import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
 
 type LoginMode = 'matching' | 'custom' | 'none';
 
@@ -89,6 +90,14 @@ export const PropertiesModal = () => {
 
   const [errorMessage, setErrorMessage] = useState('');
   const [isPauseResumePending, setIsPauseResumePending] = useState(false);
+  const actionRequestRef = useRef(0);
+  const modalRef = useModalFocus(Boolean(selectedPropertiesDownloadId && item));
+
+  useEffect(() => {
+    // Invalidate native pickers and transfer-control results when the modal
+    // switches items, closes, or reopens for the same download.
+    actionRequestRef.current += 1;
+  }, [selectedPropertiesDownloadId]);
 
   useEffect(() => {
     if (selectedPropertiesDownloadId) {
@@ -99,10 +108,19 @@ export const PropertiesModal = () => {
         if (activeItem.destination) {
           setSaveLocation(activeItem.destination);
         } else {
+          const propertiesDownloadId = selectedPropertiesDownloadId;
+          const requestId = actionRequestRef.current;
           void resolveCategoryDestination(
             useSettingsStore.getState(),
             activeItem.category
-          ).then(setSaveLocation);
+          ).then(location => {
+            if (
+              requestId === actionRequestRef.current
+              && useDownloadStore.getState().selectedPropertiesDownloadId === propertiesDownloadId
+            ) {
+              setSaveLocation(location);
+            }
+          });
         }
         setConnections(resolveDownloadConnections(activeItem.connections, perServerConnections));
         setConnectionsDirty(false);
@@ -161,7 +179,10 @@ export const PropertiesModal = () => {
   useEffect(() => {
     if (!selectedPropertiesDownloadId) return;
     const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setSelectedPropertiesDownloadId(null);
+      if (event.key === 'Escape' && isTopmostModal(modalRef.current)) {
+        event.preventDefault();
+        setSelectedPropertiesDownloadId(null);
+      }
     };
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
@@ -171,13 +192,20 @@ export const PropertiesModal = () => {
 
   const handleBrowse = async () => {
     if (identityLocked) return;
+    const requestId = ++actionRequestRef.current;
+    const propertiesDownloadId = item.id;
     try {
       const selected = await open({
         directory: true,
         multiple: false,
         defaultPath: saveLocation.startsWith('~') ? undefined : saveLocation
       });
-      if (selected && typeof selected === 'string') {
+      if (
+        selected
+        && typeof selected === 'string'
+        && requestId === actionRequestRef.current
+        && useDownloadStore.getState().selectedPropertiesDownloadId === propertiesDownloadId
+      ) {
         setSaveLocation(selected);
       }
     } catch (e) {
@@ -211,12 +239,20 @@ export const PropertiesModal = () => {
         : {}),
     };
     
+    const requestId = ++actionRequestRef.current;
     try {
       setErrorMessage('');
       await useDownloadStore.getState().applyProperties(item.id, updates);
-      setSelectedPropertiesDownloadId(null);
+      if (
+        requestId === actionRequestRef.current
+        && useDownloadStore.getState().selectedPropertiesDownloadId === item.id
+      ) {
+        setSelectedPropertiesDownloadId(null);
+      }
     } catch (e) {
-      setErrorMessage(e instanceof Error ? e.message : String(e));
+      if (requestId === actionRequestRef.current && useDownloadStore.getState().selectedPropertiesDownloadId === item.id) {
+        setErrorMessage(e instanceof Error ? e.message : String(e));
+      }
     }
   };
 
@@ -231,6 +267,7 @@ export const PropertiesModal = () => {
     }
 
     setErrorMessage('');
+    const requestId = ++actionRequestRef.current;
     setIsPauseResumePending(true);
     try {
       if (action === 'pause') {
@@ -246,9 +283,13 @@ export const PropertiesModal = () => {
       const message = action === 'pause'
         ? t($ => $.downloadTable.pauseFailed)
         : t($ => $.downloadTable.resumeFailed, { fileName: currentItem.fileName });
-      setErrorMessage(t($ => $.downloadTable.interactionError, { message, detail }));
+      if (requestId === actionRequestRef.current && useDownloadStore.getState().selectedPropertiesDownloadId === item.id) {
+        setErrorMessage(t($ => $.downloadTable.interactionError, { message, detail }));
+      }
     } finally {
-      setIsPauseResumePending(false);
+      if (requestId === actionRequestRef.current && useDownloadStore.getState().selectedPropertiesDownloadId === item.id) {
+        setIsPauseResumePending(false);
+      }
     }
   };
 
@@ -256,16 +297,27 @@ export const PropertiesModal = () => {
     if (isLiveSpeedLimitPending || item.isMedia || !['downloading', 'retrying'].includes(item.status)) return;
 
     setErrorMessage('');
+    const requestId = ++actionRequestRef.current;
     setIsLiveSpeedLimitPending(true);
     try {
       await useDownloadStore.getState().setDownloadSpeedLimit(item.id, limit);
-      if (limit === null) setLiveSpeedLimitValue('');
+      if (
+        limit === null
+        && requestId === actionRequestRef.current
+        && useDownloadStore.getState().selectedPropertiesDownloadId === item.id
+      ) {
+        setLiveSpeedLimitValue('');
+      }
     } catch (error) {
-      setErrorMessage(t($ => $.properties.liveSpeedLimitFailed, {
-        detail: error instanceof Error ? error.message : String(error)
-      }));
+      if (requestId === actionRequestRef.current && useDownloadStore.getState().selectedPropertiesDownloadId === item.id) {
+        setErrorMessage(t($ => $.properties.liveSpeedLimitFailed, {
+          detail: error instanceof Error ? error.message : String(error)
+        }));
+      }
     } finally {
-      setIsLiveSpeedLimitPending(false);
+      if (requestId === actionRequestRef.current && useDownloadStore.getState().selectedPropertiesDownloadId === item.id) {
+        setIsLiveSpeedLimitPending(false);
+      }
     }
   };
 
@@ -361,13 +413,19 @@ export const PropertiesModal = () => {
       }}
       role="dialog"
       aria-modal="true"
+      aria-labelledby="properties-modal-title"
     >
-      <div className="app-modal w-[720px] h-[580px] flex flex-col overflow-hidden text-sm">
+      <div
+        ref={modalRef}
+        tabIndex={-1}
+        data-modal-surface="true"
+        className="app-modal properties-modal w-[720px] h-[580px] flex flex-col overflow-hidden text-sm"
+      >
         
         {/* Header Summary */}
         <div className="p-4 px-5 bg-sidebar-bg/50">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-base font-semibold truncate text-text-primary pr-4">{item.fileName}</h2>
+            <h2 id="properties-modal-title" className="text-base font-semibold truncate text-text-primary pr-4">{item.fileName}</h2>
             <span className={`flex items-center gap-1.5 text-xs font-semibold tracking-wide uppercase ${statusColor}`}>
               <StatusIcon size={14} />
               {statusLabel}

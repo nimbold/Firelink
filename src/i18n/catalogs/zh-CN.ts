@@ -292,6 +292,7 @@ const zhCN = {
     enableFromSettings: '您可以随时从“设置 > 集成”中启用存储。',
     later: '稍后',
     enabling: '正在启用…',
+    waitingForPrompt: '正在等待系统提示…',
     timeout: '凭据存储请求超时。您可以选择“稍后”并重试。',
     unavailable: '{{store}}不可用。',
     accessRequired: '在重新生成配对令牌之前，请授予凭据存储访问权限。',

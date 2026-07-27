@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
 
 export type DuplicateReason = { type: 'url', msg: string } | { type: 'file', msg: string };
 type DuplicateResolution = 'rename' | 'replace' | 'skip';
@@ -22,10 +23,14 @@ interface Props {
 export const DuplicateResolutionModal = ({ conflicts: initialConflicts, onConfirm, onCancel }: Props) => {
   const { t } = useTranslation();
   const [conflicts, setConflicts] = useState<DuplicateConflict[]>(initialConflicts);
+  const modalRef = useModalFocus();
 
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onCancel();
+      if (event.key === 'Escape' && isTopmostModal(modalRef.current)) {
+        event.preventDefault();
+        onCancel();
+      }
     };
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
@@ -43,10 +48,16 @@ export const DuplicateResolutionModal = ({ conflicts: initialConflicts, onConfir
       }}
       role="dialog"
       aria-modal="true"
+      aria-labelledby="duplicate-downloads-title"
     >
-      <div className="app-modal w-[500px] flex flex-col overflow-hidden text-sm">
+      <div
+        ref={modalRef}
+        tabIndex={-1}
+        data-modal-surface="true"
+        className="app-modal w-[500px] flex flex-col overflow-hidden text-sm"
+      >
         <div className="p-4 border-b border-border-modal flex flex-col gap-2">
-          <h2 className="text-lg font-semibold text-text-primary">{t($ => $.dialogs.duplicateDownloads.title)}</h2>
+          <h2 id="duplicate-downloads-title" className="text-lg font-semibold text-text-primary">{t($ => $.dialogs.duplicateDownloads.title)}</h2>
           <p className="text-xs text-text-muted">{t($ => $.dialogs.duplicateDownloads.description)}</p>
         </div>
         

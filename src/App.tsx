@@ -1151,11 +1151,17 @@ function App() {
       
       {isAddModalOpen && <AddDownloadsModal />}
 
-      <Suspense fallback={null}>
-        {selectedPropertiesDownloadId !== null && <PropertiesModal />}
-        {isDeleteModalOpen && <DeleteConfirmationModal />}
-        {showKeychainModal && <KeychainPermissionModal consentVersion={keychainConsentVersion} />}
-      </Suspense>
+      {selectedPropertiesDownloadId !== null && (
+        <Suspense fallback={null}>
+          <PropertiesModal />
+        </Suspense>
+      )}
+      {isDeleteModalOpen && (
+        <Suspense fallback={null}>
+          <DeleteConfirmationModal />
+        </Suspense>
+      )}
+      {showKeychainModal && <KeychainPermissionModal consentVersion={keychainConsentVersion} />}
 
     </div>
   );
