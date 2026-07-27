@@ -66,8 +66,10 @@ export const useModalFocus = (enabled = true) => {
 
     const focusInitialElement = () => {
       if (!isTopmostModal(surface)) return;
+      // Keep initial focus on the dialog itself. This avoids visually selecting
+      // an action when a modal opens from a pointer interaction; Tab still
+      // enters the first available control through the trap below.
       const initialElement = surface.querySelector<HTMLElement>('[data-modal-autofocus="true"]')
-        || getFocusableElements(surface)[0]
         || surface;
       initialElement.focus({ preventScroll: true });
     };

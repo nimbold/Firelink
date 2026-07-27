@@ -632,6 +632,11 @@ html[data-list-density="relaxed"] {
     contain: layout;
   }
 
+  /* The panel is a focus anchor for the modal trap, not an action control. */
+  .app-modal[tabindex="-1"]:focus {
+    outline: none;
+  }
+
   .keychain-modal {
     max-width: 560px;
     max-height: min(680px, 100%);
