@@ -250,7 +250,7 @@ export default function SpeedLimiterView() {
                   disabled={!enabled || isSaving}
                   onClick={() => changeUnit(option)}
                   className={`rounded px-3 py-1.5 text-[12px] font-medium ${
-                    unit === option ? 'bg-accent text-white' : 'text-text-secondary hover:bg-item-hover'
+                    unit === option ? 'bg-accent text-accent-foreground' : 'text-text-secondary hover:bg-item-hover'
                   }`}
                 >
                   {option}

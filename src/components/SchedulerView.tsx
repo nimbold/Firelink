@@ -342,7 +342,7 @@ export default function SchedulerView() {
                       disabled={!draft.enabled}
                       onClick={() => toggleDay(day.value)}
                       className={`h-8 w-8 rounded-full text-[12px] font-semibold ${
-                        selected ? 'bg-accent text-white' : 'bg-bg-input text-text-primary hover:bg-item-hover'
+                        selected ? 'bg-accent text-accent-foreground' : 'bg-bg-input text-text-primary hover:bg-item-hover'
                       }`}
                     >
                       {t($ => $.scheduler.days[day.key])}

@@ -207,7 +207,7 @@ export const KeychainPermissionModal: React.FC<KeychainPermissionModalProps> = (
           <button
             onClick={handleGrant}
             disabled={isGranting || grantRequestPending}
-            className="px-4 py-2 rounded-lg text-sm font-medium transition-colors bg-accent text-white hover:bg-accent/90 disabled:opacity-50"
+            className="px-4 py-2 rounded-lg text-sm font-medium transition-colors bg-accent text-accent-foreground hover:bg-accent/90 disabled:opacity-50"
           >
             {isGranting || grantRequestPending ? t($ => $.keychain.enabling) : grantLabel}
           </button>

@@ -11,11 +11,13 @@
   --item-hover: 0 0% 0% / 0.05;
   --item-selected: 211 100% 50%;
   --accent-color: 211 100% 50%;
+  --accent-foreground: 220 20% 8%;
   --stripe-bg: 0 0% 0% / 0.035;
 
   --text-primary: 0 0% 10%;
-  --text-secondary: 0 0% 40%;
-  --text-muted: 0 0% 55%;
+  /* Supporting text stays readable on light surfaces while retaining a cool neutral hierarchy. */
+  --text-secondary: 220 12% 34%;
+  --text-muted: 220 10% 44%;
   --bg-modal: 0 0% 100%;
   --bg-input: 0 0% 100%;
   --border-modal: 0 0% 85%;
@@ -54,10 +56,12 @@
   --item-hover: 0 0% 0% / 0.05;
   --item-selected: 211 100% 50%;
   --accent-color: 211 100% 50%;
+  --accent-foreground: 220 20% 8%;
   --stripe-bg: 0 0% 0% / 0.035;
   --text-primary: 0 0% 10%;
-  --text-secondary: 0 0% 40%;
-  --text-muted: 0 0% 55%;
+  /* Supporting text stays readable on light surfaces while retaining a cool neutral hierarchy. */
+  --text-secondary: 220 12% 34%;
+  --text-muted: 220 10% 44%;
   --bg-modal: 0 0% 100%;
   --bg-input: 0 0% 100%;
   --border-modal: 0 0% 85%;
@@ -84,10 +88,11 @@
   --item-hover: 0 0% 100% / 0.07;
   --item-selected: 211 100% 56%;
   --accent-color: 211 100% 56%;
+  --accent-foreground: 220 20% 12%;
   --stripe-bg: 0 0% 100% / 0.025;
   --text-primary: 0 0% 91%;
   --text-secondary: 0 0% 75%;
-  --text-muted: 0 0% 50%;
+  --text-muted: 0 0% 60%;
   --bg-modal: 0 0% 13%;
   --bg-input: 0 0% 16%;
   --shadow-color: 0 0% 0% / 0.30;
@@ -128,10 +133,11 @@
   --item-hover: 326 100% 74% / 0.10;
   --item-selected: 326 100% 74%;
   --accent-color: 326 100% 74%;
+  --accent-foreground: 220 20% 12%;
   --stripe-bg: 0 0% 100% / 0.025;
   --text-primary: 60 30% 96%;
   --text-secondary: 228 14% 74%;
-  --text-muted: 229 12% 58%;
+  --text-muted: 229 12% 66%;
   --bg-modal: 232 14% 23%;
   --bg-input: 231 15% 20%;
   --shadow-color: 231 20% 8% / 0.35;
@@ -172,10 +178,11 @@
   --item-hover: 193 43% 67% / 0.12;
   --item-selected: 193 43% 67%;
   --accent-color: 193 43% 67%;
+  --accent-foreground: 220 20% 12%;
   --stripe-bg: 0 0% 100% / 0.025;
   --text-primary: 218 27% 92%;
   --text-secondary: 219 28% 80%;
-  --text-muted: 218 17% 63%;
+  --text-muted: 218 17% 70%;
   --bg-modal: 220 17% 27%;
   --bg-input: 220 16% 24%;
   --shadow-color: 220 25% 10% / 0.34;
@@ -209,6 +216,7 @@
   --color-sidebar-glass: hsl(var(--sidebar-glass));
   --color-main-bg: hsl(var(--main-bg));
   --color-accent: hsl(var(--accent-color));
+  --color-accent-foreground: hsl(var(--accent-foreground));
   --color-border-color: hsl(var(--border-color));
   --color-item-hover: hsl(var(--item-hover));
   --color-item-selected: hsl(var(--item-selected));
@@ -526,7 +534,7 @@ html[data-list-density="relaxed"] {
   .app-button-primary {
     border-color: transparent;
     background: var(--color-accent);
-    color: white;
+    color: var(--color-accent-foreground);
   }
 
   .app-button-primary:hover:not(:disabled) {
@@ -1083,7 +1091,7 @@ html[data-list-density="relaxed"] {
     background:
       linear-gradient(180deg, hsl(0 0% 100% / 0.16), transparent 52%),
       hsl(var(--accent-color));
-    color: white;
+    color: hsl(var(--accent-foreground));
     box-shadow:
       inset 0 1px 0 hsl(0 0% 100% / 0.18),
       0 1px 2px hsl(var(--accent-color) / 0.32);
@@ -1413,19 +1421,19 @@ html[data-list-density="relaxed"] {
 
   .sidebar-nav-item[data-active="true"] {
     background: hsl(var(--accent-color)) !important;
-    color: white !important;
+    color: hsl(var(--accent-foreground)) !important;
     box-shadow:
       inset 0 1px 0 hsl(0 0% 100% / 0.12),
       0 1px 0 hsl(0 0% 0% / 0.10);
   }
 
   .sidebar-nav-item[data-active="true"] svg {
-    color: white !important;
+    color: hsl(var(--accent-foreground)) !important;
   }
 
   .sidebar-nav-item[data-active="true"] .sidebar-count {
-    color: white !important;
-    background: hsl(0 0% 100% / 0.16) !important;
+    color: hsl(var(--accent-foreground)) !important;
+    background: hsl(var(--accent-foreground) / 0.16) !important;
   }
 
   .sidebar-nav-item:not([data-active="true"]):hover {
@@ -1468,6 +1476,9 @@ html[data-list-density="relaxed"] {
     padding: 7px 10px;
     border-top: 1px solid hsl(var(--sidebar-border));
     background: hsl(var(--sidebar-hover));
+    border-bottom-right-radius: calc(var(--window-corner-radius) - 1px);
+    border-bottom-left-radius: calc(var(--window-corner-radius) - 1px);
+    overflow: hidden;
   }
 
   .sidebar-settings-button {
@@ -1607,13 +1618,26 @@ html[data-list-density="relaxed"] {
   .settings-tab-button {
     min-height: 64px;
     border-radius: 8px;
-    transition: none;
+    transition:
+      background-color 140ms ease,
+      color 140ms ease,
+      box-shadow 160ms ease,
+      transform 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  .settings-tab-button:active {
+    transform: scale(0.98);
+  }
+
+  .settings-tab-button:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px hsl(var(--accent-color) / 0.24);
   }
 
   .settings-tab-button[data-active="true"] {
     background: hsl(var(--accent-color));
     box-shadow: none;
-    color: white;
+    color: hsl(var(--accent-foreground));
   }
 
   .settings-pane {
@@ -1625,6 +1649,11 @@ html[data-list-density="relaxed"] {
     padding: 32px;
   }
 
+  .settings-page-transition {
+    animation: settings-page-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    transform-origin: top center;
+  }
+
   .settings-title {
     margin: 0 0 24px;
     font-size: 28px;
@@ -1634,7 +1663,8 @@ html[data-list-density="relaxed"] {
   }
 
   .settings-section-title {
-    margin: 0 0 7px 12px;
+    margin: 0 0 7px;
+    padding-inline-start: 12px;
     font-size: 12px;
     line-height: 1.2;
     font-weight: 600;
@@ -1763,6 +1793,8 @@ html[data-list-density="relaxed"] {
   box-shadow:
     0 18px 42px hsl(0 0% 0% / 0.28),
     inset 0 1px 0 hsl(0 0% 100% / 0.06);
+  animation: settings-menu-in 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  transform-origin: top center;
 }
 
 .settings-combobox-option {
@@ -1841,6 +1873,11 @@ html[data-list-density="relaxed"] {
     box-shadow: 0 0 0 1px hsl(var(--accent-color));
   }
 
+  .theme-option:has(input:focus-visible) {
+    outline: 2px solid hsl(var(--accent-color) / 0.55);
+    outline-offset: 2px;
+  }
+
   .theme-option input {
     position: absolute;
     width: 1px;
@@ -1880,9 +1917,18 @@ html[data-list-density="relaxed"] {
     background: hsl(var(--border-color));
     border-radius: 20px;
     position: relative;
-    cursor: default;
+    cursor: pointer;
     outline: none;
     transition: background 0.2s ease;
+  }
+
+  .mac-switch:focus-visible {
+    box-shadow: 0 0 0 3px hsl(var(--accent-color) / 0.24);
+  }
+
+  .mac-switch:disabled {
+    cursor: default;
+    opacity: 0.55;
   }
   .mac-switch::after {
     content: '';
@@ -1906,6 +1952,15 @@ html[data-list-density="relaxed"] {
   /* Switch thumbs use physical LTR transforms in every interface direction. */
   button[role="switch"] {
     direction: ltr;
+  }
+
+  button[role="switch"]:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px hsl(var(--accent-color) / 0.24);
+  }
+
+  button[role="switch"]:disabled {
+    opacity: 0.55;
   }
 .downloads-view {
   background: hsl(var(--main-bg));
@@ -2912,6 +2967,24 @@ body.is-queue-dragging * {
 .download-context-submenu {
   inset-inline-start: 100%;
   margin-inline-start: 0.25rem;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-3px) scale(0.98);
+  transform-origin: top left;
+  transition:
+    opacity 120ms ease,
+    transform 160ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    visibility 0s linear 120ms;
+}
+
+.group:hover > .download-context-submenu,
+.group:focus-within > .download-context-submenu {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+  transition-delay: 0s;
 }
 
 .app-workspace--sidebar-right .download-context-submenu {
@@ -2919,6 +2992,7 @@ body.is-queue-dragging * {
   inset-inline-end: 100%;
   margin-inline-start: 0;
   margin-inline-end: 0.25rem;
+  transform-origin: top right;
 }
 
 html[dir="rtl"] .download-context-menu-chevron {
@@ -3173,6 +3247,28 @@ html[dir="rtl"] .download-context-menu-chevron {
 @keyframes fade-in {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+
+@keyframes settings-page-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes settings-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 @keyframes modal-backdrop-in {

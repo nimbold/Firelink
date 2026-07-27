@@ -1056,7 +1056,7 @@ function App() {
         />
       )}
       <div
-        className={`app-sidebar-shell relative z-20 shrink-0 transition-all duration-300 ease-[cubic-bezier(0.2,0.8,0.2,1)] ${
+        className={`app-sidebar-shell relative z-20 shrink-0 transition-[width,margin-inline-start,margin-inline-end,opacity] duration-300 ease-[cubic-bezier(0.2,0.8,0.2,1)] ${
           isSidebarOnRight ? 'app-sidebar-shell--right' : 'app-sidebar-shell--left'
         } ${
           isSidebarVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'

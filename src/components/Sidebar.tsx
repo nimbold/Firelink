@@ -426,7 +426,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
           onClick={() => setActiveView('settings')}
           className="sidebar-nav-item sidebar-settings-button group flex w-full items-center text-[13px] text-start cursor-default font-medium transition-colors"
         >
-          <Settings className={`w-[18px] h-[18px] me-3 shrink-0 ${activeView === 'settings' ? 'text-white' : 'text-text-muted'}`} strokeWidth={activeView === 'settings' ? 2.5 : 2} />
+          <Settings className={`w-[18px] h-[18px] me-3 shrink-0 ${activeView === 'settings' ? 'text-accent-foreground' : 'text-text-muted'}`} strokeWidth={activeView === 'settings' ? 2.5 : 2} />
           <span className="sidebar-nav-label">{t($ => $.navigation.settings)}</span>
         </button>
       </div>

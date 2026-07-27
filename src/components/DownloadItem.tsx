@@ -279,7 +279,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
             >
               {(download.status === 'queued' || download.status === 'staged') && queueIndex !== -1 ? (
                 <>
-                  <Clock size={12} className={download.status === 'queued' ? 'animate-pulse shrink-0' : 'shrink-0'} />
+                  <Clock size={12} className={download.status === 'queued' ? 'animate-pulse motion-reduce:animate-none shrink-0' : 'shrink-0'} />
                   <span className="truncate">
                     {downloadStatusLabel} #{queueIndex + 1}
                   </span>

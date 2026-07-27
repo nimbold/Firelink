@@ -725,10 +725,11 @@ runEngineChecks(false);
       <button
         type="button"
         data-active={active}
+        aria-current={active ? 'page' : undefined}
         onClick={() => settings.setActiveSettingsTab(type)}
-        className={`settings-tab-button flex min-w-0 flex-1 flex-col items-center justify-center px-1 text-center cursor-default ${
+        className={`settings-tab-button flex min-w-0 flex-1 flex-col items-center justify-center px-1 text-center cursor-pointer ${
           active
-            ? 'text-white'
+            ? 'text-accent-foreground'
             : 'text-text-primary hover:bg-item-hover'
         }`}
       >
@@ -755,6 +756,7 @@ runEngineChecks(false);
         {/* Content Area */}
         <div className="settings-scroll flex-1 overflow-y-auto">
           <div className="settings-content-shell w-full">
+            <div key={activeTab} className="settings-page-transition">
             <h1 className="settings-title text-text-primary">{activeTabLabel}</h1>
             <div className="settings-content max-w-[720px]">
 
@@ -1448,7 +1450,7 @@ runEngineChecks(false);
                     type="button"
                     onClick={handleAddLogin}
                     disabled={isSavingLogin}
-                    className="bg-accent hover:bg-accent text-white px-4 py-1.5 rounded-lg text-xs font-semibold shadow flex items-center gap-1.5"
+                    className="bg-accent hover:bg-accent text-accent-foreground px-4 py-1.5 rounded-lg text-xs font-semibold shadow flex items-center gap-1.5"
                   >
                     <Plus size={14} /> {isSavingLogin ? t($ => $.settings.siteLogins.saving) : t($ => $.settings.siteLogins.addLogin)}
                   </button>
@@ -1611,7 +1613,7 @@ className="app-button px-3 py-1.5 text-[12px] flex items-center gap-1.5 disabled
                     </p>
                     <button 
                       onClick={() => settings.setShowKeychainModal(true)}
-                      className="px-4 py-1.5 rounded-md text-xs font-medium transition-colors bg-accent text-white hover:bg-accent/90 shadow-sm"
+                      className="px-4 py-1.5 rounded-md text-xs font-medium transition-colors bg-accent text-accent-foreground hover:bg-accent/90 shadow-sm"
                     >
                     {platform.portable ? t($ => $.settings.integrations.reviewPortablePairing) : t($ => $.settings.integrations.grantCredentialAccess)}
                     </button>
@@ -1635,7 +1637,7 @@ className="app-button px-3 py-1.5 text-[12px] flex items-center gap-1.5 disabled
                   <div className="space-y-2">
                     <button
                       onClick={() => void copyToken()}
-                      className="w-full bg-accent hover:bg-accent text-white font-medium py-1 px-2 rounded text-[11px] flex items-center justify-center gap-1 shadow transition-colors"
+                      className="w-full bg-accent hover:bg-accent text-accent-foreground font-medium py-1 px-2 rounded text-[11px] flex items-center justify-center gap-1 shadow transition-colors"
                     >
                       <Copy size={11} /> {t($ => $.settings.integrations.copyToken)}
                     </button>
@@ -1798,7 +1800,7 @@ className="app-button px-3 py-1.5 text-[12px] flex items-center gap-1.5 disabled
                       role="switch"
                       aria-checked={settings.autoCheckUpdates}
                       onClick={() => settings.setAutoCheckUpdates(!settings.autoCheckUpdates)}
-                      className={`relative inline-flex h-5 w-9 shrink-0 cursor-default items-center rounded-full transition-colors duration-200 ease-in-out border border-transparent ${settings.autoCheckUpdates ? 'bg-accent' : 'bg-border-color'}`}
+                      className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors duration-200 ease-in-out border border-transparent ${settings.autoCheckUpdates ? 'bg-accent' : 'bg-border-color'}`}
                     >
                       <span className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ease-in-out ${settings.autoCheckUpdates ? 'translate-x-4' : 'translate-x-0'}`} />
                     </button>
@@ -1828,6 +1830,7 @@ className="app-button px-3 py-1.5 text-[12px] flex items-center gap-1.5 disabled
             </div>
           )}
 
+            </div>
             </div>
           </div>
         </div>
