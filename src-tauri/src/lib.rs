@@ -8851,9 +8851,11 @@ fn observe_aria2_connections_with_epoch(
         now,
     } = sample;
     if observation.gid != gid || observation.control_epoch != control_epoch {
-        let preserved_recovery_attempts = (observation.control_epoch == control_epoch)
-            .then_some(observation.recovery_attempts)
-            .unwrap_or_default();
+        let preserved_recovery_attempts = if observation.control_epoch == control_epoch {
+            observation.recovery_attempts
+        } else {
+            Default::default()
+        };
         *observation = Aria2ConnectionObservation {
             gid: gid.to_string(),
             control_epoch,

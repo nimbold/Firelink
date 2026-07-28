@@ -26,17 +26,30 @@ fn stop_is_due(
         && last_stop_key != stop_key
 }
 
-fn overnight_stop_is_due(
+struct OvernightStopCheck<'a> {
     stop_time_enabled: bool,
     start_minute: Option<u32>,
     stop_minute: Option<u32>,
     current_minute: u32,
     previous_day_allowed: bool,
-    last_start_key: &str,
-    previous_start_key: &str,
-    last_stop_key: &str,
-    stop_key: &str,
-) -> bool {
+    last_start_key: &'a str,
+    previous_start_key: &'a str,
+    last_stop_key: &'a str,
+    stop_key: &'a str,
+}
+
+fn overnight_stop_is_due(check: OvernightStopCheck<'_>) -> bool {
+    let OvernightStopCheck {
+        stop_time_enabled,
+        start_minute,
+        stop_minute,
+        current_minute,
+        previous_day_allowed,
+        last_start_key,
+        previous_start_key,
+        last_stop_key,
+        stop_key,
+    } = check;
     stop_time_enabled
         && previous_day_allowed
         && start_minute.zip(stop_minute).is_some_and(|(start, stop)| {
@@ -126,17 +139,17 @@ pub fn spawn_scheduler(
                 let previous_start_key = previous_day
                     .map(|day| format!("{}-start", day.format("%Y-%m-%d")))
                     .unwrap_or_default();
-                let overnight_stop_due = overnight_stop_is_due(
-                    scheduler.stop_time_enabled,
+                let overnight_stop_due = overnight_stop_is_due(OvernightStopCheck {
+                    stop_time_enabled: scheduler.stop_time_enabled,
                     start_minute,
                     stop_minute,
                     current_minute,
                     previous_day_allowed,
-                    &scheduler_last_start_key,
-                    &previous_start_key,
-                    &scheduler_last_stop_key,
-                    &stop_key,
-                );
+                    last_start_key: &scheduler_last_start_key,
+                    previous_start_key: &previous_start_key,
+                    last_stop_key: &scheduler_last_stop_key,
+                    stop_key: &stop_key,
+                });
 
                 if (same_day_stop_due || overnight_stop_due)
                     && last_emit
@@ -159,7 +172,7 @@ pub fn spawn_scheduler(
 
 #[cfg(test)]
 mod tests {
-    use super::{minute_of_day, overnight_stop_is_due, stop_is_due};
+    use super::{minute_of_day, overnight_stop_is_due, stop_is_due, OvernightStopCheck};
 
     #[test]
     fn parses_valid_scheduler_times() {
@@ -199,38 +212,38 @@ mod tests {
 
     #[test]
     fn overnight_stop_uses_the_previous_day_start() {
-        assert!(overnight_stop_is_due(
-            true,
-            Some(1320),
-            Some(360),
-            420,
-            true,
-            "2026-06-22-start",
-            "2026-06-22-start",
-            "",
-            "2026-06-23-stop",
-        ));
-        assert!(!overnight_stop_is_due(
-            true,
-            Some(1320),
-            Some(360),
-            1380,
-            true,
-            "2026-06-22-start",
-            "2026-06-22-start",
-            "",
-            "2026-06-22-stop",
-        ));
-        assert!(!overnight_stop_is_due(
-            true,
-            Some(1320),
-            Some(360),
-            420,
-            false,
-            "2026-06-22-start",
-            "2026-06-22-start",
-            "",
-            "2026-06-23-stop",
-        ));
+        assert!(overnight_stop_is_due(OvernightStopCheck {
+            stop_time_enabled: true,
+            start_minute: Some(1320),
+            stop_minute: Some(360),
+            current_minute: 420,
+            previous_day_allowed: true,
+            last_start_key: "2026-06-22-start",
+            previous_start_key: "2026-06-22-start",
+            last_stop_key: "",
+            stop_key: "2026-06-23-stop",
+        }));
+        assert!(!overnight_stop_is_due(OvernightStopCheck {
+            stop_time_enabled: true,
+            start_minute: Some(1320),
+            stop_minute: Some(360),
+            current_minute: 1380,
+            previous_day_allowed: true,
+            last_start_key: "2026-06-22-start",
+            previous_start_key: "2026-06-22-start",
+            last_stop_key: "",
+            stop_key: "2026-06-22-stop",
+        }));
+        assert!(!overnight_stop_is_due(OvernightStopCheck {
+            stop_time_enabled: true,
+            start_minute: Some(1320),
+            stop_minute: Some(360),
+            current_minute: 420,
+            previous_day_allowed: false,
+            last_start_key: "2026-06-22-start",
+            previous_start_key: "2026-06-22-start",
+            last_stop_key: "",
+            stop_key: "2026-06-23-stop",
+        }));
     }
 }

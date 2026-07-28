@@ -214,10 +214,11 @@ pub enum Theme {
     Nord,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
 #[serde(rename_all = "kebab-case")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub enum FontFamily {
+    #[default]
     System,
     Inter,
     Outfit,
@@ -229,16 +230,11 @@ pub enum FontFamily {
     Monospace,
 }
 
-impl Default for FontFamily {
-    fn default() -> Self {
-        Self::System
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub enum WindowControlStyle {
+    #[default]
     Auto,
     Macos,
     Windows,
@@ -246,25 +242,14 @@ pub enum WindowControlStyle {
     Minimal,
 }
 
-impl Default for WindowControlStyle {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub enum CalendarPreference {
+    #[default]
     Gregorian,
     Persian,
     Hebrew,
-}
-
-impl Default for CalendarPreference {
-    fn default() -> Self {
-        Self::Gregorian
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]

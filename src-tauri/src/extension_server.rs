@@ -436,7 +436,7 @@ fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload
     let filename = payload.filename.and_then(|value| sanitize_filename(&value));
     let batch = payload.batch && urls.len() >= 2;
     let batch_name = batch
-        .then(|| payload.batch_name)
+        .then_some(payload.batch_name)
         .flatten()
         .and_then(|value| {
             let value = value.trim().to_string();
