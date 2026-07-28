@@ -260,12 +260,12 @@ impl SidecarSpawner for RecreateSpawner {
 #[async_trait::async_trait]
 impl firelink_lib::queue::SidecarSpawner for CountingSpawner {
     async fn add_uri(&self, _id: &str, payload: &SpawnPayload) -> Result<String, String> {
-        self.add_uri_calls.fetch_add(1, Ordering::SeqCst);
+        let call = self.add_uri_calls.fetch_add(1, Ordering::SeqCst) + 1;
         self.add_speed_limits
             .lock()
             .unwrap()
             .push(payload.speed_limit.clone());
-        Ok(format!("gid-{}", self.add_uri_calls.load(Ordering::SeqCst)))
+        Ok(format!("gid-{call}"))
     }
     async fn remove_uri(&self, _gid: &str) -> Result<(), String> {
         Ok(())
