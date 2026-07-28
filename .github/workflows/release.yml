@@ -40,12 +40,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+          fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
       - name: Verify release version
         run: node scripts/verify-release-version.js
+      - name: Verify Companion release identity
+        run: node scripts/verify-companion-release.js
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

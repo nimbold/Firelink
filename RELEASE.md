@@ -65,6 +65,11 @@ pass. A `workflow_dispatch` on a `v*` tag also publishes when its
 release-certification inputs; clean-machine QA remains a release-owner gate
 before pushing the tag.
 
+For paired releases, publish and verify the Companion release first. The
+desktop release workflow requires `Extensions/Browser` to be at a clean commit
+whose exact tag matches both the Companion `package.json` and `manifest.json`
+versions before building desktop packages.
+
 ## Automated release builds
 
 Push a version tag to build and verify native artifacts:
