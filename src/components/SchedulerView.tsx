@@ -303,7 +303,7 @@ export default function SchedulerView() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="app-page-transition-content flex-1 overflow-y-auto p-6">
         <div className={`max-w-[760px] space-y-4 ${draft.enabled ? '' : 'opacity-50'}`}>
           <section className="app-card p-5">
             <div className="mb-5 flex items-center gap-2 font-semibold text-text-primary">

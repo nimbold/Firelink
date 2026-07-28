@@ -223,7 +223,7 @@ export default function SpeedLimiterView() {
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="app-page-transition-content flex-1 overflow-y-auto p-6">
         <section className={`app-card max-w-[760px] p-5 ${enabled ? '' : 'opacity-55'}`}>
           <div className="mb-2 flex items-center gap-2 font-semibold text-text-primary">
             <Gauge size={18} className="text-accent" /> {t($ => $.speedLimiter.globalSpeedLimit)}

@@ -337,7 +337,7 @@ export default function LogsView() {
       <div
         ref={scrollRef}
         onContextMenu={handleContextMenu}
-        className="logs-console flex-1 overflow-y-auto p-3 font-mono text-[11px] leading-[1.5] select-text"
+        className="app-page-transition-content logs-console flex-1 overflow-y-auto p-3 font-mono text-[11px] leading-[1.5] select-text"
         style={{ userSelect: 'text', WebkitUserSelect: 'text' }}
       >
         {logs.length === 0 && (

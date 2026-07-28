@@ -2,7 +2,12 @@ import React from 'react';
 import { useDownloadProgressStore } from '../store/downloadProgressStore';
 import { Play, Pause, MoreVertical, Clock } from 'lucide-react';
 import type { DownloadItem as DownloadItemType } from '../bindings/DownloadItem';
-import { canPauseDownload, canStartDownload } from '../utils/downloadActions';
+import {
+  canPauseDownload,
+  canStartDownload,
+  formatDownloadActionCount,
+  type DownloadActionCounts,
+} from '../utils/downloadActions';
 import { useTranslation } from 'react-i18next';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { formatDateTime } from '../utils/dateTime';
@@ -30,8 +35,11 @@ interface DownloadItemProps {
   setContextMenu: (menu: { x: number; y: number; id: string }) => void;
   handlePause: (id: string, skipConfirm?: boolean) => void;
   handleResume: (item: DownloadItemType) => void;
+  handlePauseSelected: () => void;
+  handleResumeSelected: () => void;
   getCategoryIcon: (category: string) => React.ReactNode;
   isSelected: boolean;
+  selectedActionCounts: DownloadActionCounts;
   isQueueReorderable: boolean;
   isQueueDragSource: boolean;
   onMoveInQueue: (id: string, direction: 'up' | 'down') => void;
@@ -49,8 +57,11 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   setContextMenu,
   handlePause,
   handleResume,
+  handlePauseSelected,
+  handleResumeSelected,
   getCategoryIcon,
   isSelected,
+  selectedActionCounts,
   isQueueReorderable,
   isQueueDragSource,
   onMoveInQueue,
@@ -67,6 +78,15 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   const [isActionFocused, setIsActionFocused] = React.useState(false);
   const [actionPosition, setActionPosition] = React.useState<React.CSSProperties | undefined>();
   const hasRowActions = download.status !== 'completed';
+  const pauseSelectionCount = isSelected && selectedActionCounts.pause > 1
+    ? selectedActionCounts.pause
+    : null;
+  const resumeSelectionCount = isSelected && selectedActionCounts.resume > 1
+    ? selectedActionCounts.resume
+    : null;
+  const selectedCountLabel = (count: number | null) => count === null
+    ? null
+    : t($ => $.downloadTable.summary.selected, { count });
   const isActionVisible = hasRowActions && (
     isRowHovered ||
     isActionHovered ||
@@ -358,13 +378,41 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
       }}
     >
       {canPauseDownload(download.status) && (
-        <button onClick={() => handlePause(download.id)} className="app-icon-button h-7 w-7" title={t($ => $.downloads.actions.pause)}>
+        <button
+          onClick={() => pauseSelectionCount !== null ? handlePauseSelected() : handlePause(download.id)}
+          className="app-icon-button h-7 w-7"
+          title={pauseSelectionCount === null
+            ? t($ => $.downloads.actions.pause)
+            : `${t($ => $.downloads.actions.pause)} (${selectedCountLabel(pauseSelectionCount)})`}
+          aria-label={pauseSelectionCount === null
+            ? t($ => $.downloads.actions.pause)
+            : `${t($ => $.downloads.actions.pause)} (${selectedCountLabel(pauseSelectionCount)})`}
+        >
           <Pause size={14} fill="currentColor" />
+          {pauseSelectionCount !== null ? (
+            <span className="download-row-action-badge" aria-hidden="true">
+              {formatDownloadActionCount(pauseSelectionCount)}
+            </span>
+          ) : null}
         </button>
       )}
       {canStartDownload(download.status) && (
-        <button onClick={() => handleResume(download)} className="app-icon-button h-7 w-7" title={download.status === 'paused' ? t($ => $.downloads.actions.resume) : t($ => $.downloads.actions.start)}>
+        <button
+          onClick={() => resumeSelectionCount !== null ? handleResumeSelected() : handleResume(download)}
+          className="app-icon-button h-7 w-7"
+          title={resumeSelectionCount === null
+            ? download.status === 'paused' ? t($ => $.downloads.actions.resume) : t($ => $.downloads.actions.start)
+            : `${t($ => $.downloadTable.startResume)} (${selectedCountLabel(resumeSelectionCount)})`}
+          aria-label={resumeSelectionCount === null
+            ? download.status === 'paused' ? t($ => $.downloads.actions.resume) : t($ => $.downloads.actions.start)
+            : `${t($ => $.downloadTable.startResume)} (${selectedCountLabel(resumeSelectionCount)})`}
+        >
           <Play size={14} fill="currentColor" />
+          {resumeSelectionCount !== null ? (
+            <span className="download-row-action-badge" aria-hidden="true">
+              {formatDownloadActionCount(resumeSelectionCount)}
+            </span>
+          ) : null}
         </button>
       )}
       <button

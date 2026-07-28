@@ -18,7 +18,8 @@ import {
 import {
   canPauseDownload,
   canRedownload,
-  canStartDownload
+  canStartDownload,
+  countDownloadActions
 } from '../utils/downloadActions';
 import { isActiveDownloadStatus, isTransferActiveStatus } from '../utils/downloads';
 import { summarizeDownloads, type DownloadSummary } from '../utils/downloadSummary';
@@ -1594,6 +1595,10 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     () => filteredDownloads.filter(download => selectedIds.has(download.id)),
     [filteredDownloads, selectedIds]
   );
+  const selectedActionCounts = useMemo(
+    () => countDownloadActions(selectedDownloads),
+    [selectedDownloads]
+  );
   const summaryDownloads = selectedDownloads.length > 0 ? selectedDownloads : filteredDownloads;
   const downloadSummary = useMemo(
     () => summarizeDownloads(summaryDownloads, progressMap),
@@ -1799,14 +1804,47 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     }
   }, [showInteractionError]);
 
-  const resumeItemsSequentially = async (items: DownloadItem[]) => {
+  const resumeItemsSequentially = useCallback(async (items: DownloadItem[]) => {
     for (const item of items) {
       const current = useDownloadStore.getState().downloads.find(download => download.id === item.id);
       if (current && canStartDownload(current.status)) {
         await handleResume(current);
       }
     }
-  };
+  }, [handleResume]);
+
+  const getCurrentSelectedDownloads = useCallback(() => {
+    const selected = selectedIdsRef.current;
+    return useDownloadStore.getState().downloads.filter(download => selected.has(download.id));
+  }, []);
+
+  const handlePauseSelected = useCallback(async () => {
+    const items = getCurrentSelectedDownloads().filter(download => canPauseDownload(download.status));
+    if (items.length === 0) return;
+
+    const nonResumableCount = items.filter(download => download.resumable === false).length;
+    if (nonResumableCount > 0) {
+      const confirmPause = window.confirm(
+        nonResumableCount === 1
+          ? t($ => $.downloadTable.nonResumableOne)
+          : t($ => $.downloadTable.nonResumableMany, { count: nonResumableCount })
+      );
+      if (!confirmPause) return;
+    }
+
+    await Promise.all(items.map(item => {
+      const current = useDownloadStore.getState().downloads.find(download => download.id === item.id);
+      return current && canPauseDownload(current.status)
+        ? handlePause(current.id, true)
+        : Promise.resolve();
+    }));
+  }, [getCurrentSelectedDownloads, handlePause, t]);
+
+  const handleResumeSelected = useCallback(() => {
+    const items = getCurrentSelectedDownloads().filter(download => canStartDownload(download.status));
+    if (items.length === 0) return;
+    void resumeItemsSequentially(items);
+  }, [getCurrentSelectedDownloads, resumeItemsSequentially]);
 
   const handleDelete = (ids: string | string[]) => {
     openDeleteModal(ids);
@@ -2010,7 +2048,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
         </div>
       </div>
 
-      <div className="downloads-table flex-1 flex flex-col">
+      <div className="app-page-transition-content downloads-table flex-1 flex flex-col">
         <div className="download-table-scroll">
           <div
             ref={headerRef}
@@ -2161,8 +2199,11 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
                         setContextMenu={handleContextMenu}
                         handlePause={handlePause}
                         handleResume={handleResume}
+                        handlePauseSelected={handlePauseSelected}
+                        handleResumeSelected={handleResumeSelected}
                         getCategoryIcon={getCategoryIcon}
                         isSelected={selectedIds.has(d.id)}
+                        selectedActionCounts={selectedActionCounts}
                         isQueueReorderable={queueReorderableIds.has(d.id)}
                         isQueueDragSource={Boolean(queueDragState?.active && queueDragState.ids.includes(d.id))}
                         onMoveInQueue={handleMoveInQueue}
@@ -2274,7 +2315,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
               <button
               onClick={() => {
                 setContextMenu(null);
-                void resumeItemsSequentially(itemsToResume);
+                handleResumeSelected();
               }}
                 className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
               >
@@ -2286,18 +2327,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
                 <button
                   onClick={() => {
                     setContextMenu(null);
-                    const nonResumableCount = itemsToPause.filter(d => d.resumable === false).length;
-                    if (nonResumableCount > 0) {
-                      const confirmPause = window.confirm(
-                        nonResumableCount === 1
-                          ? t($ => $.downloadTable.nonResumableOne)
-                          : t($ => $.downloadTable.nonResumableMany, { count: nonResumableCount })
-                      );
-                      if (!confirmPause) {
-                        return;
-                      }
-                    }
-                    itemsToPause.forEach(d => handlePause(d.id, true));
+                    void handlePauseSelected();
                   }}
                   className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
                 >

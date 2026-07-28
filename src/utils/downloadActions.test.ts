@@ -3,6 +3,8 @@ import {
   canPauseDownload,
   canRedownload,
   canStartDownload,
+  countDownloadActions,
+  formatDownloadActionCount,
   getPauseResumeAction,
   isIdentityLocked,
   isTransferLocked,
@@ -47,5 +49,25 @@ describe('download action policy', () => {
     expect(isTransferLocked('processing')).toBe(true);
     expect(isIdentityLocked('completed')).toBe(true);
     expect(isTransferLocked('completed')).toBe(false);
+  });
+
+  it('counts only eligible actions for a multi-selection', () => {
+    const counts = countDownloadActions([
+      { status: 'queued' },
+      { status: 'downloading' },
+      { status: 'paused' },
+      { status: 'ready' },
+      { status: 'staged' },
+      { status: 'failed' },
+      { status: 'completed' },
+    ]);
+
+    expect(counts).toEqual({ pause: 2, resume: 4 });
+  });
+
+  it('keeps large action badges compact without changing the accessible count', () => {
+    expect(formatDownloadActionCount(2)).toBe('2');
+    expect(formatDownloadActionCount(99)).toBe('99');
+    expect(formatDownloadActionCount(100)).toBe('99+');
   });
 });

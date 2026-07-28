@@ -1732,7 +1732,7 @@ html[data-list-density="relaxed"] {
   }
 
   .settings-page-transition,
-  .app-page-transition {
+  .app-page-transition .app-page-transition-content {
     animation: app-page-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
     transform-origin: top center;
   }
@@ -2935,10 +2935,12 @@ body.is-queue-dragging * {
   max-width: 100%;
   min-width: 0;
   padding: 0 2px;
-  border: 1px solid hsl(var(--border-color) / 0.88);
+  border: 1px solid hsl(var(--text-primary) / 0.32);
   border-radius: 6px;
-  background: hsl(var(--surface-raised));
-  box-shadow: 0 1px 2px hsl(var(--shadow-color));
+  background: hsl(var(--surface-overlay));
+  box-shadow:
+    0 0 0 1px hsl(var(--main-bg) / 0.72),
+    0 2px 8px hsl(var(--shadow-color));
   visibility: hidden;
   opacity: 0;
   pointer-events: none;
@@ -2953,9 +2955,33 @@ body.is-queue-dragging * {
 .download-row-actions .app-icon-button,
 .download-row-actions .app-icon-button:hover:not(:disabled),
 .download-row-actions .app-icon-button:active:not(:disabled) {
+  position: relative;
+  overflow: visible;
   background: transparent;
-  color: hsl(var(--text-secondary));
+  color: hsl(var(--text-primary));
   transition: background-color 120ms ease, box-shadow 120ms ease, color 120ms ease, transform 100ms ease;
+}
+
+.download-row-action-badge {
+  position: absolute;
+  top: -5px;
+  inset-inline-end: -5px;
+  display: inline-flex;
+  min-width: 15px;
+  height: 15px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 3px;
+  border: 1px solid hsl(var(--surface-overlay));
+  border-radius: 999px;
+  background: hsl(var(--accent-color));
+  color: hsl(var(--accent-foreground));
+  font-size: 9px;
+  font-weight: 750;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  pointer-events: none;
+  user-select: none;
 }
 
 @media (prefers-reduced-motion: reduce) {

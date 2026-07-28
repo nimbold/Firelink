@@ -26,6 +26,27 @@ export const canStartDownload = (status: DownloadStatus): boolean =>
 export const canPauseDownload = (status: DownloadStatus): boolean =>
   PAUSABLE_STATUSES.has(status);
 
+export interface DownloadActionCounts {
+  pause: number;
+  resume: number;
+}
+
+/**
+ * Count the actions that a bulk pause/resume control can actually apply.
+ * Keep this derived from the same predicates used by the individual row
+ * buttons so a badge never promises to affect an ineligible item.
+ */
+export const countDownloadActions = (
+  downloads: ReadonlyArray<{ status: DownloadStatus }>
+): DownloadActionCounts => downloads.reduce<DownloadActionCounts>((counts, download) => {
+  if (canPauseDownload(download.status)) counts.pause += 1;
+  if (canStartDownload(download.status)) counts.resume += 1;
+  return counts;
+}, { pause: 0, resume: 0 });
+
+export const formatDownloadActionCount = (count: number): string =>
+  count > 99 ? '99+' : String(count);
+
 export type PauseResumeAction = 'pause' | 'resume';
 
 export const getPauseResumeAction = (status: DownloadStatus): PauseResumeAction | null => {
