@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { invokeCommand as invoke } from '../ipc';
 import { save } from '@tauri-apps/plugin-dialog';
 import { homeDir } from '@tauri-apps/api/path';
@@ -8,6 +9,7 @@ import { WindowDragRegion } from './WindowDragRegion';
 import { useToast } from '../contexts/ToastContext';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { useTranslation } from 'react-i18next';
+import { clampFloatingPosition } from '../utils/floatingPosition';
 import {
   MAX_LOG_LINES,
   appendBoundedLogEntries,
@@ -26,6 +28,8 @@ export default function LogsView() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [levelFilter, setLevelFilter] = useState<LogEntry['level'] | 'All'>('All');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; text: string } | null>(null);
+  const [contextMenuPosition, setContextMenuPosition] = useState<{ x: number; y: number } | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
   const [pageVisible, setPageVisible] = useState(() => document.visibilityState !== 'hidden');
   const homeDirectoryRef = useRef('');
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -161,11 +165,47 @@ export default function LogsView() {
     e.preventDefault();
     const selection = window.getSelection()?.toString();
     if (selection && selection.trim().length > 0) {
+      const position = clampFloatingPosition(e.clientX, e.clientY, 150, 50, window.innerWidth, window.innerHeight);
+      setContextMenuPosition(position);
       setContextMenu({ x: e.clientX, y: e.clientY, text: selection });
     } else {
       setContextMenu(null);
     }
   };
+
+  useLayoutEffect(() => {
+    if (!contextMenu || !contextMenuRef.current) return;
+
+    const updateContextMenuPosition = () => {
+      const menu = contextMenuRef.current;
+      if (!menu) return;
+      const rect = menu.getBoundingClientRect();
+      const nextPosition = clampFloatingPosition(
+        contextMenu.x,
+        contextMenu.y,
+        menu.offsetWidth || rect.width,
+        menu.offsetHeight || rect.height,
+        window.innerWidth,
+        window.innerHeight
+      );
+      setContextMenuPosition(current => (
+        current?.x === nextPosition.x && current.y === nextPosition.y
+          ? current
+          : nextPosition
+      ));
+    };
+
+    updateContextMenuPosition();
+    const resizeObserver = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(updateContextMenuPosition);
+    resizeObserver?.observe(contextMenuRef.current);
+    window.addEventListener('resize', updateContextMenuPosition);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', updateContextMenuPosition);
+    };
+  }, [contextMenu]);
 
   const handleCopy = async () => {
     if (contextMenu?.text) {
@@ -354,11 +394,12 @@ export default function LogsView() {
       </div>
 
       {/* Context Menu */}
-      {contextMenu && (
+      {contextMenu && createPortal(
         <div
           role="menu"
-          className="app-modal fixed z-50 min-w-[150px] overflow-visible py-1.5 text-[12px] font-medium text-text-primary"
-          style={{ left: Math.min(contextMenu.x, window.innerWidth - 150), top: Math.min(contextMenu.y, window.innerHeight - 50) }}
+          ref={contextMenuRef}
+          className="app-modal fixed z-[70] min-w-[150px] max-h-[calc(100vh-16px)] overflow-y-auto overflow-x-hidden py-1.5 text-[12px] font-medium text-text-primary"
+          style={{ left: contextMenuPosition?.x, top: contextMenuPosition?.y }}
           onClick={(e) => e.stopPropagation()}
         >
           <button
@@ -368,7 +409,8 @@ export default function LogsView() {
             <Copy size={13} className="me-2 text-text-secondary" />
             {t($ => $.logs.copy)}
           </button>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

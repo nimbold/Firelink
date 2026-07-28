@@ -1006,6 +1006,103 @@ describe('useDownloadStore', () => {
     });
   });
 
+  it('starts a selected queue block in selection order and moves pending rows to the front', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'other', url: 'http://other', fileName: 'other', destination: '/tmp', status: 'staged', category: 'Other', dateAdded: '', queueId: 'selection-queue', queuePosition: 0 },
+        { id: 'selected-a', url: 'http://a', fileName: 'a', destination: '/tmp', status: 'paused', category: 'Other', dateAdded: '', queueId: 'selection-queue', queuePosition: 1, hasBeenDispatched: true },
+        { id: 'selected-b', url: 'http://b', fileName: 'b', destination: '/tmp', status: 'paused', category: 'Other', dateAdded: '', queueId: 'selection-queue', queuePosition: 2, hasBeenDispatched: true },
+      ] as any[],
+      backendRegisteredIds: new Set(['selected-a', 'selected-b'])
+    });
+
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'enqueue_download') {
+        const id = (args as { item: { id: string } }).item.id;
+        return { id, filename: id };
+      }
+      if (command === 'get_pending_order') return ['selected-b', 'selected-a', 'other'];
+      if (command === 'move_many_in_queue') return ['selected-b', 'selected-a', 'other'];
+      return undefined;
+    });
+
+    await expect(useDownloadStore.getState().startSelected(['selected-b', 'selected-a'])).resolves.toBe(2);
+
+    const enqueueIds = vi.mocked(ipc.invokeCommand).mock.calls
+      .filter(([command]) => command === 'enqueue_download')
+      .map(([, args]) => (args as { item: { id: string } }).item.id);
+    expect(enqueueIds).toEqual(['selected-b', 'selected-a']);
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('move_many_in_queue', {
+      ids: ['selected-b', 'selected-a'],
+      queueId: 'selection-queue',
+      direction: 'up',
+      targetIndex: 0,
+    });
+    expect(useDownloadStore.getState().downloads.map(item => item.id)).toEqual([
+      'other',
+      'selected-a',
+      'selected-b',
+    ]);
+    expect(useDownloadStore.getState().downloads.find(item => item.id === 'selected-b')?.queuePosition).toBe(0);
+    expect(useDownloadStore.getState().downloads.find(item => item.id === 'selected-a')?.queuePosition).toBe(1);
+  });
+
+  it('pauses queued items through the global pause action', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'queued-one', url: 'http://one', fileName: 'one', status: 'queued', category: 'Other', dateAdded: '', queueId: 'pause-queue' },
+        { id: 'queued-two', url: 'http://two', fileName: 'two', status: 'queued', category: 'Other', dateAdded: '', queueId: 'pause-queue' },
+      ] as any[],
+    });
+    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
+
+    await expect(useDownloadStore.getState().pauseAll()).resolves.toBe(2);
+    expect(
+      vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) => command === 'pause_download')
+    ).toHaveLength(2);
+    expect(useDownloadStore.getState().downloads.every(item => item.status === 'paused')).toBe(true);
+  });
+
+  it('does not let a queue pause lose a selected start in flight', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'race-first', url: 'http://first', fileName: 'first', destination: '/tmp', status: 'paused', category: 'Other', dateAdded: '', queueId: 'race-selected', queuePosition: 0 },
+        { id: 'race-second', url: 'http://second', fileName: 'second', destination: '/tmp', status: 'paused', category: 'Other', dateAdded: '', queueId: 'race-selected', queuePosition: 1 },
+      ] as any[],
+    });
+
+    let releaseEnqueue!: (value: { id: string; filename: string }) => void;
+    const enqueue = new Promise<{ id: string; filename: string }>(resolve => {
+      releaseEnqueue = resolve;
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'enqueue_download') return enqueue;
+      if (command === 'get_pending_order') return [];
+      return undefined;
+    });
+
+    const start = useDownloadStore.getState().startSelected(['race-first', 'race-second']);
+    await vi.waitFor(() => {
+      expect(vi.mocked(ipc.invokeCommand)).toHaveBeenCalledWith(
+        'enqueue_download',
+        expect.objectContaining({ item: expect.objectContaining({ id: 'race-first' }) })
+      );
+    });
+
+    const pause = useDownloadStore.getState().pauseQueue('race-selected');
+    await vi.waitFor(() => {
+      expect(vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) => command === 'cancel_enqueue_generation'))
+        .toHaveLength(2);
+    });
+    releaseEnqueue({ id: 'race-first', filename: 'first' });
+
+    await expect(start).resolves.toBe(0);
+    await expect(pause).resolves.toBe(1);
+    expect(useDownloadStore.getState().downloads.map(item => item.status)).toEqual(['paused', 'paused']);
+    expect(vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) => command === 'pause_download'))
+      .toHaveLength(1);
+  });
+
   it('cleans an accepted backend enqueue when queue reconciliation fails', async () => {
     useDownloadStore.setState({
       downloads: [

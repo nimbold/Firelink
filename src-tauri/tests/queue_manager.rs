@@ -2033,6 +2033,23 @@ async fn multi_move_reorders_selected_items_as_one_atomic_block() {
 }
 
 #[tokio::test]
+async fn direction_move_keeps_the_queue_order_for_an_unsorted_selection() {
+    use firelink_lib::ipc::QueueDirection;
+
+    let (mgr, _spawner) = make_manager(3);
+    for id in ["a", "b", "c", "d", "e"] {
+        mgr.push(sample_task(id)).await.unwrap();
+    }
+
+    let selected = vec!["d".to_string(), "b".to_string()];
+    assert_eq!(
+        mgr.move_many_in_queue(&selected, "main", QueueDirection::Up)
+            .await,
+        vec!["b", "d", "a", "c", "e"]
+    );
+}
+
+#[tokio::test]
 async fn target_move_reorders_a_selected_block_and_clamps_the_target() {
     use firelink_lib::ipc::QueueDirection;
 
@@ -2057,6 +2074,35 @@ async fn target_move_reorders_a_selected_block_and_clamps_the_target() {
             .await,
         vec!["a", "c", "b", "d", "e"]
     );
+}
+
+#[tokio::test]
+async fn target_move_preserves_the_explicit_selection_order() {
+    let (mgr, _spawner) = make_manager(3);
+    for id in ["a", "b", "c", "d", "e"] {
+        mgr.push(sample_task(id)).await.unwrap();
+    }
+
+    let selected = vec!["d".to_string(), "b".to_string()];
+    assert_eq!(
+        mgr.move_many_in_queue_to(&selected, "main", 0).await,
+        vec!["d", "b", "a", "c", "e"]
+    );
+}
+
+#[tokio::test]
+async fn target_move_deduplicates_ids_without_dropping_pending_tasks() {
+    let (mgr, _spawner) = make_manager(3);
+    for id in ["a", "b", "c", "d"] {
+        mgr.push(sample_task(id)).await.unwrap();
+    }
+
+    let selected = vec!["c".to_string(), "c".to_string(), "b".to_string()];
+    assert_eq!(
+        mgr.move_many_in_queue_to(&selected, "main", 0).await,
+        vec!["c", "b", "a", "d"]
+    );
+    assert_eq!(mgr.pending_order(None).await.len(), 4);
 }
 
 #[tokio::test]

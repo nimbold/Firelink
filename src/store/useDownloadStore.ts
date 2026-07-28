@@ -35,10 +35,16 @@ type DownloadLifecycleOperation = {
 };
 const downloadLifecycleOperations = new Map<string, DownloadLifecycleOperation>();
 const preemptDispatch = ['dispatch'] as const;
+const preemptStartSelected = ['dispatch', 'start-selected'] as const;
 let pendingStartupResume: Promise<void> | null = null;
 
 type DownloadControlIntent = 'pause' | 'resume';
 const downloadControlIntents = new Map<string, DownloadControlIntent>();
+
+export interface ResumeDownloadOptions {
+  preserveQueuePosition?: boolean;
+  forceRequeue?: boolean;
+}
 
 // State events do not carry a lifecycle generation. Keep the intent that
 // initiated a control transition long enough for the listener to discard an
@@ -711,7 +717,8 @@ interface DownloadState {
     ids: string | string[],
     queueId: string,
     targetIndex: number,
-    beforeId?: string | null
+    beforeId?: string | null,
+    selectedOrder?: readonly string[]
   ) => Promise<void>;
   removeFromQueue: (id: string) => Promise<void>;
   isAddModalOpen: boolean;
@@ -749,7 +756,8 @@ interface DownloadState {
   removeDownload: (id: string, deleteFile?: boolean, preserveResumable?: boolean) => Promise<void>;
   pauseDownload: (id: string) => Promise<void>;
   redownload: (id: string) => Promise<void>;
-  resumeDownload: (id: string) => Promise<boolean>;
+  resumeDownload: (id: string, options?: ResumeDownloadOptions) => Promise<boolean>;
+  startSelected: (ids: string[]) => Promise<number>;
   startQueue: (queueId: string) => Promise<string[]>;
   pauseQueue: (queueId: string) => Promise<number>;
   startAll: () => Promise<number>;
@@ -814,41 +822,81 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     }
   };
 
-  const resumeDownloadInternal = async (id: string): Promise<boolean> => {
+  const resumeDownloadInternal = async (
+    id: string,
+    options: ResumeDownloadOptions = {}
+  ): Promise<boolean> => {
     await waitForPendingStartupResume();
-    const targetItem = get().downloads.find(d => d.id === id);
+    let targetItem = get().downloads.find(d => d.id === id);
     if (!targetItem) return false;
 
     setDownloadControlIntent(id, 'resume');
+    let previousStatus = targetItem.status;
     try {
-      if (targetItem.status === 'ready' || targetItem.status === 'staged') {
+      if (options.forceRequeue) {
+        // Fence any older enqueue before replacing a paused backend lifecycle.
+        // Otherwise a late addUri result can win the race and make this
+        // selection start outside the requested order.
+        const { pendingDispatch } = await invalidateDispatch(id);
+        if (pendingDispatch) await pendingDispatch;
+        targetItem = get().downloads.find(download => download.id === id);
+        if (!targetItem || !canStartDownload(targetItem.status)) {
+          clearDownloadControlIntent(id, 'resume');
+          return false;
+        }
+        previousStatus = targetItem.status;
+      }
+
+      const currentTargetItem = targetItem;
+
+      if (
+        options.forceRequeue &&
+        currentTargetItem.status === 'paused' &&
+        get().backendRegisteredIds.has(id)
+      ) {
+        await invoke('detach_download_for_reconfigure', { id });
+        get().unregisterBackendIds([id]);
+      }
+
+      if (options.forceRequeue) {
+        set(state => ({
+          pendingOrder: state.pendingOrder.filter(value => value !== id)
+        }));
+      }
+
+      if (currentTargetItem.status === 'ready' || currentTargetItem.status === 'staged') {
         get().updateDownload(id, { status: 'queued', hasBeenDispatched: true });
         if (await dispatchItemInternal(id)) {
           return true;
         }
-        get().updateDownload(id, { status: targetItem.status });
+        get().updateDownload(id, { status: currentTargetItem.status });
         clearDownloadControlIntent(id, 'resume');
         return false;
       }
 
-      const prevStatus = targetItem.status;
+      const prevStatus = currentTargetItem.status;
       const queueItems = get().downloads.filter(d =>
-        (d.queueId || MAIN_QUEUE_ID) === (targetItem.queueId || MAIN_QUEUE_ID)
+        (d.queueId || MAIN_QUEUE_ID) === (currentTargetItem.queueId || MAIN_QUEUE_ID)
       );
       const maxPos = queueItems.reduce((max, d) => Math.max(max, d.queuePosition ?? 0), -1);
+      const queuePosition = options.preserveQueuePosition
+        ? currentTargetItem.queuePosition
+        : maxPos + 1;
 
       get().updateDownload(id, {
         status: 'queued',
         speed: '-',
         eta: '-',
-        queuePosition: maxPos + 1,
+        ...(queuePosition === undefined ? {} : { queuePosition }),
         lastTry: new Date().toISOString()
       });
 
-      const resumedExisting = await invoke('resume_download', {
-        id,
-        queueId: targetItem.queueId || MAIN_QUEUE_ID
-      });
+      const resumedExisting = options.forceRequeue
+        ? false
+        : await invoke('resume_download', {
+            id,
+            queueId: currentTargetItem.queueId || MAIN_QUEUE_ID
+          });
 
       let dispatchSucceeded = resumedExisting;
       if (!dispatchSucceeded) {
@@ -870,7 +918,10 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       }
     } catch (e) {
       console.error("Failed to resume download:", e);
-      get().updateDownload(id, { status: targetItem.status });
+      const current = get().downloads.find(download => download.id === id);
+      if (current?.status === 'queued') {
+        get().updateDownload(id, { status: previousStatus });
+      }
       clearDownloadControlIntent(id, 'resume');
       return false;
     }
@@ -964,8 +1015,12 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     queueReorderPromises.set(queueId, trackedOperation);
     return trackedOperation;
   },
-  moveManyInQueueToPosition: (idOrIds, queueId, targetIndex, beforeId) => {
-    const ids = Array.isArray(idOrIds) ? idOrIds : [idOrIds];
+  moveManyInQueueToPosition: (idOrIds, queueId, targetIndex, beforeId, selectedOrder) => {
+    const requestedIds = Array.isArray(idOrIds) ? idOrIds : [idOrIds];
+    const ids = [...new Set(requestedIds)];
+    const normalizedSelectedOrder = selectedOrder
+      ? [...new Set(selectedOrder)].filter(id => ids.includes(id))
+      : undefined;
     if (ids.length === 0) return Promise.resolve();
 
     // Dragging must be one serialized, atomic queue operation. This prevents
@@ -975,7 +1030,11 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     const operation = previousOperation.catch(() => undefined).then(async () => {
       const allDownloads = get().downloads;
       const queueItems = queueItemsForReordering(allDownloads, queueId);
-      const selectedItems = queueItems.filter(item => ids.includes(item.id));
+      const selectedItems = normalizedSelectedOrder
+        ? normalizedSelectedOrder
+          .map(id => queueItems.find(item => item.id === id))
+          .filter((item): item is DownloadItem => Boolean(item))
+        : queueItems.filter(item => ids.includes(item.id));
       if (selectedItems.length === 0) return;
 
       const selectedIds = new Set(selectedItems.map(item => item.id));
@@ -990,7 +1049,13 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       const resolvedTargetIndex = anchoredTargetIndex >= 0
         ? anchoredTargetIndex
         : Math.max(0, Math.min(targetIndex, unselectedItems.length));
-      const reordered = moveSelectedBlockToIndex(queueItems, selectedIds, resolvedTargetIndex);
+      const reordered = normalizedSelectedOrder
+        ? [
+            ...unselectedItems.slice(0, resolvedTargetIndex),
+            ...selectedItems,
+            ...unselectedItems.slice(resolvedTargetIndex)
+          ]
+        : moveSelectedBlockToIndex(queueItems, selectedIds, resolvedTargetIndex);
       set(state => ({ downloads: applyQueueOrder(state.downloads, queueId, reordered) }));
 
       const registeredIdsToMove = selectedItems
@@ -1345,7 +1410,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     } finally {
       clearDownloadControlIntent(id, 'pause');
     }
-  }, true, preemptDispatch),
+  }, true, preemptStartSelected),
   redownload: (id) => runDownloadLifecycleOperation(id, 'redownload', async () => {
     await waitForPendingStartupResume();
     const targetItem = get().downloads.find(d => d.id === id);
@@ -1396,13 +1461,103 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       info(`Download ${id} redownloaded (queued)`);
     }
   }, true, preemptDispatch),
-  resumeDownload: (id) => runDownloadLifecycleOperation(
+  resumeDownload: (id, options) => runDownloadLifecycleOperation(
     id,
     'resume',
-    () => resumeDownloadInternal(id),
+    () => resumeDownloadInternal(id, options),
     true,
     preemptDispatch
   ),
+  startSelected: (ids) => {
+    const orderedIds = [...new Set(ids)];
+    if (orderedIds.length === 0) return Promise.resolve(0);
+
+    return runDownloadLifecycleOperations(orderedIds, 'start-selected', async () => {
+      await waitForPendingStartupResume();
+      const selectedByQueue = new Map<string, string[]>();
+      for (const id of orderedIds) {
+        const item = get().downloads.find(download => download.id === id);
+        if (!item || !canStartDownload(item.status)) continue;
+        const queueId = item.queueId || MAIN_QUEUE_ID;
+        const queueIds = selectedByQueue.get(queueId) || [];
+        queueIds.push(id);
+        selectedByQueue.set(queueId, queueIds);
+      }
+
+      const selectedQueueGenerations = new Map(
+        Array.from(selectedByQueue.keys(), queueId => [
+          queueId,
+          advanceQueueControlGeneration(queueId)
+        ] as const)
+      );
+
+      // Make the selection's order explicit before any capacity becomes
+      // available. This keeps the frontend projection and backend pending
+      // queue aligned even when the selected rows were not adjacent.
+      for (const [queueId, queueIds] of selectedByQueue) {
+        const generation = selectedQueueGenerations.get(queueId);
+        if (generation === undefined || !isCurrentQueueControlGeneration(queueId, generation)) {
+          continue;
+        }
+        await get().moveManyInQueueToPosition(queueIds, queueId, 0, null, queueIds);
+      }
+
+      let startedCount = 0;
+      const startedByQueue = new Map<string, string[]>();
+      for (const id of orderedIds) {
+        const current = get().downloads.find(download => download.id === id);
+        if (!current || !canStartDownload(current.status)) continue;
+        const queueId = current.queueId || MAIN_QUEUE_ID;
+        const generation = selectedQueueGenerations.get(queueId);
+        if (generation === undefined || !isCurrentQueueControlGeneration(queueId, generation)) {
+          continue;
+        }
+        const resumed = await resumeDownloadInternal(id, {
+          preserveQueuePosition: true,
+          forceRequeue: true
+        });
+        if (resumed && !isCurrentQueueControlGeneration(queueId, generation)) {
+          // A queue pause can win while this item's requeue is in flight. The
+          // pause action is allowed to preempt this bulk-start operation so
+          // this item cannot remain running after the user's pause request.
+          await get().pauseDownload(id);
+          continue;
+        }
+        if (resumed) {
+          startedCount += 1;
+          const startedIds = startedByQueue.get(queueId) || [];
+          startedIds.push(id);
+          startedByQueue.set(queueId, startedIds);
+
+          // A requeued paused item is appended by the backend. Move the
+          // started prefix immediately so a newly available slot cannot let
+          // older pending work overtake the remaining selection while it is
+          // still being requeued.
+          if (isCurrentQueueControlGeneration(queueId, generation)) {
+            await get().moveManyInQueueToPosition(
+              startedIds,
+              queueId,
+              0,
+              null,
+              startedIds
+            );
+          }
+        }
+      }
+
+      // Newly dispatched rows are now visible to the backend pending list.
+      // Reapply the same ordered block so existing pending work cannot remain
+      // ahead of a user-selected start request.
+      for (const [queueId, queueIds] of selectedByQueue) {
+        const generation = selectedQueueGenerations.get(queueId);
+        if (generation === undefined || !isCurrentQueueControlGeneration(queueId, generation)) {
+          continue;
+        }
+        await get().moveManyInQueueToPosition(queueIds, queueId, 0, null, queueIds);
+      }
+      return startedCount;
+    });
+  },
   startQueue: (queueId) => {
     const requestedGeneration = currentQueueControlGeneration(queueId);
     const previousOperation = queueStartPromises.get(queueId) ?? Promise.resolve([]);
@@ -1457,7 +1612,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         const backendPending = get().pendingOrder.includes(item.id);
 
         if (currentItem.status === 'queued' && backendRegistered && !backendPending) {
-          if (await get().resumeDownload(item.id)) {
+          if (await get().resumeDownload(item.id, { preserveQueuePosition: true })) {
             acceptedIds.push(item.id);
           }
           continue;

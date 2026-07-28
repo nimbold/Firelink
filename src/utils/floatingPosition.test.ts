@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clampFloatingPosition } from './floatingPosition';
+import { clampFloatingPosition, positionFloatingSubmenu } from './floatingPosition';
 
 describe('floating surface positioning', () => {
   it('keeps a variable-height menu inside the viewport', () => {
@@ -13,6 +13,38 @@ describe('floating surface positioning', () => {
     expect(clampFloatingPosition(-20, -10, 700, 900, 400, 640)).toEqual({
       x: 8,
       y: 8,
+    });
+  });
+
+  it('opens a submenu to the right when there is room', () => {
+    expect(positionFloatingSubmenu({ left: 200, right: 280, top: 120 }, 160, 180, 800, 600)).toEqual({
+      x: 284,
+      y: 120,
+      side: 'right',
+    });
+  });
+
+  it('flips a submenu to the left at the viewport edge', () => {
+    expect(positionFloatingSubmenu({ left: 700, right: 780, top: 120 }, 160, 180, 800, 600)).toEqual({
+      x: 536,
+      y: 120,
+      side: 'left',
+    });
+  });
+
+  it('clamps a submenu vertically when its trigger is near the bottom', () => {
+    expect(positionFloatingSubmenu({ left: 200, right: 280, top: 580 }, 160, 180, 800, 600)).toEqual({
+      x: 284,
+      y: 412,
+      side: 'right',
+    });
+  });
+
+  it('prefers the inline-start side in RTL when both sides fit', () => {
+    expect(positionFloatingSubmenu({ left: 400, right: 480, top: 120 }, 160, 180, 800, 600, 8, 4, 'left')).toEqual({
+      x: 236,
+      y: 120,
+      side: 'left',
     });
   });
 });

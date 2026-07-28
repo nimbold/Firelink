@@ -53,6 +53,36 @@ fn reorder_selected_queue_tasks(
     Some(reordered)
 }
 
+fn reorder_selected_queue_tasks_in_order(
+    queue_tasks: &[QueuedTask],
+    ids: &[String],
+    target_index: usize,
+) -> Option<Vec<QueuedTask>> {
+    let selected_ids = ids.iter().collect::<HashSet<_>>();
+    let mut seen_ids = HashSet::new();
+    let selected_tasks = ids
+        .iter()
+        .filter(|id| seen_ids.insert(*id))
+        .filter_map(|id| queue_tasks.iter().find(|task| task.id == *id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if selected_tasks.is_empty() {
+        return None;
+    }
+
+    let unselected_tasks = queue_tasks
+        .iter()
+        .filter(|task| !selected_ids.contains(&task.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let insert_index = target_index.min(unselected_tasks.len());
+    let mut reordered = Vec::with_capacity(queue_tasks.len());
+    reordered.extend_from_slice(&unselected_tasks[..insert_index]);
+    reordered.extend(selected_tasks);
+    reordered.extend_from_slice(&unselected_tasks[insert_index..]);
+    Some(reordered)
+}
+
 type Aria2ControlLocks = Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2293,7 +2323,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .map(|index| pending[*index].clone())
             .collect::<Vec<_>>();
 
-        if let Some(reordered) = reorder_selected_queue_tasks(&queue_tasks, ids, target_index) {
+        if let Some(reordered) = reorder_selected_queue_tasks_in_order(&queue_tasks, ids, target_index) {
             for (queue_index, pending_index) in queue_positions.iter().enumerate() {
                 pending[*pending_index] = reordered[queue_index].clone();
             }

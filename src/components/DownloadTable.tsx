@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useDownloadStore, DownloadItem, MAIN_QUEUE_ID } from '../store/useDownloadStore';
 import { useDownloadProgressStore } from '../store/downloadProgressStore';
 import { useToast } from '../contexts/ToastContext';
@@ -6,7 +7,7 @@ import { useSettingsStore } from '../store/useSettingsStore';
 import { SidebarFilter } from './Sidebar';
 import {
   Play, Pause, Plus, FileText, Image as ImageIcon, Music, Film, Box, Archive, FileQuestion,
-  ArrowDownCircle, ArrowUp, ArrowDown, Command, ChevronRight, ChevronUp, ChevronDown, MoreHorizontal,
+  ArrowDownCircle, ArrowUp, ArrowDown, Command, ChevronUp, ChevronDown, MoreHorizontal,
   AlignLeft, AlignCenter, AlignRight, GripVertical
 } from 'lucide-react';
 import { DownloadItem as DownloadItemComponent } from './DownloadItem';
@@ -52,6 +53,8 @@ import {
   moveSelectedBlockToIndex
 } from '../utils/queueOrdering';
 import { updateDownloadSelection } from '../utils/downloadSelection';
+import { clampFloatingPosition } from '../utils/floatingPosition';
+import { FloatingQueueSubmenu } from './FloatingQueueSubmenu';
 
 export interface DownloadTableStatusSummary {
   summary: DownloadSummary;
@@ -153,7 +156,10 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     openDeleteModal,
     redownload,
     moveInQueue,
-    moveManyInQueueToPosition
+    moveManyInQueueToPosition,
+    startAll,
+    pauseAll,
+    startSelected
   } = useDownloadStore();
   const progressMap = useDownloadProgressStore(state => state.progressMap);
   const { addToast } = useToast();
@@ -273,8 +279,11 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   const [columnDragState, setColumnDragState] = useState<ColumnDragState | null>(null);
   const [columnDragOrder, setColumnDragOrder] = useState<DownloadTableColumnKey[] | null>(null);
   const [columnMenu, setColumnMenu] = useState<ColumnMenuState | null>(null);
+  const [columnMenuPosition, setColumnMenuPosition] = useState<{ x: number; y: number } | null>(null);
+  const [contextMenuPosition, setContextMenuPosition] = useState<{ x: number; y: number } | null>(null);
+  const columnMenuRef = useRef<HTMLDivElement>(null);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
   const [columnDropFlashKey, setColumnDropFlashKey] = useState<DownloadTableColumnKey | null>(null);
-  const [, setMenuViewportVersion] = useState(0);
   const columnWidthsRef = useRef(columnWidths);
   const columnOrderRef = useRef(columnOrder);
   const normalizedColumnWidths = columnWidthsRef.current.map((width, index) =>
@@ -689,30 +698,21 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   };
 
   const clampMenuPosition = useCallback((x: number, y: number, menuWidth: number, menuHeight: number) => {
-    const workspaceRect = downloadsViewRef.current?.getBoundingClientRect();
-    const minX = Math.max(8, (workspaceRect?.left ?? 0) + 8);
-    const minY = Math.max(8, (workspaceRect?.top ?? 0) + 8);
-    const maxX = Math.max(minX, Math.min(
-      window.innerWidth - menuWidth - 8,
-      (workspaceRect?.right ?? window.innerWidth) - menuWidth - 8
-    ));
-    const maxY = Math.max(minY, Math.min(
-      window.innerHeight - menuHeight - 8,
-      (workspaceRect?.bottom ?? window.innerHeight) - menuHeight - 8
-    ));
-    return {
-      x: Math.min(Math.max(minX, x), maxX),
-      y: Math.min(Math.max(minY, y), maxY),
-    };
+    return clampFloatingPosition(
+      x,
+      y,
+      menuWidth,
+      menuHeight,
+      window.innerWidth,
+      window.innerHeight
+    );
   }, []);
 
   const openColumnMenu = (key: DownloadTableColumnKey, x: number, y: number) => {
     const position = clampMenuPosition(x, y, 188, 220);
     setContextMenu(null);
-    setColumnMenu({
-      key,
-      ...position,
-    });
+    setColumnMenuPosition(position);
+    setColumnMenu({ key, x, y });
   };
 
   const setColumnAlignment = (alignment: DownloadColumnAlignment) => {
@@ -837,12 +837,69 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     };
   }, []);
 
-  useEffect(() => {
-    if (!columnMenu && !contextMenu) return;
-    const updateMenuViewport = () => setMenuViewportVersion(version => version + 1);
-    window.addEventListener('resize', updateMenuViewport);
-    return () => window.removeEventListener('resize', updateMenuViewport);
-  }, [columnMenu, contextMenu]);
+  useLayoutEffect(() => {
+    if (!columnMenu || !columnMenuRef.current) return;
+
+    const updateColumnMenuPosition = () => {
+      const menu = columnMenuRef.current;
+      if (!menu) return;
+      const rect = menu.getBoundingClientRect();
+      const nextPosition = clampMenuPosition(
+        columnMenu.x,
+        columnMenu.y,
+        menu.offsetWidth || rect.width,
+        menu.offsetHeight || rect.height
+      );
+      setColumnMenuPosition(current => (
+        current?.x === nextPosition.x && current.y === nextPosition.y
+          ? current
+          : nextPosition
+      ));
+    };
+
+    updateColumnMenuPosition();
+    const resizeObserver = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(updateColumnMenuPosition);
+    resizeObserver?.observe(columnMenuRef.current);
+    window.addEventListener('resize', updateColumnMenuPosition);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', updateColumnMenuPosition);
+    };
+  }, [columnMenu, clampMenuPosition]);
+
+  useLayoutEffect(() => {
+    if (!contextMenu || !contextMenuRef.current) return;
+
+    const updateContextMenuPosition = () => {
+      const menu = contextMenuRef.current;
+      if (!menu) return;
+      const rect = menu.getBoundingClientRect();
+      const nextPosition = clampMenuPosition(
+        contextMenu.x,
+        contextMenu.y,
+        menu.offsetWidth || rect.width,
+        menu.offsetHeight || rect.height
+      );
+      setContextMenuPosition(current => (
+        current?.x === nextPosition.x && current.y === nextPosition.y
+          ? current
+          : nextPosition
+      ));
+    };
+
+    updateContextMenuPosition();
+    const resizeObserver = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(updateContextMenuPosition);
+    resizeObserver?.observe(contextMenuRef.current);
+    window.addEventListener('resize', updateContextMenuPosition);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', updateContextMenuPosition);
+    };
+  }, [contextMenu, clampMenuPosition]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1599,6 +1656,10 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     () => countDownloadActions(selectedDownloads),
     [selectedDownloads]
   );
+  const hasStartableDownloads = downloads.some(download =>
+    download.status === 'queued' || canStartDownload(download.status)
+  );
+  const hasPausableDownloads = downloads.some(download => canPauseDownload(download.status));
   const summaryDownloads = selectedDownloads.length > 0 ? selectedDownloads : filteredDownloads;
   const downloadSummary = useMemo(
     () => summarizeDownloads(summaryDownloads, progressMap),
@@ -1702,10 +1763,9 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       setLastSelectedId(menu.id);
     }
     setColumnMenu(null);
-    setContextMenu({
-      ...menu,
-      ...clampMenuPosition(menu.x, menu.y, 200, 300),
-    });
+    const position = clampMenuPosition(menu.x, menu.y, 200, 300);
+    setContextMenuPosition(position);
+    setContextMenu(menu);
   }, [clampMenuPosition]);
 
   const handleMoveInQueue = useCallback((id: string, direction: 'up' | 'down') => {
@@ -1804,15 +1864,6 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     }
   }, [showInteractionError]);
 
-  const resumeItemsSequentially = useCallback(async (items: DownloadItem[]) => {
-    for (const item of items) {
-      const current = useDownloadStore.getState().downloads.find(download => download.id === item.id);
-      if (current && canStartDownload(current.status)) {
-        await handleResume(current);
-      }
-    }
-  }, [handleResume]);
-
   const getCurrentSelectedDownloads = useCallback(() => {
     const selected = selectedIdsRef.current;
     return useDownloadStore.getState().downloads.filter(download => selected.has(download.id));
@@ -1841,10 +1892,40 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   }, [getCurrentSelectedDownloads, handlePause, t]);
 
   const handleResumeSelected = useCallback(() => {
-    const items = getCurrentSelectedDownloads().filter(download => canStartDownload(download.status));
-    if (items.length === 0) return;
-    void resumeItemsSequentially(items);
-  }, [getCurrentSelectedDownloads, resumeItemsSequentially]);
+    const ids = Array.from(selectedIdsRef.current);
+    if (ids.length === 0) return;
+    void startSelected(ids).catch(error => {
+      showInteractionError(t($ => $.downloadTable.resumeFailed), error);
+    });
+  }, [showInteractionError, startSelected, t]);
+
+  const handleStartAll = useCallback(() => {
+    void startAll().catch(error => {
+      showInteractionError(t($ => $.downloadTable.resumeFailed), error);
+    });
+  }, [showInteractionError, startAll, t]);
+
+  const handlePauseAll = useCallback(async () => {
+    const currentDownloads = useDownloadStore.getState().downloads;
+    const pausableDownloads = currentDownloads.filter(download => canPauseDownload(download.status));
+    if (pausableDownloads.length === 0) return;
+
+    const nonResumableCount = pausableDownloads.filter(download => download.resumable === false).length;
+    if (nonResumableCount > 0) {
+      const confirmPause = window.confirm(
+        nonResumableCount === 1
+          ? t($ => $.downloadTable.nonResumableOne)
+          : t($ => $.downloadTable.nonResumableMany, { count: nonResumableCount })
+      );
+      if (!confirmPause) return;
+    }
+
+    try {
+      await pauseAll();
+    } catch (error) {
+      showInteractionError(t($ => $.downloadTable.pauseFailed), error);
+    }
+  }, [pauseAll, showInteractionError, t]);
 
   const handleDelete = (ids: string | string[]) => {
     openDeleteModal(ids);
@@ -1924,12 +2005,6 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   const columnAlignmentStyle = (key: DownloadTableColumnKey): React.CSSProperties => ({
     '--column-justify': COLUMN_ALIGNMENT_JUSTIFY[columnAlignments[key]],
   } as React.CSSProperties);
-  const columnMenuPosition = columnMenu
-    ? clampMenuPosition(columnMenu.x, columnMenu.y, 188, 220)
-    : null;
-  const contextMenuPosition = contextMenu
-    ? clampMenuPosition(contextMenu.x, contextMenu.y, 200, 300)
-    : null;
   const queueDragPreviewItem = queueDragState?.active
     ? queueDragState.ids
       .map(id => queueReorderableDownloads.find(download => download.id === id))
@@ -1956,10 +2031,8 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
 
           <button 
             className="main-control-button" 
-            disabled={sortedDownloads.length === 0}
-            onClick={() => {
-              void resumeItemsSequentially(sortedDownloads.filter(d => canStartDownload(d.status)));
-            }}
+            disabled={!hasStartableDownloads}
+            onClick={handleStartAll}
             title={t($ => $.downloadTable.resumeAll)}
           >
             <Play size={15} fill="currentColor" />
@@ -1967,23 +2040,8 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
 
           <button 
             className="main-control-button" 
-            disabled={sortedDownloads.length === 0}
-            onClick={() => {
-              const toPause = sortedDownloads.filter(d => canPauseDownload(d.status));
-              const nonResumableCount = toPause.filter(d => d.resumable === false).length;
-              if (nonResumableCount > 0) {
-                const confirmPause = window.confirm(
-                  nonResumableCount === 1
-                    ? t($ => $.downloadTable.nonResumableOne)
-                    : t($ => $.downloadTable.nonResumableMany, { count: nonResumableCount })
-                );
-                if (!confirmPause) {
-                  return;
-                }
-              }
-              // Skip the individual check by passing a flag to handlePause, or just invoking directly.
-              toPause.forEach(d => handlePause(d.id, true));
-            }}
+            disabled={!hasPausableDownloads}
+            onClick={() => void handlePauseAll()}
             title={t($ => $.downloadTable.pauseAll)}
           >
             <Pause size={15} fill="currentColor" />
@@ -2246,10 +2304,11 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
         </div>
       </div>
 
-      {columnMenu && (
+      {columnMenu && createPortal(
         <div
           role="menu"
-          className="download-column-menu app-modal fixed z-50 min-w-[188px] overflow-hidden py-1.5 text-[12px] font-medium text-text-primary"
+          ref={columnMenuRef}
+          className="download-column-menu app-modal fixed z-[70] min-w-[188px] max-h-[calc(100vh-16px)] overflow-y-auto overflow-x-hidden py-1.5 text-[12px] font-medium text-text-primary"
           style={{ top: columnMenuPosition?.y, left: columnMenuPosition?.x }}
           onClick={event => event.stopPropagation()}
         >
@@ -2285,14 +2344,16 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
             <GripVertical size={14} aria-hidden="true" />
             <span>{t($ => $.downloadTable.columnOptions.resetLayout)}</span>
           </button>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Floating Context Menu */}
-      {contextMenu && contextItem && (
+      {contextMenu && contextItem && createPortal(
         <div
           role="menu"
-          className="app-modal fixed z-50 min-w-[180px] overflow-visible py-1.5 text-[12px] font-medium text-text-primary"
+          ref={contextMenuRef}
+          className="app-modal fixed z-[70] min-w-[180px] max-h-[calc(100vh-16px)] overflow-y-auto overflow-x-hidden py-1.5 text-[12px] font-medium text-text-primary"
           style={{
              top: contextMenuPosition?.y,
              left: contextMenuPosition?.x,
@@ -2340,28 +2401,16 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
               )}
 
               {itemsToQueue.length > 0 && (
-                <div className="group relative">
-                  <button
-                    type="button"
-                    aria-haspopup="menu"
-                    className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors flex justify-between items-center"
-                  >
-                    {t($ => $.downloadTable.addToQueue)}
-                    <ChevronRight size={14} className="download-context-menu-chevron" />
-                  </button>
-                  <div className="download-context-submenu absolute top-0 min-w-[150px] bg-bg-modal border border-border-modal rounded-lg shadow-lg py-1.5 z-50" role="menu">
-                    {queues.map(q => (
-                      <button key={q.id} role="menuitem" onClick={() => {
-                        setContextMenu(null);
-                        void assignToQueue(itemsToQueue.map(item => item.id), q.id).catch(error => {
-                          showInteractionError(t($ => $.downloadTable.moveManyFailed), error);
-                        });
-                      }} className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors text-[12px]">
-                        {q.name}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <FloatingQueueSubmenu
+                  label={t($ => $.downloadTable.addToQueue)}
+                  queues={queues}
+                  onSelect={q => {
+                    setContextMenu(null);
+                    void assignToQueue(itemsToQueue.map(item => item.id), q.id).catch(error => {
+                      showInteractionError(t($ => $.downloadTable.moveManyFailed), error);
+                    });
+                  }}
+                />
               )}
 
               <div className="h-[1px] bg-border-modal/60 my-1.5 mx-2"></div>
@@ -2463,28 +2512,16 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
               )}
 
               {contextItem.status !== 'completed' && (
-                <div className="group relative">
-                  <button
-                    type="button"
-                    aria-haspopup="menu"
-                    className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors flex justify-between items-center"
-                  >
-                    {t($ => $.downloadTable.addToQueue)}
-                    <ChevronRight size={14} className="download-context-menu-chevron" />
-                  </button>
-                  <div className="download-context-submenu absolute top-0 min-w-[150px] bg-bg-modal border border-border-modal rounded-lg shadow-lg py-1.5 z-50" role="menu">
-                    {queues.map(q => (
-                      <button key={q.id} role="menuitem" onClick={() => {
-                        setContextMenu(null);
-                        void assignToQueue([contextItem.id], q.id).catch(error => {
-                          showInteractionError(t($ => $.downloadTable.moveOneFailed), error);
-                        });
-                      }} className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors text-[12px]">
-                        {q.name}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <FloatingQueueSubmenu
+                  label={t($ => $.downloadTable.addToQueue)}
+                  queues={queues}
+                  onSelect={q => {
+                    setContextMenu(null);
+                    void assignToQueue([contextItem.id], q.id).catch(error => {
+                      showInteractionError(t($ => $.downloadTable.moveOneFailed), error);
+                    });
+                  }}
+                />
               )}
 
               <div className="h-[1px] bg-border-modal/60 my-1.5 mx-2"></div>
@@ -2547,7 +2584,8 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
               </button>
             </>
           )}
-        </div>
+        </div>,
+        document.body
       )}
 
     </div>

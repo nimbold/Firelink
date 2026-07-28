@@ -3074,8 +3074,6 @@ body.is-queue-dragging * {
 }
 
 .download-context-submenu {
-  inset-inline-start: 100%;
-  margin-inline-start: 0.25rem;
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
@@ -3087,8 +3085,7 @@ body.is-queue-dragging * {
     visibility 0s linear 120ms;
 }
 
-.group:hover > .download-context-submenu,
-.group:focus-within > .download-context-submenu {
+.download-context-submenu.is-open {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
@@ -3096,11 +3093,7 @@ body.is-queue-dragging * {
   transition-delay: 0s;
 }
 
-.app-workspace--sidebar-right .download-context-submenu {
-  inset-inline-start: auto;
-  inset-inline-end: 100%;
-  margin-inline-start: 0;
-  margin-inline-end: 0.25rem;
+.download-context-submenu[data-side="left"] {
   transform-origin: top right;
 }
 
