@@ -126,8 +126,15 @@ const advanceQueueControlGeneration = (queueId: string): number => {
 const isCurrentQueueControlGeneration = (queueId: string, generation: number): boolean =>
   currentQueueControlGeneration(queueId) === generation;
 
+const comparableQueuePosition = (download: DownloadItem): number => {
+  const position = download.queuePosition;
+  return typeof position === 'number' && Number.isFinite(position) && position >= 0
+    ? position
+    : Number.MAX_SAFE_INTEGER;
+};
+
 const queuePositionComparator = (left: DownloadItem, right: DownloadItem): number =>
-  (left.queuePosition ?? Number.MAX_SAFE_INTEGER) - (right.queuePosition ?? Number.MAX_SAFE_INTEGER) ||
+  comparableQueuePosition(left) - comparableQueuePosition(right) ||
   left.id.localeCompare(right.id);
 
 const queueItemsForReordering = (downloads: DownloadItem[], queueId: string): DownloadItem[] =>
@@ -159,6 +166,17 @@ const applyQueueOrder = (
   return downloads.map(download => positions.has(download.id)
     ? { ...download, queuePosition: positions.get(download.id) }
     : download);
+};
+
+// Paused downloads remain part of the queue, but they must not be interleaved
+// with the queue's non-paused rows. Keep the partition in the store so
+// the table, persistence, and later queue operations all observe the same
+// order instead of each deriving a different one.
+const reorderQueueWithPausedAtEnd = (downloads: DownloadItem[], queueId: string): DownloadItem[] => {
+  const queueItems = queueItemsForReordering(downloads, queueId);
+  const nonPausedItems = queueItems.filter(download => download.status !== 'paused');
+  const pausedItems = queueItems.filter(download => download.status === 'paused');
+  return applyQueueOrder(downloads, queueId, [...nonPausedItems, ...pausedItems]);
 };
 
 const advanceDownloadLifecycle = (id: string): bigint => {
@@ -519,16 +537,27 @@ const effectiveDestinationForItem = async (
 
 const normalizeQueuePositions = (downloads: DownloadItem[]): DownloadItem[] => {
   const nextPosition = new Map<string, number>();
-  return downloads.map(download => {
+  const normalized: DownloadItem[] = downloads.map(download => {
     const queueId = download.queueId || MAIN_QUEUE_ID;
     const position = nextPosition.get(queueId) || 0;
     nextPosition.set(queueId, position + 1);
+    const persistedPosition = download.queuePosition;
+    const queuePosition = typeof persistedPosition === 'number' &&
+      Number.isFinite(persistedPosition) && persistedPosition >= 0
+      ? Math.trunc(persistedPosition)
+      : position;
     return {
       ...download,
       queueId,
-      queuePosition: download.queuePosition ?? position
+      queuePosition
     };
   });
+
+  let ordered = normalized;
+  for (const queueId of new Set(normalized.map(download => download.queueId || MAIN_QUEUE_ID))) {
+    ordered = reorderQueueWithPausedAtEnd(ordered, queueId);
+  }
+  return ordered;
 };
 
 const TEMPORARY_MEDIA_ESTIMATE_MAX_BYTES = 1024;
@@ -1294,7 +1323,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       hasBeenDispatched: false
     };
     advanceDownloadLifecycle(item.id);
-    set((state) => ({ downloads: [...state.downloads, ownedItem] }));
+    set((state) => ({
+      downloads: reorderQueueWithPausedAtEnd([...state.downloads, ownedItem], queueId)
+    }));
 
     if (action.type === 'add-to-queue') {
       info(`Download ${item.id} added to queue ${action.queueId}`);
@@ -1334,19 +1365,32 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     preemptDispatch
   ),
   updateDownload: (id, updates) => {
-    set((state) => ({
-      downloads: state.downloads.map(d => {
-        if (d.id === id) {
-          const updated = { 
-            ...d, 
+    set((state) => {
+      const current = state.downloads.find(download => download.id === id);
+      if (!current) return { downloads: state.downloads };
+
+      const downloads = state.downloads.map(d => d.id === id
+        ? {
+            ...d,
             ...updates,
             fraction: updates.fraction !== undefined ? updates.fraction : d.fraction
-          };
-          return updated;
-        }
-        return d;
-      })
-    }));
+          }
+        : d
+      );
+      const shouldNormalizeQueue = updates.status === 'paused' ||
+        updates.status === 'queued' ||
+        updates.status === 'staged';
+      const updated = downloads.find(download => download.id === id) ?? current;
+
+      return {
+        downloads: shouldNormalizeQueue
+          ? reorderQueueWithPausedAtEnd(downloads, updated.queueId || MAIN_QUEUE_ID)
+          : downloads,
+        ...(updates.status === 'paused'
+          ? { pendingOrder: state.pendingOrder.filter(value => value !== id) }
+          : {})
+      };
+    });
     
     if (updates.status && ['completed', 'failed', 'paused'].includes(updates.status)) {
       info(`Download ${id} status changed to ${updates.status}`);
@@ -1753,8 +1797,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       );
       const maxPos = queueItems.reduce((max, d) => Math.max(max, d.queuePosition ?? 0), -1);
       const nextPosition = maxPos + 1;
-      set(state => ({
-        downloads: state.downloads.map(item =>
+      set(state => {
+        const downloads = state.downloads.map(item =>
           movableIds.has(item.id) && item.status !== 'completed'
             ? {
                 ...item,
@@ -1764,8 +1808,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
                 hasBeenDispatched: false
               }
             : item
-        )
-      }));
+        );
+        return { downloads: reorderQueueWithPausedAtEnd(downloads, queueId) };
+      });
     });
   },
   setDownloadSpeedLimit: (id, limit) => runDownloadLifecycleOperation(
@@ -2094,11 +2139,11 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       
       // Reset interrupted active downloads to queued.
       set((state) => ({
-        downloads: state.downloads.map(d =>
+        downloads: normalizeQueuePositions(state.downloads.map(d =>
           isActiveDownloadStatus(d.status) && d.status !== 'queued'
             ? { ...d, status: 'queued' as const }
             : d
-        )
+        ))
       }));
 
     } catch (e) {

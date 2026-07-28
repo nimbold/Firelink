@@ -177,11 +177,13 @@ const startDownloadListeners = async () => {
       mainStore.updateDownload(payload.id, updates);
 
       if (status === 'completed' || status === 'failed' || status === 'paused') {
-        mainStore.setPendingOrder(mainStore.pendingOrder.filter(id => id !== payload.id));
+        useDownloadStore.setState(state => ({
+          pendingOrder: state.pendingOrder.filter(id => id !== payload.id)
+        }));
       } else if (status === 'queued') {
-        if (!mainStore.pendingOrder.includes(payload.id)) {
-          mainStore.setPendingOrder([...mainStore.pendingOrder, payload.id]);
-        }
+        useDownloadStore.setState(state => state.pendingOrder.includes(payload.id)
+          ? {}
+          : { pendingOrder: [...state.pendingOrder, payload.id] });
       }
 
       if (status === 'queued' || status === 'downloading' || status === 'processing' || status === 'retrying') {

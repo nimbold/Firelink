@@ -523,6 +523,37 @@ describe('useDownloadStore', () => {
       .toEqual(['00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001']);
   });
 
+  it('moves persisted paused rows behind runnable rows and assigns contiguous positions', async () => {
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'db_get_all_queues') {
+        return [JSON.stringify({ id: 'queue-a', name: 'Queue A', isMain: false })];
+      }
+      if (cmd === 'db_get_all_downloads') {
+        return [
+          JSON.stringify({ id: 'active', status: 'downloading', queueId: 'queue-a', queuePosition: 0 }),
+          JSON.stringify({ id: 'queued-one', status: 'queued', queueId: 'queue-a', queuePosition: 1 }),
+          JSON.stringify({ id: 'paused-one', status: 'paused', queueId: 'queue-a', queuePosition: 2 }),
+          JSON.stringify({ id: 'queued-two', status: 'queued', queueId: 'queue-a', queuePosition: 3 }),
+          JSON.stringify({ id: 'legacy-invalid', status: 'queued', queueId: 'queue-a', queuePosition: 'not-a-number' })
+        ];
+      }
+      return undefined;
+    });
+
+    await useDownloadStore.getState().initDB();
+
+    expect(useDownloadStore.getState().downloads
+      .filter(download => download.queueId === 'queue-a')
+      .sort((left, right) => (left.queuePosition ?? 0) - (right.queuePosition ?? 0))
+      .map(download => download.id)
+    ).toEqual(['active', 'queued-one', 'queued-two', 'legacy-invalid', 'paused-one']);
+    expect(useDownloadStore.getState().downloads
+      .filter(download => download.queueId === 'queue-a')
+      .map(download => download.queuePosition)
+      .sort((left, right) => (left ?? 0) - (right ?? 0))
+    ).toEqual([0, 1, 2, 3, 4]);
+  });
+
   it('removes persisted temporary media estimates that are smaller than downloaded bytes', async () => {
     vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
       if (cmd === 'db_get_all_queues') return [];
@@ -1052,15 +1083,42 @@ describe('useDownloadStore', () => {
       downloads: [
         { id: 'queued-one', url: 'http://one', fileName: 'one', status: 'queued', category: 'Other', dateAdded: '', queueId: 'pause-queue' },
         { id: 'queued-two', url: 'http://two', fileName: 'two', status: 'queued', category: 'Other', dateAdded: '', queueId: 'pause-queue' },
+        { id: 'staged-one', url: 'http://staged', fileName: 'staged', status: 'staged', category: 'Other', dateAdded: '', queueId: 'pause-queue' },
       ] as any[],
     });
     vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
 
-    await expect(useDownloadStore.getState().pauseAll()).resolves.toBe(2);
+    await expect(useDownloadStore.getState().pauseAll()).resolves.toBe(3);
     expect(
       vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) => command === 'pause_download')
-    ).toHaveLength(2);
+    ).toHaveLength(3);
     expect(useDownloadStore.getState().downloads.every(item => item.status === 'paused')).toBe(true);
+  });
+
+  it('moves a paused row behind the remaining runnable queue rows', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'active', status: 'downloading', queueId: 'ordered-pause', queuePosition: 0 },
+        { id: 'queued-one', status: 'queued', queueId: 'ordered-pause', queuePosition: 1 },
+        { id: 'pause-target', status: 'queued', queueId: 'ordered-pause', queuePosition: 2 },
+        { id: 'queued-two', status: 'queued', queueId: 'ordered-pause', queuePosition: 3 }
+      ] as any[],
+      pendingOrder: ['queued-one', 'pause-target', 'queued-two']
+    });
+    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
+
+    await useDownloadStore.getState().pauseDownload('pause-target');
+
+    const ordered = useDownloadStore.getState().downloads
+      .filter(download => download.queueId === 'ordered-pause')
+      .sort((left, right) => (left.queuePosition ?? 0) - (right.queuePosition ?? 0));
+    expect(ordered.map(download => download.id)).toEqual([
+      'active', 'queued-one', 'queued-two', 'pause-target'
+    ]);
+    expect(ordered.map(download => download.queuePosition)).toEqual([0, 1, 2, 3]);
+    expect(useDownloadStore.getState().pendingOrder).toEqual(['queued-one', 'queued-two']);
+    expect(useDownloadStore.getState().downloads.find(download => download.id === 'pause-target')?.status)
+      .toBe('paused');
   });
 
   it('does not let a queue pause lose a selected start in flight', async () => {
@@ -1141,6 +1199,35 @@ describe('useDownloadStore', () => {
     expect(item.queueId).toBe('queue-b');
     expect(item.queuePosition).toBe(0);
     expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
+  });
+
+  it('inserts a newly staged queue item before paused rows', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'already-paused',
+        url: 'https://example.com/paused.bin',
+        fileName: 'paused.bin',
+        category: 'Other',
+        dateAdded: '',
+        status: 'paused',
+        queueId: 'queue-b',
+        queuePosition: 0
+      }] as any[]
+    });
+
+    await useDownloadStore.getState().addDownload({
+      id: 'new-staged',
+      url: 'https://example.com/new.bin',
+      fileName: 'new.bin',
+      category: 'Other',
+      dateAdded: ''
+    }, { type: 'add-to-queue', queueId: 'queue-b' });
+
+    const ordered = useDownloadStore.getState().downloads
+      .filter(item => item.queueId === 'queue-b')
+      .sort((left, right) => (left.queuePosition ?? 0) - (right.queuePosition ?? 0));
+    expect(ordered.map(item => item.id)).toEqual(['new-staged', 'already-paused']);
+    expect(ordered.map(item => item.queuePosition)).toEqual([0, 1]);
   });
 
   it('carries a media format estimate into numeric progress state', async () => {
@@ -1766,7 +1853,8 @@ describe('useDownloadStore', () => {
     useDownloadStore.setState({
       downloads: [
         { id: 'ready', status: 'ready', queueId: 'old' },
-        { id: 'done', status: 'completed', queueId: 'old' }
+        { id: 'done', status: 'completed', queueId: 'old' },
+        { id: 'paused', status: 'paused', queueId: 'new', queuePosition: 0 }
       ] as any[]
     });
 
@@ -1774,6 +1862,11 @@ describe('useDownloadStore', () => {
 
     expect(useDownloadStore.getState().downloads.find(item => item.id === 'ready')?.queueId).toBe('new');
     expect(useDownloadStore.getState().downloads.find(item => item.id === 'done')?.queueId).toBe('old');
+    expect(useDownloadStore.getState().downloads
+      .filter(item => item.queueId === 'new')
+      .sort((left, right) => (left.queuePosition ?? 0) - (right.queuePosition ?? 0))
+      .map(item => item.id)
+    ).toEqual(['ready', 'paused']);
   });
 
   it('does not reassign an item that completes while queue assignment is awaiting cancellation', async () => {

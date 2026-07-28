@@ -8,6 +8,7 @@ const STARTABLE_STATUSES: ReadonlySet<DownloadStatus> = new Set([
 ]);
 
 const PAUSABLE_STATUSES: ReadonlySet<DownloadStatus> = new Set([
+  'staged',
   'queued',
   'downloading',
   'processing',

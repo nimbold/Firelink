@@ -12,13 +12,18 @@ import {
 } from './downloadActions';
 
 describe('download action policy', () => {
-  it('keeps start and pause actions mutually exclusive', () => {
+  it('allows queued items to be paused before their first dispatch', () => {
+    expect(canStartDownload('staged')).toBe(true);
+    expect(canPauseDownload('staged')).toBe(true);
+
     for (const status of ['ready', 'paused', 'failed'] as const) {
       expect(canStartDownload(status)).toBe(true);
       expect(canPauseDownload(status)).toBe(false);
     }
-    for (const status of ['queued', 'downloading', 'processing', 'retrying'] as const) {
+    for (const status of ['staged', 'queued', 'downloading', 'processing', 'retrying'] as const) {
       expect(canPauseDownload(status)).toBe(true);
+    }
+    for (const status of ['queued', 'downloading', 'processing', 'retrying'] as const) {
       expect(canStartDownload(status)).toBe(false);
     }
   });
@@ -37,9 +42,10 @@ describe('download action policy', () => {
     expect(getPauseResumeAction('retrying')).toBe('pause');
     expect(getPauseResumeAction('paused')).toBe('resume');
 
-    for (const status of ['ready', 'staged', 'completed', 'failed'] as const) {
+    for (const status of ['ready', 'completed', 'failed'] as const) {
       expect(getPauseResumeAction(status)).toBeNull();
     }
+    expect(getPauseResumeAction('staged')).toBe('pause');
   });
 
   it('provides consistent labels and edit locks', () => {
@@ -62,7 +68,7 @@ describe('download action policy', () => {
       { status: 'completed' },
     ]);
 
-    expect(counts).toEqual({ pause: 2, resume: 4 });
+    expect(counts).toEqual({ pause: 3, resume: 4 });
   });
 
   it('keeps large action badges compact without changing the accessible count', () => {
