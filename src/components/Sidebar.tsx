@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Inbox, Zap, CheckCircle2, CircleDashed,
   Film, Music, FileText, Box, Image as ImageIcon, Archive, FileQuestion,
@@ -11,6 +12,7 @@ import { ActiveView, useSettingsStore } from '../store/useSettingsStore';
 import { WindowDragRegion } from './WindowDragRegion';
 import { useToast } from '../contexts/ToastContext';
 import { isTransferActiveStatus } from '../utils/downloads';
+import { clampFloatingPosition } from '../utils/floatingPosition';
 import { useTranslation } from 'react-i18next';
 
 export type SidebarFilter = 'all' | 'active' | 'completed' | 'unfinished' | DownloadCategory | 'settings' | string;
@@ -25,13 +27,15 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
   const { downloads, queues, addQueue, renameQueue, removeQueue, startQueue, pauseQueue, setQueueConcurrency } = useDownloadStore();
   const { activeView, setActiveView, toggleSidebar } = useSettingsStore();
   const { addToast } = useToast();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
 
   const [isAddingQueue, setIsAddingQueue] = useState(false);
   const [newQueueName, setNewQueueName] = useState('');
   const [renamingQueueId, setRenamingQueueId] = useState<string | null>(null);
   const [editingQueueName, setEditingQueueName] = useState('');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; id: string } | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
+  const [contextMenuPosition, setContextMenuPosition] = useState<{ x: number; y: number } | null>(null);
   const [foldersCollapsed, setFoldersCollapsed] = useState(() =>
     window.localStorage.getItem('firelink-folders-collapsed') === 'true'
   );
@@ -48,6 +52,46 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
   const editingQueueNameRef = useRef('');
   const rejectedAddQueueNameRef = useRef<string | null>(null);
   const rejectedRenameRef = useRef<{ queueId: string; name: string } | null>(null);
+
+  useLayoutEffect(() => {
+    if (!contextMenu) return;
+    if (!queues.some(queue => queue.id === contextMenu.id)) {
+      setContextMenu(null);
+      setContextMenuPosition(null);
+      return;
+    }
+
+    const updateContextMenuPosition = () => {
+      const menu = contextMenuRef.current;
+      if (!menu) return;
+      const rect = menu.getBoundingClientRect();
+      const nextPosition = clampFloatingPosition(
+        contextMenu.x,
+        contextMenu.y,
+        rect.width,
+        rect.height,
+        window.innerWidth,
+        window.innerHeight
+      );
+      setContextMenuPosition(current => (
+        current?.x === nextPosition.x && current.y === nextPosition.y
+          ? current
+          : nextPosition
+      ));
+    };
+
+    updateContextMenuPosition();
+    const resizeObserver = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(updateContextMenuPosition);
+    const menu = contextMenuRef.current;
+    if (menu) resizeObserver?.observe(menu);
+    window.addEventListener('resize', updateContextMenuPosition);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', updateContextMenuPosition);
+    };
+  }, [contextMenu, queues, i18n.language]);
 
   useEffect(() => {
     const handleCloseMenu = () => setContextMenu(null);
@@ -156,6 +200,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
   const handleQueueContextMenu = (e: React.MouseEvent, id: string) => {
     e.preventDefault();
     e.stopPropagation();
+    setContextMenuPosition(null);
     setContextMenu({ x: e.clientX, y: e.clientY, id });
   };
 
@@ -431,13 +476,14 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
         </button>
       </div>
 
-      {contextMenu && (
+      {contextMenu && createPortal(
         <div
           role="menu"
-          className="fixed z-50 w-48 py-1 rounded-xl shadow-lg border border-border-modal bg-bg-context-menu backdrop-blur-xl animate-fade-in text-[13px] text-text-primary overflow-hidden"
-          style={{ 
-            top: Math.min(contextMenu.y, window.innerHeight - 200), 
-            left: Math.min(contextMenu.x, window.innerWidth - 200) 
+          ref={contextMenuRef}
+          className="fixed z-[70] w-48 py-1 rounded-xl shadow-lg border border-border-modal bg-bg-context-menu backdrop-blur-xl animate-fade-in text-[13px] text-text-primary overflow-hidden"
+          style={{
+            top: contextMenuPosition?.y ?? contextMenu.y,
+            left: contextMenuPosition?.x ?? contextMenu.x,
           }}
           onClick={e => e.stopPropagation()}
         >
@@ -561,7 +607,8 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
               {t($ => $.actions.deleteQueue)}
             </button>
           )}
-        </div>
+        </div>,
+        document.body
       )}
     </aside>
   );

@@ -62,10 +62,17 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   const liveProgress = useDownloadProgressStore(state => state.progressMap[download.id]);
   const rowRef = React.useRef<HTMLDivElement>(null);
   const [isRowHovered, setIsRowHovered] = React.useState(false);
-  const [isRowFocused, setIsRowFocused] = React.useState(false);
+  const [isRowKeyboardFocused, setIsRowKeyboardFocused] = React.useState(false);
+  const [isActionHovered, setIsActionHovered] = React.useState(false);
+  const [isActionFocused, setIsActionFocused] = React.useState(false);
   const [actionPosition, setActionPosition] = React.useState<React.CSSProperties | undefined>();
   const hasRowActions = download.status !== 'completed';
-  const isActionVisible = hasRowActions && (isRowHovered || isRowFocused);
+  const isActionVisible = hasRowActions && (
+    isRowHovered ||
+    isActionHovered ||
+    isRowKeyboardFocused ||
+    isActionFocused
+  );
   const mediaQualityLabel = (() => {
     if (!download.isMedia || typeof download.mediaQuality !== 'string') return undefined;
     const normalized = download.mediaQuality.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -332,6 +339,23 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
       }}
       onClick={(e) => e.stopPropagation()}
       onDoubleClick={(e) => e.stopPropagation()}
+      onMouseEnter={() => {
+        setIsActionHovered(true);
+        updateActionPosition();
+      }}
+      onMouseLeave={() => setIsActionHovered(false)}
+      onFocusCapture={event => {
+        const target = event.target;
+        const keyboardFocused = target instanceof HTMLElement && target.matches(':focus-visible');
+        setIsActionFocused(keyboardFocused);
+        if (keyboardFocused) updateActionPosition();
+      }}
+      onBlurCapture={event => {
+        const nextTarget = event.relatedTarget;
+        if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+          setIsActionFocused(false);
+        }
+      }}
     >
       {canPauseDownload(download.status) && (
         <button onClick={() => handlePause(download.id)} className="app-icon-button h-7 w-7" title={t($ => $.downloads.actions.pause)}>
@@ -374,13 +398,15 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
         }
       }}
       onFocus={() => {
-        setIsRowFocused(true);
-        if (hasRowActions) updateActionPosition();
+        const target = document.activeElement;
+        const keyboardFocused = target instanceof HTMLElement && target.matches(':focus-visible');
+        setIsRowKeyboardFocused(keyboardFocused);
+        if (hasRowActions && keyboardFocused) updateActionPosition();
       }}
       onBlur={event => {
         const nextTarget = event.relatedTarget;
         if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
-          setIsRowFocused(false);
+          setIsRowKeyboardFocused(false);
         }
       }}
       onPointerDown={event => {

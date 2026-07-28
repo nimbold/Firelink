@@ -50,6 +50,7 @@ import {
 import {
   moveSelectedBlockToIndex
 } from '../utils/queueOrdering';
+import { updateDownloadSelection } from '../utils/downloadSelection';
 
 export interface DownloadTableStatusSummary {
   summary: DownloadSummary;
@@ -222,8 +223,17 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   const queueRowAnimationGenerationRef = useRef(0);
   const queueReorderPendingCountRef = useRef(0);
   const suppressQueueClickRef = useRef(false);
+  const suppressQueueClickTimerRef = useRef<number | null>(null);
   const [queueDragState, setQueueDragState] = useState<QueueDragState | null>(null);
   const [queueDragPreviewOrder, setQueueDragPreviewOrder] = useState<string[] | null>(null);
+
+  const clearQueueClickSuppression = useCallback(() => {
+    suppressQueueClickRef.current = false;
+    if (suppressQueueClickTimerRef.current !== null) {
+      window.clearTimeout(suppressQueueClickTimerRef.current);
+      suppressQueueClickTimerRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     const className = 'is-queue-dragging';
@@ -765,6 +775,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     columnDragCleanupRef.current = null;
     queueDragCleanupRef.current = null;
     queueDragStateRef.current = null;
+    clearQueueClickSuppression();
     const queueCaptureTarget = queueDragCaptureTargetRef.current;
     const queueCapturePointerId = queueDragCapturePointerIdRef.current;
     queueDragCaptureTargetRef.current = null;
@@ -1042,9 +1053,13 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       releaseQueuePointerCapture();
     }
     if (current.active) {
+      if (suppressQueueClickTimerRef.current !== null) {
+        window.clearTimeout(suppressQueueClickTimerRef.current);
+      }
       suppressQueueClickRef.current = true;
-      window.setTimeout(() => {
+      suppressQueueClickTimerRef.current = window.setTimeout(() => {
         suppressQueueClickRef.current = false;
+        suppressQueueClickTimerRef.current = null;
       }, 0);
     }
 
@@ -1102,6 +1117,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       queueDragPreviewOrderRef.current ||
       queueReorderPendingCountRef.current > 0
     ) return;
+    clearQueueClickSuppression();
     if (
       event.target instanceof Element &&
       event.target.closest('button, a, input, textarea, select, [role="menu"], .download-row-actions')
@@ -1156,13 +1172,6 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     setQueueDragState(initialState);
     queueDragCaptureTargetRef.current = captureTarget;
     queueDragCapturePointerIdRef.current = pointerId;
-    try {
-      captureTarget.setPointerCapture(pointerId);
-    } catch {
-      // The pointer may have been cancelled between pointerdown and capture.
-      // Window-level listeners remain the best-effort cleanup fallback.
-    }
-
     let pointerMoveFrame: number | null = null;
     let pendingPointerPosition: { clientX: number; clientY: number } | null = null;
 
@@ -1174,6 +1183,15 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
         clientY - drag.startY
       );
       if (!drag.active && distance < 5) return;
+
+      if (!drag.active) {
+        try {
+          captureTarget.setPointerCapture(pointerId);
+        } catch {
+          // The pointer may have been cancelled before the drag threshold.
+          // Window-level listeners remain the best-effort cleanup fallback.
+        }
+      }
 
       const baseItems = queueDragBaseItemsRef.current;
       const selectedIdSet = new Set(drag.ids);
@@ -1224,7 +1242,13 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
         clientX: pointerEvent.clientX,
         clientY: pointerEvent.clientY,
       };
-      pointerEvent.preventDefault();
+      const drag = queueDragStateRef.current;
+      if (drag && (drag.active || Math.hypot(
+        pointerEvent.clientX - drag.startX,
+        pointerEvent.clientY - drag.startY
+      ) >= 5)) {
+        pointerEvent.preventDefault();
+      }
       if (pointerMoveFrame === null) {
         pointerMoveFrame = window.requestAnimationFrame(() => {
           pointerMoveFrame = null;
@@ -1648,44 +1672,24 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   }, [filter, isQueueFilter]);
   const handleItemClick = useCallback((e: React.MouseEvent, item: DownloadItem) => {
     if (suppressQueueClickRef.current) {
-      suppressQueueClickRef.current = false;
+      clearQueueClickSuppression();
       return;
     }
     if (e.detail === 2) {
       handleDownloadDoubleClick(item);
       return;
     }
-    const currentSortedDownloads = sortedDownloadsRef.current;
-    const currentSelectedIds = selectedIdsRef.current;
-    const currentLastSelectedId = lastSelectedIdRef.current;
-    if (e.shiftKey && currentLastSelectedId) {
-      const currentIndex = currentSortedDownloads.findIndex(d => d.id === item.id);
-      const lastIndex = currentSortedDownloads.findIndex(d => d.id === currentLastSelectedId);
-      
-      if (currentIndex !== -1 && lastIndex !== -1) {
-        const start = Math.min(currentIndex, lastIndex);
-        const end = Math.max(currentIndex, lastIndex);
-        
-        const newSelected = (e.metaKey || e.ctrlKey) ? new Set(currentSelectedIds) : new Set<string>();
-        for (let i = start; i <= end; i++) {
-          newSelected.add(currentSortedDownloads[i].id);
-        }
-        setSelectedIds(newSelected);
-      }
-    } else if (e.metaKey || e.ctrlKey) {
-      const newSelected = new Set(currentSelectedIds);
-      if (newSelected.has(item.id)) {
-        newSelected.delete(item.id);
-      } else {
-        newSelected.add(item.id);
-      }
-      setSelectedIds(newSelected);
-      setLastSelectedId(item.id);
-    } else {
-      setSelectedIds(new Set([item.id]));
-      setLastSelectedId(item.id);
-    }
-  }, [handleDownloadDoubleClick]);
+    const nextSelection = updateDownloadSelection({
+      orderedIds: sortedDownloadsRef.current.map(download => download.id),
+      selectedIds: selectedIdsRef.current,
+      lastSelectedId: lastSelectedIdRef.current,
+      targetId: item.id,
+      extendRange: e.shiftKey,
+      toggle: e.metaKey || e.ctrlKey,
+    });
+    setSelectedIds(nextSelection.selectedIds);
+    setLastSelectedId(nextSelection.lastSelectedId);
+  }, [clearQueueClickSuppression, handleDownloadDoubleClick]);
 
   const handleContextMenu = useCallback((menu: { x: number; y: number; id: string }) => {
     if (!selectedIdsRef.current.has(menu.id)) {

@@ -1,6 +1,6 @@
 import { initMediaDomains, isActiveDownloadStatus, isTransferActiveStatus } from './utils/downloads';
 import { schedulerCompletionState } from './utils/schedulerCompletion';
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Sidebar, SidebarFilter } from "./components/Sidebar";
 import { DownloadTable, type DownloadTableStatusSummary } from "./components/DownloadTable";
 // Keep the primary Add action eager so the modal cannot disappear behind a
@@ -198,6 +198,16 @@ function App() {
   const fontFamily = useSettingsStore(state => state.fontFamily);
   const appFontSize = useSettingsStore(state => state.appFontSize);
   const listRowDensity = useSettingsStore(state => state.listRowDensity);
+  const pageTransitionKey = activeView === 'downloads'
+    ? `${activeView}:${filter}`
+    : activeView;
+  const [isPageTransitionActive, setIsPageTransitionActive] = useState(false);
+
+  useLayoutEffect(() => {
+    setIsPageTransitionActive(false);
+    const frame = window.requestAnimationFrame(() => setIsPageTransitionActive(true));
+    return () => window.cancelAnimationFrame(frame);
+  }, [pageTransitionKey]);
 
   useEffect(() => {
     const locale = languagePreference === 'system'
@@ -1110,16 +1120,18 @@ function App() {
         )}
         <div className="flex-1 flex flex-col overflow-hidden relative">
           <Suspense fallback={<PageLoadingFallback />}>
-            {activeView === 'downloads' && (
-              <DownloadTable
-                filter={filter}
-                onSummaryChange={handleDownloadTableSummaryChange}
-              />
-            )}
-            {activeView === 'settings' && <SettingsView />}
-            {activeView === 'scheduler' && <SchedulerView />}
-            {activeView === 'speedLimiter' && <SpeedLimiterView />}
-            {activeView === 'logs' && <LogsView />}
+            <div className={`${isPageTransitionActive ? 'app-page-transition' : ''} flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden`}>
+              {activeView === 'downloads' && (
+                <DownloadTable
+                  filter={filter}
+                  onSummaryChange={handleDownloadTableSummaryChange}
+                />
+              )}
+              {activeView === 'settings' && <SettingsView />}
+              {activeView === 'scheduler' && <SchedulerView />}
+              {activeView === 'speedLimiter' && <SpeedLimiterView />}
+              {activeView === 'logs' && <LogsView />}
+            </div>
           </Suspense>
         </div>
         
