@@ -5334,6 +5334,7 @@ async fn wait_for_aria2_stopped(port: u16, secret: &str, gid: &str) -> Result<()
 static NEXT_DOCK_BADGE_SESSION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
+#[cfg(target_os = "macos")]
 fn should_apply_dock_badge_update(
     current_session: u64,
     current_generation: u64,
@@ -8041,6 +8042,7 @@ mod tests {
         assert!(!is_media_artifact_name("video.f1.backup", "video.mp4", "video"));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn dock_badge_updates_reject_stale_sessions_and_generations() {
         assert!(should_apply_dock_badge_update(1, 99, 2, 1));

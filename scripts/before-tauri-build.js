@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -52,12 +51,5 @@ process.env.VITE_BUILD_ID = `${configuredBuildId || 'artifact'}-${randomUUID()}`
 
 run(process.execPath, ['scripts/stage-engines.js']);
 run(process.execPath, ['scripts/verify-binaries.js', '--staged']);
-
-if (process.env.FIRELINK_OMIT_ENGINE_DIST_FOR_TAURI_BUNDLE === '1') {
-  const engineDist = path.join(repoRoot, 'src-tauri', 'engine-dist');
-  fs.rmSync(engineDist, { recursive: true, force: true });
-  fs.mkdirSync(engineDist, { recursive: true });
-  console.log('Omitted engine-dist from the initial Tauri bundle; release packaging will repack verified engines.');
-}
 
 runNpmScript('build');

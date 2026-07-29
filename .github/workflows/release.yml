@@ -93,12 +93,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/firelink-native-packages/deb" "$RUNNER_TEMP/firelink-native-packages/rpm"
           cp src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb "$RUNNER_TEMP/firelink-native-packages/deb/"
           cp src-tauri/target/${{ matrix.target }}/release/bundle/rpm/*.rpm "$RUNNER_TEMP/firelink-native-packages/rpm/"
-      - name: Build Linux AppImage
+      - name: Build Linux AppImage from existing binary
         if: runner.os == 'Linux'
-        run: npm run tauri build -- -vv --target ${{ matrix.target }} --bundles appimage
+        run: node scripts/build-linux-appimage.js --target ${{ matrix.target }}
         env:
           APPIMAGE_EXTRACT_AND_RUN: 1
-          FIRELINK_OMIT_ENGINE_DIST_FOR_TAURI_BUNDLE: '1'
       - name: Install pinned appimagetool (Linux only)
         if: runner.os == 'Linux'
         env:
