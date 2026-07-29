@@ -50,6 +50,10 @@ const ru = {
       rename: 'Переименовать',
       replace: 'Заменить',
       skip: 'Пропустить',
+      applyToAll: 'Применить ко всем',
+      renameAll: 'Переименовать все',
+      replaceAll: 'Заменить все',
+      skipAll: 'Пропустить все',
     },
     removeDownload: {
       title: 'Удалить загрузку',

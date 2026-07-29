@@ -50,6 +50,10 @@ const common = {
       rename: 'Rename',
       replace: 'Replace',
       skip: 'Skip',
+      applyToAll: 'Apply to all',
+      renameAll: 'Rename all',
+      replaceAll: 'Replace all',
+      skipAll: 'Skip all',
     },
     removeDownload: {
       title: 'Remove Download',

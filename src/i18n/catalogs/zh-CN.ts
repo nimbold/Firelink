@@ -50,6 +50,10 @@ const zhCN = {
       rename: '重命名',
       replace: '替换',
       skip: '跳过',
+      applyToAll: '应用于全部',
+      renameAll: '全部重命名',
+      replaceAll: '全部替换',
+      skipAll: '全部跳过',
     },
     removeDownload: {
       title: '移除下载',

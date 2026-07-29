@@ -50,6 +50,10 @@ const fa = {
       rename: 'تغییر نام',
       replace: 'جایگزینی',
       skip: 'رد کردن',
+      applyToAll: 'اعمال برای همه',
+      renameAll: 'تغییر نام همه',
+      replaceAll: 'جایگزینی همه',
+      skipAll: 'رد کردن همه',
     },
     removeDownload: {
       title: 'حذف دانلود',

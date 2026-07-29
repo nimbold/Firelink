@@ -54,6 +54,13 @@ export interface AddDownloadDraftRow {
   selected?: boolean;
 }
 
+/**
+ * Redirect targets are request-time details, not durable download identity.
+ * Providers such as GitHub sign those targets with short-lived credentials,
+ * so retries must start from the source URL and resolve a fresh target.
+ */
+export const durableDownloadUrl = (sourceUrl: string): string => sourceUrl.trim();
+
 const ALLOWED_SCHEMES = new Set(['http:', 'https:', 'ftp:', 'sftp:']);
 
 type ParsedInput = {

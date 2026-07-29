@@ -2944,27 +2944,46 @@ body.is-queue-dragging * {
 .download-row-actions {
   position: fixed;
   display: flex;
-  align-items: center;
-  justify-content: flex-end;
+  direction: ltr;
+  overflow: visible;
   z-index: 2;
   max-width: 100%;
   min-width: 0;
-  padding: 0 2px;
-  border: 1px solid hsl(var(--text-primary) / 0.32);
-  border-radius: 6px;
-  background: hsl(var(--surface-overlay));
-  box-shadow:
-    0 0 0 1px hsl(var(--main-bg) / 0.72),
-    0 2px 8px hsl(var(--shadow-color));
+  width: max-content;
   visibility: hidden;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 120ms ease;
+  /* Rails are mutually exclusive during pointer handoff. Animating the
+   * container would leave the previous fixed rail visible while the next
+   * row's rail appears, producing a brief duplicate-control flash. */
+  transition: none;
 }
 
-.download-row.has-visible-actions .download-row-actions {
+.download-row-actions.main-control-group {
+  overflow: visible;
+  z-index: 12;
+  isolation: isolate;
+  background: hsl(var(--surface-overlay));
+}
+
+.download-row:hover .download-row-actions.is-positioned,
+.download-row.has-keyboard-action-focus .download-row-actions.is-positioned,
+.download-row:has(> .download-row-actions:hover) .download-row-actions.is-positioned {
+  visibility: visible;
   opacity: 1;
   pointer-events: auto;
+}
+
+/* The hovered row owns the rail during pointer interaction. Keep any stale
+ * keyboard-focused fixed rail hidden while the pointer is over another row.
+ * The second :has check keeps a rail clickable when its fixed child is
+ * hovered. */
+.download-table-list-content:has(.download-row:hover, .download-row-actions:hover)
+  .download-row:not(:hover):not(:has(> .download-row-actions:hover))
+  .download-row-actions.is-positioned {
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 
 .download-row-actions .app-icon-button,
@@ -2972,18 +2991,27 @@ body.is-queue-dragging * {
 .download-row-actions .app-icon-button:active:not(:disabled) {
   position: relative;
   overflow: visible;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 26px;
+  border-radius: 0;
+  border-inline-end: 1px solid hsl(var(--border-color));
   background: transparent;
-  color: hsl(var(--text-primary));
+  color: hsl(var(--text-secondary));
   transition: background-color 120ms ease, box-shadow 120ms ease, color 120ms ease, transform 100ms ease;
+}
+
+.download-row-actions .app-icon-button:last-child {
+  border-inline-end: 0;
 }
 
 .download-row-action-badge {
   position: absolute;
-  top: -5px;
-  inset-inline-end: -5px;
+  top: 1px;
+  inset-inline-end: 1px;
   display: inline-flex;
-  min-width: 15px;
-  height: 15px;
+  min-width: 14px;
+  height: 14px;
   align-items: center;
   justify-content: center;
   padding: 0 3px;
@@ -2995,6 +3023,7 @@ body.is-queue-dragging * {
   font-weight: 750;
   line-height: 1;
   letter-spacing: -0.01em;
+  z-index: 2;
   pointer-events: none;
   user-select: none;
 }
@@ -3008,15 +3037,15 @@ body.is-queue-dragging * {
 
 .download-row-actions .app-icon-button:hover:not(:disabled),
 .download-row-actions .app-icon-button:focus-visible {
-  background: hsl(var(--accent-color) / 0.14);
-  box-shadow: 0 0 0 1px hsl(var(--accent-color) / 0.34);
-  color: hsl(var(--accent-color));
+  background: hsl(var(--item-hover));
+  box-shadow: none;
+  color: hsl(var(--text-primary));
 }
 
 .download-row-actions .app-icon-button:active:not(:disabled) {
-  background: hsl(var(--accent-color) / 0.22);
-  box-shadow: 0 0 0 1px hsl(var(--accent-color) / 0.46);
-  color: hsl(var(--accent-color));
+  background: hsl(var(--item-hover));
+  box-shadow: none;
+  color: hsl(var(--text-primary));
 }
 
 .download-column-menu {

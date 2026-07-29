@@ -37,7 +37,16 @@ export const DuplicateResolutionModal = ({ conflicts: initialConflicts, onConfir
   }, [onCancel]);
 
   const updateResolution = (id: string, resolution: DuplicateResolution) => {
-    setConflicts(conflicts.map(c => c.id === id ? { ...c, resolution } : c));
+    setConflicts(current => current.map(c => c.id === id ? { ...c, resolution } : c));
+  };
+
+  const canReplaceAll = conflicts.length > 0 && conflicts.every(conflict =>
+    conflict.replaceAllowed === true
+  );
+
+  const applyResolutionToAll = (resolution: DuplicateResolution) => {
+    if (resolution === 'replace' && !canReplaceAll) return;
+    setConflicts(current => current.map(conflict => ({ ...conflict, resolution })));
   };
 
   return (
@@ -60,7 +69,37 @@ export const DuplicateResolutionModal = ({ conflicts: initialConflicts, onConfir
           <h2 id="duplicate-downloads-title" className="text-lg font-semibold text-text-primary">{t($ => $.dialogs.duplicateDownloads.title)}</h2>
           <p className="text-xs text-text-muted">{t($ => $.dialogs.duplicateDownloads.description)}</p>
         </div>
-        
+
+        <div className="flex items-center justify-between gap-3 border-b border-border-modal/60 bg-sidebar-bg/30 px-4 py-2.5">
+          <span className="shrink-0 text-xs font-medium text-text-secondary">
+            {t($ => $.dialogs.duplicateDownloads.applyToAll)}
+          </span>
+          <div className="flex min-w-0 items-center justify-end gap-1.5" role="group" aria-label={t($ => $.dialogs.duplicateDownloads.applyToAll)}>
+            <button
+              type="button"
+              onClick={() => applyResolutionToAll('rename')}
+              className="app-button px-2.5 py-1 text-[11px]"
+            >
+              {t($ => $.dialogs.duplicateDownloads.renameAll)}
+            </button>
+            <button
+              type="button"
+              onClick={() => applyResolutionToAll('replace')}
+              disabled={!canReplaceAll}
+              className="app-button px-2.5 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {t($ => $.dialogs.duplicateDownloads.replaceAll)}
+            </button>
+            <button
+              type="button"
+              onClick={() => applyResolutionToAll('skip')}
+              className="app-button px-2.5 py-1 text-[11px]"
+            >
+              {t($ => $.dialogs.duplicateDownloads.skipAll)}
+            </button>
+          </div>
+        </div>
+
         <div className="max-h-[300px] overflow-y-auto p-4 space-y-3">
           {conflicts.map(conflict => (
             <div key={conflict.id} className="flex items-center justify-between bg-bg-input/50 p-2.5 rounded-lg border border-border-modal/50 gap-4">
@@ -74,7 +113,7 @@ export const DuplicateResolutionModal = ({ conflicts: initialConflicts, onConfir
                 className="app-control w-24 shrink-0 px-2 py-1 text-xs"
               >
                 <option value="rename">{t($ => $.dialogs.duplicateDownloads.rename)}</option>
-                {conflict.reason.type === 'file' && conflict.replaceAllowed && <option value="replace">{t($ => $.dialogs.duplicateDownloads.replace)}</option>}
+                {conflict.replaceAllowed && <option value="replace">{t($ => $.dialogs.duplicateDownloads.replace)}</option>}
                 <option value="skip">{t($ => $.dialogs.duplicateDownloads.skip)}</option>
               </select>
             </div>

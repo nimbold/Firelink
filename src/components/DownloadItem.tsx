@@ -18,7 +18,6 @@ import {
 } from '../utils/downloadProgress';
 import {
   COLUMN_ALIGNMENT_JUSTIFY,
-  DOWNLOAD_ACTIONS_COLUMN_WIDTH,
   getDownloadActionPosition,
   getColumnGridColumn,
   type DownloadColumnAlignment,
@@ -39,6 +38,7 @@ interface DownloadItemProps {
   handleResumeSelected: () => void;
   getCategoryIcon: (category: string) => React.ReactNode;
   isSelected: boolean;
+  selectedDownloadCount: number;
   selectedActionCounts: DownloadActionCounts;
   isQueueReorderable: boolean;
   isQueueDragSource: boolean;
@@ -61,6 +61,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   handleResumeSelected,
   getCategoryIcon,
   isSelected,
+  selectedDownloadCount,
   selectedActionCounts,
   isQueueReorderable,
   isQueueDragSource,
@@ -78,12 +79,19 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   const [isActionFocused, setIsActionFocused] = React.useState(false);
   const [actionPosition, setActionPosition] = React.useState<React.CSSProperties | undefined>();
   const hasRowActions = download.status !== 'completed';
-  const pauseSelectionCount = isSelected && selectedActionCounts.pause > 1
+  const isBulkSelection = isSelected && selectedDownloadCount > 1;
+  const pauseSelectionCount = isBulkSelection && selectedActionCounts.pause > 0
     ? selectedActionCounts.pause
     : null;
-  const resumeSelectionCount = isSelected && selectedActionCounts.resume > 1
+  const resumeSelectionCount = isBulkSelection && selectedActionCounts.resume > 0
     ? selectedActionCounts.resume
     : null;
+  const canResumeAction = isBulkSelection
+    ? selectedActionCounts.resume > 0
+    : canStartDownload(download.status);
+  const canPauseAction = isBulkSelection
+    ? selectedActionCounts.pause > 0
+    : canPauseDownload(download.status);
   const selectedCountLabel = (count: number | null) => count === null
     ? null
     : t($ => $.downloadTable.summary.selected, { count });
@@ -115,11 +123,13 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     const rowRect = row.getBoundingClientRect();
     const horizontalViewportRect = horizontalViewport.getBoundingClientRect();
     const verticalViewportRect = verticalViewport.getBoundingClientRect();
+    const rowPadding = Number.parseFloat(getComputedStyle(row).getPropertyValue('--download-row-padding-x'));
     const nextPosition = getDownloadActionPosition(
       rowRect,
       horizontalViewportRect,
       verticalViewportRect,
-      window.innerWidth
+      window.innerWidth,
+      Number.isFinite(rowPadding) ? rowPadding : undefined
     );
 
     setActionPosition(previous => (
@@ -133,7 +143,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     ));
   }, []);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     if (!isActionVisible) return;
 
     let frame: number | null = null;
@@ -351,11 +361,14 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
 
   const rowActions = hasRowActions ? (
     <div
-      className="download-row-actions items-center gap-0.5"
+      className={`download-row-actions main-control-group ${actionPosition?.visibility === 'visible' ? 'is-positioned' : ''}`}
       style={{
         ...actionPosition,
-        visibility: isActionVisible && actionPosition?.visibility === 'visible' ? 'visible' : 'hidden',
-        width: `${DOWNLOAD_ACTIONS_COLUMN_WIDTH}px`,
+        // Preserve the geometry helper's hidden result when the row is
+        // outside the scroll viewport. A fixed rail is not clipped by the
+        // list, while visible state remains CSS-owned so pointer handoff
+        // cannot leave two rails visible.
+        visibility: actionPosition?.visibility === 'hidden' ? 'hidden' : undefined,
       }}
       onClick={(e) => e.stopPropagation()}
       onDoubleClick={(e) => e.stopPropagation()}
@@ -377,50 +390,48 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
         }
       }}
     >
-      {canPauseDownload(download.status) && (
-        <button
-          onClick={() => pauseSelectionCount !== null ? handlePauseSelected() : handlePause(download.id)}
-          className="app-icon-button h-7 w-7"
-          title={pauseSelectionCount === null
-            ? t($ => $.downloads.actions.pause)
-            : `${t($ => $.downloads.actions.pause)} (${selectedCountLabel(pauseSelectionCount)})`}
-          aria-label={pauseSelectionCount === null
-            ? t($ => $.downloads.actions.pause)
-            : `${t($ => $.downloads.actions.pause)} (${selectedCountLabel(pauseSelectionCount)})`}
-        >
-          <Pause size={14} fill="currentColor" />
-          {pauseSelectionCount !== null ? (
-            <span className="download-row-action-badge" aria-hidden="true">
-              {formatDownloadActionCount(pauseSelectionCount)}
-            </span>
-          ) : null}
-        </button>
-      )}
-      {canStartDownload(download.status) && (
-        <button
-          onClick={() => resumeSelectionCount !== null ? handleResumeSelected() : handleResume(download)}
-          className="app-icon-button h-7 w-7"
-          title={resumeSelectionCount === null
-            ? download.status === 'paused' ? t($ => $.downloads.actions.resume) : t($ => $.downloads.actions.start)
-            : `${t($ => $.downloadTable.startResume)} (${selectedCountLabel(resumeSelectionCount)})`}
-          aria-label={resumeSelectionCount === null
-            ? download.status === 'paused' ? t($ => $.downloads.actions.resume) : t($ => $.downloads.actions.start)
-            : `${t($ => $.downloadTable.startResume)} (${selectedCountLabel(resumeSelectionCount)})`}
-        >
-          <Play size={14} fill="currentColor" />
-          {resumeSelectionCount !== null ? (
-            <span className="download-row-action-badge" aria-hidden="true">
-              {formatDownloadActionCount(resumeSelectionCount)}
-            </span>
-          ) : null}
-        </button>
-      )}
+      <button
+        disabled={!canResumeAction}
+        onClick={() => isBulkSelection ? handleResumeSelected() : handleResume(download)}
+        className="app-icon-button main-control-button"
+        title={resumeSelectionCount === null
+          ? download.status === 'paused' ? t($ => $.downloads.actions.resume) : t($ => $.downloads.actions.start)
+          : `${t($ => $.downloadTable.startResume)} (${selectedCountLabel(resumeSelectionCount)})`}
+        aria-label={resumeSelectionCount === null
+          ? download.status === 'paused' ? t($ => $.downloads.actions.resume) : t($ => $.downloads.actions.start)
+          : `${t($ => $.downloadTable.startResume)} (${selectedCountLabel(resumeSelectionCount)})`}
+      >
+        <Play size={14} fill="currentColor" />
+        {resumeSelectionCount !== null ? (
+          <span className="download-row-action-badge" aria-hidden="true">
+            {formatDownloadActionCount(resumeSelectionCount)}
+          </span>
+        ) : null}
+      </button>
+      <button
+        disabled={!canPauseAction}
+        onClick={() => isBulkSelection ? handlePauseSelected() : handlePause(download.id)}
+        className="app-icon-button main-control-button"
+        title={pauseSelectionCount === null
+          ? t($ => $.downloads.actions.pause)
+          : `${t($ => $.downloads.actions.pause)} (${selectedCountLabel(pauseSelectionCount)})`}
+        aria-label={pauseSelectionCount === null
+          ? t($ => $.downloads.actions.pause)
+          : `${t($ => $.downloads.actions.pause)} (${selectedCountLabel(pauseSelectionCount)})`}
+      >
+        <Pause size={14} fill="currentColor" />
+        {pauseSelectionCount !== null ? (
+          <span className="download-row-action-badge" aria-hidden="true">
+            {formatDownloadActionCount(pauseSelectionCount)}
+          </span>
+        ) : null}
+      </button>
       <button
         onClick={(e) => {
           e.stopPropagation();
           setContextMenu({ x: e.clientX, y: e.clientY, id: download.id });
         }}
-        className="app-icon-button h-7 w-7"
+        className="app-icon-button main-control-button"
         title={t($ => $.downloads.actions.options)}
       >
         <MoreVertical size={14} />
@@ -432,7 +443,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     <div
       ref={rowRef}
       data-download-id={download.id}
-      className={`download-row group cursor-default relative ${isActionVisible ? 'has-visible-actions' : ''} ${isSelected ? 'is-selected' : ''} ${isQueueReorderable ? 'is-queue-reorderable' : ''} ${isQueueDragSource ? 'is-queue-drag-source' : ''}`}
+      className={`download-row group cursor-default relative ${isActionVisible ? 'has-visible-actions' : ''} ${isRowKeyboardFocused || isActionFocused ? 'has-keyboard-action-focus' : ''} ${isSelected ? 'is-selected' : ''} ${isQueueReorderable ? 'is-queue-reorderable' : ''} ${isQueueDragSource ? 'is-queue-drag-source' : ''}`}
       style={{ minWidth: tableMinWidth }}
       tabIndex={0}
       onMouseEnter={() => {

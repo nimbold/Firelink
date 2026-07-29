@@ -14,11 +14,10 @@ export const DEFAULT_COLUMN_ORDER = [
 
 export const DEFAULT_COLUMN_WIDTHS = [340, 100, 220, 100, 80, 170] as const;
 export const COLUMN_MINIMUMS = [160, 58, 92, 58, 48, 144] as const;
-// Width of the compact action rail shown while hovering or focusing a row.
-export const DOWNLOAD_ACTIONS_COLUMN_WIDTH = 64;
 // Keep the viewport-anchored rail clear of the window edge and scrollbar.
 export const DOWNLOAD_ACTIONS_VIEWPORT_INSET = 8;
-export const DOWNLOAD_ACTIONS_MAX_HEIGHT = 30;
+// Match the 28px master-control group height.
+export const DOWNLOAD_ACTIONS_MAX_HEIGHT = 28;
 export const DOWNLOAD_ACTIONS_VIEWPORT_TOLERANCE = 1;
 
 export interface DownloadActionViewportRect {
@@ -40,7 +39,8 @@ export const getDownloadActionPosition = (
   rowRect: DownloadActionViewportRect,
   horizontalViewportRect: DownloadActionViewportRect,
   verticalViewportRect: DownloadActionViewportRect,
-  windowWidth: number
+  windowWidth: number,
+  actionInset = DOWNLOAD_ACTIONS_VIEWPORT_INSET
 ): DownloadActionPosition => {
   const visibleTop = Math.max(rowRect.top, verticalViewportRect.top);
   const visibleBottom = Math.min(rowRect.bottom, verticalViewportRect.bottom);
@@ -52,10 +52,13 @@ export const getDownloadActionPosition = (
     visibleWidth > DOWNLOAD_ACTIONS_VIEWPORT_TOLERANCE;
   const actionHeight = Math.min(DOWNLOAD_ACTIONS_MAX_HEIGHT, rowRect.bottom - rowRect.top, visibleHeight);
   const actionRightEdge = Math.min(rowRect.right, horizontalViewportRect.right);
+  const safeActionInset = Number.isFinite(actionInset)
+    ? Math.max(0, actionInset)
+    : DOWNLOAD_ACTIONS_VIEWPORT_INSET;
 
   return {
     top: visibleTop + Math.max(0, (visibleHeight - actionHeight) / 2),
-    right: Math.max(0, windowWidth - actionRightEdge) + DOWNLOAD_ACTIONS_VIEWPORT_INSET,
+    right: Math.max(0, windowWidth - actionRightEdge) + safeActionInset,
     height: actionHeight,
     overflow: actionHeight < rowRect.bottom - rowRect.top ? 'hidden' : 'visible',
     visibility: isVisible ? 'visible' : 'hidden',

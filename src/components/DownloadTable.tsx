@@ -2261,6 +2261,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
                         handleResumeSelected={handleResumeSelected}
                         getCategoryIcon={getCategoryIcon}
                         isSelected={selectedIds.has(d.id)}
+                        selectedDownloadCount={selectedDownloads.length}
                         selectedActionCounts={selectedActionCounts}
                         isQueueReorderable={queueReorderableIds.has(d.id)}
                         isQueueDragSource={Boolean(queueDragState?.active && queueDragState.ids.includes(d.id))}

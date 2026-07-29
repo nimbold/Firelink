@@ -35,6 +35,7 @@ import {
   appendRequestUrlsAfterVersion,
   commonMediaFormatsForRows,
   commonMediaQualitiesForRows,
+  durableDownloadUrl,
   mediaFileNameForSelectedFormat,
   mediaFormatForFormat,
   mediaQualityForFormat,
@@ -625,7 +626,12 @@ export const AddDownloadsModal = () => {
               proxy,
               deferCookies: shouldDeferCookiesForRow(row.sourceUrl)
             });
-            const nextDownloadUrl = meta.url || row.sourceUrl;
+            // Persist the stable source URL, not the resolved redirect. A
+            // redirect target may be a short-lived signed URL (for example,
+            // GitHub release assets) and would make later resumes fail after
+            // its expiry. The metadata response remains useful for filename,
+            // size, and resumability.
+            const nextDownloadUrl = durableDownloadUrl(row.sourceUrl);
             setParsedItems(current => updateRowIfCurrent(
               current,
               row.id,
@@ -889,7 +895,11 @@ export const AddDownloadsModal = () => {
         destinationOverrides[i]
       );
 
-      const isUrlDupe = store.downloads.some(d => d.url === item.downloadUrl && d.status !== 'failed' && d.status !== 'completed');
+      const urlMatch = store.downloads.find(d =>
+        normalizeComparableUrl(d.url) === normalizeComparableUrl(item.downloadUrl)
+        && d.status !== 'failed'
+        && d.status !== 'completed'
+      );
       const hasBatchConflict = plannedTargets.some(target =>
         downloadLocationEquals(
           target.location,
@@ -899,8 +909,15 @@ export const AddDownloadsModal = () => {
           platform.os
         )
       );
-      if (isUrlDupe) {
-        newConflicts.push({ id: i.toString(), fileName: finalFile, reason: { type: 'url', msg: t($ => $.addDownloads.urlAlreadyQueued) }, resolution: 'rename' });
+      if (urlMatch) {
+        newConflicts.push({
+          id: i.toString(),
+          fileName: finalFile,
+          reason: { type: 'url', msg: t($ => $.addDownloads.urlAlreadyQueued) },
+          resolution: 'rename',
+          replaceAllowed: !isTransferLocked(urlMatch.status),
+          existingDownloadId: urlMatch.id
+        });
       } else if (hasBatchConflict) {
         newConflicts.push({
           id: i.toString(),
@@ -1123,9 +1140,11 @@ export const AddDownloadsModal = () => {
                  
                  itemsToAdd[idx] = { ...item, file: newName };
              } else if (res.resolution === 'replace') {
-              if (conflict?.reason.type !== 'file' || !conflict.replaceAllowed) {
-                itemsToAdd[idx] = null;
-                continue;
+              if (!conflict?.replaceAllowed) {
+                const finalFile = item.isMedia
+                  ? mediaFileNameForSelectedFormat(item.file, item)
+                  : canonicalizeDownloadFileName(item.file);
+                throw new Error(t($ => $.addDownloads.cannotReplace, { file: finalFile }));
               }
               const finalFile = item.isMedia
                 ? mediaFileNameForSelectedFormat(item.file, item)

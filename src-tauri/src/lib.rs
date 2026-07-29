@@ -270,6 +270,8 @@ fn retry_metadata_with_cookies(
 #[derive(Serialize, TS)]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct MetadataResponse {
+    // Keep the caller's durable source URL here. Resolved redirect targets
+    // can be short-lived signed URLs and must not become download identity.
     url: String,
     filename: String,
     size: String,
@@ -2048,7 +2050,7 @@ async fn fetch_metadata(
     }
 
     Ok(MetadataResponse {
-        url: current_url,
+        url,
         filename,
         size: size_str,
         size_bytes,

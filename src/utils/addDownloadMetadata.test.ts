@@ -4,6 +4,7 @@ import {
   commonMediaFormatsForRows,
   canSubmitMetadataRows,
   commonMediaQualitiesForRows,
+  durableDownloadUrl,
   mediaFormatSelectorForRow,
   mediaFileNameForSelectedFormat,
   mediaFormatForFormat,
@@ -35,6 +36,14 @@ const row = (
 });
 
 describe('add download metadata workflow', () => {
+  it('keeps the stable source URL instead of persisting a resolved redirect', () => {
+    const sourceUrl = 'https://github.com/example/project/releases/download/v1/file.zip';
+    const signedRedirect = 'https://release-assets.githubusercontent.com/github-production-release-asset/asset?se=2099-01-01T00%3A00%3A00Z&sig=redacted';
+
+    expect(durableDownloadUrl(sourceUrl)).toBe(sourceUrl);
+    expect(durableDownloadUrl(sourceUrl)).not.toBe(signedRedirect);
+  });
+
   it('preserves rows by normalized source URL and creates only new rows', () => {
     const existing = row({ file: 'server-name.zip' });
     let nextId = 0;

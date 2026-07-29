@@ -50,6 +50,10 @@ const uk = {
       rename: 'Перейменувати',
       replace: 'Замінити',
       skip: 'Пропустити',
+      applyToAll: 'Застосувати до всіх',
+      renameAll: 'Перейменувати всі',
+      replaceAll: 'Замінити всі',
+      skipAll: 'Пропустити всі',
     },
     removeDownload: {
       title: 'Видалити завантаження',

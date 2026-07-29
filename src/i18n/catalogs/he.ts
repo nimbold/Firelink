@@ -50,6 +50,10 @@ const he = {
       rename: 'שינוי שם',
       replace: 'החלפה',
       skip: 'דילוג',
+      applyToAll: 'החל על הכול',
+      renameAll: 'שינוי שם לכולם',
+      replaceAll: 'החלפה לכולם',
+      skipAll: 'דילוג על כולם',
     },
     removeDownload: {
       title: 'הסרת הורדה',

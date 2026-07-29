@@ -73,7 +73,18 @@ describe('download table column preferences', () => {
       800
     )).toMatchObject({
       right: 8,
-      height: 30,
+      height: 28,
+      visibility: 'visible',
+    });
+
+    expect(getDownloadActionPosition(
+      { top: 40, right: 400, bottom: 72, left: 100 },
+      viewport,
+      viewport,
+      800,
+      16
+    )).toMatchObject({
+      right: 416,
       visibility: 'visible',
     });
 

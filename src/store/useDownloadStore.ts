@@ -941,8 +941,12 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         get().updateDownload(id, { hasBeenDispatched: true });
         return true;
       } else {
-        console.error("Failed to re-enqueue for resume");
-        get().updateDownload(id, { status: prevStatus });
+        const dispatchError = get().downloads.find(download => download.id === id)?.lastError;
+        console.error("Failed to re-enqueue for resume:", dispatchError || "backend rejected the enqueue request");
+        get().updateDownload(id, {
+          status: prevStatus,
+          ...(dispatchError ? { lastError: dispatchError } : {})
+        });
         clearDownloadControlIntent(id, 'resume');
         return false;
       }
