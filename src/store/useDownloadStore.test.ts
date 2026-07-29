@@ -1078,6 +1078,35 @@ describe('useDownloadStore', () => {
     expect(useDownloadStore.getState().downloads.find(item => item.id === 'selected-a')?.queuePosition).toBe(1);
   });
 
+  it('resumes a selected block whose paused rows were never dispatched', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'selected-undispatched-a', url: 'http://a', fileName: 'a', destination: '/tmp', status: 'paused', category: 'Other', dateAdded: '', queueId: 'selection-undispatched', queuePosition: 0, hasBeenDispatched: false },
+        { id: 'selected-undispatched-b', url: 'http://b', fileName: 'b', destination: '/tmp', status: 'paused', category: 'Other', dateAdded: '', queueId: 'selection-undispatched', queuePosition: 1, hasBeenDispatched: false },
+      ] as any[],
+    });
+
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'enqueue_download') {
+        const id = (args as { item: { id: string } }).item.id;
+        return { id, filename: id };
+      }
+      if (command === 'get_pending_order') return ['selected-undispatched-a', 'selected-undispatched-b'];
+      if (command === 'move_many_in_queue') return ['selected-undispatched-a', 'selected-undispatched-b'];
+      return undefined;
+    });
+
+    await expect(useDownloadStore.getState().startSelected([
+      'selected-undispatched-a',
+      'selected-undispatched-b'
+    ])).resolves.toBe(2);
+
+    const enqueueIds = vi.mocked(ipc.invokeCommand).mock.calls
+      .filter(([command]) => command === 'enqueue_download')
+      .map(([, args]) => (args as { item: { id: string } }).item.id);
+    expect(enqueueIds).toEqual(['selected-undispatched-a', 'selected-undispatched-b']);
+  });
+
   it('pauses queued items through the global pause action', async () => {
     useDownloadStore.setState({
       downloads: [
@@ -1805,6 +1834,83 @@ describe('useDownloadStore', () => {
     const calls = vi.mocked(ipc.invokeCommand).mock.calls;
     expect(calls.some(call => call[0] === 'enqueue_download')).toBe(true);
     expect(calls.some(call => call[0] === 'pause_download' && (call[1] as any).id === 'active')).toBe(true);
+  });
+
+  it('resumes paused items that were never dispatched through the master start action', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        {
+          id: 'paused-before-dispatch',
+          url: 'http://paused-before-dispatch',
+          fileName: 'paused-before-dispatch',
+          destination: '/tmp',
+          status: 'paused',
+          category: 'Other',
+          dateAdded: '',
+          queueId: 'MAIN',
+          hasBeenDispatched: false
+        }
+      ] as any[]
+    });
+
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'resume_download') return false;
+      if (cmd === 'enqueue_download') {
+        const id = (args as { item: { id: string } }).item.id;
+        return { id, filename: id };
+      }
+      if (cmd === 'get_pending_order') return ['paused-before-dispatch'];
+      return undefined;
+    });
+
+    await expect(useDownloadStore.getState().startAll()).resolves.toBe(1);
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('resume_download', {
+      id: 'paused-before-dispatch',
+      queueId: 'MAIN'
+    });
+    expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'enqueue_download',
+      expect.objectContaining({ item: expect.objectContaining({ id: 'paused-before-dispatch' }) })
+    );
+    expect(useDownloadStore.getState().downloads[0].hasBeenDispatched).toBe(true);
+  });
+
+  it('resumes an individually paused item that has no backend registration', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'individual-paused-before-dispatch',
+        url: 'http://individual-paused-before-dispatch',
+        fileName: 'individual-paused-before-dispatch',
+        destination: '/tmp',
+        status: 'paused',
+        category: 'Other',
+        dateAdded: '',
+        queueId: 'MAIN',
+        hasBeenDispatched: false
+      }] as any[]
+    });
+
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'resume_download') return false;
+      if (cmd === 'enqueue_download') {
+        const id = (args as { item: { id: string } }).item.id;
+        return { id, filename: id };
+      }
+      if (cmd === 'get_pending_order') return ['individual-paused-before-dispatch'];
+      return undefined;
+    });
+
+    await expect(useDownloadStore.getState().resumeDownload('individual-paused-before-dispatch'))
+      .resolves.toBe(true);
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('resume_download', {
+      id: 'individual-paused-before-dispatch',
+      queueId: 'MAIN'
+    });
+    expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'enqueue_download',
+      expect.objectContaining({ item: expect.objectContaining({ id: 'individual-paused-before-dispatch' }) })
+    );
+    expect(useDownloadStore.getState().downloads[0].hasBeenDispatched).toBe(true);
   });
 
   it('migrates legacy downloads without queue ids into the main queue', async () => {

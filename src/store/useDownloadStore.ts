@@ -938,6 +938,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       }
 
       if (dispatchSucceeded) {
+        get().updateDownload(id, { hasBeenDispatched: true });
         return true;
       } else {
         console.error("Failed to re-enqueue for resume");
@@ -1616,6 +1617,10 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       const needsNewDispatch = runnable.some(item => {
         const currentItem = get().downloads.find(download => download.id === item.id);
         if (!currentItem) return false;
+        // Paused rows must go through resumeDownload. This includes rows that
+        // were paused before their first dispatch, for which dispatchItem
+        // would reject the paused status before reaching the backend.
+        if (currentItem.status === 'paused') return false;
         const backendRegistered = get().backendRegisteredIds.has(item.id);
         const backendPending = get().pendingOrder.includes(item.id);
         if (currentItem.status === 'queued' && backendRegistered && !backendPending) {
@@ -1655,6 +1660,24 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         const backendRegistered = get().backendRegisteredIds.has(item.id);
         const backendPending = get().pendingOrder.includes(item.id);
 
+        if (currentItem.status === 'paused') {
+          const resumed = await get().resumeDownload(item.id, { preserveQueuePosition: true });
+          if (!resumed) continue;
+          if (!isCurrentQueueControlGeneration(queueId, requestedGeneration)) {
+            const afterResume = get().downloads.find(download => download.id === item.id);
+            if (
+              backendDispatchPromises.has(item.id) ||
+              get().backendRegisteredIds.has(item.id) ||
+              (afterResume && canPauseDownload(afterResume.status))
+            ) {
+              await get().pauseDownload(item.id);
+            }
+            continue;
+          }
+          acceptedIds.push(item.id);
+          continue;
+        }
+
         if (currentItem.status === 'queued' && backendRegistered && !backendPending) {
           if (await get().resumeDownload(item.id, { preserveQueuePosition: true })) {
             acceptedIds.push(item.id);
@@ -1688,12 +1711,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             });
             acceptedIds.push(item.id);
           }
-        } else if (currentItem.status === 'paused' || currentItem.status === 'queued') {
+        } else if (currentItem.status === 'queued') {
           // If it's queued but already dispatched, it might be waiting.
-          // If it's paused, we resume it.
-          if (currentItem.status === 'paused') {
-            if (!await get().resumeDownload(item.id)) continue;
-          }
           acceptedIds.push(item.id);
         }
       }
