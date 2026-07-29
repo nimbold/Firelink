@@ -5,6 +5,37 @@ All notable changes to Firelink will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-07-29
+
+This release focuses on smoother queue control, a more comfortable interface, and safer recovery when downloads or browser handoffs are interrupted.
+
+### New features
+
+- **Live speed limits and connection controls** can be adjusted while a download is active.
+- **Queue reordering and bulk actions** are easier to use, with paused downloads kept behind work that is ready to run.
+- **Appearance preferences** now include a Windows 11-style option, sidebar-aware window controls, curated fonts for supported languages, and optional localized calendar dates. These improvements respond to [#31](https://github.com/nimbold/Firelink/issues/31).
+- **Firelink Companion `2.1.0`** is included in the `Extensions/Browser` submodule. Get the latest extension from the [Firelink-Extension releases](https://github.com/nimbold/Firelink-Extension/releases/latest).
+
+### Improvements
+
+- Resume, retry, pause, and redownload actions now recover more reliably when an earlier attempt has disappeared or a background event arrives late, addressing the failed-resume report in [#28](https://github.com/nimbold/Firelink/issues/28).
+- Browser captures recover more safely when Firelink is starting, the extension restarts, or capture settings change during handoff. Captures remain in the Add window for review.
+- macOS minimize and Dock, Spotlight, and Raycast reopen behavior are more consistent, addressing [#30](https://github.com/nimbold/Firelink/issues/30).
+- The downloads table stays readable at narrow widths: row actions remain contained, columns resize consistently, and controls no longer cover Date Added text, addressing [#32](https://github.com/nimbold/Firelink/issues/32).
+- Add-window metadata, duplicate resolution, playlist selection, floating menus, page navigation, and table interactions provide clearer feedback and better keyboard behavior.
+- Startup consent and keychain access are more predictable, with clearer permission feedback and safer modal focus.
+
+### Fixes
+
+- Prevent stale pause, resume, retry, completion, and remove actions from reviving a download, reporting the wrong result, or leaving a row stuck in a misleading state.
+- Keep queue limits, connection recovery, missing completion events, and retry cleanup from leaving downloads stranded or exceeding the user’s settings.
+- Keep paused work behind pending downloads and make queue controls behave correctly when several actions happen close together.
+- Refresh dependencies and bundled engines, and strengthen release, package, portable-mode, and cross-platform verification.
+
+### Known limitation
+
+- Very long media-generated filenames can still exceed an operating system’s filename limit. For [#29](https://github.com/nimbold/Firelink/issues/29), the current workaround is to shorten the filename in **Properties** before starting the download.
+
 ## [1.2.0] - 2026-07-22
 
 This release makes everyday download management easier to organize, review, and trust across the desktop app and browser extension.

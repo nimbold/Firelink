@@ -28,9 +28,9 @@ It uses a Rust and Tauri backend with a React and TypeScript interface. Required
 
 ## Status
 
-Firelink `1.2.0` is the latest desktop release.
+Firelink `1.3.0` is the latest desktop release.
 
-It is paired with [Firelink Companion `2.0.6`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.0.6).
+It is paired with [the latest Firelink Companion release, `2.1.0`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.1.0).
 
 The project is actively maintained. See the [changelog](CHANGELOG.md) for release history and current work.
 
@@ -42,8 +42,10 @@ Translations are available for English, Simplified Chinese, Hebrew, Persian, Ukr
 - Media and playlist downloads through yt-dlp, FFmpeg, and Deno.
 - An Add window for metadata, duplicate handling, save locations, and download options.
 - Persistent queues with pause, resume, retry, redownload, and scheduling.
+- Live speed and connection controls for active downloads.
 - A customizable download table with sorting, column selection, reordering, and bulk actions.
 - File organization with categories, default folders, and per-download locations.
+- Appearance preferences with window styles, multilingual fonts, and localized calendar dates.
 - Browser handoff through local pairing and signed requests.
 - Tray controls, notifications, sounds, sleep prevention, and secure credential storage.
 - RTL support for Hebrew and Persian.
@@ -74,7 +76,7 @@ All packages include aria2, yt-dlp, FFmpeg, Deno, and SQLite support. No separat
 
 ## Browser integration
 
-[Firelink Companion](https://github.com/nimbold/Firelink-Extension) connects browser downloads, links, and media pages to Firelink.
+[Firelink Companion `2.1.0`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.1.0) connects browser downloads, links, and media pages to Firelink. Use the latest Companion release with the latest Firelink release.
 
 Captured links open Firelink's Add window for review before they are started or queued.
 
