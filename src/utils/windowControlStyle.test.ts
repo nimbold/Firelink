@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveWindowControlStyle } from './windowControlStyle';
+import { getWindowControlRevealOffset, resolveWindowControlStyle } from './windowControlStyle';
 
 describe('resolveWindowControlStyle', () => {
   it('uses the platform convention for automatic style', () => {
@@ -24,5 +24,12 @@ describe('resolveWindowControlStyle', () => {
     expect(resolveWindowControlStyle('windows', 'linux')).toBe('windows');
     expect(resolveWindowControlStyle('gnome', 'macos')).toBe('gnome');
     expect(resolveWindowControlStyle('minimal', 'windows')).toBe('minimal');
+  });
+
+  it('reserves space after the complete custom-control footprint', () => {
+    expect(getWindowControlRevealOffset('macos')).toBe(88);
+    expect(getWindowControlRevealOffset('windows')).toBe(168);
+    expect(getWindowControlRevealOffset('gnome')).toBe(134);
+    expect(getWindowControlRevealOffset('minimal')).toBe(104);
   });
 });

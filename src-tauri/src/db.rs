@@ -10,6 +10,12 @@ const LEGACY_BUNDLE_IDENTIFIER: &str = "com.nima.tauri-app";
 const CURRENT_SCHEMA_VERSION: i64 = 1;
 pub(crate) const TOKEN_CHANGED_NOTICE: &str = "pairing-token-changed";
 pub const PAIRING_TOKEN_KEYCHAIN_ID: &str = "extension-pairing-token";
+// Development builds are a different executable identity from the packaged
+// app. Keep their credentials separate so a debug binary cannot trigger an
+// access prompt for, or reuse, the release app's Keychain item.
+#[cfg(debug_assertions)]
+const KEYCHAIN_SERVICE: &str = "com.firelink.app.dev";
+#[cfg(not(debug_assertions))]
 const KEYCHAIN_SERVICE: &str = "com.firelink.app";
 static KEYRING_OPERATION_LOCK: Mutex<()> = Mutex::new(());
 

@@ -1411,23 +1411,26 @@ html[data-list-density="relaxed"] {
   .app-sidebar-reveal-button {
     position: absolute;
     top: 12px;
-    left: 88px;
+    left: var(--window-control-reveal-offset, 88px);
     right: auto;
     z-index: 80;
     -webkit-app-region: no-drag;
   }
 
-  .app-workspace--custom-window-controls .app-sidebar-reveal-button {
-    left: 124px;
+  /* Native-decorated windows do not render the custom control rail. Keep the
+     original compact reveal position instead of reserving custom-control
+     space for an invisible control group. */
+  .app-workspace:not(.app-workspace--custom-window-controls) .app-sidebar-reveal-button {
+    left: 88px;
   }
 
   .app-workspace--sidebar-right .app-sidebar-reveal-button {
     left: auto;
-    right: 88px;
+    right: var(--window-control-reveal-offset, 88px);
   }
 
-  .app-workspace--sidebar-right.app-workspace--custom-window-controls .app-sidebar-reveal-button {
-    right: 124px;
+  .app-workspace--sidebar-right:not(.app-workspace--custom-window-controls) .app-sidebar-reveal-button {
+    right: 88px;
   }
 
   .app-sidebar-shell--left .sidebar-nav-item {
@@ -2110,7 +2113,7 @@ html[data-list-density="relaxed"] {
   filter: saturate(1.14) brightness(1.05);
 }
 
-.window-controls:hover .window-control {
+.window-controls--style-macos:hover .window-control {
   color: hsl(0 0% 8% / 0.68);
 }
 
@@ -2214,6 +2217,11 @@ html[data-list-density="relaxed"] {
   background: transparent;
   box-shadow: none;
   color: hsl(var(--text-primary) / 0.84);
+  transition:
+    background-color 120ms ease,
+    box-shadow 120ms ease,
+    color 120ms ease,
+    transform 120ms ease;
 }
 
 .window-controls--style-gnome .window-control {
@@ -2225,17 +2233,23 @@ html[data-list-density="relaxed"] {
 .window-controls--style-gnome .window-control:hover,
 .window-controls--style-minimal .window-control:hover {
   color: hsl(var(--text-primary));
-  background: hsl(var(--item-hover));
+  /* GNOME's flat header-bar buttons surface a neutral background on hover. */
+  background: hsl(var(--text-primary) / 0.11);
+  box-shadow: inset 0 0 0 1px hsl(var(--text-primary) / 0.05);
   filter: none;
 }
 
-.window-controls--style-gnome .window-control.close,
-.window-controls--style-gnome .window-control.minimize,
-.window-controls--style-gnome .window-control.maximize,
-.window-controls--style-minimal .window-control.close,
-.window-controls--style-minimal .window-control.minimize,
-.window-controls--style-minimal .window-control.maximize {
-  background: transparent;
+.window-controls--style-gnome .window-control:active,
+.window-controls--style-minimal .window-control:active {
+  background: hsl(var(--text-primary) / 0.17);
+  box-shadow: inset 0 0 0 1px hsl(var(--text-primary) / 0.08);
+  transform: none;
+}
+
+.window-controls--style-gnome .window-control:focus-visible,
+.window-controls--style-minimal .window-control:focus-visible {
+  outline: 2px solid hsl(var(--accent-color) / 0.72);
+  outline-offset: 2px;
 }
 
 /* Minimal keeps the compact footprint while removing colored circles. */
@@ -2271,21 +2285,22 @@ html[data-list-density="relaxed"] {
 }
 
 .app-workspace--sidebar-collapsed .main-titlebar {
-  padding-left: 124px;
+  /* Keep the title after the reveal button and its control-rail gap. */
+  padding-left: calc(var(--window-control-reveal-offset, 88px) + 36px);
   padding-right: 18px;
 }
 
-.app-workspace--sidebar-collapsed.app-workspace--custom-window-controls .main-titlebar {
-  padding-left: 160px;
+.app-workspace--sidebar-collapsed:not(.app-workspace--custom-window-controls) .main-titlebar {
+  padding-left: 124px;
 }
 
 .app-workspace--sidebar-right.app-workspace--sidebar-collapsed .main-titlebar {
   padding-left: 18px;
-  padding-right: 124px;
+  padding-right: calc(var(--window-control-reveal-offset, 88px) + 36px);
 }
 
-.app-workspace--sidebar-right.app-workspace--sidebar-collapsed.app-workspace--custom-window-controls .main-titlebar {
-  padding-right: 160px;
+.app-workspace--sidebar-right.app-workspace--sidebar-collapsed:not(.app-workspace--custom-window-controls) .main-titlebar {
+  padding-right: 124px;
 }
 
 .main-titlebar-title {

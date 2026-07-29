@@ -2936,6 +2936,7 @@ pub struct AppState {
     /// again before any stale or early IPC caller can reach the OS store.
     pub keychain_access_authorized: Arc<AtomicBool>,
     pub keychain_grant_in_progress: Arc<AtomicBool>,
+    keychain_grant: Arc<Mutex<KeychainGrantState>>,
     pub extension_pairing_token: extension_server::SharedExtensionToken,
     pub extension_frontend_ready: extension_server::SharedFrontendReady,
     pub extension_acks: extension_server::SharedExtensionAcks,
@@ -2961,6 +2962,15 @@ const KEYCHAIN_CONSENT_REQUIRED_ERROR: &str =
     "Credential-store access requires explicit user consent";
 const KEYCHAIN_GRANT_IN_PROGRESS_ERROR: &str =
     "Credential-store access is already being requested";
+const KEYCHAIN_GRANT_REQUEST_ID_MAX_LEN: usize = 128;
+const MAX_ABANDONED_KEYCHAIN_REQUESTS: usize = 64;
+
+fn validate_keychain_grant_request_id(request_id: &str) -> Result<(), String> {
+    if request_id.trim().is_empty() || request_id.len() > KEYCHAIN_GRANT_REQUEST_ID_MAX_LEN {
+        return Err("Invalid keychain grant request ID".to_string());
+    }
+    Ok(())
+}
 
 fn require_keychain_access(state: &AppState) -> Result<(), String> {
     if state
@@ -2981,12 +2991,28 @@ impl Drop for KeychainGrantGuard {
     }
 }
 
-fn begin_keychain_grant(state: &AppState) -> Result<KeychainGrantGuard, String> {
-    state
+fn begin_keychain_grant(
+    state: &AppState,
+    request_id: &str,
+) -> Result<KeychainGrantGuard, String> {
+    validate_keychain_grant_request_id(request_id)?;
+    let guard = state
         .keychain_grant_in_progress
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .map(|_| KeychainGrantGuard(Arc::clone(&state.keychain_grant_in_progress)))
-        .map_err(|_| KEYCHAIN_GRANT_IN_PROGRESS_ERROR.to_string())
+        .map_err(|_| KEYCHAIN_GRANT_IN_PROGRESS_ERROR.to_string())?;
+    let mut grant = state
+        .keychain_grant
+        .lock()
+        .map_err(|_| "Keychain grant state lock is unavailable".to_string())?;
+    if grant.abandoned_request_ids.remove(request_id) {
+        return Err("Keychain grant was dismissed before it started".to_string());
+    }
+    grant.request_id = Some(request_id.to_string());
+    grant.cancelled = false;
+    grant.committed = false;
+    grant.result = None;
+    Ok(guard)
 }
 
 #[derive(Clone, Serialize, TS)]
@@ -5880,7 +5906,7 @@ fn get_free_space(app_handle: tauri::AppHandle, path: String) -> Result<String, 
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_keychain_password(
     database: tauri::State<'_, crate::db::DbState>,
     state: tauri::State<'_, AppState>,
@@ -5898,7 +5924,7 @@ fn set_keychain_password(
     crate::db::set_keychain_password(&id, &password)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_keychain_password(
     state: tauri::State<'_, AppState>,
     id: String,
@@ -5912,7 +5938,7 @@ fn get_keychain_password(
     crate::db::get_keychain_password(&id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_keychain_password(
     state: tauri::State<'_, AppState>,
     id: String,
@@ -5926,7 +5952,7 @@ fn delete_keychain_password(
     crate::db::delete_keychain_password(&id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_site_login(
     database: tauri::State<'_, crate::db::DbState>,
     state: tauri::State<'_, AppState>,
@@ -5940,7 +5966,7 @@ fn save_site_login(
     crate::db::save_site_login(&connection, &id, &url_pattern, &username, &password)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_site_login(
     database: tauri::State<'_, crate::db::DbState>,
     state: tauri::State<'_, AppState>,
@@ -5965,7 +5991,7 @@ fn authorize_keychain_access(state: tauri::State<'_, AppState>) -> Result<(), St
     Ok(())
 }
 
-#[derive(Serialize, TS)]
+#[derive(Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 struct PairingTokenHydration {
@@ -5975,10 +6001,28 @@ struct PairingTokenHydration {
     error: Option<String>,
 }
 
+#[derive(Default)]
+struct KeychainGrantState {
+    request_id: Option<String>,
+    abandoned_request_ids: HashSet<String>,
+    cancelled: bool,
+    committed: bool,
+    result: Option<Result<PairingTokenHydration, String>>,
+}
+
+#[derive(Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+struct KeychainGrantStatus {
+    started: bool,
+    in_progress: bool,
+    result: Option<PairingTokenHydration>,
+}
+
 /// Hydrate the extension pairing token after the frontend is ready. Standard
 /// mode uses the OS credential store; portable mode intentionally keeps the
 /// token with the portable settings folder.
-#[tauri::command]
+#[tauri::command(async)]
 fn hydrate_extension_pairing_token(
     database: tauri::State<'_, crate::db::DbState>,
     app_state: tauri::State<'_, AppState>,
@@ -6050,7 +6094,7 @@ fn get_session_pairing_token(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn regenerate_pairing_token(
     database: tauri::State<'_, crate::db::DbState>,
     app_state: tauri::State<'_, AppState>,
@@ -6104,13 +6148,154 @@ fn regenerate_pairing_token(
     })
 }
 
+// Keychain access can synchronously show an OS authentication prompt. Keep
+// the IPC command genuinely asynchronous and isolate all blocking credential
+// store work from both the WebView and Tauri's async worker threads. This is
+// important on macOS, where the Security framework can block while presenting
+// an authorization prompt, and on Linux/Windows where the native stores may
+// also perform synchronous IPC to their desktop credential service.
 #[tauri::command]
-fn grant_keychain_access(
-    database: tauri::State<'_, crate::db::DbState>,
+async fn grant_keychain_access(
+    app_handle: tauri::AppHandle,
+    request_id: String,
+) -> Result<(), String> {
+    validate_keychain_grant_request_id(&request_id)?;
+    let app_state = app_handle.state::<AppState>();
+    let grant_guard = begin_keychain_grant(app_state.inner(), &request_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let database = app_handle.state::<crate::db::DbState>();
+        let app_state = app_handle.state::<AppState>();
+        let result = grant_keychain_access_blocking(
+            database.inner(),
+            app_state.inner(),
+            grant_guard,
+        );
+        let Ok(mut grant) = app_state.keychain_grant.lock() else {
+            log::warn!("keychain grant state lock is unavailable");
+            return;
+        };
+        if grant.request_id.as_deref() != Some(request_id.as_str()) || grant.cancelled {
+            log::debug!("keychain grant result discarded after dismissal");
+            return;
+        }
+        if let Err(error) = &result {
+            log::warn!("keychain grant worker failed: {error}");
+        }
+        grant.result = Some(result);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn get_keychain_grant_status(
     app_state: tauri::State<'_, AppState>,
+    request_id: String,
+) -> Result<KeychainGrantStatus, String> {
+    validate_keychain_grant_request_id(&request_id)?;
+    let grant = app_state
+        .keychain_grant
+        .lock()
+        .map_err(|_| "Keychain grant state lock is unavailable".to_string())?;
+    let started = grant.request_id.as_deref() == Some(request_id.as_str());
+    let result = if started {
+        grant.result.as_ref().map(|result| match result {
+            Ok(result) => result.clone(),
+            Err(error) => PairingTokenHydration {
+                token: String::new(),
+                token_changed: false,
+                persistent: false,
+                error: Some(error.clone()),
+            },
+        })
+    } else {
+        None
+    };
+    let in_progress = app_state
+        .keychain_grant_in_progress
+        .load(Ordering::Acquire);
+    Ok(KeychainGrantStatus {
+        started,
+        in_progress,
+        result,
+    })
+}
+
+#[tauri::command]
+fn accept_keychain_grant(
+    app_state: tauri::State<'_, AppState>,
+    request_id: String,
 ) -> Result<PairingTokenHydration, String> {
-    let _grant_guard = begin_keychain_grant(&app_state)?;
+    validate_keychain_grant_request_id(&request_id)?;
+    let mut grant = app_state
+        .keychain_grant
+        .lock()
+        .map_err(|_| "Keychain grant state lock is unavailable".to_string())?;
+    if grant.request_id.as_deref() != Some(request_id.as_str()) {
+        return Err("Keychain grant request is no longer active".to_string());
+    }
+    let result = grant
+        .result
+        .take()
+        .ok_or_else(|| "Keychain grant result is no longer available".to_string())??;
+    if !result.persistent || result.token.trim().is_empty() {
+        return Ok(result);
+    }
+    let mut pairing_token = app_state
+        .extension_pairing_token
+        .write()
+        .map_err(|_| "Extension pairing token lock is unavailable".to_string())?;
+    *pairing_token = result.token.clone();
+    app_state
+        .keychain_access_authorized
+        .store(true, Ordering::Release);
+    grant.committed = true;
+    log::debug!("keychain grant accepted; extension token updated");
+    Ok(result)
+}
+
+#[tauri::command]
+fn abandon_keychain_grant(
+    app_state: tauri::State<'_, AppState>,
+    request_id: String,
+) -> Result<Option<PairingTokenHydration>, String> {
+    validate_keychain_grant_request_id(&request_id)?;
+    let mut grant = app_state
+        .keychain_grant
+        .lock()
+        .map_err(|_| "Keychain grant state lock is unavailable".to_string())?;
+    if grant.request_id.as_deref() != Some(request_id.as_str()) {
+        if grant.abandoned_request_ids.len() >= MAX_ABANDONED_KEYCHAIN_REQUESTS {
+            return Err("Too many pending keychain grant requests".to_string());
+        }
+        grant.abandoned_request_ids.insert(request_id);
+        return Ok(None);
+    }
+    if grant.committed {
+        let token = app_state
+            .extension_pairing_token
+            .read()
+            .map_err(|_| "Extension pairing token lock is unavailable".to_string())?
+            .clone();
+        return Ok(Some(PairingTokenHydration {
+            token,
+            token_changed: false,
+            persistent: true,
+            error: None,
+        }));
+    }
+    grant.cancelled = true;
+    grant.result = None;
+    Ok(None)
+}
+
+fn grant_keychain_access_blocking(
+    database: &crate::db::DbState,
+    app_state: &AppState,
+    _grant_guard: KeychainGrantGuard,
+) -> Result<PairingTokenHydration, String> {
+    log::debug!("keychain grant worker started");
     let connection = database.lock()?;
+    log::debug!("keychain grant database access acquired");
 
     if app_state.storage_layout.is_portable() {
         let token = if let Some(existing) = crate::db::load_pairing_token_from_settings(&connection)?
@@ -6121,12 +6306,7 @@ fn grant_keychain_access(
             crate::db::save_pairing_token_to_settings(&connection, &generated, true)?;
             generated
         };
-        if let Ok(mut pairing_token) = app_state.extension_pairing_token.write() {
-            *pairing_token = token.clone();
-        }
-        app_state
-            .keychain_access_authorized
-            .store(true, Ordering::Release);
+        log::debug!("keychain grant completed using portable storage");
         return Ok(PairingTokenHydration {
             token,
             token_changed: false,
@@ -6136,6 +6316,7 @@ fn grant_keychain_access(
     }
 
     if let Err(error) = crate::db::migrate_legacy_pairing_token(&connection) {
+        log::debug!("keychain grant legacy migration did not complete");
         let token = app_state
             .extension_pairing_token
             .read()
@@ -6172,15 +6353,7 @@ fn grant_keychain_access(
             generated
         }
     };
-
-    {
-        if let Ok(mut pairing_token) = app_state.extension_pairing_token.write() {
-            *pairing_token = token.clone();
-        }
-    }
-    app_state
-        .keychain_access_authorized
-        .store(true, Ordering::Release);
+    log::debug!("keychain grant credential operation completed");
     Ok(PairingTokenHydration {
         token,
         token_changed: false,
@@ -6690,10 +6863,18 @@ mod tests {
         aria2_active_connection_count,
         parse_media_playlist_metadata,
         normalize_media_connections,
-        validate_enqueue_url, validate_enqueue_uris,
+        validate_enqueue_url, validate_enqueue_uris, validate_keychain_grant_request_id,
     };
     use serde_json::json;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn keychain_grant_request_ids_are_bounded_and_nonempty() {
+        assert!(validate_keychain_grant_request_id("grant-123").is_ok());
+        assert!(validate_keychain_grant_request_id("").is_err());
+        assert!(validate_keychain_grant_request_id("   ").is_err());
+        assert!(validate_keychain_grant_request_id(&"x".repeat(129)).is_err());
+    }
 
     #[test]
     fn aria2_active_connection_count_uses_only_nonnegative_daemon_values() {
@@ -9205,6 +9386,7 @@ pub fn run() {
                 storage_layout,
                 keychain_access_authorized: Arc::new(AtomicBool::new(false)),
                 keychain_grant_in_progress: Arc::new(AtomicBool::new(false)),
+                keychain_grant: Arc::new(Mutex::new(KeychainGrantState::default())),
                 extension_pairing_token,
                 extension_frontend_ready,
                 extension_acks,
@@ -9797,6 +9979,7 @@ pub fn run() {
             set_keychain_password, get_keychain_password, delete_keychain_password,
             save_site_login, delete_site_login,
             hydrate_extension_pairing_token, get_session_pairing_token, regenerate_pairing_token, grant_keychain_access,
+            get_keychain_grant_status, accept_keychain_grant, abandon_keychain_grant,
             authorize_keychain_access,
             acknowledge_pairing_token_change,
             check_file_exists, toggle_tray_icon, set_extension_pairing_token,

@@ -1,6 +1,6 @@
 import { initMediaDomains, isActiveDownloadStatus, isTransferActiveStatus } from './utils/downloads';
 import { schedulerCompletionState } from './utils/schedulerCompletion';
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { Sidebar, SidebarFilter } from "./components/Sidebar";
 import { DownloadTable, type DownloadTableStatusSummary } from "./components/DownloadTable";
 // Keep the primary Add action eager so the modal cannot disappear behind a
@@ -20,7 +20,7 @@ import { setLogStreamActive } from './utils/logger';
 import { updateDockBadge } from './utils/dockBadge';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { getPlatformInfo, shouldUseCustomWindowControls, usePlatformInfo } from './utils/platform';
-import { resolveWindowControlStyle } from './utils/windowControlStyle';
+import { getWindowControlRevealOffset, resolveWindowControlStyle } from './utils/windowControlStyle';
 import {
   getKeychainAccessReady,
   getKeychainConsentVersion,
@@ -264,6 +264,7 @@ function App() {
   const isMacUserAgent = navigator.userAgent.includes('Mac');
   const usesCustomWindowControls = shouldUseCustomWindowControls(platform.os, navigator.userAgent);
   const windowControlStyle = resolveWindowControlStyle(windowControlStylePreference, platform.os, navigator.userAgent);
+  const windowControlRevealOffset = getWindowControlRevealOffset(windowControlStyle);
   const isRtl = localeDirection(resolveAppLocale(i18n.language)) === 'rtl';
   const isSidebarOnRight = sidebarPosition === 'right' || (sidebarPosition === 'auto' && isRtl);
   // Keep dialogs out of the titlebar area while platform detection is still
@@ -1062,7 +1063,9 @@ function App() {
       isSidebarOnRight ? 'app-shell--sidebar-right' : 'app-shell--sidebar-left'
     } ${
       hasWindowChrome ? 'app-shell--window-chrome' : ''
-    }`}>
+    }`}
+      style={{ '--window-control-reveal-offset': `${windowControlRevealOffset}px` } as CSSProperties}
+    >
       {usesCustomWindowControls && (
         <WindowControls
           side={isSidebarOnRight ? 'right' : 'left'}
