@@ -13,7 +13,7 @@ import { FolderPlus, Save, Settings, Shield, RefreshCw, FileText, HardDrive, Dat
 import { open } from '@tauri-apps/plugin-dialog';
 import { invokeCommand as invoke } from '../ipc';
 import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResolutionModal';
-import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNamesMatch, downloadMediaKindsMatch } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch } from '../utils/downloads';
 import { fetchMediaMetadataDeduped, fetchMediaPlaylistMetadataDeduped } from '../utils/mediaMetadata';
 import {
   expandTilde,
@@ -1078,8 +1078,6 @@ export const AddDownloadsModal = () => {
         );
                  
                  let count = 1;
-                 const base = finalFile.substring(0, finalFile.lastIndexOf('.')) || finalFile;
-                 const ext = finalFile.includes('.') ? finalFile.substring(finalFile.lastIndexOf('.')) : '';
                  let newName = finalFile;
                  let exists = true;
                  const batchTargets: Array<{ location: string; fileName: string }> = [];
@@ -1098,7 +1096,7 @@ export const AddDownloadsModal = () => {
                  }
                  
                  while (exists && count < 1000) {
-          newName = `${base} (${count})${ext}`;
+          newName = downloadFileNameWithSuffix(finalFile, ` (${count})`);
           let storeHas = false;
           const currentSettings = useSettingsStore.getState();
           for (const download of useDownloadStore.getState().downloads) {

@@ -3,6 +3,7 @@ import { dispatchItem, getProxyArgs, getSiteLogin, hasStaleTemporaryMediaEstimat
 import { useDownloadProgressStore } from './downloadProgressStore';
 import { useSettingsStore } from './useSettingsStore';
 import * as ipc from '../ipc';
+import { MAX_DOWNLOAD_FILENAME_BYTES } from '../utils/downloads';
 
 vi.mock('../ipc', () => ({
   invokeCommand: vi.fn(),
@@ -111,6 +112,27 @@ describe('useDownloadStore', () => {
 
     useDownloadStore.getState().toggleAddModal(false);
     expect(useDownloadStore.getState().pendingAddRequestVersion).toBe(initialVersion + 2);
+  });
+
+  it('normalizes an overlong filename edited in Properties before persisting it', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'properties-long-name',
+        url: 'https://example.com/video',
+        fileName: 'video.mp4',
+        status: 'ready',
+        category: 'Movies',
+        dateAdded: ''
+      }] as any[]
+    });
+
+    await useDownloadStore.getState().applyProperties('properties-long-name', {
+      fileName: `${'title '.repeat(100)}.mp4`
+    });
+
+    const fileName = useDownloadStore.getState().downloads[0].fileName;
+    expect(new TextEncoder().encode(fileName).length).toBeLessThanOrEqual(MAX_DOWNLOAD_FILENAME_BYTES);
+    expect(fileName.endsWith('.mp4')).toBe(true);
   });
 
   it('replaces stale media intent when an appended handoff reuses a URL', () => {
@@ -1563,7 +1585,7 @@ describe('useDownloadStore', () => {
         })];
       }
       if (cmd === 'enqueue_many') {
-        return [{ id: 'startup-accepted', success: true, filename: 'file.bin' }];
+        return [{ id: 'startup-accepted', success: true, filename: 'normalized.bin' }];
       }
       if (cmd === 'get_pending_order') throw new Error('queue state unavailable');
       if (cmd === 'resume_download') return true;
@@ -1575,6 +1597,7 @@ describe('useDownloadStore', () => {
 
     expect(useDownloadStore.getState().backendRegisteredIds.has('startup-accepted')).toBe(true);
     expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      fileName: 'normalized.bin',
       status: 'queued',
       hasBeenDispatched: true
     });

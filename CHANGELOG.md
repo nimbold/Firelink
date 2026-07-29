@@ -30,11 +30,8 @@ This release focuses on smoother queue control, a more comfortable interface, an
 - Prevent stale pause, resume, retry, completion, and remove actions from reviving a download, reporting the wrong result, or leaving a row stuck in a misleading state.
 - Keep queue limits, connection recovery, missing completion events, and retry cleanup from leaving downloads stranded or exceeding the user’s settings.
 - Keep paused work behind pending downloads and make queue controls behave correctly when several actions happen close together.
+- Automatically shorten media filenames that exceed the cross-platform per-file-name limit, addressing [#29](https://github.com/nimbold/Firelink/issues/29).
 - Refresh dependencies and bundled engines, and strengthen release, package, portable-mode, and cross-platform verification.
-
-### Known limitation
-
-- Very long media-generated filenames can still exceed an operating system’s filename limit. For [#29](https://github.com/nimbold/Firelink/issues/29), the current workaround is to shorten the filename in **Properties** before starting the download.
 
 ## [1.2.0] - 2026-07-22
 

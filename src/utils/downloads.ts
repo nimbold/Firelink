@@ -43,6 +43,27 @@ export const isTransferActiveStatus = (status: DownloadStatus): boolean =>
 export const DOWNLOAD_CONNECTIONS_MIN = 1;
 export const DOWNLOAD_CONNECTIONS_MAX = 16;
 
+// Keep every filename component within the common cross-platform filesystem
+// limit. Count UTF-8 bytes because POSIX filesystems enforce bytes, while this
+// bound is also conservative for Windows filename components.
+export const MAX_DOWNLOAD_FILENAME_BYTES = 255;
+const FILENAME_TRUNCATION_MARKER = '…';
+
+const utf8ByteLength = (value: string): number => new TextEncoder().encode(value).length;
+
+const truncateUtf8ToBytes = (value: string, maxBytes: number): string => {
+  if (maxBytes <= 0) return '';
+  let bytes = 0;
+  let result = '';
+  for (const character of value) {
+    const characterBytes = utf8ByteLength(character);
+    if (bytes + characterBytes > maxBytes) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return result;
+};
+
 /**
  * Resolve persisted/user-entered connection values before they cross into the
  * backend. Older rows may omit the value, while malformed rows can contain
@@ -126,10 +147,52 @@ export const fileNameFromUrl = (rawUrl: string): string => {
 export const canonicalizeDownloadFileName = (fileName: string): string => {
   const leaf = fileName.replace(/\\/g, '/').split('/').pop() || 'download';
   const sanitized = leaf
-    .replace(/[\u0000-\u001f<>:"/\\|?*]/g, '-')
+    .replace(/[\u0000-\u001f\u007f-\u009f<>:"/\\|?*]/g, '-')
     .trim()
     .replace(/[. ]+$/g, '');
-  return sanitized && sanitized !== '.' && sanitized !== '..' ? sanitized : 'download';
+  const canonical = sanitized && sanitized !== '.' && sanitized !== '..' ? sanitized : 'download';
+  if (utf8ByteLength(canonical) <= MAX_DOWNLOAD_FILENAME_BYTES) return canonical;
+
+  const extensionStart = canonical.lastIndexOf('.');
+  const hasExtension = extensionStart > 0;
+  const base = hasExtension ? canonical.slice(0, extensionStart) : canonical;
+  const extension = hasExtension ? canonical.slice(extensionStart) : '';
+  const baseBudget = MAX_DOWNLOAD_FILENAME_BYTES
+    - utf8ByteLength(extension)
+    - utf8ByteLength(FILENAME_TRUNCATION_MARKER);
+
+  if (baseBudget <= 0) {
+    return truncateUtf8ToBytes(canonical, MAX_DOWNLOAD_FILENAME_BYTES);
+  }
+
+  return `${truncateUtf8ToBytes(base, baseBudget)}${FILENAME_TRUNCATION_MARKER}${extension}`;
+};
+
+/**
+ * Create a deterministic alternate filename without exceeding the same
+ * component limit as canonicalizeDownloadFileName. The suffix is intended for
+ * trusted generated values such as " (1)".
+ */
+export const downloadFileNameWithSuffix = (fileName: string, suffix: string): string => {
+  const canonical = canonicalizeDownloadFileName(fileName);
+  const safeSuffix = suffix
+    .replace(/[\u0000-\u001f\u007f-\u009f<>:"/\\|?*]/g, '-')
+    .replace(/[. ]+$/g, '');
+  if (!safeSuffix.trim()) return canonical;
+
+  const extensionStart = canonical.lastIndexOf('.');
+  const hasExtension = extensionStart > 0;
+  const base = hasExtension ? canonical.slice(0, extensionStart) : canonical;
+  const extension = hasExtension ? canonical.slice(extensionStart) : '';
+  const baseBudget = MAX_DOWNLOAD_FILENAME_BYTES
+    - utf8ByteLength(safeSuffix)
+    - utf8ByteLength(extension);
+
+  if (baseBudget <= 0) {
+    return truncateUtf8ToBytes(`${base}${safeSuffix}${extension}`, MAX_DOWNLOAD_FILENAME_BYTES);
+  }
+
+  return `${truncateUtf8ToBytes(base, baseBudget)}${safeSuffix}${extension}`;
 };
 
 /**

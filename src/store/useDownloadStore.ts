@@ -9,7 +9,7 @@ import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
 import type { Queue } from '../bindings/Queue';
 import { useSettingsStore } from './useSettingsStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
-import { categoryForFileName, isActiveDownloadStatus, isTransferActiveStatus, normalizeSpeedLimitForBackend, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, isActiveDownloadStatus, isTransferActiveStatus, normalizeSpeedLimitForBackend, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
 import {
   resolveCategoryDestination
 } from '../utils/downloadLocations';
@@ -809,13 +809,16 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     const state = get();
     const item = state.downloads.find(d => d.id === id);
     if (!item) return;
+    const normalizedUpdates = updates.fileName === undefined
+      ? updates
+      : { ...updates, fileName: canonicalizeDownloadFileName(updates.fileName) };
 
     if (item.status === 'downloading' || item.status === 'processing' || item.status === 'retrying') {
       throw new Error(i18n.t($ => $.downloadTable.transferActive));
     }
 
     if (item.status === 'ready' || item.status === 'staged' || item.status === 'completed' || item.status === 'failed') {
-      state.updateDownload(id, updates);
+      state.updateDownload(id, normalizedUpdates);
       return;
     }
 
@@ -828,7 +831,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         state.unregisterBackendIds([id]);
         set(current => ({ pendingOrder: current.pendingOrder.filter(value => value !== id) }));
       }
-      state.updateDownload(id, updates);
+      state.updateDownload(id, normalizedUpdates);
       if (isRegistered || wasDispatching) {
         const dispatched = await dispatchItemInternal(id);
         if (dispatched) {
@@ -847,7 +850,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         }
         state.unregisterBackendIds([id]);
       }
-      state.updateDownload(id, updates);
+      state.updateDownload(id, normalizedUpdates);
     }
   };
 
@@ -1306,21 +1309,25 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
   setSelectedPropertiesDownloadId: (id) => set({ selectedPropertiesDownloadId: id }),
   addDownload: async (item, action) => {
     const settings = useSettingsStore.getState();
-    const destPath = await effectiveDestinationForItem(item, settings);
+    const normalizedItem = {
+      ...item,
+      fileName: canonicalizeDownloadFileName(item.fileName)
+    };
+    const destPath = await effectiveDestinationForItem(normalizedItem, settings);
     const queueId = action.type === 'add-to-queue' ? action.queueId : MAIN_QUEUE_ID;
     const queueItems = get().downloads.filter(download =>
       (download.queueId || MAIN_QUEUE_ID) === queueId
     );
     const maxPos = queueItems.reduce((max, d) => Math.max(max, d.queuePosition ?? 0), -1);
     const queuePosition = maxPos + 1;
-    const { sizeBytes, ...downloadDraft } = item;
+    const { sizeBytes, ...downloadDraft } = normalizedItem;
     const ownedItem: DownloadItem = {
       ...downloadDraft,
-      totalBytes: item.totalBytes ?? sizeBytes,
-      totalIsEstimate: item.totalIsEstimate ?? (
-        item.isMedia === true && item.size?.trim().startsWith('~')
+      totalBytes: normalizedItem.totalBytes ?? sizeBytes,
+      totalIsEstimate: normalizedItem.totalIsEstimate ?? (
+        normalizedItem.isMedia === true && normalizedItem.size?.trim().startsWith('~')
       ),
-      connections: resolveDownloadConnections(item.connections, settings.perServerConnections),
+      connections: resolveDownloadConnections(normalizedItem.connections, settings.perServerConnections),
       destination: destPath,
       status: action.type === 'add-to-queue' ? 'staged' : 'ready',
       queueId,
@@ -2055,6 +2062,11 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             .filter(result => !result.success)
             .map(result => [result.id, result.error || 'Backend rejected the queued download.'])
         );
+        const acceptedFilenames = new Map(
+          results
+            .filter(result => result.success && Boolean(result.filename))
+            .map(result => [result.id, result.filename!])
+        );
         const acceptedIdSet = new Set(registeredIds);
         const generationById = new Map(dispatchableItems.map(item => [item.id, item.lifecycle_generation]));
 
@@ -2089,7 +2101,17 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
                     lastError: failedErrors.get(download.id)
                   }
                 : liveAcceptedIds.has(download.id)
-                  ? { ...download, hasBeenDispatched: true, lastError: undefined }
+                  ? {
+                      ...download,
+                      ...(acceptedFilenames.has(download.id)
+                        ? {
+                            fileName: acceptedFilenames.get(download.id),
+                            category: categoryForFileName(acceptedFilenames.get(download.id)!)
+                          }
+                        : {}),
+                      hasBeenDispatched: true,
+                      lastError: undefined
+                    }
                   : download
             )
           };

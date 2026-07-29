@@ -28,6 +28,100 @@ const localeWithCalendar = (locale: string | null | undefined, calendar: Calenda
 const dateFromInput = (value: DateTimeInput): Date =>
   value instanceof Date ? new Date(value.getTime()) : new Date(value);
 
+const DATE_OPTION_KEYS = new Set([
+  'dateStyle',
+  'era',
+  'month',
+  'day',
+  'year',
+  'weekday'
+]);
+
+const TIME_OPTION_KEYS = [
+  'hour',
+  'hour12',
+  'hourCycle',
+  'minute',
+  'second',
+  'timeZoneName',
+  'dayPeriod',
+  'fractionalSecondDigits'
+] as const;
+
+const persianDateParts = (
+  date: Date,
+  locale: string,
+  options: Intl.DateTimeFormatOptions
+): string => {
+  const formatter = new Intl.DateTimeFormat(locale, {
+    calendar: 'persian',
+    numberingSystem: options.numberingSystem,
+    timeZone: options.timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  });
+  const values = new Map(formatter.formatToParts(date)
+    .filter(part => part.type === 'year' || part.type === 'month' || part.type === 'day')
+    .map(part => [part.type, part.value]));
+  const year = values.get('year');
+  const month = values.get('month');
+  const day = values.get('day');
+  if (!year || !month || !day) return formatter.format(date);
+  return `${year}/${month}/${day}`;
+};
+
+const formatPersianDateTime = (
+  date: Date,
+  locale: string,
+  options: Intl.DateTimeFormatOptions
+): string => {
+  const hasDateOptions = Object.keys(options).some(key => DATE_OPTION_KEYS.has(key));
+  const hasTimeOptions = options.timeStyle !== undefined ||
+    TIME_OPTION_KEYS.some(key => (options as unknown as Record<string, unknown>)[key] !== undefined);
+  const includeDate = Object.keys(options).length === 0 || hasDateOptions;
+  const parts: string[] = [];
+
+  if (includeDate) {
+    let dateText = persianDateParts(date, locale, options);
+    if (options.weekday) {
+      const weekday = new Intl.DateTimeFormat(locale, {
+        calendar: 'persian',
+        numberingSystem: options.numberingSystem,
+        timeZone: options.timeZone,
+        weekday: options.weekday
+      }).format(date);
+      dateText = `${weekday}, ${dateText}`;
+    }
+    parts.push(dateText);
+  }
+
+  if (hasTimeOptions) {
+    const timeOptions: Intl.DateTimeFormatOptions = {
+      calendar: 'persian',
+      numberingSystem: options.numberingSystem,
+      timeZone: options.timeZone
+    };
+    for (const key of TIME_OPTION_KEYS) {
+      const value = (options as unknown as Record<string, unknown>)[key];
+      if (value !== undefined) Object.assign(timeOptions, { [key]: value });
+    }
+    if (options.timeStyle) {
+      timeOptions.hour = 'numeric';
+      timeOptions.minute = '2-digit';
+      if (options.timeStyle === 'medium' || options.timeStyle === 'long' || options.timeStyle === 'full') {
+        timeOptions.second = '2-digit';
+      }
+      if (options.timeStyle === 'long' || options.timeStyle === 'full') {
+        timeOptions.timeZoneName = options.timeStyle === 'full' ? 'long' : 'short';
+      }
+    }
+    parts.push(new Intl.DateTimeFormat(locale, timeOptions).format(date));
+  }
+
+  return parts.join(', ');
+};
+
 /**
  * Format a user-facing timestamp with an explicit calendar. Gregorian is
  * passed explicitly because some localized browser defaults use a regional
@@ -46,6 +140,13 @@ export const formatDateTime = (
   const options = config.options ?? {};
 
   try {
+    if (calendar === 'persian') {
+      return formatPersianDateTime(
+        date,
+        localeWithCalendar(config.locale, calendar),
+        options
+      );
+    }
     return new Intl.DateTimeFormat(
       localeWithCalendar(config.locale, calendar),
       options

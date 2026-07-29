@@ -22,7 +22,8 @@
   --bg-input: 0 0% 100%;
   --border-modal: 0 0% 85%;
   --surface-raised: 0 0% 100%;
-  --surface-overlay: 0 0% 100% / 0.95;
+  /* Keep this token alpha-free because some consumers apply their own /alpha. */
+  --surface-overlay: 0 0% 100%;
   --shadow-color: 220 10% 20% / 0.1;
   --sidebar-shell-bg: 0 0% 92%;
   --sidebar-panel-bg: 0 0% 96%;
@@ -66,7 +67,7 @@
   --bg-input: 0 0% 100%;
   --border-modal: 0 0% 85%;
   --surface-raised: 0 0% 100%;
-  --surface-overlay: 0 0% 100% / 0.95;
+  --surface-overlay: 0 0% 100%;
   --shadow-color: 220 10% 20% / 0.1;
   --sidebar-shell-bg: 0 0% 92%;
   --sidebar-panel-bg: 0 0% 96%;
@@ -911,7 +912,7 @@ html[data-list-density="relaxed"] {
 
   .add-download-playlist-media-type-option.is-selected {
     background: hsl(var(--surface-raised) / 0.9);
-    box-shadow: 0 1px 2px hsl(var(--shadow-color) / 0.35);
+    box-shadow: 0 1px 2px hsl(var(--shadow-color));
     color: hsl(var(--text-primary));
   }
 
@@ -2508,7 +2509,7 @@ html[data-list-density="relaxed"] {
   align-items: center;
   justify-content: center;
   border: 1px solid hsl(var(--border-color));
-  border-bottom-color: hsl(var(--border-color) / 0.72);
+  border-bottom-color: hsl(var(--border-color));
   border-radius: 4px;
   background: hsl(var(--item-hover));
   color: hsl(var(--text-secondary));
@@ -3106,7 +3107,7 @@ body.is-queue-dragging * {
 
 .add-download-nested-fields {
   padding-inline-start: 1.25rem;
-  border-inline-start: 2px solid hsl(var(--border-modal) / 0.5);
+  border-inline-start: 2px solid hsl(var(--border-modal));
 }
 
 .add-download-advanced-fields {

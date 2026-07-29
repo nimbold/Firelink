@@ -10,6 +10,9 @@ struct DownloadOwnershipRecord {
 }
 
 pub fn canonical_download_filename(filename: &str) -> String {
+    const MAX_FILENAME_BYTES: usize = 255;
+    const TRUNCATION_MARKER: &str = "…";
+
     let leaf = filename.replace('\\', "/");
     let leaf = Path::new(&leaf)
         .file_name()
@@ -31,7 +34,7 @@ pub fn canonical_download_filename(filename: &str) -> String {
         })
         .collect::<String>();
     let sanitized = sanitized.trim().trim_end_matches(['.', ' ']);
-    if sanitized.is_empty() || matches!(sanitized, "." | "..") {
+    let canonical = if sanitized.is_empty() || matches!(sanitized, "." | "..") {
         "download".to_string()
     } else if crate::platform::is_windows_reserved_filename(sanitized) {
         let path = Path::new(sanitized);
@@ -45,7 +48,46 @@ pub fn canonical_download_filename(filename: &str) -> String {
         }
     } else {
         sanitized.to_string()
+    };
+
+    if canonical.len() <= MAX_FILENAME_BYTES {
+        return canonical;
     }
+
+    let extension = Path::new(&canonical)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    let base = canonical
+        .strip_suffix(&extension)
+        .unwrap_or(canonical.as_str());
+    let base_budget = MAX_FILENAME_BYTES
+        .saturating_sub(extension.len())
+        .saturating_sub(TRUNCATION_MARKER.len());
+
+    if base_budget == 0 {
+        return truncate_utf8_to_bytes(&canonical, MAX_FILENAME_BYTES);
+    }
+
+    format!(
+        "{}{}{}",
+        truncate_utf8_to_bytes(base, base_budget),
+        TRUNCATION_MARKER,
+        extension
+    )
+}
+
+fn truncate_utf8_to_bytes(value: &str, max_bytes: usize) -> String {
+    let mut end = 0;
+    for (index, character) in value.char_indices() {
+        let next = index + character.len_utf8();
+        if next > max_bytes {
+            break;
+        }
+        end = next;
+    }
+    value[..end].to_string()
 }
 
 pub fn expected_primary_path(
@@ -254,6 +296,24 @@ mod tests {
         assert_eq!(canonical_download_filename(".."), "download");
         assert_eq!(canonical_download_filename("CON.txt"), "CON-.txt");
         assert_eq!(canonical_download_filename("lpt9"), "lpt9-");
+    }
+
+    #[test]
+    fn truncates_long_filenames_by_utf8_bytes_and_preserves_extension() {
+        let filename = canonical_download_filename(&format!("{}.mp4", "title ".repeat(100)));
+
+        assert!(filename.len() <= 255);
+        assert!(filename.ends_with(".mp4"));
+        assert!(filename.contains('…'));
+    }
+
+    #[test]
+    fn truncates_multibyte_filenames_at_character_boundaries() {
+        let filename = canonical_download_filename(&format!("{}.mkv", "😀".repeat(100)));
+
+        assert!(filename.len() <= 255);
+        assert!(filename.ends_with(".mkv"));
+        assert!(!filename.contains('\u{fffd}'));
     }
 
     #[test]

@@ -17,13 +17,45 @@ describe('date/time formatting', () => {
   });
 
   it('supports the opt-in Persian and Hebrew calendars', () => {
-    const options: Intl.DateTimeFormatOptions = { dateStyle: 'long' };
-    expect(formatDateTime(instant, { locale: 'fa', calendar: 'persian', options })).toBe(
-      new Intl.DateTimeFormat('fa-u-ca-persian', options).format(instant)
+    const hebrewOptions: Intl.DateTimeFormatOptions = { dateStyle: 'long' };
+    expect(formatDateTime(instant, { locale: 'fa', calendar: 'persian' })).toBe('۱۴۰۵/۰۱/۰۱');
+    expect(formatDateTime(instant, {
+      locale: 'fa',
+      calendar: 'persian',
+      options: { dateStyle: 'medium', timeStyle: 'short' }
+    })).toContain('۱۴۰۵/۰۱/۰۱');
+    expect(formatDateTime(instant, { locale: 'he', calendar: 'hebrew', options: hebrewOptions })).toBe(
+      new Intl.DateTimeFormat('he-u-ca-hebrew', hebrewOptions).format(instant)
     );
-    expect(formatDateTime(instant, { locale: 'he', calendar: 'hebrew', options })).toBe(
-      new Intl.DateTimeFormat('he-u-ca-hebrew', options).format(instant)
+  });
+
+  it('keeps Persian dates zero-padded when the caller requests weekday or time', () => {
+    const formatted = formatDateTime(instant, {
+      locale: 'fa',
+      calendar: 'persian',
+      options: {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit'
+      }
+    });
+
+    expect(formatted).toContain('۱۴۰۵/۰۱/۰۱');
+  });
+
+  it('does not drop Persian time-only Intl fields', () => {
+    const formatted = formatDateTime(
+      new Date('2026-03-21T14:30:00.123Z'),
+      {
+        locale: 'en',
+        calendar: 'persian',
+        options: { fractionalSecondDigits: 3 } as Intl.DateTimeFormatOptions
+      }
     );
+
+    expect(formatted).toContain('123');
   });
 
   it('returns a safe placeholder for malformed timestamps and rejects unknown preferences', () => {

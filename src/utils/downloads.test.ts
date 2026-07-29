@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import type { DownloadItem } from '../bindings/DownloadItem';
 import {
   downloadFileNamesMatch,
+  downloadFileNameWithSuffix,
   downloadMediaKindsMatch,
+  MAX_DOWNLOAD_FILENAME_BYTES,
+  canonicalizeDownloadFileName,
   redactDownloadForPersistence,
   resolveDownloadConnections
 } from './downloads';
@@ -63,6 +66,29 @@ describe('download connection resolution', () => {
 });
 
 describe('download filename matching', () => {
+  it('truncates long names by UTF-8 bytes while preserving the extension', () => {
+    const filename = canonicalizeDownloadFileName(`${'title '.repeat(100)}.mp4`);
+
+    expect(new TextEncoder().encode(filename).length).toBeLessThanOrEqual(MAX_DOWNLOAD_FILENAME_BYTES);
+    expect(filename.endsWith('.mp4')).toBe(true);
+    expect(filename).toContain('…');
+  });
+
+  it('does not split a multibyte character at the filesystem boundary', () => {
+    const filename = canonicalizeDownloadFileName(`${'😀'.repeat(100)}.mkv`);
+
+    expect(new TextEncoder().encode(filename).length).toBeLessThanOrEqual(MAX_DOWNLOAD_FILENAME_BYTES);
+    expect(filename.endsWith('.mkv')).toBe(true);
+    expect([...filename].every(character => character !== '\uFFFD')).toBe(true);
+  });
+
+  it('keeps alternate names unique and bounded after long-name truncation', () => {
+    const filename = downloadFileNameWithSuffix(`${'title '.repeat(100)}.mp4`, ' (1)');
+
+    expect(new TextEncoder().encode(filename).length).toBeLessThanOrEqual(MAX_DOWNLOAD_FILENAME_BYTES);
+    expect(filename.endsWith(' (1).mp4')).toBe(true);
+  });
+
   it('matches case and path spelling while preserving the actual filename', () => {
     expect(downloadFileNamesMatch(
       'Media\\Example.Show.S01E01.MKV',
