@@ -1836,6 +1836,28 @@ describe('useDownloadStore', () => {
     expect(calls.some(call => call[0] === 'pause_download' && (call[1] as any).id === 'active')).toBe(true);
   });
 
+  it('direct queue controls treat missing queue ids as the main queue', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'legacy-ready', url: 'http://ready', fileName: 'ready', status: 'ready', category: 'Other', dateAdded: '' },
+        { id: 'legacy-active', url: 'http://active', fileName: 'active', status: 'processing', category: 'Other', dateAdded: '' },
+      ] as any[],
+    });
+
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_pending_order') return ['legacy-ready'];
+      return undefined;
+    });
+
+    await expect(useDownloadStore.getState().startQueue('00000000-0000-0000-0000-000000000001'))
+      .resolves.toEqual(['legacy-ready']);
+    await expect(useDownloadStore.getState().pauseQueue('00000000-0000-0000-0000-000000000001'))
+      .resolves.toBe(2);
+
+    expect(vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) => command === 'pause_download'))
+      .toHaveLength(2);
+  });
+
   it('resumes paused items that were never dispatched through the master start action', async () => {
     useDownloadStore.setState({
       downloads: [

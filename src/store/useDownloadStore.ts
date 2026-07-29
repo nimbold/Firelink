@@ -1609,7 +1609,10 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     const operation = previousOperation.catch(() => []).then(async () => {
       await waitForPendingStartupResume();
       const runnable = get().downloads
-        .filter(item => item.queueId === queueId && (item.status === 'queued' || canStartDownload(item.status)))
+        .filter(item =>
+          (item.queueId || MAIN_QUEUE_ID) === queueId &&
+          (item.status === 'queued' || canStartDownload(item.status))
+        )
         .sort(queuePositionComparator);
 
       if (runnable.length === 0 || !isCurrentQueueControlGeneration(queueId, requestedGeneration)) return [];
@@ -1736,7 +1739,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     advanceQueueControlGeneration(queueId);
     const activeIds = get().downloads
       .filter(item =>
-        item.queueId === queueId &&
+        (item.queueId || MAIN_QUEUE_ID) === queueId &&
         (canPauseDownload(item.status) || backendDispatchPromises.has(item.id))
       )
       .map(item => item.id);

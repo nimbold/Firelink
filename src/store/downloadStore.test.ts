@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { initDownloadListener, useDownloadProgressStore } from './downloadStore';
 import {
   clearDownloadControlIntents,
+  downloadControlIntentFor,
   setDownloadControlIntent,
   useDownloadStore
 } from './useDownloadStore';
@@ -425,6 +426,39 @@ describe('useDownloadProgressStore', () => {
       status: 'paused'
     } });
     expect(useDownloadStore.getState().downloads[0].status).toBe('paused');
+    release();
+  });
+
+  it('accepts an authoritative resume failure while ignoring stale paused events', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'resume-failure',
+        url: 'https://example.com/file',
+        fileName: 'file.bin',
+        status: 'queued',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+    setDownloadControlIntent('resume-failure', 'resume');
+
+    const release = await initDownloadListener();
+    handlers['download-state']({ payload: {
+      id: 'resume-failure',
+      status: 'paused',
+      error: 'aria2 resume failed'
+    } });
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'paused',
+      lastError: 'aria2 resume failed'
+    });
+    expect(downloadControlIntentFor('resume-failure')).toBeUndefined();
     release();
   });
 });

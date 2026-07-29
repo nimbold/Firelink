@@ -110,7 +110,8 @@ const startDownloadListeners = async () => {
       // row visibly paused and make dispatch reject it before IPC.
       if (status === 'paused' &&
           current.status === 'queued' &&
-          downloadControlIntentFor(payload.id) === 'resume') {
+          downloadControlIntentFor(payload.id) === 'resume' &&
+          !payload.error) {
         // Keep the resume intent until an active or terminal event proves
         // that the new lifecycle has taken over. An explicit pause replaces
         // this intent in pauseDownload, so a genuine user pause is still
@@ -123,6 +124,7 @@ const startDownloadListeners = async () => {
       }
       if (status === 'paused') {
         clearDownloadControlIntent(payload.id, 'pause');
+        if (payload.error) clearDownloadControlIntent(payload.id, 'resume');
       }
 
       // Prevent stale lifecycle events from moving a paused row back into an

@@ -4701,9 +4701,9 @@ async fn resume_download(
                             );
                             let _ = app_handle_clone.emit(
                                 "download-state",
-                                crate::ipc::DownloadStateEvent::new(
+                                crate::ipc::DownloadStateEvent::paused_with_error(
                                     &id_clone,
-                                    crate::ipc::DownloadStatus::Paused,
+                                    unpause_error,
                                 ),
                             );
                             return;

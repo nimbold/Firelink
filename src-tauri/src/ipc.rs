@@ -420,6 +420,15 @@ impl DownloadStateEvent {
         }
     }
 
+    pub fn paused_with_error(id: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            status: DownloadStatus::Paused.as_str().to_string(),
+            error: Some(error.into()),
+            file_name: None,
+        }
+    }
+
     pub fn completed_with_file(id: impl Into<String>, file_name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
