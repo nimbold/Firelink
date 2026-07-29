@@ -103,17 +103,18 @@ const startDownloadListeners = async () => {
       const status = payload.status as DownloadStatus;
 
       // resume_download queues the row before the backend can emit its new
-      // active state. A paused event already emitted by the old lifecycle may
-      // arrive in that gap. Do not let it overwrite the queued transition;
-      // otherwise the guard below would reject the legitimate downloading
-      // event and leave the row visibly paused forever.
+      // active state. Paused events already emitted by the old lifecycle may
+      // arrive in that gap, and more than one can be queued before the new
+      // lifecycle reports its state. Do not let any of them overwrite the
+      // queued transition; otherwise a duplicate stale event can leave the
+      // row visibly paused and make dispatch reject it before IPC.
       if (status === 'paused' &&
           current.status === 'queued' &&
           downloadControlIntentFor(payload.id) === 'resume') {
-        // Consume only the stale pause event that caused the resume race.
-        // A later real pause must be allowed through even if the backend has
-        // not emitted a new active state yet.
-        clearDownloadControlIntent(payload.id, 'resume');
+        // Keep the resume intent until an active or terminal event proves
+        // that the new lifecycle has taken over. An explicit pause replaces
+        // this intent in pauseDownload, so a genuine user pause is still
+        // applied while the transition is in flight.
         return;
       }
       if (status === 'downloading' || status === 'processing' ||

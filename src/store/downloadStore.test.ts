@@ -353,7 +353,7 @@ describe('useDownloadProgressStore', () => {
     release();
   });
 
-  it('ignores a stale paused event during resume and accepts the new active state', async () => {
+  it('ignores duplicate stale paused events during resume and accepts the new active state', async () => {
     const handlers: Record<string, (event: any) => void> = {};
     vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
       handlers[event] = handler as (event: any) => void;
@@ -380,13 +380,19 @@ describe('useDownloadProgressStore', () => {
 
     handlers['download-state']({ payload: {
       id: 'resume-race',
+      status: 'paused'
+    } });
+    expect(useDownloadStore.getState().downloads[0].status).toBe('queued');
+
+    handlers['download-state']({ payload: {
+      id: 'resume-race',
       status: 'downloading'
     } });
     expect(useDownloadStore.getState().downloads[0].status).toBe('downloading');
     release();
   });
 
-  it('allows a later genuine pause after consuming the stale resume event', async () => {
+  it('accepts an explicit pause while a resume transition is in flight', async () => {
     const handlers: Record<string, (event: any) => void> = {};
     vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
       handlers[event] = handler as (event: any) => void;
@@ -411,6 +417,9 @@ describe('useDownloadProgressStore', () => {
     } });
     expect(useDownloadStore.getState().downloads[0].status).toBe('queued');
 
+    // pauseDownload replaces the resume intent before it asks the backend to
+    // pause, so the next paused event is authoritative.
+    setDownloadControlIntent('resume-pause-race', 'pause');
     handlers['download-state']({ payload: {
       id: 'resume-pause-race',
       status: 'paused'
