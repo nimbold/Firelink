@@ -472,6 +472,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         };
         if released {
             self.aria2_retry_cancelled.lock().await.remove(id);
+            self.notify.notify_waiters();
         }
     }
 
@@ -619,6 +620,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         let mut epochs = self.aria2_control_epochs.lock().await;
         let epoch = epochs.get(id).copied().unwrap_or_default().wrapping_add(1);
         epochs.insert(id.to_string(), epoch);
+        self.notify.notify_waiters();
         epoch
     }
 
@@ -817,17 +819,28 @@ impl<R: tauri::Runtime> QueueManager<R> {
         id: &str,
         queue_id: &str,
         lifecycle_generation: u64,
+        control_epoch: u64,
     ) -> Option<OwnedSemaphorePermit> {
         loop {
-            if !self.is_registered_generation(id, lifecycle_generation).await {
+            if !self.is_registered_generation(id, lifecycle_generation).await
+                || self.is_aria2_retry_cancelled(id).await
+                || !self.is_aria2_control_epoch_current(id, control_epoch).await
+            {
                 return None;
             }
             let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(permit) = self
                 .try_reserve_queue_slot(id, queue_id, lifecycle_generation)
                 .await
             {
-                if self.is_registered_generation(id, lifecycle_generation).await {
+                if self.is_registered_generation(id, lifecycle_generation).await
+                    && !self.is_aria2_retry_cancelled(id).await
+                    && self
+                        .is_aria2_control_epoch_current(id, control_epoch)
+                        .await
+                {
                     return Some(permit);
                 }
                 self.release_queue_reservation_for_generation(id, lifecycle_generation)
@@ -1141,6 +1154,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 return false;
             }
             let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let generation = self
                 .registered_lifecycle_generation(id)
                 .await
@@ -1301,6 +1316,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
     pub async fn run_dispatcher(self: Arc<Self>) {
         loop {
             let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some((permit, task)) = self.try_admit_next_task().await {
                 // Admission owns the global and per-queue reservation before
                 // this task is spawned. Keep the dispatcher free to admit
@@ -1623,6 +1640,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .await
             .insert(id.to_string());
         self.aria2_retry_cancel_notify.notify_waiters();
+        self.notify.notify_waiters();
     }
 
     pub async fn allow_aria2_retries(&self, id: &str) {

@@ -4584,6 +4584,7 @@ async fn resume_download(
                             &id_clone,
                             &queue_id,
                             lifecycle_generation,
+                            control_epoch,
                         )
                         .await
                 };
@@ -4791,6 +4792,7 @@ async fn resume_download(
                             &id_clone,
                             &queue_id_clone,
                             lifecycle_generation,
+                            resume_epoch,
                         )
                         .await
                 };

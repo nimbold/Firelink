@@ -917,6 +917,75 @@ async fn aria2_resume_waits_for_shrunk_capacity() {
 }
 
 #[tokio::test]
+async fn cancelled_resume_waiter_exits_without_capacity_release() {
+    let (mgr, _spawner) = make_manager(1);
+    let manager = Arc::new(mgr);
+    manager
+        .reserve_enqueue_generation("cancelled-resume", 1)
+        .await
+        .unwrap();
+    let blocker = manager.acquire_permit().await.unwrap();
+    manager.park_permit("blocker", blocker).await;
+
+    let waiter = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move {
+            manager
+                .acquire_aria2_permit_candidate_for_queue("cancelled-resume", "main", 1, 0)
+                .await
+                .is_none()
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "resume worker should be waiting for capacity"
+    );
+
+    manager.cancel_aria2_retries("cancelled-resume").await;
+    assert!(timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("cancellation should wake the waiting resume worker")
+        .expect("resume worker should not panic"));
+    manager.release_permit("blocker").await;
+}
+
+#[tokio::test]
+async fn stale_control_epoch_wakes_a_waiting_resume_worker() {
+    let (mgr, _spawner) = make_manager(1);
+    let manager = Arc::new(mgr);
+    manager
+        .reserve_enqueue_generation("stale-resume", 1)
+        .await
+        .unwrap();
+    let control_epoch = manager.next_aria2_control_epoch("stale-resume").await;
+    let blocker = manager.acquire_permit().await.unwrap();
+    manager.park_permit("blocker", blocker).await;
+
+    let waiter = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move {
+            manager
+                .acquire_aria2_permit_candidate_for_queue("stale-resume", "main", 1, control_epoch)
+                .await
+                .is_none()
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "resume worker should be waiting for capacity"
+    );
+
+    manager.next_aria2_control_epoch("stale-resume").await;
+    assert!(timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("a newer control epoch should wake the stale worker")
+        .expect("resume worker should not panic"));
+    manager.release_permit("blocker").await;
+}
+
+#[tokio::test]
 async fn dispatcher_skips_a_full_front_queue_for_later_eligible_work() {
     let (manager, _spawner) = make_manager(2);
     let manager = Arc::new(manager);
@@ -1146,7 +1215,7 @@ async fn stale_queue_resume_reservation_is_removed_when_activation_fails() {
         .unwrap();
     assert!(previous.is_none());
     let candidate = manager
-        .acquire_aria2_permit_candidate_for_queue("candidate", "queue-a", 1)
+        .acquire_aria2_permit_candidate_for_queue("candidate", "queue-a", 1, 0)
         .await
         .expect("candidate should reserve the queue slot");
 
