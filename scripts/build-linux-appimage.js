@@ -11,7 +11,7 @@ let receivedSignal;
 export const APPIMAGE_CONFIG = JSON.stringify({
   bundle: {
     resources: {
-      'engine-dist/': null,
+      '../THIRD_PARTY_NOTICES.md': 'THIRD_PARTY_NOTICES.md',
     },
   },
 });

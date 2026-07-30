@@ -48,6 +48,17 @@ export const DOWNLOAD_CONNECTIONS_MAX = 16;
 // bound is also conservative for Windows filename components.
 export const MAX_DOWNLOAD_FILENAME_BYTES = 255;
 const FILENAME_TRUNCATION_MARKER = '…';
+const WINDOWS_RESERVED_FILENAME_STEMS = new Set([
+  'CON',
+  'PRN',
+  'AUX',
+  'NUL',
+  'CLOCK$',
+  'CONIN$',
+  'CONOUT$',
+  ...Array.from({ length: 9 }, (_, index) => `COM${index + 1}`),
+  ...Array.from({ length: 9 }, (_, index) => `LPT${index + 1}`)
+]);
 
 const utf8ByteLength = (value: string): number => new TextEncoder().encode(value).length;
 
@@ -150,7 +161,14 @@ export const canonicalizeDownloadFileName = (fileName: string): string => {
     .replace(/[\u0000-\u001f\u007f-\u009f<>:"/\\|?*]/g, '-')
     .trim()
     .replace(/[. ]+$/g, '');
-  const canonical = sanitized && sanitized !== '.' && sanitized !== '..' ? sanitized : 'download';
+  let canonical = sanitized && sanitized !== '.' && sanitized !== '..' ? sanitized : 'download';
+  const reservedStem = canonical.split('.')[0]?.toUpperCase();
+  if (reservedStem && WINDOWS_RESERVED_FILENAME_STEMS.has(reservedStem)) {
+    const extensionStart = canonical.lastIndexOf('.');
+    const base = extensionStart > 0 ? canonical.slice(0, extensionStart) : canonical;
+    const extension = extensionStart > 0 ? canonical.slice(extensionStart) : '';
+    canonical = `${base}-${extension}`;
+  }
   if (utf8ByteLength(canonical) <= MAX_DOWNLOAD_FILENAME_BYTES) return canonical;
 
   const extensionStart = canonical.lastIndexOf('.');

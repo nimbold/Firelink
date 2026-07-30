@@ -58,6 +58,14 @@ describe('date/time formatting', () => {
     expect(formatted).toContain('123');
   });
 
+  it('uses the default Persian date when only locale or timezone options are supplied', () => {
+    expect(formatDateTime(instant, {
+      locale: 'fa',
+      calendar: 'persian',
+      options: { timeZone: 'UTC' }
+    })).toBe('۱۴۰۵/۰۱/۰۱');
+  });
+
   it('returns a safe placeholder for malformed timestamps and rejects unknown preferences', () => {
     expect(formatDateTime('not-a-timestamp', { locale: 'en' })).toBe('-');
     expect(isCalendarPreference('gregorian')).toBe(true);

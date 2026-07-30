@@ -66,6 +66,13 @@ describe('download connection resolution', () => {
 });
 
 describe('download filename matching', () => {
+  it('matches frontend filenames to the backend Windows device-name canonicalization', () => {
+    expect(canonicalizeDownloadFileName('CON.txt')).toBe('CON-.txt');
+    expect(canonicalizeDownloadFileName('com1.archive.zip')).toBe('com1.archive-.zip');
+    expect(downloadFileNamesMatch('CON-.txt', 'CON.txt')).toBe(true);
+    expect(downloadFileNamesMatch('console.txt', 'CON.txt')).toBe(false);
+  });
+
   it('truncates long names by UTF-8 bytes while preserving the extension', () => {
     const filename = canonicalizeDownloadFileName(`${'title '.repeat(100)}.mp4`);
 

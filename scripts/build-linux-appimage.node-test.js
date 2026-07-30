@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { APPIMAGE_CONFIG, appImageBundleArguments } from './build-linux-appimage.js';
 
-test('AppImage config removes only engine-dist from Tauri resources', () => {
+test('AppImage config keeps notices while excluding the staged engine payload', () => {
   assert.deepEqual(JSON.parse(APPIMAGE_CONFIG), {
     bundle: {
       resources: {
-        'engine-dist/': null,
+        '../THIRD_PARTY_NOTICES.md': 'THIRD_PARTY_NOTICES.md',
       },
     },
   });

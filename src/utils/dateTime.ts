@@ -79,7 +79,10 @@ const formatPersianDateTime = (
   const hasDateOptions = Object.keys(options).some(key => DATE_OPTION_KEYS.has(key));
   const hasTimeOptions = options.timeStyle !== undefined ||
     TIME_OPTION_KEYS.some(key => (options as unknown as Record<string, unknown>)[key] !== undefined);
-  const includeDate = Object.keys(options).length === 0 || hasDateOptions;
+  // Locale and timezone options do not select a date or time field by
+  // themselves. Match Intl's default date behavior for those option-only
+  // calls instead of returning an empty string.
+  const includeDate = hasDateOptions || !hasTimeOptions;
   const parts: string[] = [];
 
   if (includeDate) {
