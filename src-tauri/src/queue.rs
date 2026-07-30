@@ -298,6 +298,11 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
 
     /// download id -> spawn payload for aria2 transient-error re-addUri retries.
     aria2_payloads: Mutex<HashMap<String, SpawnPayload>>,
+    /// Initial aria2 addUri handoffs that have not yet either published a GID
+    /// or removed a stale late GID. Removal waits for these handoffs before
+    /// deleting owned assets so a magnet cannot leave an orphaned output.
+    aria2_dispatch_inflight: Mutex<HashMap<String, HashSet<u64>>>,
+    aria2_dispatch_notify: Notify,
 
     /// The daemon-wide download cap currently applied to aria2. This mirrors
     /// successful RPC changes so the poller can avoid treating an intentional
@@ -376,6 +381,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
             aria2_gids: Arc::new(std::sync::RwLock::new(HashMap::new())),
             pending_completion: Arc::new(Mutex::new(HashMap::new())),
             aria2_payloads: Mutex::new(HashMap::new()),
+            aria2_dispatch_inflight: Mutex::new(HashMap::new()),
+            aria2_dispatch_notify: Notify::new(),
             aria2_global_speed_limit: Arc::new(StdMutex::new(None)),
             aria2_retry_strikes: Mutex::new(HashMap::new()),
             aria2_retry_cancelled: Mutex::new(HashSet::new()),
@@ -1203,7 +1210,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         }
     }
 
-    async fn release_permit_for_generation(&self, id: &str, generation: u64) {
+    pub(crate) async fn release_permit_for_generation(&self, id: &str, generation: u64) {
         let _admission_gate = self.admission_gate.lock().await;
         let removed = {
             let mut permits = self.active_permits.lock().await;
@@ -1392,6 +1399,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
         } else {
             None
         };
+        if let Some(epoch) = aria2_lifecycle_epoch {
+            self.begin_aria2_dispatch(&id, epoch).await;
+        }
         self.emit_state(&id, DownloadStatus::Downloading);
         drop(control_guard);
 
@@ -1399,7 +1409,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
             TaskKind::Aria2 => {
                 let lifecycle_epoch = aria2_lifecycle_epoch
                     .expect("aria2 dispatch must initialize a control epoch");
-                match self.spawner.add_uri(&id, &task.payload).await {
+                let add_result = self.spawner.add_uri(&id, &task.payload).await;
+                match add_result {
                     Ok(gid) => {
                         let control_guard = self.acquire_aria2_control(&id).await;
                         let cancelled = self.aria2_retry_cancelled.lock().await.contains(&id);
@@ -1414,6 +1425,23 @@ impl<R: tauri::Runtime> QueueManager<R> {
                                 id,
                                 gid
                             );
+                            if task.payload.is_torrent {
+                                if let Err(error) = self
+                                    .reconcile_aria2_torrent_ownership_for_payload(
+                                        &id,
+                                        &gid,
+                                        &task.payload,
+                                    )
+                                    .await
+                                {
+                                    log::debug!(
+                                        "aria2 dispatch cancellation [{}]: could not resolve torrent output paths for gid {}: {}",
+                                        id,
+                                        gid,
+                                        error
+                                    );
+                                }
+                            }
                             if let Err(error) = self.spawner.remove_uri(&gid).await {
                                 log::warn!(
                                     "aria2 dispatch cancellation [{}]: failed to remove late gid {}: {}",
@@ -1423,6 +1451,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                                 );
                             }
                             self.ignore_aria2_gid(&gid).await;
+                            self.finish_aria2_dispatch(&id, lifecycle_epoch).await;
                             if current_lifecycle {
                                 self.clear_aria2_retry_state(&id).await;
                                 self.release_permit(&id).await;
@@ -1430,6 +1459,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                             return;
                         }
                         let buffered_outcome = self.remember_gid(id.clone(), gid.clone()).await;
+                        self.finish_aria2_dispatch(&id, lifecycle_epoch).await;
                         drop(control_guard);
                         if let Some(outcome) = buffered_outcome {
                             self.handle_aria2_event(&gid, outcome).await;
@@ -1454,6 +1484,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                                 id
                             );
                         }
+                        self.finish_aria2_dispatch(&id, lifecycle_epoch).await;
                     }
                 }
             }
@@ -1755,23 +1786,55 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .find_map(|(gid, mapping)| (mapping.id == id).then(|| gid.clone()))
     }
 
-    /// Refresh ownership from Aria2's resolved file list before a torrent
-    /// lifecycle is forgotten. Magnet metadata is not available when the row
-    /// is enqueued, so the user-provided display name is not a safe ownership
-    /// path until Aria2 reports the actual files.
-    pub async fn reconcile_aria2_torrent_ownership(
+    async fn begin_aria2_dispatch(&self, id: &str, epoch: u64) {
+        self.aria2_dispatch_inflight
+            .lock()
+            .await
+            .entry(id.to_string())
+            .or_default()
+            .insert(epoch);
+    }
+
+    async fn finish_aria2_dispatch(&self, id: &str, epoch: u64) {
+        let mut inflight = self.aria2_dispatch_inflight.lock().await;
+        let removed = if let Some(epochs) = inflight.get_mut(id) {
+            let removed = epochs.remove(&epoch);
+            if epochs.is_empty() {
+                inflight.remove(id);
+            }
+            removed
+        } else {
+            false
+        };
+        drop(inflight);
+        if removed {
+            self.aria2_dispatch_notify.notify_waiters();
+        }
+    }
+
+    pub async fn wait_for_aria2_dispatch(&self, id: &str) {
+        loop {
+            let notified = self.aria2_dispatch_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self
+                .aria2_dispatch_inflight
+                .lock()
+                .await
+                .contains_key(id)
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    async fn reconcile_aria2_torrent_ownership_for_payload(
         &self,
         id: &str,
         gid: &str,
+        payload: &SpawnPayload,
     ) -> Result<(), String> {
-        let payload = self.aria2_payloads.lock().await.get(id).cloned();
-        let Some(payload) = payload.filter(|payload| payload.is_torrent) else {
-            return Ok(());
-        };
-        let mapping = self
-            .aria2_gid_mapping(gid)
-            .filter(|mapping| mapping.id == id)
-            .ok_or_else(|| "aria2 torrent ownership has no current gid mapping".to_string())?;
         let state = self.app_handle.state::<crate::AppState>();
         let result = crate::rpc_call(
             state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
@@ -1780,14 +1843,15 @@ impl<R: tauri::Runtime> QueueManager<R> {
             serde_json::json!([gid]),
         )
         .await?;
-        if !self.is_current_aria2_gid_mapping(gid, &mapping)
-            || !self
-                .is_aria2_control_epoch_current(id, mapping.epoch)
-                .await
-        {
-            return Err("aria2 torrent lifecycle changed while resolving output paths".to_string());
-        }
+        self.persist_aria2_torrent_ownership(id, payload, result)
+    }
 
+    fn persist_aria2_torrent_ownership(
+        &self,
+        id: &str,
+        payload: &SpawnPayload,
+        result: serde_json::Value,
+    ) -> Result<(), String> {
         let paths = result
             .as_array()
             .into_iter()
@@ -1839,6 +1903,41 @@ impl<R: tauri::Runtime> QueueManager<R> {
             &primary,
             &paths,
         )
+    }
+
+    /// Refresh ownership from Aria2's resolved file list before a torrent
+    /// lifecycle is forgotten. Magnet metadata is not available when the row
+    /// is enqueued, so the user-provided display name is not a safe ownership
+    /// path until Aria2 reports the actual files.
+    pub async fn reconcile_aria2_torrent_ownership(
+        &self,
+        id: &str,
+        gid: &str,
+    ) -> Result<(), String> {
+        let payload = self.aria2_payloads.lock().await.get(id).cloned();
+        let Some(payload) = payload.filter(|payload| payload.is_torrent) else {
+            return Ok(());
+        };
+        let mapping = self
+            .aria2_gid_mapping(gid)
+            .filter(|mapping| mapping.id == id)
+            .ok_or_else(|| "aria2 torrent ownership has no current gid mapping".to_string())?;
+        let state = self.app_handle.state::<crate::AppState>();
+        let result = crate::rpc_call(
+            state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+            &state.aria2_secret,
+            "aria2.getFiles",
+            serde_json::json!([gid]),
+        )
+        .await?;
+        if !self.is_current_aria2_gid_mapping(gid, &mapping)
+            || !self
+                .is_aria2_control_epoch_current(id, mapping.epoch)
+                .await
+        {
+            return Err("aria2 torrent lifecycle changed while resolving output paths".to_string());
+        }
+        self.persist_aria2_torrent_ownership(id, &payload, result)
     }
 
     /// Capture the GID ownership token used by the poller. The mapping's
@@ -2467,6 +2566,17 @@ impl<R: tauri::Runtime> QueueManager<R> {
         }
         removed
     }
+
+    pub async fn remove_from_pending_for_generation(&self, id: &str, generation: u64) -> bool {
+        let mut pending = self.pending.lock().await;
+        let before = pending.len();
+        pending.retain(|task| !(task.id == id && task.lifecycle_generation == generation));
+        let removed = pending.len() < before;
+        if removed {
+            self.notify.notify_one();
+        }
+        removed
+    }
 }
 
 fn automatic_retry_limit(max_tries: Option<i32>) -> usize {
@@ -2950,7 +3060,14 @@ impl SidecarSpawner for ProductionSpawner {
         )
         .await?;
         match result.as_str() {
-            Some(returned_gid) if returned_gid == gid => Ok(()),
+            Some(returned_gid) if returned_gid == gid => {
+                crate::wait_for_aria2_stopped(
+                    state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+                    &state.aria2_secret,
+                    gid,
+                )
+                .await
+            }
             Some(returned_gid) => Err(format!(
                 "aria2.forceRemove returned unexpected gid {returned_gid}, expected {gid}"
             )),

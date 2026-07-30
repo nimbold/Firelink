@@ -4884,16 +4884,22 @@ async fn remove_download(
 ) -> Result<(), String> {
     log::info!("remove_download called for id: {}", id);
     let preserve_resumable = preserve_resumable.unwrap_or(false);
-    let mut owned_paths = crate::download_ownership::owned_paths_for_id(&app_handle, &id)?;
-    let _control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
 
     let active_kind = state.queue_manager.active_kind(&id).await;
-    let media_lifecycle_generation = state
+    let registered_lifecycle_generation = state
         .queue_manager
         .registered_lifecycle_generation(&id)
-        .await
-        .unwrap_or_default();
-    state.queue_manager.remove_from_pending(&id).await;
+        .await;
+    let media_lifecycle_generation = registered_lifecycle_generation.unwrap_or_default();
+    if let Some(generation) = registered_lifecycle_generation {
+        state
+            .queue_manager
+            .remove_from_pending_for_generation(&id, generation)
+            .await;
+    } else {
+        state.queue_manager.remove_from_pending(&id).await;
+    }
 
     let gid = state.queue_manager.aria2_gid_for_download(&id);
     if let Some(gid) = gid.as_deref() {
@@ -4909,7 +4915,6 @@ async fn remove_download(
                 error
             );
         }
-        owned_paths = crate::download_ownership::owned_paths_for_id(&app_handle, &id)?;
         // Keep the current epoch and mapping alive until daemon removal is
         // confirmed. If removal fails, terminal events from this lifecycle
         // must still be accepted so the permit and mapping can be cleaned up.
@@ -4942,7 +4947,7 @@ async fn remove_download(
         // There may be an addUri or retry handoff in flight with no mapped
         // GID yet. Invalidate that pending lifecycle before acknowledging the
         // removal so its late result cannot resurrect the download.
-        state.queue_manager.next_aria2_control_epoch(&id).await;
+        let removal_epoch = state.queue_manager.next_aria2_control_epoch(&id).await;
         state.queue_manager.cancel_aria2_retries(&id).await;
         let (tx, rx) = tokio::sync::oneshot::channel();
         if matches!(active_kind, Some(crate::queue::TaskKind::Media)) {
@@ -4961,10 +4966,78 @@ async fn remove_download(
                 .await;
         }
 
+        // The initial addUri call intentionally runs outside the control lock.
+        // Do not delete the guessed magnet path and ownership record until a
+        // late GID has been removed; otherwise the daemon can finish creating
+        // an output after cleanup and leave an untracked file behind.
+        drop(control_guard);
+        state.queue_manager.wait_for_aria2_dispatch(&id).await;
+        let _control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+        let current_generation = state
+            .queue_manager
+            .registered_lifecycle_generation(&id)
+            .await;
+        let lifecycle_changed = registered_lifecycle_generation.is_some()
+            && current_generation != registered_lifecycle_generation
+            || registered_lifecycle_generation.is_none() && current_generation.is_some();
+        if lifecycle_changed {
+            state
+                .queue_manager
+                .release_permit_for_generation(&id, media_lifecycle_generation)
+                .await;
+            return Err("download lifecycle changed while waiting for aria2 dispatch".to_string());
+        }
+        if let Some(late_gid) = state.queue_manager.aria2_gid_for_download(&id) {
+            if let Err(error) = state
+                .queue_manager
+                .reconcile_aria2_torrent_ownership(&id, &late_gid)
+                .await
+            {
+                log::debug!(
+                    "aria2 remove [{}]: could not resolve files for late gid {}: {}",
+                    id,
+                    late_gid,
+                    error
+                );
+            }
+            let removal_result = async {
+                force_remove_aria2_gid(
+                    state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+                    &state.aria2_secret,
+                    &late_gid,
+                )
+                .await?;
+                wait_for_aria2_stopped(
+                    state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+                    &state.aria2_secret,
+                    &late_gid,
+                )
+                .await
+            }
+            .await;
+            if let Err(error) = removal_result {
+                state.queue_manager.allow_aria2_retries(&id).await;
+                return Err(error);
+            }
+            state.queue_manager.next_aria2_control_epoch(&id).await;
+            state.queue_manager.clear_aria2_retry_state(&id).await;
+            state.queue_manager.forget_aria2_gid(&id).await;
+        } else if !state
+            .queue_manager
+            .is_aria2_control_epoch_current(&id, removal_epoch)
+            .await
+        {
+            // A same-generation pause/resume control action may advance the
+            // epoch while the late add is being retired. Removal still owns
+            // the registered row, so fence that action before cleaning it.
+            state.queue_manager.next_aria2_control_epoch(&id).await;
+        }
         state.queue_manager.release_permit(&id).await;
         state.queue_manager.clear_aria2_retry_state(&id).await;
         state.queue_manager.forget_aria2_gid(&id).await;
     }
+
+    let owned_paths = crate::download_ownership::owned_paths_for_id(&app_handle, &id)?;
 
     use tauri::Emitter;
     let _ = app_handle.emit(
@@ -5545,6 +5618,10 @@ async fn validate_torrent_enqueue(
         let bytes = std::fs::read(path)
             .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
         let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
+        crate::torrent::validate_info_hash(
+            item.torrent_info_hash.as_deref(),
+            &metadata.info_hash,
+        )?;
         crate::torrent::validate_selected_indices(
             item.torrent_file_indices.as_deref(),
             metadata.files.len(),
@@ -5559,7 +5636,8 @@ async fn validate_torrent_enqueue(
     if item.torrent_file_indices.is_some() {
         return Err("magnet file selection requires resolved torrent metadata".to_string());
     }
-    crate::torrent::inspect_source(&item.url).map(|_| ())
+    let metadata = crate::torrent::inspect_source(&item.url)?;
+    crate::torrent::validate_info_hash(item.torrent_info_hash.as_deref(), &metadata.info_hash)
 }
 
 fn expected_torrent_output_paths(

@@ -292,6 +292,55 @@ fn parse_info(info: &BencodeValue) -> Result<ParsedTorrent, String> {
     Ok(ParsedTorrent { name, total_bytes, files, info_hash })
 }
 
+fn canonical_btih(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.len() == 40 && normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Some(normalized);
+    }
+    if normalized.len() != 32 {
+        return None;
+    }
+
+    let mut decoded = Vec::with_capacity(20);
+    let mut accumulator = 0u64;
+    let mut bits = 0u8;
+    for byte in normalized.bytes() {
+        let value = match byte {
+            b'a'..=b'z' => byte - b'a',
+            b'2'..=b'7' => byte - b'2' + 26,
+            _ => return None,
+        } as u64;
+        accumulator = (accumulator << 5) | value;
+        bits += 5;
+        while bits >= 8 {
+            bits -= 8;
+            decoded.push(((accumulator >> bits) & 0xff) as u8);
+        }
+        if bits == 0 {
+            accumulator = 0;
+        } else {
+            accumulator &= (1u64 << bits) - 1;
+        }
+    }
+    if bits != 0 || decoded.len() != 20 {
+        return None;
+    }
+
+    Some(decoded.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+pub fn validate_info_hash(expected: Option<&str>, actual: &str) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let expected = canonical_btih(expected)
+        .ok_or_else(|| "torrent metadata has an invalid expected info hash".to_string())?;
+    if expected != actual {
+        return Err("torrent metadata changed before it was queued".to_string());
+    }
+    Ok(())
+}
+
 pub fn parse_torrent_bytes(bytes: &[u8]) -> Result<ParsedTorrent, String> {
     if bytes.is_empty() || bytes.len() > MAX_TORRENT_BYTES {
         return Err(format!("torrent metadata must be between 1 byte and {MAX_TORRENT_BYTES} bytes"));
@@ -319,17 +368,7 @@ fn magnet_metadata(source: &str) -> Result<ParsedTorrent, String> {
                 return None;
             }
             let value = value.strip_prefix("urn:btih:")?;
-            let normalized = value.trim().to_ascii_lowercase();
-            if (normalized.len() == 40 && normalized.bytes().all(|byte| byte.is_ascii_hexdigit()))
-                || (normalized.len() == 32
-                    && normalized
-                        .bytes()
-                        .all(|byte| byte.is_ascii_lowercase() || matches!(byte, b'2'..=b'7')))
-            {
-                Some(normalized)
-            } else {
-                None
-            }
+            canonical_btih(value)
         })
         .ok_or_else(|| "magnet URI has no valid BitTorrent info hash".to_string())?;
     let name = parsed
@@ -543,11 +582,41 @@ mod tests {
     }
 
     #[test]
+    fn canonicalizes_base32_magnet_hashes_to_hex() {
+        let parsed = inspect_source(
+            "magnet:?xt=urn:btih:AERUKZ4JVPG66AJDIVTYTK6N54ASGRLH&dn=Base32",
+        )
+        .expect("a valid Base32 hash should parse");
+        assert_eq!(parsed.info_hash, "0123456789abcdef0123456789abcdef01234567");
+    }
+
+    #[test]
+    fn validates_expected_hashes_across_hex_and_base32_encodings() {
+        validate_info_hash(
+            Some("AERUKZ4JVPG66AJDIVTYTK6N54ASGRLH"),
+            "0123456789abcdef0123456789abcdef01234567",
+        )
+        .expect("equivalent Base32 and hexadecimal hashes should match");
+        assert!(validate_info_hash(
+            Some("0123456789abcdef0123456789abcdef01234567"),
+            "fedcba9876543210fedcba9876543210fedcba98",
+        )
+        .is_err());
+        validate_info_hash(None, "not-used").expect("missing legacy identity should remain compatible");
+    }
+
+    #[test]
     fn rejects_malformed_base32_magnet_hashes() {
         let error = inspect_source(
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcde!&dn=Invalid",
         )
         .expect_err("a 32-character hash with non-base32 characters must be rejected");
+        assert!(error.contains("valid BitTorrent info hash"));
+
+        let error = inspect_source(
+            "magnet:?xt=urn:btih:00000000000000000000000000000000&dn=Invalid",
+        )
+        .expect_err("characters outside RFC 4648 Base32 must be rejected");
         assert!(error.contains("valid BitTorrent info hash"));
     }
 

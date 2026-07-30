@@ -2043,7 +2043,9 @@ async fn late_aria2_gid_after_cancellation_is_removed_without_leaking_permit() {
     manager.release_registered_id("late").await;
     manager.release_permit("late").await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    timeout(Duration::from_secs(1), manager.wait_for_aria2_dispatch("late"))
+        .await
+        .expect("late dispatch must be fully removed before it is considered finished");
 
     assert!(manager.aria2_gid_for_download("late").is_none());
     assert_eq!(manager.available_permits(), 1);
