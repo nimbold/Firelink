@@ -55,6 +55,7 @@ export interface AddDownloadDraftRow {
   selected?: boolean;
   isTorrent?: boolean;
   torrentPath?: string;
+  torrentCacheId?: string;
   torrentInfoHash?: string;
   torrentFiles?: TorrentFile[];
   selectedTorrentFileIndices?: number[];
@@ -237,6 +238,7 @@ export const reconcileDownloadRows = (
         || preserved.playlistCount !== input.playlistCount
         || preserved.playlistEntryTitle !== input.playlistEntryTitle;
       if ((forcedMedia && !preserved.isMedia) || contextChanged || playlistContextChanged) {
+        const nextGeneration = preserved.generation + 1;
         const requestedFilename = input.playlistSourceUrl
           ? `${playlistFilePrefix(input.playlistIndex, input.playlistCount)}${input.playlistEntryTitle || 'video'}`
           : requestFilenames[input.sourceUrl];
@@ -246,7 +248,7 @@ export const reconcileDownloadRows = (
             ? canonicalizeDownloadFileName(requestedFilename || fileNameFromUrl(input.sourceUrl))
             : preserved.file,
           status: 'loading',
-          generation: preserved.generation + 1,
+          generation: nextGeneration,
           requestContextVersion,
           isMedia: preserved.isMedia || forcedMedia || Boolean(input.playlistSourceUrl),
           isTorrent: input.isTorrent,
@@ -267,10 +269,11 @@ export const reconcileDownloadRows = (
           playlistEntryTitle: input.playlistEntryTitle,
           playlistError: undefined,
           metadataBlockedReason: undefined,
-          torrentPath: input.isTorrent ? preserved.torrentPath : undefined,
-          torrentInfoHash: input.isTorrent ? preserved.torrentInfoHash : undefined,
-          torrentFiles: input.isTorrent ? preserved.torrentFiles : undefined,
-          selectedTorrentFileIndices: input.isTorrent ? preserved.selectedTorrentFileIndices : undefined
+          torrentPath: undefined,
+          torrentCacheId: input.isTorrent ? `${preserved.id}-${nextGeneration}` : undefined,
+          torrentInfoHash: undefined,
+          torrentFiles: undefined,
+          selectedTorrentFileIndices: undefined
         };
       }
       return preserved;
@@ -284,13 +287,15 @@ export const reconcileDownloadRows = (
       requestedFilename || fileNameFromUrl(input.sourceUrl)
     );
 
+    const id = createId();
+    const generation = input.valid ? 1 : 0;
     return {
-      id: createId(),
+      id,
       sourceUrl: input.sourceUrl,
       downloadUrl: input.sourceUrl,
       file: fallback,
       status: input.valid ? 'loading' : 'invalid',
-      generation: input.valid ? 1 : 0,
+      generation,
       requestContextVersion: input.requestContextVersion,
       isMedia: input.valid && (
         Boolean(input.isPlaylist)
@@ -306,6 +311,7 @@ export const reconcileDownloadRows = (
       playlistCount: input.playlistCount,
       playlistEntryTitle: input.playlistEntryTitle,
       metadataBlockedReason: undefined,
+      torrentCacheId: input.valid && input.isTorrent ? `${id}-${generation}` : undefined,
       selected: input.selected !== false
     };
   });

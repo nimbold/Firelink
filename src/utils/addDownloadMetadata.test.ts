@@ -102,6 +102,40 @@ describe('add download metadata workflow', () => {
       sourceUrl: 'file:///tmp/Example.torrent',
       status: 'loading'
     });
+    expect(rows[0].torrentCacheId).toBe(`${rows[0].id}-1`);
+    expect(rows[1].torrentCacheId).toBe(`${rows[1].id}-1`);
+  });
+
+  it('gives refreshed torrent metadata a new cache identity', () => {
+    const existing = row({
+      id: 'torrent-row',
+      sourceUrl: 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567',
+      downloadUrl: 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567',
+      isTorrent: true,
+      torrentCacheId: 'torrent-row-1',
+      torrentPath: '/managed/torrent-row-1.torrent',
+      torrentInfoHash: '0123456789abcdef0123456789abcdef01234567',
+      generation: 1,
+      requestContextVersion: 1
+    });
+
+    const refreshed = reconcileDownloadRows(
+      existing.sourceUrl,
+      [existing],
+      undefined,
+      new Set(),
+      undefined,
+      {},
+      { [existing.sourceUrl]: 2 }
+    );
+
+    expect(refreshed[0]).toMatchObject({
+      generation: 2,
+      torrentCacheId: 'torrent-row-2',
+      torrentPath: undefined,
+      torrentInfoHash: undefined,
+      torrentFiles: undefined
+    });
   });
 
   it('keeps a playlist as one loading row until discovery succeeds', () => {

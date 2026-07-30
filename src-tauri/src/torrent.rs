@@ -457,12 +457,82 @@ pub fn managed_torrent_path<R: tauri::Runtime>(
     if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
         return Err("invalid torrent download id".to_string());
     }
+    let root = managed_torrent_storage_root(app_handle)?;
+    Ok(root.join(format!("{id}.torrent")))
+}
+
+pub fn managed_torrent_storage_root<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<PathBuf, String> {
     let root = app_handle
         .path()
         .app_data_dir()
         .map_err(|error| format!("could not resolve torrent storage: {error}"))?
         .join("torrents");
-    Ok(root.join(format!("{id}.torrent")))
+    Ok(root)
+}
+
+pub fn remove_orphaned_probe_dirs<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<usize, String> {
+    let root = managed_torrent_storage_root(app_handle)?;
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(format!("could not inspect torrent probe storage: {error}")),
+    };
+    let mut removed = 0;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("could not inspect torrent probe storage: {error}"))?;
+        let is_probe = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(".probe-"));
+        if !is_probe || !entry
+            .file_type()
+            .map_err(|error| format!("could not inspect torrent probe entry: {error}"))?
+            .is_dir()
+        {
+            continue;
+        }
+        std::fs::remove_dir_all(entry.path())
+            .map_err(|error| format!("could not remove orphaned torrent probe: {error}"))?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
+pub fn remove_orphaned_cached_torrents<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    retained_ids: &HashSet<String>,
+) -> Result<usize, String> {
+    let root = managed_torrent_storage_root(app_handle)?;
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(format!("could not inspect torrent metadata storage: {error}")),
+    };
+    let mut removed = 0;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("could not inspect torrent metadata storage: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("could not inspect torrent metadata entry: {error}"))?;
+        if !file_type.is_file() || entry.path().extension().and_then(|ext| ext.to_str()) != Some("torrent") {
+            continue;
+        }
+        let path = entry.path();
+        let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if retained_ids.contains(id) {
+            continue;
+        }
+        std::fs::remove_file(path)
+            .map_err(|error| format!("could not remove orphaned torrent metadata: {error}"))?;
+        removed += 1;
+    }
+    Ok(removed)
 }
 
 pub fn validate_selected_indices(
@@ -499,16 +569,30 @@ pub async fn prepare_local_torrent<R: tauri::Runtime>(
         .await
         .map_err(|error| format!("could not read torrent file: {error}"))?;
     let parsed = parse_torrent_bytes(&bytes)?;
+    let destination = cache_torrent_bytes(app_handle, id, &bytes).await?;
+    Ok((parsed, destination))
+}
+
+pub async fn cache_torrent_bytes<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    id: &str,
+    bytes: &[u8],
+) -> Result<String, String> {
+    if bytes.is_empty() || bytes.len() > MAX_TORRENT_BYTES {
+        return Err(format!(
+            "torrent metadata must be between 1 byte and {MAX_TORRENT_BYTES} bytes"
+        ));
+    }
     let destination = managed_torrent_path(app_handle, id)?;
     if let Some(parent) = destination.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|error| format!("could not create torrent storage: {error}"))?;
     }
-    tokio::fs::write(&destination, &bytes)
+    tokio::fs::write(&destination, bytes)
         .await
         .map_err(|error| format!("could not cache torrent metadata: {error}"))?;
-    Ok((parsed, destination.to_string_lossy().to_string()))
+    Ok(destination.to_string_lossy().to_string())
 }
 
 pub fn validate_managed_torrent_path<R: tauri::Runtime>(

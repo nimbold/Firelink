@@ -2700,7 +2700,7 @@ fn proxy_scheme(proxy: &str) -> Option<String> {
         .map(|(scheme, _)| scheme.trim().to_ascii_lowercase())
 }
 
-fn aria2_all_proxy_value(proxy: &str) -> Result<Option<String>, String> {
+pub(crate) fn aria2_all_proxy_value(proxy: &str) -> Result<Option<String>, String> {
     let proxy = proxy.trim();
     if proxy.is_empty() {
         return Ok(None);

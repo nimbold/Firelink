@@ -34,8 +34,16 @@ type CommandMap = {
     result: MediaPlaylistMetadata;
   };
   inspect_torrent: {
-    args: { source: string; id: string; cache?: boolean };
+    args: { source: string; id: string; cache?: boolean; proxy?: string };
     result: TorrentMetadata;
+  };
+  rekey_torrent_metadata: {
+    args: { sourceId: string; targetId: string };
+    result: string;
+  };
+  remove_torrent_metadata: {
+    args: { id: string };
+    result: void;
   };
  get_aria2_engine_status: { args: undefined; result: EngineStatusItem };
  get_ytdlp_engine_status: { args: undefined; result: EngineStatusItem };

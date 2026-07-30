@@ -5688,17 +5688,191 @@ fn expected_torrent_output_paths(
     Ok(Some(paths))
 }
 
+async fn resolve_magnet_metadata(
+    app_handle: &tauri::AppHandle,
+    state: &AppState,
+    source: &str,
+    id: &str,
+    proxy: Option<&str>,
+    cache: bool,
+) -> Result<crate::ipc::TorrentMetadata, String> {
+    let expected = crate::torrent::inspect_source(source)?;
+    let managed_path = crate::torrent::managed_torrent_path(app_handle, id)?;
+    let storage_root = managed_path
+        .parent()
+        .ok_or_else(|| "torrent storage has no parent directory".to_string())?;
+    let probe_dir = storage_root.join(format!(".probe-{}", uuid::Uuid::new_v4().simple()));
+    tokio::fs::create_dir_all(&probe_dir)
+        .await
+        .map_err(|error| format!("could not create torrent metadata probe: {error}"))?;
+
+    let port = state
+        .aria2_port
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let secret = state.aria2_secret.clone();
+    let metadata_path = probe_dir.join(format!("{}.torrent", expected.info_hash));
+    let mut gid = None;
+    let metadata_result = async {
+        let mut options = serde_json::Map::new();
+        options.insert(
+            "dir".to_string(),
+            serde_json::json!(probe_dir.to_string_lossy().to_string()),
+        );
+        options.insert("bt-metadata-only".to_string(), serde_json::json!("true"));
+        options.insert("bt-save-metadata".to_string(), serde_json::json!("true"));
+        options.insert("max-tries".to_string(), serde_json::json!("3"));
+        options.insert("retry-wait".to_string(), serde_json::json!("2"));
+        options.insert("connect-timeout".to_string(), serde_json::json!("20"));
+        options.insert("timeout".to_string(), serde_json::json!("60"));
+        options.insert("auto-file-renaming".to_string(), serde_json::json!("false"));
+        if let Some(proxy) = proxy {
+            if let Some(proxy) = crate::queue::aria2_all_proxy_value(proxy)? {
+                options.insert("all-proxy".to_string(), serde_json::json!(proxy));
+            }
+        }
+
+        let result = crate::rpc_call(
+            port,
+            &secret,
+            "aria2.addUri",
+            serde_json::json!([[source], options]),
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "Aria2 could not start magnet metadata resolution: {}",
+                crate::redact_sensitive_text(&error)
+            )
+        })?;
+        let added_gid = result
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "Aria2 returned an empty metadata probe GID".to_string())?
+            .to_string();
+        gid = Some(added_gid.clone());
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let status = match crate::rpc_call(
+                port,
+                &secret,
+                "aria2.tellStatus",
+                serde_json::json!([&added_gid, ["status", "errorCode", "errorMessage"]]),
+            )
+            .await
+            {
+                Ok(status) => status,
+                Err(error) if aria2_gid_not_found(&error) => {
+                    return Err(
+                        "Aria2 removed the magnet metadata probe before metadata was saved"
+                            .to_string(),
+                    );
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "Aria2 metadata resolution status failed: {}",
+                        crate::redact_sensitive_text(&error)
+                    ));
+                }
+            };
+            match status.get("status").and_then(serde_json::Value::as_str) {
+                Some("complete") => break,
+                Some("error") | Some("removed") => {
+                    let error_code = status
+                        .get("errorCode")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|value| !value.is_empty());
+                    let error_message = status
+                        .get("errorMessage")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("metadata probe ended without a torrent file");
+                    let detail = match error_code {
+                        Some(code) => format!("aria2 error code {code}: {error_message}"),
+                        None => error_message.to_string(),
+                    };
+                    return Err(format!(
+                        "Aria2 could not resolve magnet metadata: {}",
+                        crate::redact_sensitive_text(&detail)
+                    ));
+                }
+                Some("active") | Some("waiting") | Some("paused") | None => {}
+                Some(status) => {
+                    return Err(format!(
+                        "Aria2 returned an unsupported metadata probe status: {status}"
+                    ));
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err("Aria2 magnet metadata resolution timed out".to_string());
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+
+        let bytes = tokio::fs::read(&metadata_path)
+            .await
+            .map_err(|error| format!("Aria2 did not save magnet metadata: {error}"))?;
+        let parsed = crate::torrent::parse_torrent_bytes(&bytes)?;
+        crate::torrent::validate_info_hash(Some(&expected.info_hash), &parsed.info_hash)?;
+        Ok((parsed, bytes))
+    }
+    .await;
+
+    let cleanup_result = if let Some(gid) = gid.as_deref() {
+        let removal = force_remove_aria2_gid(port, &secret, gid).await;
+        match removal {
+            Ok(()) => wait_for_aria2_stopped(port, &secret, gid).await,
+            Err(error) => Err(error),
+        }
+    } else {
+        Ok(())
+    };
+    if let Err(error) = cleanup_result {
+        if aria2_daemon_process_exited(app_handle) {
+            if let Err(remove_error) = tokio::fs::remove_dir_all(&probe_dir).await {
+                return Err(format!(
+                    "could not clean up magnet metadata probe: {error}; could not remove probe after aria2 exit: {remove_error}"
+                ));
+            }
+            return Err(format!(
+                "could not clean up magnet metadata probe after aria2 exit: {error}"
+            ));
+        }
+        return Err(format!("could not clean up magnet metadata probe: {error}"));
+    }
+    if let Err(error) = tokio::fs::remove_dir_all(&probe_dir).await {
+        return Err(format!("could not remove magnet metadata probe: {error}"));
+    }
+
+    let (parsed, bytes) = metadata_result?;
+    let torrent_path = if cache {
+        Some(crate::torrent::cache_torrent_bytes(app_handle, id, &bytes).await?)
+    } else {
+        None
+    };
+    Ok(crate::torrent::to_metadata(parsed, torrent_path))
+}
+
 #[tauri::command]
 async fn inspect_torrent(
     app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
     source: String,
     id: String,
     cache: Option<bool>,
+    proxy: Option<String>,
 ) -> Result<crate::ipc::TorrentMetadata, AppError> {
     if source.trim_start().to_ascii_lowercase().starts_with("magnet:") {
-        return crate::torrent::inspect_source(&source)
-            .map(|parsed| crate::torrent::to_metadata(parsed, None))
-            .map_err(AppError::Internal);
+        return resolve_magnet_metadata(
+            &app_handle,
+            state.inner(),
+            &source,
+            &id,
+            proxy.as_deref(),
+            cache == Some(true),
+        )
+        .await
+        .map_err(AppError::Internal);
     }
     if cache == Some(false) {
         return crate::torrent::inspect_source(&source)
@@ -5709,6 +5883,52 @@ async fn inspect_torrent(
         .await
         .map_err(AppError::Internal)?;
     Ok(crate::torrent::to_metadata(parsed, Some(path)))
+}
+
+#[tauri::command]
+async fn rekey_torrent_metadata(
+    app_handle: tauri::AppHandle,
+    source_id: String,
+    target_id: String,
+) -> Result<String, AppError> {
+    let source = crate::torrent::managed_torrent_path(&app_handle, &source_id)
+        .map_err(AppError::Internal)?;
+    let source = crate::torrent::validate_managed_torrent_path(
+        &app_handle,
+        &source_id,
+        &source.to_string_lossy(),
+    )
+    .map_err(AppError::Internal)?;
+    let bytes = tokio::fs::read(&source)
+        .await
+        .map_err(|error| {
+            AppError::Internal(format!("could not read cached torrent metadata: {error}"))
+        })?;
+    crate::torrent::parse_torrent_bytes(&bytes).map_err(AppError::Internal)?;
+    let target = crate::torrent::cache_torrent_bytes(&app_handle, &target_id, &bytes)
+        .await
+        .map_err(AppError::Internal)?;
+    let target = crate::torrent::validate_managed_torrent_path(
+        &app_handle,
+        &target_id,
+        &target,
+    )
+    .map_err(AppError::Internal)?;
+    if source != target {
+        tokio::fs::remove_file(&source).await.map_err(|error| {
+            AppError::Internal(format!("could not remove temporary torrent metadata: {error}"))
+        })?;
+    }
+    Ok(target.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn remove_torrent_metadata(
+    app_handle: tauri::AppHandle,
+    id: String,
+) -> Result<(), AppError> {
+    crate::torrent::remove_managed_torrent(&app_handle, &id).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -9629,6 +9849,46 @@ pub fn run() {
 
             let database = crate::db::init(&storage_layout)
                 .map_err(|error| format!("failed to initialize persistence: {error}"))?;
+            if let Err(error) = crate::torrent::remove_orphaned_probe_dirs(app.handle()) {
+                log::warn!("could not remove orphaned torrent probes: {error}");
+            }
+            let retained_torrent_ids = database
+                .lock()
+                .and_then(|connection| crate::db::load_downloads(&connection))
+                .and_then(|records| {
+                    records
+                        .into_iter()
+                        .map(|record| {
+                            serde_json::from_str::<crate::ipc::DownloadItem>(&record)
+                                .map_err(|error| {
+                                    format!("could not decode persisted download metadata: {error}")
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .map(|downloads| {
+                    downloads
+                        .into_iter()
+                        .filter(|download| {
+                            download.is_torrent.unwrap_or(false)
+                                && download.torrent_path.is_some()
+                        })
+                        .map(|download| download.id)
+                        .collect::<HashSet<_>>()
+                });
+            match retained_torrent_ids {
+                Ok(retained_torrent_ids) => {
+                    if let Err(error) = crate::torrent::remove_orphaned_cached_torrents(
+                        app.handle(),
+                        &retained_torrent_ids,
+                    ) {
+                        log::warn!("could not remove orphaned torrent metadata: {error}");
+                    }
+                }
+                Err(error) => {
+                    log::warn!("could not identify retained torrent metadata: {error}");
+                }
+            }
             let initial_pairing_token = {
                 // Generate a temporary session token for the extension server on startup.
                 // The frontend will hydrate the real token via IPC once it mounts,
@@ -10291,7 +10551,7 @@ pub fn run() {
 .invoke_handler(tauri::generate_handler![
  get_engine_status, get_aria2_engine_status, get_ytdlp_engine_status, get_ffmpeg_engine_status,
  get_deno_engine_status, test_ytdlp, test_aria2c, test_ffmpeg, test_deno,
- pause_download, resume_download, fetch_metadata, inspect_torrent, fetch_media_metadata, fetch_media_playlist_metadata,
+ pause_download, resume_download, fetch_metadata, inspect_torrent, rekey_torrent_metadata, remove_torrent_metadata, fetch_media_metadata, fetch_media_playlist_metadata,
             begin_dock_badge_session, update_dock_badge, get_platform_info, approve_download_root, set_prevent_sleep, set_power_preferences, get_free_space, perform_system_action,
             ack_schedule_trigger,
             check_automation_permission, request_automation_permission, open_automation_settings,

@@ -160,10 +160,46 @@ export const AddDownloadsModal = () => {
   const [urls, setUrls] = useState('');
   const [selectedItemIndex, setSelectedItemIndex] = useState<number | null>(null);
   const [parsedItems, setParsedItems] = useState<AddDownloadDraftRow[]>([]);
+  const parsedItemsRef = useRef<AddDownloadDraftRow[]>([]);
+  const addModalOpenRef = useRef(isAddModalOpen);
   const metadataRequestsRef = useRef(new Set<string>());
   const playlistRequestsRef = useRef(new Set<string>());
   const latestPlaylistRequestRef = useRef(new Map<string, string>());
+  const cachedTorrentDraftIdsRef = useRef(new Set<string>());
   const [playlistExpansions, setPlaylistExpansions] = useState<Record<string, MediaPlaylistMetadata>>({});
+
+  parsedItemsRef.current = parsedItems;
+  addModalOpenRef.current = isAddModalOpen;
+
+  const cleanupDraftTorrentCache = useCallback((ids?: Iterable<string>) => {
+    const idsToRemove = ids
+      ? Array.from(ids)
+      : Array.from(cachedTorrentDraftIdsRef.current);
+    idsToRemove.forEach(id => cachedTorrentDraftIdsRef.current.delete(id));
+    idsToRemove.forEach(id => {
+      void invoke('remove_torrent_metadata', { id }).catch(error => {
+        console.warn('Failed to remove temporary torrent metadata:', error);
+      });
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!isAddModalOpen) cleanupDraftTorrentCache();
+  }, [cleanupDraftTorrentCache, isAddModalOpen]);
+
+  useEffect(() => {
+    const activeDraftIds = new Set<string>();
+    for (const row of parsedItems) {
+      if (!row.isTorrent) continue;
+      activeDraftIds.add(row.torrentCacheId || row.id);
+      activeDraftIds.add(`${row.id}-${row.generation}`);
+    }
+    const staleDraftIds = Array.from(cachedTorrentDraftIdsRef.current)
+      .filter(id => !activeDraftIds.has(id));
+    if (staleDraftIds.length > 0) cleanupDraftTorrentCache(staleDraftIds);
+  }, [cleanupDraftTorrentCache, parsedItems]);
+
+  useEffect(() => cleanupDraftTorrentCache, [cleanupDraftTorrentCache]);
 
   const [conflicts, setConflicts] = useState<DuplicateConflict[]>([]);
   const [showingDuplicates, setShowingDuplicates] = useState(false);
@@ -519,11 +555,30 @@ export const AddDownloadsModal = () => {
           const contextUrl = requestContextUrlForRow(row);
           const requestContext = requestContextForUrl(contextUrl);
           if (row.isTorrent) {
+            const torrentCacheId = row.torrentCacheId || `${row.id}-${row.generation}`;
+            const proxy = row.sourceUrl.trim().toLowerCase().startsWith('magnet:')
+              ? await getProxyArgs(settingsStore)
+              : undefined;
             const torrentData = await invoke('inspect_torrent', {
               source: row.sourceUrl,
-              id: row.id,
-              cache: false
+              id: torrentCacheId,
+              cache: true,
+              proxy: proxy ?? undefined
             });
+            const isCurrentTorrentDraft = addModalOpenRef.current
+              && parsedItemsRef.current.some(currentRow =>
+                currentRow.id === row.id
+                && currentRow.sourceUrl === row.sourceUrl
+                && currentRow.generation === row.generation
+                && (currentRow.torrentCacheId || `${currentRow.id}-${currentRow.generation}`) === torrentCacheId
+              );
+            if (torrentData.torrentPath && isCurrentTorrentDraft) {
+              cachedTorrentDraftIdsRef.current.add(torrentCacheId);
+            } else if (torrentData.torrentPath) {
+              void invoke('remove_torrent_metadata', { id: torrentCacheId }).catch(error => {
+                console.warn('Failed to remove stale torrent metadata:', error);
+              });
+            }
             const totalBytes = torrentData.totalBytes || undefined;
             setParsedItems(current => updateRowIfCurrent(
               current,
@@ -541,6 +596,7 @@ export const AddDownloadsModal = () => {
                 status: 'ready',
                 isTorrent: true,
                 torrentPath: torrentData.torrentPath,
+                torrentCacheId,
                 torrentInfoHash: torrentData.infoHash,
                 torrentFiles: torrentData.files,
                 selectedTorrentFileIndices: currentRow.selectedTorrentFileIndices
@@ -1280,20 +1336,32 @@ export const AddDownloadsModal = () => {
 
       for (const [itemIndex, item] of itemsToAdd.entries()) {
         if (!item) continue;
+        let allocatedId: string | null = null;
         try {
           const id = crypto.randomUUID();
+          allocatedId = id;
           let torrentPath = item.torrentPath;
-          if (item.isTorrent && !item.sourceUrl.trim().toLowerCase().startsWith('magnet:')) {
-            // Cached torrent metadata is deliberately keyed by the download
-            // identity. The metadata row ID is temporary, so re-key the
-            // cache after the final download ID is allocated (including
-            // replacement flows).
-            const torrentData = await invoke('inspect_torrent', {
-              source: item.sourceUrl,
-              id,
-              cache: true
-            });
-            torrentPath = torrentData.torrentPath;
+          if (item.isTorrent) {
+            if (item.torrentPath) {
+              torrentPath = await invoke('rekey_torrent_metadata', {
+                sourceId: item.torrentCacheId || item.id,
+                targetId: id
+              });
+              cachedTorrentDraftIdsRef.current.delete(item.torrentCacheId || item.id);
+            } else {
+              // Keep a safe fallback for rows restored from an older draft
+              // shape that did not retain the preview cache identity.
+              const proxy = item.sourceUrl.trim().toLowerCase().startsWith('magnet:')
+                ? await getProxyArgs(useSettingsStore.getState())
+                : undefined;
+              const torrentData = await invoke('inspect_torrent', {
+                source: item.sourceUrl,
+                id,
+                cache: true,
+                proxy: proxy ?? undefined
+              });
+              torrentPath = torrentData.torrentPath;
+            }
           }
           let finalFile = item.isMedia
             ? mediaFileNameForSelectedFormat(item.file, item)
@@ -1342,6 +1410,11 @@ export const AddDownloadsModal = () => {
         }
         addedCount += 1;
         } catch (e) {
+          if (item.isTorrent && allocatedId) {
+            await invoke('remove_torrent_metadata', { id: allocatedId }).catch(error => {
+              console.warn('Failed to remove cached torrent metadata after add failure:', error);
+            });
+          }
           console.error("Invalid URL or failed to add:", e);
           failures.push(`${item.file}: ${e instanceof Error ? e.message : String(e)}`);
         }
