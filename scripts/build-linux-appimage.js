@@ -11,7 +11,11 @@ let receivedSignal;
 export const APPIMAGE_CONFIG = JSON.stringify({
   bundle: {
     resources: {
-      '../THIRD_PARTY_NOTICES.md': 'THIRD_PARTY_NOTICES.md',
+      // Tauri merges --config values using JSON Merge Patch. An omitted key
+      // would leave the base engine resource enabled; null explicitly removes
+      // it for this first packaging pass. The verified payload is added back
+      // by repack-linux-appimage-engines.js after linuxdeploy finishes.
+      'engine-dist/': null,
     },
   },
 });
