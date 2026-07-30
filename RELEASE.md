@@ -25,7 +25,7 @@ Firelink never falls back to system-installed media tools.
 - `scripts/stage-engines.js` creates one target-specific bundle payload.
 - `scripts/verify-binaries.js` runs architecture, packaging, version, and RPC checks.
 
-Linux `.deb` and `.rpm` packages are built with the complete verified engine payload. The AppImage is built separately with the engine payload temporarily omitted, then repacked from the verified payload because the AppImage tooling can rewrite bundled native binaries.
+Linux `.deb` and `.rpm` packages are built with the complete verified engine payload. The AppImage is bundled separately with the engine resource excluded from the initial Linux packaging pass, then repacked from the verified payload because the AppImage tooling can rewrite bundled native binaries.
 
 yt-dlp must remain its official PyInstaller **onedir** distribution: launcher plus adjacent `_internal` runtime. Onefile builds are rejected because repeated extraction caused roughly 17-second startup latency.
 

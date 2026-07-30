@@ -5,6 +5,25 @@ All notable changes to Firelink will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-07-30
+
+This hotfix improves filename handling, localized display details, and release reliability across platforms.
+
+### Fixes
+
+- Prevent filename errors for long downloads and Windows-reserved names such as `CON` and `COM1`. Names are shortened safely while keeping their file extensions, addressing [#29](https://github.com/nimbold/Firelink/issues/29).
+- Correct Persian date formatting in affected settings and timezone cases, while preserving Hebrew locale formatting.
+- Fix remaining light-theme overlay and contrast details reported with the broader appearance and localization work in [#31](https://github.com/nimbold/Firelink/issues/31).
+
+### Improvements
+
+- Make Linux AppImage packaging more reliable and avoid compiling the same Rust release binary twice.
+- Strengthen cross-platform release checks so Windows and Linux test builds handle macOS-only code correctly.
+
+### Compatibility
+
+- Firelink Companion `2.1.0` remains the current compatible extension. No extension update is required for this hotfix; use the [latest Companion release](https://github.com/nimbold/Firelink-Extension/releases/latest).
+
 ## [1.3.0] - 2026-07-29
 
 This release focuses on smoother queue control, a more comfortable interface, and safer recovery when downloads or browser handoffs are interrupted.
