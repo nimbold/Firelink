@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use crate::ipc::{DownloadStateEvent, DownloadStatus, QueueDirection};
 use crate::power::PowerManager;
 use crate::retry::{backoff_and_emit, is_transient_network_error, BackoffOutcome, MAX_RETRIES};
@@ -201,6 +202,9 @@ pub struct SpawnPayload {
     pub format_selector: Option<String>,
     pub cookie_source: Option<String>,
     pub is_media: bool,
+    pub is_torrent: bool,
+    pub torrent_path: Option<String>,
+    pub torrent_file_indices: Option<Vec<u32>>,
 }
 
 /// A sidecar spawner. In production this calls the real aria2/yt-dlp
@@ -1594,6 +1598,16 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// and lets commands reconcile an Aria2 terminal status without releasing
     /// the lock first.
     pub(crate) async fn apply_completion_locked(&self, id: &str, outcome: PendingOutcome) {
+        if let Some(gid) = self.aria2_gid_for_download(id) {
+            if let Err(error) = self.reconcile_aria2_torrent_ownership(id, &gid).await {
+                log::debug!(
+                    "aria2 torrent ownership [{}]: could not resolve files for gid {}: {}",
+                    id,
+                    gid,
+                    error
+                );
+            }
+        }
         // A terminal event invalidates every delayed retry or control worker
         // from the previous lifecycle before releasing its permit.
         self.next_aria2_control_epoch(id).await;
@@ -1609,11 +1623,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
             PendingOutcome::Error(error) => {
                 if error.to_ascii_lowercase().contains("checksum") {
                     log::warn!("Checksum error detected for {}, cleaning up assets", id);
-                    if let Ok(primary_path) =
-                        crate::download_ownership::primary_path_for_id(&self.app_handle, id)
+                    if let Ok(paths) =
+                        crate::download_ownership::owned_paths_for_id(&self.app_handle, id)
                     {
-                        if let Some(path) = primary_path.as_deref() {
-                            let _ = crate::remove_download_assets(path, &self.app_handle).await;
+                        for path in paths {
+                            let _ = crate::remove_download_assets(&path, &self.app_handle).await;
                         }
                     }
                 }
@@ -1739,6 +1753,92 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .unwrap()
             .iter()
             .find_map(|(gid, mapping)| (mapping.id == id).then(|| gid.clone()))
+    }
+
+    /// Refresh ownership from Aria2's resolved file list before a torrent
+    /// lifecycle is forgotten. Magnet metadata is not available when the row
+    /// is enqueued, so the user-provided display name is not a safe ownership
+    /// path until Aria2 reports the actual files.
+    pub async fn reconcile_aria2_torrent_ownership(
+        &self,
+        id: &str,
+        gid: &str,
+    ) -> Result<(), String> {
+        let payload = self.aria2_payloads.lock().await.get(id).cloned();
+        let Some(payload) = payload.filter(|payload| payload.is_torrent) else {
+            return Ok(());
+        };
+        let mapping = self
+            .aria2_gid_mapping(gid)
+            .filter(|mapping| mapping.id == id)
+            .ok_or_else(|| "aria2 torrent ownership has no current gid mapping".to_string())?;
+        let state = self.app_handle.state::<crate::AppState>();
+        let result = crate::rpc_call(
+            state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+            &state.aria2_secret,
+            "aria2.getFiles",
+            serde_json::json!([gid]),
+        )
+        .await?;
+        if !self.is_current_aria2_gid_mapping(gid, &mapping)
+            || !self
+                .is_aria2_control_epoch_current(id, mapping.epoch)
+                .await
+        {
+            return Err("aria2 torrent lifecycle changed while resolving output paths".to_string());
+        }
+
+        let paths = result
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|file| file.get("selected").and_then(|value| value.as_str()) != Some("false"))
+            .filter_map(|file| file.get("path").and_then(|value| value.as_str()))
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            return Err("aria2 returned no selected torrent output paths".to_string());
+        }
+        let destination = crate::resolve_path(&payload.destination, &self.app_handle);
+        let canonical_destination = crate::canonicalize_with_missing_components(&destination)
+            .ok_or_else(|| "torrent destination could not be canonicalized".to_string())?;
+        if paths.iter().any(|path| {
+            crate::canonicalize_with_missing_components(path)
+                .is_none_or(|path| !crate::platform::path_is_within(&path, &canonical_destination))
+        }) {
+            return Err("aria2 returned a torrent output path outside its destination".to_string());
+        }
+        let primary = if paths.len() == 1 {
+            paths[0].clone()
+        } else {
+            let canonical_paths = paths
+                .iter()
+                .filter_map(|path| crate::canonicalize_with_missing_components(path))
+                .collect::<Vec<_>>();
+            let mut common = canonical_paths
+                .first()
+                .and_then(|path| path.parent())
+                .map(std::path::Path::to_path_buf)
+                .ok_or_else(|| "torrent output path has no parent".to_string())?;
+            for path in canonical_paths.iter().skip(1) {
+                while !crate::platform::path_is_within(path, &common) {
+                    let Some(parent) = common.parent() else {
+                        return Err("torrent output paths have no common directory".to_string());
+                    };
+                    if parent == common {
+                        return Err("torrent output paths have no common directory".to_string());
+                    }
+                    common = parent.to_path_buf();
+                }
+            }
+            common
+        };
+        crate::download_ownership::set_owned_paths_with_primary(
+            &self.app_handle,
+            id,
+            &primary,
+            &paths,
+        )
     }
 
     /// Capture the GID ownership token used by the poller. The mapping's
@@ -2666,9 +2766,10 @@ impl ProductionSpawner {
         Self { app_handle }
     }
 
-    async fn add_uri_rpc(
+    async fn add_transfer_rpc(
         &self,
         state: &crate::AppState,
+        method: &str,
         params: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
@@ -2676,7 +2777,7 @@ impl ProductionSpawner {
             match crate::rpc_call(
                 state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
                 &state.aria2_secret,
-                "aria2.addUri",
+                method,
                 params.clone(),
             )
             .await
@@ -2714,7 +2815,9 @@ impl SidecarSpawner for ProductionSpawner {
         );
         let safe_filename =
             crate::download_ownership::canonical_download_filename(&payload.filename);
-        options.insert("out".to_string(), serde_json::json!(safe_filename));
+        if !payload.is_torrent {
+            options.insert("out".to_string(), serde_json::json!(safe_filename));
+        }
         let conn = effective_aria2_connections(id, payload).await;
         apply_aria2_connection_options(&mut options, conn);
         let mt = aria2_attempt_limit(payload.max_tries);
@@ -2766,23 +2869,73 @@ impl SidecarSpawner for ProductionSpawner {
         if let Some(prox) = proxy_value {
             options.insert("all-proxy".to_string(), serde_json::json!(prox));
         }
-        let uris = crate::collect_download_uris(&payload.url, payload.mirrors.as_deref());
-        let params = serde_json::json!([uris, options]);
 
-        match self.add_uri_rpc(&state, &params).await {
+        let (method, params) = if payload.is_torrent {
+            if let Some(path) = payload.torrent_path.as_deref() {
+                let path = crate::torrent::validate_managed_torrent_path(
+                    &self.app_handle,
+                    id,
+                    path,
+                )?;
+                let bytes = tokio::fs::read(&path)
+                    .await
+                    .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
+                let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
+                options.insert(
+                    "index-out".to_string(),
+                    serde_json::json!(crate::torrent::aria2_index_outputs(&metadata)),
+                );
+                let selected = crate::torrent::validate_selected_indices(
+                    payload.torrent_file_indices.as_deref(),
+                    metadata.files.len(),
+                )?;
+                if let Some(indices) = selected {
+                    options.insert(
+                        "select-file".to_string(),
+                        serde_json::json!(indices.iter().map(u32::to_string).collect::<Vec<_>>().join(",")),
+                    );
+                }
+                let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+                let uris = payload
+                    .mirrors
+                    .as_deref()
+                    .map(|mirrors| crate::collect_download_uris("", Some(mirrors)))
+                    .unwrap_or_default();
+                ("aria2.addTorrent", serde_json::json!([encoded, uris, options]))
+            } else {
+                let parsed = url::Url::parse(&payload.url)
+                    .map_err(|_| "invalid magnet URI".to_string())?;
+                if parsed.scheme() != "magnet" {
+                    return Err("torrent transfer has no magnet URI or cached metadata".to_string());
+                }
+                let selected = crate::torrent::validate_selected_indices(
+                    payload.torrent_file_indices.as_deref(),
+                    usize::MAX,
+                )?;
+                if selected.is_some() {
+                    return Err("magnet file selection requires resolved torrent metadata".to_string());
+                }
+                ("aria2.addUri", serde_json::json!([[payload.url.clone()], options]))
+            }
+        } else {
+            let uris = crate::collect_download_uris(&payload.url, payload.mirrors.as_deref());
+            ("aria2.addUri", serde_json::json!([uris, options]))
+        };
+
+        match self.add_transfer_rpc(&state, method, &params).await {
             Ok(result) => {
                 let gid = result.as_str().unwrap_or("").to_string();
                 if gid.is_empty() {
-                    Err("aria2.addUri returned an empty gid".to_string())
+                    Err(format!("{method} returned an empty gid"))
                 } else {
-                    log::info!("aria2 addUri [{}]: created gid {}", id, gid);
+                    log::info!("aria2 {} [{}]: created gid {}", method, id, gid);
                     Ok(gid)
                 }
             }
             Err(e) => {
                 let safe_error = crate::redact_sensitive_text(&e);
-                log::error!("aria2 addUri [{}] failed: {}", id, safe_error);
-                Err(format!("aria2 addUri failed: {safe_error}"))
+                log::error!("aria2 {} [{}] failed: {}", method, id, safe_error);
+                Err(format!("aria2 {method} failed: {safe_error}"))
             }
         }
     }
@@ -3108,6 +3261,18 @@ pub struct EnqueueItem {
     pub is_media: Option<bool>,
     #[serde(default)]
     #[ts(optional)]
+    pub is_torrent: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_path: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_file_indices: Option<Vec<u32>>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_info_hash: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
     pub lifecycle_generation: Option<String>,
 }
 
@@ -3147,6 +3312,9 @@ impl EnqueueItem {
                 format_selector: self.format_selector,
                 cookie_source: self.cookie_source,
                 is_media: media,
+                is_torrent: self.is_torrent.unwrap_or(false),
+                torrent_path: self.torrent_path,
+                torrent_file_indices: self.torrent_file_indices,
             },
         }
     }

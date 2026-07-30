@@ -341,6 +341,10 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
         format_selector: item.mediaFormatSelector || null,
         cookie_source: settings.mediaCookieSource !== 'none' ? settings.mediaCookieSource : null,
         is_media: item.isMedia || false,
+        is_torrent: item.isTorrent || false,
+        torrent_path: item.torrentPath || undefined,
+        torrent_file_indices: item.torrentFileIndices || undefined,
+        torrent_info_hash: item.torrentInfoHash || undefined,
         lifecycle_generation: lifecycleGeneration.toString(),
       };
 
@@ -2040,6 +2044,10 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             format_selector: item.mediaFormatSelector || null,
             cookie_source: settings.mediaCookieSource !== 'none' ? settings.mediaCookieSource : null,
             is_media: item.isMedia || false,
+            is_torrent: item.isTorrent || false,
+            torrent_path: item.torrentPath || undefined,
+            torrent_file_indices: item.torrentFileIndices || undefined,
+            torrent_info_hash: item.torrentInfoHash || undefined,
             lifecycle_generation: currentDownloadLifecycle(item.id).toString(),
           });
         }

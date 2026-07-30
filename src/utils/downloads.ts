@@ -162,7 +162,7 @@ export const canonicalizeDownloadFileName = (fileName: string): string => {
     .trim()
     .replace(/[. ]+$/g, '');
   let canonical = sanitized && sanitized !== '.' && sanitized !== '..' ? sanitized : 'download';
-  const reservedStem = canonical.split('.')[0]?.toUpperCase();
+  const reservedStem = canonical.split('.')[0]?.trimEnd().toUpperCase();
   if (reservedStem && WINDOWS_RESERVED_FILENAME_STEMS.has(reservedStem)) {
     const extensionStart = canonical.lastIndexOf('.');
     const base = extensionStart > 0 ? canonical.slice(0, extensionStart) : canonical;

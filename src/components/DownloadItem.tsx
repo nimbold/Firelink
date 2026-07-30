@@ -241,6 +241,11 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
               {mediaQualityLabel}
             </span>
           ) : null}
+          {download.isTorrent ? (
+            <span className="download-quality-chip shrink-0" title={t($ => $.addDownloads.torrentFiles)}>
+              {t($ => $.addDownloads.torrentFiles)}
+            </span>
+          ) : null}
         </div>
       </div>
     ),

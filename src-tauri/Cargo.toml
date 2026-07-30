@@ -40,6 +40,8 @@ tauri-plugin-clipboard-manager = "2.3.2"
 sysinfo = "0.39.3"
 hmac = "0.13"
 sha2 = "0.11"
+sha1 = "0.10"
+base64 = "0.22"
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
 tempfile = "3"

@@ -192,6 +192,28 @@ export const AddDownloadsModal = () => {
   const [freeSpace, setFreeSpace] = useState('Unknown');
   const freeSpaceRequestRef = useRef(0);
 
+  const addTorrentFiles = async () => {
+    try {
+      const selected = await open({
+        multiple: true,
+        directory: false,
+        title: 'Choose torrent files',
+        filters: [{ name: 'Torrent', extensions: ['torrent'] }]
+      });
+      const paths = Array.isArray(selected)
+        ? selected
+        : selected
+          ? [selected]
+          : [];
+      if (paths.length === 0) return;
+      setUrls(current => [...current.split('\n').map(line => line.trim()).filter(Boolean), ...paths]
+        .filter((value, index, values) => values.indexOf(value) === index)
+        .join('\n'));
+    } catch (error) {
+      console.error('Failed to select torrent files:', error);
+    }
+  };
+
   const [useAuth, setUseAuth] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -493,10 +515,41 @@ export const AddDownloadsModal = () => {
       void (async () => {
         try {
           const settingsStore = useSettingsStore.getState();
-          const proxy = await getProxyArgs(settingsStore);
           const login = getSiteLogin(row.sourceUrl, settingsStore);
           const contextUrl = requestContextUrlForRow(row);
           const requestContext = requestContextForUrl(contextUrl);
+          if (row.isTorrent) {
+            const torrentData = await invoke('inspect_torrent', {
+              source: row.sourceUrl,
+              id: row.id,
+              cache: false
+            });
+            const totalBytes = torrentData.totalBytes || undefined;
+            setParsedItems(current => updateRowIfCurrent(
+              current,
+              row.id,
+              row.sourceUrl,
+              row.generation,
+              currentRow => ({
+                ...currentRow,
+                downloadUrl: !row.sourceUrl.trim().toLowerCase().startsWith('magnet:')
+                  ? 'torrent:' + torrentData.infoHash
+                  : row.sourceUrl,
+                file: canonicalizeDownloadFileName(torrentData.name),
+                size: totalBytes ? formatBytes(totalBytes) : undefined,
+                sizeBytes: totalBytes,
+                status: 'ready',
+                isTorrent: true,
+                torrentPath: torrentData.torrentPath,
+                torrentInfoHash: torrentData.infoHash,
+                torrentFiles: torrentData.files,
+                selectedTorrentFileIndices: currentRow.selectedTorrentFileIndices
+                  ?.filter(index => torrentData.files.some(file => file.index === index))
+              })
+            ));
+            return;
+          }
+          const proxy = await getProxyArgs(settingsStore);
           if (login && !useAuth && !keychainAccessReady && !keychainPromptDismissed) {
             settingsStore.setShowKeychainModal(true);
             return;
@@ -1184,15 +1237,19 @@ export const AddDownloadsModal = () => {
                  if (!existingItem) {
                    throw new Error(t($ => $.addDownloads.cannotReplace, { file: finalFile }));
                  }
-                 const incomingMediaFormat = mediaFormatSelectorForRow(item);
-                 const mediaFormatChanged = item.isMedia
-                   && existingItem.mediaFormatSelector !== incomingMediaFormat;
-                 if (existingItem.status === 'completed' || mediaFormatChanged) {
-                   // Completed replacements must remove the old file so the
-                   // new transfer cannot be treated as an already-complete
-                   // aria2 target. Unfinished rows use the in-place path to
-                   // preserve their resumable assets and progress.
-                   await store.removeDownload(existingItem.id, true, false);
+                const incomingMediaFormat = mediaFormatSelectorForRow(item);
+                const mediaFormatChanged = item.isMedia
+                  && existingItem.mediaFormatSelector !== incomingMediaFormat;
+                const torrentReplacement = Boolean(item.isTorrent) || Boolean(existingItem.isTorrent);
+                if (existingItem.status === 'completed' || mediaFormatChanged || torrentReplacement) {
+                  // Completed replacements must remove the old file so the
+                  // new transfer cannot be treated as an already-complete
+                  // aria2 target. A torrent replacement also needs a fresh
+                  // identity because its cached metadata is keyed by the
+                  // new row ID and its output contract differs from a normal
+                  // file transfer. Unfinished ordinary rows use the in-place
+                  // path to preserve their resumable assets and progress.
+                  await store.removeDownload(existingItem.id, true, false);
                  } else {
                    const contextUrl = requestContextUrlForRow(item);
                    const replaced = await store.replaceDownload(existingItem.id, {
@@ -1225,6 +1282,19 @@ export const AddDownloadsModal = () => {
         if (!item) continue;
         try {
           const id = crypto.randomUUID();
+          let torrentPath = item.torrentPath;
+          if (item.isTorrent && !item.sourceUrl.trim().toLowerCase().startsWith('magnet:')) {
+            // Cached torrent metadata is deliberately keyed by the download
+            // identity. The metadata row ID is temporary, so re-key the
+            // cache after the final download ID is allocated (including
+            // replacement flows).
+            const torrentData = await invoke('inspect_torrent', {
+              source: item.sourceUrl,
+              id,
+              cache: true
+            });
+            torrentPath = torrentData.torrentPath;
+          }
           let finalFile = item.isMedia
             ? mediaFileNameForSelectedFormat(item.file, item)
             : canonicalizeDownloadFileName(item.file);
@@ -1260,6 +1330,10 @@ export const AddDownloadsModal = () => {
           resumable: item.resumable,
           mediaFormatSelector: formatSelector,
           mediaQuality: mediaQualityForRow(item),
+          isTorrent: item.isTorrent,
+          torrentPath,
+          torrentInfoHash: item.torrentInfoHash,
+          torrentFileIndices: item.selectedTorrentFileIndices,
           size: item.size || (item.sizeBytes ? formatBytes(item.sizeBytes) : undefined),
           sizeBytes: item.sizeBytes
         }, action);
@@ -1367,6 +1441,23 @@ export const AddDownloadsModal = () => {
           }
         : item
     ));
+  };
+
+  const toggleTorrentFile = (index: number) => {
+    if (selectedItemIndex === null) return;
+    setParsedItems(items => items.map((item, itemIndex) => {
+      if (itemIndex !== selectedItemIndex || !item.torrentFiles?.length) return item;
+      const allIndices = item.torrentFiles.map(file => file.index);
+      const selectedIndices = item.selectedTorrentFileIndices ?? allIndices;
+      if (selectedIndices.length === 1 && selectedIndices[0] === index) return item;
+      const next = selectedIndices.includes(index)
+        ? selectedIndices.filter(value => value !== index)
+        : [...selectedIndices, index].sort((left, right) => left - right);
+      return {
+        ...item,
+        selectedTorrentFileIndices: next.length === allIndices.length ? undefined : next
+      };
+    }));
   };
 
   const selectedItems = parsedItems.filter(item => item.selected !== false);
@@ -1635,6 +1726,15 @@ export const AddDownloadsModal = () => {
                   value={urls}
                   onChange={(e) => setUrls(e.target.value)}
                 />
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => void addTorrentFiles()}
+                    className="add-download-link-button flex items-center gap-1.5 text-[11px] font-medium"
+                  >
+                    <FolderPlus size={12} /> {t($ => $.addDownloads.chooseTorrentFiles)}
+                  </button>
+                </div>
                 {playlistSummaries.map(([sourceUrl, playlist]) => {
                   const total = playlist.entry_count || playlist.entries.length;
                   return (
@@ -1765,6 +1865,46 @@ export const AddDownloadsModal = () => {
           {/* Right Column: Settings */}
           <div className="add-download-settings w-[45%] flex flex-col overflow-y-auto">
             <div className="p-6 space-y-5">
+
+              {selectedItemIndex !== null && parsedItems[selectedItemIndex]?.isTorrent && (
+                <section className="add-download-section relative overflow-hidden p-4">
+                  <div className="add-download-section-title flex items-center gap-2 mb-3">
+                    <FileText size={16} className="text-blue-500" /> {t($ => $.addDownloads.torrentFiles)}
+                  </div>
+                  {parsedItems[selectedItemIndex].torrentFiles?.length ? (
+                    <div
+                      className="flex flex-col gap-1 max-h-64 overflow-y-auto pe-1"
+                      role="group"
+                      aria-label={t($ => $.addDownloads.torrentFiles)}
+                    >
+                      {parsedItems[selectedItemIndex].torrentFiles!.map(file => {
+                        const selectedIndices = parsedItems[selectedItemIndex!].selectedTorrentFileIndices;
+                        const checked = !selectedIndices || selectedIndices.includes(file.index);
+                        return (
+                          <label
+                            key={file.index}
+                            className="flex items-center gap-2 px-2 py-1.5 text-xs text-text-secondary hover:bg-surface-hover rounded"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleTorrentFile(file.index)}
+                              aria-label={file.path}
+                              className="accent-blue-500"
+                            />
+                            <span className="truncate flex-1" title={file.path}>{file.path}</span>
+                            <span className="font-mono text-text-muted shrink-0">{formatBytes(file.length)}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-text-muted">
+                      {t($ => $.addDownloads.torrentMetadataPending)}
+                    </p>
+                  )}
+                </section>
+              )}
 
               {/* Media Format (Dynamic) */}
               {selectedItemIndex !== null && parsedItems[selectedItemIndex]?.isMedia && (

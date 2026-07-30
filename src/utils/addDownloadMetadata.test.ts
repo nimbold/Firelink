@@ -84,6 +84,26 @@ describe('add download metadata workflow', () => {
     expect(isYouTubePlaylistUrl('https://example.com/playlist?list=PL123')).toBe(false);
   });
 
+  it('admits magnets and local torrent files through the Add window metadata path', () => {
+    const rows = reconcileDownloadRows(
+      'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Example\nfile:///tmp/Example.torrent',
+      []
+    );
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      isTorrent: true,
+      isMedia: false,
+      status: 'loading'
+    });
+    expect(rows[1]).toMatchObject({
+      isTorrent: true,
+      isMedia: false,
+      sourceUrl: 'file:///tmp/Example.torrent',
+      status: 'loading'
+    });
+  });
+
   it('keeps a playlist as one loading row until discovery succeeds', () => {
     const rows = reconcileDownloadRows(
       'https://www.youtube.com/playlist?list=PL123',

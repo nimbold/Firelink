@@ -1365,6 +1365,14 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   }, []);
 
   const getDownloadPath = useCallback(async (item: DownloadItem) => {
+    if (item.isTorrent) {
+      try {
+        const ownedPath = await invoke('get_download_primary_path', { id: item.id });
+        if (ownedPath) return ownedPath;
+      } catch (error) {
+        console.error("Failed to resolve torrent output path:", error);
+      }
+    }
     const fileName = item.fileName?.trim();
     if (!fileName) return null;
     const settings = useSettingsStore.getState();
@@ -1377,9 +1385,30 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     useDownloadStore.getState().setSelectedPropertiesDownloadId(id);
   }, []);
 
+  const revealDownloadFile = useCallback(async (item: DownloadItem) => {
+    const pathToReveal = await getDownloadPath(item);
+
+    if (!pathToReveal) {
+      openProperties(item.id);
+      return;
+    }
+
+    try {
+      await invoke('reveal_in_file_manager', { path: pathToReveal });
+    } catch (error) {
+      console.error("Failed to show in Finder:", error);
+      showInteractionError(t($ => $.downloadTable.revealFileFailed), error);
+    }
+  }, [getDownloadPath, openProperties, showInteractionError]);
+
   const openDownloadFile = useCallback(async (item: DownloadItem) => {
     if (item.status !== 'completed') {
       openProperties(item.id);
+      return;
+    }
+
+    if (item.isTorrent) {
+      await revealDownloadFile(item);
       return;
     }
 
@@ -1395,23 +1424,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       console.error("Failed to open file:", error);
       showInteractionError(t($ => $.downloadTable.openFileFailed), error);
     }
-  }, [getDownloadPath, openProperties, showInteractionError]);
-
-  const revealDownloadFile = async (item: DownloadItem) => {
-    const pathToReveal = await getDownloadPath(item);
-
-    if (!pathToReveal) {
-      openProperties(item.id);
-      return;
-    }
-
-    try {
-      await invoke('reveal_in_file_manager', { path: pathToReveal });
-    } catch (error) {
-      console.error("Failed to show in Finder:", error);
-      showInteractionError(t($ => $.downloadTable.revealFileFailed), error);
-    }
-  };
+  }, [getDownloadPath, openProperties, revealDownloadFile, showInteractionError]);
 
   const handleDownloadDoubleClick = useCallback((item: DownloadItem) => {
     if (item.status === 'completed') {

@@ -7,7 +7,7 @@ use std::sync::Mutex;
 const DATABASE_NAME: &str = "firelink.sqlite";
 const LEGACY_STORE_NAME: &str = "store.bin";
 const LEGACY_BUNDLE_IDENTIFIER: &str = "com.nima.tauri-app";
-const CURRENT_SCHEMA_VERSION: i64 = 1;
+const CURRENT_SCHEMA_VERSION: i64 = 2;
 pub(crate) const TOKEN_CHANGED_NOTICE: &str = "pairing-token-changed";
 pub const PAIRING_TOKEN_KEYCHAIN_ID: &str = "extension-pairing-token";
 // Development builds are a different executable identity from the packaged
@@ -127,6 +127,10 @@ fn migrate_schema(connection: &mut Connection, from_version: i64) -> Result<(), 
                     id TEXT PRIMARY KEY,
                     primary_path TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS download_owned_paths (
+                    id TEXT PRIMARY KEY,
+                    paths TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS migration_events (
                     key TEXT PRIMARY KEY,
                     consumed INTEGER NOT NULL DEFAULT 0
@@ -174,6 +178,19 @@ fn migrate_schema(connection: &mut Connection, from_version: i64) -> Result<(), 
                 )
                 .map_err(|error| format!("failed to create downloads table: {error}"))?;
         }
+    }
+
+    if from_version < 2 {
+        transaction
+            .execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS download_owned_paths (
+                    id TEXT PRIMARY KEY,
+                    paths TEXT NOT NULL
+                );
+                ",
+            )
+            .map_err(|error| format!("failed to migrate download ownership paths: {error}"))?;
     }
 
     transaction
@@ -937,19 +954,43 @@ fn remove_persisted_transfer_secrets(value: &mut Value) {
     if let Some(url) = object.get("url").and_then(Value::as_str) {
         if let Ok(mut parsed) = url::Url::parse(url) {
             let had_userinfo = !parsed.username().is_empty() || parsed.password().is_some();
-            let had_query_or_fragment = parsed.query().is_some() || parsed.fragment().is_some();
-            if had_userinfo || had_query_or_fragment {
+            if parsed.scheme() == "magnet" {
+                let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+                let mut retained_info_hash = false;
+                let mut removed_query_context = false;
+                for (key, value) in parsed.query_pairs() {
+                    if key == "xt" || key == "dn" {
+                        retained_info_hash |= key == "xt";
+                        serializer.append_pair(&key, &value);
+                    } else {
+                        removed_query_context = true;
+                    }
+                }
+                let removed_fragment = parsed.fragment().is_some();
+                let safe_query = serializer.finish();
                 let _ = parsed.set_username("");
                 let _ = parsed.set_password(None);
-                parsed.set_query(None);
+                parsed.set_query((!safe_query.is_empty()).then_some(safe_query.as_str()));
                 parsed.set_fragment(None);
                 object.insert("url".to_string(), Value::String(parsed.to_string()));
-
-                // A queued transfer whose URL depended on query/fragment
-                // credentials must not silently auto-resume with a truncated
-                // URL after a portable restart.
-                if had_userinfo || had_query_or_fragment {
+                if had_userinfo || removed_query_context || removed_fragment || !retained_info_hash {
                     mark_portable_download_unresumable(object);
+                }
+            } else {
+                let had_query_or_fragment = parsed.query().is_some() || parsed.fragment().is_some();
+                if had_userinfo || had_query_or_fragment {
+                    let _ = parsed.set_username("");
+                    let _ = parsed.set_password(None);
+                    parsed.set_query(None);
+                    parsed.set_fragment(None);
+                    object.insert("url".to_string(), Value::String(parsed.to_string()));
+
+                    // A queued transfer whose URL depended on query/fragment
+                    // credentials must not silently auto-resume with a truncated
+                    // URL after a portable restart.
+                    if had_userinfo || had_query_or_fragment {
+                        mark_portable_download_unresumable(object);
+                    }
                 }
             }
         } else {
@@ -1117,43 +1158,91 @@ fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("persisted item is missing '{key}'"))
 }
 
-pub fn load_ownership(connection: &Connection) -> Result<Vec<(String, String)>, String> {
+pub fn load_ownership(connection: &Connection) -> Result<Vec<(String, String, Vec<String>)>, String> {
     let mut statement = connection
-        .prepare("SELECT id, primary_path FROM download_ownership")
+        .prepare(
+            "SELECT ownership.id, ownership.primary_path, paths.paths
+             FROM download_ownership AS ownership
+             LEFT JOIN download_owned_paths AS paths ON paths.id = ownership.id",
+        )
         .map_err(|error| format!("failed to prepare ownership query: {error}"))?;
     let rows = statement
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map([], |row| {
+            let primary_path: String = row.get(1)?;
+            let owned_paths = row
+                .get::<_, Option<String>>(2)?
+                .and_then(|paths| serde_json::from_str::<Vec<String>>(&paths).ok())
+                .filter(|paths| !paths.is_empty())
+                .unwrap_or_else(|| vec![primary_path.clone()]);
+            Ok((row.get(0)?, primary_path, owned_paths))
+        })
         .map_err(|error| format!("failed to query ownership data: {error}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("failed to read ownership data: {error}"))
 }
 
-pub fn set_ownership(connection: &Connection, id: &str, path: &str) -> Result<(), String> {
-    let existing_owner = connection
-        .query_row(
-            "SELECT id FROM download_ownership
-             WHERE primary_path = ?1 AND id <> ?2
-             LIMIT 1",
-            params![path, id],
-            |row| row.get::<_, String>(0),
+pub fn set_ownership_paths(
+    connection: &Connection,
+    id: &str,
+    primary_path: &str,
+    paths: &[String],
+) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT ownership.id, ownership.primary_path, paths.paths
+             FROM download_ownership AS ownership
+             LEFT JOIN download_owned_paths AS paths ON paths.id = ownership.id
+             WHERE ownership.id <> ?1",
         )
-        .optional()
-        .map_err(|error| format!("failed to check download ownership path: {error}"))?;
-    if existing_owner.is_some() {
-        return Err("Download destination is already owned by another Firelink download".to_string());
+        .map_err(|error| format!("failed to prepare download ownership check: {error}"))?;
+    let existing = statement
+        .query_map(params![id], |row| {
+            let primary: String = row.get(1)?;
+            let owned = row
+                .get::<_, Option<String>>(2)?
+                .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+                .unwrap_or_else(|| vec![primary.clone()]);
+            Ok((primary, owned))
+        })
+        .map_err(|error| format!("failed to check download ownership paths: {error}"))?;
+    for row in existing {
+        let (existing_primary, owned) =
+            row.map_err(|error| format!("failed to read download ownership paths: {error}"))?;
+        let new_paths = std::iter::once(primary_path).chain(paths.iter().map(String::as_str));
+        let existing_paths = std::iter::once(existing_primary.as_str())
+            .chain(owned.iter().map(String::as_str));
+        if new_paths.clone().any(|new_path| {
+            existing_paths
+                .clone()
+                .any(|existing_path| crate::platform::paths_equal(Path::new(new_path), Path::new(existing_path)))
+        }) {
+            return Err("Download destination is already owned by another Firelink download".to_string());
+        }
     }
 
     connection
         .execute(
             "INSERT INTO download_ownership (id, primary_path) VALUES (?1, ?2)
              ON CONFLICT(id) DO UPDATE SET primary_path = excluded.primary_path",
-            params![id, path],
+            params![id, primary_path],
         )
         .map_err(|error| format!("failed to save ownership data: {error}"))?;
+    let encoded_paths = serde_json::to_string(paths)
+        .map_err(|error| format!("failed to encode download ownership paths: {error}"))?;
+    connection
+        .execute(
+            "INSERT INTO download_owned_paths (id, paths) VALUES (?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET paths = excluded.paths",
+            params![id, encoded_paths],
+        )
+        .map_err(|error| format!("failed to save download ownership path list: {error}"))?;
     Ok(())
 }
 
 pub fn remove_ownership(connection: &Connection, id: &str) -> Result<(), String> {
+    connection
+        .execute("DELETE FROM download_owned_paths WHERE id = ?1", params![id])
+        .map_err(|error| format!("failed to delete download ownership paths: {error}"))?;
     connection
         .execute("DELETE FROM download_ownership WHERE id = ?1", params![id])
         .map_err(|error| format!("failed to delete ownership data: {error}"))?;
@@ -1938,6 +2027,29 @@ mod tests {
     }
 
     #[test]
+    fn portable_magnet_persistence_keeps_identity_but_does_not_resume_after_tracker_removal() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let mut connection = state.lock().unwrap();
+        let data = json!([{
+            "id": "magnet-download",
+            "status": "queued",
+            "queueId": "main",
+            "url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Example%20Torrent&tr=https%3A%2F%2Ftracker.invalid%2Fsecret"
+        }])
+        .to_string();
+
+        replace_downloads(&mut connection, &data, true).unwrap();
+
+        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
+        assert_eq!(saved["url"], "magnet:?xt=urn%3Abtih%3A0123456789abcdef0123456789abcdef01234567&dn=Example+Torrent");
+        assert_eq!(saved["status"], "failed");
+        assert_eq!(saved["resumable"], false);
+        assert!(!saved.to_string().contains("tracker.invalid"));
+        assert!(!saved.to_string().contains("secret"));
+    }
+
+    #[test]
     fn portable_download_persistence_redacts_error_secrets_but_preserves_safe_errors_and_standard_details() {
         let temp = TempDir::new().unwrap();
         let state = init_at_path(temp.path()).unwrap();
@@ -2142,15 +2254,62 @@ mod tests {
         let state = init_at_path(temp.path()).unwrap();
         let connection = state.lock().unwrap();
 
-        set_ownership(&connection, "first", "/downloads/file.bin").unwrap();
-        let error = set_ownership(&connection, "second", "/downloads/file.bin")
+        set_ownership_paths(
+            &connection,
+            "first",
+            "/downloads/file.bin",
+            &["/downloads/file.bin".to_string()],
+        )
+        .unwrap();
+        let error = set_ownership_paths(
+            &connection,
+            "second",
+            "/downloads/file.bin",
+            &["/downloads/file.bin".to_string()],
+        )
             .expect_err("a primary path must have one live owner");
 
         assert!(error.contains("already owned"));
-        assert_eq!(load_ownership(&connection).unwrap(), vec![(
-            "first".to_string(),
-            "/downloads/file.bin".to_string()
-        )]);
-        set_ownership(&connection, "first", "/downloads/renamed.bin").unwrap();
+        assert_eq!(
+            load_ownership(&connection).unwrap(),
+            vec![(
+                "first".to_string(),
+                "/downloads/file.bin".to_string(),
+                vec!["/downloads/file.bin".to_string()]
+            )]
+        );
+        set_ownership_paths(
+            &connection,
+            "first",
+            "/downloads/renamed.bin",
+            &["/downloads/renamed.bin".to_string()],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_overlap_with_any_owned_torrent_path() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let connection = state.lock().unwrap();
+
+        set_ownership_paths(
+            &connection,
+            "first",
+            "/downloads/root",
+            &[
+                "/downloads/root/a.bin".to_string(),
+                "/downloads/root/b.bin".to_string(),
+            ],
+        )
+        .unwrap();
+        let error = set_ownership_paths(
+            &connection,
+            "second",
+            "/downloads/root",
+            &["/downloads/root/c.bin".to_string()],
+        )
+        .expect_err("a torrent root must not be reused");
+        assert!(error.contains("already owned"));
     }
 }

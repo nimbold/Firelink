@@ -18,6 +18,7 @@ import type { EnqueueItem } from './bindings/EnqueueItem';
 import type { EnqueueAccepted } from './bindings/EnqueueAccepted';
 import type { PlatformInfo } from './bindings/PlatformInfo';
 import type { QueueConcurrencyConfig } from './bindings/QueueConcurrencyConfig';
+import type { TorrentMetadata } from './bindings/TorrentMetadata';
 
 type CommandMap = {
   fetch_metadata: {
@@ -32,6 +33,10 @@ type CommandMap = {
     args: { url: string; cookieBrowser: string | null; userAgent: string | null; username: string | null; password: string | null; headers: string | null; cookies: string | null; proxy: string | null };
     result: MediaPlaylistMetadata;
   };
+  inspect_torrent: {
+    args: { source: string; id: string; cache?: boolean };
+    result: TorrentMetadata;
+  };
  get_aria2_engine_status: { args: undefined; result: EngineStatusItem };
  get_ytdlp_engine_status: { args: undefined; result: EngineStatusItem };
  get_ffmpeg_engine_status: { args: undefined; result: EngineStatusItem };
@@ -41,6 +46,7 @@ type CommandMap = {
   pause_download: { args: { id: string }; result: void };
   resume_download: { args: { id: string; queueId: string }; result: boolean };
   remove_download: { args: { id: string; deleteAssets: boolean; preserveResumable?: boolean }; result: void };
+  get_download_primary_path: { args: { id: string }; result: string | null };
   detach_download_for_reconfigure: { args: { id: string }; result: void };
   begin_dock_badge_session: { args: undefined; result: number };
   update_dock_badge: { args: { count: number; generation: number; session: number }; result: void };

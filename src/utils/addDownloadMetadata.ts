@@ -4,6 +4,7 @@ import {
   isMediaUrl
 } from './downloads';
 import type { MediaPlaylistMetadata } from '../bindings/MediaPlaylistMetadata';
+import type { TorrentFile } from '../bindings/TorrentFile';
 import i18n from '../i18n';
 import { localePluralVariant } from '../i18n/locales';
 
@@ -52,6 +53,11 @@ export interface AddDownloadDraftRow {
   playlistError?: string;
   metadataBlockedReason?: 'unsafe-url';
   selected?: boolean;
+  isTorrent?: boolean;
+  torrentPath?: string;
+  torrentInfoHash?: string;
+  torrentFiles?: TorrentFile[];
+  selectedTorrentFileIndices?: number[];
 }
 
 /**
@@ -61,12 +67,27 @@ export interface AddDownloadDraftRow {
  */
 export const durableDownloadUrl = (sourceUrl: string): string => sourceUrl.trim();
 
-const ALLOWED_SCHEMES = new Set(['http:', 'https:', 'ftp:', 'sftp:']);
+const ALLOWED_SCHEMES = new Set(['http:', 'https:', 'ftp:', 'sftp:', 'magnet:']);
+
+const isLocalTorrentPath = (value: string): boolean => {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === 'file:') {
+      return parsed.pathname.toLowerCase().endsWith('.torrent');
+    }
+  } catch {
+    // A native Windows path is not a URL, even though URL parsing may treat
+    // its drive letter as a scheme.
+  }
+  return value.toLowerCase().endsWith('.torrent')
+    && (value.startsWith('/') || /^[a-z]:[\\/]/i.test(value));
+};
 
 type ParsedInput = {
   identity: string;
   sourceUrl: string;
   valid: boolean;
+  isTorrent?: boolean;
   isPlaylist?: boolean;
   playlistSourceUrl?: string;
   playlistTitle?: string;
@@ -115,10 +136,18 @@ const parseInputLines = (
 
     let sourceUrl = line;
     let valid = false;
+    let isTorrent = false;
+    if (isLocalTorrentPath(line)) {
+      valid = true;
+      isTorrent = true;
+    }
     try {
-      const url = new URL(line);
-      valid = ALLOWED_SCHEMES.has(url.protocol);
-      if (valid) sourceUrl = url.href;
+      if (!isTorrent) {
+        const url = new URL(line);
+        valid = ALLOWED_SCHEMES.has(url.protocol);
+        isTorrent = valid && url.protocol === 'magnet:';
+        if (valid) sourceUrl = url.href;
+      }
     } catch {
       valid = false;
     }
@@ -166,6 +195,7 @@ const parseInputLines = (
       identity,
       sourceUrl,
       valid,
+      isTorrent,
       isPlaylist: valid && isYouTubePlaylistUrl(sourceUrl),
       requestContextVersion: valid ? requestContextVersions[sourceUrl] : undefined,
       selected: selectedBySourceUrl[sourceUrl] !== false
@@ -219,6 +249,7 @@ export const reconcileDownloadRows = (
           generation: preserved.generation + 1,
           requestContextVersion,
           isMedia: preserved.isMedia || forcedMedia || Boolean(input.playlistSourceUrl),
+          isTorrent: input.isTorrent,
           size: undefined,
           sizeBytes: undefined,
           resumable: undefined,
@@ -235,7 +266,11 @@ export const reconcileDownloadRows = (
           playlistCount: input.playlistCount,
           playlistEntryTitle: input.playlistEntryTitle,
           playlistError: undefined,
-          metadataBlockedReason: undefined
+          metadataBlockedReason: undefined,
+          torrentPath: input.isTorrent ? preserved.torrentPath : undefined,
+          torrentInfoHash: input.isTorrent ? preserved.torrentInfoHash : undefined,
+          torrentFiles: input.isTorrent ? preserved.torrentFiles : undefined,
+          selectedTorrentFileIndices: input.isTorrent ? preserved.selectedTorrentFileIndices : undefined
         };
       }
       return preserved;
@@ -263,6 +298,7 @@ export const reconcileDownloadRows = (
         || forceMediaUrls.has(input.sourceUrl)
         || isMediaUrl(input.sourceUrl)
       ),
+      isTorrent: input.valid && Boolean(input.isTorrent),
       isPlaylist: input.isPlaylist,
       playlistSourceUrl: input.playlistSourceUrl,
       playlistTitle: input.playlistTitle,

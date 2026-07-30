@@ -2918,6 +2918,7 @@ mod platform;
 pub mod queue;
 pub mod process;
 pub mod retry;
+pub mod torrent;
 mod settings;
 mod storage;
 pub use error::AppError;
@@ -3156,7 +3157,7 @@ fn parse_firelink_deep_link(deep_link: &url::Url) -> FirelinkDeepLink {
         let Ok(url) = url::Url::parse(raw_url) else {
             continue;
         };
-        if !matches!(url.scheme(), "http" | "https" | "ftp" | "sftp") {
+        if !matches!(url.scheme(), "http" | "https" | "ftp" | "sftp" | "magnet") {
             continue;
         }
         let url = url.to_string();
@@ -4883,7 +4884,7 @@ async fn remove_download(
 ) -> Result<(), String> {
     log::info!("remove_download called for id: {}", id);
     let preserve_resumable = preserve_resumable.unwrap_or(false);
-    let primary_path = crate::download_ownership::primary_path_for_id(&app_handle, &id)?;
+    let mut owned_paths = crate::download_ownership::owned_paths_for_id(&app_handle, &id)?;
     let _control_guard = state.queue_manager.acquire_aria2_control(&id).await;
 
     let active_kind = state.queue_manager.active_kind(&id).await;
@@ -4896,6 +4897,19 @@ async fn remove_download(
 
     let gid = state.queue_manager.aria2_gid_for_download(&id);
     if let Some(gid) = gid.as_deref() {
+        if let Err(error) = state
+            .queue_manager
+            .reconcile_aria2_torrent_ownership(&id, gid)
+            .await
+        {
+            log::debug!(
+                "aria2 torrent ownership [{}]: could not resolve files before removal of gid {}: {}",
+                id,
+                gid,
+                error
+            );
+        }
+        owned_paths = crate::download_ownership::owned_paths_for_id(&app_handle, &id)?;
         // Keep the current epoch and mapping alive until daemon removal is
         // confirmed. If removal fails, terminal events from this lifecycle
         // must still be accepted so the permit and mapping can be cleaned up.
@@ -4959,16 +4973,15 @@ async fn remove_download(
     );
 
     let preserve_assets = preserve_resumable
-        && primary_path
-            .as_deref()
-            .is_some_and(has_resumable_download_assets);
+        && owned_paths.iter().any(|path| has_resumable_download_assets(path));
 
     let cleanup_result = async {
         if delete_assets && !preserve_assets {
-            if let Some(path) = primary_path.as_deref() {
+            for path in &owned_paths {
                 remove_download_assets(path, &app_handle).await?;
             }
         }
+        crate::torrent::remove_managed_torrent(&app_handle, &id).await;
         crate::download_ownership::remove(&app_handle, &id)?;
         Ok::<(), String>(())
     }
@@ -4976,6 +4989,15 @@ async fn remove_download(
 
     state.queue_manager.release_registered_id(&id).await;
     cleanup_result
+}
+
+#[tauri::command]
+fn get_download_primary_path(
+    app_handle: tauri::AppHandle,
+    id: String,
+) -> Result<Option<String>, String> {
+    crate::download_ownership::primary_path_for_id(&app_handle, &id)
+        .map(|path| path.map(|path| path.to_string_lossy().to_string()))
 }
 
 fn has_resumable_download_assets(primary: &std::path::Path) -> bool {
@@ -5510,15 +5532,122 @@ async fn validate_enqueue_uris(url: &str, mirrors: Option<&str>) -> Result<(), S
     Ok(())
 }
 
+async fn validate_torrent_enqueue(
+    app_handle: &tauri::AppHandle,
+    item: &queue::EnqueueItem,
+) -> Result<(), String> {
+    if item.is_media.unwrap_or(false) {
+        return Err("torrent transfer cannot be a media download".to_string());
+    }
+    validate_enqueue_uris("", item.mirrors.as_deref()).await?;
+    if let Some(path) = item.torrent_path.as_deref() {
+        let path = crate::torrent::validate_managed_torrent_path(app_handle, &item.id, path)?;
+        let bytes = std::fs::read(path)
+            .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
+        let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
+        crate::torrent::validate_selected_indices(
+            item.torrent_file_indices.as_deref(),
+            metadata.files.len(),
+        )?;
+        return Ok(());
+    }
+
+    let parsed = url::Url::parse(&item.url).map_err(|_| "invalid magnet URI".to_string())?;
+    if parsed.scheme() != "magnet" {
+        return Err("torrent transfer has no magnet URI or cached metadata".to_string());
+    }
+    if item.torrent_file_indices.is_some() {
+        return Err("magnet file selection requires resolved torrent metadata".to_string());
+    }
+    crate::torrent::inspect_source(&item.url).map(|_| ())
+}
+
+fn expected_torrent_output_paths(
+    app_handle: &tauri::AppHandle,
+    item: &queue::EnqueueItem,
+) -> Result<Option<Vec<std::path::PathBuf>>, String> {
+    if !item.is_torrent.unwrap_or(false) {
+        return Ok(None);
+    }
+    let Some(torrent_path) = item.torrent_path.as_deref() else {
+        return Ok(None);
+    };
+    let torrent_path = crate::torrent::validate_managed_torrent_path(app_handle, &item.id, torrent_path)?;
+    let bytes = std::fs::read(torrent_path)
+        .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
+    let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
+    let selected = crate::torrent::validate_selected_indices(
+        item.torrent_file_indices.as_deref(),
+        metadata.files.len(),
+    )?;
+    let destination = crate::resolve_path(&item.destination, app_handle);
+    if !crate::is_safe_path(&destination, app_handle) {
+        return Err("Path traversal blocked".to_string());
+    }
+    let canonical_destination = crate::canonicalize_with_missing_components(&destination)
+        .ok_or_else(|| "torrent destination could not be canonicalized".to_string())?;
+    let mut paths = Vec::new();
+    for relative in crate::torrent::aria2_output_paths(&metadata, selected.as_deref()) {
+        let relative = std::path::PathBuf::from(relative);
+        if relative.is_absolute()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            })
+        {
+            return Err("torrent output path is unsafe".to_string());
+        }
+        let path = destination.join(relative);
+        let canonical_path = crate::canonicalize_with_missing_components(&path)
+            .ok_or_else(|| "torrent output path could not be canonicalized".to_string())?;
+        if !crate::platform::path_is_within(&canonical_path, &canonical_destination) {
+            return Err("torrent output path is outside its destination".to_string());
+        }
+        paths.push(canonical_path);
+    }
+    Ok(Some(paths))
+}
+
+#[tauri::command]
+async fn inspect_torrent(
+    app_handle: tauri::AppHandle,
+    source: String,
+    id: String,
+    cache: Option<bool>,
+) -> Result<crate::ipc::TorrentMetadata, AppError> {
+    if source.trim_start().to_ascii_lowercase().starts_with("magnet:") {
+        return crate::torrent::inspect_source(&source)
+            .map(|parsed| crate::torrent::to_metadata(parsed, None))
+            .map_err(AppError::Internal);
+    }
+    if cache == Some(false) {
+        return crate::torrent::inspect_source(&source)
+            .map(|parsed| crate::torrent::to_metadata(parsed, None))
+            .map_err(AppError::Internal);
+    }
+    let (parsed, path) = crate::torrent::prepare_local_torrent(&app_handle, &source, &id)
+        .await
+        .map_err(AppError::Internal)?;
+    Ok(crate::torrent::to_metadata(parsed, Some(path)))
+}
+
 #[tauri::command]
 async fn enqueue_download(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     mut item: queue::EnqueueItem,
 ) -> Result<crate::ipc::EnqueueAccepted, AppError> {
-    validate_enqueue_uris(&item.url, item.mirrors.as_deref())
-        .await
-        .map_err(AppError::Internal)?;
+    if item.is_torrent.unwrap_or(false) {
+        validate_torrent_enqueue(&app_handle, &item)
+            .await
+            .map_err(AppError::Internal)?;
+    } else {
+        validate_enqueue_uris(&item.url, item.mirrors.as_deref())
+            .await
+            .map_err(AppError::Internal)?;
+    }
     let id = item.id.clone();
     item.filename = crate::download_ownership::canonical_download_filename(&item.filename);
     let accepted_filename = item.filename.clone();
@@ -5539,6 +5668,47 @@ async fn enqueue_download(
             .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
             .await;
         return Err(AppError::Internal(error));
+    }
+    match expected_torrent_output_paths(&app_handle, &item) {
+        Ok(Some(paths)) => {
+            let primary = match crate::download_ownership::expected_primary_path(
+                &app_handle,
+                &item.destination,
+                &item.filename,
+            ) {
+                Ok(primary) => primary,
+                Err(error) => {
+                    let _ = crate::download_ownership::remove(&app_handle, &id);
+                    state
+                        .queue_manager
+                        .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
+                        .await;
+                    return Err(AppError::Internal(error));
+                }
+            };
+            if let Err(error) = crate::download_ownership::set_owned_paths_with_primary(
+                &app_handle,
+                &item.id,
+                &primary,
+                &paths,
+            ) {
+                let _ = crate::download_ownership::remove(&app_handle, &id);
+                state
+                    .queue_manager
+                    .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
+                    .await;
+                return Err(AppError::Internal(error));
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let _ = crate::download_ownership::remove(&app_handle, &id);
+            state
+                .queue_manager
+                .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
+                .await;
+            return Err(AppError::Internal(error));
+        }
     }
     if let Err(error) = state
         .queue_manager
@@ -5583,7 +5753,12 @@ async fn enqueue_many(
     let mut results = Vec::with_capacity(items.len());
     for mut item in items {
         let id = item.id.clone();
-        if let Err(error) = validate_enqueue_uris(&item.url, item.mirrors.as_deref()).await {
+        let validation = if item.is_torrent.unwrap_or(false) {
+            validate_torrent_enqueue(&app_handle, &item).await
+        } else {
+            validate_enqueue_uris(&item.url, item.mirrors.as_deref()).await
+        };
+        if let Err(error) = validation {
             results.push(crate::ipc::EnqueueResult {
                 id,
                 success: false,
@@ -5639,6 +5814,65 @@ async fn enqueue_many(
                 error: Some(error),
             });
             continue;
+        }
+        match expected_torrent_output_paths(&app_handle, &item) {
+            Ok(Some(paths)) => {
+                let primary = match crate::download_ownership::expected_primary_path(
+                    &app_handle,
+                    &item.destination,
+                    &item.filename,
+                ) {
+                    Ok(primary) => primary,
+                    Err(error) => {
+                        let _ = crate::download_ownership::remove(&app_handle, &id);
+                        state
+                            .queue_manager
+                            .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
+                            .await;
+                        results.push(crate::ipc::EnqueueResult {
+                            id,
+                            success: false,
+                            filename: None,
+                            error: Some(error),
+                        });
+                        continue;
+                    }
+                };
+                if let Err(error) = crate::download_ownership::set_owned_paths_with_primary(
+                    &app_handle,
+                    &item.id,
+                    &primary,
+                    &paths,
+                ) {
+                    let _ = crate::download_ownership::remove(&app_handle, &id);
+                    state
+                        .queue_manager
+                        .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
+                        .await;
+                    results.push(crate::ipc::EnqueueResult {
+                        id,
+                        success: false,
+                        filename: None,
+                        error: Some(error),
+                    });
+                    continue;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = crate::download_ownership::remove(&app_handle, &id);
+                state
+                    .queue_manager
+                    .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
+                    .await;
+                results.push(crate::ipc::EnqueueResult {
+                    id,
+                    success: false,
+                    filename: None,
+                    error: Some(error),
+                });
+                continue;
+            }
         }
         if let Err(error) = state
             .queue_manager
@@ -9979,7 +10213,7 @@ pub fn run() {
 .invoke_handler(tauri::generate_handler![
  get_engine_status, get_aria2_engine_status, get_ytdlp_engine_status, get_ffmpeg_engine_status,
  get_deno_engine_status, test_ytdlp, test_aria2c, test_ffmpeg, test_deno,
- pause_download, resume_download, fetch_metadata, fetch_media_metadata, fetch_media_playlist_metadata,
+ pause_download, resume_download, fetch_metadata, inspect_torrent, fetch_media_metadata, fetch_media_playlist_metadata,
             begin_dock_badge_session, update_dock_badge, get_platform_info, approve_download_root, set_prevent_sleep, set_power_preferences, get_free_space, perform_system_action,
             ack_schedule_trigger,
             check_automation_permission, request_automation_permission, open_automation_settings,
@@ -9990,7 +10224,7 @@ pub fn run() {
             authorize_keychain_access,
             acknowledge_pairing_token_change,
             check_file_exists, toggle_tray_icon, set_extension_pairing_token,
-            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_global_speed_limit, remove_download,
+            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_global_speed_limit, remove_download, get_download_primary_path,
             detach_download_for_reconfigure,
             enqueue_download, enqueue_many, cancel_enqueue_generation, move_in_queue, move_many_in_queue, remove_from_queue, get_pending_order,
             commands::reveal_in_file_manager, commands::open_downloaded_file,

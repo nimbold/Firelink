@@ -7,6 +7,7 @@ use tauri::Manager;
 struct DownloadOwnershipRecord {
     id: String,
     primary_path: String,
+    owned_paths: Vec<String>,
 }
 
 pub fn canonical_download_filename(filename: &str) -> String {
@@ -124,6 +125,63 @@ pub fn set_primary_path(
     id: &str,
     path: &Path,
 ) -> Result<(), String> {
+    set_owned_paths(app_handle, id, &[path.to_path_buf()])
+}
+
+pub fn set_owned_paths<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    id: &str,
+    paths: &[PathBuf],
+) -> Result<(), String> {
+    let primary = paths
+        .first()
+        .ok_or_else(|| "Download ownership requires at least one path".to_string())?;
+    set_owned_paths_with_primary(app_handle, id, primary, paths)
+}
+
+pub fn set_owned_paths_with_primary<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    id: &str,
+    primary: &Path,
+    paths: &[PathBuf],
+) -> Result<(), String> {
+    if paths.is_empty() {
+        return Err("Download ownership requires at least one path".to_string());
+    }
+
+    let canonical_primary = canonical_owned_path(app_handle, primary)?;
+    let mut canonical_paths = Vec::with_capacity(paths.len());
+    for path in paths {
+        if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+            return Err("Download ownership file path is a directory".to_string());
+        }
+        let canonical_path = canonical_owned_path(app_handle, path)?;
+        if !canonical_paths
+            .iter()
+            .any(|existing: &PathBuf| crate::platform::paths_equal(existing, &canonical_path))
+        {
+            canonical_paths.push(canonical_path);
+        }
+    }
+
+    let path_strings = canonical_paths
+        .iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    let database = app_handle.state::<crate::db::DbState>();
+    let connection = database.lock()?;
+    crate::db::set_ownership_paths(
+        &connection,
+        id,
+        &canonical_primary.to_string_lossy(),
+        &path_strings,
+    )
+}
+
+fn canonical_owned_path<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    path: &Path,
+) -> Result<PathBuf, String> {
     if !path.is_absolute() {
         return Err("Download ownership path must be absolute".to_string());
     }
@@ -140,10 +198,10 @@ pub fn set_primary_path(
     }
     let canonical_path = crate::canonicalize_with_missing_components(path)
         .ok_or_else(|| "Download ownership path could not be canonicalized".to_string())?;
-
-    let database = app_handle.state::<crate::db::DbState>();
-    let connection = database.lock()?;
-    crate::db::set_ownership(&connection, id, &canonical_path.to_string_lossy())
+    if !crate::is_safe_path(&canonical_path, app_handle) {
+        return Err("Download ownership path is outside an allowed download location".to_string());
+    }
+    Ok(canonical_path)
 }
 
 pub fn remove(app_handle: &tauri::AppHandle, id: &str) -> Result<(), String> {
@@ -162,10 +220,25 @@ pub fn primary_path_for_id<R: tauri::Runtime>(
         .map(|record| PathBuf::from(record.primary_path)))
 }
 
+pub fn owned_paths_for_id<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    id: &str,
+) -> Result<Vec<PathBuf>, String> {
+    Ok(load_records(app_handle)?
+        .into_iter()
+        .find(|record| record.id == id)
+        .map(|record| record.owned_paths.into_iter().map(PathBuf::from).collect())
+        .unwrap_or_default())
+}
+
 pub fn known_primary_paths(app_handle: &tauri::AppHandle) -> Result<Vec<PathBuf>, String> {
     let mut paths: Vec<PathBuf> = load_records(app_handle)?
         .into_iter()
-        .map(|record| PathBuf::from(record.primary_path))
+        .flat_map(|record| {
+            std::iter::once(PathBuf::from(record.primary_path)).chain(
+                record.owned_paths.into_iter().map(PathBuf::from),
+            )
+        })
         .collect();
 
     // One-time compatibility for downloads created before the backend-owned
@@ -185,7 +258,11 @@ fn load_records<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<V
     crate::db::load_ownership(&connection).map(|records| {
         records
             .into_iter()
-            .map(|(id, primary_path)| DownloadOwnershipRecord { id, primary_path })
+            .map(|(id, primary_path, owned_paths)| DownloadOwnershipRecord {
+                id,
+                primary_path,
+                owned_paths,
+            })
             .collect()
     })
 }

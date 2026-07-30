@@ -144,6 +144,42 @@ pub struct DownloadItem {
     pub last_error: Option<String>,
     #[ts(optional)]
     pub last_try: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub is_torrent: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_path: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_file_indices: Option<Vec<u32>>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_info_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TorrentFile {
+    pub index: u32,
+    pub path: String,
+    #[ts(type = "number")]
+    pub length: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TorrentMetadata {
+    pub name: String,
+    #[ts(type = "number")]
+    pub total_bytes: u64,
+    pub files: Vec<TorrentFile>,
+    pub info_hash: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]

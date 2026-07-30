@@ -123,12 +123,12 @@ pub fn path_is_within(path: &Path, root: &Path) -> bool {
 }
 
 pub fn paths_equal(left: &Path, right: &Path) -> bool {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         left.to_string_lossy()
             .eq_ignore_ascii_case(&right.to_string_lossy())
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         left == right
     }
