@@ -6857,7 +6857,6 @@ mod tests {
         redact_log_line, redact_log_line_for_output, sanitize_ytdlp_config_value,
         has_resumable_download_assets, is_media_artifact_name,
         should_cleanup_media_artifacts_after_failure,
-        should_apply_dock_badge_update,
         should_retry_without_browser_cookies,
         retry_metadata_with_cookies, should_retry_metadata_with_cookies,
         should_send_metadata_credentials, collect_log_files, FirelinkDeepLink,
@@ -6870,6 +6869,8 @@ mod tests {
         normalize_media_connections,
         validate_enqueue_url, validate_enqueue_uris, validate_keychain_grant_request_id,
     };
+    #[cfg(target_os = "macos")]
+    use super::should_apply_dock_badge_update;
     use serde_json::json;
     use std::time::{Duration, Instant};
 
