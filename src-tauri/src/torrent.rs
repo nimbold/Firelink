@@ -1,6 +1,6 @@
 use sha1::{Digest, Sha1};
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tauri::Manager;
 
@@ -476,6 +476,10 @@ pub fn remove_orphaned_probe_dirs<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
 ) -> Result<usize, String> {
     let root = managed_torrent_storage_root(app_handle)?;
+    remove_orphaned_probe_dirs_at(&root)
+}
+
+fn remove_orphaned_probe_dirs_at(root: &Path) -> Result<usize, String> {
     let entries = match std::fs::read_dir(&root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -495,9 +499,11 @@ pub fn remove_orphaned_probe_dirs<R: tauri::Runtime>(
         {
             continue;
         }
-        std::fs::remove_dir_all(entry.path())
-            .map_err(|error| format!("could not remove orphaned torrent probe: {error}"))?;
-        removed += 1;
+        match std::fs::remove_dir_all(entry.path()) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("could not remove orphaned torrent probe: {error}")),
+        }
     }
     Ok(removed)
 }
@@ -507,6 +513,13 @@ pub fn remove_orphaned_cached_torrents<R: tauri::Runtime>(
     retained_ids: &HashSet<String>,
 ) -> Result<usize, String> {
     let root = managed_torrent_storage_root(app_handle)?;
+    remove_orphaned_cached_torrents_at(&root, retained_ids)
+}
+
+fn remove_orphaned_cached_torrents_at(
+    root: &Path,
+    retained_ids: &HashSet<String>,
+) -> Result<usize, String> {
     let entries = match std::fs::read_dir(&root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -528,9 +541,13 @@ pub fn remove_orphaned_cached_torrents<R: tauri::Runtime>(
         if retained_ids.contains(id) {
             continue;
         }
-        std::fs::remove_file(path)
-            .map_err(|error| format!("could not remove orphaned torrent metadata: {error}"))?;
-        removed += 1;
+        match std::fs::remove_file(path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!("could not remove orphaned torrent metadata: {error}"));
+            }
+        }
     }
     Ok(removed)
 }
@@ -730,5 +747,38 @@ mod tests {
     fn rejects_noncanonical_lengths_and_invalid_files_field() {
         assert!(parse_torrent_bytes(b"d4:infod6:lengthi5e4:name04:testee").is_err());
         assert!(parse_torrent_bytes(b"d4:infod5:filesi1e6:lengthi5e4:name4:testee").is_err());
+    }
+
+    #[test]
+    fn removes_only_orphaned_probe_directories() {
+        let temporary = tempfile::tempdir().expect("temporary torrent storage should exist");
+        let root = temporary.path();
+        std::fs::create_dir(root.join(".probe-stale")).expect("probe directory should exist");
+        std::fs::write(root.join(".probe-file"), b"not a directory")
+            .expect("probe marker file should exist");
+        std::fs::create_dir(root.join("retained-dir")).expect("unrelated directory should exist");
+
+        assert_eq!(remove_orphaned_probe_dirs_at(root).unwrap(), 1);
+        assert!(!root.join(".probe-stale").exists());
+        assert!(root.join(".probe-file").is_file());
+        assert!(root.join("retained-dir").is_dir());
+    }
+
+    #[test]
+    fn removes_unretained_torrent_files_but_preserves_retained_and_unrelated_entries() {
+        let temporary = tempfile::tempdir().expect("temporary torrent storage should exist");
+        let root = temporary.path();
+        std::fs::write(root.join("keep-id.torrent"), b"retained")
+            .expect("retained metadata should exist");
+        std::fs::write(root.join("orphan-id.torrent"), b"orphan")
+            .expect("orphan metadata should exist");
+        std::fs::write(root.join("notes.txt"), b"unrelated")
+            .expect("unrelated file should exist");
+        let retained = HashSet::from(["keep-id".to_string()]);
+
+        assert_eq!(remove_orphaned_cached_torrents_at(root, &retained).unwrap(), 1);
+        assert!(root.join("keep-id.torrent").is_file());
+        assert!(!root.join("orphan-id.torrent").exists());
+        assert!(root.join("notes.txt").is_file());
     }
 }
