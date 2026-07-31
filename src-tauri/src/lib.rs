@@ -2918,6 +2918,7 @@ mod platform;
 pub mod queue;
 pub mod process;
 pub mod retry;
+mod torrent_probe;
 pub mod torrent;
 mod settings;
 mod storage;
@@ -3273,6 +3274,22 @@ pub(crate) async fn rpc_call(
     json.get("result")
         .cloned()
         .ok_or_else(|| "aria2 returned no result".to_string())
+}
+
+struct Aria2RpcClient {
+    port: u16,
+    secret: String,
+}
+
+#[async_trait::async_trait]
+impl crate::torrent_probe::RpcClient for Aria2RpcClient {
+    async fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        rpc_call(self.port, &self.secret, method, params).await
+    }
 }
 
 #[tauri::command]
@@ -5688,6 +5705,17 @@ fn expected_torrent_output_paths(
     Ok(Some(paths))
 }
 
+async fn remove_magnet_metadata_probe_dir(path: &std::path::Path) -> Result<(), String> {
+    match tokio::fs::remove_dir_all(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "could not remove magnet metadata probe ({:?})",
+            error.kind()
+        )),
+    }
+}
+
 async fn resolve_magnet_metadata(
     app_handle: &tauri::AppHandle,
     state: &AppState,
@@ -5698,6 +5726,10 @@ async fn resolve_magnet_metadata(
 ) -> Result<crate::ipc::TorrentMetadata, String> {
     let expected = crate::torrent::inspect_source(source)?;
     let managed_path = crate::torrent::managed_torrent_path(app_handle, id)?;
+    let proxy_value = proxy
+        .map(crate::queue::aria2_all_proxy_value)
+        .transpose()?
+        .flatten();
     let storage_root = managed_path
         .parent()
         .ok_or_else(|| "torrent storage has no parent directory".to_string())?;
@@ -5711,140 +5743,61 @@ async fn resolve_magnet_metadata(
         .load(std::sync::atomic::Ordering::Relaxed);
     let secret = state.aria2_secret.clone();
     let metadata_path = probe_dir.join(format!("{}.torrent", expected.info_hash));
-    let mut gid = None;
-    let metadata_result = async {
-        let mut options = serde_json::Map::new();
-        options.insert(
-            "dir".to_string(),
-            serde_json::json!(probe_dir.to_string_lossy().to_string()),
-        );
-        options.insert("bt-metadata-only".to_string(), serde_json::json!("true"));
-        options.insert("bt-save-metadata".to_string(), serde_json::json!("true"));
-        options.insert("max-tries".to_string(), serde_json::json!("3"));
-        options.insert("retry-wait".to_string(), serde_json::json!("2"));
-        options.insert("connect-timeout".to_string(), serde_json::json!("20"));
-        options.insert("timeout".to_string(), serde_json::json!("60"));
-        options.insert("auto-file-renaming".to_string(), serde_json::json!("false"));
-        if let Some(proxy) = proxy {
-            if let Some(proxy) = crate::queue::aria2_all_proxy_value(proxy)? {
-                options.insert("all-proxy".to_string(), serde_json::json!(proxy));
-            }
-        }
-
-        let result = crate::rpc_call(
-            port,
-            &secret,
-            "aria2.addUri",
-            serde_json::json!([[source], options]),
-        )
-        .await
-        .map_err(|error| {
-            format!(
-                "Aria2 could not start magnet metadata resolution: {}",
-                crate::redact_sensitive_text(&error)
-            )
-        })?;
-        let added_gid = result
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| "Aria2 returned an empty metadata probe GID".to_string())?
-            .to_string();
-        gid = Some(added_gid.clone());
-
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            let status = match crate::rpc_call(
-                port,
-                &secret,
-                "aria2.tellStatus",
-                serde_json::json!([&added_gid, ["status", "errorCode", "errorMessage"]]),
-            )
-            .await
-            {
-                Ok(status) => status,
-                Err(error) if aria2_gid_not_found(&error) => {
-                    return Err(
-                        "Aria2 removed the magnet metadata probe before metadata was saved"
-                            .to_string(),
-                    );
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "Aria2 metadata resolution status failed: {}",
-                        crate::redact_sensitive_text(&error)
-                    ));
-                }
-            };
-            match status.get("status").and_then(serde_json::Value::as_str) {
-                Some("complete") => break,
-                Some("error") | Some("removed") => {
-                    let error_code = status
-                        .get("errorCode")
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|value| !value.is_empty());
-                    let error_message = status
-                        .get("errorMessage")
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|value| !value.is_empty())
-                        .unwrap_or("metadata probe ended without a torrent file");
-                    let detail = match error_code {
-                        Some(code) => format!("aria2 error code {code}: {error_message}"),
-                        None => error_message.to_string(),
-                    };
-                    return Err(format!(
-                        "Aria2 could not resolve magnet metadata: {}",
-                        crate::redact_sensitive_text(&detail)
-                    ));
-                }
-                Some("active") | Some("waiting") | Some("paused") | None => {}
-                Some(status) => {
-                    return Err(format!(
-                        "Aria2 returned an unsupported metadata probe status: {status}"
-                    ));
-                }
-            }
-            if Instant::now() >= deadline {
-                return Err("Aria2 magnet metadata resolution timed out".to_string());
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-
-        let bytes = tokio::fs::read(&metadata_path)
-            .await
-            .map_err(|error| format!("Aria2 did not save magnet metadata: {error}"))?;
-        let parsed = crate::torrent::parse_torrent_bytes(&bytes)?;
-        crate::torrent::validate_info_hash(Some(&expected.info_hash), &parsed.info_hash)?;
-        Ok((parsed, bytes))
+    let mut options = serde_json::Map::new();
+    options.insert(
+        "dir".to_string(),
+        serde_json::json!(probe_dir.to_string_lossy().to_string()),
+    );
+    options.insert("bt-metadata-only".to_string(), serde_json::json!("true"));
+    options.insert("bt-save-metadata".to_string(), serde_json::json!("true"));
+    options.insert("max-tries".to_string(), serde_json::json!("3"));
+    options.insert("retry-wait".to_string(), serde_json::json!("2"));
+    options.insert("connect-timeout".to_string(), serde_json::json!("20"));
+    options.insert("timeout".to_string(), serde_json::json!("60"));
+    options.insert("auto-file-renaming".to_string(), serde_json::json!("false"));
+    if let Some(proxy) = proxy_value {
+        options.insert("all-proxy".to_string(), serde_json::json!(proxy));
     }
+
+    let client = std::sync::Arc::new(Aria2RpcClient { port, secret });
+    let metadata_result = crate::torrent_probe::run_metadata_probe(
+        client,
+        source,
+        options,
+        &metadata_path,
+        Duration::from_secs(60),
+        Duration::from_millis(250),
+    )
     .await;
 
-    let cleanup_result = if let Some(gid) = gid.as_deref() {
-        let removal = force_remove_aria2_gid(port, &secret, gid).await;
-        match removal {
-            Ok(()) => wait_for_aria2_stopped(port, &secret, gid).await,
-            Err(error) => Err(error),
+    let bytes = match metadata_result {
+        Ok(bytes) => bytes,
+        Err(crate::torrent_probe::ProbeFailure::Metadata(error)) => {
+            if let Err(remove_error) = remove_magnet_metadata_probe_dir(&probe_dir).await {
+                return Err(remove_error);
+            }
+            return Err(error);
         }
-    } else {
-        Ok(())
-    };
-    if let Err(error) = cleanup_result {
-        if aria2_daemon_process_exited(app_handle) {
-            if let Err(remove_error) = tokio::fs::remove_dir_all(&probe_dir).await {
+        Err(crate::torrent_probe::ProbeFailure::Cleanup(error)) => {
+            if aria2_daemon_process_exited(app_handle) {
+                if let Err(remove_error) = remove_magnet_metadata_probe_dir(&probe_dir).await {
+                    return Err(format!(
+                        "could not clean up magnet metadata probe: {error}; could not remove probe after aria2 exit: {remove_error}"
+                    ));
+                }
                 return Err(format!(
-                    "could not clean up magnet metadata probe: {error}; could not remove probe after aria2 exit: {remove_error}"
+                    "could not clean up magnet metadata probe after aria2 exit: {error}"
                 ));
             }
-            return Err(format!(
-                "could not clean up magnet metadata probe after aria2 exit: {error}"
-            ));
+            return Err(format!("could not clean up magnet metadata probe: {error}"));
         }
-        return Err(format!("could not clean up magnet metadata probe: {error}"));
-    }
-    if let Err(error) = tokio::fs::remove_dir_all(&probe_dir).await {
-        return Err(format!("could not remove magnet metadata probe: {error}"));
-    }
+    };
 
-    let (parsed, bytes) = metadata_result?;
+    if let Err(error) = remove_magnet_metadata_probe_dir(&probe_dir).await {
+        return Err(error);
+    }
+    let parsed = crate::torrent::parse_torrent_bytes(&bytes)?;
+    crate::torrent::validate_info_hash(Some(&expected.info_hash), &parsed.info_hash)?;
     let torrent_path = if cache {
         Some(crate::torrent::cache_torrent_bytes(app_handle, id, &bytes).await?)
     } else {
