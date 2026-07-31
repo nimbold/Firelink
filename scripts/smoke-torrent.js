@@ -39,12 +39,31 @@ const binaryPath = path.resolve(
   argumentValue('--binary') || path.join(repoRoot, 'src-tauri', 'binaries', executableName),
 );
 
-const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+const runtimeAbortController = new AbortController();
+const sleep = (milliseconds, signal = runtimeAbortController.signal) => new Promise((resolve, reject) => {
+  if (signal?.aborted) {
+    reject(new Error('Torrent runtime smoke was interrupted'));
+    return;
+  }
+  let timer;
+  const onAbort = () => {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+    reject(new Error('Torrent runtime smoke was interrupted'));
+  };
+  timer = setTimeout(() => {
+    signal?.removeEventListener('abort', onAbort);
+    resolve();
+  }, milliseconds);
+  signal?.addEventListener('abort', onAbort, { once: true });
+});
 const activeDaemons = new Set();
 let runtimeTempRoot;
 let runtimeTracker;
 let cleanupPromise;
 let signalTerminationRequested = false;
+
+class DaemonExitedError extends Error {}
 
 function childExited(child) {
   return child.exitCode !== null || child.signalCode !== null;
@@ -176,7 +195,14 @@ function createRuntimeTorrent(trackerUrl) {
 function startTracker(seederPort) {
   let activeSeederPort = seederPort;
   const server = http.createServer((request, response) => {
-    if (!request.url || new URL(request.url, 'http://127.0.0.1').pathname !== '/announce') {
+    let pathname;
+    try {
+      pathname = request.url ? new URL(request.url, 'http://127.0.0.1').pathname : undefined;
+    } catch {
+      response.writeHead(400).end();
+      return;
+    }
+    if (pathname !== '/announce') {
       response.writeHead(404).end();
       return;
     }
@@ -224,7 +250,7 @@ function daemonEnvironment() {
     : process.env;
 }
 
-async function rpc(port, secret, method, params = []) {
+async function rpc(port, secret, method, params = [], { signal = runtimeAbortController.signal } = {}) {
   const response = await fetch(`http://127.0.0.1:${port}/jsonrpc`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -234,7 +260,7 @@ async function rpc(port, secret, method, params = []) {
       method,
       params: [`token:${secret}`, ...params],
     }),
-    signal: AbortSignal.timeout(3000),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(3000)]) : AbortSignal.timeout(3000),
   });
   const body = await response.json();
   if (body.error) throw new Error(`${method}: ${JSON.stringify(body.error)}`);
@@ -247,10 +273,12 @@ async function waitFor(description, check, timeoutMs = 15000) {
   let lastError;
   while (Date.now() < deadline) {
     try {
+      if (runtimeAbortController.signal.aborted) throw new Error('Torrent runtime smoke was interrupted');
       const result = await check();
       if (result) return result;
     } catch (error) {
       lastError = error;
+      if (runtimeAbortController.signal.aborted || error instanceof DaemonExitedError) throw error;
     }
     await sleep(100);
   }
@@ -299,7 +327,7 @@ async function startDaemon({ name, rpcPort, listenPort, directory, extraArgs = [
     activeDaemons.add(daemon);
     try {
       await waitFor(`${name} Aria2 RPC`, async () => {
-        if (exit) throw new Error(`${name} exited: ${exit.error?.message || `${exit.code}/${exit.signal}`}`);
+        if (exit) throw new DaemonExitedError(`${name} exited: ${exit.error?.message || `${exit.code}/${exit.signal}`}`);
         try {
           await rpc(selectedRpcPort, secret, 'aria2.getVersion');
           return true;
@@ -326,7 +354,7 @@ async function stopDaemon(daemon) {
   try {
     if (!childExited(child)) {
       try {
-        await rpc(daemon.rpcPort, daemon.secret, 'aria2.shutdown');
+        await rpc(daemon.rpcPort, daemon.secret, 'aria2.shutdown', [], { signal: null });
       } catch {
         // The process may already have exited during cleanup.
       }
@@ -384,10 +412,19 @@ async function tellStatus(daemon, gid) {
   ]]);
 }
 
+function assertDaemonRunning(daemon) {
+  if (childExited(daemon.child)) {
+    throw new DaemonExitedError(
+      `Aria2 daemon exited: ${daemon.child.exitCode ?? 'null'}/${daemon.child.signalCode ?? 'null'}`,
+    );
+  }
+}
+
 async function waitForTerminal(daemon, gid, timeoutMs = 30000) {
   let lastStatus;
   try {
     return await waitFor(`Aria2 transfer ${gid} to complete`, async () => {
+      assertDaemonRunning(daemon);
       lastStatus = await tellStatus(daemon, gid);
       if (lastStatus.status === 'complete') return lastStatus;
       if (lastStatus.status === 'error' || lastStatus.status === 'removed') {
@@ -403,6 +440,7 @@ async function waitForTerminal(daemon, gid, timeoutMs = 30000) {
 
 async function waitForStatus(daemon, gid, expected, timeoutMs = 10000) {
   return waitFor(`Aria2 transfer ${gid} to become ${expected}`, async () => {
+    assertDaemonRunning(daemon);
     const status = await tellStatus(daemon, gid);
     if (status.status === expected) return status;
     if (status.status === 'error' || status.status === 'removed') {
@@ -416,6 +454,7 @@ async function waitForDataComplete(daemon, gid, timeoutMs = 30000) {
   let lastStatus;
   try {
     return await waitFor(`Aria2 transfer ${gid} data to complete`, async () => {
+      assertDaemonRunning(daemon);
       lastStatus = await tellStatus(daemon, gid);
       if (lastStatus.status === 'error' || lastStatus.status === 'removed') {
         throw new Error(`transfer ended ${lastStatus.status}: ${lastStatus.errorCode || ''} ${lastStatus.errorMessage || ''}`);
@@ -432,6 +471,7 @@ async function waitForRemoved(daemon, gid) {
   let lastStatus;
   try {
     return await waitFor(`Aria2 transfer ${gid} to be removed`, async () => {
+      assertDaemonRunning(daemon);
       try {
         lastStatus = await tellStatus(daemon, gid);
         return lastStatus.status === 'removed' ? lastStatus : false;
@@ -693,6 +733,7 @@ async function main() {
 function handleTerminationSignal(signal) {
   if (signalTerminationRequested) return;
   signalTerminationRequested = true;
+  runtimeAbortController.abort();
   void cleanupRuntime().then(() => {
     process.exit(signal === 'SIGINT' ? 130 : 143);
   }, error => {
