@@ -33,6 +33,8 @@
     "build": "tsc && vite build",
     "check:i18n": "vitest run src/i18n/resources.test.ts",
     "check:updates": "node scripts/check-updates.js",
+    "smoke:torrent": "node scripts/smoke-torrent.js",
+    "smoke:torrent:failure-paths": "node scripts/smoke-torrent.js --failure-paths",
     "verify:macos-signing": "node scripts/verify-macos-signing.js",
     "preview": "vite preview",
     "tauri": "tauri",
