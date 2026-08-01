@@ -45,17 +45,19 @@ const startDownloadListeners = async () => {
       // A sidecar can flush one last progress chunk after a pause, failure,
       // completion, or lifecycle reset. Do not let that stale chunk repopulate
       // the live progress map or overwrite a later lifecycle's first frame.
-      if (!['downloading', 'processing'].includes(current.status)) {
+      if (!['downloading', 'processing', 'seeding'].includes(current.status)) {
         useDownloadProgressStore.getState().clearDownloadProgress(payload.id);
         return;
       }
       useDownloadProgressStore.getState().updateDownloadProgress(payload.id, payload);
       const shouldUpdateSize = Boolean(payload.size && (!current.isMedia || payload.size_is_final));
       const updates: Partial<DownloadItem> = {};
-      if (current.status === 'downloading' || current.status === 'processing') {
+      if (current.status === 'downloading' || current.status === 'processing' || current.status === 'seeding') {
         updates.fraction = payload.fraction;
-        updates.speed = payload.speed;
-        updates.eta = payload.eta;
+        updates.speed = current.status === 'seeding'
+          ? payload.upload_speed ?? '-'
+          : payload.speed;
+        updates.eta = current.status === 'seeding' ? '-' : payload.eta;
       }
       if (shouldUpdateSize && current.size !== payload.size) {
         updates.size = payload.size!;
@@ -119,7 +121,7 @@ const startDownloadListeners = async () => {
         return;
       }
       if (status === 'downloading' || status === 'processing' ||
-          status === 'completed' || status === 'failed') {
+          status === 'seeding' || status === 'completed' || status === 'failed') {
         clearDownloadControlIntent(payload.id, 'resume');
       }
       if (status === 'paused') {
@@ -137,6 +139,13 @@ const startDownloadListeners = async () => {
         return;
       }
       if (current.status === 'paused' &&
+          status !== 'paused' &&
+          status !== 'completed' &&
+          status !== 'failed') {
+        return;
+      }
+      if (current.status === 'seeding' &&
+          status !== 'seeding' &&
           status !== 'paused' &&
           status !== 'completed' &&
           status !== 'failed') {
@@ -179,7 +188,7 @@ const startDownloadListeners = async () => {
       }
       mainStore.updateDownload(payload.id, updates);
 
-      if (status === 'completed' || status === 'failed' || status === 'paused') {
+      if (status === 'completed' || status === 'failed' || status === 'paused' || status === 'seeding') {
         useDownloadStore.setState(state => ({
           pendingOrder: state.pendingOrder.filter(id => id !== payload.id)
         }));
@@ -189,7 +198,7 @@ const startDownloadListeners = async () => {
           : { pendingOrder: [...state.pendingOrder, payload.id] });
       }
 
-      if (status === 'queued' || status === 'downloading' || status === 'processing' || status === 'retrying') {
+      if (status === 'queued' || status === 'downloading' || status === 'processing' || status === 'seeding' || status === 'retrying') {
         mainStore.registerBackendIds([payload.id]);
       } else if (status === 'completed' || status === 'failed') {
         mainStore.unregisterBackendIds([payload.id]);

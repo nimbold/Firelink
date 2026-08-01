@@ -59,6 +59,9 @@ export interface AddDownloadDraftRow {
   torrentInfoHash?: string;
   torrentFiles?: TorrentFile[];
   selectedTorrentFileIndices?: number[];
+  torrentSeedTime?: number;
+  torrentSeedRatio?: number;
+  torrentUploadLimit?: string;
 }
 
 /**

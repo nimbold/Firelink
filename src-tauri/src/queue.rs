@@ -122,6 +122,10 @@ impl Drop for Aria2ControlGuard {
 #[derive(Debug, Clone)]
 pub enum PendingOutcome {
     Complete,
+    /// BitTorrent payload is complete, but Aria2 is still seeding. Keep the
+    /// GID, ownership record, and queue permit until the final complete
+    /// notification arrives.
+    Seeding,
     Error(String),
 }
 
@@ -205,6 +209,9 @@ pub struct SpawnPayload {
     pub is_torrent: bool,
     pub torrent_path: Option<String>,
     pub torrent_file_indices: Option<Vec<u32>>,
+    pub torrent_seed_time: Option<f64>,
+    pub torrent_seed_ratio: Option<f64>,
+    pub torrent_upload_limit: Option<String>,
 }
 
 /// A sidecar spawner. In production this calls the real aria2/yt-dlp
@@ -692,6 +699,14 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .get(id)
             .and_then(|payload| payload.connections)
             .map(clamp_download_connections)
+    }
+
+    pub async fn aria2_torrent_seeding_requested(&self, id: &str) -> bool {
+        self.aria2_payloads
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(torrent_seeding_requested)
     }
 
     pub fn set_aria2_global_speed_limit(&self, limit: Option<String>) {
@@ -1629,6 +1644,18 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// and lets commands reconcile an Aria2 terminal status without releasing
     /// the lock first.
     pub(crate) async fn apply_completion_locked(&self, id: &str, outcome: PendingOutcome) {
+        let outcome = match outcome {
+            PendingOutcome::Seeding if self.aria2_torrent_seeding_requested(id).await => {
+                self.emit_state(id, DownloadStatus::Seeding);
+                return;
+            }
+            // `onBtDownloadComplete` means that Aria2 is still seeding. If
+            // Firelink has no seeding policy for this payload, reconcile it
+            // as terminal so a daemon-side default or stale event cannot
+            // strand the GID and permit.
+            PendingOutcome::Seeding => PendingOutcome::Complete,
+            other => other,
+        };
         if let Some(gid) = self.aria2_gid_for_download(id) {
             if let Err(error) = self.reconcile_aria2_torrent_ownership(id, &gid).await {
                 log::debug!(
@@ -1671,6 +1698,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 self.release_permit(id).await;
                 self.emit_failed(id, error);
             }
+            PendingOutcome::Seeding => unreachable!("seeding outcomes are normalized before terminal cleanup"),
         }
     }
 
@@ -2583,6 +2611,16 @@ fn automatic_retry_limit(max_tries: Option<i32>) -> usize {
     max_tries.unwrap_or(MAX_RETRIES as i32).max(0) as usize
 }
 
+fn torrent_seeding_requested(payload: &SpawnPayload) -> bool {
+    payload.is_torrent
+        && (payload
+            .torrent_seed_time
+            .is_some_and(|minutes| minutes.is_finite() && minutes > 0.0)
+            || payload
+                .torrent_seed_ratio
+                .is_some_and(|ratio| ratio.is_finite() && ratio >= 0.0))
+}
+
 fn aria2_attempt_limit(max_tries: Option<i32>) -> u32 {
     // Firelink owns the retry budget and performs the backoff/GID rotation.
     // Keep each aria2 GID to one attempt so `max_tries` is not multiplied by
@@ -2871,6 +2909,53 @@ fn apply_aria2_connection_options(
     );
 }
 
+fn format_aria2_torrent_number(value: f64, field: &str) -> Result<String, String> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(format!("torrent {field} must be a finite non-negative number"));
+    }
+    Ok(value.to_string())
+}
+
+fn apply_aria2_torrent_options(
+    options: &mut serde_json::Map<String, serde_json::Value>,
+    payload: &SpawnPayload,
+) -> Result<(), String> {
+    if !payload.is_torrent {
+        return Ok(());
+    }
+
+    let seed_time = payload
+        .torrent_seed_time
+        .map(|value| format_aria2_torrent_number(value, "seed time"))
+        .transpose()?;
+    let seed_ratio = payload
+        .torrent_seed_ratio
+        .map(|value| format_aria2_torrent_number(value, "seed ratio"))
+        .transpose()?;
+
+    // Aria2 treats seed-time=0 as an explicit disable. Omit it when a ratio
+    // policy exists so ratio-only and unlimited-ratio policies remain active.
+    // With no policy, keep the explicit zero to prevent daemon defaults from
+    // turning a normal Torrent download into an untracked seeding lifecycle.
+    if seed_ratio.is_none() || payload.torrent_seed_time.is_some_and(|value| value > 0.0) {
+        options.insert(
+            "seed-time".to_string(),
+            serde_json::json!(seed_time.unwrap_or_else(|| "0".to_string())),
+        );
+    }
+
+    if let Some(seed_ratio) = seed_ratio {
+        options.insert("seed-ratio".to_string(), serde_json::json!(seed_ratio));
+    }
+
+    if let Some(upload_limit) = payload.torrent_upload_limit.as_deref() {
+        let normalized = crate::normalize_speed_limit_for_aria2(upload_limit)
+            .ok_or_else(|| "torrent upload limit must be greater than zero".to_string())?;
+        options.insert("max-upload-limit".to_string(), serde_json::json!(normalized));
+    }
+    Ok(())
+}
+
 impl ProductionSpawner {
     pub fn new(app_handle: AppHandle<tauri::Wry>) -> Self {
         Self { app_handle }
@@ -2930,6 +3015,7 @@ impl SidecarSpawner for ProductionSpawner {
         }
         let conn = effective_aria2_connections(id, payload).await;
         apply_aria2_connection_options(&mut options, conn);
+        apply_aria2_torrent_options(&mut options, payload)?;
         let mt = aria2_attempt_limit(payload.max_tries);
         options.insert("max-tries".to_string(), serde_json::json!(mt.to_string()));
         options.insert("retry-wait".to_string(), serde_json::json!("2"));
@@ -3390,6 +3476,15 @@ pub struct EnqueueItem {
     pub torrent_info_hash: Option<String>,
     #[serde(default)]
     #[ts(optional)]
+    pub torrent_seed_time: Option<f64>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_seed_ratio: Option<f64>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_upload_limit: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
     pub lifecycle_generation: Option<String>,
 }
 
@@ -3432,6 +3527,9 @@ impl EnqueueItem {
                 is_torrent: self.is_torrent.unwrap_or(false),
                 torrent_path: self.torrent_path,
                 torrent_file_indices: self.torrent_file_indices,
+                torrent_seed_time: self.torrent_seed_time,
+                torrent_seed_ratio: self.torrent_seed_ratio,
+                torrent_upload_limit: self.torrent_upload_limit,
             },
         }
     }
@@ -3440,6 +3538,28 @@ impl EnqueueItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestSpawner;
+
+    #[async_trait::async_trait]
+    impl SidecarSpawner for TestSpawner {
+        async fn add_uri(&self, _id: &str, _payload: &SpawnPayload) -> Result<String, String> {
+            Ok("test-gid".to_string())
+        }
+
+        async fn remove_uri(&self, _gid: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn run_media(
+            &self,
+            _id: &str,
+            _payload: &SpawnPayload,
+            _lifecycle_generation: u64,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn aria2_connection_options_enable_requested_ranges_for_small_release_assets() {
@@ -3460,6 +3580,135 @@ mod tests {
             options.get("stream-piece-selector"),
             Some(&serde_json::json!("inorder"))
         );
+    }
+
+    #[test]
+    fn torrent_options_disable_seeding_when_no_policy_is_saved() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            ..Default::default()
+        };
+
+        apply_aria2_torrent_options(&mut options, &payload).unwrap();
+
+        assert_eq!(options.get("seed-time"), Some(&serde_json::json!("0")));
+        assert!(!options.contains_key("max-upload-limit"));
+    }
+
+    #[test]
+    fn torrent_options_preserve_seed_policy_and_upload_limit() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_seed_time: Some(30.0),
+            torrent_seed_ratio: Some(1.5),
+            torrent_upload_limit: Some("2 MiB/s".to_string()),
+            ..Default::default()
+        };
+
+        apply_aria2_torrent_options(&mut options, &payload).unwrap();
+
+        assert_eq!(options.get("seed-time"), Some(&serde_json::json!("30")));
+        assert_eq!(options.get("seed-ratio"), Some(&serde_json::json!("1.5")));
+        assert_eq!(
+            options.get("max-upload-limit"),
+            Some(&serde_json::json!("2M"))
+        );
+        assert!(torrent_seeding_requested(&payload));
+    }
+
+    #[test]
+    fn torrent_options_support_ratio_only_seeding_without_disabling_seed_time() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_seed_ratio: Some(1.5),
+            ..Default::default()
+        };
+
+        apply_aria2_torrent_options(&mut options, &payload).unwrap();
+
+        assert!(!options.contains_key("seed-time"));
+        assert_eq!(options.get("seed-ratio"), Some(&serde_json::json!("1.5")));
+        assert!(torrent_seeding_requested(&payload));
+    }
+
+    #[test]
+    fn torrent_options_reject_invalid_seed_values() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_seed_time: Some(f64::NAN),
+            ..Default::default()
+        };
+
+        let error = apply_aria2_torrent_options(&mut options, &payload).unwrap_err();
+        assert!(error.contains("seed time"));
+    }
+
+    #[tokio::test]
+    async fn seeding_outcome_keeps_torrent_ownership_and_permit_live() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = QueueManager::test_new(
+            app.handle().clone(),
+            1,
+            Arc::new(TestSpawner),
+        );
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_seed_time: Some(30.0),
+            ..Default::default()
+        };
+
+        assert!(manager.ensure_aria2_permit("torrent").await);
+        manager
+            .aria2_payloads
+            .lock()
+            .await
+            .insert("torrent".to_string(), payload);
+        manager
+            .remember_gid("torrent".to_string(), "test-gid".to_string())
+            .await;
+        manager
+            .apply_completion("torrent", PendingOutcome::Seeding)
+            .await;
+
+        assert_eq!(manager.aria2_gid_for_download("torrent").as_deref(), Some("test-gid"));
+        assert_eq!(manager.available_permits(), 0);
+    }
+
+    #[tokio::test]
+    async fn unexpected_seeding_outcome_without_policy_is_reconciled_as_complete() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = QueueManager::test_new(
+            app.handle().clone(),
+            1,
+            Arc::new(TestSpawner),
+        );
+
+        assert!(manager.ensure_aria2_permit("torrent").await);
+        manager
+            .aria2_payloads
+            .lock()
+            .await
+            .insert(
+                "torrent".to_string(),
+                SpawnPayload {
+                    is_torrent: true,
+                    ..Default::default()
+                },
+            );
+        manager
+            .apply_completion("torrent", PendingOutcome::Seeding)
+            .await;
+
+        assert_eq!(manager.aria2_gid_for_download("torrent"), None);
+        assert_eq!(manager.available_permits(), 1);
     }
 
     #[test]

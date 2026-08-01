@@ -125,6 +125,84 @@ describe('useDownloadProgressStore', () => {
     release();
   });
 
+  it('projects torrent seeding state and upload telemetry', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'torrent-seeding',
+        url: 'magnet:?xt=urn:btih:test',
+        fileName: 'ubuntu.iso',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-state']({ payload: {
+      id: 'torrent-seeding',
+      status: 'seeding'
+    } });
+    handlers['download-progress']({ payload: {
+      id: 'torrent-seeding',
+      fraction: 1,
+      speed: '0 B/s',
+      eta: '-',
+      size: '2 GB',
+      size_is_final: false,
+      uploaded_bytes: 1048576,
+      upload_speed: '512 KiB/s',
+      num_seeders: 4,
+      active_connections: 6,
+      requested_connections: 8
+    } });
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'seeding',
+      fraction: 1,
+      speed: '512 KiB/s',
+      eta: '-'
+    });
+    expect(useDownloadProgressStore.getState().progressMap['torrent-seeding'])
+      .toMatchObject({ uploaded_bytes: 1048576, upload_speed: '512 KiB/s', num_seeders: 4 });
+    release();
+  });
+
+  it('does not regress a seeding row from a delayed active state event', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'torrent-seeding-race',
+        url: 'magnet:?xt=urn:btih:test',
+        fileName: 'ubuntu.iso',
+        status: 'seeding',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-state']({ payload: {
+      id: 'torrent-seeding-race',
+      status: 'downloading'
+    } });
+    handlers['download-state']({ payload: {
+      id: 'torrent-seeding-race',
+      status: 'queued'
+    } });
+
+    expect(useDownloadStore.getState().downloads[0].status).toBe('seeding');
+    release();
+  });
+
   it('clears progress when events arrive after a download row was removed', async () => {
     const handlers: Record<string, (event: any) => void> = {};
     vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {

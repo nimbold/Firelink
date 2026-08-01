@@ -345,6 +345,9 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
         torrent_path: item.torrentPath || undefined,
         torrent_file_indices: item.torrentFileIndices || undefined,
         torrent_info_hash: item.torrentInfoHash || undefined,
+        torrent_seed_time: item.torrentSeedTime,
+        torrent_seed_ratio: item.torrentSeedRatio,
+        torrent_upload_limit: item.torrentUploadLimit || undefined,
         lifecycle_generation: lifecycleGeneration.toString(),
       };
 
@@ -817,7 +820,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       ? updates
       : { ...updates, fileName: canonicalizeDownloadFileName(updates.fileName) };
 
-    if (item.status === 'downloading' || item.status === 'processing' || item.status === 'retrying') {
+    if (item.status === 'downloading' || item.status === 'processing' || item.status === 'seeding' || item.status === 'retrying') {
       throw new Error(i18n.t($ => $.downloadTable.transferActive));
     }
 
@@ -1411,8 +1414,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     if (updates.status && ['completed', 'failed', 'paused'].includes(updates.status)) {
       info(`Download ${id} status changed to ${updates.status}`);
       syncSystemIntegrations();
-    } else if (updates.status === 'downloading') {
-      info(`Download ${id} status changed to downloading`);
+    } else if (updates.status === 'downloading' || updates.status === 'seeding') {
+      info(`Download ${id} status changed to ${updates.status}`);
       syncSystemIntegrations();
     }
   },
@@ -2048,6 +2051,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             torrent_path: item.torrentPath || undefined,
             torrent_file_indices: item.torrentFileIndices || undefined,
             torrent_info_hash: item.torrentInfoHash || undefined,
+            torrent_seed_time: item.torrentSeedTime,
+            torrent_seed_ratio: item.torrentSeedRatio,
+            torrent_upload_limit: item.torrentUploadLimit || undefined,
             lifecycle_generation: currentDownloadLifecycle(item.id).toString(),
           });
         }

@@ -3239,6 +3239,10 @@ html[dir="rtl"] .download-context-menu-chevron {
     background: hsl(199 89% 48%);
   }
 
+  .download-progress-fill.seeding {
+    background: hsl(262 83% 58%);
+  }
+
   .download-progress-fill.queued {
     background: hsl(var(--status-queued));
   }
@@ -3278,6 +3282,11 @@ html[dir="rtl"] .download-context-menu-chevron {
 
   .download-status-processing {
     color: hsl(199 89% 48%);
+    font-weight: 600;
+  }
+
+  .download-status-seeding {
+    color: hsl(262 83% 58%);
     font-weight: 600;
   }
 

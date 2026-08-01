@@ -20,6 +20,7 @@ const isFreshDownloadStatus = (status: DownloadItem['status']): boolean =>
   status === 'staged' ||
   status === 'queued' ||
   status === 'downloading' ||
+  status === 'seeding' ||
   status === 'processing' ||
   status === 'retrying';
 

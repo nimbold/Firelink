@@ -333,6 +333,7 @@ export const PropertiesModal = () => {
   const observedActiveConnections = liveProgress?.active_connections;
   const connectionTelemetryActive = item.status === 'downloading' ||
     item.status === 'processing' ||
+    item.status === 'seeding' ||
     item.status === 'retrying';
   const connectionStatus = (() => {
     if (!connectionTelemetryActive) return String(configuredConnections);
@@ -363,9 +364,13 @@ export const PropertiesModal = () => {
     : liveProgress?.fraction ?? item.fraction ?? 0;
   const displayedSpeed = item.status === 'completed'
     ? '-'
+    : item.status === 'seeding'
+      ? liveProgress?.upload_speed ?? '-'
     : liveProgress?.speed ?? item.speed ?? '-';
   const displayedEta = item.status === 'completed'
     ? '-'
+    : item.status === 'seeding'
+      ? '-'
     : liveProgress?.eta ?? item.eta ?? '-';
   const sizeDisplay = resolveDownloadSizeDisplay({
     downloadedBytes: liveProgress?.downloaded_bytes ?? item.downloadedBytes,
@@ -400,7 +405,7 @@ export const PropertiesModal = () => {
   let statusColor = 'text-text-secondary';
   let StatusIcon = Info;
   if (item.status === 'completed') { statusColor = 'text-green-500'; StatusIcon = CheckCircle; }
-  else if (item.status === 'downloading' || item.status === 'retrying') { statusColor = 'text-blue-500'; StatusIcon = Play; }
+  else if (item.status === 'downloading' || item.status === 'seeding' || item.status === 'retrying') { statusColor = 'text-blue-500'; StatusIcon = Play; }
   else if (item.status === 'processing') { statusColor = 'text-sky-500'; StatusIcon = Play; }
   else if (item.status === 'paused') { statusColor = 'text-orange-500'; StatusIcon = Pause; }
   else if (item.status === 'failed') { statusColor = 'text-red-500'; StatusIcon = AlertCircle; }

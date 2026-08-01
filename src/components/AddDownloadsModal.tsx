@@ -225,6 +225,11 @@ export const AddDownloadsModal = () => {
   const [connections, setConnections] = useState(perServerConnections);
   const [speedLimitEnabled, setSpeedLimitEnabled] = useState(false);
   const [speedLimit, setSpeedLimit] = useState('1024');
+  const [torrentSeedingEnabled, setTorrentSeedingEnabled] = useState(false);
+  const [torrentSeedTime, setTorrentSeedTime] = useState('60');
+  const [torrentSeedRatio, setTorrentSeedRatio] = useState('1.0');
+  const [torrentUploadLimitEnabled, setTorrentUploadLimitEnabled] = useState(false);
+  const [torrentUploadLimit, setTorrentUploadLimit] = useState('1024');
   const [freeSpace, setFreeSpace] = useState('Unknown');
   const freeSpaceRequestRef = useRef(0);
 
@@ -358,6 +363,11 @@ export const AddDownloadsModal = () => {
     setFreeSpace('Unknown');
     setSpeedLimitEnabled(false);
     setSpeedLimit('1024');
+    setTorrentSeedingEnabled(false);
+    setTorrentSeedTime('60');
+    setTorrentSeedRatio('1.0');
+    setTorrentUploadLimitEnabled(false);
+    setTorrentUploadLimit('1024');
     setUseAuth(false);
     setUsername('');
     setPassword('');
@@ -931,6 +941,19 @@ export const AddDownloadsModal = () => {
       addToast({ message: t($ => $.addDownloads.speedInvalid), variant: 'error', isActionable: true });
       return;
     }
+    const hasSelectedTorrent = parsedItems.some(item => item.selected !== false && item.isTorrent);
+    if (hasSelectedTorrent && torrentSeedingEnabled && (!Number.isFinite(Number(torrentSeedTime)) || Number(torrentSeedTime) <= 0)) {
+      addToast({ message: t($ => $.addDownloads.torrentSeedTimeInvalid), variant: 'error', isActionable: true });
+      return;
+    }
+    if (hasSelectedTorrent && torrentSeedingEnabled && (!Number.isFinite(Number(torrentSeedRatio)) || Number(torrentSeedRatio) < 0)) {
+      addToast({ message: t($ => $.addDownloads.torrentSeedRatioInvalid), variant: 'error', isActionable: true });
+      return;
+    }
+    if (hasSelectedTorrent && torrentUploadLimitEnabled && (!Number.isFinite(Number(torrentUploadLimit)) || Number(torrentUploadLimit) <= 0)) {
+      addToast({ message: t($ => $.addDownloads.torrentUploadLimitInvalid), variant: 'error', isActionable: true });
+      return;
+    }
     if (saveInDedicatedFolder && !sanitizeBatchFolderName(dedicatedFolderName)) {
       addToast({
         message: t($ => $.addDownloads.dedicatedFolderNameRequired),
@@ -1402,6 +1425,9 @@ export const AddDownloadsModal = () => {
           torrentPath,
           torrentInfoHash: item.torrentInfoHash,
           torrentFileIndices: item.selectedTorrentFileIndices,
+          torrentSeedTime: item.isTorrent && torrentSeedingEnabled ? Number(torrentSeedTime) : undefined,
+          torrentSeedRatio: item.isTorrent && torrentSeedingEnabled ? Number(torrentSeedRatio) : undefined,
+          torrentUploadLimit: item.isTorrent && torrentUploadLimitEnabled ? `${torrentUploadLimit}K` : undefined,
           size: item.size || (item.sizeBytes ? formatBytes(item.sizeBytes) : undefined),
           sizeBytes: item.sizeBytes
         }, action);
@@ -1976,6 +2002,79 @@ export const AddDownloadsModal = () => {
                       {t($ => $.addDownloads.torrentMetadataPending)}
                     </p>
                   )}
+                </section>
+              )}
+
+              {selectedItemIndex !== null && parsedItems[selectedItemIndex]?.isTorrent && (
+                <section className="add-download-section relative overflow-hidden p-4">
+                  <div className="add-download-section-title flex items-center gap-2 mb-3">
+                    <HardDrive size={16} className="text-blue-500" /> {t($ => $.addDownloads.torrentSeeding)}
+                  </div>
+                  <div className="space-y-3 text-xs">
+                    <label className="flex items-center gap-2 text-text-primary">
+                      <input
+                        type="checkbox"
+                        checked={torrentSeedingEnabled}
+                        onChange={event => setTorrentSeedingEnabled(event.target.checked)}
+                        className="accent-blue-500"
+                      />
+                      {t($ => $.addDownloads.seedAfterDownload)}
+                    </label>
+                    {torrentSeedingEnabled ? (
+                      <div className="grid grid-cols-[1fr_auto] gap-2 items-center">
+                        <label htmlFor="torrent-seed-time" className="text-text-muted">{t($ => $.addDownloads.seedTime)}</label>
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            id="torrent-seed-time"
+                            type="number"
+                            min={1}
+                            step={1}
+                            value={torrentSeedTime}
+                            onChange={event => setTorrentSeedTime(event.target.value)}
+                            className="app-control w-20 px-2 py-1 text-end font-mono"
+                          />
+                          <span className="text-text-muted">{t($ => $.addDownloads.minutes)}</span>
+                        </div>
+                        <label htmlFor="torrent-seed-ratio" className="text-text-muted">{t($ => $.addDownloads.seedRatio)}</label>
+                        <input
+                          id="torrent-seed-ratio"
+                          type="number"
+                          min={0}
+                          step={0.1}
+                          value={torrentSeedRatio}
+                          onChange={event => setTorrentSeedRatio(event.target.value)}
+                          className="app-control w-20 px-2 py-1 text-end font-mono"
+                          aria-describedby="torrent-seed-ratio-hint"
+                        />
+                        <span id="torrent-seed-ratio-hint" className="col-span-2 text-[10px] text-text-muted">
+                          {t($ => $.addDownloads.seedRatioHint)}
+                        </span>
+                      </div>
+                    ) : null}
+                    <label className="flex items-center gap-2 text-text-primary">
+                      <input
+                        type="checkbox"
+                        checked={torrentUploadLimitEnabled}
+                        onChange={event => setTorrentUploadLimitEnabled(event.target.checked)}
+                        className="accent-blue-500"
+                      />
+                      {t($ => $.addDownloads.limitTorrentUpload)}
+                    </label>
+                    {torrentUploadLimitEnabled ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min={1}
+                          step={128}
+                          value={torrentUploadLimit}
+                          onChange={event => setTorrentUploadLimit(event.target.value)}
+                          className="app-control w-24 px-2 py-1 text-end font-mono"
+                          aria-label={t($ => $.addDownloads.torrentUploadLimit)}
+                        />
+                        <span className="text-text-muted">KiB/s</span>
+                      </div>
+                    ) : null}
+                  </div>
                 </section>
               )}
 

@@ -178,16 +178,20 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     };
   }, [isActionVisible, updateActionPosition]);
 
-  const displayFraction = download.status === 'downloading'
+  const displayFraction = download.status === 'downloading' || download.status === 'seeding'
     ? liveProgress?.fraction ?? download.fraction ?? 0
     : download.fraction ?? 0;
   const displayPercent = `${(displayFraction * 100).toFixed(0)}%`;
-  const displaySpeed = download.status === 'downloading'
+  const displaySpeed = download.status === 'seeding'
+    ? liveProgress?.upload_speed ?? '-'
+    : download.status === 'downloading'
     ? liveProgress?.speed ?? download.speed
     : download.status === 'processing'
       ? t($ => $.downloads.values.processing)
       : '-';
-  const displayEta = download.status === 'downloading'
+  const displayEta = download.status === 'seeding'
+    ? '-'
+    : download.status === 'downloading'
     ? liveProgress?.eta ?? download.eta
     : download.status === 'processing'
       ? t($ => $.downloads.values.muxing)
@@ -291,6 +295,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
               <div
                 className={`download-progress-fill ${
                   download.status === 'paused' ? 'paused' :
+                  download.status === 'seeding' ? 'seeding' :
                   download.status === 'processing' ? 'processing' :
                   download.status === 'queued' || download.status === 'staged' ? 'queued' :
                   download.status === 'retrying' ? 'retrying' : ''
@@ -312,6 +317,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
               }
               className={`download-status flex items-center gap-1.5 ${
                 download.status === 'paused' ? 'download-status-paused' :
+                download.status === 'seeding' ? 'download-status-seeding' :
                 download.status === 'failed' ? 'download-status-failed' :
                 download.status === 'processing' ? 'download-status-processing' :
                 download.status === 'downloading' ? 'download-status-downloading' :
@@ -327,6 +333,8 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                   </span>
                 </>
               ) : download.status === 'downloading' ? (
+                displayPercent
+              ) : download.status === 'seeding' ? (
                 displayPercent
               ) : download.status === 'processing' ? (
                 downloadStatusLabel

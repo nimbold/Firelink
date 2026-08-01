@@ -30,6 +30,7 @@ const ACTIVE_DOWNLOAD_STATUSES: ReadonlySet<DownloadStatus> = new Set([
   'queued',
   'downloading',
   'processing',
+  'seeding',
   'retrying',
 ]);
 
@@ -38,7 +39,7 @@ export const isActiveDownloadStatus = (status: DownloadStatus): boolean =>
 
 /** Transfer states that consume a worker/permit. Queued is intentionally excluded. */
 export const isTransferActiveStatus = (status: DownloadStatus): boolean =>
-  status === 'downloading' || status === 'processing' || status === 'retrying';
+  status === 'downloading' || status === 'processing' || status === 'seeding' || status === 'retrying';
 
 export const DOWNLOAD_CONNECTIONS_MIN = 1;
 export const DOWNLOAD_CONNECTIONS_MAX = 16;
@@ -255,7 +256,8 @@ export const isMediaUrl = (rawUrl: string): boolean => {
  */
 const DOWNLOAD_SECRET_FIELDS = ['password', 'cookies', 'headers'] as const;
 const VOLATILE_PROGRESS_STATUSES = new Set([
-  'downloading'
+  'downloading',
+  'seeding'
 ]);
 
 /**

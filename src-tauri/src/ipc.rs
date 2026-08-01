@@ -26,6 +26,9 @@ pub enum DownloadStatus {
     /// Post-download media processing such as yt-dlp/ffmpeg merging or
     /// extraction. The queue permit is still held.
     Processing,
+    /// A BitTorrent download has all selected data and is still seeding.
+    /// The Aria2 GID and queue permit remain live until seeding ends.
+    Seeding,
     Paused,
     Completed,
     Failed,
@@ -42,6 +45,7 @@ impl DownloadStatus {
             Self::Staged => "staged",
             Self::Downloading => "downloading",
             Self::Processing => "processing",
+            Self::Seeding => "seeding",
             Self::Paused => "paused",
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -156,6 +160,15 @@ pub struct DownloadItem {
     #[serde(default)]
     #[ts(optional)]
     pub torrent_info_hash: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_seed_time: Option<f64>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_seed_ratio: Option<f64>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_upload_limit: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]

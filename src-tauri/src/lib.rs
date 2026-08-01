@@ -1468,6 +1468,9 @@ fn emit_media_progress(
                 total_is_estimate,
                 active_connections: None,
                 requested_connections: None,
+                uploaded_bytes: None,
+                upload_speed: None,
+                num_seeders: None,
             },
         );
         state.last_progress_at = now;
@@ -3038,6 +3041,12 @@ pub struct DownloadProgressEvent {
     active_connections: Option<i32>,
     #[ts(optional)]
     requested_connections: Option<i32>,
+    #[ts(optional)]
+    uploaded_bytes: Option<f64>,
+    #[ts(optional)]
+    upload_speed: Option<String>,
+    #[ts(optional)]
+    num_seeders: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -4208,6 +4217,9 @@ pub(crate) async fn start_media_download_internal(
                                         total_is_estimate: Some(false),
                                         active_connections: None,
                                         requested_connections: None,
+                                        uploaded_bytes: None,
+                                        upload_speed: None,
+                                        num_seeders: None,
                                     });
                                 }
                                 let lower = line.to_lowercase();
@@ -4281,6 +4293,9 @@ pub(crate) async fn start_media_download_internal(
                                             total_is_estimate: Some(false),
                                             active_connections: None,
                                             requested_connections: None,
+                                            uploaded_bytes: None,
+                                            upload_speed: None,
+                                            num_seeders: None,
                                         });
                                     }
                                 }
@@ -5313,7 +5328,7 @@ async fn reconcile_aria2_downloads(app_handle: &tauri::AppHandle) {
             port,
             &secret,
             "aria2.tellStatus",
-            serde_json::json!([gid, ["status", "errorCode", "errorMessage"]]),
+            serde_json::json!([gid, ["status", "seeder", "errorCode", "errorMessage"]]),
         )
         .await
         {
@@ -5359,6 +5374,17 @@ async fn reconcile_aria2_downloads(app_handle: &tauri::AppHandle) {
         let status_name = status.get("status").and_then(|value| value.as_str());
         let outcome = match status_name {
             Some("complete") => Some(crate::queue::PendingOutcome::Complete),
+            Some("active")
+                if status.get("seeder").is_some_and(|value| {
+                    value.as_str() == Some("true") || value.as_bool() == Some(true)
+                })
+                    && state
+                        .queue_manager
+                        .aria2_torrent_seeding_requested(&id)
+                        .await =>
+            {
+                Some(crate::queue::PendingOutcome::Seeding)
+            }
             Some("error") | Some("removed") => {
                 let error_code = status
                     .get("errorCode")
@@ -9462,6 +9488,7 @@ struct Aria2ConnectionObservation {
     last_refreshed_at: Option<Instant>,
     peak_speed_bytes: f64,
     last_completed: u64,
+    seeder: bool,
 }
 
 struct Aria2ConnectionSample<'a> {
@@ -10160,6 +10187,7 @@ pub fn run() {
                                                     let state = app_handle_bg.state::<AppState>();
                                                     let outcome = match method {
                                                         "aria2.onDownloadComplete" => Some(crate::queue::PendingOutcome::Complete),
+                                                        "aria2.onBtDownloadComplete" => Some(crate::queue::PendingOutcome::Seeding),
                                                         "aria2.onDownloadError" => {
                                                             let mut msg = event.get("error_message").and_then(|m| m.as_str()).unwrap_or("aria2 download error").to_string();
                                                             let aria2_port = state.aria2_port.load(std::sync::atomic::Ordering::Relaxed);
@@ -10235,7 +10263,19 @@ pub fn run() {
                         .collect();
                     observations.retain(|id, _| mapped_ids.contains(id));
                     missing_gid_recovery_at.retain(|id, _| mapped_ids.contains(id));
-                    let params = serde_json::json!([["gid", "status", "totalLength", "completedLength", "downloadSpeed", "connections", "errorMessage"]]);
+                    let params = serde_json::json!([[
+                        "gid",
+                        "status",
+                        "totalLength",
+                        "completedLength",
+                        "downloadSpeed",
+                        "uploadLength",
+                        "uploadSpeed",
+                        "numSeeders",
+                        "seeder",
+                        "connections",
+                        "errorMessage"
+                    ]]);
                     if let Ok(active_list) = rpc_call(poll_port.load(std::sync::atomic::Ordering::Relaxed), &poll_secret, "aria2.tellActive", params).await {
                         if let Some(active_arr) = active_list.as_array() {
                             let mut seen_ids = HashSet::new();
@@ -10251,6 +10291,12 @@ pub fn run() {
                                     let total = status_info.get("totalLength").and_then(|s| s.as_str()).unwrap_or("0").parse::<u64>().unwrap_or(0);
                                     let completed = status_info.get("completedLength").and_then(|s| s.as_str()).unwrap_or("0").parse::<u64>().unwrap_or(0);
                                     let speed_bytes = status_info.get("downloadSpeed").and_then(|s| s.as_str()).unwrap_or("0").parse::<f64>().unwrap_or(0.0);
+                                    let uploaded_bytes = status_info.get("uploadLength").and_then(|s| s.as_str()).and_then(|value| value.parse::<u64>().ok());
+                                    let upload_speed_bytes = status_info.get("uploadSpeed").and_then(|s| s.as_str()).and_then(|value| value.parse::<f64>().ok());
+                                    let num_seeders = status_info.get("numSeeders").and_then(|s| s.as_str()).and_then(|value| value.parse::<i32>().ok());
+                                    let is_seeder = status_info.get("seeder").is_some_and(|value| {
+                                        value.as_str() == Some("true") || value.as_bool() == Some(true)
+                                    });
                                     let active_connections =
                                         aria2_active_connection_count(status_info);
                                     let requested_connections = poll_mgr
@@ -10292,9 +10338,12 @@ pub fn run() {
                                             now,
                                         },
                                     );
+                                    let entering_seeding = is_seeder && !observation.seeder;
+                                    observation.seeder = is_seeder;
 
                                     let fraction = if total > 0 { completed as f64 / total as f64 } else { 0.0 };
                                     let speed = crate::download::format_speed(speed_bytes);
+                                    let upload_speed = upload_speed_bytes.map(crate::download::format_speed);
                                     let eta = if speed_bytes > 0.0 && total > completed {
                                         crate::download::format_duration((total - completed) as f64 / speed_bytes)
                                     } else {
@@ -10319,7 +10368,21 @@ pub fn run() {
                                         total_is_estimate: Some(false),
                                         active_connections: Some(active_connections),
                                         requested_connections: Some(requested_connections),
+                                        uploaded_bytes: uploaded_bytes.map(|value| value as f64),
+                                        upload_speed,
+                                        num_seeders,
                                     });
+
+                                    if entering_seeding
+                                        && poll_mgr.aria2_torrent_seeding_requested(&id).await
+                                    {
+                                        poll_mgr
+                                            .handle_aria2_event(
+                                                &gid,
+                                                crate::queue::PendingOutcome::Seeding,
+                                            )
+                                            .await;
+                                    }
 
                                     if let Some(reason) = recovery_reason {
                                         log::warn!(
@@ -10360,7 +10423,7 @@ pub fn run() {
                                     poll_port.load(std::sync::atomic::Ordering::Relaxed),
                                     &poll_secret,
                                     "aria2.tellStatus",
-                                    serde_json::json!([gid, ["status", "errorCode", "errorMessage"]]),
+                                    serde_json::json!([gid, ["status", "seeder", "errorCode", "errorMessage"]]),
                                 )
                                 .await
                                 {
@@ -10424,6 +10487,15 @@ pub fn run() {
                                     .unwrap_or("");
                                 let outcome = match status_name {
                                     "complete" => Some(crate::queue::PendingOutcome::Complete),
+                                    "active"
+                                        if status.get("seeder").is_some_and(|value| {
+                                            value.as_str() == Some("true")
+                                                || value.as_bool() == Some(true)
+                                        })
+                                            && poll_mgr.aria2_torrent_seeding_requested(&id).await =>
+                                    {
+                                        Some(crate::queue::PendingOutcome::Seeding)
+                                    }
                                     "error" | "removed" => {
                                         let error_code = status
                                             .get("errorCode")
