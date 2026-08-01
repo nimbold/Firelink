@@ -3928,6 +3928,8 @@ mod tests {
 
     #[test]
     fn torrent_options_reject_invalid_peer_values() {
+        assert!(normalize_torrent_max_peers(Some(-1)).is_err());
+
         let mut options = serde_json::Map::new();
         let payload = SpawnPayload {
             is_torrent: true,

@@ -7003,6 +7003,22 @@ fn db_get_all_downloads(
     crate::db::load_downloads(&connection)
 }
 
+fn retained_torrent_id_from_persisted_record(record: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(record).ok()?;
+    let object = value.as_object()?;
+    if object.get("isTorrent").and_then(serde_json::Value::as_bool) != Some(true)
+        || object.get("torrentPath").is_none_or(serde_json::Value::is_null)
+    {
+        return None;
+    }
+    object
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 #[tauri::command]
 fn db_replace_downloads(
     state: tauri::State<'_, crate::db::DbState>,
@@ -7446,6 +7462,7 @@ mod tests {
         parse_media_playlist_metadata,
         normalize_media_connections,
         validate_enqueue_url, validate_enqueue_uris, validate_keychain_grant_request_id,
+        retained_torrent_id_from_persisted_record,
     };
     #[cfg(target_os = "macos")]
     use super::should_apply_dock_badge_update;
@@ -7477,6 +7494,27 @@ mod tests {
                 "--bt-enable-lpd=true",
             ]
         );
+    }
+
+    #[test]
+    fn retained_torrent_metadata_survives_unrelated_persisted_field_corruption() {
+        let record = json!({
+            "id": "retained-torrent",
+            "isTorrent": true,
+            "torrentPath": "/tmp/retained-torrent.torrent",
+            "torrentMaxPeers": "corrupted"
+        })
+        .to_string();
+
+        assert_eq!(
+            retained_torrent_id_from_persisted_record(&record).as_deref(),
+            Some("retained-torrent")
+        );
+        assert!(retained_torrent_id_from_persisted_record("not-json").is_none());
+        assert!(retained_torrent_id_from_persisted_record(
+            &json!({ "id": "ordinary", "isTorrent": false }).to_string()
+        )
+        .is_none());
     }
 
     #[test]
@@ -9921,25 +9959,20 @@ pub fn run() {
             let retained_torrent_ids = database
                 .lock()
                 .and_then(|connection| crate::db::load_downloads(&connection))
-                .and_then(|records| {
+                .map(|records| {
                     records
                         .into_iter()
-                        .map(|record| {
-                            serde_json::from_str::<crate::ipc::DownloadItem>(&record)
-                                .map_err(|error| {
-                                    format!("could not decode persisted download metadata: {error}")
-                                })
+                        .filter_map(|record| {
+                            let retained = retained_torrent_id_from_persisted_record(&record);
+                            if retained.is_none() {
+                                if serde_json::from_str::<crate::ipc::DownloadItem>(&record).is_err() {
+                                    log::warn!(
+                                        "skipping malformed persisted download during torrent metadata retention"
+                                    );
+                                }
+                            }
+                            retained
                         })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .map(|downloads| {
-                    downloads
-                        .into_iter()
-                        .filter(|download| {
-                            download.is_torrent.unwrap_or(false)
-                                && download.torrent_path.is_some()
-                        })
-                        .map(|download| download.id)
                         .collect::<HashSet<_>>()
                 });
             match retained_torrent_ids {
