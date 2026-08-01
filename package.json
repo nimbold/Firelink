@@ -35,6 +35,7 @@
     "check:updates": "node scripts/check-updates.js",
     "smoke:torrent": "node scripts/smoke-torrent.js",
     "smoke:torrent:failure-paths": "node scripts/smoke-torrent.js --failure-paths",
+    "test:torrent:rpc": "cd src-tauri && cargo test torrent_probe::tests::http_rpc_harness -- --nocapture",
     "verify:macos-signing": "node scripts/verify-macos-signing.js",
     "preview": "vite preview",
     "tauri": "tauri",

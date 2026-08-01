@@ -36,6 +36,14 @@ npm run smoke:torrent
 Use `node scripts/smoke-torrent.js --binary /path/to/aria2c` when validating a
 packaged or target-specific Aria2 binary.
 
+Run the HTTP-boundary Torrent probe harness with a controllable local JSON-RPC
+server. It drives the production Aria2 RPC client through scripted status,
+outage, race, cancellation, and daemon-termination cases:
+
+```sh
+npm run test:torrent:rpc
+```
+
 Run the deterministic unavailable-tracker and Aria2-daemon-exit checks with:
 
 ```sh

@@ -3267,7 +3267,30 @@ pub(crate) async fn rpc_call(
         .await
         .map_err(|e| e.to_string())?;
 
-    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let http_status = res.status();
+    let body = res.text().await.map_err(|e| e.to_string())?;
+    let json: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
+        if http_status.is_success() {
+            error.to_string()
+        } else {
+            format!(
+                "HTTP {} {}: invalid JSON-RPC response: {error}",
+                http_status.as_u16(),
+                http_status.canonical_reason().unwrap_or("response error")
+            )
+        }
+    })?;
+    if !http_status.is_success() {
+        let detail = json
+            .get("error")
+            .map(serde_json::Value::to_string)
+            .unwrap_or_else(|| "aria2 returned no JSON-RPC error".to_string());
+        return Err(format!(
+            "HTTP {} {}: {detail}",
+            http_status.as_u16(),
+            http_status.canonical_reason().unwrap_or("response error")
+        ));
+    }
     if let Some(error) = json.get("error") {
         return Err(error.to_string());
     }

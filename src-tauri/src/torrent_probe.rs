@@ -298,9 +298,273 @@ async fn wait_for_stopped<C: RpcClient>(client: &C, gid: &str) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        body::Body,
+        extract::State,
+        http::StatusCode,
+        response::{IntoResponse, Response},
+        routing::post,
+        Json, Router,
+    };
+    use std::collections::HashMap;
     use std::collections::VecDeque;
+    use std::net::SocketAddr;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
+    use tokio::sync::{oneshot, Notify};
+
+    enum ScriptedReply {
+        Result(Value),
+        RpcError(String),
+        HttpError(StatusCode, String),
+        Malformed(String),
+        Delay(Duration, Box<ScriptedReply>),
+        Hang,
+    }
+
+    struct RecordedCall {
+        method: String,
+        params: Value,
+    }
+
+    struct ScriptedRpcState {
+        secret: String,
+        scripts: Mutex<HashMap<String, VecDeque<ScriptedReply>>>,
+        calls: Mutex<Vec<RecordedCall>>,
+        call_notification: Notify,
+    }
+
+    struct ScriptedRpcServer {
+        address: SocketAddr,
+        state: Arc<ScriptedRpcState>,
+        shutdown: Option<oneshot::Sender<()>>,
+        task: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    impl ScriptedRpcServer {
+        async fn start(scripts: impl IntoIterator<Item = (String, Vec<ScriptedReply>)>) -> Self {
+            let secret = "torrent-probe-test-secret".to_string();
+            let state = Arc::new(ScriptedRpcState {
+                secret: secret.clone(),
+                scripts: Mutex::new(
+                    scripts
+                        .into_iter()
+                        .map(|(method, replies)| (method, replies.into_iter().collect()))
+                        .collect(),
+                ),
+                calls: Mutex::new(Vec::new()),
+                call_notification: Notify::new(),
+            });
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .expect("scripted RPC listener should bind");
+            let address = listener
+                .local_addr()
+                .expect("scripted RPC listener should have an address");
+            let app = Router::new()
+                .route("/jsonrpc", post(scripted_rpc_handler))
+                .with_state(Arc::clone(&state));
+            let (shutdown, shutdown_signal) = oneshot::channel();
+            let task = tokio::spawn(async move {
+                let _ = axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_signal.await;
+                    })
+                    .await;
+            });
+            Self {
+                address,
+                state,
+                shutdown: Some(shutdown),
+                task: Some(task),
+            }
+        }
+
+        fn client(&self) -> Arc<crate::Aria2RpcClient> {
+            Arc::new(crate::Aria2RpcClient {
+                port: self.address.port(),
+                secret: self.state.secret.clone(),
+            })
+        }
+
+        fn calls(&self) -> Vec<(String, Value)> {
+            self.state
+                .calls
+                .lock()
+                .expect("scripted RPC call log lock should work")
+                .iter()
+                .map(|call| (call.method.clone(), call.params.clone()))
+                .collect()
+        }
+
+        async fn wait_for_method(&self, method: &str, occurrence: usize) {
+            loop {
+                let count = self
+                    .state
+                    .calls
+                    .lock()
+                    .expect("scripted RPC call log lock should work")
+                    .iter()
+                    .filter(|call| call.method == method)
+                    .count();
+                if count >= occurrence {
+                    return;
+                }
+                self.state.call_notification.notified().await;
+            }
+        }
+
+        async fn shutdown(mut self) {
+            if let Some(shutdown) = self.shutdown.take() {
+                let _ = shutdown.send(());
+            }
+            if let Some(task) = self.task.take() {
+                task.await.expect("scripted RPC server should stop cleanly");
+            }
+        }
+
+        async fn terminate(mut self) {
+            if let Some(task) = self.task.take() {
+                task.abort();
+                let _ = task.await;
+            }
+            self.shutdown.take();
+        }
+    }
+
+    impl Drop for ScriptedRpcServer {
+        fn drop(&mut self) {
+            if let Some(task) = self.task.take() {
+                task.abort();
+            }
+        }
+    }
+
+    async fn scripted_rpc_handler(
+        State(state): State<Arc<ScriptedRpcState>>,
+        Json(request): Json<Value>,
+    ) -> Response {
+        let id = request.get("id").cloned().unwrap_or(Value::Null);
+        let method = request
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing-method>")
+            .to_string();
+        let params = request.get("params").cloned().unwrap_or(Value::Null);
+        state
+            .calls
+            .lock()
+            .expect("scripted RPC call log lock should work")
+            .push(RecordedCall {
+                method: method.clone(),
+                params: params.clone(),
+            });
+        state.call_notification.notify_waiters();
+
+        let token = params
+            .as_array()
+            .and_then(|params| params.first())
+            .and_then(Value::as_str);
+        let expected_token = format!("token:{}", state.secret);
+        if token != Some(expected_token.as_str()) {
+            return rpc_error_response(
+                id,
+                StatusCode::UNAUTHORIZED,
+                "invalid RPC token".to_string(),
+            );
+        }
+
+        let reply = state
+            .scripts
+            .lock()
+            .expect("scripted RPC scripts lock should work")
+            .get_mut(&method)
+            .and_then(VecDeque::pop_front)
+            .unwrap_or_else(|| {
+                ScriptedReply::RpcError(format!("unexpected scripted RPC method {method}"))
+            });
+        scripted_reply_response(id, reply).await
+    }
+
+    async fn scripted_reply_response(id: Value, mut reply: ScriptedReply) -> Response {
+        loop {
+            match reply {
+                ScriptedReply::Delay(delay, next) => {
+                    tokio::time::sleep(delay).await;
+                    reply = *next;
+                }
+                ScriptedReply::Hang => return std::future::pending::<Response>().await,
+                ScriptedReply::Result(result) => {
+                    return Json(json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": result,
+                    }))
+                    .into_response();
+                }
+                ScriptedReply::RpcError(message) => {
+                    return rpc_error_response(id, StatusCode::OK, message);
+                }
+                ScriptedReply::HttpError(status, message) => {
+                    return rpc_error_response(id, status, message);
+                }
+                ScriptedReply::Malformed(body) => {
+                    return (StatusCode::OK, Body::from(body)).into_response();
+                }
+            }
+        }
+    }
+
+    fn rpc_error_response(id: Value, status: StatusCode, message: String) -> Response {
+        (
+            status,
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": 1, "message": message },
+            })),
+        )
+            .into_response()
+    }
+
+    fn scripts(
+        entries: impl IntoIterator<Item = (&'static str, Vec<ScriptedReply>)>,
+    ) -> Vec<(String, Vec<ScriptedReply>)> {
+        entries
+            .into_iter()
+            .map(|(method, replies)| (method.to_string(), replies))
+            .collect()
+    }
+
+    async fn probe_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let temporary = tempfile::tempdir().expect("temporary probe storage should exist");
+        let probe_dir = temporary.path().join("probe");
+        tokio::fs::create_dir(&probe_dir)
+            .await
+            .expect("probe directory should be created");
+        let metadata_path = probe_dir.join("metadata.torrent");
+        tokio::fs::write(&metadata_path, b"torrent metadata")
+            .await
+            .expect("metadata fixture should be writable");
+        (temporary, probe_dir, metadata_path)
+    }
+
+    async fn wait_for_path(path: &Path, should_exist: bool) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if path.exists() == should_exist {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            path.exists(),
+            should_exist,
+            "path state did not become {}: {}",
+            should_exist,
+            path.display()
+        );
+    }
 
     struct FakeRpc {
         statuses: Mutex<VecDeque<Result<Value, String>>>,
@@ -637,5 +901,492 @@ mod tests {
         })
         .await
         .expect("cancellation cleanup should remove the probe directory");
+    }
+
+    fn status_reply(status: &str) -> ScriptedReply {
+        ScriptedReply::Result(json!({ "status": status }))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_rpc_harness_exercises_production_client_and_status_order() {
+        let server = ScriptedRpcServer::start(scripts([
+            ("aria2.addUri", vec![ScriptedReply::Result(json!("gid-1"))]),
+            (
+                "aria2.tellStatus",
+                vec![
+                    status_reply("active"),
+                    status_reply("waiting"),
+                    status_reply("paused"),
+                    status_reply("complete"),
+                    status_reply("removed"),
+                ],
+            ),
+            (
+                "aria2.forceRemove",
+                vec![ScriptedReply::Result(json!("gid-1"))],
+            ),
+        ]))
+        .await;
+        let (_temporary, probe_dir, metadata_path) = probe_fixture().await;
+        let mut options = Map::new();
+        options.insert("bt-metadata-only".to_string(), json!("true"));
+        options.insert("bt-save-metadata".to_string(), json!("true"));
+        let bytes = run_metadata_probe(
+            server.client(),
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            options,
+            &metadata_path,
+            Duration::from_secs(1),
+            Duration::ZERO,
+        )
+        .await
+        .expect("HTTP-backed metadata probe should resolve");
+
+        assert_eq!(bytes, b"torrent metadata");
+        let calls = server.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "aria2.addUri",
+                "aria2.tellStatus",
+                "aria2.tellStatus",
+                "aria2.tellStatus",
+                "aria2.tellStatus",
+                "aria2.forceRemove",
+                "aria2.tellStatus",
+            ]
+        );
+        assert!(calls.iter().all(|(_, params)| {
+            params
+                .as_array()
+                .and_then(|params| params.first())
+                .and_then(Value::as_str)
+                == Some("token:torrent-probe-test-secret")
+        }));
+        let add_params = calls[0]
+            .1
+            .as_array()
+            .expect("addUri params should be an array");
+        assert_eq!(
+            add_params[1],
+            json!(["magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"])
+        );
+        let options = add_params[2]
+            .as_object()
+            .expect("addUri options should be an object");
+        assert_eq!(
+            options.get("bt-metadata-only"),
+            Some(&json!("true")),
+            "recorded addUri params: {add_params:?}"
+        );
+        assert_eq!(
+            options.get("bt-save-metadata"),
+            Some(&json!("true")),
+            "recorded addUri params: {add_params:?}"
+        );
+        tokio::fs::remove_dir_all(&probe_dir)
+            .await
+            .expect("successful probe fixture should be removable");
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_rpc_harness_reports_add_uri_failure_without_fabricating_cleanup() {
+        let server = ScriptedRpcServer::start(scripts([(
+            "aria2.addUri",
+            vec![ScriptedReply::HttpError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "daemon is starting".to_string(),
+            )],
+        )]))
+        .await;
+        let (_temporary, probe_dir, metadata_path) = probe_fixture().await;
+        let error = run_metadata_probe(
+            server.client(),
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            Map::new(),
+            &metadata_path,
+            Duration::from_secs(1),
+            Duration::ZERO,
+        )
+        .await
+        .expect_err("addUri failure should fail metadata resolution");
+        assert!(matches!(
+            error,
+            ProbeFailure::Metadata(message) if message.contains("could not start")
+        ));
+        assert_eq!(
+            server
+                .calls()
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            vec!["aria2.addUri"]
+        );
+        assert!(probe_dir.exists());
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_rpc_harness_covers_terminal_malformed_and_missing_gid_statuses() {
+        for (initial_status, expected_message) in [
+            (
+                ScriptedReply::Result(json!({
+                    "status": "error",
+                    "errorCode": "19",
+                    "errorMessage": "tracker rejected metadata",
+                })),
+                "could not resolve",
+            ),
+            (status_reply("removed"), "could not resolve"),
+            (
+                ScriptedReply::Result(json!({ "unexpected": "shape" })),
+                "invalid metadata probe status",
+            ),
+            (ScriptedReply::Malformed("{".to_string()), "status failed"),
+        ] {
+            let server = ScriptedRpcServer::start(scripts([
+                ("aria2.addUri", vec![ScriptedReply::Result(json!("gid-1"))]),
+                (
+                    "aria2.tellStatus",
+                    vec![initial_status, status_reply("removed")],
+                ),
+                (
+                    "aria2.forceRemove",
+                    vec![ScriptedReply::Result(json!("gid-1"))],
+                ),
+            ]))
+            .await;
+            let (_temporary, _probe_dir, metadata_path) = probe_fixture().await;
+            let error = run_metadata_probe(
+                server.client(),
+                "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                Map::new(),
+                &metadata_path,
+                Duration::from_secs(1),
+                Duration::ZERO,
+            )
+            .await
+            .expect_err("terminal or malformed status should fail the probe");
+            assert!(matches!(
+                error,
+                ProbeFailure::Metadata(message) if message.contains(expected_message)
+            ));
+            server.shutdown().await;
+        }
+
+        let server = ScriptedRpcServer::start(scripts([
+            ("aria2.addUri", vec![ScriptedReply::Result(json!("gid-1"))]),
+            (
+                "aria2.tellStatus",
+                vec![ScriptedReply::RpcError("gid gid-1 not found".to_string())],
+            ),
+            (
+                "aria2.forceRemove",
+                vec![ScriptedReply::RpcError("gid gid-1 not found".to_string())],
+            ),
+        ]))
+        .await;
+        let (_temporary, _probe_dir, metadata_path) = probe_fixture().await;
+        let error = run_metadata_probe(
+            server.client(),
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            Map::new(),
+            &metadata_path,
+            Duration::from_secs(1),
+            Duration::ZERO,
+        )
+        .await
+        .expect_err("a missing GID should fail metadata resolution");
+        assert!(matches!(
+            error,
+            ProbeFailure::Metadata(message) if message.contains("removed")
+        ));
+        assert_eq!(
+            server
+                .calls()
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            vec!["aria2.addUri", "aria2.tellStatus", "aria2.forceRemove"]
+        );
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_rpc_harness_retries_polling_and_force_remove_outages() {
+        let server = ScriptedRpcServer::start(scripts([
+            ("aria2.addUri", vec![ScriptedReply::Result(json!("gid-1"))]),
+            (
+                "aria2.tellStatus",
+                vec![
+                    ScriptedReply::HttpError(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "temporary polling outage".to_string(),
+                    ),
+                    status_reply("complete"),
+                    status_reply("removed"),
+                ],
+            ),
+            (
+                "aria2.forceRemove",
+                vec![ScriptedReply::Result(json!("gid-1"))],
+            ),
+        ]))
+        .await;
+        let (_temporary, probe_dir, metadata_path) = probe_fixture().await;
+        run_metadata_probe(
+            server.client(),
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            Map::new(),
+            &metadata_path,
+            Duration::from_secs(1),
+            Duration::ZERO,
+        )
+        .await
+        .expect("a transient polling outage should be retried");
+        assert_eq!(
+            server
+                .calls()
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "aria2.addUri",
+                "aria2.tellStatus",
+                "aria2.tellStatus",
+                "aria2.forceRemove",
+                "aria2.tellStatus",
+            ]
+        );
+        tokio::fs::remove_dir_all(&probe_dir)
+            .await
+            .expect("successful probe fixture should be removable");
+        server.shutdown().await;
+
+        let server = ScriptedRpcServer::start(scripts([
+            ("aria2.addUri", vec![ScriptedReply::Result(json!("gid-1"))]),
+            (
+                "aria2.tellStatus",
+                vec![status_reply("complete"), status_reply("complete")],
+            ),
+            (
+                "aria2.forceRemove",
+                vec![ScriptedReply::HttpError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporary cleanup outage".to_string(),
+                )],
+            ),
+        ]))
+        .await;
+        let (_temporary, probe_dir, metadata_path) = probe_fixture().await;
+        run_metadata_probe(
+            server.client(),
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            Map::new(),
+            &metadata_path,
+            Duration::from_secs(1),
+            Duration::ZERO,
+        )
+        .await
+        .expect("a completion race after forceRemove should be accepted");
+        assert_eq!(
+            server
+                .calls()
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "aria2.addUri",
+                "aria2.tellStatus",
+                "aria2.forceRemove",
+                "aria2.tellStatus",
+            ]
+        );
+        tokio::fs::remove_dir_all(&probe_dir)
+            .await
+            .expect("successful probe fixture should be removable");
+        server.shutdown().await;
+
+        let server = ScriptedRpcServer::start(scripts([
+            ("aria2.addUri", vec![ScriptedReply::Result(json!("gid-1"))]),
+            (
+                "aria2.tellStatus",
+                vec![
+                    status_reply("complete"),
+                    status_reply("active"),
+                    status_reply("active"),
+                    status_reply("removed"),
+                ],
+            ),
+            (
+                "aria2.forceRemove",
+                vec![
+                    ScriptedReply::HttpError(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "temporary cleanup outage".to_string(),
+                    ),
+                    ScriptedReply::RpcError("connection reset by peer".to_string()),
+                    ScriptedReply::Result(json!("gid-1")),
+                ],
+            ),
+        ]))
+        .await;
+        let (_temporary, probe_dir, metadata_path) = probe_fixture().await;
+        let error = run_metadata_probe(
+            server.client(),
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            Map::new(),
+            &metadata_path,
+            Duration::from_secs(1),
+            Duration::ZERO,
+        )
+        .await
+        .expect_err("cleanup must report an unverified active GID");
+        assert!(matches!(error, ProbeFailure::Cleanup(_)));
+        server.wait_for_method("aria2.forceRemove", 3).await;
+        wait_for_path(&probe_dir, false).await;
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_rpc_harness_covers_cancellation_before_and_after_gid_assignment() {
+        let server = ScriptedRpcServer::start(scripts([(
+            "aria2.addUri",
+            vec![ScriptedReply::Delay(
+                Duration::from_millis(250),
+                Box::new(ScriptedReply::Result(json!("gid-1"))),
+            )],
+        )]))
+        .await;
+        let (_temporary, probe_dir, metadata_path) = probe_fixture().await;
+        let probe_path = metadata_path.clone();
+        let client = server.client();
+        let task = tokio::spawn(async move {
+            run_metadata_probe(
+                client,
+                "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                Map::new(),
+                &probe_path,
+                Duration::from_secs(60),
+                Duration::from_secs(60),
+            )
+            .await
+        });
+        server.wait_for_method("aria2.addUri", 1).await;
+        task.abort();
+        let _ = task.await;
+        wait_for_path(&probe_dir, false).await;
+        server.shutdown().await;
+
+        let server = ScriptedRpcServer::start(scripts([
+            ("aria2.addUri", vec![ScriptedReply::Result(json!("gid-1"))]),
+            (
+                "aria2.tellStatus",
+                vec![ScriptedReply::Hang, status_reply("removed")],
+            ),
+            (
+                "aria2.forceRemove",
+                vec![ScriptedReply::Result(json!("gid-1"))],
+            ),
+        ]))
+        .await;
+        let (_temporary, probe_dir, metadata_path) = probe_fixture().await;
+        let probe_path = metadata_path.clone();
+        let client = server.client();
+        let task = tokio::spawn(async move {
+            run_metadata_probe(
+                client,
+                "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                Map::new(),
+                &probe_path,
+                Duration::from_secs(60),
+                Duration::from_secs(60),
+            )
+            .await
+        });
+        server.wait_for_method("aria2.tellStatus", 1).await;
+        task.abort();
+        let _ = task.await;
+        server.wait_for_method("aria2.forceRemove", 1).await;
+        wait_for_path(&probe_dir, false).await;
+        server.terminate().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_rpc_harness_retains_probe_when_daemon_shuts_down_during_resolution_or_cleanup() {
+        let server = ScriptedRpcServer::start(scripts([
+            ("aria2.addUri", vec![ScriptedReply::Result(json!("gid-1"))]),
+            (
+                "aria2.tellStatus",
+                vec![ScriptedReply::Delay(
+                    Duration::from_millis(250),
+                    Box::new(status_reply("active")),
+                )],
+            ),
+        ]))
+        .await;
+        let (_temporary, probe_dir, metadata_path) = probe_fixture().await;
+        let probe_path = metadata_path.clone();
+        let client = server.client();
+        let task = tokio::spawn(async move {
+            run_metadata_probe(
+                client,
+                "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                Map::new(),
+                &probe_path,
+                Duration::from_millis(40),
+                Duration::from_millis(5),
+            )
+            .await
+        });
+        server.wait_for_method("aria2.tellStatus", 1).await;
+        server.terminate().await;
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("probe should finish after daemon shutdown")
+            .expect("probe task should not panic")
+            .expect_err("daemon shutdown should not report metadata success");
+        assert!(matches!(result, ProbeFailure::Cleanup(_)));
+        assert!(probe_dir.exists());
+
+        let server = ScriptedRpcServer::start(scripts([
+            ("aria2.addUri", vec![ScriptedReply::Result(json!("gid-1"))]),
+            ("aria2.tellStatus", vec![status_reply("complete")]),
+            (
+                "aria2.forceRemove",
+                vec![ScriptedReply::Delay(
+                    Duration::from_secs(1),
+                    Box::new(ScriptedReply::Result(json!("gid-1"))),
+                )],
+            ),
+        ]))
+        .await;
+        let (_temporary, probe_dir, metadata_path) = probe_fixture().await;
+        let probe_path = metadata_path.clone();
+        let client = server.client();
+        let task = tokio::spawn(async move {
+            run_metadata_probe(
+                client,
+                "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                Map::new(),
+                &probe_path,
+                Duration::from_secs(1),
+                Duration::ZERO,
+            )
+            .await
+        });
+        server.wait_for_method("aria2.forceRemove", 1).await;
+        server.terminate().await;
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("cleanup should finish after daemon shutdown")
+            .expect("cleanup task should not panic")
+            .expect_err("daemon shutdown should report cleanup uncertainty");
+        assert!(matches!(result, ProbeFailure::Cleanup(_)));
+        assert!(probe_dir.exists());
     }
 }
