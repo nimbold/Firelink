@@ -6324,6 +6324,23 @@ pub(crate) fn normalize_speed_limit_for_aria2(limit: &str) -> Option<String> {
     })
 }
 
+fn apply_aria2_torrent_peer_discovery_options(
+    command: &mut std::process::Command,
+    enable_dht: bool,
+    enable_dht6: bool,
+    enable_pex: bool,
+    enable_lpd: bool,
+) {
+    // These are daemon-global BitTorrent options. Keep them explicit at
+    // launch so Firelink does not silently inherit a different aria2
+    // configuration from the host or a future bundled-engine default.
+    command
+        .arg(format!("--enable-dht={enable_dht}"))
+        .arg(format!("--enable-dht6={enable_dht6}"))
+        .arg(format!("--enable-peer-exchange={enable_pex}"))
+        .arg(format!("--bt-enable-lpd={enable_lpd}"));
+}
+
 #[tauri::command]
 async fn set_global_speed_limit(
     state: tauri::State<'_, AppState>,
@@ -7400,6 +7417,7 @@ mod tests {
         cookie_scope_for_url, metadata_authentication_error, metadata_cookie_header_present,
         metadata_headers, metadata_response_error,
         normalize_speed_limit_for_aria2,
+        apply_aria2_torrent_peer_discovery_options,
         parse_firelink_deep_link, parse_ffmpeg_version, parse_media_progress_line,
         redact_log_line, redact_log_line_for_output, sanitize_ytdlp_config_value,
         has_resumable_download_assets, is_media_artifact_name,
@@ -7427,6 +7445,25 @@ mod tests {
         assert!(validate_keychain_grant_request_id("").is_err());
         assert!(validate_keychain_grant_request_id("   ").is_err());
         assert!(validate_keychain_grant_request_id(&"x".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn aria2_torrent_peer_discovery_options_are_explicit_and_launch_scoped() {
+        let mut command = std::process::Command::new("aria2c");
+        apply_aria2_torrent_peer_discovery_options(&mut command, false, true, false, true);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "--enable-dht=false",
+                "--enable-dht6=true",
+                "--enable-peer-exchange=false",
+                "--bt-enable-lpd=true",
+            ]
+        );
     }
 
     #[test]
@@ -10033,6 +10070,17 @@ pub fn run() {
                 .as_ref()
                 .map(|settings| settings.global_speed_limit.clone())
                 .unwrap_or_default();
+            let torrent_peer_discovery = persisted_settings
+                .as_ref()
+                .map(|settings| {
+                    (
+                        settings.torrent_enable_dht,
+                        settings.torrent_enable_dht6,
+                        settings.torrent_enable_pex,
+                        settings.torrent_enable_lpd,
+                    )
+                })
+                .unwrap_or((true, false, true, false));
 
             let aria2_secret_clone = aria2_secret.clone();
             let app_handle_bg = app.handle().clone();
@@ -10066,6 +10114,14 @@ pub fn run() {
                                 .arg("--max-concurrent-downloads=9999")
                                 .arg("--check-certificate=true")
                                 .arg(format!("--stop-with-process={}", std::process::id()));
+
+                            apply_aria2_torrent_peer_discovery_options(
+                                &mut cmd,
+                                torrent_peer_discovery.0,
+                                torrent_peer_discovery.1,
+                                torrent_peer_discovery.2,
+                                torrent_peer_discovery.3,
+                            );
 
                             if let Some(limit) = normalize_speed_limit_for_aria2(&global_speed_limit) {
                                 cmd.arg(format!("--max-overall-download-limit={}", limit));

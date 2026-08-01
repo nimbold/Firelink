@@ -1157,6 +1157,61 @@ runEngineChecks(false);
                 )}
               </div>
 
+              <h2 className="settings-section-title">{t($ => $.settings.network.torrentPeerDiscovery)}</h2>
+              <div className="mac-settings-group">
+                <label className="mac-settings-row cursor-default">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentDht)}</span>
+                    <small>{t($ => $.settings.network.torrentDhtDescription)}</small>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.torrentEnableDht}
+                    onChange={(event) => settings.setTorrentEnableDht(event.target.checked)}
+                    className="mac-switch"
+                  />
+                </label>
+                <label className="mac-settings-row cursor-default">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentDht6)}</span>
+                    <small>{t($ => $.settings.network.torrentDht6Description)}</small>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.torrentEnableDht6}
+                    onChange={(event) => settings.setTorrentEnableDht6(event.target.checked)}
+                    className="mac-switch"
+                  />
+                </label>
+                <label className="mac-settings-row cursor-default">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentPex)}</span>
+                    <small>{t($ => $.settings.network.torrentPexDescription)}</small>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.torrentEnablePex}
+                    onChange={(event) => settings.setTorrentEnablePex(event.target.checked)}
+                    className="mac-switch"
+                  />
+                </label>
+                <label className="mac-settings-row cursor-default">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentLpd)}</span>
+                    <small>{t($ => $.settings.network.torrentLpdDescription)}</small>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.torrentEnableLpd}
+                    onChange={(event) => settings.setTorrentEnableLpd(event.target.checked)}
+                    className="mac-switch"
+                  />
+                </label>
+                <p className="settings-group-footer">
+                  {t($ => $.settings.network.torrentPeerDiscoveryRestartNote)}
+                </p>
+              </div>
+
               <h2 className="settings-section-title">{t($ => $.settings.network.identity)}</h2>
               <div className="mac-settings-group settings-popup-group">
                 <div className="mac-settings-row settings-network-row">

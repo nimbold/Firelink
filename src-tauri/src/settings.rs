@@ -188,6 +188,14 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
     sanitize_integer_setting(state, "maxConcurrentDownloads", |value| value.as_u64().is_some());
     sanitize_integer_setting(state, "perServerConnections", |value| value.as_i64().is_some());
     sanitize_integer_setting(state, "maxAutomaticRetries", |value| value.as_i64().is_some());
+    for key in [
+        "torrentEnableDht",
+        "torrentEnableDht6",
+        "torrentEnablePex",
+        "torrentEnableLpd",
+    ] {
+        sanitize_boolean_setting(state, key);
+    }
     sanitize_allowed_string(
         state,
         "theme",
@@ -269,6 +277,12 @@ fn sanitize_integer_setting(
     is_valid: impl Fn(&Value) -> bool,
 ) {
     if state.get(key).is_some_and(|value| !is_valid(value)) {
+        state.remove(key);
+    }
+}
+
+fn sanitize_boolean_setting(state: &mut serde_json::Map<String, Value>, key: &str) {
+    if state.get(key).is_some_and(|value| !value.is_boolean()) {
         state.remove(key);
     }
 }
@@ -482,6 +496,10 @@ fn default_settings() -> PersistedSettings {
         proxy_mode: ProxyMode::None,
         proxy_host: String::new(),
         proxy_port: 8080,
+        torrent_enable_dht: true,
+        torrent_enable_dht6: false,
+        torrent_enable_pex: true,
+        torrent_enable_lpd: false,
         custom_user_agent: String::new(),
         ask_where_to_save_each_file: false,
         remember_last_used_download_directory: false,
@@ -770,6 +788,10 @@ mod tests {
                 "maxConcurrentDownloads": "not-a-number",
                 "perServerConnections": 5,
                 "showNotifications": "yes",
+                "torrentEnableDht": "yes",
+                "torrentEnableDht6": 1,
+                "torrentEnablePex": null,
+                "torrentEnableLpd": [],
                 "theme": "not-a-theme",
                 "calendarPreference": "lunar",
                 "siteLogins": [{"id": "valid", "urlPattern": "example.com", "username": "user"}, {"id": 3}]
@@ -783,6 +805,10 @@ mod tests {
         assert_eq!(settings.max_concurrent_downloads, 3);
         assert_eq!(settings.per_server_connections, 5);
         assert!(settings.show_notifications);
+        assert!(settings.torrent_enable_dht);
+        assert!(!settings.torrent_enable_dht6);
+        assert!(settings.torrent_enable_pex);
+        assert!(!settings.torrent_enable_lpd);
         assert!(matches!(settings.theme, crate::ipc::Theme::System));
         assert!(matches!(
             settings.calendar_preference,

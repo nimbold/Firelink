@@ -14,6 +14,22 @@ fn default_sidebar_position() -> String {
     "auto".to_string()
 }
 
+fn default_torrent_enable_dht() -> bool {
+    true
+}
+
+fn default_torrent_enable_dht6() -> bool {
+    false
+}
+
+fn default_torrent_enable_pex() -> bool {
+    true
+}
+
+fn default_torrent_enable_lpd() -> bool {
+    false
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../src/bindings/")]
@@ -408,6 +424,14 @@ pub struct PersistedSettings {
     pub proxy_mode: ProxyMode,
     pub proxy_host: String,
     pub proxy_port: u16,
+    #[serde(default = "default_torrent_enable_dht")]
+    pub torrent_enable_dht: bool,
+    #[serde(default = "default_torrent_enable_dht6")]
+    pub torrent_enable_dht6: bool,
+    #[serde(default = "default_torrent_enable_pex")]
+    pub torrent_enable_pex: bool,
+    #[serde(default = "default_torrent_enable_lpd")]
+    pub torrent_enable_lpd: bool,
     pub custom_user_agent: String,
     pub ask_where_to_save_each_file: bool,
     pub remember_last_used_download_directory: bool,

@@ -21,6 +21,42 @@ describe('last used download directory preference', () => {
   });
 });
 
+describe('Torrent peer discovery preferences', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useSettingsStore.setState({
+      torrentEnableDht: true,
+      torrentEnableDht6: false,
+      torrentEnablePex: true,
+      torrentEnableLpd: false
+    });
+  });
+
+  it('matches Aria2 defaults and persists explicit changes', async () => {
+    expect(useSettingsStore.getState().torrentEnableDht).toBe(true);
+    expect(useSettingsStore.getState().torrentEnableDht6).toBe(false);
+    expect(useSettingsStore.getState().torrentEnablePex).toBe(true);
+    expect(useSettingsStore.getState().torrentEnableLpd).toBe(false);
+
+    useSettingsStore.getState().setTorrentEnableDht(false);
+    useSettingsStore.getState().setTorrentEnableDht6(true);
+    useSettingsStore.getState().setTorrentEnablePex(false);
+    useSettingsStore.getState().setTorrentEnableLpd(true);
+    await vi.waitFor(() => {
+      const save = vi.mocked(ipc.invokeCommand).mock.calls
+        .filter(([command]) => command === 'db_save_settings')
+        .slice(-1)[0];
+      expect(save).toBeDefined();
+      expect(JSON.parse((save?.[1] as { data: string }).data).state).toMatchObject({
+        torrentEnableDht: false,
+        torrentEnableDht6: true,
+        torrentEnablePex: false,
+        torrentEnableLpd: true
+      });
+    });
+  });
+});
+
 describe('calendar preference', () => {
   it('keeps Gregorian as the default and persists explicit calendar choices', async () => {
     vi.clearAllMocks();

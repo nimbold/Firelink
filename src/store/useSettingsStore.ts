@@ -234,6 +234,10 @@ export interface SettingsState {
   proxyMode: ProxyMode;
   proxyHost: string;
   proxyPort: number;
+  torrentEnableDht: boolean;
+  torrentEnableDht6: boolean;
+  torrentEnablePex: boolean;
+  torrentEnableLpd: boolean;
   customUserAgent: string;
   askWhereToSaveEachFile: boolean;
   preventsSleepWhileDownloading: boolean;
@@ -284,6 +288,10 @@ export interface SettingsState {
   setProxyMode: (mode: ProxyMode) => void;
   setProxyHost: (host: string) => void;
   setProxyPort: (port: number) => void;
+  setTorrentEnableDht: (enabled: boolean) => void;
+  setTorrentEnableDht6: (enabled: boolean) => void;
+  setTorrentEnablePex: (enabled: boolean) => void;
+  setTorrentEnableLpd: (enabled: boolean) => void;
   setCustomUserAgent: (userAgent: string) => void;
   setAskWhereToSaveEachFile: (ask: boolean) => void;
   setPreventsSleepWhileDownloading: (prevent: boolean) => void;
@@ -360,6 +368,10 @@ export const useSettingsStore = create<SettingsState>()(
       proxyMode: 'none',
       proxyHost: '',
       proxyPort: 8080,
+      torrentEnableDht: true,
+      torrentEnableDht6: false,
+      torrentEnablePex: true,
+      torrentEnableLpd: false,
       customUserAgent: '',
       askWhereToSaveEachFile: false,
       preventsSleepWhileDownloading: true,
@@ -454,6 +466,10 @@ export const useSettingsStore = create<SettingsState>()(
           ? Math.min(65535, Math.max(1, Math.trunc(proxyPort)))
           : 8080
       }),
+      setTorrentEnableDht: (torrentEnableDht) => set({ torrentEnableDht }),
+      setTorrentEnableDht6: (torrentEnableDht6) => set({ torrentEnableDht6 }),
+      setTorrentEnablePex: (torrentEnablePex) => set({ torrentEnablePex }),
+      setTorrentEnableLpd: (torrentEnableLpd) => set({ torrentEnableLpd }),
       setCustomUserAgent: (customUserAgent) => set({ customUserAgent }),
       setAskWhereToSaveEachFile: (askWhereToSaveEachFile) => set({ askWhereToSaveEachFile }),
       setPreventsSleepWhileDownloading: (preventsSleepWhileDownloading) => {
@@ -635,6 +651,10 @@ export const useSettingsStore = create<SettingsState>()(
         proxyMode: state.proxyMode,
         proxyHost: state.proxyHost,
         proxyPort: state.proxyPort,
+        torrentEnableDht: state.torrentEnableDht,
+        torrentEnableDht6: state.torrentEnableDht6,
+        torrentEnablePex: state.torrentEnablePex,
+        torrentEnableLpd: state.torrentEnableLpd,
         customUserAgent: state.customUserAgent,
         askWhereToSaveEachFile: state.askWhereToSaveEachFile,
         preventsSleepWhileDownloading: state.preventsSleepWhileDownloading,
@@ -680,6 +700,10 @@ export const useSettingsStore = create<SettingsState>()(
           listRowDensity: isAllowedSetting(LIST_ROW_DENSITY_VALUES, persisted.listRowDensity)
             ? persisted.listRowDensity
             : currentState.listRowDensity,
+          torrentEnableDht: persistedBoolean(persisted.torrentEnableDht, currentState.torrentEnableDht),
+          torrentEnableDht6: persistedBoolean(persisted.torrentEnableDht6, currentState.torrentEnableDht6),
+          torrentEnablePex: persistedBoolean(persisted.torrentEnablePex, currentState.torrentEnablePex),
+          torrentEnableLpd: persistedBoolean(persisted.torrentEnableLpd, currentState.torrentEnableLpd),
           sidebarPosition: isAllowedSetting(SIDEBAR_POSITION_VALUES, persisted.sidebarPosition)
             ? persisted.sidebarPosition
             : currentState.sidebarPosition,
