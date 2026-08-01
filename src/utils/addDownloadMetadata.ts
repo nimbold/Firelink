@@ -91,6 +91,16 @@ const isLocalTorrentPath = (value: string): boolean => {
     && (value.startsWith('/') || /^[a-z]:[\\/]/i.test(value));
 };
 
+export const isRemoteTorrentUrl = (value: string): boolean => {
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+      && parsed.pathname.toLowerCase().endsWith('.torrent');
+  } catch {
+    return false;
+  }
+};
+
 type ParsedInput = {
   identity: string;
   sourceUrl: string;
@@ -153,7 +163,7 @@ const parseInputLines = (
       if (!isTorrent) {
         const url = new URL(line);
         valid = ALLOWED_SCHEMES.has(url.protocol);
-        isTorrent = valid && url.protocol === 'magnet:';
+        isTorrent = valid && (url.protocol === 'magnet:' || isRemoteTorrentUrl(sourceUrl));
         if (valid) sourceUrl = url.href;
       }
     } catch {

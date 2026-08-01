@@ -407,6 +407,20 @@ pub fn inspect_source(source: &str) -> Result<ParsedTorrent, String> {
     parse_torrent_bytes(&bytes)
 }
 
+/// Remote torrent metadata is fetched and cached before enqueue so it follows
+/// the same validated `addTorrent`, ownership, retry, and restart path as
+/// local metadata and magnets.
+pub fn is_remote_torrent_url(source: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(source.trim()) else {
+        return false;
+    };
+    matches!(parsed.scheme(), "http" | "https")
+        && parsed
+            .path_segments()
+            .and_then(|segments| segments.last())
+            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".torrent"))
+}
+
 pub fn to_metadata(parsed: ParsedTorrent, torrent_path: Option<String>) -> TorrentMetadata {
     TorrentMetadata {
         name: parsed.name,
@@ -741,6 +755,17 @@ mod tests {
             aria2_index_outputs(&parsed),
             vec!["1=root/root/a.txt".to_string(), "2=root/root/b.bin".to_string()]
         );
+    }
+
+    #[test]
+    fn recognizes_only_http_torrent_metadata_urls() {
+        assert!(is_remote_torrent_url("https://example.com/files/sample.torrent"));
+        assert!(is_remote_torrent_url("http://example.com/sample.TORRENT?download=1"));
+        assert!(!is_remote_torrent_url("https://example.com/files/sample.zip"));
+        assert!(!is_remote_torrent_url("ftp://example.com/files/sample.torrent"));
+        assert!(!is_remote_torrent_url(
+            "magnet:?xt=urn:btih:0123456789012345678901234567890123456789"
+        ));
     }
 
     #[test]

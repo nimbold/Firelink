@@ -1,6 +1,7 @@
 #![allow(unexpected_cfgs)]
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+use futures_util::StreamExt;
 use regex::Regex;
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -1741,6 +1742,125 @@ async fn validate_url_ssrf(url: &str) -> Result<Option<(String, std::net::Socket
         return Err("SSRF blocked: Only HTTP/HTTPS schemes allowed".to_string());
     }
     resolve_and_validate_url_host(&parsed).await.map(Some)
+}
+
+const MAX_REMOTE_TORRENT_REDIRECTS: usize = 5;
+
+/// Fetch remote `.torrent` metadata through the same SSRF, redirect, proxy,
+/// timeout, and bounded-body rules used by Firelink's metadata path. The
+/// bytes are parsed and cached before they can enter the Aria2 lifecycle.
+async fn fetch_remote_torrent_bytes(
+    source: &str,
+    proxy: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    ensure_reqwest_crypto_provider();
+    let proxy = proxy
+        .map(crate::queue::aria2_all_proxy_value)
+        .transpose()?
+        .flatten();
+    let mut current = reqwest::Url::parse(source)
+        .map_err(|_| "SSRF blocked: Invalid URL".to_string())?;
+
+    for redirect_count in 0..=MAX_REMOTE_TORRENT_REDIRECTS {
+        if !matches!(current.scheme(), "http" | "https") {
+            return Err("Remote torrent metadata must use HTTP or HTTPS".to_string());
+        }
+        if !current.username().is_empty() || current.password().is_some() {
+            return Err("Torrent metadata URLs must not contain credentials".to_string());
+        }
+
+        let (host, address) = validate_url_ssrf(current.as_str())
+            .await?
+            .ok_or_else(|| "SSRF blocked: No host".to_string())?;
+        let mut builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(FILE_METADATA_TIMEOUT)
+            .user_agent("Firelink torrent metadata");
+        match proxy.as_deref().map(str::trim) {
+            Some("") => builder = builder.no_proxy(),
+            Some(proxy) => {
+                builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|error| error.to_string())?);
+            }
+            None => {}
+        }
+        builder = builder.resolve(&host, address);
+        let client = builder
+            .build()
+            .map_err(|error| format!("could not create torrent metadata client: {error}"))?;
+        let response = client
+            .get(current.clone())
+            .header(
+                reqwest::header::ACCEPT,
+                "application/x-bittorrent, application/octet-stream",
+            )
+            .send()
+            .await
+            .map_err(|error| {
+                format!(
+                    "remote torrent metadata request failed: {}",
+                    crate::redact_sensitive_text(&error.to_string())
+                )
+            })?;
+
+        if response.status().is_redirection() {
+            if redirect_count == MAX_REMOTE_TORRENT_REDIRECTS {
+                return Err("Too many redirects while fetching torrent metadata".to_string());
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| "Torrent metadata redirect has no valid location".to_string())?;
+            current = current
+                .join(location)
+                .map_err(|_| "Torrent metadata redirect URL is invalid".to_string())?;
+            continue;
+        }
+
+        if !response.status().is_success() {
+            return Err(format!(
+                "Remote torrent metadata request returned HTTP {}",
+                response.status().as_u16()
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > crate::torrent::MAX_TORRENT_BYTES as u64)
+        {
+            return Err(format!(
+                "torrent metadata must be at most {} bytes",
+                crate::torrent::MAX_TORRENT_BYTES
+            ));
+        }
+
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| {
+                format!(
+                    "remote torrent metadata response failed: {}",
+                    crate::redact_sensitive_text(&error.to_string())
+                )
+            })?;
+            if bytes
+                .len()
+                .checked_add(chunk.len())
+                .is_none_or(|length| length > crate::torrent::MAX_TORRENT_BYTES)
+            {
+                return Err(format!(
+                    "torrent metadata must be at most {} bytes",
+                    crate::torrent::MAX_TORRENT_BYTES
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.is_empty() {
+            return Err("remote torrent metadata response was empty".to_string());
+        }
+        return Ok(bytes);
+    }
+
+    Err("Too many redirects while fetching torrent metadata".to_string())
 }
 
 fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
@@ -5878,6 +5998,23 @@ async fn inspect_torrent(
         .await
         .map_err(AppError::Internal);
     }
+    if crate::torrent::is_remote_torrent_url(&source) {
+        let remote_source = source.trim();
+        let bytes = fetch_remote_torrent_bytes(remote_source, proxy.as_deref())
+            .await
+            .map_err(AppError::Internal)?;
+        let parsed = crate::torrent::parse_torrent_bytes(&bytes).map_err(AppError::Internal)?;
+        let torrent_path = if cache != Some(false) {
+            Some(
+                crate::torrent::cache_torrent_bytes(&app_handle, &id, &bytes)
+                    .await
+                    .map_err(AppError::Internal)?,
+            )
+        } else {
+            None
+        };
+        return Ok(crate::torrent::to_metadata(parsed, torrent_path));
+    }
     if cache == Some(false) {
         return crate::torrent::inspect_source(&source)
             .map(|parsed| crate::torrent::to_metadata(parsed, None))
@@ -7571,6 +7708,26 @@ mod tests {
             validate_enqueue_url("file:///tmp/file.zip").await,
             Err("Unsupported URL scheme".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn remote_torrent_fetch_rejects_non_http_and_embedded_credentials() {
+        assert_eq!(
+            super::fetch_remote_torrent_bytes("ftp://example.com/sample.torrent", None).await,
+            Err("Remote torrent metadata must use HTTP or HTTPS".to_string())
+        );
+        assert_eq!(
+            super::fetch_remote_torrent_bytes("https://user:pass@example.com/sample.torrent", None)
+                .await,
+            Err("Torrent metadata URLs must not contain credentials".to_string())
+        );
+        let proxy_error = super::fetch_remote_torrent_bytes(
+            "https://example.com/sample.torrent",
+            Some("socks5://127.0.0.1:1080"),
+        )
+        .await
+        .expect_err("remote Torrent metadata must use the shared proxy policy");
+        assert!(proxy_error.contains("SOCKS"));
     }
 
     #[tokio::test]

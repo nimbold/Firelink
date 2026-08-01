@@ -12,6 +12,7 @@ import {
   mediaTypeForFormat,
   metadataSummaryMessage,
   isYouTubePlaylistUrl,
+  isRemoteTorrentUrl,
   playlistFilePrefix,
   reconcileDownloadRows,
   refreshFailedMetadataRows,
@@ -104,6 +105,19 @@ describe('add download metadata workflow', () => {
     });
     expect(rows[0].torrentCacheId).toBe(`${rows[0].id}-1`);
     expect(rows[1].torrentCacheId).toBe(`${rows[1].id}-1`);
+  });
+
+  it('admits remote .torrent URLs through the Torrent metadata path', () => {
+    expect(isRemoteTorrentUrl('https://example.com/files/sample.torrent?download=1')).toBe(true);
+    expect(isRemoteTorrentUrl('https://example.com/files/sample.zip')).toBe(false);
+
+    const rows = reconcileDownloadRows('https://example.com/files/sample.torrent?download=1', []);
+
+    expect(rows[0]).toMatchObject({
+      isTorrent: true,
+      isMedia: false,
+      status: 'loading'
+    });
   });
 
   it('gives refreshed torrent metadata a new cache identity', () => {

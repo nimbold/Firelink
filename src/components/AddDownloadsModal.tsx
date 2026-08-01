@@ -574,9 +574,7 @@ export const AddDownloadsModal = () => {
           const requestContext = requestContextForUrl(contextUrl);
           if (row.isTorrent) {
             const torrentCacheId = row.torrentCacheId || `${row.id}-${row.generation}`;
-            const proxy = row.sourceUrl.trim().toLowerCase().startsWith('magnet:')
-              ? await getProxyArgs(settingsStore)
-              : undefined;
+            const proxy = await getProxyArgs(settingsStore);
             const torrentData = await invoke('inspect_torrent', {
               source: row.sourceUrl,
               id: torrentCacheId,
