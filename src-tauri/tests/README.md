@@ -49,3 +49,8 @@ Run the deterministic unavailable-tracker and Aria2-daemon-exit checks with:
 ```sh
 npm run smoke:torrent:failure-paths
 ```
+
+Native CI runs this failure-path smoke after staging the target-specific
+bundled engines on macOS, Windows, and Linux. Windows also runs the filtered
+HTTP-boundary RPC harness explicitly because its general Rust job compiles the
+library tests without executing them.

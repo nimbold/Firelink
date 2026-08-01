@@ -6,7 +6,7 @@ import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -359,12 +359,30 @@ async function stopDaemon(daemon) {
         // The process may already have exited during cleanup.
       }
     }
-    if (!await waitForChildExit(child, 3000)) {
-      child.kill('SIGTERM');
-      if (!await waitForChildExit(child, 3000) && process.platform !== 'win32') {
-        child.kill('SIGKILL');
-        await waitForChildExit(child, 1000);
+    let exited = await waitForChildExit(child, 3000);
+    if (!exited) {
+      if (process.platform === 'win32') {
+        try {
+          execFileSync('taskkill', ['/pid', String(child.pid), '/t', '/f'], {
+            stdio: 'ignore',
+            timeout: 3000,
+          });
+        } catch {
+          // The process may have exited between the wait and taskkill.
+        }
+      } else {
+        child.kill('SIGTERM');
       }
+      exited = await waitForChildExit(child, 3000);
+    }
+    if (!exited) {
+      if (process.platform !== 'win32') {
+        child.kill('SIGKILL');
+        exited = await waitForChildExit(child, 3000);
+      }
+    }
+    if (!exited) {
+      throw new Error(`Aria2 daemon process ${child.pid} did not exit after forced cleanup`);
     }
   } finally {
     activeDaemons.delete(daemon);
@@ -379,11 +397,13 @@ async function closeServer(server) {
 async function cleanupRuntime() {
   if (cleanupPromise) return cleanupPromise;
   cleanupPromise = (async () => {
+    let cleanupError;
     for (const daemon of [...activeDaemons].reverse()) {
       try {
         await stopDaemon(daemon);
       } catch (error) {
-        console.error(`[WARN] failed to stop Aria2 daemon: ${error.message}`);
+        cleanupError ??= error;
+        console.error(`[FAIL] failed to stop Aria2 daemon: ${error.message}`);
       }
     }
     if (runtimeTracker) {
@@ -394,9 +414,19 @@ async function cleanupRuntime() {
     if (runtimeTempRoot) {
       const tempRoot = runtimeTempRoot;
       runtimeTempRoot = undefined;
-      if (keepTemp) console.log(`[INFO] retained smoke-test directory: ${tempRoot}`);
-      else fs.rmSync(tempRoot, { recursive: true, force: true });
+      if (keepTemp || cleanupError) {
+        console.log(`[INFO] retained smoke-test directory: ${tempRoot}`);
+      } else {
+        try {
+          fs.rmSync(tempRoot, { recursive: true, force: true });
+        } catch (error) {
+          cleanupError ??= error;
+          console.error(`[FAIL] failed to remove smoke-test directory: ${error.message}`);
+          console.log(`[INFO] retained smoke-test directory: ${tempRoot}`);
+        }
+      }
     }
+    if (cleanupError) throw cleanupError;
   })();
   return cleanupPromise;
 }
