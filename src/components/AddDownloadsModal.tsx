@@ -232,6 +232,7 @@ export const AddDownloadsModal = () => {
   const [torrentUploadLimit, setTorrentUploadLimit] = useState('1024');
   const [torrentMaxPeers, setTorrentMaxPeers] = useState('');
   const [torrentPeerSpeedLimit, setTorrentPeerSpeedLimit] = useState('');
+  const [torrentCheckIntegrity, setTorrentCheckIntegrity] = useState(false);
   const [freeSpace, setFreeSpace] = useState('Unknown');
   const freeSpaceRequestRef = useRef(0);
 
@@ -372,6 +373,7 @@ export const AddDownloadsModal = () => {
     setTorrentUploadLimit('1024');
     setTorrentMaxPeers('');
     setTorrentPeerSpeedLimit('');
+    setTorrentCheckIntegrity(false);
     setUseAuth(false);
     setUsername('');
     setPassword('');
@@ -1448,6 +1450,7 @@ export const AddDownloadsModal = () => {
           torrentPeerSpeedLimit: item.isTorrent
             ? normalizeSpeedLimitForBackend(torrentPeerSpeedLimit) || undefined
             : undefined,
+          torrentCheckIntegrity: item.isTorrent ? torrentCheckIntegrity : undefined,
           size: item.size || (item.sizeBytes ? formatBytes(item.sizeBytes) : undefined),
           sizeBytes: item.sizeBytes
         }, action);
@@ -2094,6 +2097,20 @@ export const AddDownloadsModal = () => {
                         <span className="text-text-muted">KiB/s</span>
                       </div>
                     ) : null}
+                    <label className="flex items-start gap-2 text-text-primary pt-2 border-t border-border-modal/50">
+                      <input
+                        type="checkbox"
+                        checked={torrentCheckIntegrity}
+                        onChange={event => setTorrentCheckIntegrity(event.target.checked)}
+                        className="accent-blue-500 mt-0.5"
+                      />
+                      <span>
+                        <span className="block">{t($ => $.addDownloads.torrentVerifyIntegrity)}</span>
+                        <span className="block text-[10px] text-text-muted">
+                          {t($ => $.addDownloads.torrentVerifyIntegrityHint)}
+                        </span>
+                      </span>
+                    </label>
                     <div className="grid grid-cols-[1fr_auto] gap-2 items-center pt-2 border-t border-border-modal/50">
                       <label htmlFor="torrent-max-peers" className="text-text-muted">
                         {t($ => $.addDownloads.torrentMaxPeers)}

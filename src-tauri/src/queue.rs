@@ -214,6 +214,7 @@ pub struct SpawnPayload {
     pub torrent_upload_limit: Option<String>,
     pub torrent_max_peers: Option<u32>,
     pub torrent_peer_speed_limit: Option<String>,
+    pub torrent_check_integrity: bool,
 }
 
 /// A sidecar spawner. In production this calls the real aria2/yt-dlp
@@ -3163,6 +3164,22 @@ fn apply_aria2_torrent_options(
             serde_json::json!(normalized),
         );
     }
+    if payload.torrent_check_integrity {
+        options.insert(
+            "check-integrity".to_string(),
+            serde_json::json!("true"),
+        );
+        options.insert(
+            "bt-hash-check-seed".to_string(),
+            serde_json::json!(torrent_seeding_requested(payload).to_string()),
+        );
+        // Do not let a daemon-wide bt-seed-unverified setting bypass the
+        // explicit per-download integrity request.
+        options.insert(
+            "bt-seed-unverified".to_string(),
+            serde_json::json!("false"),
+        );
+    }
     Ok(())
 }
 
@@ -3752,6 +3769,9 @@ pub struct EnqueueItem {
     pub torrent_peer_speed_limit: Option<String>,
     #[serde(default)]
     #[ts(optional)]
+    pub torrent_check_integrity: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
     pub lifecycle_generation: Option<String>,
 }
 
@@ -3799,6 +3819,7 @@ impl EnqueueItem {
                 torrent_upload_limit: self.torrent_upload_limit,
                 torrent_max_peers: self.torrent_max_peers,
                 torrent_peer_speed_limit: self.torrent_peer_speed_limit,
+                torrent_check_integrity: self.torrent_check_integrity.unwrap_or(false),
             },
         }
     }
@@ -3911,6 +3932,85 @@ mod tests {
         assert!(!options.contains_key("seed-time"));
         assert_eq!(options.get("seed-ratio"), Some(&serde_json::json!("1.5")));
         assert!(torrent_seeding_requested(&payload));
+    }
+
+    #[test]
+    fn torrent_integrity_check_does_not_enter_seeding_without_a_seed_policy() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_check_integrity: true,
+            ..Default::default()
+        };
+
+        apply_aria2_torrent_options(&mut options, &payload).unwrap();
+
+        assert_eq!(options.get("check-integrity"), Some(&serde_json::json!("true")));
+        assert_eq!(
+            options.get("bt-hash-check-seed"),
+            Some(&serde_json::json!("false"))
+        );
+        assert_eq!(
+            options.get("bt-seed-unverified"),
+            Some(&serde_json::json!("false"))
+        );
+    }
+
+    #[test]
+    fn torrent_integrity_check_preserves_an_explicit_seeding_policy() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_check_integrity: true,
+            torrent_seed_ratio: Some(1.0),
+            ..Default::default()
+        };
+
+        apply_aria2_torrent_options(&mut options, &payload).unwrap();
+
+        assert_eq!(options.get("check-integrity"), Some(&serde_json::json!("true")));
+        assert_eq!(
+            options.get("bt-hash-check-seed"),
+            Some(&serde_json::json!("true"))
+        );
+        assert_eq!(
+            options.get("bt-seed-unverified"),
+            Some(&serde_json::json!("false"))
+        );
+    }
+
+    #[test]
+    fn torrent_integrity_options_are_not_emitted_when_disabled_or_non_torrent() {
+        for payload in [
+            SpawnPayload::default(),
+            SpawnPayload {
+                is_torrent: true,
+                ..Default::default()
+            },
+        ] {
+            let mut options = serde_json::Map::new();
+            apply_aria2_torrent_options(&mut options, &payload).unwrap();
+            assert!(!options.contains_key("check-integrity"));
+            assert!(!options.contains_key("bt-hash-check-seed"));
+            assert!(!options.contains_key("bt-seed-unverified"));
+        }
+    }
+
+    #[test]
+    fn enqueue_item_deserializes_integrity_policy_from_frontend_payload() {
+        let item: EnqueueItem = serde_json::from_value(serde_json::json!({
+            "id": "torrent-integrity",
+            "queue_id": "main",
+            "url": "magnet:?xt=urn:btih:0123456789012345678901234567890123456789",
+            "destination": "/tmp/downloads",
+            "filename": "payload",
+            "is_media": false,
+            "is_torrent": true,
+            "torrent_check_integrity": true
+        }))
+        .expect("frontend enqueue payload should deserialize");
+
+        assert!(item.into_task().payload.torrent_check_integrity);
     }
 
     #[test]

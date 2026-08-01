@@ -350,6 +350,7 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
         torrent_upload_limit: item.torrentUploadLimit || undefined,
         torrent_max_peers: item.torrentMaxPeers,
         torrent_peer_speed_limit: item.torrentPeerSpeedLimit || undefined,
+        torrent_check_integrity: item.torrentCheckIntegrity,
         lifecycle_generation: lifecycleGeneration.toString(),
       };
 
@@ -626,12 +627,18 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
   const normalizedPeerSpeedLimit = typeof rawPeerSpeedLimit === 'string'
     ? normalizeSpeedLimitForBackend(rawPeerSpeedLimit) || undefined
     : undefined;
+  const rawCheckIntegrity = download.torrentCheckIntegrity as unknown;
+  const normalizedCheckIntegrity = typeof rawCheckIntegrity === 'boolean'
+    ? rawCheckIntegrity
+    : undefined;
   const normalizedOptions = rawMaxPeers !== normalizedMaxPeers ||
-    rawPeerSpeedLimit !== normalizedPeerSpeedLimit
+    rawPeerSpeedLimit !== normalizedPeerSpeedLimit ||
+    rawCheckIntegrity !== normalizedCheckIntegrity
     ? {
         ...download,
         torrentMaxPeers: normalizedMaxPeers,
-        torrentPeerSpeedLimit: normalizedPeerSpeedLimit
+        torrentPeerSpeedLimit: normalizedPeerSpeedLimit,
+        torrentCheckIntegrity: normalizedCheckIntegrity
       }
     : download;
 
@@ -2162,6 +2169,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             torrent_upload_limit: item.torrentUploadLimit || undefined,
             torrent_max_peers: item.torrentMaxPeers,
             torrent_peer_speed_limit: item.torrentPeerSpeedLimit || undefined,
+            torrent_check_integrity: item.torrentCheckIntegrity,
             lifecycle_generation: currentDownloadLifecycle(item.id).toString(),
           });
         }

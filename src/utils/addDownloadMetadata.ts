@@ -64,6 +64,7 @@ export interface AddDownloadDraftRow {
   torrentUploadLimit?: string;
   torrentMaxPeers?: number;
   torrentPeerSpeedLimit?: string;
+  torrentCheckIntegrity?: boolean;
 }
 
 /**

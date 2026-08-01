@@ -77,6 +77,7 @@ export const PropertiesModal = () => {
   const [liveTorrentUploadLimitValue, setLiveTorrentUploadLimitValue] = useState('');
   const [liveTorrentMaxPeersValue, setLiveTorrentMaxPeersValue] = useState('');
   const [liveTorrentPeerSpeedLimitValue, setLiveTorrentPeerSpeedLimitValue] = useState('');
+  const [torrentCheckIntegrity, setTorrentCheckIntegrity] = useState(false);
   const [isLiveSpeedLimitPending, setIsLiveSpeedLimitPending] = useState(false);
   const [isLiveTorrentUploadLimitPending, setIsLiveTorrentUploadLimitPending] = useState(false);
   const [isLiveTorrentPeerOptionsPending, setIsLiveTorrentPeerOptionsPending] = useState(false);
@@ -168,6 +169,7 @@ export const PropertiesModal = () => {
           activeItem.torrentMaxPeers === undefined ? '' : String(activeItem.torrentMaxPeers)
         );
         setLiveTorrentPeerSpeedLimitValue(activeItem.torrentPeerSpeedLimit || '');
+        setTorrentCheckIntegrity(activeItem.torrentCheckIntegrity === true);
         setErrorMessage('');
       } else {
         setSelectedPropertiesDownloadId(null);
@@ -279,6 +281,7 @@ export const PropertiesModal = () => {
         ? {
             torrentMaxPeers: normalizedMaxPeers,
             torrentPeerSpeedLimit: normalizedPeerSpeedLimit || undefined,
+            torrentCheckIntegrity,
           }
         : {}),
       ...(connectionsDirty
@@ -701,6 +704,23 @@ export const PropertiesModal = () => {
                   <div className="col-start-2 text-[11px] text-text-muted">
                     {t($ => $.properties.torrentPeerOptionsSavedHint)}
                   </div>
+                  <label className="text-xs text-text-muted text-right" htmlFor="torrent-check-integrity">
+                    {t($ => $.properties.torrentVerifyIntegrity)}
+                  </label>
+                  <label className="flex items-start gap-2 text-xs text-text-primary">
+                    <input
+                      id="torrent-check-integrity"
+                      type="checkbox"
+                      checked={torrentCheckIntegrity}
+                      onChange={event => setTorrentCheckIntegrity(event.currentTarget.checked)}
+                      disabled={transferLocked}
+                      className="accent-accent mt-0.5 disabled:opacity-50"
+                      aria-describedby="torrent-check-integrity-hint"
+                    />
+                    <span id="torrent-check-integrity-hint" className="text-[11px] text-text-muted">
+                      {t($ => $.properties.torrentVerifyIntegrityHint)}
+                    </span>
+                  </label>
                 </>
               )}
               {(liveSpeedLimitAvailable || liveSpeedLimitUnavailable) && (

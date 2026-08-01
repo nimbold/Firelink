@@ -627,8 +627,9 @@ async function main() {
     const seedRoot = path.join(seedParent, 'firelink-torrent-runtime');
     const probeDir = path.join(tempRoot, 'probe');
     const finalDir = path.join(tempRoot, 'final');
+    const integrityDir = path.join(tempRoot, 'integrity');
     const cancelDir = path.join(tempRoot, 'cancel');
-    for (const directory of [seedRoot, probeDir, finalDir, cancelDir]) fs.mkdirSync(directory, { recursive: true });
+    for (const directory of [seedRoot, probeDir, finalDir, integrityDir, cancelDir]) fs.mkdirSync(directory, { recursive: true });
 
     const seederListenPort = await findAvailablePort();
     const clientListenPort = await findAvailablePort();
@@ -729,6 +730,27 @@ async function main() {
     assert(reportedSelected, `Aria2 ownership list did not report ${selectedPath}`);
     assert(finalStatus.files?.some(file => file.path === selectedPath || file.path.endsWith('/selected.bin')), 'terminal status omitted selected output');
     console.log('[OK] selected addTorrent output, pause/resume, and Aria2 file ownership passed');
+
+    const integrityPath = path.join(integrityDir, torrent.name, 'selected.bin');
+    fs.mkdirSync(path.dirname(integrityPath), { recursive: true });
+    fs.writeFileSync(integrityPath, Buffer.alloc(torrent.files[0].data.length, 0x00));
+    const integrityGid = await rpc(client.rpcPort, client.secret, 'aria2.addTorrent', [
+      savedTorrentBytes.toString('base64'),
+      [],
+      {
+        dir: integrityDir,
+        'select-file': '1',
+        'index-out': indexOut,
+        'check-integrity': 'true',
+        'bt-hash-check-seed': 'false',
+        'seed-time': '0',
+        'auto-file-renaming': 'false',
+      },
+    ]);
+    const integrityStatus = await waitForTerminal(client, integrityGid, 30000);
+    assert(integrityStatus.status === 'complete', 'integrity-check torrent did not complete');
+    assert(fs.readFileSync(integrityPath).equals(torrent.files[0].data), 'integrity check did not replace corrupted torrent data');
+    console.log('[OK] check-integrity detected and repaired corrupted Torrent data');
 
     const cancelGid = await rpc(client.rpcPort, client.secret, 'aria2.addTorrent', [
       savedTorrentBytes.toString('base64'),

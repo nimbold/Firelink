@@ -852,11 +852,13 @@ describe('useDownloadStore', () => {
       dateAdded: '',
       isTorrent: true,
       torrentMaxPeers: 'not-a-number' as unknown as number,
-      torrentPeerSpeedLimit: 0 as unknown as string
+      torrentPeerSpeedLimit: 0 as unknown as string,
+      torrentCheckIntegrity: 'yes' as unknown as boolean
     });
 
     expect(normalized.torrentMaxPeers).toBeUndefined();
     expect(normalized.torrentPeerSpeedLimit).toBeUndefined();
+    expect(normalized.torrentCheckIntegrity).toBeUndefined();
   });
 
   it('normalizes proxy settings for download dispatch', async () => {
@@ -1505,7 +1507,9 @@ describe('useDownloadStore', () => {
       url: 'https://example.com/start.bin',
       fileName: 'start.bin',
       category: 'Other',
-      dateAdded: ''
+      dateAdded: '',
+      isTorrent: true,
+      torrentCheckIntegrity: true
     }, { type: 'start-now' });
 
     const item = useDownloadStore.getState().downloads[0];
@@ -1514,7 +1518,10 @@ describe('useDownloadStore', () => {
     expect(ipc.invokeCommand).toHaveBeenCalledWith(
       'enqueue_download',
       expect.objectContaining({
-        item: expect.objectContaining({ id: 'start-1' })
+        item: expect.objectContaining({
+          id: 'start-1',
+          torrent_check_integrity: true
+        })
       })
     );
   });
