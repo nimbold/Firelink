@@ -15,6 +15,11 @@ struct CountingSpawner {
     media_calls: AtomicUsize,
     speed_limit_calls: AtomicUsize,
     last_speed_limit: std::sync::Mutex<Option<String>>,
+    torrent_upload_limit_calls: AtomicUsize,
+    last_torrent_upload_limit: std::sync::Mutex<Option<String>>,
+    block_torrent_upload_limit: std::sync::atomic::AtomicBool,
+    torrent_upload_limit_started: tokio::sync::Notify,
+    torrent_upload_limit_release: tokio::sync::Notify,
     add_speed_limits: std::sync::Mutex<Vec<Option<String>>>,
     block_speed_limit: std::sync::atomic::AtomicBool,
     speed_limit_started: tokio::sync::Notify,
@@ -188,6 +193,11 @@ impl CountingSpawner {
             media_calls: AtomicUsize::new(0),
             speed_limit_calls: AtomicUsize::new(0),
             last_speed_limit: std::sync::Mutex::new(None),
+            torrent_upload_limit_calls: AtomicUsize::new(0),
+            last_torrent_upload_limit: std::sync::Mutex::new(None),
+            block_torrent_upload_limit: std::sync::atomic::AtomicBool::new(false),
+            torrent_upload_limit_started: tokio::sync::Notify::new(),
+            torrent_upload_limit_release: tokio::sync::Notify::new(),
             add_speed_limits: std::sync::Mutex::new(Vec::new()),
             block_speed_limit: std::sync::atomic::AtomicBool::new(false),
             speed_limit_started: tokio::sync::Notify::new(),
@@ -283,6 +293,22 @@ impl firelink_lib::queue::SidecarSpawner for CountingSpawner {
         {
             self.speed_limit_started.notify_one();
             self.speed_limit_release.notified().await;
+        }
+        Ok(())
+    }
+    async fn set_torrent_upload_limit(
+        &self,
+        _gid: &str,
+        limit: Option<&str>,
+    ) -> Result<(), String> {
+        self.torrent_upload_limit_calls.fetch_add(1, Ordering::SeqCst);
+        *self.last_torrent_upload_limit.lock().unwrap() = limit.map(str::to_string);
+        if self
+            .block_torrent_upload_limit
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.torrent_upload_limit_started.notify_one();
+            self.torrent_upload_limit_release.notified().await;
         }
         Ok(())
     }
@@ -540,6 +566,173 @@ async fn live_aria2_speed_limit_does_not_update_payload_after_gid_replacement() 
             firelink_lib::queue::PendingOutcome::Complete,
         )
         .await;
+    dispatcher.abort();
+}
+
+#[tokio::test]
+async fn live_torrent_upload_limit_updates_current_gid_and_payload() {
+    let (manager, spawner) = make_manager(1);
+    let manager = Arc::new(manager);
+    let mut task = aria2_task("torrent-upload-limit");
+    task.payload.is_torrent = true;
+    manager.push(task).await.unwrap();
+
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if manager.aria2_gid_for_download("torrent-upload-limit").is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("aria2 dispatch should register a Torrent gid");
+
+    manager
+        .set_aria2_torrent_upload_limit(
+            "torrent-upload-limit",
+            Some("512K".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        spawner.torrent_upload_limit_calls.load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        spawner
+            .last_torrent_upload_limit
+            .lock()
+            .unwrap()
+            .as_deref(),
+        Some("512K")
+    );
+    manager
+        .set_aria2_torrent_upload_limit("torrent-upload-limit", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        spawner.torrent_upload_limit_calls.load(Ordering::SeqCst),
+        2
+    );
+    assert!(spawner
+        .last_torrent_upload_limit
+        .lock()
+        .unwrap()
+        .is_none());
+
+    manager.clear_aria2_retry_state("torrent-upload-limit").await;
+    manager.forget_aria2_gid("torrent-upload-limit").await;
+    manager.release_permit("torrent-upload-limit").await;
+    manager.release_registered_id("torrent-upload-limit").await;
+    dispatcher.abort();
+}
+
+#[tokio::test]
+async fn live_torrent_upload_limit_rejects_non_torrents_and_invalid_values() {
+    let (manager, spawner) = make_manager(1);
+
+    assert!(manager
+        .set_aria2_torrent_upload_limit("missing", Some("512K".to_string()))
+        .await
+        .is_err());
+
+    let manager = Arc::new(manager);
+    let task = aria2_task("ordinary-download");
+    manager.push(task).await.unwrap();
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if manager.aria2_gid_for_download("ordinary-download").is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("aria2 dispatch should register a gid");
+
+    assert!(manager
+        .set_aria2_torrent_upload_limit("ordinary-download", Some("not-a-rate".to_string()))
+        .await
+        .is_err());
+    assert!(manager
+        .set_aria2_torrent_upload_limit("ordinary-download", Some("512K".to_string()))
+        .await
+        .is_err());
+    assert_eq!(spawner.torrent_upload_limit_calls.load(Ordering::SeqCst), 0);
+
+    manager
+        .apply_completion(
+            "ordinary-download",
+            firelink_lib::queue::PendingOutcome::Complete,
+        )
+        .await;
+    dispatcher.abort();
+}
+
+#[tokio::test]
+async fn live_torrent_upload_limit_does_not_update_after_gid_replacement() {
+    let (manager, spawner) = make_manager(1);
+    let manager = Arc::new(manager);
+    let mut task = aria2_task("torrent-upload-stale");
+    task.payload.is_torrent = true;
+    manager.push(task).await.unwrap();
+
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if manager.aria2_gid_for_download("torrent-upload-stale").is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("aria2 dispatch should register a Torrent gid");
+
+    spawner
+        .block_torrent_upload_limit
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let started = spawner.torrent_upload_limit_started.notified();
+    let setter = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move {
+            manager
+                .set_aria2_torrent_upload_limit(
+                    "torrent-upload-stale",
+                    Some("512K".to_string()),
+                )
+                .await
+        })
+    };
+    timeout(Duration::from_secs(1), started)
+        .await
+        .expect("Torrent upload RPC should start");
+
+    manager
+        .remember_gid(
+            "torrent-upload-stale".to_string(),
+            "gid-replaced".to_string(),
+        )
+        .await;
+    spawner.torrent_upload_limit_release.notify_one();
+    assert!(setter.await.unwrap().is_err());
+
+    manager.clear_aria2_retry_state("torrent-upload-stale").await;
+    manager.forget_aria2_gid("torrent-upload-stale").await;
+    manager.release_permit("torrent-upload-stale").await;
+    manager.release_registered_id("torrent-upload-stale").await;
     dispatcher.abort();
 }
 

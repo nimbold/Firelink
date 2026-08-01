@@ -6288,6 +6288,18 @@ async fn set_download_speed_limit(
         .await
 }
 
+#[tauri::command]
+async fn set_torrent_upload_limit(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    limit: Option<String>,
+) -> Result<(), String> {
+    state
+        .queue_manager
+        .set_aria2_torrent_upload_limit(&id, limit)
+        .await
+}
+
 pub(crate) fn normalize_speed_limit_for_aria2(limit: &str) -> Option<String> {
     let trimmed = limit.trim();
     if trimmed.is_empty() {
@@ -10611,7 +10623,7 @@ pub fn run() {
             authorize_keychain_access,
             acknowledge_pairing_token_change,
             check_file_exists, toggle_tray_icon, set_extension_pairing_token,
-            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_global_speed_limit, remove_download, get_download_primary_path,
+            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_global_speed_limit, remove_download, get_download_primary_path,
             detach_download_for_reconfigure,
             enqueue_download, enqueue_many, cancel_enqueue_generation, move_in_queue, move_many_in_queue, remove_from_queue, get_pending_order,
             commands::reveal_in_file_manager, commands::open_downloaded_file,

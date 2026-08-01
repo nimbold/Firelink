@@ -70,6 +70,7 @@ type CommandMap = {
   set_concurrent_limit: { args: { limit: number }; result: void };
   set_queue_concurrency_limits: { args: { limits: QueueConcurrencyConfig[] }; result: void };
   set_download_speed_limit: { args: { id: string; limit: string | null }; result: void };
+  set_torrent_upload_limit: { args: { id: string; limit: string | null }; result: void };
   set_global_speed_limit: { args: { limit: string | null }; result: void };
   request_automation_permission: { args: undefined; result: void };
   check_automation_permission: { args: undefined; result: void };

@@ -74,7 +74,9 @@ export const PropertiesModal = () => {
   const [speedLimitEnabled, setSpeedLimitEnabled] = useState(false);
   const [speedLimitValue, setSpeedLimitValue] = useState('1024'); // KiB/s
   const [liveSpeedLimitValue, setLiveSpeedLimitValue] = useState('');
+  const [liveTorrentUploadLimitValue, setLiveTorrentUploadLimitValue] = useState('');
   const [isLiveSpeedLimitPending, setIsLiveSpeedLimitPending] = useState(false);
+  const [isLiveTorrentUploadLimitPending, setIsLiveTorrentUploadLimitPending] = useState(false);
 
   const [loginMode, setLoginMode] = useState<LoginMode>('matching');
   const [username, setUsername] = useState('');
@@ -97,6 +99,8 @@ export const PropertiesModal = () => {
     // Invalidate native pickers and transfer-control results when the modal
     // switches items, closes, or reopens for the same download.
     actionRequestRef.current += 1;
+    setIsLiveSpeedLimitPending(false);
+    setIsLiveTorrentUploadLimitPending(false);
   }, [selectedPropertiesDownloadId]);
 
   useEffect(() => {
@@ -167,6 +171,11 @@ export const PropertiesModal = () => {
     const activeLimit = item?.speedLimit?.trim();
     setLiveSpeedLimitValue(activeLimit && activeLimit !== '0' ? activeLimit : '');
   }, [item?.speedLimit, selectedPropertiesDownloadId]);
+
+  useEffect(() => {
+    const activeLimit = item?.torrentUploadLimit?.trim();
+    setLiveTorrentUploadLimitValue(activeLimit && activeLimit !== '0' ? activeLimit : '');
+  }, [item?.torrentUploadLimit, selectedPropertiesDownloadId]);
 
   useEffect(() => {
     if (!selectedPropertiesDownloadId || connectionsDirty) return;
@@ -321,10 +330,43 @@ export const PropertiesModal = () => {
     }
   };
 
+  const handleLiveTorrentUploadLimit = async (limit: string | null) => {
+    if (
+      isLiveTorrentUploadLimitPending
+      || !item.isTorrent
+      || !['downloading', 'seeding', 'retrying'].includes(item.status)
+    ) return;
+
+    setErrorMessage('');
+    const requestId = ++actionRequestRef.current;
+    setIsLiveTorrentUploadLimitPending(true);
+    try {
+      await useDownloadStore.getState().setTorrentUploadLimit(item.id, limit);
+      if (
+        limit === null
+        && requestId === actionRequestRef.current
+        && useDownloadStore.getState().selectedPropertiesDownloadId === item.id
+      ) {
+        setLiveTorrentUploadLimitValue('');
+      }
+    } catch (error) {
+      if (requestId === actionRequestRef.current && useDownloadStore.getState().selectedPropertiesDownloadId === item.id) {
+        setErrorMessage(t($ => $.properties.liveTorrentUploadLimitFailed, {
+          detail: error instanceof Error ? error.message : String(error)
+        }));
+      }
+    } finally {
+      if (requestId === actionRequestRef.current && useDownloadStore.getState().selectedPropertiesDownloadId === item.id) {
+        setIsLiveTorrentUploadLimitPending(false);
+      }
+    }
+  };
+
   const identityLocked = getIdentityLocked(item.status);
   const transferLocked = getTransferLocked(item.status);
   const liveSpeedLimitAvailable = !item.isMedia && ['downloading', 'retrying'].includes(item.status);
   const liveSpeedLimitUnavailable = item.isMedia && ['downloading', 'processing', 'retrying'].includes(item.status);
+  const liveTorrentUploadLimitAvailable = item.isTorrent && ['downloading', 'seeding', 'retrying'].includes(item.status);
   const configuredConnections = resolveDownloadConnections(item.connections, perServerConnections);
   const observedConnectionTotal = Math.max(
     1,
@@ -609,6 +651,45 @@ export const PropertiesModal = () => {
                       {t($ => $.properties.liveSpeedLimitUnavailable)}
                     </p>
                   )}
+                </div>
+              )}
+              {liveTorrentUploadLimitAvailable && (
+                <div className="col-start-2 rounded-lg border border-border-modal bg-bg-input/30 p-3 space-y-2">
+                  <label htmlFor="live-torrent-upload-limit" className="block text-xs font-semibold text-text-primary">
+                    {t($ => $.properties.liveTorrentUploadLimit)}
+                  </label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      id="live-torrent-upload-limit"
+                      type="text"
+                      inputMode="decimal"
+                      value={liveTorrentUploadLimitValue}
+                      onChange={event => setLiveTorrentUploadLimitValue(event.currentTarget.value)}
+                      placeholder={t($ => $.properties.liveTorrentUploadLimitPlaceholder)}
+                      disabled={isLiveTorrentUploadLimitPending}
+                      aria-describedby="live-torrent-upload-limit-hint"
+                      className="app-control w-32 px-2.5 py-1.5 text-xs font-mono disabled:opacity-50"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void handleLiveTorrentUploadLimit(liveTorrentUploadLimitValue)}
+                      disabled={isLiveTorrentUploadLimitPending}
+                      className="app-button app-button-primary px-3 text-xs disabled:opacity-50"
+                    >
+                      {t($ => $.properties.liveSpeedLimitApply)}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleLiveTorrentUploadLimit(null)}
+                      disabled={isLiveTorrentUploadLimitPending || !liveTorrentUploadLimitValue}
+                      className="app-button px-3 text-xs disabled:opacity-50"
+                    >
+                      {t($ => $.properties.liveSpeedLimitClear)}
+                    </button>
+                  </div>
+                  <p id="live-torrent-upload-limit-hint" className="text-[11px] text-text-muted">
+                    {t($ => $.properties.liveTorrentUploadLimitHint)}
+                  </p>
                 </div>
               )}
             </div>

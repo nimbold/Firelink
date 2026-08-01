@@ -800,6 +800,7 @@ interface DownloadState {
   pauseAll: () => Promise<number>;
   assignToQueue: (ids: string[], queueId: string) => Promise<void>;
   setDownloadSpeedLimit: (id: string, limit: string | null) => Promise<void>;
+  setTorrentUploadLimit: (id: string, limit: string | null) => Promise<void>;
   setQueueConcurrency: (id: string, maxConcurrent: number | null) => Promise<void>;
   addQueue: (name: string) => boolean;
   renameQueue: (id: string, name: string) => boolean;
@@ -1881,6 +1882,39 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       });
       if (get().downloads.some(download => download.id === id)) {
         get().updateDownload(id, { speedLimit: normalizedLimit ?? undefined });
+      }
+    },
+    true,
+    preemptDispatch
+  ),
+  setTorrentUploadLimit: (id, limit) => runDownloadLifecycleOperation(
+    id,
+    'torrent-upload-limit',
+    async () => {
+      await waitForPendingStartupResume();
+      const item = get().downloads.find(download => download.id === id);
+      if (!item) throw new Error('Download no longer exists.');
+      if (!item.isTorrent) {
+        throw new Error('Live upload control is available only for Torrent downloads.');
+      }
+      if (!['downloading', 'seeding', 'retrying'].includes(item.status)) {
+        throw new Error('Live upload control requires an active Torrent.');
+      }
+
+      const trimmed = limit?.trim() || '';
+      const normalizedLimit = trimmed
+        ? normalizeSpeedLimitForBackend(trimmed)
+        : null;
+      if (trimmed && normalizedLimit === null) {
+        throw new Error('Enter a valid Torrent upload limit.');
+      }
+
+      await invoke('set_torrent_upload_limit', {
+        id,
+        limit: normalizedLimit
+      });
+      if (get().downloads.some(download => download.id === id)) {
+        get().updateDownload(id, { torrentUploadLimit: normalizedLimit ?? undefined });
       }
     },
     true,

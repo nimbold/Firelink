@@ -258,6 +258,16 @@ pub trait SidecarSpawner: Send + Sync + 'static {
         Err("live aria2 speed limits are unavailable".to_string())
     }
 
+    /// Change one active BitTorrent transfer's runtime upload cap without
+    /// replacing its GID or queue permit.
+    async fn set_torrent_upload_limit(
+        &self,
+        _gid: &str,
+        _limit: Option<&str>,
+    ) -> Result<(), String> {
+        Err("live torrent upload limits are unavailable".to_string())
+    }
+
     /// Run a media download to completion. The permit is parked for the full
     /// duration; release is handled by QueueManager on the runner's exit.
     async fn run_media(
@@ -794,6 +804,76 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .get_mut(id)
             .ok_or_else(|| "active aria2 transfer payload is unavailable".to_string())?;
         payload.speed_limit = normalized_limit;
+        Ok(())
+    }
+
+    /// Change an active Torrent's upload cap without replacing its GID or
+    /// queue permit. The control lock and post-RPC ownership check fence a
+    /// late response from a terminal or replaced lifecycle.
+    pub async fn set_aria2_torrent_upload_limit(
+        &self,
+        id: &str,
+        limit: Option<String>,
+    ) -> Result<(), String> {
+        let normalized_limit = match limit.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(raw) => Some(
+                crate::normalize_speed_limit_for_aria2(raw)
+                    .ok_or_else(|| "invalid torrent upload limit".to_string())?,
+            ),
+        };
+        let _control_guard = self.acquire_aria2_control(id).await;
+
+        if !self.is_registered(id).await
+            || !matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
+        {
+            return Err("download is not an active aria2 transfer".to_string());
+        }
+        let is_torrent = self
+            .aria2_payloads
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|payload| payload.is_torrent);
+        if !is_torrent {
+            return Err("download is not a Torrent transfer".to_string());
+        }
+        let gid = self
+            .aria2_gid_for_download(id)
+            .ok_or_else(|| "active Torrent transfer has no gid".to_string())?;
+        let expected_mapping = self
+            .aria2_gid_mapping(&gid)
+            .ok_or_else(|| "active Torrent transfer has no current gid mapping".to_string())?;
+        if expected_mapping.id != id {
+            return Err("aria2 gid belongs to another download".to_string());
+        }
+        if !self
+            .is_aria2_control_epoch_current(id, expected_mapping.epoch)
+            .await
+        {
+            return Err("active Torrent transfer has a stale control epoch".to_string());
+        }
+
+        self.spawner
+            .set_torrent_upload_limit(&gid, normalized_limit.as_deref())
+            .await?;
+
+        let still_current = self.is_registered(id).await
+            && matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
+            && self
+                .is_aria2_control_epoch_current(id, expected_mapping.epoch)
+                .await
+            && self.is_current_aria2_gid_mapping(&gid, &expected_mapping)
+            && self.aria2_gid_for_download(id).as_deref() == Some(gid.as_str());
+        if !still_current {
+            return Err("Torrent lifecycle changed while setting upload limit".to_string());
+        }
+
+        let mut payloads = self.aria2_payloads.lock().await;
+        let payload = payloads
+            .get_mut(id)
+            .ok_or_else(|| "active Torrent transfer payload is unavailable".to_string())?;
+        payload.torrent_upload_limit = normalized_limit;
         Ok(())
     }
 
@@ -3173,6 +3253,30 @@ impl SidecarSpawner for ProductionSpawner {
             &state.aria2_secret,
             "aria2.changeOption",
             serde_json::json!([gid, {"max-download-limit": limit}]),
+        )
+        .await
+        .map_err(|error| format!("aria2 changeOption failed for gid {gid}: {error}"))?;
+        match result.as_str() {
+            Some("OK") => Ok(()),
+            Some(value) => Err(format!(
+                "aria2.changeOption returned unexpected result {value} for gid {gid}"
+            )),
+            None => Err("aria2.changeOption returned a non-string result".to_string()),
+        }
+    }
+
+    async fn set_torrent_upload_limit(
+        &self,
+        gid: &str,
+        limit: Option<&str>,
+    ) -> Result<(), String> {
+        let state = self.app_handle.state::<crate::AppState>();
+        let limit = limit.unwrap_or("0");
+        let result = crate::rpc_call(
+            state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+            &state.aria2_secret,
+            "aria2.changeOption",
+            serde_json::json!([gid, {"max-upload-limit": limit}]),
         )
         .await
         .map_err(|error| format!("aria2 changeOption failed for gid {gid}: {error}"))?;

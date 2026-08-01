@@ -396,6 +396,71 @@ describe('useDownloadStore', () => {
     expect(useDownloadStore.getState().downloads[0].speedLimit).toBeUndefined();
   });
 
+  it('updates an active Torrent upload limit while seeding and clears it', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'live-torrent-upload',
+        status: 'seeding',
+        isMedia: false,
+        isTorrent: true,
+        torrentUploadLimit: '512K'
+      }] as any[]
+    });
+    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
+
+    await useDownloadStore.getState().setTorrentUploadLimit('live-torrent-upload', '2M');
+
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('set_torrent_upload_limit', {
+      id: 'live-torrent-upload',
+      limit: '2M'
+    });
+    expect(useDownloadStore.getState().downloads[0].torrentUploadLimit).toBe('2M');
+
+    await useDownloadStore.getState().setTorrentUploadLimit('live-torrent-upload', null);
+    const uploadLimitCalls = vi.mocked(ipc.invokeCommand).mock.calls
+      .filter(([command]) => command === 'set_torrent_upload_limit');
+    expect(uploadLimitCalls[uploadLimitCalls.length - 1]).toEqual(['set_torrent_upload_limit', {
+      id: 'live-torrent-upload',
+      limit: null
+    }]);
+    expect(useDownloadStore.getState().downloads[0].torrentUploadLimit).toBeUndefined();
+  });
+
+  it('rejects live Torrent upload control for ordinary or inactive downloads', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'ordinary-upload', status: 'downloading', isMedia: false, isTorrent: false },
+        { id: 'paused-upload', status: 'paused', isMedia: false, isTorrent: true }
+      ] as any[]
+    });
+
+    await expect(useDownloadStore.getState().setTorrentUploadLimit('ordinary-upload', '2M'))
+      .rejects.toThrow('only for Torrent');
+    await expect(useDownloadStore.getState().setTorrentUploadLimit('paused-upload', '2M'))
+      .rejects.toThrow('active Torrent');
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('set_torrent_upload_limit', expect.anything());
+  });
+
+  it('keeps the prior Torrent upload limit when the backend rejects the update', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'live-torrent-upload-failure',
+        status: 'downloading',
+        isMedia: false,
+        isTorrent: true,
+        torrentUploadLimit: '512K'
+      }] as any[]
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
+      if (command === 'set_torrent_upload_limit') throw new Error('aria2 unavailable');
+      return undefined;
+    });
+
+    await expect(useDownloadStore.getState().setTorrentUploadLimit('live-torrent-upload-failure', '2M'))
+      .rejects.toThrow('aria2 unavailable');
+    expect(useDownloadStore.getState().downloads[0].torrentUploadLimit).toBe('512K');
+  });
+
   it('rejects live speed changes for media and inactive downloads', async () => {
     useDownloadStore.setState({
       downloads: [
