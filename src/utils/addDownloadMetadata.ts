@@ -62,6 +62,8 @@ export interface AddDownloadDraftRow {
   torrentSeedTime?: number;
   torrentSeedRatio?: number;
   torrentUploadLimit?: string;
+  torrentMaxPeers?: number;
+  torrentPeerSpeedLimit?: string;
 }
 
 /**

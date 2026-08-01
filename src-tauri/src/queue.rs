@@ -212,6 +212,8 @@ pub struct SpawnPayload {
     pub torrent_seed_time: Option<f64>,
     pub torrent_seed_ratio: Option<f64>,
     pub torrent_upload_limit: Option<String>,
+    pub torrent_max_peers: Option<u32>,
+    pub torrent_peer_speed_limit: Option<String>,
 }
 
 /// A sidecar spawner. In production this calls the real aria2/yt-dlp
@@ -266,6 +268,17 @@ pub trait SidecarSpawner: Send + Sync + 'static {
         _limit: Option<&str>,
     ) -> Result<(), String> {
         Err("live torrent upload limits are unavailable".to_string())
+    }
+
+    /// Change the peer cap and low-speed peer expansion threshold without
+    /// replacing the Torrent GID or queue permit.
+    async fn set_torrent_peer_options(
+        &self,
+        _gid: &str,
+        _max_peers: u32,
+        _peer_speed_limit: &str,
+    ) -> Result<(), String> {
+        Err("live torrent peer options are unavailable".to_string())
     }
 
     /// Run a media download to completion. The permit is parked for the full
@@ -874,6 +887,78 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .get_mut(id)
             .ok_or_else(|| "active Torrent transfer payload is unavailable".to_string())?;
         payload.torrent_upload_limit = normalized_limit;
+        Ok(())
+    }
+
+    /// Change active Torrent peer settings without replacing the GID or queue
+    /// permit. Clearing a setting restores Aria2's documented default while
+    /// keeping the persisted payload override-free for future retries.
+    pub async fn set_aria2_torrent_peer_options(
+        &self,
+        id: &str,
+        max_peers: Option<i64>,
+        peer_speed_limit: Option<String>,
+    ) -> Result<(), String> {
+        let normalized_max_peers = normalize_torrent_max_peers(max_peers)?;
+        let normalized_peer_speed_limit =
+            normalize_torrent_peer_speed_limit(peer_speed_limit.as_deref())?;
+        let rpc_max_peers = normalized_max_peers.unwrap_or(ARIA2_DEFAULT_TORRENT_MAX_PEERS);
+        let rpc_peer_speed_limit = normalized_peer_speed_limit
+            .as_deref()
+            .unwrap_or(ARIA2_DEFAULT_TORRENT_PEER_SPEED_LIMIT);
+        let _control_guard = self.acquire_aria2_control(id).await;
+
+        if !self.is_registered(id).await
+            || !matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
+        {
+            return Err("download is not an active aria2 transfer".to_string());
+        }
+        let is_torrent = self
+            .aria2_payloads
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|payload| payload.is_torrent);
+        if !is_torrent {
+            return Err("download is not a Torrent transfer".to_string());
+        }
+        let gid = self
+            .aria2_gid_for_download(id)
+            .ok_or_else(|| "active Torrent transfer has no gid".to_string())?;
+        let expected_mapping = self
+            .aria2_gid_mapping(&gid)
+            .ok_or_else(|| "active Torrent transfer has no current gid mapping".to_string())?;
+        if expected_mapping.id != id {
+            return Err("aria2 gid belongs to another download".to_string());
+        }
+        if !self
+            .is_aria2_control_epoch_current(id, expected_mapping.epoch)
+            .await
+        {
+            return Err("active Torrent transfer has a stale control epoch".to_string());
+        }
+
+        self.spawner
+            .set_torrent_peer_options(&gid, rpc_max_peers, rpc_peer_speed_limit)
+            .await?;
+
+        let still_current = self.is_registered(id).await
+            && matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
+            && self
+                .is_aria2_control_epoch_current(id, expected_mapping.epoch)
+                .await
+            && self.is_current_aria2_gid_mapping(&gid, &expected_mapping)
+            && self.aria2_gid_for_download(id).as_deref() == Some(gid.as_str());
+        if !still_current {
+            return Err("Torrent lifecycle changed while setting peer options".to_string());
+        }
+
+        let mut payloads = self.aria2_payloads.lock().await;
+        let payload = payloads
+            .get_mut(id)
+            .ok_or_else(|| "active Torrent transfer payload is unavailable".to_string())?;
+        payload.torrent_max_peers = normalized_max_peers;
+        payload.torrent_peer_speed_limit = normalized_peer_speed_limit;
         Ok(())
     }
 
@@ -2958,6 +3043,9 @@ pub struct ProductionSpawner {
 
 const ARIA2_MIN_SPLIT_SIZE: &str = "1M";
 const ARIA2_STREAM_PIECE_SELECTOR: &str = "inorder";
+const ARIA2_DEFAULT_TORRENT_MAX_PEERS: u32 = 55;
+const ARIA2_DEFAULT_TORRENT_PEER_SPEED_LIMIT: &str = "50K";
+const MAX_TORRENT_MAX_PEERS: u32 = 1000;
 
 fn apply_aria2_connection_options(
     options: &mut serde_json::Map<String, serde_json::Value>,
@@ -2996,6 +3084,27 @@ fn format_aria2_torrent_number(value: f64, field: &str) -> Result<String, String
     Ok(value.to_string())
 }
 
+fn normalize_torrent_max_peers(value: Option<i64>) -> Result<Option<u32>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !(0..=i64::from(MAX_TORRENT_MAX_PEERS)).contains(&value) {
+        return Err(format!(
+            "torrent maximum peers must be between 0 and {MAX_TORRENT_MAX_PEERS}"
+        ));
+    }
+    Ok(Some(value as u32))
+}
+
+fn normalize_torrent_peer_speed_limit(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    crate::normalize_speed_limit_for_aria2(value)
+        .map(Some)
+        .ok_or_else(|| "torrent peer speed limit must be greater than zero".to_string())
+}
+
 fn apply_aria2_torrent_options(
     options: &mut serde_json::Map<String, serde_json::Value>,
     payload: &SpawnPayload,
@@ -3032,6 +3141,27 @@ fn apply_aria2_torrent_options(
         let normalized = crate::normalize_speed_limit_for_aria2(upload_limit)
             .ok_or_else(|| "torrent upload limit must be greater than zero".to_string())?;
         options.insert("max-upload-limit".to_string(), serde_json::json!(normalized));
+    }
+
+    if let Some(max_peers) = payload.torrent_max_peers {
+        if max_peers > MAX_TORRENT_MAX_PEERS {
+            return Err(format!(
+                "torrent maximum peers must be between 0 and {MAX_TORRENT_MAX_PEERS}"
+            ));
+        }
+        options.insert(
+            "bt-max-peers".to_string(),
+            serde_json::json!(max_peers.to_string()),
+        );
+    }
+
+    if let Some(peer_speed_limit) = payload.torrent_peer_speed_limit.as_deref() {
+        let normalized = normalize_torrent_peer_speed_limit(Some(peer_speed_limit))
+            ?.ok_or_else(|| "torrent peer speed limit must be greater than zero".to_string())?;
+        options.insert(
+            "bt-request-peer-speed-limit".to_string(),
+            serde_json::json!(normalized),
+        );
     }
     Ok(())
 }
@@ -3280,6 +3410,33 @@ impl SidecarSpawner for ProductionSpawner {
         )
         .await
         .map_err(|error| format!("aria2 changeOption failed for gid {gid}: {error}"))?;
+        match result.as_str() {
+            Some("OK") => Ok(()),
+            Some(value) => Err(format!(
+                "aria2.changeOption returned unexpected result {value} for gid {gid}"
+            )),
+            None => Err("aria2.changeOption returned a non-string result".to_string()),
+        }
+    }
+
+    async fn set_torrent_peer_options(
+        &self,
+        gid: &str,
+        max_peers: u32,
+        peer_speed_limit: &str,
+    ) -> Result<(), String> {
+        let state = self.app_handle.state::<crate::AppState>();
+        let result = crate::rpc_call(
+            state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+            &state.aria2_secret,
+            "aria2.changeOption",
+            serde_json::json!([gid, {
+                "bt-max-peers": max_peers.to_string(),
+                "bt-request-peer-speed-limit": peer_speed_limit,
+            }]),
+        )
+        .await
+        .map_err(|error| format!("aria2.changeOption failed for gid {gid}: {error}"))?;
         match result.as_str() {
             Some("OK") => Ok(()),
             Some(value) => Err(format!(
@@ -3589,6 +3746,12 @@ pub struct EnqueueItem {
     pub torrent_upload_limit: Option<String>,
     #[serde(default)]
     #[ts(optional)]
+    pub torrent_max_peers: Option<u32>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_peer_speed_limit: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
     pub lifecycle_generation: Option<String>,
 }
 
@@ -3634,6 +3797,8 @@ impl EnqueueItem {
                 torrent_seed_time: self.torrent_seed_time,
                 torrent_seed_ratio: self.torrent_seed_ratio,
                 torrent_upload_limit: self.torrent_upload_limit,
+                torrent_max_peers: self.torrent_max_peers,
+                torrent_peer_speed_limit: self.torrent_peer_speed_limit,
             },
         }
     }
@@ -3708,6 +3873,8 @@ mod tests {
             torrent_seed_time: Some(30.0),
             torrent_seed_ratio: Some(1.5),
             torrent_upload_limit: Some("2 MiB/s".to_string()),
+            torrent_max_peers: Some(120),
+            torrent_peer_speed_limit: Some("2M".to_string()),
             ..Default::default()
         };
 
@@ -3717,6 +3884,14 @@ mod tests {
         assert_eq!(options.get("seed-ratio"), Some(&serde_json::json!("1.5")));
         assert_eq!(
             options.get("max-upload-limit"),
+            Some(&serde_json::json!("2M"))
+        );
+        assert_eq!(
+            options.get("bt-max-peers"),
+            Some(&serde_json::json!("120"))
+        );
+        assert_eq!(
+            options.get("bt-request-peer-speed-limit"),
             Some(&serde_json::json!("2M"))
         );
         assert!(torrent_seeding_requested(&payload));
@@ -3749,6 +3924,27 @@ mod tests {
 
         let error = apply_aria2_torrent_options(&mut options, &payload).unwrap_err();
         assert!(error.contains("seed time"));
+    }
+
+    #[test]
+    fn torrent_options_reject_invalid_peer_values() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_max_peers: Some(MAX_TORRENT_MAX_PEERS + 1),
+            ..Default::default()
+        };
+        let error = apply_aria2_torrent_options(&mut options, &payload).unwrap_err();
+        assert!(error.contains("maximum peers"));
+
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_peer_speed_limit: Some("0".to_string()),
+            ..Default::default()
+        };
+        let error = apply_aria2_torrent_options(&mut options, &payload).unwrap_err();
+        assert!(error.contains("peer speed limit"));
     }
 
     #[tokio::test]

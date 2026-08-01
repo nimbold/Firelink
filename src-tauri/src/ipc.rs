@@ -185,6 +185,12 @@ pub struct DownloadItem {
     #[serde(default)]
     #[ts(optional)]
     pub torrent_upload_limit: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_max_peers: Option<u32>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_peer_speed_limit: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]

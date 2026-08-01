@@ -461,6 +461,91 @@ describe('useDownloadStore', () => {
     expect(useDownloadStore.getState().downloads[0].torrentUploadLimit).toBe('512K');
   });
 
+  it('updates active Torrent peer options and clears them to Aria2 defaults', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'live-torrent-peers',
+        status: 'seeding',
+        isMedia: false,
+        isTorrent: true,
+        torrentMaxPeers: 120,
+        torrentPeerSpeedLimit: '512K'
+      }] as any[]
+    });
+    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
+
+    await useDownloadStore.getState().setTorrentPeerOptions('live-torrent-peers', '240', '2M');
+
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('set_torrent_peer_options', {
+      id: 'live-torrent-peers',
+      max_peers: 240,
+      peer_speed_limit: '2M'
+    });
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      torrentMaxPeers: 240,
+      torrentPeerSpeedLimit: '2M'
+    });
+
+    await useDownloadStore.getState().setTorrentPeerOptions('live-torrent-peers', null, null);
+    const peerOptionCalls = vi.mocked(ipc.invokeCommand).mock.calls
+      .filter(([command]) => command === 'set_torrent_peer_options');
+    expect(peerOptionCalls[peerOptionCalls.length - 1]).toEqual(['set_torrent_peer_options', {
+      id: 'live-torrent-peers',
+      max_peers: null,
+      peer_speed_limit: null
+    }]);
+    expect(useDownloadStore.getState().downloads[0].torrentMaxPeers).toBeUndefined();
+    expect(useDownloadStore.getState().downloads[0].torrentPeerSpeedLimit).toBeUndefined();
+  });
+
+  it('rejects invalid or inactive live Torrent peer options', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'ordinary-peers', status: 'downloading', isMedia: false, isTorrent: false },
+        { id: 'paused-peers', status: 'paused', isMedia: false, isTorrent: true }
+      ] as any[]
+    });
+
+    await expect(useDownloadStore.getState().setTorrentPeerOptions('ordinary-peers', '100', '2M'))
+      .rejects.toThrow('only for Torrent');
+    await expect(useDownloadStore.getState().setTorrentPeerOptions('paused-peers', '100', '2M'))
+      .rejects.toThrow('active Torrent');
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('set_torrent_peer_options', expect.anything());
+
+    useDownloadStore.setState({
+      downloads: [{ id: 'invalid-peers', status: 'downloading', isMedia: false, isTorrent: true }] as any[]
+    });
+    await expect(useDownloadStore.getState().setTorrentPeerOptions('invalid-peers', '1001', '2M'))
+      .rejects.toThrow('between 0 and 1000');
+    await expect(useDownloadStore.getState().setTorrentPeerOptions('invalid-peers', '100', 'not-a-rate'))
+      .rejects.toThrow('valid Torrent peer speed');
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('set_torrent_peer_options', expect.anything());
+  });
+
+  it('keeps prior Torrent peer options when the backend rejects the update', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'live-torrent-peers-failure',
+        status: 'downloading',
+        isMedia: false,
+        isTorrent: true,
+        torrentMaxPeers: 120,
+        torrentPeerSpeedLimit: '512K'
+      }] as any[]
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
+      if (command === 'set_torrent_peer_options') throw new Error('aria2 unavailable');
+      return undefined;
+    });
+
+    await expect(useDownloadStore.getState().setTorrentPeerOptions('live-torrent-peers-failure', '240', '2M'))
+      .rejects.toThrow('aria2 unavailable');
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      torrentMaxPeers: 120,
+      torrentPeerSpeedLimit: '512K'
+    });
+  });
+
   it('rejects live speed changes for media and inactive downloads', async () => {
     useDownloadStore.setState({
       downloads: [
@@ -610,6 +695,33 @@ describe('useDownloadStore', () => {
       .toEqual(['00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001']);
   });
 
+  it('skips malformed persisted download records without blocking startup', async () => {
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'db_get_all_queues') return [];
+      if (cmd === 'db_get_all_downloads') {
+        return [
+          '{not-json',
+          JSON.stringify(null),
+          JSON.stringify([]),
+          JSON.stringify({
+            id: 'valid-after-corruption',
+            url: 'https://example.com/valid.bin',
+            fileName: 'valid.bin',
+            status: 'ready',
+            category: 'Other',
+            dateAdded: ''
+          })
+        ];
+      }
+      return undefined;
+    });
+
+    await useDownloadStore.getState().initDB();
+
+    expect(useDownloadStore.getState().downloads.map(download => download.id))
+      .toEqual(['valid-after-corruption']);
+  });
+
   it('moves persisted paused rows behind runnable rows and assigns contiguous positions', async () => {
     vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
       if (cmd === 'db_get_all_queues') {
@@ -728,6 +840,23 @@ describe('useDownloadStore', () => {
       totalBytes: undefined,
       totalIsEstimate: true
     })).toBe(true);
+  });
+
+  it('clears malformed persisted Torrent peer options', () => {
+    const normalized = normalizePersistedDownloadProgress({
+      id: 'malformed-torrent-options',
+      url: 'magnet:?xt=urn:btih:bad',
+      fileName: 'payload',
+      status: 'queued',
+      category: 'Other',
+      dateAdded: '',
+      isTorrent: true,
+      torrentMaxPeers: 'not-a-number' as unknown as number,
+      torrentPeerSpeedLimit: 0 as unknown as string
+    });
+
+    expect(normalized.torrentMaxPeers).toBeUndefined();
+    expect(normalized.torrentPeerSpeedLimit).toBeUndefined();
   });
 
   it('normalizes proxy settings for download dispatch', async () => {

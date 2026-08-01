@@ -13,7 +13,7 @@ import { FolderPlus, Save, Settings, Shield, RefreshCw, FileText, HardDrive, Dat
 import { open } from '@tauri-apps/plugin-dialog';
 import { invokeCommand as invoke } from '../ipc';
 import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResolutionModal';
-import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, normalizeSpeedLimitForBackend } from '../utils/downloads';
 import { fetchMediaMetadataDeduped, fetchMediaPlaylistMetadataDeduped } from '../utils/mediaMetadata';
 import {
   expandTilde,
@@ -230,6 +230,8 @@ export const AddDownloadsModal = () => {
   const [torrentSeedRatio, setTorrentSeedRatio] = useState('1.0');
   const [torrentUploadLimitEnabled, setTorrentUploadLimitEnabled] = useState(false);
   const [torrentUploadLimit, setTorrentUploadLimit] = useState('1024');
+  const [torrentMaxPeers, setTorrentMaxPeers] = useState('');
+  const [torrentPeerSpeedLimit, setTorrentPeerSpeedLimit] = useState('');
   const [freeSpace, setFreeSpace] = useState('Unknown');
   const freeSpaceRequestRef = useRef(0);
 
@@ -368,6 +370,8 @@ export const AddDownloadsModal = () => {
     setTorrentSeedRatio('1.0');
     setTorrentUploadLimitEnabled(false);
     setTorrentUploadLimit('1024');
+    setTorrentMaxPeers('');
+    setTorrentPeerSpeedLimit('');
     setUseAuth(false);
     setUsername('');
     setPassword('');
@@ -954,6 +958,18 @@ export const AddDownloadsModal = () => {
       addToast({ message: t($ => $.addDownloads.torrentUploadLimitInvalid), variant: 'error', isActionable: true });
       return;
     }
+    if (
+      hasSelectedTorrent
+      && torrentMaxPeers.trim()
+      && (!Number.isInteger(Number(torrentMaxPeers)) || Number(torrentMaxPeers) < 0 || Number(torrentMaxPeers) > 1000)
+    ) {
+      addToast({ message: t($ => $.addDownloads.torrentMaxPeersInvalid), variant: 'error', isActionable: true });
+      return;
+    }
+    if (hasSelectedTorrent && torrentPeerSpeedLimit.trim() && !normalizeSpeedLimitForBackend(torrentPeerSpeedLimit)) {
+      addToast({ message: t($ => $.addDownloads.torrentPeerSpeedLimitInvalid), variant: 'error', isActionable: true });
+      return;
+    }
     if (saveInDedicatedFolder && !sanitizeBatchFolderName(dedicatedFolderName)) {
       addToast({
         message: t($ => $.addDownloads.dedicatedFolderNameRequired),
@@ -1428,6 +1444,10 @@ export const AddDownloadsModal = () => {
           torrentSeedTime: item.isTorrent && torrentSeedingEnabled ? Number(torrentSeedTime) : undefined,
           torrentSeedRatio: item.isTorrent && torrentSeedingEnabled ? Number(torrentSeedRatio) : undefined,
           torrentUploadLimit: item.isTorrent && torrentUploadLimitEnabled ? `${torrentUploadLimit}K` : undefined,
+          torrentMaxPeers: item.isTorrent && torrentMaxPeers.trim() ? Number(torrentMaxPeers) : undefined,
+          torrentPeerSpeedLimit: item.isTorrent
+            ? normalizeSpeedLimitForBackend(torrentPeerSpeedLimit) || undefined
+            : undefined,
           size: item.size || (item.sizeBytes ? formatBytes(item.sizeBytes) : undefined),
           sizeBytes: item.sizeBytes
         }, action);
@@ -2074,6 +2094,39 @@ export const AddDownloadsModal = () => {
                         <span className="text-text-muted">KiB/s</span>
                       </div>
                     ) : null}
+                    <div className="grid grid-cols-[1fr_auto] gap-2 items-center pt-2 border-t border-border-modal/50">
+                      <label htmlFor="torrent-max-peers" className="text-text-muted">
+                        {t($ => $.addDownloads.torrentMaxPeers)}
+                      </label>
+                      <input
+                        id="torrent-max-peers"
+                        type="number"
+                        min={0}
+                        max={1000}
+                        step={1}
+                        value={torrentMaxPeers}
+                        onChange={event => setTorrentMaxPeers(event.target.value)}
+                        placeholder="55"
+                        className="app-control w-24 px-2 py-1 text-end font-mono"
+                        aria-describedby="torrent-peer-options-hint"
+                      />
+                      <label htmlFor="torrent-peer-speed-limit" className="text-text-muted">
+                        {t($ => $.addDownloads.torrentPeerSpeedLimit)}
+                      </label>
+                      <input
+                        id="torrent-peer-speed-limit"
+                        type="text"
+                        inputMode="decimal"
+                        value={torrentPeerSpeedLimit}
+                        onChange={event => setTorrentPeerSpeedLimit(event.target.value)}
+                        placeholder="50K"
+                        className="app-control w-24 px-2 py-1 text-end font-mono"
+                        aria-describedby="torrent-peer-options-hint"
+                      />
+                      <p id="torrent-peer-options-hint" className="col-span-2 text-[10px] text-text-muted">
+                        {t($ => $.addDownloads.torrentPeerOptionsHint)}
+                      </p>
+                    </div>
                   </div>
                 </section>
               )}

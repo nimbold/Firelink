@@ -20,7 +20,13 @@ struct CountingSpawner {
     block_torrent_upload_limit: std::sync::atomic::AtomicBool,
     torrent_upload_limit_started: tokio::sync::Notify,
     torrent_upload_limit_release: tokio::sync::Notify,
+    torrent_peer_options_calls: AtomicUsize,
+    last_torrent_peer_options: std::sync::Mutex<Option<(u32, String)>>,
+    block_torrent_peer_options: std::sync::atomic::AtomicBool,
+    torrent_peer_options_started: tokio::sync::Notify,
+    torrent_peer_options_release: tokio::sync::Notify,
     add_speed_limits: std::sync::Mutex<Vec<Option<String>>>,
+    add_peer_options: std::sync::Mutex<Vec<(Option<u32>, Option<String>)>>,
     block_speed_limit: std::sync::atomic::AtomicBool,
     speed_limit_started: tokio::sync::Notify,
     speed_limit_release: tokio::sync::Notify,
@@ -198,7 +204,13 @@ impl CountingSpawner {
             block_torrent_upload_limit: std::sync::atomic::AtomicBool::new(false),
             torrent_upload_limit_started: tokio::sync::Notify::new(),
             torrent_upload_limit_release: tokio::sync::Notify::new(),
+            torrent_peer_options_calls: AtomicUsize::new(0),
+            last_torrent_peer_options: std::sync::Mutex::new(None),
+            block_torrent_peer_options: std::sync::atomic::AtomicBool::new(false),
+            torrent_peer_options_started: tokio::sync::Notify::new(),
+            torrent_peer_options_release: tokio::sync::Notify::new(),
             add_speed_limits: std::sync::Mutex::new(Vec::new()),
+            add_peer_options: std::sync::Mutex::new(Vec::new()),
             block_speed_limit: std::sync::atomic::AtomicBool::new(false),
             speed_limit_started: tokio::sync::Notify::new(),
             speed_limit_release: tokio::sync::Notify::new(),
@@ -275,6 +287,13 @@ impl firelink_lib::queue::SidecarSpawner for CountingSpawner {
             .lock()
             .unwrap()
             .push(payload.speed_limit.clone());
+        self.add_peer_options
+            .lock()
+            .unwrap()
+            .push((
+                payload.torrent_max_peers,
+                payload.torrent_peer_speed_limit.clone(),
+            ));
         Ok(format!("gid-{call}"))
     }
     async fn remove_uri(&self, _gid: &str) -> Result<(), String> {
@@ -309,6 +328,24 @@ impl firelink_lib::queue::SidecarSpawner for CountingSpawner {
         {
             self.torrent_upload_limit_started.notify_one();
             self.torrent_upload_limit_release.notified().await;
+        }
+        Ok(())
+    }
+    async fn set_torrent_peer_options(
+        &self,
+        _gid: &str,
+        max_peers: u32,
+        peer_speed_limit: &str,
+    ) -> Result<(), String> {
+        self.torrent_peer_options_calls.fetch_add(1, Ordering::SeqCst);
+        *self.last_torrent_peer_options.lock().unwrap() =
+            Some((max_peers, peer_speed_limit.to_string()));
+        if self
+            .block_torrent_peer_options
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.torrent_peer_options_started.notify_one();
+            self.torrent_peer_options_release.notified().await;
         }
         Ok(())
     }
@@ -737,6 +774,137 @@ async fn live_torrent_upload_limit_does_not_update_after_gid_replacement() {
 }
 
 #[tokio::test]
+async fn live_torrent_peer_options_update_current_gid_and_payload() {
+    let (manager, spawner) = make_manager(1);
+    let manager = Arc::new(manager);
+    let mut task = aria2_task("torrent-peer-options");
+    task.payload.is_torrent = true;
+    manager.push(task).await.unwrap();
+
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if manager.aria2_gid_for_download("torrent-peer-options").is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("aria2 dispatch should register a Torrent gid");
+
+    manager
+        .set_aria2_torrent_peer_options(
+            "torrent-peer-options",
+            Some(120),
+            Some("2M".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(spawner.torrent_peer_options_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        spawner.last_torrent_peer_options.lock().unwrap().as_ref(),
+        Some(&(120, "2M".to_string()))
+    );
+    manager
+        .set_aria2_torrent_peer_options("torrent-peer-options", None, None)
+        .await
+        .unwrap();
+    assert_eq!(spawner.torrent_peer_options_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        spawner.last_torrent_peer_options.lock().unwrap().as_ref(),
+        Some(&(55, "50K".to_string()))
+    );
+    manager.clear_aria2_retry_state("torrent-peer-options").await;
+    manager.forget_aria2_gid("torrent-peer-options").await;
+    manager.release_permit("torrent-peer-options").await;
+    manager.release_registered_id("torrent-peer-options").await;
+    dispatcher.abort();
+}
+
+#[tokio::test]
+async fn live_torrent_peer_options_reject_invalid_values_and_stale_gid() {
+    let (manager, spawner) = make_manager(1);
+    let manager = Arc::new(manager);
+    let mut task = aria2_task("torrent-peer-options-stale");
+    task.payload.is_torrent = true;
+    manager.push(task).await.unwrap();
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if manager
+                .aria2_gid_for_download("torrent-peer-options-stale")
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("aria2 dispatch should register a Torrent gid");
+
+    assert!(manager
+        .set_aria2_torrent_peer_options(
+            "torrent-peer-options-stale",
+            Some(1001),
+            Some("2M".to_string()),
+        )
+        .await
+        .is_err());
+    assert!(manager
+        .set_aria2_torrent_peer_options(
+            "torrent-peer-options-stale",
+            Some(100),
+            Some("not-a-rate".to_string()),
+        )
+        .await
+        .is_err());
+    assert_eq!(spawner.torrent_peer_options_calls.load(Ordering::SeqCst), 0);
+
+    spawner
+        .block_torrent_peer_options
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let started = spawner.torrent_peer_options_started.notified();
+    let setter = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move {
+            manager
+                .set_aria2_torrent_peer_options(
+                    "torrent-peer-options-stale",
+                    Some(100),
+                    Some("2M".to_string()),
+                )
+                .await
+        })
+    };
+    timeout(Duration::from_secs(1), started)
+        .await
+        .expect("Torrent peer options RPC should start");
+
+    manager
+        .remember_gid(
+            "torrent-peer-options-stale".to_string(),
+            "gid-replaced".to_string(),
+        )
+        .await;
+    spawner.torrent_peer_options_release.notify_one();
+    assert!(setter.await.unwrap().is_err());
+
+    manager.clear_aria2_retry_state("torrent-peer-options-stale").await;
+    manager.forget_aria2_gid("torrent-peer-options-stale").await;
+    manager.release_permit("torrent-peer-options-stale").await;
+    manager.release_registered_id("torrent-peer-options-stale").await;
+    dispatcher.abort();
+}
+
+#[tokio::test]
 async fn retry_readds_aria2_with_the_latest_live_speed_limit() {
     use firelink_lib::queue::PendingOutcome;
 
@@ -795,6 +963,80 @@ async fn retry_readds_aria2_with_the_latest_live_speed_limit() {
             PendingOutcome::Error("permanent failure".to_string()),
         )
         .await;
+    dispatcher.abort();
+}
+
+#[tokio::test]
+async fn retry_readds_torrent_with_the_latest_live_peer_options() {
+    use firelink_lib::queue::PendingOutcome;
+
+    let (mgr, spawner) = make_manager(1);
+    let manager = Arc::new(mgr);
+    let mut task = aria2_task("peer-options-retry");
+    task.payload.is_torrent = true;
+    task.payload.max_tries = Some(1);
+    task.payload.torrent_max_peers = Some(120);
+    task.payload.torrent_peer_speed_limit = Some("1M".to_string());
+    manager.push(task).await.unwrap();
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if spawner.add_uri_calls.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial Torrent add should run");
+
+    manager
+        .handle_aria2_event(
+            "gid-1",
+            PendingOutcome::Error(
+                "aria2 error code 1: Failed to receive data, cause: protocol error".to_string(),
+            ),
+        )
+        .await;
+    manager
+        .set_aria2_torrent_peer_options(
+            "peer-options-retry",
+            Some(240),
+            Some("2M".to_string()),
+        )
+        .await
+        .unwrap();
+
+    timeout(Duration::from_secs(4), async {
+        loop {
+            if spawner.add_uri_calls.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("Torrent retry should re-add after backoff");
+    assert_eq!(
+        spawner.add_peer_options.lock().unwrap().as_slice(),
+        &[
+            (Some(120), Some("1M".to_string())),
+            (Some(240), Some("2M".to_string()))
+        ]
+    );
+
+    manager
+        .clear_aria2_retry_state("peer-options-retry")
+        .await;
+    manager
+        .forget_aria2_gid("peer-options-retry")
+        .await;
+    manager.release_permit("peer-options-retry").await;
+    manager.release_registered_id("peer-options-retry").await;
     dispatcher.abort();
 }
 

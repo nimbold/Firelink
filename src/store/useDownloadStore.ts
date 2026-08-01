@@ -348,6 +348,8 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
         torrent_seed_time: item.torrentSeedTime,
         torrent_seed_ratio: item.torrentSeedRatio,
         torrent_upload_limit: item.torrentUploadLimit || undefined,
+        torrent_max_peers: item.torrentMaxPeers,
+        torrent_peer_speed_limit: item.torrentPeerSpeedLimit || undefined,
         lifecycle_generation: lifecycleGeneration.toString(),
       };
 
@@ -612,10 +614,30 @@ export const hasStaleTemporaryMediaEstimate = (
   return hasImpossibleNumericEstimate || hasImpossibleVisibleEstimate;
 };
 
-export const normalizePersistedDownloadProgress = (download: DownloadItem): DownloadItem =>
-  hasStaleTemporaryMediaEstimate(download)
+export const normalizePersistedDownloadProgress = (download: DownloadItem): DownloadItem => {
+  const rawMaxPeers = download.torrentMaxPeers as unknown;
+  const normalizedMaxPeers = typeof rawMaxPeers === 'number' &&
+    Number.isInteger(rawMaxPeers) &&
+    rawMaxPeers >= 0 &&
+    rawMaxPeers <= 1000
+    ? rawMaxPeers
+    : undefined;
+  const rawPeerSpeedLimit = download.torrentPeerSpeedLimit as unknown;
+  const normalizedPeerSpeedLimit = typeof rawPeerSpeedLimit === 'string'
+    ? normalizeSpeedLimitForBackend(rawPeerSpeedLimit) || undefined
+    : undefined;
+  const normalizedOptions = rawMaxPeers !== normalizedMaxPeers ||
+    rawPeerSpeedLimit !== normalizedPeerSpeedLimit
     ? {
         ...download,
+        torrentMaxPeers: normalizedMaxPeers,
+        torrentPeerSpeedLimit: normalizedPeerSpeedLimit
+      }
+    : download;
+
+  return hasStaleTemporaryMediaEstimate(normalizedOptions)
+    ? {
+        ...normalizedOptions,
         // The old lifecycle could persist yt-dlp's temporary HLS estimate as
         // both the numeric denominator and the visible size. Neither value is
         // recoverable after the fact, so remove the false claim on startup.
@@ -623,7 +645,8 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
         totalBytes: undefined,
         totalIsEstimate: undefined
       }
-    : download;
+    : normalizedOptions;
+};
 
 export type { DownloadStatus };
 export const MAIN_QUEUE_ID = '00000000-0000-0000-0000-000000000001';
@@ -801,6 +824,11 @@ interface DownloadState {
   assignToQueue: (ids: string[], queueId: string) => Promise<void>;
   setDownloadSpeedLimit: (id: string, limit: string | null) => Promise<void>;
   setTorrentUploadLimit: (id: string, limit: string | null) => Promise<void>;
+  setTorrentPeerOptions: (
+    id: string,
+    maxPeers: string | null,
+    peerSpeedLimit: string | null
+  ) => Promise<void>;
   setQueueConcurrency: (id: string, maxConcurrent: number | null) => Promise<void>;
   addQueue: (name: string) => boolean;
   renameQueue: (id: string, name: string) => boolean;
@@ -1920,6 +1948,50 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     true,
     preemptDispatch
   ),
+  setTorrentPeerOptions: (id, maxPeers, peerSpeedLimit) => runDownloadLifecycleOperation(
+    id,
+    'torrent-peer-options',
+    async () => {
+      await waitForPendingStartupResume();
+      const item = get().downloads.find(download => download.id === id);
+      if (!item) throw new Error('Download no longer exists.');
+      if (!item.isTorrent) {
+        throw new Error('Live peer control is available only for Torrent downloads.');
+      }
+      if (!['downloading', 'seeding', 'retrying'].includes(item.status)) {
+        throw new Error('Live peer control requires an active Torrent.');
+      }
+
+      const trimmedMaxPeers = maxPeers?.trim() || '';
+      const parsedMaxPeers = trimmedMaxPeers ? Number(trimmedMaxPeers) : null;
+      if (
+        parsedMaxPeers !== null
+        && (!Number.isInteger(parsedMaxPeers) || parsedMaxPeers < 0 || parsedMaxPeers > 1000)
+      ) {
+        throw new Error('Torrent maximum peers must be an integer between 0 and 1000.');
+      }
+      const normalizedPeerSpeedLimit = peerSpeedLimit?.trim()
+        ? normalizeSpeedLimitForBackend(peerSpeedLimit)
+        : null;
+      if (peerSpeedLimit?.trim() && normalizedPeerSpeedLimit === null) {
+        throw new Error('Enter a valid Torrent peer speed limit.');
+      }
+
+      await invoke('set_torrent_peer_options', {
+        id,
+        max_peers: parsedMaxPeers,
+        peer_speed_limit: normalizedPeerSpeedLimit
+      });
+      if (get().downloads.some(download => download.id === id)) {
+        get().updateDownload(id, {
+          torrentMaxPeers: parsedMaxPeers === null ? undefined : parsedMaxPeers,
+          torrentPeerSpeedLimit: normalizedPeerSpeedLimit ?? undefined
+        });
+      }
+    },
+    true,
+    preemptDispatch
+  ),
   setQueueConcurrency: (id, maxConcurrent) => {
     const operation = queueConfigurationQueue.then(async () => {
       if (
@@ -2088,6 +2160,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             torrent_seed_time: item.torrentSeedTime,
             torrent_seed_ratio: item.torrentSeedRatio,
             torrent_upload_limit: item.torrentUploadLimit || undefined,
+            torrent_max_peers: item.torrentMaxPeers,
+            torrent_peer_speed_limit: item.torrentPeerSpeedLimit || undefined,
             lifecycle_generation: currentDownloadLifecycle(item.id).toString(),
           });
         }
@@ -2212,9 +2286,18 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       const normalizedQueueState = normalizePersistedQueueState(persistedQueues);
       const queues = normalizedQueueState.queues;
       const knownQueueIds = new Set(queues.map(queue => queue.id));
-      const downloads = (await invoke('db_get_all_downloads')).map(
-        value => JSON.parse(value) as DownloadItem
-      ).map(download => {
+      const downloads = (await invoke('db_get_all_downloads')).flatMap(value => {
+        try {
+          const parsed: unknown = JSON.parse(value);
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new Error('persisted download is not an object');
+          }
+          return [parsed as DownloadItem];
+        } catch {
+          console.warn('Skipping malformed persisted download record during startup');
+          return [];
+        }
+      }).map(download => {
         const persistedQueueId = download.queueId || MAIN_QUEUE_ID;
         const queueId = normalizedQueueState.queueIdRemap.get(persistedQueueId)
           || (knownQueueIds.has(persistedQueueId) ? persistedQueueId : MAIN_QUEUE_ID);

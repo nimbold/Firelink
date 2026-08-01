@@ -16,7 +16,7 @@ import {
   formatDownloadTotal,
   resolveDownloadSizeDisplay
 } from '../utils/downloadProgress';
-import { resolveDownloadConnections } from '../utils/downloads';
+import { normalizeSpeedLimitForBackend, resolveDownloadConnections } from '../utils/downloads';
 import { useTranslation } from 'react-i18next';
 import { formatDateTime, type CalendarPreference } from '../utils/dateTime';
 import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
@@ -75,8 +75,11 @@ export const PropertiesModal = () => {
   const [speedLimitValue, setSpeedLimitValue] = useState('1024'); // KiB/s
   const [liveSpeedLimitValue, setLiveSpeedLimitValue] = useState('');
   const [liveTorrentUploadLimitValue, setLiveTorrentUploadLimitValue] = useState('');
+  const [liveTorrentMaxPeersValue, setLiveTorrentMaxPeersValue] = useState('');
+  const [liveTorrentPeerSpeedLimitValue, setLiveTorrentPeerSpeedLimitValue] = useState('');
   const [isLiveSpeedLimitPending, setIsLiveSpeedLimitPending] = useState(false);
   const [isLiveTorrentUploadLimitPending, setIsLiveTorrentUploadLimitPending] = useState(false);
+  const [isLiveTorrentPeerOptionsPending, setIsLiveTorrentPeerOptionsPending] = useState(false);
 
   const [loginMode, setLoginMode] = useState<LoginMode>('matching');
   const [username, setUsername] = useState('');
@@ -101,6 +104,7 @@ export const PropertiesModal = () => {
     actionRequestRef.current += 1;
     setIsLiveSpeedLimitPending(false);
     setIsLiveTorrentUploadLimitPending(false);
+    setIsLiveTorrentPeerOptionsPending(false);
   }, [selectedPropertiesDownloadId]);
 
   useEffect(() => {
@@ -160,6 +164,10 @@ export const PropertiesModal = () => {
         }
         setCookies(activeItem.cookies || '');
         setMirrors(activeItem.mirrors || '');
+        setLiveTorrentMaxPeersValue(
+          activeItem.torrentMaxPeers === undefined ? '' : String(activeItem.torrentMaxPeers)
+        );
+        setLiveTorrentPeerSpeedLimitValue(activeItem.torrentPeerSpeedLimit || '');
         setErrorMessage('');
       } else {
         setSelectedPropertiesDownloadId(null);
@@ -176,6 +184,13 @@ export const PropertiesModal = () => {
     const activeLimit = item?.torrentUploadLimit?.trim();
     setLiveTorrentUploadLimitValue(activeLimit && activeLimit !== '0' ? activeLimit : '');
   }, [item?.torrentUploadLimit, selectedPropertiesDownloadId]);
+
+  useEffect(() => {
+    setLiveTorrentMaxPeersValue(
+      item?.torrentMaxPeers === undefined ? '' : String(item.torrentMaxPeers)
+    );
+    setLiveTorrentPeerSpeedLimitValue(item?.torrentPeerSpeedLimit || '');
+  }, [item?.torrentMaxPeers, item?.torrentPeerSpeedLimit, selectedPropertiesDownloadId]);
 
   useEffect(() => {
     if (!selectedPropertiesDownloadId || connectionsDirty) return;
@@ -232,6 +247,23 @@ export const PropertiesModal = () => {
       return;
     }
 
+    const normalizedMaxPeers = liveTorrentMaxPeersValue.trim()
+      ? Number(liveTorrentMaxPeersValue)
+      : undefined;
+    if (
+      item.isTorrent
+      && normalizedMaxPeers !== undefined
+      && (!Number.isInteger(normalizedMaxPeers) || normalizedMaxPeers < 0 || normalizedMaxPeers > 1000)
+    ) {
+      setErrorMessage(t($ => $.properties.torrentMaxPeersInvalid));
+      return;
+    }
+    const normalizedPeerSpeedLimit = normalizeSpeedLimitForBackend(liveTorrentPeerSpeedLimitValue);
+    if (item.isTorrent && liveTorrentPeerSpeedLimitValue.trim() && !normalizedPeerSpeedLimit) {
+      setErrorMessage(t($ => $.properties.torrentPeerSpeedLimitInvalid));
+      return;
+    }
+
     const updates: Partial<DownloadItem> = {
       url,
       fileName,
@@ -243,6 +275,12 @@ export const PropertiesModal = () => {
       checksum: checksumEnabled && checksumValue.trim() ? `${checksumAlgorithm}=${checksumValue.trim()}` : undefined,
       cookies: cookies.trim() || undefined,
       mirrors: mirrors.trim() || undefined,
+      ...(item.isTorrent
+        ? {
+            torrentMaxPeers: normalizedMaxPeers,
+            torrentPeerSpeedLimit: normalizedPeerSpeedLimit || undefined,
+          }
+        : {}),
       ...(connectionsDirty
         ? { connections: resolveDownloadConnections(connections, perServerConnections) }
         : {}),
@@ -362,11 +400,41 @@ export const PropertiesModal = () => {
     }
   };
 
+  const handleLiveTorrentPeerOptions = async () => {
+    if (
+      isLiveTorrentPeerOptionsPending
+      || !item.isTorrent
+      || !['downloading', 'seeding', 'retrying'].includes(item.status)
+    ) return;
+
+    setErrorMessage('');
+    const requestId = ++actionRequestRef.current;
+    setIsLiveTorrentPeerOptionsPending(true);
+    try {
+      await useDownloadStore.getState().setTorrentPeerOptions(
+        item.id,
+        liveTorrentMaxPeersValue,
+        liveTorrentPeerSpeedLimitValue
+      );
+    } catch (error) {
+      if (requestId === actionRequestRef.current && useDownloadStore.getState().selectedPropertiesDownloadId === item.id) {
+        setErrorMessage(t($ => $.properties.liveTorrentPeerOptionsFailed, {
+          detail: error instanceof Error ? error.message : String(error)
+        }));
+      }
+    } finally {
+      if (requestId === actionRequestRef.current && useDownloadStore.getState().selectedPropertiesDownloadId === item.id) {
+        setIsLiveTorrentPeerOptionsPending(false);
+      }
+    }
+  };
+
   const identityLocked = getIdentityLocked(item.status);
   const transferLocked = getTransferLocked(item.status);
   const liveSpeedLimitAvailable = !item.isMedia && ['downloading', 'retrying'].includes(item.status);
   const liveSpeedLimitUnavailable = item.isMedia && ['downloading', 'processing', 'retrying'].includes(item.status);
   const liveTorrentUploadLimitAvailable = item.isTorrent && ['downloading', 'seeding', 'retrying'].includes(item.status);
+  const liveTorrentPeerOptionsAvailable = item.isTorrent && ['downloading', 'seeding', 'retrying'].includes(item.status);
   const configuredConnections = resolveDownloadConnections(item.connections, perServerConnections);
   const observedConnectionTotal = Math.max(
     1,
@@ -606,6 +674,35 @@ export const PropertiesModal = () => {
               <div className="col-start-2 text-[11px] text-text-muted">
                 {t($ => $.properties.savedPerDownload)}
               </div>
+              {item.isTorrent && (
+                <>
+                  <label className="text-xs text-text-muted text-right">{t($ => $.properties.torrentMaxPeers)}</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={1000}
+                    step={1}
+                    value={liveTorrentMaxPeersValue}
+                    onChange={event => setLiveTorrentMaxPeersValue(event.currentTarget.value)}
+                    placeholder="55"
+                    disabled={transferLocked}
+                    className="app-control w-24 px-2.5 py-1.5 text-end text-xs font-mono disabled:opacity-50"
+                  />
+                  <label className="text-xs text-text-muted text-right">{t($ => $.properties.torrentPeerSpeedLimit)}</label>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={liveTorrentPeerSpeedLimitValue}
+                    onChange={event => setLiveTorrentPeerSpeedLimitValue(event.currentTarget.value)}
+                    placeholder="50K"
+                    disabled={transferLocked}
+                    className="app-control w-24 px-2.5 py-1.5 text-end text-xs font-mono disabled:opacity-50"
+                  />
+                  <div className="col-start-2 text-[11px] text-text-muted">
+                    {t($ => $.properties.torrentPeerOptionsSavedHint)}
+                  </div>
+                </>
+              )}
               {(liveSpeedLimitAvailable || liveSpeedLimitUnavailable) && (
                 <div className="col-start-2 rounded-lg border border-border-modal bg-bg-input/30 p-3 space-y-2">
                   {liveSpeedLimitAvailable ? (
@@ -689,6 +786,56 @@ export const PropertiesModal = () => {
                   </div>
                   <p id="live-torrent-upload-limit-hint" className="text-[11px] text-text-muted">
                     {t($ => $.properties.liveTorrentUploadLimitHint)}
+                  </p>
+                </div>
+              )}
+              {liveTorrentPeerOptionsAvailable && (
+                <div className="col-start-2 rounded-lg border border-border-modal bg-bg-input/30 p-3 space-y-2">
+                  <div className="text-xs font-semibold text-text-primary">
+                    {t($ => $.properties.liveTorrentPeerOptions)}
+                  </div>
+                  <div className="grid grid-cols-[1fr_auto] items-center gap-2">
+                    <label htmlFor="live-torrent-max-peers" className="text-[11px] text-text-muted">
+                      {t($ => $.properties.torrentMaxPeers)}
+                    </label>
+                    <input
+                      id="live-torrent-max-peers"
+                      type="number"
+                      min={0}
+                      max={1000}
+                      step={1}
+                      value={liveTorrentMaxPeersValue}
+                      onChange={event => setLiveTorrentMaxPeersValue(event.currentTarget.value)}
+                      placeholder="55"
+                      disabled={isLiveTorrentPeerOptionsPending}
+                      aria-describedby="live-torrent-peer-options-hint"
+                      className="app-control w-24 px-2.5 py-1.5 text-end text-xs font-mono disabled:opacity-50"
+                    />
+                    <label htmlFor="live-torrent-peer-speed-limit" className="text-[11px] text-text-muted">
+                      {t($ => $.properties.torrentPeerSpeedLimit)}
+                    </label>
+                    <input
+                      id="live-torrent-peer-speed-limit"
+                      type="text"
+                      inputMode="decimal"
+                      value={liveTorrentPeerSpeedLimitValue}
+                      onChange={event => setLiveTorrentPeerSpeedLimitValue(event.currentTarget.value)}
+                      placeholder="50K"
+                      disabled={isLiveTorrentPeerOptionsPending}
+                      aria-describedby="live-torrent-peer-options-hint"
+                      className="app-control w-24 px-2.5 py-1.5 text-end text-xs font-mono disabled:opacity-50"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleLiveTorrentPeerOptions()}
+                    disabled={isLiveTorrentPeerOptionsPending}
+                    className="app-button app-button-primary px-3 text-xs disabled:opacity-50"
+                  >
+                    {t($ => $.properties.liveTorrentPeerOptionsApply)}
+                  </button>
+                  <p id="live-torrent-peer-options-hint" className="text-[11px] text-text-muted">
+                    {t($ => $.properties.liveTorrentPeerOptionsHint)}
                   </p>
                 </div>
               )}
