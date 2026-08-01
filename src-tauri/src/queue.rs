@@ -216,6 +216,7 @@ pub struct SpawnPayload {
     pub torrent_peer_speed_limit: Option<String>,
     pub torrent_check_integrity: bool,
     pub torrent_trackers: Option<String>,
+    pub torrent_stop_timeout: Option<u32>,
 }
 
 /// A sidecar spawner. In production this calls the real aria2/yt-dlp
@@ -3048,6 +3049,7 @@ const ARIA2_STREAM_PIECE_SELECTOR: &str = "inorder";
 const ARIA2_DEFAULT_TORRENT_MAX_PEERS: u32 = 55;
 const ARIA2_DEFAULT_TORRENT_PEER_SPEED_LIMIT: &str = "50K";
 const MAX_TORRENT_MAX_PEERS: u32 = 1000;
+pub(crate) const MAX_TORRENT_STOP_TIMEOUT: u32 = 7 * 24 * 60 * 60;
 const MAX_TORRENT_TRACKERS: usize = 64;
 const MAX_TORRENT_TRACKER_BYTES: usize = 16 * 1024;
 
@@ -3107,6 +3109,18 @@ fn normalize_torrent_peer_speed_limit(value: Option<&str>) -> Result<Option<Stri
     crate::normalize_speed_limit_for_aria2(value)
         .map(Some)
         .ok_or_else(|| "torrent peer speed limit must be greater than zero".to_string())
+}
+
+pub(crate) fn normalize_torrent_stop_timeout(value: Option<u32>) -> Result<Option<u32>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value > MAX_TORRENT_STOP_TIMEOUT {
+        return Err(format!(
+            "torrent stall timeout must be between 0 and {MAX_TORRENT_STOP_TIMEOUT} seconds"
+        ));
+    }
+    Ok(Some(value))
 }
 
 pub(crate) fn normalize_torrent_trackers(value: Option<&str>) -> Result<Option<String>, String> {
@@ -3237,6 +3251,12 @@ fn apply_aria2_torrent_options(
     }
     if let Some(trackers) = normalize_torrent_trackers(payload.torrent_trackers.as_deref())? {
         options.insert("bt-tracker".to_string(), serde_json::json!(trackers));
+    }
+    if let Some(stop_timeout) = normalize_torrent_stop_timeout(payload.torrent_stop_timeout)? {
+        options.insert(
+            "bt-stop-timeout".to_string(),
+            serde_json::json!(stop_timeout.to_string()),
+        );
     }
     if payload.torrent_check_integrity {
         options.insert(
@@ -3849,6 +3869,9 @@ pub struct EnqueueItem {
     pub torrent_trackers: Option<String>,
     #[serde(default)]
     #[ts(optional)]
+    pub torrent_stop_timeout: Option<u32>,
+    #[serde(default)]
+    #[ts(optional)]
     pub lifecycle_generation: Option<String>,
 }
 
@@ -3898,6 +3921,7 @@ impl EnqueueItem {
                 torrent_peer_speed_limit: self.torrent_peer_speed_limit,
                 torrent_check_integrity: self.torrent_check_integrity.unwrap_or(false),
                 torrent_trackers: self.torrent_trackers,
+                torrent_stop_timeout: self.torrent_stop_timeout,
             },
         }
     }
@@ -4139,6 +4163,54 @@ mod tests {
     }
 
     #[test]
+    fn torrent_stop_timeout_is_normalized_and_emitted() {
+        assert_eq!(normalize_torrent_stop_timeout(None).unwrap(), None);
+        assert_eq!(normalize_torrent_stop_timeout(Some(0)).unwrap(), Some(0));
+        assert_eq!(
+            normalize_torrent_stop_timeout(Some(MAX_TORRENT_STOP_TIMEOUT)).unwrap(),
+            Some(MAX_TORRENT_STOP_TIMEOUT)
+        );
+        assert!(normalize_torrent_stop_timeout(Some(MAX_TORRENT_STOP_TIMEOUT + 1)).is_err());
+
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_stop_timeout: Some(300),
+            ..Default::default()
+        };
+        apply_aria2_torrent_options(&mut options, &payload).unwrap();
+        assert_eq!(
+            options.get("bt-stop-timeout"),
+            Some(&serde_json::json!("300"))
+        );
+
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_stop_timeout: Some(0),
+            ..Default::default()
+        };
+        apply_aria2_torrent_options(&mut options, &payload).unwrap();
+        assert_eq!(
+            options.get("bt-stop-timeout"),
+            Some(&serde_json::json!("0"))
+        );
+    }
+
+    #[test]
+    fn torrent_stop_timeout_is_not_applied_to_non_torrent_payloads() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            torrent_stop_timeout: Some(300),
+            ..Default::default()
+        };
+
+        apply_aria2_torrent_options(&mut options, &payload).unwrap();
+
+        assert!(!options.contains_key("bt-stop-timeout"));
+    }
+
+    #[test]
     fn enqueue_item_carries_torrent_trackers_into_the_spawn_payload() {
         let item: EnqueueItem = serde_json::from_value(serde_json::json!({
             "id": "torrent-trackers",
@@ -4155,6 +4227,26 @@ mod tests {
         assert_eq!(
             item.into_task().payload.torrent_trackers.as_deref(),
             Some("https://tracker.example/announce")
+        );
+    }
+
+    #[test]
+    fn enqueue_item_carries_torrent_stop_timeout_into_the_spawn_payload() {
+        let item: EnqueueItem = serde_json::from_value(serde_json::json!({
+            "id": "torrent-stop-timeout",
+            "queue_id": "main",
+            "url": "magnet:?xt=urn:btih:0123456789012345678901234567890123456789",
+            "destination": "/tmp/downloads",
+            "filename": "payload",
+            "is_media": false,
+            "is_torrent": true,
+            "torrent_stop_timeout": 300
+        }))
+        .expect("frontend enqueue payload should deserialize");
+
+        assert_eq!(
+            item.into_task().payload.torrent_stop_timeout,
+            Some(300)
         );
     }
 
@@ -4352,6 +4444,11 @@ mod tests {
             "aria2 error code 8: No URI available."
         ));
         assert!(!is_retryable_aria2_error("No URI available."));
+    }
+
+    #[test]
+    fn aria2_stall_timeout_outcome_is_not_automatically_retried() {
+        assert!(!is_retryable_aria2_error("aria2 error code 7: unfinished download"));
     }
 
     #[test]

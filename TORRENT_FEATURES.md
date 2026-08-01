@@ -21,24 +21,25 @@ belong in the download UI. The Aria2 reference is the [1.37.0 manual](https://ar
 - Global DHT, IPv6 DHT, PEX, and Local Peer Discovery toggles.
 - Optional piece-integrity verification, including the explicit policy that
   disables unverified seeding when verification is requested.
+- Optional stall timeout through `bt-stop-timeout`, persisted with each
+  Torrent and re-applied when it starts or retries. A value of zero disables
+  the policy; Aria2 stops the Torrent after the configured consecutive
+  zero-download-speed interval.
 - Additional per-Torrent tracker URLs through `bt-tracker`, with bounded and
   credential-free HTTP/HTTPS/UDP validation.
 - Deterministic local Aria2 smoke coverage for metadata resolution, selected
   output, pause/resume, ownership, cancellation/removal, unavailable trackers,
-  and daemon failure; RPC-boundary coverage is separate.
+  daemon failure, and `bt-stop-timeout` terminal behavior; RPC-boundary
+  coverage is separate.
 
 ## Priority tiers for remaining work
 
 ### Tier 0 — reliability and user-visible control
 
-1. **Stall timeout** — expose `bt-stop-timeout` with clear semantics for a
-   Torrent that has no download progress. The queue must reconcile the Aria2
-   stop/error outcome and release its permit without turning an intentional
-   stall policy into a stale retry loop.
-2. **Peer diagnostics** — expose `aria2.getPeers` as bounded, redacted,
+1. **Peer diagnostics** — expose `aria2.getPeers` as bounded, redacted,
    read-only detail for the selected Torrent. Keep the current counts as the
    fast summary and treat peer IPs/IDs as sensitive display data.
-3. **Tracker exclusion** — add `bt-exclude-tracker` alongside the existing
+2. **Tracker exclusion** — add `bt-exclude-tracker` alongside the existing
    additional-tracker list. It must be persisted, re-normalized, and re-applied
    on every retry/GID replacement. Document that it filters announce URLs only;
    it does not disable DHT or PEX.
@@ -68,6 +69,5 @@ belong in the download UI. The Aria2 reference is the [1.37.0 manual](https://ar
    if the resulting child-GID ownership model can be represented safely; the
    current explicit metadata path intentionally avoids unmapped child jobs.
 
-The first implementation in this task is the former missing Tier 0 intake
-capability: remote `.torrent` metadata now uses Firelink's existing safe,
-cached, lifecycle-aware Torrent path.
+The first implementation in this task was remote `.torrent` metadata intake;
+the follow-up implementation adds the former Tier 0 stall-timeout control.

@@ -120,6 +120,7 @@ export const normalizeSpeedLimitForBackend = (value?: string | null): string | n
 
 const MAX_TORRENT_TRACKERS = 64;
 const MAX_TORRENT_TRACKER_BYTES = 16 * 1024;
+export const MAX_TORRENT_STOP_TIMEOUT = 7 * 24 * 60 * 60;
 
 /**
  * Performs the same user-facing safety checks as the native tracker boundary.

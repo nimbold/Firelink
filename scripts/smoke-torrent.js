@@ -629,7 +629,8 @@ async function main() {
     const finalDir = path.join(tempRoot, 'final');
     const integrityDir = path.join(tempRoot, 'integrity');
     const cancelDir = path.join(tempRoot, 'cancel');
-    for (const directory of [seedRoot, probeDir, finalDir, integrityDir, cancelDir]) fs.mkdirSync(directory, { recursive: true });
+    const stallDir = path.join(tempRoot, 'stall');
+    for (const directory of [seedRoot, probeDir, finalDir, integrityDir, cancelDir, stallDir]) fs.mkdirSync(directory, { recursive: true });
 
     const seederListenPort = await findAvailablePort();
     const clientListenPort = await findAvailablePort();
@@ -778,6 +779,28 @@ async function main() {
       'canceled torrent produced a complete output',
     );
     console.log('[OK] cancel/remove stopped the second torrent before completion');
+
+    const stallGid = await rpc(client.rpcPort, client.secret, 'aria2.addTorrent', [
+      trackerlessTorrentBytes.toString('base64'),
+      [],
+      {
+        dir: stallDir,
+        'bt-stop-timeout': '2',
+        'seed-time': '0',
+        'auto-file-renaming': 'false',
+      },
+    ]);
+    let stallStatus;
+    await waitFor('stalled Torrent to stop', async () => {
+      assertDaemonRunning(client);
+      stallStatus = await tellStatus(client, stallGid);
+      if (stallStatus.status === 'complete') {
+        throw new Error('stalled Torrent completed without a peer');
+      }
+      return stallStatus.status === 'error';
+    }, 10000);
+    assert(stallStatus.errorCode === '7', `unexpected stall timeout error: ${JSON.stringify(stallStatus)}`);
+    console.log('[OK] bt-stop-timeout ended a stalled Torrent without a retry loop');
 
     if (runFailurePaths) {
       await runFailurePathChecks({ client, tempRoot });

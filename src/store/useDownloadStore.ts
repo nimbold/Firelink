@@ -9,7 +9,7 @@ import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
 import type { Queue } from '../bindings/Queue';
 import { useSettingsStore } from './useSettingsStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
-import { canonicalizeDownloadFileName, categoryForFileName, isActiveDownloadStatus, isTransferActiveStatus, normalizeSpeedLimitForBackend, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, isActiveDownloadStatus, isTransferActiveStatus, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
 import {
   resolveCategoryDestination
 } from '../utils/downloadLocations';
@@ -352,6 +352,7 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
         torrent_peer_speed_limit: item.torrentPeerSpeedLimit || undefined,
         torrent_check_integrity: item.torrentCheckIntegrity,
         torrent_trackers: item.torrentTrackers || undefined,
+        torrent_stop_timeout: item.torrentStopTimeout,
         lifecycle_generation: lifecycleGeneration.toString(),
       };
 
@@ -636,16 +637,25 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
   const normalizedTrackers = typeof rawTrackers === 'string' && rawTrackers.trim()
     ? rawTrackers.trim()
     : undefined;
+  const rawStopTimeout = download.torrentStopTimeout as unknown;
+  const normalizedStopTimeout = typeof rawStopTimeout === 'number' &&
+    Number.isInteger(rawStopTimeout) &&
+    rawStopTimeout >= 0 &&
+    rawStopTimeout <= MAX_TORRENT_STOP_TIMEOUT
+    ? rawStopTimeout
+    : undefined;
   const normalizedOptions = rawMaxPeers !== normalizedMaxPeers ||
     rawPeerSpeedLimit !== normalizedPeerSpeedLimit ||
     rawCheckIntegrity !== normalizedCheckIntegrity ||
-    rawTrackers !== normalizedTrackers
+    rawTrackers !== normalizedTrackers ||
+    rawStopTimeout !== normalizedStopTimeout
     ? {
         ...download,
         torrentMaxPeers: normalizedMaxPeers,
         torrentPeerSpeedLimit: normalizedPeerSpeedLimit,
         torrentCheckIntegrity: normalizedCheckIntegrity,
-        torrentTrackers: normalizedTrackers
+        torrentTrackers: normalizedTrackers,
+        torrentStopTimeout: normalizedStopTimeout
       }
     : download;
 
@@ -2178,6 +2188,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             torrent_peer_speed_limit: item.torrentPeerSpeedLimit || undefined,
             torrent_check_integrity: item.torrentCheckIntegrity,
             torrent_trackers: item.torrentTrackers || undefined,
+            torrent_stop_timeout: item.torrentStopTimeout,
             lifecycle_generation: currentDownloadLifecycle(item.id).toString(),
           });
         }

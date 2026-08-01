@@ -16,7 +16,7 @@ import {
   formatDownloadTotal,
   resolveDownloadSizeDisplay
 } from '../utils/downloadProgress';
-import { isValidTorrentTrackerList, normalizeSpeedLimitForBackend, resolveDownloadConnections } from '../utils/downloads';
+import { isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, resolveDownloadConnections } from '../utils/downloads';
 import { useTranslation } from 'react-i18next';
 import { formatDateTime, type CalendarPreference } from '../utils/dateTime';
 import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
@@ -79,6 +79,7 @@ export const PropertiesModal = () => {
   const [liveTorrentPeerSpeedLimitValue, setLiveTorrentPeerSpeedLimitValue] = useState('');
   const [torrentCheckIntegrity, setTorrentCheckIntegrity] = useState(false);
   const [torrentTrackers, setTorrentTrackers] = useState('');
+  const [torrentStopTimeout, setTorrentStopTimeout] = useState('0');
   const [isLiveSpeedLimitPending, setIsLiveSpeedLimitPending] = useState(false);
   const [isLiveTorrentUploadLimitPending, setIsLiveTorrentUploadLimitPending] = useState(false);
   const [isLiveTorrentPeerOptionsPending, setIsLiveTorrentPeerOptionsPending] = useState(false);
@@ -172,6 +173,7 @@ export const PropertiesModal = () => {
         setLiveTorrentPeerSpeedLimitValue(activeItem.torrentPeerSpeedLimit || '');
         setTorrentCheckIntegrity(activeItem.torrentCheckIntegrity === true);
         setTorrentTrackers(activeItem.torrentTrackers || '');
+        setTorrentStopTimeout(activeItem.torrentStopTimeout === undefined ? '0' : String(activeItem.torrentStopTimeout));
         setErrorMessage('');
       } else {
         setSelectedPropertiesDownloadId(null);
@@ -271,6 +273,17 @@ export const PropertiesModal = () => {
       setErrorMessage(t($ => $.properties.torrentTrackersInvalid));
       return;
     }
+    const normalizedStopTimeout = torrentStopTimeout.trim()
+      ? Number(torrentStopTimeout)
+      : undefined;
+    if (
+      item.isTorrent
+      && normalizedStopTimeout !== undefined
+      && (!Number.isInteger(normalizedStopTimeout) || normalizedStopTimeout < 0 || normalizedStopTimeout > MAX_TORRENT_STOP_TIMEOUT)
+    ) {
+      setErrorMessage(t($ => $.properties.torrentStopTimeoutInvalid));
+      return;
+    }
 
     const updates: Partial<DownloadItem> = {
       url,
@@ -289,6 +302,7 @@ export const PropertiesModal = () => {
             torrentPeerSpeedLimit: normalizedPeerSpeedLimit || undefined,
             torrentCheckIntegrity,
             torrentTrackers: torrentTrackers.trim() || undefined,
+            torrentStopTimeout: normalizedStopTimeout,
           }
         : {}),
       ...(connectionsDirty
@@ -727,6 +741,29 @@ export const PropertiesModal = () => {
                     />
                     <p id="torrent-trackers-properties-hint" className="mt-1 text-[11px] text-text-muted">
                       {t($ => $.properties.torrentTrackersHint)}
+                    </p>
+                  </div>
+                  <label className="text-xs text-text-muted text-right" htmlFor="torrent-stop-timeout-properties">
+                    {t($ => $.properties.torrentStopTimeout)}
+                  </label>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        id="torrent-stop-timeout-properties"
+                        type="number"
+                        min={0}
+                        max={MAX_TORRENT_STOP_TIMEOUT}
+                        step={1}
+                        value={torrentStopTimeout}
+                        onChange={event => setTorrentStopTimeout(event.currentTarget.value)}
+                        disabled={transferLocked}
+                        aria-describedby="torrent-stop-timeout-properties-hint"
+                        className="app-control w-24 px-2.5 py-1.5 text-end text-xs font-mono disabled:opacity-50"
+                      />
+                      <span className="text-[11px] text-text-muted">{t($ => $.properties.seconds)}</span>
+                    </div>
+                    <p id="torrent-stop-timeout-properties-hint" className="mt-1 text-[11px] text-text-muted">
+                      {t($ => $.properties.torrentStopTimeoutHint)}
                     </p>
                   </div>
                   <label className="text-xs text-text-muted text-right" htmlFor="torrent-check-integrity">

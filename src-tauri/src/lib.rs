@@ -5800,6 +5800,7 @@ async fn validate_torrent_enqueue(
         return Err("torrent transfer cannot be a media download".to_string());
     }
     item.torrent_trackers = queue::normalize_torrent_trackers(item.torrent_trackers.as_deref())?;
+    item.torrent_stop_timeout = queue::normalize_torrent_stop_timeout(item.torrent_stop_timeout)?;
     validate_enqueue_uris("", item.mirrors.as_deref()).await?;
     if let Some(path) = item.torrent_path.as_deref() {
         let path = crate::torrent::validate_managed_torrent_path(app_handle, &item.id, path)?;

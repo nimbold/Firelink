@@ -854,13 +854,15 @@ describe('useDownloadStore', () => {
       torrentMaxPeers: 'not-a-number' as unknown as number,
       torrentPeerSpeedLimit: 0 as unknown as string,
       torrentCheckIntegrity: 'yes' as unknown as boolean,
-      torrentTrackers: 123 as unknown as string
+      torrentTrackers: 123 as unknown as string,
+      torrentStopTimeout: 604801
     });
 
     expect(normalized.torrentMaxPeers).toBeUndefined();
     expect(normalized.torrentPeerSpeedLimit).toBeUndefined();
     expect(normalized.torrentCheckIntegrity).toBeUndefined();
     expect(normalized.torrentTrackers).toBeUndefined();
+    expect(normalized.torrentStopTimeout).toBeUndefined();
   });
 
   it('normalizes proxy settings for download dispatch', async () => {
@@ -1512,7 +1514,8 @@ describe('useDownloadStore', () => {
       dateAdded: '',
       isTorrent: true,
       torrentCheckIntegrity: true,
-      torrentTrackers: 'https://tracker.example/announce'
+      torrentTrackers: 'https://tracker.example/announce',
+      torrentStopTimeout: 300
     }, { type: 'start-now' });
 
     const item = useDownloadStore.getState().downloads[0];
@@ -1524,7 +1527,8 @@ describe('useDownloadStore', () => {
         item: expect.objectContaining({
           id: 'start-1',
           torrent_check_integrity: true,
-          torrent_trackers: 'https://tracker.example/announce'
+          torrent_trackers: 'https://tracker.example/announce',
+          torrent_stop_timeout: 300
         })
       })
     );

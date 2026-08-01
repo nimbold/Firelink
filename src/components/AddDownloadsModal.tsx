@@ -13,7 +13,7 @@ import { FolderPlus, Save, Settings, Shield, RefreshCw, FileText, HardDrive, Dat
 import { open } from '@tauri-apps/plugin-dialog';
 import { invokeCommand as invoke } from '../ipc';
 import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResolutionModal';
-import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, isValidTorrentTrackerList, normalizeSpeedLimitForBackend } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend } from '../utils/downloads';
 import { fetchMediaMetadataDeduped, fetchMediaPlaylistMetadataDeduped } from '../utils/mediaMetadata';
 import {
   expandTilde,
@@ -234,6 +234,7 @@ export const AddDownloadsModal = () => {
   const [torrentPeerSpeedLimit, setTorrentPeerSpeedLimit] = useState('');
   const [torrentCheckIntegrity, setTorrentCheckIntegrity] = useState(false);
   const [torrentTrackers, setTorrentTrackers] = useState('');
+  const [torrentStopTimeout, setTorrentStopTimeout] = useState('0');
   const [freeSpace, setFreeSpace] = useState('Unknown');
   const freeSpaceRequestRef = useRef(0);
 
@@ -376,6 +377,7 @@ export const AddDownloadsModal = () => {
     setTorrentPeerSpeedLimit('');
     setTorrentCheckIntegrity(false);
     setTorrentTrackers('');
+    setTorrentStopTimeout('0');
     setUseAuth(false);
     setUsername('');
     setPassword('');
@@ -976,6 +978,14 @@ export const AddDownloadsModal = () => {
       addToast({ message: t($ => $.addDownloads.torrentTrackersInvalid), variant: 'error', isActionable: true });
       return;
     }
+    if (
+      hasSelectedTorrent
+      && torrentStopTimeout.trim()
+      && (!Number.isInteger(Number(torrentStopTimeout)) || Number(torrentStopTimeout) < 0 || Number(torrentStopTimeout) > MAX_TORRENT_STOP_TIMEOUT)
+    ) {
+      addToast({ message: t($ => $.addDownloads.torrentStopTimeoutInvalid), variant: 'error', isActionable: true });
+      return;
+    }
     if (saveInDedicatedFolder && !sanitizeBatchFolderName(dedicatedFolderName)) {
       addToast({
         message: t($ => $.addDownloads.dedicatedFolderNameRequired),
@@ -1456,6 +1466,7 @@ export const AddDownloadsModal = () => {
             : undefined,
           torrentCheckIntegrity: item.isTorrent ? torrentCheckIntegrity : undefined,
           torrentTrackers: item.isTorrent ? torrentTrackers.trim() || undefined : undefined,
+          torrentStopTimeout: item.isTorrent && torrentStopTimeout.trim() ? Number(torrentStopTimeout) : undefined,
           size: item.size || (item.sizeBytes ? formatBytes(item.sizeBytes) : undefined),
           sizeBytes: item.sizeBytes
         }, action);
@@ -2164,6 +2175,28 @@ export const AddDownloadsModal = () => {
                       />
                       <p id="torrent-peer-options-hint" className="col-span-2 text-[10px] text-text-muted">
                         {t($ => $.addDownloads.torrentPeerOptionsHint)}
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-[1fr_auto] gap-2 items-center pt-2 border-t border-border-modal/50">
+                      <label htmlFor="torrent-stop-timeout" className="text-text-muted">
+                        {t($ => $.addDownloads.torrentStopTimeout)}
+                      </label>
+                      <div className="flex items-center gap-1">
+                        <input
+                          id="torrent-stop-timeout"
+                          type="number"
+                          min={0}
+                          max={MAX_TORRENT_STOP_TIMEOUT}
+                          step={1}
+                          value={torrentStopTimeout}
+                          onChange={event => setTorrentStopTimeout(event.currentTarget.value)}
+                          className="app-control w-24 px-2 py-1 text-end font-mono"
+                          aria-describedby="torrent-stop-timeout-hint"
+                        />
+                        <span className="text-[10px] text-text-muted">{t($ => $.addDownloads.seconds)}</span>
+                      </div>
+                      <p id="torrent-stop-timeout-hint" className="col-span-2 text-[10px] text-text-muted">
+                        {t($ => $.addDownloads.torrentStopTimeoutHint)}
                       </p>
                     </div>
                   </div>
