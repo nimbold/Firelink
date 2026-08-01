@@ -13,7 +13,7 @@ import { FolderPlus, Save, Settings, Shield, RefreshCw, FileText, HardDrive, Dat
 import { open } from '@tauri-apps/plugin-dialog';
 import { invokeCommand as invoke } from '../ipc';
 import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResolutionModal';
-import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, normalizeSpeedLimitForBackend } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, isValidTorrentTrackerList, normalizeSpeedLimitForBackend } from '../utils/downloads';
 import { fetchMediaMetadataDeduped, fetchMediaPlaylistMetadataDeduped } from '../utils/mediaMetadata';
 import {
   expandTilde,
@@ -233,6 +233,7 @@ export const AddDownloadsModal = () => {
   const [torrentMaxPeers, setTorrentMaxPeers] = useState('');
   const [torrentPeerSpeedLimit, setTorrentPeerSpeedLimit] = useState('');
   const [torrentCheckIntegrity, setTorrentCheckIntegrity] = useState(false);
+  const [torrentTrackers, setTorrentTrackers] = useState('');
   const [freeSpace, setFreeSpace] = useState('Unknown');
   const freeSpaceRequestRef = useRef(0);
 
@@ -374,6 +375,7 @@ export const AddDownloadsModal = () => {
     setTorrentMaxPeers('');
     setTorrentPeerSpeedLimit('');
     setTorrentCheckIntegrity(false);
+    setTorrentTrackers('');
     setUseAuth(false);
     setUsername('');
     setPassword('');
@@ -972,6 +974,10 @@ export const AddDownloadsModal = () => {
       addToast({ message: t($ => $.addDownloads.torrentPeerSpeedLimitInvalid), variant: 'error', isActionable: true });
       return;
     }
+    if (hasSelectedTorrent && !isValidTorrentTrackerList(torrentTrackers)) {
+      addToast({ message: t($ => $.addDownloads.torrentTrackersInvalid), variant: 'error', isActionable: true });
+      return;
+    }
     if (saveInDedicatedFolder && !sanitizeBatchFolderName(dedicatedFolderName)) {
       addToast({
         message: t($ => $.addDownloads.dedicatedFolderNameRequired),
@@ -1451,6 +1457,7 @@ export const AddDownloadsModal = () => {
             ? normalizeSpeedLimitForBackend(torrentPeerSpeedLimit) || undefined
             : undefined,
           torrentCheckIntegrity: item.isTorrent ? torrentCheckIntegrity : undefined,
+          torrentTrackers: item.isTorrent ? torrentTrackers.trim() || undefined : undefined,
           size: item.size || (item.sizeBytes ? formatBytes(item.sizeBytes) : undefined),
           sizeBytes: item.sizeBytes
         }, action);
@@ -2111,6 +2118,23 @@ export const AddDownloadsModal = () => {
                         </span>
                       </span>
                     </label>
+                    <div className="pt-2 border-t border-border-modal/50">
+                      <label htmlFor="torrent-trackers" className="block text-text-muted">
+                        {t($ => $.addDownloads.torrentTrackers)}
+                      </label>
+                      <textarea
+                        id="torrent-trackers"
+                        rows={3}
+                        value={torrentTrackers}
+                        onChange={event => setTorrentTrackers(event.currentTarget.value)}
+                        placeholder="https://tracker.example/announce"
+                        aria-describedby="torrent-trackers-hint"
+                        className="app-control mt-1 min-h-20 w-full resize-y px-2.5 py-1.5 text-xs font-mono"
+                      />
+                      <p id="torrent-trackers-hint" className="mt-1 text-[10px] text-text-muted">
+                        {t($ => $.addDownloads.torrentTrackersHint)}
+                      </p>
+                    </div>
                     <div className="grid grid-cols-[1fr_auto] gap-2 items-center pt-2 border-t border-border-modal/50">
                       <label htmlFor="torrent-max-peers" className="text-text-muted">
                         {t($ => $.addDownloads.torrentMaxPeers)}

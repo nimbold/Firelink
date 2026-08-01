@@ -118,6 +118,52 @@ export const normalizeSpeedLimitForBackend = (value?: string | null): string | n
   return unit ? `${amount}${unit}` : `${amount}K`;
 };
 
+const MAX_TORRENT_TRACKERS = 64;
+const MAX_TORRENT_TRACKER_BYTES = 16 * 1024;
+
+/**
+ * Performs the same user-facing safety checks as the native tracker boundary.
+ * The Rust validator remains authoritative because persisted data can bypass
+ * this helper and the browser URL parser is not the native URL parser.
+ */
+export const isValidTorrentTrackerList = (value: string): boolean => {
+  const raw = value.trim();
+  if (!raw) return true;
+  if (utf8ByteLength(raw) > MAX_TORRENT_TRACKER_BYTES) return false;
+
+  const normalized = new Set<string>();
+  let serializedBytes = 0;
+  for (const line of raw.split(/[\r\n]/)) {
+    const trimmedLine = line.trim();
+    if (!trimmedLine) continue;
+    for (const part of trimmedLine.split(',')) {
+      const token = part.trim();
+      if (!token || [...token].some(character => character.charCodeAt(0) < 0x20 || character.charCodeAt(0) === 0x7f)) {
+        return false;
+      }
+      let parsed: URL;
+      try {
+        parsed = new URL(token);
+      } catch {
+        return false;
+      }
+      if (!['http:', 'https:', 'udp:'].includes(parsed.protocol) || !parsed.hostname) {
+        return false;
+      }
+      if (parsed.username || parsed.password || parsed.hash) {
+        return false;
+      }
+      const canonical = parsed.toString();
+      if (normalized.has(canonical)) continue;
+      normalized.add(canonical);
+      if (normalized.size > MAX_TORRENT_TRACKERS) return false;
+      serializedBytes += utf8ByteLength(canonical) + (normalized.size > 1 ? 1 : 0);
+      if (serializedBytes > MAX_TORRENT_TRACKER_BYTES) return false;
+    }
+  }
+  return normalized.size > 0;
+};
+
 export const initMediaDomains = async () => {
   try {
     const domains = await invoke('get_supported_media_domains');

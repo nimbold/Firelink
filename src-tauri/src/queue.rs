@@ -215,6 +215,7 @@ pub struct SpawnPayload {
     pub torrent_max_peers: Option<u32>,
     pub torrent_peer_speed_limit: Option<String>,
     pub torrent_check_integrity: bool,
+    pub torrent_trackers: Option<String>,
 }
 
 /// A sidecar spawner. In production this calls the real aria2/yt-dlp
@@ -3047,6 +3048,8 @@ const ARIA2_STREAM_PIECE_SELECTOR: &str = "inorder";
 const ARIA2_DEFAULT_TORRENT_MAX_PEERS: u32 = 55;
 const ARIA2_DEFAULT_TORRENT_PEER_SPEED_LIMIT: &str = "50K";
 const MAX_TORRENT_MAX_PEERS: u32 = 1000;
+const MAX_TORRENT_TRACKERS: usize = 64;
+const MAX_TORRENT_TRACKER_BYTES: usize = 16 * 1024;
 
 fn apply_aria2_connection_options(
     options: &mut serde_json::Map<String, serde_json::Value>,
@@ -3106,6 +3109,74 @@ fn normalize_torrent_peer_speed_limit(value: Option<&str>) -> Result<Option<Stri
         .ok_or_else(|| "torrent peer speed limit must be greater than zero".to_string())
 }
 
+pub(crate) fn normalize_torrent_trackers(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if raw.len() > MAX_TORRENT_TRACKER_BYTES {
+        return Err(format!(
+            "torrent tracker list must be at most {MAX_TORRENT_TRACKER_BYTES} bytes"
+        ));
+    }
+
+    let mut trackers = Vec::new();
+    let mut serialized_bytes = 0usize;
+    for line in raw.split(['\r', '\n']) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        for token in line.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                return Err("torrent tracker list contains an empty entry".to_string());
+            }
+            if token.chars().any(char::is_control) {
+                return Err("torrent tracker URI contains a control character".to_string());
+            }
+            let parsed = url::Url::parse(token)
+                .map_err(|_| "torrent tracker URI is invalid".to_string())?;
+            if !matches!(parsed.scheme(), "http" | "https" | "udp") {
+                return Err("torrent tracker URI must use http, https, or udp".to_string());
+            }
+            if parsed.host_str().is_none_or(str::is_empty) {
+                return Err("torrent tracker URI must include a host".to_string());
+            }
+            if !parsed.username().is_empty() || parsed.password().is_some() {
+                return Err("torrent tracker URI must not contain credentials".to_string());
+            }
+            if parsed.fragment().is_some() {
+                return Err("torrent tracker URI must not contain a fragment".to_string());
+            }
+
+            let normalized = parsed.to_string();
+            if trackers.iter().any(|tracker| tracker == &normalized) {
+                continue;
+            }
+            if trackers.len() >= MAX_TORRENT_TRACKERS {
+                return Err(format!(
+                    "torrent tracker list must contain at most {MAX_TORRENT_TRACKERS} trackers"
+                ));
+            }
+            serialized_bytes = serialized_bytes
+                .checked_add(normalized.len())
+                .and_then(|bytes| bytes.checked_add(if trackers.is_empty() { 0 } else { 1 }))
+                .ok_or_else(|| "torrent tracker list is too large".to_string())?;
+            if serialized_bytes > MAX_TORRENT_TRACKER_BYTES {
+                return Err(format!(
+                    "torrent tracker list must be at most {MAX_TORRENT_TRACKER_BYTES} bytes"
+                ));
+            }
+            trackers.push(normalized);
+        }
+    }
+
+    if trackers.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(trackers.join(",")))
+}
+
 fn apply_aria2_torrent_options(
     options: &mut serde_json::Map<String, serde_json::Value>,
     payload: &SpawnPayload,
@@ -3163,6 +3234,9 @@ fn apply_aria2_torrent_options(
             "bt-request-peer-speed-limit".to_string(),
             serde_json::json!(normalized),
         );
+    }
+    if let Some(trackers) = normalize_torrent_trackers(payload.torrent_trackers.as_deref())? {
+        options.insert("bt-tracker".to_string(), serde_json::json!(trackers));
     }
     if payload.torrent_check_integrity {
         options.insert(
@@ -3772,6 +3846,9 @@ pub struct EnqueueItem {
     pub torrent_check_integrity: Option<bool>,
     #[serde(default)]
     #[ts(optional)]
+    pub torrent_trackers: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
     pub lifecycle_generation: Option<String>,
 }
 
@@ -3820,6 +3897,7 @@ impl EnqueueItem {
                 torrent_max_peers: self.torrent_max_peers,
                 torrent_peer_speed_limit: self.torrent_peer_speed_limit,
                 torrent_check_integrity: self.torrent_check_integrity.unwrap_or(false),
+                torrent_trackers: self.torrent_trackers,
             },
         }
     }
@@ -4011,6 +4089,73 @@ mod tests {
         .expect("frontend enqueue payload should deserialize");
 
         assert!(item.into_task().payload.torrent_check_integrity);
+    }
+
+    #[test]
+    fn torrent_trackers_are_normalized_and_deduplicated() {
+        assert_eq!(
+            normalize_torrent_trackers(Some(
+                " https://tracker.example/announce\nudp://tracker.example:6969/announce\nhttps://tracker.example/announce "
+            ))
+            .unwrap(),
+            Some("https://tracker.example/announce,udp://tracker.example:6969/announce".to_string())
+        );
+        assert_eq!(normalize_torrent_trackers(Some("  \n\n  ")).unwrap(), None);
+    }
+
+    #[test]
+    fn torrent_trackers_reject_unsafe_or_unbounded_values() {
+        for value in [
+            "ftp://tracker.example/announce",
+            "https://user:pass@tracker.example/announce",
+            "https://tracker.example/announce#fragment",
+            "https://tracker.example/announce,",
+            "https://",
+        ] {
+            assert!(normalize_torrent_trackers(Some(value)).is_err(), "{value}");
+        }
+        let too_many = (0..=MAX_TORRENT_TRACKERS)
+            .map(|index| format!("https://tracker{index}.example/announce"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(normalize_torrent_trackers(Some(&too_many)).is_err());
+    }
+
+    #[test]
+    fn torrent_trackers_are_emitted_as_the_aria2_tracker_option() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_trackers: Some("https://tracker.example/announce".to_string()),
+            ..Default::default()
+        };
+
+        apply_aria2_torrent_options(&mut options, &payload).unwrap();
+
+        assert_eq!(
+            options.get("bt-tracker"),
+            Some(&serde_json::json!("https://tracker.example/announce"))
+        );
+    }
+
+    #[test]
+    fn enqueue_item_carries_torrent_trackers_into_the_spawn_payload() {
+        let item: EnqueueItem = serde_json::from_value(serde_json::json!({
+            "id": "torrent-trackers",
+            "queue_id": "main",
+            "url": "magnet:?xt=urn:btih:0123456789012345678901234567890123456789",
+            "destination": "/tmp/downloads",
+            "filename": "payload",
+            "is_media": false,
+            "is_torrent": true,
+            "torrent_trackers": "https://tracker.example/announce"
+        }))
+        .expect("frontend enqueue payload should deserialize");
+
+        assert_eq!(
+            item.into_task().payload.torrent_trackers.as_deref(),
+            Some("https://tracker.example/announce")
+        );
     }
 
     #[test]

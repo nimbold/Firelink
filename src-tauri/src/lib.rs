@@ -5674,11 +5674,12 @@ async fn validate_enqueue_uris(url: &str, mirrors: Option<&str>) -> Result<(), S
 
 async fn validate_torrent_enqueue(
     app_handle: &tauri::AppHandle,
-    item: &queue::EnqueueItem,
+    item: &mut queue::EnqueueItem,
 ) -> Result<(), String> {
     if item.is_media.unwrap_or(false) {
         return Err("torrent transfer cannot be a media download".to_string());
     }
+    item.torrent_trackers = queue::normalize_torrent_trackers(item.torrent_trackers.as_deref())?;
     validate_enqueue_uris("", item.mirrors.as_deref()).await?;
     if let Some(path) = item.torrent_path.as_deref() {
         let path = crate::torrent::validate_managed_torrent_path(app_handle, &item.id, path)?;
@@ -5941,7 +5942,7 @@ async fn enqueue_download(
     mut item: queue::EnqueueItem,
 ) -> Result<crate::ipc::EnqueueAccepted, AppError> {
     if item.is_torrent.unwrap_or(false) {
-        validate_torrent_enqueue(&app_handle, &item)
+        validate_torrent_enqueue(&app_handle, &mut item)
             .await
             .map_err(AppError::Internal)?;
     } else {
@@ -6055,7 +6056,7 @@ async fn enqueue_many(
     for mut item in items {
         let id = item.id.clone();
         let validation = if item.is_torrent.unwrap_or(false) {
-            validate_torrent_enqueue(&app_handle, &item).await
+            validate_torrent_enqueue(&app_handle, &mut item).await
         } else {
             validate_enqueue_uris(&item.url, item.mirrors.as_deref()).await
         };

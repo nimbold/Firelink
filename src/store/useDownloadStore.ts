@@ -351,6 +351,7 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
         torrent_max_peers: item.torrentMaxPeers,
         torrent_peer_speed_limit: item.torrentPeerSpeedLimit || undefined,
         torrent_check_integrity: item.torrentCheckIntegrity,
+        torrent_trackers: item.torrentTrackers || undefined,
         lifecycle_generation: lifecycleGeneration.toString(),
       };
 
@@ -631,14 +632,20 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
   const normalizedCheckIntegrity = typeof rawCheckIntegrity === 'boolean'
     ? rawCheckIntegrity
     : undefined;
+  const rawTrackers = download.torrentTrackers as unknown;
+  const normalizedTrackers = typeof rawTrackers === 'string' && rawTrackers.trim()
+    ? rawTrackers.trim()
+    : undefined;
   const normalizedOptions = rawMaxPeers !== normalizedMaxPeers ||
     rawPeerSpeedLimit !== normalizedPeerSpeedLimit ||
-    rawCheckIntegrity !== normalizedCheckIntegrity
+    rawCheckIntegrity !== normalizedCheckIntegrity ||
+    rawTrackers !== normalizedTrackers
     ? {
         ...download,
         torrentMaxPeers: normalizedMaxPeers,
         torrentPeerSpeedLimit: normalizedPeerSpeedLimit,
-        torrentCheckIntegrity: normalizedCheckIntegrity
+        torrentCheckIntegrity: normalizedCheckIntegrity,
+        torrentTrackers: normalizedTrackers
       }
     : download;
 
@@ -2170,6 +2177,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             torrent_max_peers: item.torrentMaxPeers,
             torrent_peer_speed_limit: item.torrentPeerSpeedLimit || undefined,
             torrent_check_integrity: item.torrentCheckIntegrity,
+            torrent_trackers: item.torrentTrackers || undefined,
             lifecycle_generation: currentDownloadLifecycle(item.id).toString(),
           });
         }

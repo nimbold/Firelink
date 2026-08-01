@@ -697,6 +697,10 @@ async function main() {
     assert(savedInfo instanceof Map, 'saved metadata has no info dictionary');
     assert(sha1(bencode(savedInfo)).toString('hex') === torrent.infoHash, 'saved metadata hash differs from magnet');
     console.log(`[OK] magnet metadata resolved and hash matched ${torrent.infoHash}`);
+    const trackerlessTorrent = new Map(savedTorrent);
+    trackerlessTorrent.delete('announce');
+    trackerlessTorrent.delete('announce-list');
+    const trackerlessTorrentBytes = bencode(trackerlessTorrent);
     const probeRemoved = await forceRemoveIfPresent(client, probeGid);
     if (probeRemoved) await waitForRemoved(client, probeGid);
     fs.rmSync(probeDir, { recursive: true, force: true });
@@ -704,10 +708,11 @@ async function main() {
     console.log('[OK] metadata probe was removed after resolution');
 
     const finalGid = await rpc(client.rpcPort, client.secret, 'aria2.addTorrent', [
-      savedTorrentBytes.toString('base64'),
+      trackerlessTorrentBytes.toString('base64'),
       [],
       {
         dir: finalDir,
+        'bt-tracker': `http://127.0.0.1:${trackerPort}/announce`,
         'select-file': '1',
         'index-out': indexOut,
         'max-download-limit': '32K',
@@ -729,7 +734,7 @@ async function main() {
     const reportedSelected = reportedFiles.find(file => file.path === selectedPath || file.path.endsWith('/selected.bin'));
     assert(reportedSelected, `Aria2 ownership list did not report ${selectedPath}`);
     assert(finalStatus.files?.some(file => file.path === selectedPath || file.path.endsWith('/selected.bin')), 'terminal status omitted selected output');
-    console.log('[OK] selected addTorrent output, pause/resume, and Aria2 file ownership passed');
+    console.log('[OK] additional tracker injection, selected output, pause/resume, and Aria2 file ownership passed');
 
     const integrityPath = path.join(integrityDir, torrent.name, 'selected.bin');
     fs.mkdirSync(path.dirname(integrityPath), { recursive: true });

@@ -16,7 +16,7 @@ import {
   formatDownloadTotal,
   resolveDownloadSizeDisplay
 } from '../utils/downloadProgress';
-import { normalizeSpeedLimitForBackend, resolveDownloadConnections } from '../utils/downloads';
+import { isValidTorrentTrackerList, normalizeSpeedLimitForBackend, resolveDownloadConnections } from '../utils/downloads';
 import { useTranslation } from 'react-i18next';
 import { formatDateTime, type CalendarPreference } from '../utils/dateTime';
 import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
@@ -78,6 +78,7 @@ export const PropertiesModal = () => {
   const [liveTorrentMaxPeersValue, setLiveTorrentMaxPeersValue] = useState('');
   const [liveTorrentPeerSpeedLimitValue, setLiveTorrentPeerSpeedLimitValue] = useState('');
   const [torrentCheckIntegrity, setTorrentCheckIntegrity] = useState(false);
+  const [torrentTrackers, setTorrentTrackers] = useState('');
   const [isLiveSpeedLimitPending, setIsLiveSpeedLimitPending] = useState(false);
   const [isLiveTorrentUploadLimitPending, setIsLiveTorrentUploadLimitPending] = useState(false);
   const [isLiveTorrentPeerOptionsPending, setIsLiveTorrentPeerOptionsPending] = useState(false);
@@ -170,6 +171,7 @@ export const PropertiesModal = () => {
         );
         setLiveTorrentPeerSpeedLimitValue(activeItem.torrentPeerSpeedLimit || '');
         setTorrentCheckIntegrity(activeItem.torrentCheckIntegrity === true);
+        setTorrentTrackers(activeItem.torrentTrackers || '');
         setErrorMessage('');
       } else {
         setSelectedPropertiesDownloadId(null);
@@ -265,6 +267,10 @@ export const PropertiesModal = () => {
       setErrorMessage(t($ => $.properties.torrentPeerSpeedLimitInvalid));
       return;
     }
+    if (item.isTorrent && !isValidTorrentTrackerList(torrentTrackers)) {
+      setErrorMessage(t($ => $.properties.torrentTrackersInvalid));
+      return;
+    }
 
     const updates: Partial<DownloadItem> = {
       url,
@@ -282,6 +288,7 @@ export const PropertiesModal = () => {
             torrentMaxPeers: normalizedMaxPeers,
             torrentPeerSpeedLimit: normalizedPeerSpeedLimit || undefined,
             torrentCheckIntegrity,
+            torrentTrackers: torrentTrackers.trim() || undefined,
           }
         : {}),
       ...(connectionsDirty
@@ -703,6 +710,24 @@ export const PropertiesModal = () => {
                   />
                   <div className="col-start-2 text-[11px] text-text-muted">
                     {t($ => $.properties.torrentPeerOptionsSavedHint)}
+                  </div>
+                  <label className="text-xs text-text-muted text-right" htmlFor="torrent-trackers-properties">
+                    {t($ => $.properties.torrentTrackers)}
+                  </label>
+                  <div>
+                    <textarea
+                      id="torrent-trackers-properties"
+                      rows={3}
+                      value={torrentTrackers}
+                      onChange={event => setTorrentTrackers(event.currentTarget.value)}
+                      placeholder="https://tracker.example/announce"
+                      disabled={transferLocked}
+                      aria-describedby="torrent-trackers-properties-hint"
+                      className="app-control min-h-20 w-full resize-y px-2.5 py-1.5 text-xs font-mono disabled:opacity-50"
+                    />
+                    <p id="torrent-trackers-properties-hint" className="mt-1 text-[11px] text-text-muted">
+                      {t($ => $.properties.torrentTrackersHint)}
+                    </p>
                   </div>
                   <label className="text-xs text-text-muted text-right" htmlFor="torrent-check-integrity">
                     {t($ => $.properties.torrentVerifyIntegrity)}

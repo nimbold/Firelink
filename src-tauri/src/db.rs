@@ -951,6 +951,8 @@ fn remove_persisted_transfer_secrets(value: &mut Value) {
         );
     }
 
+    sanitize_portable_torrent_trackers(object);
+
     if let Some(url) = object.get("url").and_then(Value::as_str) {
         if let Ok(mut parsed) = url::Url::parse(url) {
             let had_userinfo = !parsed.username().is_empty() || parsed.password().is_some();
@@ -1004,6 +1006,61 @@ fn remove_persisted_transfer_secrets(value: &mut Value) {
     // valid, but its semantics have changed and the user must re-add it with
     // the required request settings.
     if removed_transfer_context {
+        mark_portable_download_unresumable(object);
+    }
+}
+
+fn sanitize_portable_torrent_trackers(object: &mut serde_json::Map<String, Value>) {
+    let Some(raw_value) = object.get("torrentTrackers").cloned() else {
+        return;
+    };
+    let Some(raw) = raw_value.as_str().map(str::to_string) else {
+        object.remove("torrentTrackers");
+        mark_portable_download_unresumable(object);
+        return;
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        object.remove("torrentTrackers");
+        return;
+    }
+    let Some(normalized) = crate::queue::normalize_torrent_trackers(Some(raw)).ok().flatten() else {
+        object.remove("torrentTrackers");
+        mark_portable_download_unresumable(object);
+        return;
+    };
+
+    let mut sanitized = Vec::new();
+    let mut removed_context = false;
+    for token in normalized.split(',') {
+        let Ok(mut parsed) = url::Url::parse(token) else {
+            object.remove("torrentTrackers");
+            mark_portable_download_unresumable(object);
+            return;
+        };
+        let had_context = !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some();
+        if had_context {
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            removed_context = true;
+        }
+        sanitized.push(parsed.to_string());
+    }
+
+    if sanitized.is_empty() {
+        object.remove("torrentTrackers");
+    } else {
+        object.insert(
+            "torrentTrackers".to_string(),
+            Value::String(sanitized.join(",")),
+        );
+    }
+    if removed_context {
         mark_portable_download_unresumable(object);
     }
 }
@@ -1983,7 +2040,8 @@ mod tests {
             "cookies": "session=secret",
             "headers": "Authorization: Bearer secret",
             "mirrors": "https://user:secret@example.com/mirror",
-            "proxy": "http://user:secret@example.com:8080"
+            "proxy": "http://user:secret@example.com:8080",
+            "torrentTrackers": "https://tracker.example/announce?passkey=secret"
         }])
         .to_string();
 
@@ -1997,6 +2055,52 @@ mod tests {
         for key in ["password", "cookies", "headers", "mirrors", "proxy"] {
             assert!(saved.get(key).is_none(), "portable data retained {key}");
         }
+        assert_eq!(saved["torrentTrackers"], "https://tracker.example/announce");
+    }
+
+    #[test]
+    fn portable_download_persistence_drops_malformed_tracker_fields() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let mut connection = state.lock().unwrap();
+        let data = json!([{
+            "id": "download-malformed-trackers",
+            "status": "queued",
+            "queueId": "main",
+            "url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            "torrentTrackers": { "token": "secret" }
+        }])
+        .to_string();
+
+        replace_downloads(&mut connection, &data, true).unwrap();
+
+        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
+        assert!(saved.get("torrentTrackers").is_none());
+        assert_eq!(saved["status"], "failed");
+        assert_eq!(saved["resumable"], false);
+        assert!(!saved.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn portable_download_persistence_drops_invalid_tracker_urls() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let mut connection = state.lock().unwrap();
+        let data = json!([{
+            "id": "download-invalid-trackers",
+            "status": "queued",
+            "queueId": "main",
+            "url": "https://example.com/file.bin",
+            "torrentTrackers": "ftp://tracker.example/announce"
+        }])
+        .to_string();
+
+        replace_downloads(&mut connection, &data, true).unwrap();
+
+        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
+        assert!(saved.get("torrentTrackers").is_none());
+        assert_eq!(saved["status"], "failed");
+        assert_eq!(saved["resumable"], false);
     }
 
     #[test]

@@ -6,6 +6,7 @@ import {
   downloadMediaKindsMatch,
   MAX_DOWNLOAD_FILENAME_BYTES,
   canonicalizeDownloadFileName,
+  isValidTorrentTrackerList,
   redactDownloadForPersistence,
   resolveDownloadConnections
 } from './downloads';
@@ -49,6 +50,22 @@ describe('download persistence progress snapshots', () => {
       expect(persisted.totalIsEstimate).toBe(false);
     }
   );
+});
+
+describe('Torrent tracker input validation', () => {
+  it('accepts supported trackers separated by lines or commas', () => {
+    expect(isValidTorrentTrackerList(
+      ' https://tracker.example/announce\nudp://tracker.example:6969/announce '
+    )).toBe(true);
+    expect(isValidTorrentTrackerList('https://tracker.example/announce,https://tracker.example/announce')).toBe(true);
+  });
+
+  it('rejects unsupported, credential-bearing, empty, and oversized entries', () => {
+    expect(isValidTorrentTrackerList('ftp://tracker.example/announce')).toBe(false);
+    expect(isValidTorrentTrackerList('https://user:pass@tracker.example/announce')).toBe(false);
+    expect(isValidTorrentTrackerList('https://tracker.example/announce,')).toBe(false);
+    expect(isValidTorrentTrackerList(Array.from({ length: 65 }, (_, index) => `https://tracker${index}.example/announce`).join('\n'))).toBe(false);
+  });
 });
 
 describe('download connection resolution', () => {

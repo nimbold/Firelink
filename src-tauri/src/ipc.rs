@@ -194,6 +194,9 @@ pub struct DownloadItem {
     #[serde(default)]
     #[ts(optional)]
     pub torrent_check_integrity: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_trackers: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
