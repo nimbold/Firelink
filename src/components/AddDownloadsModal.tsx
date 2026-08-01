@@ -13,7 +13,7 @@ import { FolderPlus, Save, Settings, Shield, RefreshCw, FileText, HardDrive, Dat
 import { open } from '@tauri-apps/plugin-dialog';
 import { invokeCommand as invoke } from '../ipc';
 import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResolutionModal';
-import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend } from '../utils/downloads';
 import { fetchMediaMetadataDeduped, fetchMediaPlaylistMetadataDeduped } from '../utils/mediaMetadata';
 import {
   expandTilde,
@@ -234,6 +234,7 @@ export const AddDownloadsModal = () => {
   const [torrentPeerSpeedLimit, setTorrentPeerSpeedLimit] = useState('');
   const [torrentCheckIntegrity, setTorrentCheckIntegrity] = useState(false);
   const [torrentTrackers, setTorrentTrackers] = useState('');
+  const [torrentExcludeTrackers, setTorrentExcludeTrackers] = useState('');
   const [torrentStopTimeout, setTorrentStopTimeout] = useState('0');
   const [freeSpace, setFreeSpace] = useState('Unknown');
   const freeSpaceRequestRef = useRef(0);
@@ -377,6 +378,7 @@ export const AddDownloadsModal = () => {
     setTorrentPeerSpeedLimit('');
     setTorrentCheckIntegrity(false);
     setTorrentTrackers('');
+    setTorrentExcludeTrackers('');
     setTorrentStopTimeout('0');
     setUseAuth(false);
     setUsername('');
@@ -978,6 +980,10 @@ export const AddDownloadsModal = () => {
       addToast({ message: t($ => $.addDownloads.torrentTrackersInvalid), variant: 'error', isActionable: true });
       return;
     }
+    if (hasSelectedTorrent && !isValidTorrentExcludeTrackerList(torrentExcludeTrackers)) {
+      addToast({ message: t($ => $.addDownloads.torrentExcludeTrackersInvalid), variant: 'error', isActionable: true });
+      return;
+    }
     if (
       hasSelectedTorrent
       && torrentStopTimeout.trim()
@@ -1466,6 +1472,7 @@ export const AddDownloadsModal = () => {
             : undefined,
           torrentCheckIntegrity: item.isTorrent ? torrentCheckIntegrity : undefined,
           torrentTrackers: item.isTorrent ? torrentTrackers.trim() || undefined : undefined,
+          torrentExcludeTrackers: item.isTorrent ? torrentExcludeTrackers.trim() || undefined : undefined,
           torrentStopTimeout: item.isTorrent && torrentStopTimeout.trim() ? Number(torrentStopTimeout) : undefined,
           size: item.size || (item.sizeBytes ? formatBytes(item.sizeBytes) : undefined),
           sizeBytes: item.sizeBytes
@@ -2142,6 +2149,23 @@ export const AddDownloadsModal = () => {
                       />
                       <p id="torrent-trackers-hint" className="mt-1 text-[10px] text-text-muted">
                         {t($ => $.addDownloads.torrentTrackersHint)}
+                      </p>
+                    </div>
+                    <div className="pt-2 border-t border-border-modal/50">
+                      <label htmlFor="torrent-exclude-trackers" className="block text-text-muted">
+                        {t($ => $.addDownloads.torrentExcludeTrackers)}
+                      </label>
+                      <textarea
+                        id="torrent-exclude-trackers"
+                        rows={3}
+                        value={torrentExcludeTrackers}
+                        onChange={event => setTorrentExcludeTrackers(event.currentTarget.value)}
+                        placeholder="https://tracker.example/announce or *"
+                        aria-describedby="torrent-exclude-trackers-hint"
+                        className="app-control mt-1 min-h-20 w-full resize-y px-2.5 py-1.5 text-xs font-mono"
+                      />
+                      <p id="torrent-exclude-trackers-hint" className="mt-1 text-[10px] text-text-muted">
+                        {t($ => $.addDownloads.torrentExcludeTrackersHint)}
                       </p>
                     </div>
                     <div className="grid grid-cols-[1fr_auto] gap-2 items-center pt-2 border-t border-border-modal/50">

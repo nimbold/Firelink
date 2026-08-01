@@ -952,6 +952,7 @@ fn remove_persisted_transfer_secrets(value: &mut Value) {
     }
 
     sanitize_portable_torrent_trackers(object);
+    sanitize_portable_torrent_exclude_trackers(object);
 
     if let Some(url) = object.get("url").and_then(Value::as_str) {
         if let Ok(mut parsed) = url::Url::parse(url) {
@@ -1010,22 +1011,26 @@ fn remove_persisted_transfer_secrets(value: &mut Value) {
     }
 }
 
-fn sanitize_portable_torrent_trackers(object: &mut serde_json::Map<String, Value>) {
-    let Some(raw_value) = object.get("torrentTrackers").cloned() else {
+fn sanitize_portable_torrent_tracker_field(
+    object: &mut serde_json::Map<String, Value>,
+    key: &str,
+    normalize: fn(Option<&str>) -> Result<Option<String>, String>,
+) {
+    let Some(raw_value) = object.get(key).cloned() else {
         return;
     };
     let Some(raw) = raw_value.as_str().map(str::to_string) else {
-        object.remove("torrentTrackers");
+        object.remove(key);
         mark_portable_download_unresumable(object);
         return;
     };
     let raw = raw.trim();
     if raw.is_empty() {
-        object.remove("torrentTrackers");
+        object.remove(key);
         return;
     }
-    let Some(normalized) = crate::queue::normalize_torrent_trackers(Some(raw)).ok().flatten() else {
-        object.remove("torrentTrackers");
+    let Some(normalized) = normalize(Some(raw)).ok().flatten() else {
+        object.remove(key);
         mark_portable_download_unresumable(object);
         return;
     };
@@ -1033,8 +1038,12 @@ fn sanitize_portable_torrent_trackers(object: &mut serde_json::Map<String, Value
     let mut sanitized = Vec::new();
     let mut removed_context = false;
     for token in normalized.split(',') {
+        if token == "*" {
+            sanitized.push(token.to_string());
+            continue;
+        }
         let Ok(mut parsed) = url::Url::parse(token) else {
-            object.remove("torrentTrackers");
+            object.remove(key);
             mark_portable_download_unresumable(object);
             return;
         };
@@ -1053,16 +1062,29 @@ fn sanitize_portable_torrent_trackers(object: &mut serde_json::Map<String, Value
     }
 
     if sanitized.is_empty() {
-        object.remove("torrentTrackers");
+        object.remove(key);
     } else {
-        object.insert(
-            "torrentTrackers".to_string(),
-            Value::String(sanitized.join(",")),
-        );
+        object.insert(key.to_string(), Value::String(sanitized.join(",")));
     }
     if removed_context {
         mark_portable_download_unresumable(object);
     }
+}
+
+fn sanitize_portable_torrent_trackers(object: &mut serde_json::Map<String, Value>) {
+    sanitize_portable_torrent_tracker_field(
+        object,
+        "torrentTrackers",
+        crate::queue::normalize_torrent_trackers,
+    );
+}
+
+fn sanitize_portable_torrent_exclude_trackers(object: &mut serde_json::Map<String, Value>) {
+    sanitize_portable_torrent_tracker_field(
+        object,
+        "torrentExcludeTrackers",
+        crate::queue::normalize_torrent_exclude_trackers,
+    );
 }
 
 fn value_is_empty(value: &Value) -> bool {
@@ -2041,7 +2063,8 @@ mod tests {
             "headers": "Authorization: Bearer secret",
             "mirrors": "https://user:secret@example.com/mirror",
             "proxy": "http://user:secret@example.com:8080",
-            "torrentTrackers": "https://tracker.example/announce?passkey=secret"
+            "torrentTrackers": "https://tracker.example/announce?passkey=secret",
+            "torrentExcludeTrackers": "https://tracker.example/exclude?passkey=secret"
         }])
         .to_string();
 
@@ -2056,6 +2079,7 @@ mod tests {
             assert!(saved.get(key).is_none(), "portable data retained {key}");
         }
         assert_eq!(saved["torrentTrackers"], "https://tracker.example/announce");
+        assert_eq!(saved["torrentExcludeTrackers"], "https://tracker.example/exclude");
     }
 
     #[test]
@@ -2068,7 +2092,8 @@ mod tests {
             "status": "queued",
             "queueId": "main",
             "url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
-            "torrentTrackers": { "token": "secret" }
+            "torrentTrackers": { "token": "secret" },
+            "torrentExcludeTrackers": { "token": "secret" }
         }])
         .to_string();
 
@@ -2076,9 +2101,30 @@ mod tests {
 
         let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
         assert!(saved.get("torrentTrackers").is_none());
+        assert!(saved.get("torrentExcludeTrackers").is_none());
         assert_eq!(saved["status"], "failed");
         assert_eq!(saved["resumable"], false);
         assert!(!saved.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn portable_download_persistence_keeps_wildcard_tracker_exclusion() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let mut connection = state.lock().unwrap();
+        let data = json!([{
+            "id": "download-wildcard-exclusion",
+            "status": "queued",
+            "queueId": "main",
+            "url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            "torrentExcludeTrackers": "*"
+        }])
+        .to_string();
+
+        replace_downloads(&mut connection, &data, true).unwrap();
+
+        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
+        assert_eq!(saved["torrentExcludeTrackers"], "*");
     }
 
     #[test]
@@ -2091,7 +2137,8 @@ mod tests {
             "status": "queued",
             "queueId": "main",
             "url": "https://example.com/file.bin",
-            "torrentTrackers": "ftp://tracker.example/announce"
+            "torrentTrackers": "ftp://tracker.example/announce",
+            "torrentExcludeTrackers": "ftp://tracker.example/announce"
         }])
         .to_string();
 
@@ -2099,6 +2146,7 @@ mod tests {
 
         let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
         assert!(saved.get("torrentTrackers").is_none());
+        assert!(saved.get("torrentExcludeTrackers").is_none());
         assert_eq!(saved["status"], "failed");
         assert_eq!(saved["resumable"], false);
     }

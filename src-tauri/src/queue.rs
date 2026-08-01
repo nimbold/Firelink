@@ -216,6 +216,7 @@ pub struct SpawnPayload {
     pub torrent_peer_speed_limit: Option<String>,
     pub torrent_check_integrity: bool,
     pub torrent_trackers: Option<String>,
+    pub torrent_exclude_trackers: Option<String>,
     pub torrent_stop_timeout: Option<u32>,
 }
 
@@ -3262,7 +3263,10 @@ pub(crate) fn parse_torrent_peer_diagnostics(
     })
 }
 
-pub(crate) fn normalize_torrent_trackers(value: Option<&str>) -> Result<Option<String>, String> {
+fn normalize_torrent_tracker_list(
+    value: Option<&str>,
+    allow_wildcard: bool,
+) -> Result<Option<String>, String> {
     let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
@@ -3273,6 +3277,7 @@ pub(crate) fn normalize_torrent_trackers(value: Option<&str>) -> Result<Option<S
     }
 
     let mut trackers = Vec::new();
+    let mut wildcard = false;
     let mut serialized_bytes = 0usize;
     for line in raw.split(['\r', '\n']) {
         let line = line.trim();
@@ -3286,6 +3291,22 @@ pub(crate) fn normalize_torrent_trackers(value: Option<&str>) -> Result<Option<S
             }
             if token.chars().any(char::is_control) {
                 return Err("torrent tracker URI contains a control character".to_string());
+            }
+            if allow_wildcard && token == "*" {
+                if !trackers.is_empty() {
+                    return Err(
+                        "torrent tracker exclusion wildcard cannot be combined with tracker URLs"
+                            .to_string(),
+                    );
+                }
+                wildcard = true;
+                continue;
+            }
+            if wildcard {
+                return Err(
+                    "torrent tracker exclusion wildcard cannot be combined with tracker URLs"
+                        .to_string(),
+                );
             }
             let parsed = url::Url::parse(token)
                 .map_err(|_| "torrent tracker URI is invalid".to_string())?;
@@ -3324,10 +3345,23 @@ pub(crate) fn normalize_torrent_trackers(value: Option<&str>) -> Result<Option<S
         }
     }
 
+    if wildcard {
+        return Ok(Some("*".to_string()));
+    }
     if trackers.is_empty() {
         return Ok(None);
     }
     Ok(Some(trackers.join(",")))
+}
+
+pub(crate) fn normalize_torrent_trackers(value: Option<&str>) -> Result<Option<String>, String> {
+    normalize_torrent_tracker_list(value, false)
+}
+
+pub(crate) fn normalize_torrent_exclude_trackers(
+    value: Option<&str>,
+) -> Result<Option<String>, String> {
+    normalize_torrent_tracker_list(value, true)
 }
 
 fn apply_aria2_torrent_options(
@@ -3390,6 +3424,11 @@ fn apply_aria2_torrent_options(
     }
     if let Some(trackers) = normalize_torrent_trackers(payload.torrent_trackers.as_deref())? {
         options.insert("bt-tracker".to_string(), serde_json::json!(trackers));
+    }
+    if let Some(trackers) =
+        normalize_torrent_exclude_trackers(payload.torrent_exclude_trackers.as_deref())?
+    {
+        options.insert("bt-exclude-tracker".to_string(), serde_json::json!(trackers));
     }
     if let Some(stop_timeout) = normalize_torrent_stop_timeout(payload.torrent_stop_timeout)? {
         options.insert(
@@ -4008,6 +4047,9 @@ pub struct EnqueueItem {
     pub torrent_trackers: Option<String>,
     #[serde(default)]
     #[ts(optional)]
+    pub torrent_exclude_trackers: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
     pub torrent_stop_timeout: Option<u32>,
     #[serde(default)]
     #[ts(optional)]
@@ -4060,6 +4102,7 @@ impl EnqueueItem {
                 torrent_peer_speed_limit: self.torrent_peer_speed_limit,
                 torrent_check_integrity: self.torrent_check_integrity.unwrap_or(false),
                 torrent_trackers: self.torrent_trackers,
+                torrent_exclude_trackers: self.torrent_exclude_trackers,
                 torrent_stop_timeout: self.torrent_stop_timeout,
             },
         }
@@ -4285,6 +4328,33 @@ mod tests {
     }
 
     #[test]
+    fn torrent_exclude_trackers_support_wildcard_and_normalized_uris() {
+        assert_eq!(normalize_torrent_exclude_trackers(Some("*")).unwrap(), Some("*".to_string()));
+        assert_eq!(
+            normalize_torrent_exclude_trackers(Some(
+                " https://tracker.example/announce\nudp://tracker.example:6969/announce "
+            ))
+            .unwrap(),
+            Some("https://tracker.example/announce,udp://tracker.example:6969/announce".to_string())
+        );
+        assert_eq!(normalize_torrent_exclude_trackers(Some("  \n\n  ")).unwrap(), None);
+    }
+
+    #[test]
+    fn torrent_exclude_trackers_reject_unsafe_or_ambiguous_values() {
+        for value in [
+            "ftp://tracker.example/announce",
+            "https://user:pass@tracker.example/announce",
+            "https://tracker.example/announce#fragment",
+            "https://tracker.example/announce,*",
+            "*,https://tracker.example/announce",
+            "https://tracker.example/announce,",
+        ] {
+            assert!(normalize_torrent_exclude_trackers(Some(value)).is_err(), "{value}");
+        }
+    }
+
+    #[test]
     fn torrent_trackers_are_emitted_as_the_aria2_tracker_option() {
         let mut options = serde_json::Map::new();
         let payload = SpawnPayload {
@@ -4298,6 +4368,23 @@ mod tests {
         assert_eq!(
             options.get("bt-tracker"),
             Some(&serde_json::json!("https://tracker.example/announce"))
+        );
+    }
+
+    #[test]
+    fn torrent_exclude_trackers_are_emitted_as_the_aria2_option() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_exclude_trackers: Some("*".to_string()),
+            ..Default::default()
+        };
+
+        apply_aria2_torrent_options(&mut options, &payload).unwrap();
+
+        assert_eq!(
+            options.get("bt-exclude-tracker"),
+            Some(&serde_json::json!("*"))
         );
     }
 
@@ -4410,14 +4497,17 @@ mod tests {
             "filename": "payload",
             "is_media": false,
             "is_torrent": true,
-            "torrent_trackers": "https://tracker.example/announce"
+            "torrent_trackers": "https://tracker.example/announce",
+            "torrent_exclude_trackers": "*"
         }))
         .expect("frontend enqueue payload should deserialize");
 
+        let payload = item.into_task().payload;
         assert_eq!(
-            item.into_task().payload.torrent_trackers.as_deref(),
+            payload.torrent_trackers.as_deref(),
             Some("https://tracker.example/announce")
         );
+        assert_eq!(payload.torrent_exclude_trackers.as_deref(), Some("*"));
     }
 
     #[test]

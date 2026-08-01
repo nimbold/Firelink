@@ -19,7 +19,7 @@ import {
   formatDownloadTotal,
   resolveDownloadSizeDisplay
 } from '../utils/downloadProgress';
-import { isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, resolveDownloadConnections } from '../utils/downloads';
+import { isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, resolveDownloadConnections } from '../utils/downloads';
 import { useTranslation } from 'react-i18next';
 import { formatDateTime, type CalendarPreference } from '../utils/dateTime';
 import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
@@ -88,6 +88,7 @@ export const PropertiesModal = () => {
   const [liveTorrentPeerSpeedLimitValue, setLiveTorrentPeerSpeedLimitValue] = useState('');
   const [torrentCheckIntegrity, setTorrentCheckIntegrity] = useState(false);
   const [torrentTrackers, setTorrentTrackers] = useState('');
+  const [torrentExcludeTrackers, setTorrentExcludeTrackers] = useState('');
   const [torrentStopTimeout, setTorrentStopTimeout] = useState('0');
   const [torrentPeerDiagnostics, setTorrentPeerDiagnostics] = useState<TorrentPeerDiagnostics | null>(null);
   const [torrentPeerDiagnosticsError, setTorrentPeerDiagnosticsError] = useState(false);
@@ -190,6 +191,7 @@ export const PropertiesModal = () => {
         setLiveTorrentPeerSpeedLimitValue(activeItem.torrentPeerSpeedLimit || '');
         setTorrentCheckIntegrity(activeItem.torrentCheckIntegrity === true);
         setTorrentTrackers(activeItem.torrentTrackers || '');
+        setTorrentExcludeTrackers(activeItem.torrentExcludeTrackers || '');
         setTorrentStopTimeout(activeItem.torrentStopTimeout === undefined ? '0' : String(activeItem.torrentStopTimeout));
         setErrorMessage('');
       } else {
@@ -337,6 +339,10 @@ export const PropertiesModal = () => {
       setErrorMessage(t($ => $.properties.torrentTrackersInvalid));
       return;
     }
+    if (item.isTorrent && !isValidTorrentExcludeTrackerList(torrentExcludeTrackers)) {
+      setErrorMessage(t($ => $.properties.torrentExcludeTrackersInvalid));
+      return;
+    }
     const normalizedStopTimeout = torrentStopTimeout.trim()
       ? Number(torrentStopTimeout)
       : undefined;
@@ -366,6 +372,7 @@ export const PropertiesModal = () => {
             torrentPeerSpeedLimit: normalizedPeerSpeedLimit || undefined,
             torrentCheckIntegrity,
             torrentTrackers: torrentTrackers.trim() || undefined,
+            torrentExcludeTrackers: torrentExcludeTrackers.trim() || undefined,
             torrentStopTimeout: normalizedStopTimeout,
           }
         : {}),
@@ -880,6 +887,24 @@ export const PropertiesModal = () => {
                     />
                     <p id="torrent-trackers-properties-hint" className="mt-1 text-[11px] text-text-muted">
                       {t($ => $.properties.torrentTrackersHint)}
+                    </p>
+                  </div>
+                  <label className="text-xs text-text-muted text-right" htmlFor="torrent-exclude-trackers-properties">
+                    {t($ => $.properties.torrentExcludeTrackers)}
+                  </label>
+                  <div>
+                    <textarea
+                      id="torrent-exclude-trackers-properties"
+                      rows={3}
+                      value={torrentExcludeTrackers}
+                      onChange={event => setTorrentExcludeTrackers(event.currentTarget.value)}
+                      placeholder="https://tracker.example/announce or *"
+                      disabled={transferLocked}
+                      aria-describedby="torrent-exclude-trackers-properties-hint"
+                      className="app-control min-h-20 w-full resize-y px-2.5 py-1.5 text-xs font-mono disabled:opacity-50"
+                    />
+                    <p id="torrent-exclude-trackers-properties-hint" className="mt-1 text-[11px] text-text-muted">
+                      {t($ => $.properties.torrentExcludeTrackersHint)}
                     </p>
                   </div>
                   <label className="text-xs text-text-muted text-right" htmlFor="torrent-stop-timeout-properties">

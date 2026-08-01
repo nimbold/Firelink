@@ -31,6 +31,9 @@ belong in the download UI. The Aria2 reference is the [1.37.0 manual](https://ar
   zero-download-speed interval.
 - Additional per-Torrent tracker URLs through `bt-tracker`, with bounded and
   credential-free HTTP/HTTPS/UDP validation.
+- Per-Torrent tracker exclusion through `bt-exclude-tracker`, including Aria2's
+  explicit `*` value for excluding all announce URLs. Exclusions are persisted,
+  normalized, reapplied on retries, and do not change DHT or PEX settings.
 - Deterministic local Aria2 smoke coverage for metadata resolution, selected
   output, pause/resume, ownership, cancellation/removal, unavailable trackers,
   daemon failure, and `bt-stop-timeout` terminal behavior; RPC-boundary
@@ -40,10 +43,7 @@ belong in the download UI. The Aria2 reference is the [1.37.0 manual](https://ar
 
 ### Tier 0 — reliability and user-visible control
 
-1. **Tracker exclusion** — add `bt-exclude-tracker` alongside the existing
-   additional-tracker list. It must be persisted, re-normalized, and re-applied
-   on every retry/GID replacement. Document that it filters announce URLs only;
-   it does not disable DHT or PEX.
+No remaining Tier 0 items.
 
 ### Tier 1 — transfer policy and storage behavior
 
@@ -71,5 +71,5 @@ belong in the download UI. The Aria2 reference is the [1.37.0 manual](https://ar
    current explicit metadata path intentionally avoids unmapped child jobs.
 
 The first implementation in this task was remote `.torrent` metadata intake;
-follow-up implementations add stall-timeout control and bounded peer
-diagnostics.
+follow-up implementations add stall-timeout control, bounded peer diagnostics,
+and persisted tracker exclusion.

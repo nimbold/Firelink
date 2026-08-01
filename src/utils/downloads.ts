@@ -127,12 +127,13 @@ export const MAX_TORRENT_STOP_TIMEOUT = 7 * 24 * 60 * 60;
  * The Rust validator remains authoritative because persisted data can bypass
  * this helper and the browser URL parser is not the native URL parser.
  */
-export const isValidTorrentTrackerList = (value: string): boolean => {
+const isValidTorrentTrackerListInternal = (value: string, allowWildcard: boolean): boolean => {
   const raw = value.trim();
   if (!raw) return true;
   if (utf8ByteLength(raw) > MAX_TORRENT_TRACKER_BYTES) return false;
 
   const normalized = new Set<string>();
+  let wildcard = false;
   let serializedBytes = 0;
   for (const line of raw.split(/[\r\n]/)) {
     const trimmedLine = line.trim();
@@ -142,6 +143,12 @@ export const isValidTorrentTrackerList = (value: string): boolean => {
       if (!token || [...token].some(character => character.charCodeAt(0) < 0x20 || character.charCodeAt(0) === 0x7f)) {
         return false;
       }
+      if (allowWildcard && token === '*') {
+        if (normalized.size > 0) return false;
+        wildcard = true;
+        continue;
+      }
+      if (wildcard) return false;
       let parsed: URL;
       try {
         parsed = new URL(token);
@@ -162,8 +169,14 @@ export const isValidTorrentTrackerList = (value: string): boolean => {
       if (serializedBytes > MAX_TORRENT_TRACKER_BYTES) return false;
     }
   }
-  return normalized.size > 0;
+  return normalized.size > 0 || wildcard;
 };
+
+export const isValidTorrentTrackerList = (value: string): boolean =>
+  isValidTorrentTrackerListInternal(value, false);
+
+export const isValidTorrentExcludeTrackerList = (value: string): boolean =>
+  isValidTorrentTrackerListInternal(value, true);
 
 export const initMediaDomains = async () => {
   try {

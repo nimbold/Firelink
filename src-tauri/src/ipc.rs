@@ -199,6 +199,9 @@ pub struct DownloadItem {
     pub torrent_trackers: Option<String>,
     #[serde(default)]
     #[ts(optional)]
+    pub torrent_exclude_trackers: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
     pub torrent_stop_timeout: Option<u32>,
 }
 

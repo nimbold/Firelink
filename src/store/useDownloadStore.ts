@@ -9,7 +9,7 @@ import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
 import type { Queue } from '../bindings/Queue';
 import { useSettingsStore } from './useSettingsStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
-import { canonicalizeDownloadFileName, categoryForFileName, isActiveDownloadStatus, isTransferActiveStatus, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, isActiveDownloadStatus, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
 import {
   resolveCategoryDestination
 } from '../utils/downloadLocations';
@@ -352,6 +352,7 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
         torrent_peer_speed_limit: item.torrentPeerSpeedLimit || undefined,
         torrent_check_integrity: item.torrentCheckIntegrity,
         torrent_trackers: item.torrentTrackers || undefined,
+        torrent_exclude_trackers: item.torrentExcludeTrackers || undefined,
         torrent_stop_timeout: item.torrentStopTimeout,
         lifecycle_generation: lifecycleGeneration.toString(),
       };
@@ -634,8 +635,12 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
     ? rawCheckIntegrity
     : undefined;
   const rawTrackers = download.torrentTrackers as unknown;
-  const normalizedTrackers = typeof rawTrackers === 'string' && rawTrackers.trim()
+  const normalizedTrackers = typeof rawTrackers === 'string' && rawTrackers.trim() && isValidTorrentTrackerList(rawTrackers)
     ? rawTrackers.trim()
+    : undefined;
+  const rawExcludeTrackers = download.torrentExcludeTrackers as unknown;
+  const normalizedExcludeTrackers = typeof rawExcludeTrackers === 'string' && rawExcludeTrackers.trim() && isValidTorrentExcludeTrackerList(rawExcludeTrackers)
+    ? rawExcludeTrackers.trim()
     : undefined;
   const rawStopTimeout = download.torrentStopTimeout as unknown;
   const normalizedStopTimeout = typeof rawStopTimeout === 'number' &&
@@ -648,6 +653,7 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
     rawPeerSpeedLimit !== normalizedPeerSpeedLimit ||
     rawCheckIntegrity !== normalizedCheckIntegrity ||
     rawTrackers !== normalizedTrackers ||
+    rawExcludeTrackers !== normalizedExcludeTrackers ||
     rawStopTimeout !== normalizedStopTimeout
     ? {
         ...download,
@@ -655,6 +661,7 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
         torrentPeerSpeedLimit: normalizedPeerSpeedLimit,
         torrentCheckIntegrity: normalizedCheckIntegrity,
         torrentTrackers: normalizedTrackers,
+        torrentExcludeTrackers: normalizedExcludeTrackers,
         torrentStopTimeout: normalizedStopTimeout
       }
     : download;
@@ -2188,6 +2195,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             torrent_peer_speed_limit: item.torrentPeerSpeedLimit || undefined,
             torrent_check_integrity: item.torrentCheckIntegrity,
             torrent_trackers: item.torrentTrackers || undefined,
+            torrent_exclude_trackers: item.torrentExcludeTrackers || undefined,
             torrent_stop_timeout: item.torrentStopTimeout,
             lifecycle_generation: currentDownloadLifecycle(item.id).toString(),
           });

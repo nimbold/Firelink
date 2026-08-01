@@ -855,6 +855,7 @@ describe('useDownloadStore', () => {
       torrentPeerSpeedLimit: 0 as unknown as string,
       torrentCheckIntegrity: 'yes' as unknown as boolean,
       torrentTrackers: 123 as unknown as string,
+      torrentExcludeTrackers: 123 as unknown as string,
       torrentStopTimeout: 604801
     });
 
@@ -862,6 +863,7 @@ describe('useDownloadStore', () => {
     expect(normalized.torrentPeerSpeedLimit).toBeUndefined();
     expect(normalized.torrentCheckIntegrity).toBeUndefined();
     expect(normalized.torrentTrackers).toBeUndefined();
+    expect(normalized.torrentExcludeTrackers).toBeUndefined();
     expect(normalized.torrentStopTimeout).toBeUndefined();
   });
 
@@ -1515,6 +1517,7 @@ describe('useDownloadStore', () => {
       isTorrent: true,
       torrentCheckIntegrity: true,
       torrentTrackers: 'https://tracker.example/announce',
+      torrentExcludeTrackers: '*',
       torrentStopTimeout: 300
     }, { type: 'start-now' });
 
@@ -1528,6 +1531,7 @@ describe('useDownloadStore', () => {
           id: 'start-1',
           torrent_check_integrity: true,
           torrent_trackers: 'https://tracker.example/announce',
+          torrent_exclude_trackers: '*',
           torrent_stop_timeout: 300
         })
       })
