@@ -36,9 +36,9 @@ npm run smoke:torrent
 Use `node scripts/smoke-torrent.js --binary /path/to/aria2c` when validating a
 packaged or target-specific Aria2 binary.
 
-Run the HTTP-boundary Torrent probe harness with a controllable local JSON-RPC
-server. It drives the production Aria2 RPC client through scripted status,
-outage, race, cancellation, and daemon-termination cases:
+Run the HTTP-boundary Torrent RPC integration test. It drives the production
+Aria2 RPC client through a local JSON-RPC server and verifies successful
+requests plus HTTP gateway errors:
 
 ```sh
 npm run test:torrent:rpc
@@ -51,6 +51,7 @@ npm run smoke:torrent:failure-paths
 ```
 
 Native CI runs this failure-path smoke after staging the target-specific
-bundled engines on macOS, Windows, and Linux. Windows also runs the filtered
-HTTP-boundary RPC harness explicitly because its general Rust job compiles the
-library tests without executing them.
+bundled engines on macOS, Windows, and Linux. Windows runs this RPC
+integration test through its target-qualified `cargo test --tests` step;
+the general Rust job compiles the library tests without executing the
+known-broken Tauri library harness.

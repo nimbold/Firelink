@@ -3235,7 +3235,8 @@ fn dispatch_deep_links(app_handle: tauri::AppHandle, deep_links: Vec<url::Url>) 
     });
 }
 
-pub(crate) async fn rpc_call(
+#[doc(hidden)]
+pub async fn rpc_call(
     port: u16,
     secret: &str,
     method: &str,

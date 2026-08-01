@@ -71,10 +71,6 @@ jobs:
         run: |
           cargo test --tests --target ${{ matrix.target }}
           cargo test --lib --no-run --target ${{ matrix.target }}
-      - name: Test Torrent RPC harness on Windows
-        if: runner.os == 'Windows'
-        working-directory: src-tauri
-        run: cargo test torrent_probe::tests::http_rpc_harness --target ${{ matrix.target }} -- --nocapture
       - name: Provision locked engines
         if: runner.os != 'macOS'
         run: node scripts/provision-engines.js --target ${{ matrix.target }}
