@@ -311,7 +311,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
-    use tokio::sync::{oneshot, Notify};
+    use tokio::sync::{oneshot, watch, Notify};
 
     enum ScriptedReply {
         Result(Value),
@@ -332,6 +332,7 @@ mod tests {
         scripts: Mutex<HashMap<String, VecDeque<ScriptedReply>>>,
         calls: Mutex<Vec<RecordedCall>>,
         call_notification: Notify,
+        termination: watch::Sender<bool>,
     }
 
     struct ScriptedRpcServer {
@@ -344,6 +345,7 @@ mod tests {
     impl ScriptedRpcServer {
         async fn start(scripts: impl IntoIterator<Item = (String, Vec<ScriptedReply>)>) -> Self {
             let secret = "torrent-probe-test-secret".to_string();
+            let (termination, _) = watch::channel(false);
             let state = Arc::new(ScriptedRpcState {
                 secret: secret.clone(),
                 scripts: Mutex::new(
@@ -354,6 +356,7 @@ mod tests {
                 ),
                 calls: Mutex::new(Vec::new()),
                 call_notification: Notify::new(),
+                termination,
             });
             let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
                 .await
@@ -415,6 +418,7 @@ mod tests {
         }
 
         async fn shutdown(mut self) {
+            self.state.termination.send_replace(true);
             if let Some(shutdown) = self.shutdown.take() {
                 let _ = shutdown.send(());
             }
@@ -424,16 +428,27 @@ mod tests {
         }
 
         async fn terminate(mut self) {
-            if let Some(task) = self.task.take() {
-                task.abort();
-                let _ = task.await;
+            self.state.termination.send_replace(true);
+            if let Some(shutdown) = self.shutdown.take() {
+                let _ = shutdown.send(());
             }
-            self.shutdown.take();
+            if let Some(mut task) = self.task.take() {
+                match tokio::time::timeout(Duration::from_secs(1), &mut task).await {
+                    Ok(result) => {
+                        let _ = result;
+                    }
+                    Err(_) => {
+                        task.abort();
+                        let _ = task.await;
+                    }
+                }
+            }
         }
     }
 
     impl Drop for ScriptedRpcServer {
         fn drop(&mut self) {
+            self.state.termination.send_replace(true);
             if let Some(task) = self.task.take() {
                 task.abort();
             }
@@ -483,17 +498,29 @@ mod tests {
             .unwrap_or_else(|| {
                 ScriptedReply::RpcError(format!("unexpected scripted RPC method {method}"))
             });
-        scripted_reply_response(id, reply).await
+        scripted_reply_response(id, reply, state.termination.subscribe()).await
     }
 
-    async fn scripted_reply_response(id: Value, mut reply: ScriptedReply) -> Response {
+    async fn scripted_reply_response(
+        id: Value,
+        mut reply: ScriptedReply,
+        mut termination: watch::Receiver<bool>,
+    ) -> Response {
         loop {
+            if *termination.borrow() {
+                return terminated_response();
+            }
             match reply {
                 ScriptedReply::Delay(delay, next) => {
-                    tokio::time::sleep(delay).await;
-                    reply = *next;
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => reply = *next,
+                        _ = termination.changed() => return terminated_response(),
+                    }
                 }
-                ScriptedReply::Hang => return std::future::pending::<Response>().await,
+                ScriptedReply::Hang => {
+                    let _ = termination.changed().await;
+                    return terminated_response();
+                }
                 ScriptedReply::Result(result) => {
                     return Json(json!({
                         "jsonrpc": "2.0",
@@ -513,6 +540,10 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn terminated_response() -> Response {
+        (StatusCode::OK, Body::empty()).into_response()
     }
 
     fn rpc_error_response(id: Value, status: StatusCode, message: String) -> Response {
@@ -1226,8 +1257,8 @@ mod tests {
                 "aria2.forceRemove",
                 vec![
                     ScriptedReply::HttpError(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "temporary cleanup outage".to_string(),
+                        StatusCode::BAD_GATEWAY,
+                        "temporary gateway outage".to_string(),
                     ),
                     ScriptedReply::RpcError("connection reset by peer".to_string()),
                     ScriptedReply::Result(json!("gid-1")),
@@ -1345,7 +1376,7 @@ mod tests {
         });
         server.wait_for_method("aria2.tellStatus", 1).await;
         server.terminate().await;
-        let result = tokio::time::timeout(Duration::from_secs(5), task)
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .expect("probe should finish after daemon shutdown")
             .expect("probe task should not panic")
@@ -1381,7 +1412,7 @@ mod tests {
         });
         server.wait_for_method("aria2.forceRemove", 1).await;
         server.terminate().await;
-        let result = tokio::time::timeout(Duration::from_secs(5), task)
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .expect("cleanup should finish after daemon shutdown")
             .expect("cleanup task should not panic")

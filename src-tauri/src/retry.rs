@@ -64,7 +64,7 @@ pub fn backoff_for(strike: usize) -> Duration {
 /// Classify an error string as a transient network condition worth retrying.
 ///
 /// Returns `true` for socket drops, connect/read timeouts, connection resets,
-/// and HTTP 408 / request-timeout conditions across both download paths:
+/// and transient HTTP status conditions across both download paths:
 ///
 /// - **yt-dlp**: stderr lines like `ERROR: unable to ... Connection timed out`,
 ///   `HTTP Error 408`.
@@ -164,9 +164,12 @@ pub fn is_transient_network_error(message: &str) -> bool {
         "timeout.",
         "invalid range header",
     ];
-    contains_http_status(&m, "408")
-        || contains_http_status(&m, "429")
-        || contains_http_status(&m, "503")
+    const TRANSIENT_HTTP_STATUS: [&str; 11] = [
+        "408", "429", "500", "502", "503", "504", "520", "521", "522", "523", "524",
+    ];
+    TRANSIENT_HTTP_STATUS
+        .iter()
+        .any(|status| contains_http_status(&m, status))
         || TRANSIENT.iter().any(|t| m.contains(t))
 }
 
@@ -290,6 +293,16 @@ mod tests {
         assert!(is_transient_network_error("HTTP Error 429: Too Many Requests"));
         assert!(is_transient_network_error("429 too many requests"));
         assert!(is_transient_network_error("The response status is not successful. status=429"));
+    }
+
+    #[test]
+    fn classifies_rpc_http_gateway_errors_as_transient() {
+        for status in [500, 502, 503, 504, 520, 521, 522, 523, 524] {
+            assert!(
+                is_transient_network_error(&format!("HTTP {status} gateway failure")),
+                "HTTP {status} should be retryable"
+            );
+        }
     }
 
     #[test]
