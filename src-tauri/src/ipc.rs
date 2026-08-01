@@ -202,6 +202,31 @@ pub struct DownloadItem {
     pub torrent_stop_timeout: Option<u32>,
 }
 
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TorrentPeer {
+    #[ts(type = "number")]
+    pub download_speed: u64,
+    #[ts(type = "number")]
+    pub upload_speed: u64,
+    pub seeder: bool,
+    pub am_choking: bool,
+    pub peer_choking: bool,
+}
+
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TorrentPeerDiagnostics {
+    #[ts(type = "number")]
+    pub total_peers: u32,
+    #[ts(type = "number")]
+    pub total_seeders: u32,
+    pub peers: Vec<TorrentPeer>,
+    pub truncated: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]

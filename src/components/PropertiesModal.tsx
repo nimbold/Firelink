@@ -3,6 +3,8 @@ import { useDownloadStore, DownloadItem } from '../store/useDownloadStore';
 import { useDownloadProgressStore } from '../store/downloadProgressStore';
 import { useShallow } from 'zustand/react/shallow';
 import { useSettingsStore } from '../store/useSettingsStore';
+import type { TorrentPeerDiagnostics } from '../bindings/TorrentPeerDiagnostics';
+import { invokeCommand as invoke } from '../ipc';
 import { ChevronDown, ChevronRight, FolderPlus, Info, CheckCircle, AlertCircle, Play, Pause } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { resolveCategoryDestination } from '../utils/downloadLocations';
@@ -13,6 +15,7 @@ import {
 } from '../utils/downloadActions';
 import {
   downloadProgressColorClass,
+  formatDownloadBytes,
   formatDownloadTotal,
   resolveDownloadSizeDisplay
 } from '../utils/downloadProgress';
@@ -35,6 +38,12 @@ const formatLastTry = (
     options: { dateStyle: 'medium', timeStyle: 'short' }
   });
 };
+
+const isPeerDiagnosticsStatus = (status: string): boolean =>
+  ['downloading', 'seeding', 'retrying'].includes(status);
+
+const formatPeerSpeed = (bytesPerSecond: number): string =>
+  `${formatDownloadBytes(bytesPerSecond)}/s`;
 
 export const PropertiesModal = () => {
   const { t, i18n } = useTranslation();
@@ -80,6 +89,9 @@ export const PropertiesModal = () => {
   const [torrentCheckIntegrity, setTorrentCheckIntegrity] = useState(false);
   const [torrentTrackers, setTorrentTrackers] = useState('');
   const [torrentStopTimeout, setTorrentStopTimeout] = useState('0');
+  const [torrentPeerDiagnostics, setTorrentPeerDiagnostics] = useState<TorrentPeerDiagnostics | null>(null);
+  const [torrentPeerDiagnosticsError, setTorrentPeerDiagnosticsError] = useState(false);
+  const [isTorrentPeerDiagnosticsPending, setIsTorrentPeerDiagnosticsPending] = useState(false);
   const [isLiveSpeedLimitPending, setIsLiveSpeedLimitPending] = useState(false);
   const [isLiveTorrentUploadLimitPending, setIsLiveTorrentUploadLimitPending] = useState(false);
   const [isLiveTorrentPeerOptionsPending, setIsLiveTorrentPeerOptionsPending] = useState(false);
@@ -99,6 +111,7 @@ export const PropertiesModal = () => {
   const [errorMessage, setErrorMessage] = useState('');
   const [isPauseResumePending, setIsPauseResumePending] = useState(false);
   const actionRequestRef = useRef(0);
+  const peerDiagnosticsRequestRef = useRef(0);
   const modalRef = useModalFocus(Boolean(selectedPropertiesDownloadId && item));
 
   useEffect(() => {
@@ -108,6 +121,10 @@ export const PropertiesModal = () => {
     setIsLiveSpeedLimitPending(false);
     setIsLiveTorrentUploadLimitPending(false);
     setIsLiveTorrentPeerOptionsPending(false);
+    peerDiagnosticsRequestRef.current += 1;
+    setTorrentPeerDiagnostics(null);
+    setTorrentPeerDiagnosticsError(false);
+    setIsTorrentPeerDiagnosticsPending(false);
   }, [selectedPropertiesDownloadId]);
 
   useEffect(() => {
@@ -192,6 +209,13 @@ export const PropertiesModal = () => {
   }, [item?.torrentUploadLimit, selectedPropertiesDownloadId]);
 
   useEffect(() => {
+    peerDiagnosticsRequestRef.current += 1;
+    setTorrentPeerDiagnostics(null);
+    setTorrentPeerDiagnosticsError(false);
+    setIsTorrentPeerDiagnosticsPending(false);
+  }, [item?.id, item?.isTorrent, item?.lastTry, item?.status]);
+
+  useEffect(() => {
     setLiveTorrentMaxPeersValue(
       item?.torrentMaxPeers === undefined ? '' : String(item.torrentMaxPeers)
     );
@@ -240,6 +264,46 @@ export const PropertiesModal = () => {
       }
     } catch (e) {
       console.error("Failed to select folder:", e);
+    }
+  };
+
+  const handleRefreshTorrentPeers = async () => {
+    if (
+      isTorrentPeerDiagnosticsPending
+      || !item.isTorrent
+      || !isPeerDiagnosticsStatus(item.status)
+    ) return;
+
+    const requestId = ++peerDiagnosticsRequestRef.current;
+    const propertiesDownloadId = item.id;
+    setIsTorrentPeerDiagnosticsPending(true);
+    setTorrentPeerDiagnosticsError(false);
+    try {
+      const diagnostics = await invoke('get_torrent_peers', { id: propertiesDownloadId });
+      const currentItem = useDownloadStore.getState().downloads.find(download => download.id === propertiesDownloadId);
+      if (
+        requestId === peerDiagnosticsRequestRef.current
+        && useDownloadStore.getState().selectedPropertiesDownloadId === propertiesDownloadId
+        && currentItem?.isTorrent
+        && isPeerDiagnosticsStatus(currentItem.status)
+      ) {
+        setTorrentPeerDiagnostics(diagnostics);
+      }
+    } catch {
+      const currentItem = useDownloadStore.getState().downloads.find(download => download.id === propertiesDownloadId);
+      if (
+        requestId === peerDiagnosticsRequestRef.current
+        && useDownloadStore.getState().selectedPropertiesDownloadId === propertiesDownloadId
+        && currentItem?.isTorrent
+        && isPeerDiagnosticsStatus(currentItem.status)
+      ) {
+        setTorrentPeerDiagnosticsError(true);
+        setTorrentPeerDiagnostics(null);
+      }
+    } finally {
+      if (requestId === peerDiagnosticsRequestRef.current) {
+        setIsTorrentPeerDiagnosticsPending(false);
+      }
     }
   };
 
@@ -459,6 +523,7 @@ export const PropertiesModal = () => {
   const liveSpeedLimitUnavailable = item.isMedia && ['downloading', 'processing', 'retrying'].includes(item.status);
   const liveTorrentUploadLimitAvailable = item.isTorrent && ['downloading', 'seeding', 'retrying'].includes(item.status);
   const liveTorrentPeerOptionsAvailable = item.isTorrent && ['downloading', 'seeding', 'retrying'].includes(item.status);
+  const torrentPeerDiagnosticsAvailable = item.isTorrent && isPeerDiagnosticsStatus(item.status);
   const configuredConnections = resolveDownloadConnections(item.connections, perServerConnections);
   const observedConnectionTotal = Math.max(
     1,
@@ -724,6 +789,80 @@ export const PropertiesModal = () => {
                   />
                   <div className="col-start-2 text-[11px] text-text-muted">
                     {t($ => $.properties.torrentPeerOptionsSavedHint)}
+                  </div>
+                  <div className="col-start-2 rounded-lg border border-border-modal bg-bg-input/30 p-3 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-xs font-semibold text-text-primary">
+                        {t($ => $.properties.torrentPeerDiagnostics)}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void handleRefreshTorrentPeers()}
+                        disabled={!torrentPeerDiagnosticsAvailable || isTorrentPeerDiagnosticsPending}
+                        className="app-button px-3 text-xs disabled:opacity-50"
+                      >
+                        {isTorrentPeerDiagnosticsPending
+                          ? t($ => $.properties.torrentPeerDiagnosticsLoading)
+                          : t($ => $.properties.torrentPeerDiagnosticsRefresh)}
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-text-muted">
+                      {t($ => $.properties.torrentPeerDiagnosticsHint)}
+                    </p>
+                    {!torrentPeerDiagnosticsAvailable && (
+                      <p className="text-[11px] text-text-muted">
+                        {t($ => $.properties.torrentPeerDiagnosticsUnavailable)}
+                      </p>
+                    )}
+                    {torrentPeerDiagnosticsError && (
+                      <p className="text-[11px] text-red-400">
+                        {t($ => $.properties.torrentPeerDiagnosticsFailed)}
+                      </p>
+                    )}
+                    {torrentPeerDiagnostics && (
+                      <>
+                        <div className="text-[11px] font-medium text-text-primary">
+                          {t($ => $.properties.torrentPeerCount, {
+                            total: torrentPeerDiagnostics.totalPeers,
+                            seeders: torrentPeerDiagnostics.totalSeeders
+                          })}
+                        </div>
+                        <div className="max-h-48 overflow-auto rounded border border-border-modal/60">
+                          <table className="w-full text-[10px]">
+                            <thead className="sticky top-0 bg-bg-input text-text-muted">
+                              <tr>
+                                <th className="px-2 py-1 text-start">#</th>
+                                <th className="px-2 py-1 text-start">{t($ => $.properties.torrentPeerDownload)}</th>
+                                <th className="px-2 py-1 text-start">{t($ => $.properties.torrentPeerUpload)}</th>
+                                <th className="px-2 py-1 text-start">{t($ => $.properties.torrentPeerSeeder)}</th>
+                                <th className="px-2 py-1 text-start">{t($ => $.properties.torrentPeerAmChoking)}</th>
+                                <th className="px-2 py-1 text-start">{t($ => $.properties.torrentPeerChoking)}</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {torrentPeerDiagnostics.peers.map((peer, index) => (
+                                <tr key={`${index}-${peer.downloadSpeed}-${peer.uploadSpeed}`} className="border-t border-border-modal/40 text-text-primary">
+                                  <td className="px-2 py-1 font-mono">{index + 1}</td>
+                                  <td className="px-2 py-1 font-mono">{formatPeerSpeed(peer.downloadSpeed)}</td>
+                                  <td className="px-2 py-1 font-mono">{formatPeerSpeed(peer.uploadSpeed)}</td>
+                                  <td className="px-2 py-1">{peer.seeder ? '✓' : '—'}</td>
+                                  <td className="px-2 py-1">{peer.amChoking ? '✓' : '—'}</td>
+                                  <td className="px-2 py-1">{peer.peerChoking ? '✓' : '—'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        {torrentPeerDiagnostics.truncated && (
+                          <p className="text-[11px] text-text-muted">
+                            {t($ => $.properties.torrentPeerShowing, {
+                              shown: torrentPeerDiagnostics.peers.length,
+                              total: torrentPeerDiagnostics.totalPeers
+                            })}
+                          </p>
+                        )}
+                      </>
+                    )}
                   </div>
                   <label className="text-xs text-text-muted text-right" htmlFor="torrent-trackers-properties">
                     {t($ => $.properties.torrentTrackers)}

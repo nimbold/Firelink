@@ -18,6 +18,10 @@ belong in the download UI. The Aria2 reference is the [1.37.0 manual](https://ar
 - Optional seeding by time and/or ratio, upload progress, upload limits,
   seeders telemetry, per-Torrent maximum peers, and the Aria2
   `bt-request-peer-speed-limit` threshold.
+- Bounded, read-only Torrent peer diagnostics through `aria2.getPeers`.
+  Firelink discards peer IPs, ports, IDs, and bitfields at the native boundary;
+  the selected-Torrent detail view exposes only operational speeds, seeder,
+  and choking flags, with a bounded display count.
 - Global DHT, IPv6 DHT, PEX, and Local Peer Discovery toggles.
 - Optional piece-integrity verification, including the explicit policy that
   disables unverified seeding when verification is requested.
@@ -36,10 +40,7 @@ belong in the download UI. The Aria2 reference is the [1.37.0 manual](https://ar
 
 ### Tier 0 — reliability and user-visible control
 
-1. **Peer diagnostics** — expose `aria2.getPeers` as bounded, redacted,
-   read-only detail for the selected Torrent. Keep the current counts as the
-   fast summary and treat peer IPs/IDs as sensitive display data.
-2. **Tracker exclusion** — add `bt-exclude-tracker` alongside the existing
+1. **Tracker exclusion** — add `bt-exclude-tracker` alongside the existing
    additional-tracker list. It must be persisted, re-normalized, and re-applied
    on every retry/GID replacement. Document that it filters announce URLs only;
    it does not disable DHT or PEX.
@@ -70,4 +71,5 @@ belong in the download UI. The Aria2 reference is the [1.37.0 manual](https://ar
    current explicit metadata path intentionally avoids unmapped child jobs.
 
 The first implementation in this task was remote `.torrent` metadata intake;
-the follow-up implementation adds the former Tier 0 stall-timeout control.
+follow-up implementations add stall-timeout control and bounded peer
+diagnostics.

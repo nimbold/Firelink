@@ -965,6 +965,72 @@ impl<R: tauri::Runtime> QueueManager<R> {
         Ok(())
     }
 
+    /// Return redacted, bounded peer diagnostics for the current Torrent GID.
+    /// The control lock and post-RPC mapping check prevent a late response from
+    /// being attributed to a replaced or terminal lifecycle.
+    pub async fn get_aria2_torrent_peers(
+        &self,
+        id: &str,
+    ) -> Result<crate::ipc::TorrentPeerDiagnostics, String> {
+        let _control_guard = self.acquire_aria2_control(id).await;
+        if !self.is_registered(id).await
+            || !matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
+        {
+            return Err("download is not an active aria2 transfer".to_string());
+        }
+        let is_torrent = self
+            .aria2_payloads
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|payload| payload.is_torrent);
+        if !is_torrent {
+            return Err("download is not a Torrent transfer".to_string());
+        }
+        let gid = self
+            .aria2_gid_for_download(id)
+            .ok_or_else(|| "active Torrent transfer has no gid".to_string())?;
+        let expected_mapping = self
+            .aria2_gid_mapping(&gid)
+            .ok_or_else(|| "active Torrent transfer has no current gid mapping".to_string())?;
+        if expected_mapping.id != id
+            || !self
+                .is_aria2_control_epoch_current(id, expected_mapping.epoch)
+                .await
+        {
+            return Err("active Torrent transfer has a stale control epoch".to_string());
+        }
+
+        let state = self.app_handle.state::<crate::AppState>();
+        let result = crate::rpc_call(
+            state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+            &state.aria2_secret,
+            "aria2.getPeers",
+            serde_json::json!([gid]),
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "aria2.getPeers failed: {}",
+                crate::redact_sensitive_text(&error)
+            )
+        })?;
+        let diagnostics = parse_torrent_peer_diagnostics(result)?;
+
+        let still_current = self.is_registered(id).await
+            && matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
+            && self
+                .is_aria2_control_epoch_current(id, expected_mapping.epoch)
+                .await
+            && self.is_current_aria2_gid_mapping(&gid, &expected_mapping)
+            && self.aria2_gid_for_download(id).as_deref() == Some(gid.as_str());
+        if !still_current {
+            return Err("Torrent lifecycle changed while reading peer diagnostics".to_string());
+        }
+
+        Ok(diagnostics)
+    }
+
     /// Pop the next task, or None if empty.
     pub async fn pop_front(&self) -> Option<QueuedTask> {
         self.pending.lock().await.pop_front()
@@ -3050,6 +3116,8 @@ const ARIA2_DEFAULT_TORRENT_MAX_PEERS: u32 = 55;
 const ARIA2_DEFAULT_TORRENT_PEER_SPEED_LIMIT: &str = "50K";
 const MAX_TORRENT_MAX_PEERS: u32 = 1000;
 pub(crate) const MAX_TORRENT_STOP_TIMEOUT: u32 = 7 * 24 * 60 * 60;
+pub(crate) const MAX_TORRENT_PEER_DIAGNOSTICS: usize = 128;
+const MAX_TORRENT_PEER_RESPONSE: usize = 4096;
 const MAX_TORRENT_TRACKERS: usize = 64;
 const MAX_TORRENT_TRACKER_BYTES: usize = 16 * 1024;
 
@@ -3121,6 +3189,77 @@ pub(crate) fn normalize_torrent_stop_timeout(value: Option<u32>) -> Result<Optio
         ));
     }
     Ok(Some(value))
+}
+
+fn aria2_peer_number(value: Option<&serde_json::Value>) -> u64 {
+    match value {
+        Some(serde_json::Value::String(value)) => value.parse().unwrap_or_default(),
+        Some(serde_json::Value::Number(value)) => value.as_u64().unwrap_or_default(),
+        _ => 0,
+    }
+}
+
+fn aria2_peer_bool(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(serde_json::Value::String(value)) => {
+            value.eq_ignore_ascii_case("true") || value == "1"
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn parse_torrent_peer_diagnostics(
+    result: serde_json::Value,
+) -> Result<crate::ipc::TorrentPeerDiagnostics, String> {
+    let peers = result
+        .as_array()
+        .ok_or_else(|| "aria2.getPeers returned a non-array result".to_string())?;
+    if peers.len() > MAX_TORRENT_PEER_RESPONSE {
+        return Err("aria2.getPeers returned too many peers".to_string());
+    }
+    if peers.iter().any(|peer| !peer.is_object()) {
+        return Err("aria2.getPeers returned malformed peer data".to_string());
+    }
+    let total_peers = u32::try_from(peers.len()).unwrap_or(u32::MAX);
+    let mut total_seeders = 0u32;
+    let mut sanitized = Vec::with_capacity(peers.len().min(MAX_TORRENT_PEER_DIAGNOSTICS));
+
+    for peer in peers.iter().take(MAX_TORRENT_PEER_DIAGNOSTICS) {
+        let peer = peer
+            .as_object()
+            .ok_or_else(|| "aria2.getPeers returned malformed peer data".to_string())?;
+        let seeder = aria2_peer_bool(peer.get("seeder"));
+        if seeder {
+            total_seeders = total_seeders.saturating_add(1);
+        }
+        sanitized.push(crate::ipc::TorrentPeer {
+            download_speed: aria2_peer_number(peer.get("downloadSpeed")),
+            upload_speed: aria2_peer_number(peer.get("uploadSpeed")),
+            seeder,
+            am_choking: aria2_peer_bool(peer.get("amChoking")),
+            peer_choking: aria2_peer_bool(peer.get("peerChoking")),
+        });
+    }
+
+    // Count seeders beyond the display cap without retaining any identifying
+    // peer data. The response is bounded by Aria2's per-Torrent peer limit,
+    // while the UI receives at most MAX_TORRENT_PEER_DIAGNOSTICS rows.
+    for peer in peers.iter().skip(MAX_TORRENT_PEER_DIAGNOSTICS) {
+        let peer = peer
+            .as_object()
+            .ok_or_else(|| "aria2.getPeers returned malformed peer data".to_string())?;
+        if aria2_peer_bool(peer.get("seeder")) {
+            total_seeders = total_seeders.saturating_add(1);
+        }
+    }
+
+    Ok(crate::ipc::TorrentPeerDiagnostics {
+        total_peers,
+        total_seeders,
+        peers: sanitized,
+        truncated: peers.len() > MAX_TORRENT_PEER_DIAGNOSTICS,
+    })
 }
 
 pub(crate) fn normalize_torrent_trackers(value: Option<&str>) -> Result<Option<String>, String> {
@@ -4208,6 +4347,57 @@ mod tests {
         apply_aria2_torrent_options(&mut options, &payload).unwrap();
 
         assert!(!options.contains_key("bt-stop-timeout"));
+    }
+
+    #[test]
+    fn torrent_peer_diagnostics_are_redacted_and_bounded() {
+        let mut result = vec![serde_json::json!({
+            "peerId": "secret-peer-id",
+            "ip": "192.0.2.10",
+            "port": "6881",
+            "bitfield": "ffffffff",
+            "downloadSpeed": "10602",
+            "uploadSpeed": "6890",
+            "seeder": "true",
+            "amChoking": "false",
+            "peerChoking": "true"
+        })];
+        result.extend((1..MAX_TORRENT_PEER_DIAGNOSTICS + 2).map(|index| {
+            serde_json::json!({
+                "peerId": format!("peer-{index}"),
+                "ip": format!("192.0.2.{index}"),
+                "downloadSpeed": index.to_string(),
+                "uploadSpeed": 0,
+                "seeder": index == MAX_TORRENT_PEER_DIAGNOSTICS + 1,
+                "amChoking": false,
+                "peerChoking": false
+            })
+        }));
+
+        let diagnostics = parse_torrent_peer_diagnostics(serde_json::Value::Array(result)).unwrap();
+        assert_eq!(diagnostics.total_peers, (MAX_TORRENT_PEER_DIAGNOSTICS + 2) as u32);
+        assert_eq!(diagnostics.total_seeders, 2);
+        assert_eq!(diagnostics.peers.len(), MAX_TORRENT_PEER_DIAGNOSTICS);
+        assert!(diagnostics.truncated);
+        let serialized = serde_json::to_string(&diagnostics).unwrap();
+        assert!(!serialized.contains("peerId"));
+        assert!(!serialized.contains("192.0.2."));
+        assert!(!serialized.contains("bitfield"));
+    }
+
+    #[test]
+    fn torrent_peer_diagnostics_reject_non_array_results() {
+        let error = parse_torrent_peer_diagnostics(serde_json::json!({"peers": []})).unwrap_err();
+        assert!(error.contains("non-array"));
+    }
+
+    #[test]
+    fn torrent_peer_diagnostics_reject_malformed_peer_entries() {
+        let error = parse_torrent_peer_diagnostics(serde_json::json!([{
+            "seeder": true
+        }, "not-a-peer"]))
+        .unwrap_err();
+        assert!(error.contains("malformed"));
     }
 
     #[test]

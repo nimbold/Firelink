@@ -19,6 +19,7 @@ import type { EnqueueAccepted } from './bindings/EnqueueAccepted';
 import type { PlatformInfo } from './bindings/PlatformInfo';
 import type { QueueConcurrencyConfig } from './bindings/QueueConcurrencyConfig';
 import type { TorrentMetadata } from './bindings/TorrentMetadata';
+import type { TorrentPeerDiagnostics } from './bindings/TorrentPeerDiagnostics';
 
 type CommandMap = {
   fetch_metadata: {
@@ -75,6 +76,7 @@ type CommandMap = {
     args: { id: string; max_peers: number | null; peer_speed_limit: string | null };
     result: void;
   };
+  get_torrent_peers: { args: { id: string }; result: TorrentPeerDiagnostics };
   set_global_speed_limit: { args: { limit: string | null }; result: void };
   request_automation_permission: { args: undefined; result: void };
   check_automation_permission: { args: undefined; result: void };
