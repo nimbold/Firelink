@@ -24,9 +24,21 @@ pub const DOWNLOAD_CONNECTIONS_MAX: i32 = 16;
 pub const MAX_TORRENT_PIECE_PRIORITY_SIZE_MIB: u64 = 1024;
 pub const MAX_TORRENT_TRACKER_TIMEOUT: u32 = 604_800;
 pub const MAX_TORRENT_TRACKER_INTERVAL: u32 = 604_800;
+pub const DEFAULT_TORRENT_MAX_OPEN_FILES: u32 = 100;
+pub const MIN_TORRENT_MAX_OPEN_FILES: u32 = 1;
+pub const MAX_TORRENT_MAX_OPEN_FILES: u32 = 4_096;
 
 pub fn clamp_download_connections(connections: i32) -> i32 {
     connections.clamp(DOWNLOAD_CONNECTIONS_MIN, DOWNLOAD_CONNECTIONS_MAX)
+}
+
+pub fn normalize_torrent_max_open_files(value: u32) -> Result<u32, String> {
+    if !(MIN_TORRENT_MAX_OPEN_FILES..=MAX_TORRENT_MAX_OPEN_FILES).contains(&value) {
+        return Err(format!(
+            "torrent maximum open files must be between {MIN_TORRENT_MAX_OPEN_FILES} and {MAX_TORRENT_MAX_OPEN_FILES}"
+        ));
+    }
+    Ok(value)
 }
 
 fn reorder_selected_queue_tasks(
@@ -4829,6 +4841,17 @@ mod tests {
         assert!(!options.contains_key("bt-tracker-connect-timeout"));
         assert!(!options.contains_key("bt-tracker-timeout"));
         assert!(!options.contains_key("bt-tracker-interval"));
+    }
+
+    #[test]
+    fn torrent_max_open_files_is_bounded() {
+        assert_eq!(normalize_torrent_max_open_files(1).unwrap(), 1);
+        assert_eq!(
+            normalize_torrent_max_open_files(MAX_TORRENT_MAX_OPEN_FILES).unwrap(),
+            MAX_TORRENT_MAX_OPEN_FILES
+        );
+        assert!(normalize_torrent_max_open_files(0).is_err());
+        assert!(normalize_torrent_max_open_files(MAX_TORRENT_MAX_OPEN_FILES + 1).is_err());
     }
 
     #[test]

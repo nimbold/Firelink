@@ -188,6 +188,15 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
     sanitize_integer_setting(state, "maxConcurrentDownloads", |value| value.as_u64().is_some());
     sanitize_integer_setting(state, "perServerConnections", |value| value.as_i64().is_some());
     sanitize_integer_setting(state, "maxAutomaticRetries", |value| value.as_i64().is_some());
+    sanitize_integer_setting(state, "torrentMaxOpenFiles", |value| {
+        value
+            .as_u64()
+            .is_some_and(|value| {
+                (crate::queue::MIN_TORRENT_MAX_OPEN_FILES as u64..=
+                    crate::queue::MAX_TORRENT_MAX_OPEN_FILES as u64)
+                    .contains(&value)
+            })
+    });
     for key in [
         "torrentEnableDht",
         "torrentEnableDht6",
@@ -308,6 +317,10 @@ fn validate_settings(settings: &mut PersistedSettings) {
     settings.max_concurrent_downloads = settings.max_concurrent_downloads.min(12);
     settings.per_server_connections = settings.per_server_connections.clamp(1, 16);
     settings.max_automatic_retries = settings.max_automatic_retries.clamp(0, 10);
+    settings.torrent_max_open_files = crate::queue::normalize_torrent_max_open_files(
+        settings.torrent_max_open_files,
+    )
+    .unwrap_or(crate::queue::DEFAULT_TORRENT_MAX_OPEN_FILES);
     if !matches!(
         settings.last_custom_speed_limit_unit.as_str(),
         "KB/s" | "MB/s"
@@ -500,6 +513,7 @@ fn default_settings() -> PersistedSettings {
         torrent_enable_dht6: false,
         torrent_enable_pex: true,
         torrent_enable_lpd: false,
+        torrent_max_open_files: crate::queue::DEFAULT_TORRENT_MAX_OPEN_FILES,
         custom_user_agent: String::new(),
         ask_where_to_save_each_file: false,
         remember_last_used_download_directory: false,
@@ -792,6 +806,7 @@ mod tests {
                 "torrentEnableDht6": 1,
                 "torrentEnablePex": null,
                 "torrentEnableLpd": [],
+                "torrentMaxOpenFiles": 0,
                 "theme": "not-a-theme",
                 "calendarPreference": "lunar",
                 "siteLogins": [{"id": "valid", "urlPattern": "example.com", "username": "user"}, {"id": 3}]
@@ -809,6 +824,10 @@ mod tests {
         assert!(!settings.torrent_enable_dht6);
         assert!(settings.torrent_enable_pex);
         assert!(!settings.torrent_enable_lpd);
+        assert_eq!(
+            settings.torrent_max_open_files,
+            crate::queue::DEFAULT_TORRENT_MAX_OPEN_FILES
+        );
         assert!(matches!(settings.theme, crate::ipc::Theme::System));
         assert!(matches!(
             settings.calendar_preference,

@@ -67,6 +67,9 @@ export const normalizeTorrentEncryptionPolicy = (
 
 export const MAX_TORRENT_TRACKER_TIMEOUT = 604800;
 export const MAX_TORRENT_TRACKER_INTERVAL = 604800;
+export const DEFAULT_TORRENT_MAX_OPEN_FILES = 100;
+export const MIN_TORRENT_MAX_OPEN_FILES = 1;
+export const MAX_TORRENT_MAX_OPEN_FILES = 4096;
 
 const parseIntegerOption = (value: unknown): number | undefined => {
   if (typeof value === 'number') {
@@ -89,6 +92,15 @@ export const normalizeTorrentTrackerTimeout = (value: unknown): number | undefin
 export const normalizeTorrentTrackerInterval = (value: unknown): number | undefined => {
   const parsed = parseIntegerOption(value);
   return parsed !== undefined && parsed >= 0 && parsed <= MAX_TORRENT_TRACKER_INTERVAL
+    ? parsed
+    : undefined;
+};
+
+export const normalizeTorrentMaxOpenFiles = (value: unknown): number | undefined => {
+  const parsed = parseIntegerOption(value);
+  return parsed !== undefined
+    && parsed >= MIN_TORRENT_MAX_OPEN_FILES
+    && parsed <= MAX_TORRENT_MAX_OPEN_FILES
     ? parsed
     : undefined;
 };

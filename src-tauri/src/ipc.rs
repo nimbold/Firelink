@@ -30,6 +30,10 @@ fn default_torrent_enable_lpd() -> bool {
     false
 }
 
+fn default_torrent_max_open_files() -> u32 {
+    crate::queue::DEFAULT_TORRENT_MAX_OPEN_FILES
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../src/bindings/")]
@@ -493,6 +497,8 @@ pub struct PersistedSettings {
     pub torrent_enable_pex: bool,
     #[serde(default = "default_torrent_enable_lpd")]
     pub torrent_enable_lpd: bool,
+    #[serde(default = "default_torrent_max_open_files")]
+    pub torrent_max_open_files: u32,
     pub custom_user_agent: String,
     pub ask_where_to_save_each_file: bool,
     pub remember_last_used_download_directory: bool,

@@ -9,6 +9,7 @@ import {
   isValidTorrentExcludeTrackerList,
   isValidTorrentTrackerList,
   normalizeTorrentEncryptionPolicy,
+  normalizeTorrentMaxOpenFiles,
   normalizeTorrentPrioritizePiece,
   normalizeTorrentTrackerInterval,
   normalizeTorrentTrackerTimeout,
@@ -123,6 +124,19 @@ describe('Torrent tracker timing validation', () => {
     expect(normalizeTorrentTrackerInterval(-1)).toBeUndefined();
     expect(normalizeTorrentTrackerInterval(604801)).toBeUndefined();
     expect(normalizeTorrentTrackerTimeout('1.5')).toBeUndefined();
+  });
+});
+
+describe('Torrent open-file limit validation', () => {
+  it('accepts bounded integer limits', () => {
+    expect(normalizeTorrentMaxOpenFiles(1)).toBe(1);
+    expect(normalizeTorrentMaxOpenFiles(4096)).toBe(4096);
+  });
+
+  it('rejects zero, fractional, and oversized limits', () => {
+    expect(normalizeTorrentMaxOpenFiles(0)).toBeUndefined();
+    expect(normalizeTorrentMaxOpenFiles('1.5')).toBeUndefined();
+    expect(normalizeTorrentMaxOpenFiles(4097)).toBeUndefined();
   });
 });
 

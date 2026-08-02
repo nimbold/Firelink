@@ -6626,6 +6626,32 @@ fn apply_aria2_torrent_peer_discovery_options(
         .arg(format!("--bt-enable-lpd={enable_lpd}"));
 }
 
+fn apply_aria2_torrent_global_options(
+    command: &mut std::process::Command,
+    max_open_files: u32,
+) {
+    let max_open_files = queue::normalize_torrent_max_open_files(max_open_files)
+        .unwrap_or(queue::DEFAULT_TORRENT_MAX_OPEN_FILES);
+    command.arg(format!("--bt-max-open-files={max_open_files}"));
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn set_torrent_max_open_files(
+    state: tauri::State<'_, AppState>,
+    max_open_files: u32,
+) -> Result<(), String> {
+    let max_open_files = queue::normalize_torrent_max_open_files(max_open_files)?;
+    rpc_call(
+        state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+        &state.aria2_secret,
+        "aria2.changeGlobalOption",
+        serde_json::json!([{"bt-max-open-files": max_open_files.to_string()}]),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| format!("Failed to set Torrent maximum open files: {error}"))
+}
+
 #[tauri::command]
 async fn set_global_speed_limit(
     state: tauri::State<'_, AppState>,
@@ -7718,6 +7744,7 @@ mod tests {
         cookie_scope_for_url, metadata_authentication_error, metadata_cookie_header_present,
         metadata_headers, metadata_response_error,
         normalize_speed_limit_for_aria2,
+        apply_aria2_torrent_global_options,
         apply_aria2_torrent_peer_discovery_options,
         parse_firelink_deep_link, parse_ffmpeg_version, parse_media_progress_line,
         redact_log_line, redact_log_line_for_output, sanitize_ytdlp_config_value,
@@ -7739,6 +7766,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     use super::should_apply_dock_badge_update;
     use serde_json::json;
+    use crate::queue;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -7765,6 +7793,31 @@ mod tests {
                 "--enable-peer-exchange=false",
                 "--bt-enable-lpd=true",
             ]
+        );
+    }
+
+    #[test]
+    fn aria2_torrent_global_options_are_bounded_and_explicit() {
+        let mut command = std::process::Command::new("aria2c");
+        apply_aria2_torrent_global_options(&mut command, 256);
+        assert_eq!(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["--bt-max-open-files=256"]
+        );
+        let mut fallback_command = std::process::Command::new("aria2c");
+        apply_aria2_torrent_global_options(
+            &mut fallback_command,
+            queue::MAX_TORRENT_MAX_OPEN_FILES + 1,
+        );
+        assert_eq!(
+            fallback_command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["--bt-max-open-files=100"]
         );
     }
 
@@ -10419,6 +10472,21 @@ pub fn run() {
                     )
                 })
                 .unwrap_or((true, false, true, false));
+            let torrent_max_open_files = persisted_settings
+                .as_ref()
+                .map(|settings| settings.torrent_max_open_files)
+                .unwrap_or(queue::DEFAULT_TORRENT_MAX_OPEN_FILES);
+            let torrent_max_open_files = match queue::normalize_torrent_max_open_files(
+                torrent_max_open_files,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    log::error!(
+                        "invalid persisted Torrent open-file limit; using Aria2 default: {error}"
+                    );
+                    queue::DEFAULT_TORRENT_MAX_OPEN_FILES
+                }
+            };
 
             let aria2_secret_clone = aria2_secret.clone();
             let app_handle_bg = app.handle().clone();
@@ -10452,6 +10520,8 @@ pub fn run() {
                                 .arg("--max-concurrent-downloads=9999")
                                 .arg("--check-certificate=true")
                                 .arg(format!("--stop-with-process={}", std::process::id()));
+
+                            apply_aria2_torrent_global_options(&mut cmd, torrent_max_open_files);
 
                             apply_aria2_torrent_peer_discovery_options(
                                 &mut cmd,
@@ -11017,7 +11087,7 @@ pub fn run() {
             authorize_keychain_access,
             acknowledge_pairing_token_change,
             check_file_exists, toggle_tray_icon, set_extension_pairing_token,
-            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, set_global_speed_limit, remove_download, get_download_primary_path,
+            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, set_torrent_max_open_files, set_global_speed_limit, remove_download, get_download_primary_path,
             detach_download_for_reconfigure,
             enqueue_download, enqueue_many, cancel_enqueue_generation, move_in_queue, move_many_in_queue, remove_from_queue, get_pending_order,
             commands::reveal_in_file_manager, commands::open_downloaded_file,

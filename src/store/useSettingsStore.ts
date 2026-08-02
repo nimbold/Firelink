@@ -20,7 +20,13 @@ import {
   DEFAULT_CATEGORY_SUBFOLDERS,
   normalizeDownloadLocationSettings
 } from '../utils/downloadLocations';
-import { normalizeSpeedLimitForBackend } from '../utils/downloads';
+import {
+  DEFAULT_TORRENT_MAX_OPEN_FILES,
+  MAX_TORRENT_MAX_OPEN_FILES,
+  MIN_TORRENT_MAX_OPEN_FILES,
+  normalizeSpeedLimitForBackend,
+  normalizeTorrentMaxOpenFiles
+} from '../utils/downloads';
 import i18n from '../i18n';
 import { isAppLocalePreference, type AppLocalePreference } from '../i18n/locales';
 import {
@@ -30,6 +36,7 @@ import {
 } from '../utils/dateTime';
 
 let settingsQueue: Promise<void> = Promise.resolve();
+let torrentMaxOpenFilesQueue: Promise<void> = Promise.resolve();
 let pairingTokenHydrationRequest: Promise<PairingTokenHydration> | null = null;
 const settingsPersistenceErrorListeners = new Set<() => void>();
 let settingsPersistenceFailed = false;
@@ -238,6 +245,7 @@ export interface SettingsState {
   torrentEnableDht6: boolean;
   torrentEnablePex: boolean;
   torrentEnableLpd: boolean;
+  torrentMaxOpenFiles: number;
   customUserAgent: string;
   askWhereToSaveEachFile: boolean;
   preventsSleepWhileDownloading: boolean;
@@ -292,6 +300,7 @@ export interface SettingsState {
   setTorrentEnableDht6: (enabled: boolean) => void;
   setTorrentEnablePex: (enabled: boolean) => void;
   setTorrentEnableLpd: (enabled: boolean) => void;
+  setTorrentMaxOpenFiles: (value: number) => Promise<void>;
   setCustomUserAgent: (userAgent: string) => void;
   setAskWhereToSaveEachFile: (ask: boolean) => void;
   setPreventsSleepWhileDownloading: (prevent: boolean) => void;
@@ -372,6 +381,7 @@ export const useSettingsStore = create<SettingsState>()(
       torrentEnableDht6: false,
       torrentEnablePex: true,
       torrentEnableLpd: false,
+      torrentMaxOpenFiles: DEFAULT_TORRENT_MAX_OPEN_FILES,
       customUserAgent: '',
       askWhereToSaveEachFile: false,
       preventsSleepWhileDownloading: true,
@@ -470,6 +480,22 @@ export const useSettingsStore = create<SettingsState>()(
       setTorrentEnableDht6: (torrentEnableDht6) => set({ torrentEnableDht6 }),
       setTorrentEnablePex: (torrentEnablePex) => set({ torrentEnablePex }),
       setTorrentEnableLpd: (torrentEnableLpd) => set({ torrentEnableLpd }),
+      setTorrentMaxOpenFiles: (value) => {
+        const normalized = normalizeTorrentMaxOpenFiles(value);
+        if (normalized === undefined) {
+          return Promise.reject(new Error(
+            `Torrent maximum open files must be between ${MIN_TORRENT_MAX_OPEN_FILES} and ${MAX_TORRENT_MAX_OPEN_FILES}`
+          ));
+        }
+        const apply = async () => {
+          await invoke('set_torrent_max_open_files', { max_open_files: normalized });
+          info('Settings updated: torrentMaxOpenFiles');
+          set({ torrentMaxOpenFiles: normalized });
+        };
+        const result = torrentMaxOpenFilesQueue.then(apply, apply);
+        torrentMaxOpenFilesQueue = result.then(() => undefined, () => undefined);
+        return result;
+      },
       setCustomUserAgent: (customUserAgent) => set({ customUserAgent }),
       setAskWhereToSaveEachFile: (askWhereToSaveEachFile) => set({ askWhereToSaveEachFile }),
       setPreventsSleepWhileDownloading: (preventsSleepWhileDownloading) => {
@@ -655,6 +681,7 @@ export const useSettingsStore = create<SettingsState>()(
         torrentEnableDht6: state.torrentEnableDht6,
         torrentEnablePex: state.torrentEnablePex,
         torrentEnableLpd: state.torrentEnableLpd,
+        torrentMaxOpenFiles: state.torrentMaxOpenFiles,
         customUserAgent: state.customUserAgent,
         askWhereToSaveEachFile: state.askWhereToSaveEachFile,
         preventsSleepWhileDownloading: state.preventsSleepWhileDownloading,
@@ -704,6 +731,8 @@ export const useSettingsStore = create<SettingsState>()(
           torrentEnableDht6: persistedBoolean(persisted.torrentEnableDht6, currentState.torrentEnableDht6),
           torrentEnablePex: persistedBoolean(persisted.torrentEnablePex, currentState.torrentEnablePex),
           torrentEnableLpd: persistedBoolean(persisted.torrentEnableLpd, currentState.torrentEnableLpd),
+          torrentMaxOpenFiles: normalizeTorrentMaxOpenFiles(persisted.torrentMaxOpenFiles)
+            ?? currentState.torrentMaxOpenFiles,
           sidebarPosition: isAllowedSetting(SIDEBAR_POSITION_VALUES, persisted.sidebarPosition)
             ? persisted.sidebarPosition
             : currentState.sidebarPosition,

@@ -34,6 +34,11 @@ import {
 import { usePlatformInfo } from '../utils/platform';
 import { isTrustedFirelinkReleaseUrl } from '../utils/releaseUrls';
 import { normalizeCustomProxy } from '../store/useDownloadStore';
+import {
+  MAX_TORRENT_MAX_OPEN_FILES,
+  MIN_TORRENT_MAX_OPEN_FILES,
+  normalizeTorrentMaxOpenFiles
+} from '../utils/downloads';
 import { useTranslation } from 'react-i18next';
 import { localeDirection, resolveAppLocale } from '../i18n';
 
@@ -318,6 +323,10 @@ const engineRunId = useRef(0);
     () => String(settings.maxConcurrentDownloads)
   );
   const [proxyPortInput, setProxyPortInput] = useState(() => String(settings.proxyPort));
+  const [torrentMaxOpenFilesInput, setTorrentMaxOpenFilesInput] = useState(
+    () => String(settings.torrentMaxOpenFiles)
+  );
+  const torrentMaxOpenFilesCommitRef = useRef(0);
 
   useEffect(() => {
     setPerServerConnectionsInput(String(settings.perServerConnections));
@@ -330,6 +339,10 @@ const engineRunId = useRef(0);
   useEffect(() => {
     setProxyPortInput(String(settings.proxyPort));
   }, [settings.proxyPort]);
+
+  useEffect(() => {
+    setTorrentMaxOpenFilesInput(String(settings.torrentMaxOpenFiles));
+  }, [settings.torrentMaxOpenFiles]);
 
   // Local state for adding site login
   const [loginPattern, setLoginPattern] = useState('');
@@ -346,6 +359,22 @@ const engineRunId = useRef(0);
 
   // Toast notifications
   const { addToast } = useToast();
+  const commitTorrentMaxOpenFiles = (raw: string) => {
+    const next = normalizeTorrentMaxOpenFiles(raw) ?? settings.torrentMaxOpenFiles;
+    const requestId = ++torrentMaxOpenFilesCommitRef.current;
+    setTorrentMaxOpenFilesInput(String(next));
+    void settings.setTorrentMaxOpenFiles(next).catch(error => {
+      if (requestId !== torrentMaxOpenFilesCommitRef.current) return;
+      setTorrentMaxOpenFilesInput(String(settings.torrentMaxOpenFiles));
+      addToast({
+        message: t($ => $.settings.network.torrentMaxOpenFilesUpdateFailed, {
+          detail: error instanceof Error ? error.message : String(error)
+        }),
+        variant: 'error',
+        isActionable: true
+      });
+    });
+  };
   const [isCheckingForUpdates, setIsCheckingForUpdates] = useState(false);
   const [manualUpdateStatus, setManualUpdateStatus] = useState<ManualUpdateStatus>({ type: 'idle' });
 
@@ -1210,6 +1239,27 @@ runEngineChecks(false);
                 <p className="settings-group-footer">
                   {t($ => $.settings.network.torrentPeerDiscoveryRestartNote)}
                 </p>
+              </div>
+
+              <h2 className="settings-section-title">{t($ => $.settings.network.torrentResourceLimits)}</h2>
+              <div className="mac-settings-group">
+                <div className="mac-settings-row settings-network-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentMaxOpenFiles)}</span>
+                    <small>{t($ => $.settings.network.torrentMaxOpenFilesDescription)}</small>
+                  </div>
+                  <input
+                    type="number"
+                    min={MIN_TORRENT_MAX_OPEN_FILES}
+                    max={MAX_TORRENT_MAX_OPEN_FILES}
+                    step={1}
+                    value={torrentMaxOpenFilesInput}
+                    onChange={(event) => setTorrentMaxOpenFilesInput(event.target.value)}
+                    onBlur={(event) => commitTorrentMaxOpenFiles(event.target.value)}
+                    className="app-control settings-port-input text-center"
+                    aria-label={t($ => $.settings.network.torrentMaxOpenFiles)}
+                  />
+                </div>
               </div>
 
               <h2 className="settings-section-title">{t($ => $.settings.network.identity)}</h2>

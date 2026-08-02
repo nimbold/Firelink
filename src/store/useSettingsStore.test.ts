@@ -6,6 +6,10 @@ import {
 } from './useSettingsStore';
 import * as ipc from '../ipc';
 import type { PairingTokenHydration } from '../bindings/PairingTokenHydration';
+import {
+  DEFAULT_TORRENT_MAX_OPEN_FILES,
+  MAX_TORRENT_MAX_OPEN_FILES
+} from '../utils/downloads';
 
 vi.mock('../ipc', () => ({
   invokeCommand: vi.fn()
@@ -54,6 +58,66 @@ describe('Torrent peer discovery preferences', () => {
         torrentEnableLpd: true
       });
     });
+  });
+});
+
+describe('Torrent open-file limit preference', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useSettingsStore.setState({ torrentMaxOpenFiles: DEFAULT_TORRENT_MAX_OPEN_FILES });
+  });
+
+  it('applies a bounded global limit before persisting it', async () => {
+    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined);
+
+    await useSettingsStore.getState().setTorrentMaxOpenFiles(256);
+
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('set_torrent_max_open_files', {
+      max_open_files: 256
+    });
+    expect(useSettingsStore.getState().torrentMaxOpenFiles).toBe(256);
+  });
+
+  it('rejects unsafe values without changing the saved limit', async () => {
+    await expect(useSettingsStore.getState().setTorrentMaxOpenFiles(0)).rejects.toThrow();
+    await expect(
+      useSettingsStore.getState().setTorrentMaxOpenFiles(MAX_TORRENT_MAX_OPEN_FILES + 1)
+    ).rejects.toThrow();
+
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith(
+      'set_torrent_max_open_files',
+      expect.anything()
+    );
+    expect(useSettingsStore.getState().torrentMaxOpenFiles)
+      .toBe(DEFAULT_TORRENT_MAX_OPEN_FILES);
+  });
+
+  it('serializes rapid updates so the native global option cannot reorder', async () => {
+    let releaseFirst!: () => void;
+    const firstUpdate = new Promise<void>(resolve => {
+      releaseFirst = resolve;
+    });
+    const events: string[] = [];
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
+      if (command !== 'set_torrent_max_open_files') return undefined;
+      const value = (args as { max_open_files: number }).max_open_files;
+      events.push(`start:${value}`);
+      if (value === 256) await firstUpdate;
+      events.push(`finish:${value}`);
+      return undefined;
+    });
+
+    const first = useSettingsStore.getState().setTorrentMaxOpenFiles(256);
+    const second = useSettingsStore.getState().setTorrentMaxOpenFiles(512);
+    await vi.waitFor(() => expect(events).toEqual(['start:256']));
+    expect(useSettingsStore.getState().torrentMaxOpenFiles)
+      .toBe(DEFAULT_TORRENT_MAX_OPEN_FILES);
+
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(events).toEqual(['start:256', 'finish:256', 'start:512', 'finish:512']);
+    expect(useSettingsStore.getState().torrentMaxOpenFiles).toBe(512);
   });
 });
 

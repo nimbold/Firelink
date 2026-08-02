@@ -704,6 +704,14 @@ async function main() {
     trackerlessTorrent.delete('announce');
     trackerlessTorrent.delete('announce-list');
     const trackerlessTorrentBytes = bencode(trackerlessTorrent);
+    await rpc(client.rpcPort, client.secret, 'aria2.changeGlobalOption', [
+      { 'bt-max-open-files': '256' },
+    ]);
+    const globalOptions = await rpc(client.rpcPort, client.secret, 'aria2.getGlobalOption', []);
+    assert(
+      globalOptions['bt-max-open-files'] === '256',
+      `Aria2 did not retain the global Torrent open-file limit: ${JSON.stringify(globalOptions['bt-max-open-files'])}`,
+    );
     const probeRemoved = await forceRemoveIfPresent(client, probeGid);
     if (probeRemoved) await waitForRemoved(client, probeGid);
     fs.rmSync(probeDir, { recursive: true, force: true });
@@ -749,7 +757,7 @@ async function main() {
     const reportedSelected = reportedFiles.find(file => file.path === selectedPath || file.path.endsWith('/selected.bin'));
     assert(reportedSelected, `Aria2 ownership list did not report ${selectedPath}`);
     assert(finalStatus.files?.some(file => file.path === selectedPath || file.path.endsWith('/selected.bin')), 'terminal status omitted selected output');
-    console.log('[OK] additional tracker injection, piece priority, selected output, pause/resume, and Aria2 file ownership passed');
+    console.log('[OK] global open-file limit, tracker injection, piece priority, selected output, pause/resume, and Aria2 file ownership passed');
 
     const integrityPath = path.join(integrityDir, torrent.name, 'selected.bin');
     fs.mkdirSync(path.dirname(integrityPath), { recursive: true });

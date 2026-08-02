@@ -46,6 +46,10 @@ belong in the download UI. The Aria2 reference is the [1.37.0 manual](https://ar
   timeouts are bounded to 1–604800 seconds; interval 0 restores Aria2's
   response/progress-driven scheduling. Timing is persisted and reapplied when
   a Torrent starts or retries.
+- Global `bt-max-open-files` control for multi-file Torrents, bounded to
+  1–4096 with Aria2's default of 100. The setting is persisted, applied at
+  daemon startup, and updateable through Aria2's global-option RPC; changes
+  affect newly added Torrents without restarting Aria2.
 - Optional `bt-remove-unselected-file` cleanup after completion when a
   selected-file subset is configured. Firelink requires explicit confirmation,
   reserves the unselected paths against competing downloads, keeps those
@@ -75,7 +79,8 @@ No remaining Tier 0 items.
 
 1. Configurable TCP/UDP listen ports, external IP, DHT entry points, IPv6 DHT
    listen address, and LPD interface, with platform/firewall warnings.
-2. Global BitTorrent open-file limits and peer identity/agent controls.
+2. Peer identity/agent controls, with explicit privacy and protocol-identity
+   warnings.
 3. Aria2 `follow-torrent`/in-memory follow behavior for generic downloads only
    if the resulting child-GID ownership model can be represented safely; the
    current explicit metadata path intentionally avoids unmapped child jobs.
@@ -83,4 +88,5 @@ No remaining Tier 0 items.
 The first implementation in this task was remote `.torrent` metadata intake;
 follow-up implementations add stall-timeout control, bounded peer diagnostics,
 persisted tracker exclusion, piece-preview priority, safe unselected-file
-removal, the validated encryption policy, and tracker timing controls.
+removal, the validated encryption policy, tracker timing controls, and the
+global Torrent open-file limit.
