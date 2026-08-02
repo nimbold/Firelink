@@ -19,7 +19,7 @@ import {
   formatDownloadTotal,
   resolveDownloadSizeDisplay
 } from '../utils/downloadProgress';
-import { isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentPrioritizePiece, resolveDownloadConnections, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type TorrentEncryptionPolicy } from '../utils/downloads';
+import { isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, MAX_TORRENT_TRACKER_INTERVAL, MAX_TORRENT_TRACKER_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, resolveDownloadConnections, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type TorrentEncryptionPolicy } from '../utils/downloads';
 import { useTranslation } from 'react-i18next';
 import { formatDateTime, type CalendarPreference } from '../utils/dateTime';
 import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
@@ -91,6 +91,9 @@ export const PropertiesModal = () => {
   const [torrentEncryptionPolicy, setTorrentEncryptionPolicy] = useState<TorrentEncryptionPolicy>(TORRENT_ENCRYPTION_POLICY_DISABLED);
   const [torrentTrackers, setTorrentTrackers] = useState('');
   const [torrentExcludeTrackers, setTorrentExcludeTrackers] = useState('');
+  const [torrentTrackerConnectTimeout, setTorrentTrackerConnectTimeout] = useState('');
+  const [torrentTrackerTimeout, setTorrentTrackerTimeout] = useState('');
+  const [torrentTrackerInterval, setTorrentTrackerInterval] = useState('0');
   const [torrentStopTimeout, setTorrentStopTimeout] = useState('0');
   const [torrentPrioritizePiece, setTorrentPrioritizePiece] = useState('');
   const [torrentPeerDiagnostics, setTorrentPeerDiagnostics] = useState<TorrentPeerDiagnostics | null>(null);
@@ -197,6 +200,9 @@ export const PropertiesModal = () => {
         setTorrentEncryptionPolicy(normalizeTorrentEncryptionPolicy(activeItem.torrentEncryptionPolicy) || TORRENT_ENCRYPTION_POLICY_DISABLED);
         setTorrentTrackers(activeItem.torrentTrackers || '');
         setTorrentExcludeTrackers(activeItem.torrentExcludeTrackers || '');
+        setTorrentTrackerConnectTimeout(activeItem.torrentTrackerConnectTimeout === undefined ? '' : String(activeItem.torrentTrackerConnectTimeout));
+        setTorrentTrackerTimeout(activeItem.torrentTrackerTimeout === undefined ? '' : String(activeItem.torrentTrackerTimeout));
+        setTorrentTrackerInterval(activeItem.torrentTrackerInterval === undefined ? '0' : String(activeItem.torrentTrackerInterval));
         setTorrentStopTimeout(activeItem.torrentStopTimeout === undefined ? '0' : String(activeItem.torrentStopTimeout));
         setTorrentPrioritizePiece(activeItem.torrentPrioritizePiece || '');
         setErrorMessage('');
@@ -349,6 +355,18 @@ export const PropertiesModal = () => {
       setErrorMessage(t($ => $.properties.torrentExcludeTrackersInvalid));
       return;
     }
+    if (item.isTorrent && torrentTrackerConnectTimeout.trim() && !normalizeTorrentTrackerTimeout(torrentTrackerConnectTimeout)) {
+      setErrorMessage(t($ => $.properties.torrentTrackerTimeoutInvalid));
+      return;
+    }
+    if (item.isTorrent && torrentTrackerTimeout.trim() && !normalizeTorrentTrackerTimeout(torrentTrackerTimeout)) {
+      setErrorMessage(t($ => $.properties.torrentTrackerTimeoutInvalid));
+      return;
+    }
+    if (item.isTorrent && torrentTrackerInterval.trim() && normalizeTorrentTrackerInterval(torrentTrackerInterval) === undefined) {
+      setErrorMessage(t($ => $.properties.torrentTrackerIntervalInvalid));
+      return;
+    }
     if (item.isTorrent && torrentPrioritizePiece.trim() && !normalizeTorrentPrioritizePiece(torrentPrioritizePiece)) {
       setErrorMessage(t($ => $.properties.torrentPrioritizePieceInvalid));
       return;
@@ -399,6 +417,15 @@ export const PropertiesModal = () => {
             torrentCheckIntegrity,
             torrentTrackers: torrentTrackers.trim() || undefined,
             torrentExcludeTrackers: torrentExcludeTrackers.trim() || undefined,
+            torrentTrackerConnectTimeout: torrentTrackerConnectTimeout.trim()
+              ? Number(torrentTrackerConnectTimeout)
+              : undefined,
+            torrentTrackerTimeout: torrentTrackerTimeout.trim()
+              ? Number(torrentTrackerTimeout)
+              : undefined,
+            torrentTrackerInterval: torrentTrackerInterval.trim()
+              ? Number(torrentTrackerInterval)
+              : undefined,
             torrentStopTimeout: normalizedStopTimeout,
             torrentPrioritizePiece: normalizeTorrentPrioritizePiece(torrentPrioritizePiece) || undefined,
             torrentRemoveUnselectedFile: item.torrentFileIndices !== undefined
@@ -938,6 +965,71 @@ export const PropertiesModal = () => {
                     />
                     <p id="torrent-exclude-trackers-properties-hint" className="mt-1 text-[11px] text-text-muted">
                       {t($ => $.properties.torrentExcludeTrackersHint)}
+                    </p>
+                  </div>
+                  <label className="text-xs text-text-muted text-right" htmlFor="torrent-tracker-connect-timeout-properties">
+                    {t($ => $.properties.torrentTrackerConnectTimeout)}
+                  </label>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        id="torrent-tracker-connect-timeout-properties"
+                        type="number"
+                        min={1}
+                        max={MAX_TORRENT_TRACKER_TIMEOUT}
+                        step={1}
+                        value={torrentTrackerConnectTimeout}
+                        onChange={event => setTorrentTrackerConnectTimeout(event.currentTarget.value)}
+                        placeholder="60"
+                        disabled={transferLocked}
+                        aria-describedby="torrent-tracker-timing-properties-hint"
+                        className="app-control w-24 px-2.5 py-1.5 text-end text-xs font-mono disabled:opacity-50"
+                      />
+                      <span className="text-[11px] text-text-muted">{t($ => $.properties.seconds)}</span>
+                    </div>
+                  </div>
+                  <label className="text-xs text-text-muted text-right" htmlFor="torrent-tracker-timeout-properties">
+                    {t($ => $.properties.torrentTrackerTimeout)}
+                  </label>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        id="torrent-tracker-timeout-properties"
+                        type="number"
+                        min={1}
+                        max={MAX_TORRENT_TRACKER_TIMEOUT}
+                        step={1}
+                        value={torrentTrackerTimeout}
+                        onChange={event => setTorrentTrackerTimeout(event.currentTarget.value)}
+                        placeholder="60"
+                        disabled={transferLocked}
+                        aria-describedby="torrent-tracker-timing-properties-hint"
+                        className="app-control w-24 px-2.5 py-1.5 text-end text-xs font-mono disabled:opacity-50"
+                      />
+                      <span className="text-[11px] text-text-muted">{t($ => $.properties.seconds)}</span>
+                    </div>
+                  </div>
+                  <label className="text-xs text-text-muted text-right" htmlFor="torrent-tracker-interval-properties">
+                    {t($ => $.properties.torrentTrackerInterval)}
+                  </label>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        id="torrent-tracker-interval-properties"
+                        type="number"
+                        min={0}
+                        max={MAX_TORRENT_TRACKER_INTERVAL}
+                        step={1}
+                        value={torrentTrackerInterval}
+                        onChange={event => setTorrentTrackerInterval(event.currentTarget.value)}
+                        disabled={transferLocked}
+                        aria-describedby="torrent-tracker-timing-properties-hint"
+                        className="app-control w-24 px-2.5 py-1.5 text-end text-xs font-mono disabled:opacity-50"
+                      />
+                      <span className="text-[11px] text-text-muted">{t($ => $.properties.seconds)}</span>
+                    </div>
+                    <p id="torrent-tracker-timing-properties-hint" className="mt-1 text-[11px] text-text-muted">
+                      {t($ => $.properties.torrentTrackerTimingHint)}
                     </p>
                   </div>
                   <label className="text-xs text-text-muted text-right" htmlFor="torrent-stop-timeout-properties">

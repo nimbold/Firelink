@@ -9,7 +9,7 @@ import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
 import type { Queue } from '../bindings/Queue';
 import { useSettingsStore } from './useSettingsStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
-import { canonicalizeDownloadFileName, categoryForFileName, isActiveDownloadStatus, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentPrioritizePiece, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, isActiveDownloadStatus, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
 import {
   resolveCategoryDestination
 } from '../utils/downloadLocations';
@@ -353,6 +353,9 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
         torrent_check_integrity: item.torrentCheckIntegrity,
         torrent_trackers: item.torrentTrackers || undefined,
         torrent_exclude_trackers: item.torrentExcludeTrackers || undefined,
+        torrent_tracker_connect_timeout: item.torrentTrackerConnectTimeout,
+        torrent_tracker_timeout: item.torrentTrackerTimeout,
+        torrent_tracker_interval: item.torrentTrackerInterval,
         torrent_stop_timeout: item.torrentStopTimeout,
         torrent_prioritize_piece: item.torrentPrioritizePiece || undefined,
         torrent_remove_unselected_file: item.torrentRemoveUnselectedFile,
@@ -645,6 +648,12 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
   const normalizedExcludeTrackers = typeof rawExcludeTrackers === 'string' && rawExcludeTrackers.trim() && isValidTorrentExcludeTrackerList(rawExcludeTrackers)
     ? rawExcludeTrackers.trim()
     : undefined;
+  const rawTrackerConnectTimeout = download.torrentTrackerConnectTimeout as unknown;
+  const normalizedTrackerConnectTimeout = normalizeTorrentTrackerTimeout(rawTrackerConnectTimeout);
+  const rawTrackerTimeout = download.torrentTrackerTimeout as unknown;
+  const normalizedTrackerTimeout = normalizeTorrentTrackerTimeout(rawTrackerTimeout);
+  const rawTrackerInterval = download.torrentTrackerInterval as unknown;
+  const normalizedTrackerInterval = normalizeTorrentTrackerInterval(rawTrackerInterval);
   const rawStopTimeout = download.torrentStopTimeout as unknown;
   const normalizedStopTimeout = typeof rawStopTimeout === 'number' &&
     Number.isInteger(rawStopTimeout) &&
@@ -667,6 +676,9 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
     rawCheckIntegrity !== normalizedCheckIntegrity ||
     rawTrackers !== normalizedTrackers ||
     rawExcludeTrackers !== normalizedExcludeTrackers ||
+    rawTrackerConnectTimeout !== normalizedTrackerConnectTimeout ||
+    rawTrackerTimeout !== normalizedTrackerTimeout ||
+    rawTrackerInterval !== normalizedTrackerInterval ||
     rawStopTimeout !== normalizedStopTimeout ||
     rawPrioritizePiece !== normalizedPrioritizePiece ||
     rawRemoveUnselectedFile !== normalizedRemoveUnselectedFile ||
@@ -678,6 +690,9 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
         torrentCheckIntegrity: normalizedCheckIntegrity,
         torrentTrackers: normalizedTrackers,
         torrentExcludeTrackers: normalizedExcludeTrackers,
+        torrentTrackerConnectTimeout: normalizedTrackerConnectTimeout,
+        torrentTrackerTimeout: normalizedTrackerTimeout,
+        torrentTrackerInterval: normalizedTrackerInterval,
         torrentStopTimeout: normalizedStopTimeout,
         torrentPrioritizePiece: normalizedPrioritizePiece,
         torrentRemoveUnselectedFile: normalizedRemoveUnselectedFile,
@@ -2215,6 +2230,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             torrent_check_integrity: item.torrentCheckIntegrity,
             torrent_trackers: item.torrentTrackers || undefined,
             torrent_exclude_trackers: item.torrentExcludeTrackers || undefined,
+            torrent_tracker_connect_timeout: item.torrentTrackerConnectTimeout,
+            torrent_tracker_timeout: item.torrentTrackerTimeout,
+            torrent_tracker_interval: item.torrentTrackerInterval,
             torrent_stop_timeout: item.torrentStopTimeout,
             torrent_prioritize_piece: item.torrentPrioritizePiece || undefined,
             torrent_remove_unselected_file: item.torrentRemoveUnselectedFile,

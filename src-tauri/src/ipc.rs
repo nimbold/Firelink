@@ -202,6 +202,15 @@ pub struct DownloadItem {
     pub torrent_exclude_trackers: Option<String>,
     #[serde(default)]
     #[ts(optional)]
+    pub torrent_tracker_connect_timeout: Option<u32>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_tracker_timeout: Option<u32>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_tracker_interval: Option<u32>,
+    #[serde(default)]
+    #[ts(optional)]
     pub torrent_stop_timeout: Option<u32>,
     #[serde(default)]
     #[ts(optional)]

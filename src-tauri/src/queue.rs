@@ -22,6 +22,8 @@ pub const MEDIA_RUN_CANCELLED: &str = "__firelink_media_run_cancelled__";
 pub const DOWNLOAD_CONNECTIONS_MIN: i32 = 1;
 pub const DOWNLOAD_CONNECTIONS_MAX: i32 = 16;
 pub const MAX_TORRENT_PIECE_PRIORITY_SIZE_MIB: u64 = 1024;
+pub const MAX_TORRENT_TRACKER_TIMEOUT: u32 = 604_800;
+pub const MAX_TORRENT_TRACKER_INTERVAL: u32 = 604_800;
 
 pub fn clamp_download_connections(connections: i32) -> i32 {
     connections.clamp(DOWNLOAD_CONNECTIONS_MIN, DOWNLOAD_CONNECTIONS_MAX)
@@ -218,6 +220,9 @@ pub struct SpawnPayload {
     pub torrent_check_integrity: bool,
     pub torrent_trackers: Option<String>,
     pub torrent_exclude_trackers: Option<String>,
+    pub torrent_tracker_connect_timeout: Option<u32>,
+    pub torrent_tracker_timeout: Option<u32>,
+    pub torrent_tracker_interval: Option<u32>,
     pub torrent_stop_timeout: Option<u32>,
     pub torrent_prioritize_piece: Option<String>,
     pub torrent_remove_unselected_file: bool,
@@ -3507,6 +3512,44 @@ pub(crate) fn normalize_torrent_exclude_trackers(
     normalize_torrent_tracker_list(value, true)
 }
 
+fn normalize_torrent_tracker_timeout(value: Option<u32>, field: &str) -> Result<Option<u32>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !(1..=MAX_TORRENT_TRACKER_TIMEOUT).contains(&value) {
+        return Err(format!(
+            "torrent {field} must be between 1 and {MAX_TORRENT_TRACKER_TIMEOUT} seconds"
+        ));
+    }
+    Ok(Some(value))
+}
+
+pub(crate) fn normalize_torrent_tracker_connect_timeout(
+    value: Option<u32>,
+) -> Result<Option<u32>, String> {
+    normalize_torrent_tracker_timeout(value, "tracker connect timeout")
+}
+
+pub(crate) fn normalize_torrent_tracker_request_timeout(
+    value: Option<u32>,
+) -> Result<Option<u32>, String> {
+    normalize_torrent_tracker_timeout(value, "tracker timeout")
+}
+
+pub(crate) fn normalize_torrent_tracker_interval(
+    value: Option<u32>,
+) -> Result<Option<u32>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value > MAX_TORRENT_TRACKER_INTERVAL {
+        return Err(format!(
+            "torrent tracker interval must be between 0 and {MAX_TORRENT_TRACKER_INTERVAL} seconds"
+        ));
+    }
+    Ok(Some(value))
+}
+
 pub(crate) fn normalize_torrent_encryption_policy(
     value: Option<&str>,
 ) -> Result<Option<String>, String> {
@@ -3613,6 +3656,28 @@ fn apply_aria2_torrent_options(
         normalize_torrent_exclude_trackers(payload.torrent_exclude_trackers.as_deref())?
     {
         options.insert("bt-exclude-tracker".to_string(), serde_json::json!(trackers));
+    }
+    if let Some(timeout) = normalize_torrent_tracker_connect_timeout(
+        payload.torrent_tracker_connect_timeout,
+    )? {
+        options.insert(
+            "bt-tracker-connect-timeout".to_string(),
+            serde_json::json!(timeout.to_string()),
+        );
+    }
+    if let Some(timeout) =
+        normalize_torrent_tracker_request_timeout(payload.torrent_tracker_timeout)?
+    {
+        options.insert(
+            "bt-tracker-timeout".to_string(),
+            serde_json::json!(timeout.to_string()),
+        );
+    }
+    if let Some(interval) = normalize_torrent_tracker_interval(payload.torrent_tracker_interval)? {
+        options.insert(
+            "bt-tracker-interval".to_string(),
+            serde_json::json!(interval.to_string()),
+        );
     }
     if let Some(stop_timeout) = normalize_torrent_stop_timeout(payload.torrent_stop_timeout)? {
         options.insert(
@@ -4257,6 +4322,15 @@ pub struct EnqueueItem {
     pub torrent_exclude_trackers: Option<String>,
     #[serde(default)]
     #[ts(optional)]
+    pub torrent_tracker_connect_timeout: Option<u32>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_tracker_timeout: Option<u32>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_tracker_interval: Option<u32>,
+    #[serde(default)]
+    #[ts(optional)]
     pub torrent_stop_timeout: Option<u32>,
     #[serde(default)]
     #[ts(optional)]
@@ -4319,6 +4393,9 @@ impl EnqueueItem {
                 torrent_check_integrity: self.torrent_check_integrity.unwrap_or(false),
                 torrent_trackers: self.torrent_trackers,
                 torrent_exclude_trackers: self.torrent_exclude_trackers,
+                torrent_tracker_connect_timeout: self.torrent_tracker_connect_timeout,
+                torrent_tracker_timeout: self.torrent_tracker_timeout,
+                torrent_tracker_interval: self.torrent_tracker_interval,
                 torrent_stop_timeout: self.torrent_stop_timeout,
                 torrent_prioritize_piece: self.torrent_prioritize_piece,
                 torrent_remove_unselected_file: self
@@ -4620,6 +4697,28 @@ mod tests {
     }
 
     #[test]
+    fn enqueue_item_preserves_torrent_tracker_timing() {
+        let item: EnqueueItem = serde_json::from_value(serde_json::json!({
+            "id": "torrent-tracker-timing",
+            "queue_id": "main",
+            "url": "magnet:?xt=urn:btih:0123456789012345678901234567890123456789",
+            "destination": "/tmp/downloads",
+            "filename": "payload",
+            "is_media": false,
+            "is_torrent": true,
+            "torrent_tracker_connect_timeout": 11,
+            "torrent_tracker_timeout": 22,
+            "torrent_tracker_interval": 33
+        }))
+        .expect("frontend enqueue payload should deserialize");
+
+        let payload = item.into_task().payload;
+        assert_eq!(payload.torrent_tracker_connect_timeout, Some(11));
+        assert_eq!(payload.torrent_tracker_timeout, Some(22));
+        assert_eq!(payload.torrent_tracker_interval, Some(33));
+    }
+
+    #[test]
     fn torrent_trackers_are_normalized_and_deduplicated() {
         assert_eq!(
             normalize_torrent_trackers(Some(
@@ -4674,6 +4773,62 @@ mod tests {
         ] {
             assert!(normalize_torrent_exclude_trackers(Some(value)).is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn torrent_tracker_timing_is_bounded_and_preserves_aria2_defaults() {
+        assert_eq!(normalize_torrent_tracker_connect_timeout(None).unwrap(), None);
+        assert_eq!(
+            normalize_torrent_tracker_connect_timeout(Some(1)).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            normalize_torrent_tracker_request_timeout(Some(MAX_TORRENT_TRACKER_TIMEOUT)).unwrap(),
+            Some(MAX_TORRENT_TRACKER_TIMEOUT)
+        );
+        assert_eq!(normalize_torrent_tracker_interval(Some(0)).unwrap(), Some(0));
+        assert!(normalize_torrent_tracker_connect_timeout(Some(0)).is_err());
+        assert!(normalize_torrent_tracker_request_timeout(Some(0)).is_err());
+        assert!(normalize_torrent_tracker_interval(Some(MAX_TORRENT_TRACKER_INTERVAL + 1)).is_err());
+
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_tracker_connect_timeout: Some(11),
+            torrent_tracker_timeout: Some(22),
+            torrent_tracker_interval: Some(33),
+            ..Default::default()
+        };
+        apply_aria2_torrent_options(&mut options, &payload).unwrap();
+        assert_eq!(
+            options.get("bt-tracker-connect-timeout"),
+            Some(&serde_json::json!("11"))
+        );
+        assert_eq!(
+            options.get("bt-tracker-timeout"),
+            Some(&serde_json::json!("22"))
+        );
+        assert_eq!(
+            options.get("bt-tracker-interval"),
+            Some(&serde_json::json!("33"))
+        );
+    }
+
+    #[test]
+    fn torrent_tracker_timing_is_not_applied_to_non_torrent_payloads() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            torrent_tracker_connect_timeout: Some(11),
+            torrent_tracker_timeout: Some(22),
+            torrent_tracker_interval: Some(33),
+            ..Default::default()
+        };
+
+        apply_aria2_torrent_options(&mut options, &payload).unwrap();
+
+        assert!(!options.contains_key("bt-tracker-connect-timeout"));
+        assert!(!options.contains_key("bt-tracker-timeout"));
+        assert!(!options.contains_key("bt-tracker-interval"));
     }
 
     #[test]

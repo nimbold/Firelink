@@ -10,6 +10,8 @@ import {
   isValidTorrentTrackerList,
   normalizeTorrentEncryptionPolicy,
   normalizeTorrentPrioritizePiece,
+  normalizeTorrentTrackerInterval,
+  normalizeTorrentTrackerTimeout,
   redactDownloadForPersistence,
   resolveDownloadConnections
 } from './downloads';
@@ -104,6 +106,23 @@ describe('Torrent encryption policy validation', () => {
     expect(normalizeTorrentEncryptionPolicy(undefined)).toBeUndefined();
     expect(normalizeTorrentEncryptionPolicy('arc4')).toBeUndefined();
     expect(normalizeTorrentEncryptionPolicy(true)).toBeUndefined();
+  });
+});
+
+describe('Torrent tracker timing validation', () => {
+  it('accepts bounded timeout values and an automatic interval', () => {
+    expect(normalizeTorrentTrackerTimeout('1')).toBe(1);
+    expect(normalizeTorrentTrackerTimeout(604800)).toBe(604800);
+    expect(normalizeTorrentTrackerInterval('0')).toBe(0);
+    expect(normalizeTorrentTrackerInterval(604800)).toBe(604800);
+  });
+
+  it('rejects zero timeouts and out-of-range timing values', () => {
+    expect(normalizeTorrentTrackerTimeout('0')).toBeUndefined();
+    expect(normalizeTorrentTrackerTimeout(604801)).toBeUndefined();
+    expect(normalizeTorrentTrackerInterval(-1)).toBeUndefined();
+    expect(normalizeTorrentTrackerInterval(604801)).toBeUndefined();
+    expect(normalizeTorrentTrackerTimeout('1.5')).toBeUndefined();
   });
 });
 

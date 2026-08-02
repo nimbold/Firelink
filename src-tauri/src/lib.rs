@@ -5802,6 +5802,13 @@ async fn validate_torrent_enqueue(
     item.torrent_trackers = queue::normalize_torrent_trackers(item.torrent_trackers.as_deref())?;
     item.torrent_exclude_trackers =
         queue::normalize_torrent_exclude_trackers(item.torrent_exclude_trackers.as_deref())?;
+    item.torrent_tracker_connect_timeout = queue::normalize_torrent_tracker_connect_timeout(
+        item.torrent_tracker_connect_timeout,
+    )?;
+    item.torrent_tracker_timeout =
+        queue::normalize_torrent_tracker_request_timeout(item.torrent_tracker_timeout)?;
+    item.torrent_tracker_interval =
+        queue::normalize_torrent_tracker_interval(item.torrent_tracker_interval)?;
     item.torrent_stop_timeout = queue::normalize_torrent_stop_timeout(item.torrent_stop_timeout)?;
     item.torrent_prioritize_piece = queue::normalize_torrent_prioritize_piece(
         item.torrent_prioritize_piece.as_deref(),

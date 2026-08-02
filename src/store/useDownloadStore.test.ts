@@ -856,6 +856,9 @@ describe('useDownloadStore', () => {
       torrentCheckIntegrity: 'yes' as unknown as boolean,
       torrentTrackers: 123 as unknown as string,
       torrentExcludeTrackers: 123 as unknown as string,
+      torrentTrackerConnectTimeout: 0,
+      torrentTrackerTimeout: 604801,
+      torrentTrackerInterval: -1,
       torrentStopTimeout: 604801,
       torrentPrioritizePiece: 'head=1G',
       torrentRemoveUnselectedFile: 'yes' as unknown as boolean,
@@ -867,6 +870,9 @@ describe('useDownloadStore', () => {
     expect(normalized.torrentCheckIntegrity).toBeUndefined();
     expect(normalized.torrentTrackers).toBeUndefined();
     expect(normalized.torrentExcludeTrackers).toBeUndefined();
+    expect(normalized.torrentTrackerConnectTimeout).toBeUndefined();
+    expect(normalized.torrentTrackerTimeout).toBeUndefined();
+    expect(normalized.torrentTrackerInterval).toBeUndefined();
     expect(normalized.torrentStopTimeout).toBeUndefined();
     expect(normalized.torrentPrioritizePiece).toBeUndefined();
     expect(normalized.torrentRemoveUnselectedFile).toBeUndefined();
@@ -1524,6 +1530,9 @@ describe('useDownloadStore', () => {
       torrentCheckIntegrity: true,
       torrentTrackers: 'https://tracker.example/announce',
       torrentExcludeTrackers: '*',
+      torrentTrackerConnectTimeout: 11,
+      torrentTrackerTimeout: 22,
+      torrentTrackerInterval: 33,
       torrentStopTimeout: 300,
       torrentPrioritizePiece: 'head=1M,tail=1M',
       torrentEncryptionPolicy: 'force-encryption',
@@ -1542,6 +1551,9 @@ describe('useDownloadStore', () => {
           torrent_check_integrity: true,
           torrent_trackers: 'https://tracker.example/announce',
           torrent_exclude_trackers: '*',
+          torrent_tracker_connect_timeout: 11,
+          torrent_tracker_timeout: 22,
+          torrent_tracker_interval: 33,
           torrent_stop_timeout: 300,
           torrent_prioritize_piece: 'head=1M,tail=1M',
           torrent_encryption_policy: 'force-encryption',

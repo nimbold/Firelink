@@ -65,6 +65,34 @@ export const normalizeTorrentEncryptionPolicy = (
   return undefined;
 };
 
+export const MAX_TORRENT_TRACKER_TIMEOUT = 604800;
+export const MAX_TORRENT_TRACKER_INTERVAL = 604800;
+
+const parseIntegerOption = (value: unknown): number | undefined => {
+  if (typeof value === 'number') {
+    return Number.isInteger(value) ? value : undefined;
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isInteger(parsed) ? parsed : undefined;
+  }
+  return undefined;
+};
+
+export const normalizeTorrentTrackerTimeout = (value: unknown): number | undefined => {
+  const parsed = parseIntegerOption(value);
+  return parsed !== undefined && parsed >= 1 && parsed <= MAX_TORRENT_TRACKER_TIMEOUT
+    ? parsed
+    : undefined;
+};
+
+export const normalizeTorrentTrackerInterval = (value: unknown): number | undefined => {
+  const parsed = parseIntegerOption(value);
+  return parsed !== undefined && parsed >= 0 && parsed <= MAX_TORRENT_TRACKER_INTERVAL
+    ? parsed
+    : undefined;
+};
+
 // Keep every filename component within the common cross-platform filesystem
 // limit. Count UTF-8 bytes because POSIX filesystems enforce bytes, while this
 // bound is also conservative for Windows filename components.

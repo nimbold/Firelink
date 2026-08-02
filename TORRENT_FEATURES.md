@@ -41,6 +41,11 @@ belong in the download UI. The Aria2 reference is the [1.37.0 manual](https://ar
   `bt-force-encryption`, `bt-require-crypto`, and `bt-min-crypto-level`:
   disabled, required obfuscated handshake, or forced ARC4 payload encryption.
   The policy is persisted and reapplied when a Torrent starts or retries.
+- Optional tracker timing controls through `bt-tracker-connect-timeout`,
+  `bt-tracker-timeout`, and `bt-tracker-interval`. Connect and request
+  timeouts are bounded to 1–604800 seconds; interval 0 restores Aria2's
+  response/progress-driven scheduling. Timing is persisted and reapplied when
+  a Torrent starts or retries.
 - Optional `bt-remove-unselected-file` cleanup after completion when a
   selected-file subset is configured. Firelink requires explicit confirmation,
   reserves the unselected paths against competing downloads, keeps those
@@ -48,8 +53,8 @@ belong in the download UI. The Aria2 reference is the [1.37.0 manual](https://ar
   after observing Aria2's completion cleanup (or on terminal failure,
   cancellation, or reconfiguration).
 - Deterministic local Aria2 smoke coverage for metadata resolution, selected
-  output, piece priority, encryption policy, pause/resume, ownership,
-  cancellation/removal, unavailable trackers, daemon failure, and
+  output, piece priority, encryption policy, tracker timing, pause/resume,
+  ownership, cancellation/removal, unavailable trackers, daemon failure, and
   `bt-stop-timeout` terminal behavior; RPC-boundary coverage is separate.
 
 ## Priority tiers for remaining work
@@ -65,9 +70,6 @@ No remaining Tier 0 items.
    per-file priority option. Firelink therefore does not pretend that
    `select-file` is file priority; this remains pending an engine capability or
    a safe product-level model.
-2. **Tracker timing controls** — expose tracker connect timeout, request
-   timeout, and interval only when their effect on battery/network behavior is
-   explained and persisted.
 
 ### Tier 2 — advanced networking and daemon tuning
 
@@ -81,4 +83,4 @@ No remaining Tier 0 items.
 The first implementation in this task was remote `.torrent` metadata intake;
 follow-up implementations add stall-timeout control, bounded peer diagnostics,
 persisted tracker exclusion, piece-preview priority, safe unselected-file
-removal, and the validated encryption policy.
+removal, the validated encryption policy, and tracker timing controls.

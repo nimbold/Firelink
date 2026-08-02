@@ -716,6 +716,9 @@ async function main() {
       {
         dir: finalDir,
         'bt-tracker': `http://127.0.0.1:${trackerPort}/announce`,
+        'bt-tracker-connect-timeout': '5',
+        'bt-tracker-timeout': '7',
+        'bt-tracker-interval': '2',
         'select-file': '1',
         'bt-prioritize-piece': 'head=32K,tail=16K',
         'index-out': indexOut,
@@ -730,6 +733,9 @@ async function main() {
       finalOptions['bt-prioritize-piece'] === 'head=32K,tail=16K',
       `Aria2 did not retain the piece-priority option: ${JSON.stringify(finalOptions['bt-prioritize-piece'])}`,
     );
+    assert(finalOptions['bt-tracker-connect-timeout'] === '5', 'Aria2 did not retain tracker connect timeout');
+    assert(finalOptions['bt-tracker-timeout'] === '7', 'Aria2 did not retain tracker request timeout');
+    assert(finalOptions['bt-tracker-interval'] === '2', 'Aria2 did not retain tracker interval');
     await rpc(client.rpcPort, client.secret, 'aria2.forcePause', [finalGid]);
     await waitForStatus(client, finalGid, 'paused', 10000);
     await rpc(client.rpcPort, client.secret, 'aria2.unpause', [finalGid]);
