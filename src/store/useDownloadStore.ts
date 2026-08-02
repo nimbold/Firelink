@@ -355,6 +355,7 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
         torrent_exclude_trackers: item.torrentExcludeTrackers || undefined,
         torrent_stop_timeout: item.torrentStopTimeout,
         torrent_prioritize_piece: item.torrentPrioritizePiece || undefined,
+        torrent_remove_unselected_file: item.torrentRemoveUnselectedFile,
         lifecycle_generation: lifecycleGeneration.toString(),
       };
 
@@ -654,13 +655,18 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
   const normalizedPrioritizePiece = typeof rawPrioritizePiece === 'string'
     ? normalizeTorrentPrioritizePiece(rawPrioritizePiece) || undefined
     : undefined;
+  const rawRemoveUnselectedFile = download.torrentRemoveUnselectedFile as unknown;
+  const normalizedRemoveUnselectedFile = typeof rawRemoveUnselectedFile === 'boolean'
+    ? rawRemoveUnselectedFile
+    : undefined;
   const normalizedOptions = rawMaxPeers !== normalizedMaxPeers ||
     rawPeerSpeedLimit !== normalizedPeerSpeedLimit ||
     rawCheckIntegrity !== normalizedCheckIntegrity ||
     rawTrackers !== normalizedTrackers ||
     rawExcludeTrackers !== normalizedExcludeTrackers ||
     rawStopTimeout !== normalizedStopTimeout ||
-    rawPrioritizePiece !== normalizedPrioritizePiece
+    rawPrioritizePiece !== normalizedPrioritizePiece ||
+    rawRemoveUnselectedFile !== normalizedRemoveUnselectedFile
     ? {
         ...download,
         torrentMaxPeers: normalizedMaxPeers,
@@ -669,7 +675,8 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
         torrentTrackers: normalizedTrackers,
         torrentExcludeTrackers: normalizedExcludeTrackers,
         torrentStopTimeout: normalizedStopTimeout,
-        torrentPrioritizePiece: normalizedPrioritizePiece
+        torrentPrioritizePiece: normalizedPrioritizePiece,
+        torrentRemoveUnselectedFile: normalizedRemoveUnselectedFile
       }
     : download;
 
@@ -2205,6 +2212,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             torrent_exclude_trackers: item.torrentExcludeTrackers || undefined,
             torrent_stop_timeout: item.torrentStopTimeout,
             torrent_prioritize_piece: item.torrentPrioritizePiece || undefined,
+            torrent_remove_unselected_file: item.torrentRemoveUnselectedFile,
             lifecycle_generation: currentDownloadLifecycle(item.id).toString(),
           });
         }

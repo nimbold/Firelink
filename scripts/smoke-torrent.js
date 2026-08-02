@@ -629,8 +629,9 @@ async function main() {
     const finalDir = path.join(tempRoot, 'final');
     const integrityDir = path.join(tempRoot, 'integrity');
     const cancelDir = path.join(tempRoot, 'cancel');
+    const removeUnselectedDir = path.join(tempRoot, 'remove-unselected');
     const stallDir = path.join(tempRoot, 'stall');
-    for (const directory of [seedRoot, probeDir, finalDir, integrityDir, cancelDir, stallDir]) fs.mkdirSync(directory, { recursive: true });
+    for (const directory of [seedRoot, probeDir, finalDir, integrityDir, cancelDir, removeUnselectedDir, stallDir]) fs.mkdirSync(directory, { recursive: true });
 
     const seederListenPort = await findAvailablePort();
     const clientListenPort = await findAvailablePort();
@@ -764,6 +765,37 @@ async function main() {
     assert(fs.readFileSync(integrityPath).equals(torrent.files[0].data), 'integrity check did not replace corrupted torrent data');
     console.log('[OK] check-integrity detected and repaired corrupted Torrent data');
 
+    const removalSkippedPath = path.join(removeUnselectedDir, torrent.name, 'skipped.bin');
+    fs.mkdirSync(path.dirname(removalSkippedPath), { recursive: true });
+    fs.writeFileSync(removalSkippedPath, Buffer.from('pre-existing file owned outside the Torrent\n'));
+    const removalGid = await rpc(client.rpcPort, client.secret, 'aria2.addTorrent', [
+      savedTorrentBytes.toString('base64'),
+      [],
+      {
+        dir: removeUnselectedDir,
+        'select-file': '1',
+        'index-out': indexOut,
+        'bt-remove-unselected-file': 'true',
+        'allow-overwrite': 'true',
+        'seed-time': '0',
+        'auto-file-renaming': 'false',
+      },
+    ]);
+    const removalOptions = await rpc(client.rpcPort, client.secret, 'aria2.getOption', [removalGid]);
+    assert(
+      removalOptions['bt-remove-unselected-file'] === 'true',
+      `Aria2 did not retain unselected-file removal: ${JSON.stringify(removalOptions['bt-remove-unselected-file'])}`,
+    );
+    await waitForTerminal(client, removalGid, 30000);
+    const removalSelectedPath = path.join(removeUnselectedDir, torrent.name, 'selected.bin');
+    assert(fs.existsSync(removalSelectedPath), 'selected Torrent output was not retained with removal enabled');
+    assert(!fs.existsSync(removalSkippedPath), 'unselected Torrent file was not removed after completion');
+    console.log('[OK] bt-remove-unselected-file deleted only the unselected pre-existing output after completion');
+
+    const canceledSkippedPath = path.join(cancelDir, torrent.name, 'skipped.bin');
+    fs.mkdirSync(path.dirname(canceledSkippedPath), { recursive: true });
+    const canceledSentinel = Buffer.from('cancellation must preserve this file\n');
+    fs.writeFileSync(canceledSkippedPath, canceledSentinel);
     const cancelGid = await rpc(client.rpcPort, client.secret, 'aria2.addTorrent', [
       savedTorrentBytes.toString('base64'),
       [],
@@ -771,6 +803,8 @@ async function main() {
         dir: cancelDir,
         'select-file': '1',
         'index-out': indexOut,
+        'bt-remove-unselected-file': 'true',
+        'allow-overwrite': 'true',
         'max-download-limit': '8K',
         'seed-time': '0',
         'auto-file-renaming': 'false',
@@ -784,7 +818,9 @@ async function main() {
       !fs.existsSync(canceledPath) || fs.statSync(canceledPath).size < torrent.files[0].data.length,
       'canceled torrent produced a complete output',
     );
-    console.log('[OK] cancel/remove stopped the second torrent before completion');
+    assert(fs.existsSync(canceledSkippedPath), 'canceled Torrent removed an unselected file before completion');
+    assert(fs.readFileSync(canceledSkippedPath).equals(canceledSentinel), 'canceled Torrent changed the unselected file');
+    console.log('[OK] cancel/remove stopped the second torrent before completion without deleting an unselected file');
 
     const stallGid = await rpc(client.rpcPort, client.secret, 'aria2.addTorrent', [
       trackerlessTorrentBytes.toString('base64'),

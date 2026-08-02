@@ -5816,10 +5816,24 @@ async fn validate_torrent_enqueue(
             item.torrent_info_hash.as_deref(),
             &metadata.info_hash,
         )?;
-        crate::torrent::validate_selected_indices(
+        let selected = crate::torrent::validate_selected_indices(
             item.torrent_file_indices.as_deref(),
             metadata.files.len(),
         )?;
+        if item.torrent_remove_unselected_file.unwrap_or(false) {
+            let Some(selected) = selected else {
+                return Err(
+                    "removing unselected Torrent files requires selecting a subset of files"
+                        .to_string(),
+                );
+            };
+            if selected.len() >= metadata.files.len() {
+                return Err(
+                    "removing unselected Torrent files requires at least one unselected file"
+                        .to_string(),
+                );
+            }
+        }
         return Ok(());
     }
 
@@ -5830,14 +5844,24 @@ async fn validate_torrent_enqueue(
     if item.torrent_file_indices.is_some() {
         return Err("magnet file selection requires resolved torrent metadata".to_string());
     }
+    if item.torrent_remove_unselected_file.unwrap_or(false) {
+        return Err(
+            "removing unselected Torrent files requires resolved torrent metadata".to_string(),
+        );
+    }
     let metadata = crate::torrent::inspect_source(&item.url)?;
     crate::torrent::validate_info_hash(item.torrent_info_hash.as_deref(), &metadata.info_hash)
+}
+
+struct ExpectedTorrentOutputPaths {
+    selected: Vec<std::path::PathBuf>,
+    unselected: Vec<std::path::PathBuf>,
 }
 
 fn expected_torrent_output_paths(
     app_handle: &tauri::AppHandle,
     item: &queue::EnqueueItem,
-) -> Result<Option<Vec<std::path::PathBuf>>, String> {
+) -> Result<Option<ExpectedTorrentOutputPaths>, String> {
     if !item.is_torrent.unwrap_or(false) {
         return Ok(None);
     }
@@ -5858,8 +5882,10 @@ fn expected_torrent_output_paths(
     }
     let canonical_destination = crate::canonicalize_with_missing_components(&destination)
         .ok_or_else(|| "torrent destination could not be canonicalized".to_string())?;
-    let mut paths = Vec::new();
-    for relative in crate::torrent::aria2_output_paths(&metadata, selected.as_deref()) {
+    let selected_relative = crate::torrent::aria2_output_paths(&metadata, selected.as_deref());
+    let resolve_paths = |relative_paths: Vec<String>| -> Result<Vec<std::path::PathBuf>, String> {
+        let mut paths = Vec::new();
+        for relative in relative_paths {
         let relative = std::path::PathBuf::from(relative);
         if relative.is_absolute()
             || relative.components().any(|component| {
@@ -5878,8 +5904,41 @@ fn expected_torrent_output_paths(
             return Err("torrent output path is outside its destination".to_string());
         }
         paths.push(canonical_path);
-    }
-    Ok(Some(paths))
+        }
+        Ok(paths)
+    };
+    let selected_paths = resolve_paths(selected_relative)?;
+    let unselected_paths = if item.torrent_remove_unselected_file.unwrap_or(false) {
+        let selected_indices = selected
+            .as_deref()
+            .ok_or_else(|| "torrent file selection is required for unselected-file removal".to_string())?;
+        let selected_indices = selected_indices.iter().copied().collect::<std::collections::HashSet<_>>();
+        let unselected_relative = metadata
+            .files
+            .iter()
+            .filter(|file| !selected_indices.contains(&file.index))
+            .map(|file| {
+                if metadata.files.len() == 1 {
+                    file.path.clone()
+                } else {
+                    format!("{}/{}", metadata.name, file.path)
+                }
+            })
+            .collect::<Vec<_>>();
+        let paths = resolve_paths(unselected_relative)?;
+        if paths.iter().any(|path| {
+            std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
+        }) {
+            return Err("unselected Torrent output path is a directory".to_string());
+        }
+        paths
+    } else {
+        Vec::new()
+    };
+    Ok(Some(ExpectedTorrentOutputPaths {
+        selected: selected_paths,
+        unselected: unselected_paths,
+    }))
 }
 
 async fn remove_magnet_metadata_probe_dir(path: &std::path::Path) -> Result<(), String> {
@@ -6131,12 +6190,23 @@ async fn enqueue_download(
                     return Err(AppError::Internal(error));
                 }
             };
-            if let Err(error) = crate::download_ownership::set_owned_paths_with_primary(
-                &app_handle,
-                &item.id,
-                &primary,
-                &paths,
-            ) {
+            let ownership_result = if item.torrent_remove_unselected_file.unwrap_or(false) {
+                crate::download_ownership::set_owned_paths_with_primary_and_removal(
+                    &app_handle,
+                    &item.id,
+                    &primary,
+                    &paths.selected,
+                    &paths.unselected,
+                )
+            } else {
+                crate::download_ownership::set_owned_paths_with_primary(
+                    &app_handle,
+                    &item.id,
+                    &primary,
+                    &paths.selected,
+                )
+            };
+            if let Err(error) = ownership_result {
                 let _ = crate::download_ownership::remove(&app_handle, &id);
                 state
                     .queue_manager
@@ -6147,6 +6217,17 @@ async fn enqueue_download(
         }
         Ok(None) => {}
         Err(error) => {
+            let _ = crate::download_ownership::remove(&app_handle, &id);
+            state
+                .queue_manager
+                .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
+                .await;
+            return Err(AppError::Internal(error));
+        }
+    }
+    if !item.torrent_remove_unselected_file.unwrap_or(false) {
+        if let Err(error) = crate::download_ownership::clear_torrent_removal_paths(&app_handle, &id)
+        {
             let _ = crate::download_ownership::remove(&app_handle, &id);
             state
                 .queue_manager
@@ -6283,12 +6364,23 @@ async fn enqueue_many(
                         continue;
                     }
                 };
-                if let Err(error) = crate::download_ownership::set_owned_paths_with_primary(
-                    &app_handle,
-                    &item.id,
-                    &primary,
-                    &paths,
-                ) {
+                let ownership_result = if item.torrent_remove_unselected_file.unwrap_or(false) {
+                    crate::download_ownership::set_owned_paths_with_primary_and_removal(
+                        &app_handle,
+                        &item.id,
+                        &primary,
+                        &paths.selected,
+                        &paths.unselected,
+                    )
+                } else {
+                    crate::download_ownership::set_owned_paths_with_primary(
+                        &app_handle,
+                        &item.id,
+                        &primary,
+                        &paths.selected,
+                    )
+                };
+                if let Err(error) = ownership_result {
                     let _ = crate::download_ownership::remove(&app_handle, &id);
                     state
                         .queue_manager
@@ -6305,6 +6397,24 @@ async fn enqueue_many(
             }
             Ok(None) => {}
             Err(error) => {
+                let _ = crate::download_ownership::remove(&app_handle, &id);
+                state
+                    .queue_manager
+                    .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
+                    .await;
+                results.push(crate::ipc::EnqueueResult {
+                    id,
+                    success: false,
+                    filename: None,
+                    error: Some(error),
+                });
+                continue;
+            }
+        }
+        if !item.torrent_remove_unselected_file.unwrap_or(false) {
+            if let Err(error) =
+                crate::download_ownership::clear_torrent_removal_paths(&app_handle, &id)
+            {
                 let _ = crate::download_ownership::remove(&app_handle, &id);
                 state
                     .queue_manager

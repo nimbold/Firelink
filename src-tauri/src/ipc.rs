@@ -206,6 +206,9 @@ pub struct DownloadItem {
     #[serde(default)]
     #[ts(optional)]
     pub torrent_prioritize_piece: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_remove_unselected_file: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, TS)]

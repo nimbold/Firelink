@@ -233,6 +233,7 @@ export const AddDownloadsModal = () => {
   const [torrentMaxPeers, setTorrentMaxPeers] = useState('');
   const [torrentPeerSpeedLimit, setTorrentPeerSpeedLimit] = useState('');
   const [torrentCheckIntegrity, setTorrentCheckIntegrity] = useState(false);
+  const [torrentRemoveUnselectedFile, setTorrentRemoveUnselectedFile] = useState(false);
   const [torrentTrackers, setTorrentTrackers] = useState('');
   const [torrentExcludeTrackers, setTorrentExcludeTrackers] = useState('');
   const [torrentStopTimeout, setTorrentStopTimeout] = useState('0');
@@ -997,6 +998,21 @@ export const AddDownloadsModal = () => {
       addToast({ message: t($ => $.addDownloads.torrentStopTimeoutInvalid), variant: 'error', isActionable: true });
       return;
     }
+    const removableTorrentFileCount = parsedItems.reduce((total, item) => {
+      if (item.selected === false || !item.isTorrent || !item.torrentFiles?.length) return total;
+      const selected = item.selectedTorrentFileIndices;
+      if (!selected || selected.length === 0 || selected.length >= item.torrentFiles.length) return total;
+      return total + item.torrentFiles.length - selected.length;
+    }, 0);
+    if (
+      torrentRemoveUnselectedFile
+      && removableTorrentFileCount > 0
+      && !window.confirm(t($ => $.addDownloads.torrentRemoveUnselectedFileConfirm, {
+        count: removableTorrentFileCount
+      }))
+    ) {
+      return;
+    }
     if (saveInDedicatedFolder && !sanitizeBatchFolderName(dedicatedFolderName)) {
       addToast({
         message: t($ => $.addDownloads.dedicatedFolderNameRequired),
@@ -1476,6 +1492,9 @@ export const AddDownloadsModal = () => {
             ? normalizeSpeedLimitForBackend(torrentPeerSpeedLimit) || undefined
             : undefined,
           torrentCheckIntegrity: item.isTorrent ? torrentCheckIntegrity : undefined,
+          torrentRemoveUnselectedFile: item.isTorrent && torrentRemoveUnselectedFile && hasPartialTorrentSelection(item)
+            ? true
+            : undefined,
           torrentTrackers: item.isTorrent ? torrentTrackers.trim() || undefined : undefined,
           torrentExcludeTrackers: item.isTorrent ? torrentExcludeTrackers.trim() || undefined : undefined,
           torrentStopTimeout: item.isTorrent && torrentStopTimeout.trim() ? Number(torrentStopTimeout) : undefined,
@@ -1612,6 +1631,11 @@ export const AddDownloadsModal = () => {
   };
 
   const selectedItems = parsedItems.filter(item => item.selected !== false);
+  const hasPartialTorrentSelection = (item: AddDownloadDraftRow): boolean => {
+    if (!item.isTorrent || !item.torrentFiles?.length) return false;
+    const selected = item.selectedTorrentFileIndices;
+    return Boolean(selected && selected.length > 0 && selected.length < item.torrentFiles.length);
+  };
   const selectedItem = selectedItemIndex === null ? undefined : parsedItems[selectedItemIndex];
   const selectedPlaylistSourceUrl = selectedItem?.playlistSourceUrl;
   const selectedPlaylistRows = selectedPlaylistSourceUrl
@@ -2137,6 +2161,21 @@ export const AddDownloadsModal = () => {
                         <span className="block">{t($ => $.addDownloads.torrentVerifyIntegrity)}</span>
                         <span className="block text-[10px] text-text-muted">
                           {t($ => $.addDownloads.torrentVerifyIntegrityHint)}
+                        </span>
+                      </span>
+                    </label>
+                    <label className="flex items-start gap-2 text-text-primary pt-2 border-t border-border-modal/50">
+                      <input
+                        type="checkbox"
+                        checked={torrentRemoveUnselectedFile}
+                        onChange={event => setTorrentRemoveUnselectedFile(event.target.checked)}
+                        disabled={parsedItems.every(item => !hasPartialTorrentSelection(item))}
+                        className="accent-red-500 mt-0.5 disabled:opacity-50"
+                      />
+                      <span>
+                        <span className="block">{t($ => $.addDownloads.torrentRemoveUnselectedFile)}</span>
+                        <span className="block text-[10px] text-text-muted">
+                          {t($ => $.addDownloads.torrentRemoveUnselectedFileHint)}
                         </span>
                       </span>
                     </label>

@@ -7,7 +7,7 @@ use std::sync::Mutex;
 const DATABASE_NAME: &str = "firelink.sqlite";
 const LEGACY_STORE_NAME: &str = "store.bin";
 const LEGACY_BUNDLE_IDENTIFIER: &str = "com.nima.tauri-app";
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 3;
 pub(crate) const TOKEN_CHANGED_NOTICE: &str = "pairing-token-changed";
 pub const PAIRING_TOKEN_KEYCHAIN_ID: &str = "extension-pairing-token";
 // Development builds are a different executable identity from the packaged
@@ -191,6 +191,19 @@ fn migrate_schema(connection: &mut Connection, from_version: i64) -> Result<(), 
                 ",
             )
             .map_err(|error| format!("failed to migrate download ownership paths: {error}"))?;
+    }
+
+    if from_version < 3 {
+        transaction
+            .execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS download_removal_paths (
+                    id TEXT PRIMARY KEY,
+                    paths TEXT NOT NULL
+                );
+                ",
+            )
+            .map_err(|error| format!("failed to migrate torrent removal paths: {error}"))?;
     }
 
     transaction
@@ -1266,11 +1279,22 @@ pub fn set_ownership_paths(
     primary_path: &str,
     paths: &[String],
 ) -> Result<(), String> {
+    set_ownership_paths_checked(connection, id, primary_path, paths, &[])
+}
+
+fn set_ownership_paths_checked(
+    connection: &Connection,
+    id: &str,
+    primary_path: &str,
+    paths: &[String],
+    removal_paths: &[String],
+) -> Result<(), String> {
     let mut statement = connection
         .prepare(
-            "SELECT ownership.id, ownership.primary_path, paths.paths
+            "SELECT ownership.id, ownership.primary_path, paths.paths, removal.paths
              FROM download_ownership AS ownership
              LEFT JOIN download_owned_paths AS paths ON paths.id = ownership.id
+             LEFT JOIN download_removal_paths AS removal ON removal.id = ownership.id
              WHERE ownership.id <> ?1",
         )
         .map_err(|error| format!("failed to prepare download ownership check: {error}"))?;
@@ -1281,15 +1305,22 @@ pub fn set_ownership_paths(
                 .get::<_, Option<String>>(2)?
                 .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
                 .unwrap_or_else(|| vec![primary.clone()]);
-            Ok((primary, owned))
+            let removal = row
+                .get::<_, Option<String>>(3)?
+                .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+                .unwrap_or_default();
+            Ok((primary, owned, removal))
         })
         .map_err(|error| format!("failed to check download ownership paths: {error}"))?;
     for row in existing {
-        let (existing_primary, owned) =
+        let (existing_primary, owned, removal) =
             row.map_err(|error| format!("failed to read download ownership paths: {error}"))?;
-        let new_paths = std::iter::once(primary_path).chain(paths.iter().map(String::as_str));
+        let new_paths = std::iter::once(primary_path)
+            .chain(paths.iter().map(String::as_str))
+            .chain(removal_paths.iter().map(String::as_str));
         let existing_paths = std::iter::once(existing_primary.as_str())
-            .chain(owned.iter().map(String::as_str));
+            .chain(owned.iter().map(String::as_str))
+            .chain(removal.iter().map(String::as_str));
         if new_paths.clone().any(|new_path| {
             existing_paths
                 .clone()
@@ -1318,7 +1349,39 @@ pub fn set_ownership_paths(
     Ok(())
 }
 
+pub fn set_ownership_and_removal_paths(
+    connection: &Connection,
+    id: &str,
+    primary_path: &str,
+    paths: &[String],
+    removal_paths: &[String],
+) -> Result<(), String> {
+    set_ownership_paths_checked(connection, id, primary_path, paths, removal_paths)?;
+    if removal_paths.is_empty() {
+        connection
+            .execute(
+                "DELETE FROM download_removal_paths WHERE id = ?1",
+                params![id],
+            )
+            .map_err(|error| format!("failed to clear torrent removal paths: {error}"))?;
+    } else {
+        let encoded_paths = serde_json::to_string(removal_paths)
+            .map_err(|error| format!("failed to encode torrent removal paths: {error}"))?;
+        connection
+            .execute(
+                "INSERT INTO download_removal_paths (id, paths) VALUES (?1, ?2)
+                 ON CONFLICT(id) DO UPDATE SET paths = excluded.paths",
+                params![id, encoded_paths],
+            )
+            .map_err(|error| format!("failed to save torrent removal paths: {error}"))?;
+    }
+    Ok(())
+}
+
 pub fn remove_ownership(connection: &Connection, id: &str) -> Result<(), String> {
+    connection
+        .execute("DELETE FROM download_removal_paths WHERE id = ?1", params![id])
+        .map_err(|error| format!("failed to delete torrent removal paths: {error}"))?;
     connection
         .execute("DELETE FROM download_owned_paths WHERE id = ?1", params![id])
         .map_err(|error| format!("failed to delete download ownership paths: {error}"))?;
@@ -1326,6 +1389,33 @@ pub fn remove_ownership(connection: &Connection, id: &str) -> Result<(), String>
         .execute("DELETE FROM download_ownership WHERE id = ?1", params![id])
         .map_err(|error| format!("failed to delete ownership data: {error}"))?;
     Ok(())
+}
+
+pub fn remove_torrent_removal_paths(connection: &Connection, id: &str) -> Result<(), String> {
+    connection
+        .execute("DELETE FROM download_removal_paths WHERE id = ?1", params![id])
+        .map_err(|error| format!("failed to clear torrent removal paths: {error}"))?;
+    Ok(())
+}
+
+pub fn load_torrent_removal_paths(
+    connection: &Connection,
+    id: &str,
+) -> Result<Vec<String>, String> {
+    connection
+        .query_row(
+            "SELECT paths FROM download_removal_paths WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("failed to read torrent removal paths: {error}"))?
+        .map(|value| {
+            serde_json::from_str::<Vec<String>>(&value)
+                .map_err(|error| format!("failed to decode torrent removal paths: {error}"))
+        })
+        .transpose()
+        .map(|paths| paths.unwrap_or_default())
 }
 
 pub fn has_user_data(connection: &Connection) -> Result<bool, String> {
@@ -2463,5 +2553,38 @@ mod tests {
         )
         .expect_err("a torrent root must not be reused");
         assert!(error.contains("already owned"));
+    }
+
+    #[test]
+    fn removal_reservations_block_later_download_ownership_claims() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let connection = state.lock().unwrap();
+
+        set_ownership_and_removal_paths(
+            &connection,
+            "torrent",
+            "/downloads/selected.bin",
+            &["/downloads/selected.bin".to_string()],
+            &["/downloads/unselected.bin".to_string()],
+        )
+        .unwrap();
+        let error = set_ownership_paths(
+            &connection,
+            "later",
+            "/downloads/unselected.bin",
+            &["/downloads/unselected.bin".to_string()],
+        )
+        .expect_err("a planned Torrent deletion must reserve its path");
+
+        assert!(error.contains("already owned"));
+        remove_torrent_removal_paths(&connection, "torrent").unwrap();
+        set_ownership_paths(
+            &connection,
+            "later",
+            "/downloads/unselected.bin",
+            &["/downloads/unselected.bin".to_string()],
+        )
+        .unwrap();
     }
 }

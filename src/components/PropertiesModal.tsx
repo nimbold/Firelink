@@ -87,6 +87,7 @@ export const PropertiesModal = () => {
   const [liveTorrentMaxPeersValue, setLiveTorrentMaxPeersValue] = useState('');
   const [liveTorrentPeerSpeedLimitValue, setLiveTorrentPeerSpeedLimitValue] = useState('');
   const [torrentCheckIntegrity, setTorrentCheckIntegrity] = useState(false);
+  const [torrentRemoveUnselectedFile, setTorrentRemoveUnselectedFile] = useState(false);
   const [torrentTrackers, setTorrentTrackers] = useState('');
   const [torrentExcludeTrackers, setTorrentExcludeTrackers] = useState('');
   const [torrentStopTimeout, setTorrentStopTimeout] = useState('0');
@@ -191,6 +192,7 @@ export const PropertiesModal = () => {
         );
         setLiveTorrentPeerSpeedLimitValue(activeItem.torrentPeerSpeedLimit || '');
         setTorrentCheckIntegrity(activeItem.torrentCheckIntegrity === true);
+        setTorrentRemoveUnselectedFile(activeItem.torrentRemoveUnselectedFile === true);
         setTorrentTrackers(activeItem.torrentTrackers || '');
         setTorrentExcludeTrackers(activeItem.torrentExcludeTrackers || '');
         setTorrentStopTimeout(activeItem.torrentStopTimeout === undefined ? '0' : String(activeItem.torrentStopTimeout));
@@ -360,6 +362,18 @@ export const PropertiesModal = () => {
       setErrorMessage(t($ => $.properties.torrentStopTimeoutInvalid));
       return;
     }
+    if (item.isTorrent && torrentRemoveUnselectedFile && !item.torrentFileIndices?.length) {
+      setErrorMessage(t($ => $.properties.torrentRemoveUnselectedFileSelectionRequired));
+      return;
+    }
+    if (
+      item.isTorrent
+      && torrentRemoveUnselectedFile
+      && !item.torrentRemoveUnselectedFile
+      && !window.confirm(t($ => $.properties.torrentRemoveUnselectedFileConfirm))
+    ) {
+      return;
+    }
 
     const updates: Partial<DownloadItem> = {
       url,
@@ -381,6 +395,9 @@ export const PropertiesModal = () => {
             torrentExcludeTrackers: torrentExcludeTrackers.trim() || undefined,
             torrentStopTimeout: normalizedStopTimeout,
             torrentPrioritizePiece: normalizeTorrentPrioritizePiece(torrentPrioritizePiece) || undefined,
+            torrentRemoveUnselectedFile: item.torrentFileIndices !== undefined
+              ? torrentRemoveUnselectedFile
+              : undefined,
           }
         : {}),
       ...(connectionsDirty
@@ -970,6 +987,25 @@ export const PropertiesModal = () => {
                     />
                     <span id="torrent-check-integrity-hint" className="text-[11px] text-text-muted">
                       {t($ => $.properties.torrentVerifyIntegrityHint)}
+                    </span>
+                  </label>
+                  <label className="text-xs text-text-muted text-right" htmlFor="torrent-remove-unselected-file">
+                    {t($ => $.properties.torrentRemoveUnselectedFile)}
+                  </label>
+                  <label className="flex items-start gap-2 text-xs text-text-primary">
+                    <input
+                      id="torrent-remove-unselected-file"
+                      type="checkbox"
+                      checked={torrentRemoveUnselectedFile}
+                      onChange={event => setTorrentRemoveUnselectedFile(event.currentTarget.checked)}
+                      disabled={transferLocked || !item.torrentFileIndices?.length}
+                      className="accent-red-500 mt-0.5 disabled:opacity-50"
+                      aria-describedby="torrent-remove-unselected-file-hint"
+                    />
+                    <span id="torrent-remove-unselected-file-hint" className="text-[11px] text-text-muted">
+                      {item.torrentFileIndices?.length
+                        ? t($ => $.properties.torrentRemoveUnselectedFileHint)
+                        : t($ => $.properties.torrentRemoveUnselectedFileSelectionRequired)}
                     </span>
                   </label>
                 </>

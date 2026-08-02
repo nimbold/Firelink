@@ -220,6 +220,7 @@ pub struct SpawnPayload {
     pub torrent_exclude_trackers: Option<String>,
     pub torrent_stop_timeout: Option<u32>,
     pub torrent_prioritize_piece: Option<String>,
+    pub torrent_remove_unselected_file: bool,
 }
 
 /// A sidecar spawner. In production this calls the real aria2/yt-dlp
@@ -1907,10 +1908,51 @@ impl<R: tauri::Runtime> QueueManager<R> {
         // from the previous lifecycle before releasing its permit.
         self.next_aria2_control_epoch(id).await;
         self.cancel_aria2_retries(id).await;
+        let torrent_removal_requested = self
+            .aria2_payloads
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|payload| payload.is_torrent && payload.torrent_remove_unselected_file);
         match outcome {
             PendingOutcome::Complete => {
                 self.clear_aria2_retry_state(id).await;
                 self.forget_aria2_gid(id).await;
+                if torrent_removal_requested {
+                    match crate::download_ownership::torrent_removal_paths_for_id(
+                        &self.app_handle,
+                        id,
+                    ) {
+                        Ok(paths) if paths.iter().all(|path| !path.exists()) => {
+                            if let Err(error) =
+                                crate::download_ownership::clear_torrent_removal_paths(
+                                    &self.app_handle,
+                                    id,
+                                )
+                            {
+                                log::warn!(
+                                    "aria2 torrent removal reservation [{}]: could not clear after completion: {}",
+                                    id,
+                                    error
+                                );
+                            }
+                        }
+                        Ok(paths) => {
+                            log::warn!(
+                                "aria2 torrent removal reservation [{}]: keeping {} path(s) reserved because Aria2 cleanup was not observed",
+                                id,
+                                paths.len()
+                            );
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "aria2 torrent removal reservation [{}]: could not verify cleanup: {}",
+                                id,
+                                error
+                            );
+                        }
+                    }
+                }
                 self.release_registered_id(id).await;
                 self.release_permit(id).await;
                 self.emit_state(id, DownloadStatus::Completed);
@@ -1931,6 +1973,17 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
                 self.clear_aria2_retry_state(id).await;
                 self.forget_aria2_gid(id).await;
+                if torrent_removal_requested {
+                    if let Err(clear_error) =
+                        crate::download_ownership::clear_torrent_removal_paths(&self.app_handle, id)
+                    {
+                        log::warn!(
+                            "aria2 torrent removal reservation [{}]: could not clear after terminal failure: {}",
+                            id,
+                            clear_error
+                        );
+                    }
+                }
                 self.release_registered_id(id).await;
                 self.release_permit(id).await;
                 self.emit_failed(id, error);
@@ -3533,6 +3586,21 @@ fn apply_aria2_torrent_options(
             serde_json::json!(piece_priority),
         );
     }
+    if payload.torrent_remove_unselected_file {
+        let Some(indices) = payload.torrent_file_indices.as_deref() else {
+            return Err(
+                "removing unselected Torrent files requires selecting a subset of files"
+                    .to_string(),
+            );
+        };
+        if indices.is_empty() {
+            return Err("torrent file selection is invalid".to_string());
+        }
+        options.insert(
+            "bt-remove-unselected-file".to_string(),
+            serde_json::json!("true"),
+        );
+    }
     if payload.torrent_check_integrity {
         options.insert(
             "check-integrity".to_string(),
@@ -4153,6 +4221,9 @@ pub struct EnqueueItem {
     pub torrent_prioritize_piece: Option<String>,
     #[serde(default)]
     #[ts(optional)]
+    pub torrent_remove_unselected_file: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
     pub lifecycle_generation: Option<String>,
 }
 
@@ -4205,6 +4276,9 @@ impl EnqueueItem {
                 torrent_exclude_trackers: self.torrent_exclude_trackers,
                 torrent_stop_timeout: self.torrent_stop_timeout,
                 torrent_prioritize_piece: self.torrent_prioritize_piece,
+                torrent_remove_unselected_file: self
+                    .torrent_remove_unselected_file
+                    .unwrap_or(false),
             },
         }
     }
@@ -4597,6 +4671,52 @@ mod tests {
     }
 
     #[test]
+    fn torrent_unselected_file_removal_requires_a_non_empty_file_selection() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_remove_unselected_file: true,
+            torrent_file_indices: Some(vec![]),
+            ..Default::default()
+        };
+
+        let error = apply_aria2_torrent_options(&mut options, &payload).unwrap_err();
+        assert!(error.contains("file selection"));
+        assert!(!options.contains_key("bt-remove-unselected-file"));
+    }
+
+    #[test]
+    fn torrent_unselected_file_removal_is_emitted_only_for_selected_torrent_files() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_remove_unselected_file: true,
+            torrent_file_indices: Some(vec![1]),
+            ..Default::default()
+        };
+
+        apply_aria2_torrent_options(&mut options, &payload).unwrap();
+
+        assert_eq!(
+            options.get("bt-remove-unselected-file"),
+            Some(&serde_json::json!("true"))
+        );
+    }
+
+    #[test]
+    fn torrent_unselected_file_removal_is_not_applied_without_torrent_selection() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_remove_unselected_file: true,
+            ..Default::default()
+        };
+
+        let error = apply_aria2_torrent_options(&mut options, &payload).unwrap_err();
+        assert!(error.contains("subset"));
+    }
+
+    #[test]
     fn torrent_peer_diagnostics_are_redacted_and_bounded() {
         let mut result = vec![serde_json::json!({
             "peerId": "secret-peer-id",
@@ -4708,6 +4828,24 @@ mod tests {
             item.into_task().payload.torrent_prioritize_piece.as_deref(),
             Some("head=2M,tail=1M")
         );
+    }
+
+    #[test]
+    fn enqueue_item_carries_torrent_unselected_file_removal_into_the_spawn_payload() {
+        let item: EnqueueItem = serde_json::from_value(serde_json::json!({
+            "id": "torrent-remove-unselected",
+            "queue_id": "main",
+            "url": "file:///tmp/payload.torrent",
+            "destination": "/tmp/downloads",
+            "filename": "payload",
+            "is_media": false,
+            "is_torrent": true,
+            "torrent_file_indices": [1],
+            "torrent_remove_unselected_file": true
+        }))
+        .expect("frontend enqueue payload should deserialize");
+
+        assert!(item.into_task().payload.torrent_remove_unselected_file);
     }
 
     #[test]
