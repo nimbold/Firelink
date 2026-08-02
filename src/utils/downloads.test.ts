@@ -8,6 +8,7 @@ import {
   canonicalizeDownloadFileName,
   isValidTorrentExcludeTrackerList,
   isValidTorrentTrackerList,
+  normalizeTorrentEncryptionPolicy,
   normalizeTorrentPrioritizePiece,
   redactDownloadForPersistence,
   resolveDownloadConnections
@@ -89,6 +90,20 @@ describe('Torrent piece priority validation', () => {
     for (const value of ['head,head', 'middle', 'head=0K', 'tail=1G', 'head=1K,', 'head=1025M']) {
       expect(normalizeTorrentPrioritizePiece(value)).toBeNull();
     }
+  });
+});
+
+describe('Torrent encryption policy validation', () => {
+  it('accepts only the canonical policy states', () => {
+    expect(normalizeTorrentEncryptionPolicy('disabled')).toBe('disabled');
+    expect(normalizeTorrentEncryptionPolicy('require-crypto')).toBe('require-crypto');
+    expect(normalizeTorrentEncryptionPolicy('force-encryption')).toBe('force-encryption');
+  });
+
+  it('clears unknown or malformed persisted values', () => {
+    expect(normalizeTorrentEncryptionPolicy(undefined)).toBeUndefined();
+    expect(normalizeTorrentEncryptionPolicy('arc4')).toBeUndefined();
+    expect(normalizeTorrentEncryptionPolicy(true)).toBeUndefined();
   });
 });
 

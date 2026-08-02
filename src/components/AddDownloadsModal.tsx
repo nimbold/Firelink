@@ -13,7 +13,7 @@ import { FolderPlus, Save, Settings, Shield, RefreshCw, FileText, HardDrive, Dat
 import { open } from '@tauri-apps/plugin-dialog';
 import { invokeCommand as invoke } from '../ipc';
 import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResolutionModal';
-import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentPrioritizePiece } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentPrioritizePiece, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type TorrentEncryptionPolicy } from '../utils/downloads';
 import { fetchMediaMetadataDeduped, fetchMediaPlaylistMetadataDeduped } from '../utils/mediaMetadata';
 import {
   expandTilde,
@@ -234,6 +234,7 @@ export const AddDownloadsModal = () => {
   const [torrentPeerSpeedLimit, setTorrentPeerSpeedLimit] = useState('');
   const [torrentCheckIntegrity, setTorrentCheckIntegrity] = useState(false);
   const [torrentRemoveUnselectedFile, setTorrentRemoveUnselectedFile] = useState(false);
+  const [torrentEncryptionPolicy, setTorrentEncryptionPolicy] = useState<TorrentEncryptionPolicy>(TORRENT_ENCRYPTION_POLICY_DISABLED);
   const [torrentTrackers, setTorrentTrackers] = useState('');
   const [torrentExcludeTrackers, setTorrentExcludeTrackers] = useState('');
   const [torrentStopTimeout, setTorrentStopTimeout] = useState('0');
@@ -1495,6 +1496,9 @@ export const AddDownloadsModal = () => {
           torrentRemoveUnselectedFile: item.isTorrent && torrentRemoveUnselectedFile && hasPartialTorrentSelection(item)
             ? true
             : undefined,
+          torrentEncryptionPolicy: item.isTorrent && torrentEncryptionPolicy !== TORRENT_ENCRYPTION_POLICY_DISABLED
+            ? torrentEncryptionPolicy
+            : undefined,
           torrentTrackers: item.isTorrent ? torrentTrackers.trim() || undefined : undefined,
           torrentExcludeTrackers: item.isTorrent ? torrentExcludeTrackers.trim() || undefined : undefined,
           torrentStopTimeout: item.isTorrent && torrentStopTimeout.trim() ? Number(torrentStopTimeout) : undefined,
@@ -2164,6 +2168,31 @@ export const AddDownloadsModal = () => {
                         </span>
                       </span>
                     </label>
+                    <div className="grid grid-cols-[1fr_auto] gap-2 items-center pt-2 border-t border-border-modal/50">
+                      <label htmlFor="torrent-encryption-policy" className="text-text-muted">
+                        {t($ => $.addDownloads.torrentEncryptionPolicy)}
+                      </label>
+                      <select
+                        id="torrent-encryption-policy"
+                        value={torrentEncryptionPolicy}
+                        onChange={event => setTorrentEncryptionPolicy(event.currentTarget.value as TorrentEncryptionPolicy)}
+                        aria-describedby="torrent-encryption-policy-hint"
+                        className="app-control max-w-56 px-2 py-1 text-xs"
+                      >
+                        <option value={TORRENT_ENCRYPTION_POLICY_DISABLED}>
+                          {t($ => $.addDownloads.torrentEncryptionDisabled)}
+                        </option>
+                        <option value={TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO}>
+                          {t($ => $.addDownloads.torrentEncryptionRequireCrypto)}
+                        </option>
+                        <option value={TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION}>
+                          {t($ => $.addDownloads.torrentEncryptionForceEncryption)}
+                        </option>
+                      </select>
+                      <p id="torrent-encryption-policy-hint" className="col-span-2 text-[10px] text-text-muted">
+                        {t($ => $.addDownloads.torrentEncryptionPolicyHint)}
+                      </p>
+                    </div>
                     <label className="flex items-start gap-2 text-text-primary pt-2 border-t border-border-modal/50">
                       <input
                         type="checkbox"

@@ -221,6 +221,7 @@ pub struct SpawnPayload {
     pub torrent_stop_timeout: Option<u32>,
     pub torrent_prioritize_piece: Option<String>,
     pub torrent_remove_unselected_file: bool,
+    pub torrent_encryption_policy: Option<String>,
 }
 
 /// A sidecar spawner. In production this calls the real aria2/yt-dlp
@@ -3506,6 +3507,23 @@ pub(crate) fn normalize_torrent_exclude_trackers(
     normalize_torrent_tracker_list(value, true)
 }
 
+pub(crate) fn normalize_torrent_encryption_policy(
+    value: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    match raw {
+        "disabled" => Ok(None),
+        "require-crypto" => Ok(Some("require-crypto".to_string())),
+        "force-encryption" => Ok(Some("force-encryption".to_string())),
+        _ => Err(
+            "torrent encryption policy must be disabled, require-crypto, or force-encryption"
+                .to_string(),
+        ),
+    }
+}
+
 fn apply_aria2_torrent_options(
     options: &mut serde_json::Map<String, serde_json::Value>,
     payload: &SpawnPayload,
@@ -3513,6 +3531,30 @@ fn apply_aria2_torrent_options(
     if !payload.is_torrent {
         return Ok(());
     }
+
+    let encryption_policy =
+        normalize_torrent_encryption_policy(payload.torrent_encryption_policy.as_deref())?;
+    let (force_encryption, require_crypto, min_crypto_level) =
+        match encryption_policy.as_deref() {
+            Some("require-crypto") => (false, true, "plain"),
+            Some("force-encryption") => (true, true, "arc4"),
+            None => (false, false, "plain"),
+            Some(policy) => {
+                return Err(format!("unsupported normalized Torrent encryption policy: {policy}"));
+            }
+        };
+    options.insert(
+        "bt-force-encryption".to_string(),
+        serde_json::json!(force_encryption.to_string()),
+    );
+    options.insert(
+        "bt-require-crypto".to_string(),
+        serde_json::json!(require_crypto.to_string()),
+    );
+    options.insert(
+        "bt-min-crypto-level".to_string(),
+        serde_json::json!(min_crypto_level),
+    );
 
     let seed_time = payload
         .torrent_seed_time
@@ -4224,6 +4266,9 @@ pub struct EnqueueItem {
     pub torrent_remove_unselected_file: Option<bool>,
     #[serde(default)]
     #[ts(optional)]
+    pub torrent_encryption_policy: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
     pub lifecycle_generation: Option<String>,
 }
 
@@ -4279,6 +4324,7 @@ impl EnqueueItem {
                 torrent_remove_unselected_file: self
                     .torrent_remove_unselected_file
                     .unwrap_or(false),
+                torrent_encryption_policy: self.torrent_encryption_policy,
             },
         }
     }
@@ -4343,6 +4389,87 @@ mod tests {
 
         assert_eq!(options.get("seed-time"), Some(&serde_json::json!("0")));
         assert!(!options.contains_key("max-upload-limit"));
+        assert_eq!(
+            options.get("bt-force-encryption"),
+            Some(&serde_json::json!("false"))
+        );
+        assert_eq!(
+            options.get("bt-require-crypto"),
+            Some(&serde_json::json!("false"))
+        );
+        assert_eq!(
+            options.get("bt-min-crypto-level"),
+            Some(&serde_json::json!("plain"))
+        );
+    }
+
+    #[test]
+    fn torrent_encryption_policy_maps_to_one_consistent_aria2_policy() {
+        let cases = [
+            (
+                Some("require-crypto"),
+                ("false", "true", "plain"),
+            ),
+            (
+                Some("force-encryption"),
+                ("true", "true", "arc4"),
+            ),
+            (None, ("false", "false", "plain")),
+        ];
+
+        for (policy, expected) in cases {
+            let mut options = serde_json::Map::new();
+            let payload = SpawnPayload {
+                is_torrent: true,
+                torrent_encryption_policy: policy.map(str::to_string),
+                ..Default::default()
+            };
+
+            apply_aria2_torrent_options(&mut options, &payload).unwrap();
+
+            assert_eq!(
+                options.get("bt-force-encryption"),
+                Some(&serde_json::json!(expected.0))
+            );
+            assert_eq!(
+                options.get("bt-require-crypto"),
+                Some(&serde_json::json!(expected.1))
+            );
+            assert_eq!(
+                options.get("bt-min-crypto-level"),
+                Some(&serde_json::json!(expected.2))
+            );
+        }
+    }
+
+    #[test]
+    fn torrent_encryption_policy_rejects_unknown_values() {
+        assert_eq!(normalize_torrent_encryption_policy(None).unwrap(), None);
+        assert_eq!(
+            normalize_torrent_encryption_policy(Some(" disabled ")).unwrap(),
+            None
+        );
+        assert_eq!(
+            normalize_torrent_encryption_policy(Some("require-crypto")).unwrap(),
+            Some("require-crypto".to_string())
+        );
+        assert!(normalize_torrent_encryption_policy(Some("arc4")).is_err());
+        assert!(normalize_torrent_encryption_policy(Some("true")).is_err());
+    }
+
+    #[test]
+    fn torrent_encryption_policy_is_not_applied_to_non_torrent_payloads() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            torrent_encryption_policy: Some("force-encryption".to_string()),
+            ..Default::default()
+        };
+
+        apply_aria2_torrent_options(&mut options, &payload).unwrap();
+
+        assert!(!options.contains_key("bt-force-encryption"));
+        assert!(!options.contains_key("bt-require-crypto"));
+        assert!(!options.contains_key("bt-min-crypto-level"));
     }
 
     #[test]
@@ -4470,6 +4597,26 @@ mod tests {
         .expect("frontend enqueue payload should deserialize");
 
         assert!(item.into_task().payload.torrent_check_integrity);
+    }
+
+    #[test]
+    fn enqueue_item_preserves_torrent_encryption_policy() {
+        let item: EnqueueItem = serde_json::from_value(serde_json::json!({
+            "id": "torrent-encryption",
+            "queue_id": "main",
+            "url": "magnet:?xt=urn:btih:0123456789012345678901234567890123456789",
+            "destination": "/tmp/downloads",
+            "filename": "payload",
+            "is_media": false,
+            "is_torrent": true,
+            "torrent_encryption_policy": "force-encryption"
+        }))
+        .expect("frontend enqueue payload should deserialize");
+
+        assert_eq!(
+            item.into_task().payload.torrent_encryption_policy.as_deref(),
+            Some("force-encryption")
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
 import type { Queue } from '../bindings/Queue';
 import { useSettingsStore } from './useSettingsStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
-import { canonicalizeDownloadFileName, categoryForFileName, isActiveDownloadStatus, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentPrioritizePiece, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, isActiveDownloadStatus, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentPrioritizePiece, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
 import {
   resolveCategoryDestination
 } from '../utils/downloadLocations';
@@ -356,6 +356,7 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
         torrent_stop_timeout: item.torrentStopTimeout,
         torrent_prioritize_piece: item.torrentPrioritizePiece || undefined,
         torrent_remove_unselected_file: item.torrentRemoveUnselectedFile,
+        torrent_encryption_policy: item.torrentEncryptionPolicy || undefined,
         lifecycle_generation: lifecycleGeneration.toString(),
       };
 
@@ -659,6 +660,8 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
   const normalizedRemoveUnselectedFile = typeof rawRemoveUnselectedFile === 'boolean'
     ? rawRemoveUnselectedFile
     : undefined;
+  const rawEncryptionPolicy = download.torrentEncryptionPolicy as unknown;
+  const normalizedEncryptionPolicy = normalizeTorrentEncryptionPolicy(rawEncryptionPolicy);
   const normalizedOptions = rawMaxPeers !== normalizedMaxPeers ||
     rawPeerSpeedLimit !== normalizedPeerSpeedLimit ||
     rawCheckIntegrity !== normalizedCheckIntegrity ||
@@ -666,7 +669,8 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
     rawExcludeTrackers !== normalizedExcludeTrackers ||
     rawStopTimeout !== normalizedStopTimeout ||
     rawPrioritizePiece !== normalizedPrioritizePiece ||
-    rawRemoveUnselectedFile !== normalizedRemoveUnselectedFile
+    rawRemoveUnselectedFile !== normalizedRemoveUnselectedFile ||
+    rawEncryptionPolicy !== normalizedEncryptionPolicy
     ? {
         ...download,
         torrentMaxPeers: normalizedMaxPeers,
@@ -676,7 +680,8 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
         torrentExcludeTrackers: normalizedExcludeTrackers,
         torrentStopTimeout: normalizedStopTimeout,
         torrentPrioritizePiece: normalizedPrioritizePiece,
-        torrentRemoveUnselectedFile: normalizedRemoveUnselectedFile
+        torrentRemoveUnselectedFile: normalizedRemoveUnselectedFile,
+        torrentEncryptionPolicy: normalizedEncryptionPolicy
       }
     : download;
 
@@ -2213,6 +2218,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             torrent_stop_timeout: item.torrentStopTimeout,
             torrent_prioritize_piece: item.torrentPrioritizePiece || undefined,
             torrent_remove_unselected_file: item.torrentRemoveUnselectedFile,
+            torrent_encryption_policy: item.torrentEncryptionPolicy || undefined,
             lifecycle_generation: currentDownloadLifecycle(item.id).toString(),
           });
         }

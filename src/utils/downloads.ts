@@ -44,6 +44,27 @@ export const isTransferActiveStatus = (status: DownloadStatus): boolean =>
 export const DOWNLOAD_CONNECTIONS_MIN = 1;
 export const DOWNLOAD_CONNECTIONS_MAX = 16;
 
+export const TORRENT_ENCRYPTION_POLICY_DISABLED = 'disabled' as const;
+export const TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO = 'require-crypto' as const;
+export const TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION = 'force-encryption' as const;
+export type TorrentEncryptionPolicy =
+  | typeof TORRENT_ENCRYPTION_POLICY_DISABLED
+  | typeof TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO
+  | typeof TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION;
+
+export const normalizeTorrentEncryptionPolicy = (
+  value: unknown
+): TorrentEncryptionPolicy | undefined => {
+  if (
+    value === TORRENT_ENCRYPTION_POLICY_DISABLED ||
+    value === TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO ||
+    value === TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION
+  ) {
+    return value;
+  }
+  return undefined;
+};
+
 // Keep every filename component within the common cross-platform filesystem
 // limit. Count UTF-8 bytes because POSIX filesystems enforce bytes, while this
 // bound is also conservative for Windows filename components.

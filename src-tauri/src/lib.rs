@@ -5806,6 +5806,9 @@ async fn validate_torrent_enqueue(
     item.torrent_prioritize_piece = queue::normalize_torrent_prioritize_piece(
         item.torrent_prioritize_piece.as_deref(),
     )?;
+    item.torrent_encryption_policy = queue::normalize_torrent_encryption_policy(
+        item.torrent_encryption_policy.as_deref(),
+    )?;
     validate_enqueue_uris("", item.mirrors.as_deref()).await?;
     if let Some(path) = item.torrent_path.as_deref() {
         let path = crate::torrent::validate_managed_torrent_path(app_handle, &item.id, path)?;

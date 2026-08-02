@@ -19,7 +19,7 @@ import {
   formatDownloadTotal,
   resolveDownloadSizeDisplay
 } from '../utils/downloadProgress';
-import { isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentPrioritizePiece, resolveDownloadConnections } from '../utils/downloads';
+import { isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentPrioritizePiece, resolveDownloadConnections, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type TorrentEncryptionPolicy } from '../utils/downloads';
 import { useTranslation } from 'react-i18next';
 import { formatDateTime, type CalendarPreference } from '../utils/dateTime';
 import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
@@ -88,6 +88,7 @@ export const PropertiesModal = () => {
   const [liveTorrentPeerSpeedLimitValue, setLiveTorrentPeerSpeedLimitValue] = useState('');
   const [torrentCheckIntegrity, setTorrentCheckIntegrity] = useState(false);
   const [torrentRemoveUnselectedFile, setTorrentRemoveUnselectedFile] = useState(false);
+  const [torrentEncryptionPolicy, setTorrentEncryptionPolicy] = useState<TorrentEncryptionPolicy>(TORRENT_ENCRYPTION_POLICY_DISABLED);
   const [torrentTrackers, setTorrentTrackers] = useState('');
   const [torrentExcludeTrackers, setTorrentExcludeTrackers] = useState('');
   const [torrentStopTimeout, setTorrentStopTimeout] = useState('0');
@@ -193,6 +194,7 @@ export const PropertiesModal = () => {
         setLiveTorrentPeerSpeedLimitValue(activeItem.torrentPeerSpeedLimit || '');
         setTorrentCheckIntegrity(activeItem.torrentCheckIntegrity === true);
         setTorrentRemoveUnselectedFile(activeItem.torrentRemoveUnselectedFile === true);
+        setTorrentEncryptionPolicy(normalizeTorrentEncryptionPolicy(activeItem.torrentEncryptionPolicy) || TORRENT_ENCRYPTION_POLICY_DISABLED);
         setTorrentTrackers(activeItem.torrentTrackers || '');
         setTorrentExcludeTrackers(activeItem.torrentExcludeTrackers || '');
         setTorrentStopTimeout(activeItem.torrentStopTimeout === undefined ? '0' : String(activeItem.torrentStopTimeout));
@@ -366,6 +368,10 @@ export const PropertiesModal = () => {
       setErrorMessage(t($ => $.properties.torrentRemoveUnselectedFileSelectionRequired));
       return;
     }
+    if (item.isTorrent && !normalizeTorrentEncryptionPolicy(torrentEncryptionPolicy)) {
+      setErrorMessage(t($ => $.properties.torrentEncryptionPolicyInvalid));
+      return;
+    }
     if (
       item.isTorrent
       && torrentRemoveUnselectedFile
@@ -397,6 +403,9 @@ export const PropertiesModal = () => {
             torrentPrioritizePiece: normalizeTorrentPrioritizePiece(torrentPrioritizePiece) || undefined,
             torrentRemoveUnselectedFile: item.torrentFileIndices !== undefined
               ? torrentRemoveUnselectedFile
+              : undefined,
+            torrentEncryptionPolicy: torrentEncryptionPolicy !== TORRENT_ENCRYPTION_POLICY_DISABLED
+              ? torrentEncryptionPolicy
               : undefined,
           }
         : {}),
@@ -970,6 +979,32 @@ export const PropertiesModal = () => {
                     />
                     <p id="torrent-prioritize-piece-properties-hint" className="mt-1 text-[11px] text-text-muted">
                       {t($ => $.properties.torrentPrioritizePieceHint)}
+                    </p>
+                  </div>
+                  <label className="text-xs text-text-muted text-right" htmlFor="torrent-encryption-policy-properties">
+                    {t($ => $.properties.torrentEncryptionPolicy)}
+                  </label>
+                  <div>
+                    <select
+                      id="torrent-encryption-policy-properties"
+                      value={torrentEncryptionPolicy}
+                      onChange={event => setTorrentEncryptionPolicy(event.currentTarget.value as TorrentEncryptionPolicy)}
+                      disabled={transferLocked}
+                      aria-describedby="torrent-encryption-policy-properties-hint"
+                      className="app-control max-w-56 px-2.5 py-1.5 text-xs disabled:opacity-50"
+                    >
+                      <option value={TORRENT_ENCRYPTION_POLICY_DISABLED}>
+                        {t($ => $.properties.torrentEncryptionDisabled)}
+                      </option>
+                      <option value={TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO}>
+                        {t($ => $.properties.torrentEncryptionRequireCrypto)}
+                      </option>
+                      <option value={TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION}>
+                        {t($ => $.properties.torrentEncryptionForceEncryption)}
+                      </option>
+                    </select>
+                    <p id="torrent-encryption-policy-properties-hint" className="mt-1 text-[11px] text-text-muted">
+                      {t($ => $.properties.torrentEncryptionPolicyHint)}
                     </p>
                   </div>
                   <label className="text-xs text-text-muted text-right" htmlFor="torrent-check-integrity">

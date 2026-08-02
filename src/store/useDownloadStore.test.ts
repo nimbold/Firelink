@@ -858,7 +858,8 @@ describe('useDownloadStore', () => {
       torrentExcludeTrackers: 123 as unknown as string,
       torrentStopTimeout: 604801,
       torrentPrioritizePiece: 'head=1G',
-      torrentRemoveUnselectedFile: 'yes' as unknown as boolean
+      torrentRemoveUnselectedFile: 'yes' as unknown as boolean,
+      torrentEncryptionPolicy: 'arc4'
     });
 
     expect(normalized.torrentMaxPeers).toBeUndefined();
@@ -869,6 +870,7 @@ describe('useDownloadStore', () => {
     expect(normalized.torrentStopTimeout).toBeUndefined();
     expect(normalized.torrentPrioritizePiece).toBeUndefined();
     expect(normalized.torrentRemoveUnselectedFile).toBeUndefined();
+    expect(normalized.torrentEncryptionPolicy).toBeUndefined();
   });
 
   it('normalizes proxy settings for download dispatch', async () => {
@@ -1524,6 +1526,7 @@ describe('useDownloadStore', () => {
       torrentExcludeTrackers: '*',
       torrentStopTimeout: 300,
       torrentPrioritizePiece: 'head=1M,tail=1M',
+      torrentEncryptionPolicy: 'force-encryption',
       torrentFileIndices: [1],
       torrentRemoveUnselectedFile: true
     }, { type: 'start-now' });
@@ -1541,6 +1544,7 @@ describe('useDownloadStore', () => {
           torrent_exclude_trackers: '*',
           torrent_stop_timeout: 300,
           torrent_prioritize_piece: 'head=1M,tail=1M',
+          torrent_encryption_policy: 'force-encryption',
           torrent_file_indices: [1],
           torrent_remove_unselected_file: true
         })

@@ -628,10 +628,11 @@ async function main() {
     const probeDir = path.join(tempRoot, 'probe');
     const finalDir = path.join(tempRoot, 'final');
     const integrityDir = path.join(tempRoot, 'integrity');
+    const encryptionDir = path.join(tempRoot, 'encryption');
     const cancelDir = path.join(tempRoot, 'cancel');
     const removeUnselectedDir = path.join(tempRoot, 'remove-unselected');
     const stallDir = path.join(tempRoot, 'stall');
-    for (const directory of [seedRoot, probeDir, finalDir, integrityDir, cancelDir, removeUnselectedDir, stallDir]) fs.mkdirSync(directory, { recursive: true });
+    for (const directory of [seedRoot, probeDir, finalDir, integrityDir, encryptionDir, cancelDir, removeUnselectedDir, stallDir]) fs.mkdirSync(directory, { recursive: true });
 
     const seederListenPort = await findAvailablePort();
     const clientListenPort = await findAvailablePort();
@@ -764,6 +765,29 @@ async function main() {
     assert(integrityStatus.status === 'complete', 'integrity-check torrent did not complete');
     assert(fs.readFileSync(integrityPath).equals(torrent.files[0].data), 'integrity check did not replace corrupted torrent data');
     console.log('[OK] check-integrity detected and repaired corrupted Torrent data');
+
+    const encryptionGid = await rpc(client.rpcPort, client.secret, 'aria2.addTorrent', [
+      savedTorrentBytes.toString('base64'),
+      [],
+      {
+        dir: encryptionDir,
+        'select-file': '1',
+        'index-out': indexOut,
+        'bt-force-encryption': 'true',
+        'bt-require-crypto': 'true',
+        'bt-min-crypto-level': 'arc4',
+        'seed-time': '0',
+        'auto-file-renaming': 'false',
+      },
+    ]);
+    const encryptionOptions = await rpc(client.rpcPort, client.secret, 'aria2.getOption', [encryptionGid]);
+    assert(encryptionOptions['bt-force-encryption'] === 'true', 'Aria2 did not retain force encryption');
+    assert(encryptionOptions['bt-require-crypto'] === 'true', 'Aria2 did not retain the crypto requirement');
+    assert(encryptionOptions['bt-min-crypto-level'] === 'arc4', 'Aria2 did not retain the ARC4 minimum crypto level');
+    await waitForTerminal(client, encryptionGid, 30000);
+    const encryptedPath = path.join(encryptionDir, torrent.name, 'selected.bin');
+    assert(fs.readFileSync(encryptedPath).equals(torrent.files[0].data), 'encrypted Torrent output content differs');
+    console.log('[OK] Torrent encryption policy retained all three Aria2 options and completed');
 
     const removalSkippedPath = path.join(removeUnselectedDir, torrent.name, 'skipped.bin');
     fs.mkdirSync(path.dirname(removalSkippedPath), { recursive: true });

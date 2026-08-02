@@ -209,6 +209,9 @@ pub struct DownloadItem {
     #[serde(default)]
     #[ts(optional)]
     pub torrent_remove_unselected_file: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_encryption_policy: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, TS)]
