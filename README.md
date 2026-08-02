@@ -64,6 +64,25 @@ Download the [latest Firelink release](https://github.com/nimbold/Firelink/relea
 All packages include aria2, yt-dlp, FFmpeg, Deno, and SQLite support. No separate engine installation is required.
 
 <details>
+<summary><strong>macOS security warning and first launch</strong></summary>
+
+Firelink's macOS release is ad-hoc signed but not notarized by Apple. A paid Apple Developer Program account is required for Apple's Developer ID signing and notarization, so macOS may warn that it cannot verify Firelink or check that it is free of malware. This warning does not by itself mean that the app contains malware.
+
+Only use these steps for Firelink downloaded from the [official GitHub release page](https://github.com/nimbold/Firelink/releases/latest). After moving `Firelink.app` to Applications, use one of these methods to approve the first launch:
+
+1. In Finder, Control-click or right-click `Firelink.app`, choose **Open**, then choose **Open** again.
+2. Try opening Firelink once, then open **System Settings -> Privacy & Security**, scroll down, and choose **Open Anyway** for Firelink.
+3. In Terminal, remove only the downloaded-file quarantine flag:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/Firelink.app
+   ```
+
+   If Firelink is stored somewhere else, replace the path with the actual path to `Firelink.app`. The approval is normally needed only once.
+
+</details>
+
+<details>
 <summary><strong>Windows portable ZIP notes</strong></summary>
 
 - Keep the folder writable. Avoid `Program Files` and read-only media.
