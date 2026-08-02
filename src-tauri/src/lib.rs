@@ -6609,6 +6609,18 @@ pub(crate) fn normalize_speed_limit_for_aria2(limit: &str) -> Option<String> {
     })
 }
 
+fn normalize_torrent_overall_upload_limit(limit: Option<&str>) -> Result<Option<String>, String> {
+    let Some(limit) = limit else {
+        return Ok(None);
+    };
+    if limit.trim().is_empty() {
+        return Ok(None);
+    }
+    normalize_speed_limit_for_aria2(limit)
+        .map(Some)
+        .ok_or_else(|| "Torrent overall upload limit is invalid".to_string())
+}
+
 fn apply_aria2_torrent_peer_discovery_options(
     command: &mut std::process::Command,
     enable_dht: bool,
@@ -6675,10 +6687,14 @@ fn aria2_rpc_port_is_occupied(port: u16) -> bool {
 fn apply_aria2_torrent_global_options(
     command: &mut std::process::Command,
     max_open_files: u32,
+    overall_upload_limit: Option<&str>,
 ) {
     let max_open_files = queue::normalize_torrent_max_open_files(max_open_files)
         .unwrap_or(queue::DEFAULT_TORRENT_MAX_OPEN_FILES);
     command.arg(format!("--bt-max-open-files={max_open_files}"));
+    if let Some(limit) = overall_upload_limit.and_then(normalize_speed_limit_for_aria2) {
+        command.arg(format!("--max-overall-upload-limit={limit}"));
+    }
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -6696,6 +6712,24 @@ async fn set_torrent_max_open_files(
     .await
     .map(|_| ())
     .map_err(|error| format!("Failed to set Torrent maximum open files: {error}"))
+}
+
+#[tauri::command]
+async fn set_torrent_overall_upload_limit(
+    state: tauri::State<'_, AppState>,
+    limit: Option<String>,
+) -> Result<(), String> {
+    let normalized_limit = normalize_torrent_overall_upload_limit(limit.as_deref())?;
+    let limit_str = normalized_limit.as_deref().unwrap_or("0");
+    rpc_call(
+        state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+        &state.aria2_secret,
+        "aria2.changeGlobalOption",
+        serde_json::json!([{"max-overall-upload-limit": limit_str}]),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| format!("Failed to set Torrent overall upload limit: {error}"))
 }
 
 #[tauri::command]
@@ -7795,6 +7829,7 @@ mod tests {
         cookie_scope_for_url, metadata_authentication_error, metadata_cookie_header_present,
         metadata_headers, metadata_response_error,
         normalize_speed_limit_for_aria2,
+        normalize_torrent_overall_upload_limit,
         apply_aria2_torrent_global_options,
         apply_aria2_torrent_network_options,
         apply_aria2_torrent_peer_identity_options,
@@ -7853,18 +7888,19 @@ mod tests {
     #[test]
     fn aria2_torrent_global_options_are_bounded_and_explicit() {
         let mut command = std::process::Command::new("aria2c");
-        apply_aria2_torrent_global_options(&mut command, 256);
+        apply_aria2_torrent_global_options(&mut command, 256, Some("2M"));
         assert_eq!(
             command
                 .get_args()
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<_>>(),
-            vec!["--bt-max-open-files=256"]
+            vec!["--bt-max-open-files=256", "--max-overall-upload-limit=2M"]
         );
         let mut fallback_command = std::process::Command::new("aria2c");
         apply_aria2_torrent_global_options(
             &mut fallback_command,
             queue::MAX_TORRENT_MAX_OPEN_FILES + 1,
+            Some("not-a-rate"),
         );
         assert_eq!(
             fallback_command
@@ -7873,6 +7909,32 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["--bt-max-open-files=100"]
         );
+        let mut unlimited_command = std::process::Command::new("aria2c");
+        apply_aria2_torrent_global_options(&mut unlimited_command, 256, None);
+        assert_eq!(
+            unlimited_command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["--bt-max-open-files=256"]
+        );
+    }
+
+    #[test]
+    fn torrent_overall_upload_limit_rejects_invalid_values_but_accepts_unlimited() {
+        assert_eq!(
+            normalize_torrent_overall_upload_limit(None).unwrap(),
+            None
+        );
+        assert_eq!(
+            normalize_torrent_overall_upload_limit(Some(" ")).unwrap(),
+            None
+        );
+        assert_eq!(
+            normalize_torrent_overall_upload_limit(Some("1.5 MB/s")).unwrap(),
+            Some("1.5M".to_string())
+        );
+        assert!(normalize_torrent_overall_upload_limit(Some("not-a-rate")).is_err());
     }
 
     #[test]
@@ -10583,6 +10645,10 @@ pub fn run() {
                 .as_ref()
                 .map(|settings| settings.global_speed_limit.clone())
                 .unwrap_or_default();
+            let torrent_overall_upload_limit = persisted_settings
+                .as_ref()
+                .map(|settings| settings.torrent_overall_upload_limit.clone())
+                .unwrap_or_default();
             let torrent_peer_discovery = persisted_settings
                 .as_ref()
                 .map(|settings| {
@@ -10658,7 +10724,11 @@ pub fn run() {
                                 .arg("--check-certificate=true")
                                 .arg(format!("--stop-with-process={}", std::process::id()));
 
-                            apply_aria2_torrent_global_options(&mut cmd, torrent_max_open_files);
+                            apply_aria2_torrent_global_options(
+                                &mut cmd,
+                                torrent_max_open_files,
+                                Some(&torrent_overall_upload_limit),
+                            );
 
                             apply_aria2_torrent_peer_discovery_options(
                                 &mut cmd,
@@ -11268,7 +11338,7 @@ pub fn run() {
             authorize_keychain_access,
             acknowledge_pairing_token_change,
             check_file_exists, toggle_tray_icon, set_extension_pairing_token,
-            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, set_torrent_max_open_files, set_global_speed_limit, remove_download, get_download_primary_path,
+            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, set_torrent_max_open_files, set_torrent_overall_upload_limit, set_global_speed_limit, remove_download, get_download_primary_path,
             detach_download_for_reconfigure,
             enqueue_download, enqueue_many, cancel_enqueue_generation, move_in_queue, move_many_in_queue, remove_from_queue, get_pending_order,
             commands::reveal_in_file_manager, commands::open_downloaded_file,

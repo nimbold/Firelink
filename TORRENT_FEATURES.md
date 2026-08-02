@@ -1,103 +1,218 @@
 # Firelink Torrent feature matrix
 
-This is the current product-facing comparison for BitTorrent features exposed
-by Firelink's bundled Aria2 engine. It intentionally excludes Aria2's generic
-HTTP/FTP/Metalink options, shell hooks, and daemon-admin RPC methods that do not
-belong in the download UI. The Aria2 reference is the [1.37.0 manual](https://aria2.github.io/manual/en/html/aria2c.html).
+This document is the source of truth for Firelink's BitTorrent scope, current
+implementation status, and next work. It compares Firelink with the
+BitTorrent-specific surface of the bundled Aria2 1.37.0 engine. Aria2's
+generic HTTP/FTP/SFTP/Metalink options, arbitrary shell hooks, and daemon
+administration RPCs are intentionally separate unless they affect Torrent
+ownership or safety.
+
+Reference: [Aria2 1.37.0 manual](https://aria2.github.io/manual/en/html/aria2c.html).
+
+## Audit basis
+
+- Audited on 2026-08-02 at Firelink `b2c86a2` (`main`), with the cumulative
+  Torrent work reviewed from `edc76a7`.
+- Source of truth: `src-tauri/src/torrent.rs`, `torrent_probe.rs`, `queue.rs`,
+  `lib.rs`, `settings.rs`, `download_ownership.rs`, `db.rs`, the IPC bindings,
+  frontend stores/components, and `scripts/smoke-torrent.js`.
+- Reliability claims require a source postcondition or a test/harness
+  assertion. A passing local macOS check does not prove Windows/Linux native
+  behavior, public tracker/DHT reachability, or packaged-app behavior.
+- The requested Agy and OpenCode review was bounded to the cumulative Torrent
+  diff and relevant paths. Their advice was used only after this source audit
+  and was verified against the live tree.
 
 ## Implemented
 
+### Intake, metadata, and file selection
+
 - Local `.torrent` files, magnet links, and remote HTTP(S) `.torrent` metadata.
-  Remote metadata is bounded, SSRF-checked, redirect-checked, parsed, and
-  cached before it enters the normal `addTorrent` path.
-- Bencode validation, canonical info-hash checks, safe output paths, managed
-  metadata retention, selected-file preview, `select-file`, and `index-out`.
-- Firelink queue admission, per-queue/global permits, pause/resume, cancel,
-  retry/GID replacement, restart recovery, terminal reconciliation, and
-  output ownership for Torrent lifecycles.
-- Optional seeding by time and/or ratio, upload progress, upload limits,
-  seeders telemetry, per-Torrent maximum peers, and the Aria2
-  `bt-request-peer-speed-limit` threshold.
-- Bounded, read-only Torrent peer diagnostics through `aria2.getPeers`.
-  Firelink discards peer IPs, ports, IDs, and bitfields at the native boundary;
-  the selected-Torrent detail view exposes only operational speeds, seeder,
-  and choking flags, with a bounded display count.
-- Global DHT, IPv6 DHT, PEX, and Local Peer Discovery toggles.
-- Configurable TCP and UDP listen-port ranges, external BitTorrent IP,
-  IPv4/IPv6 DHT entry points, IPv6 DHT listen address, and LPD interface.
-  Values are validated, persisted, applied at Aria2 startup, and accompanied
-  by platform and firewall/port-forwarding warnings.
-- Optional peer-ID prefix and BitTorrent peer-agent controls. Values are
-  bounded and validated, remain disabled by default, and include explicit
-  privacy, protocol-identity, and compatibility warnings.
-- Optional piece-integrity verification, including the explicit policy that
-  disables unverified seeding when verification is requested.
-- Optional stall timeout through `bt-stop-timeout`, persisted with each
-  Torrent and re-applied when it starts or retries. A value of zero disables
-  the policy; Aria2 stops the Torrent after the configured consecutive
-  zero-download-speed interval.
-- Additional per-Torrent tracker URLs through `bt-tracker`, with bounded and
-  credential-free HTTP/HTTPS/UDP validation.
-- Per-Torrent tracker exclusion through `bt-exclude-tracker`, including Aria2's
-  explicit `*` value for excluding all announce URLs. Exclusions are persisted,
-  normalized, reapplied on retries, and do not change DHT or PEX settings.
-- Optional `bt-prioritize-piece` preview policy for the head, tail, or both
-  ends of every selected file. The constrained policy is validated, persisted,
-  normalized, and reapplied when a Torrent starts or retries.
-- One validated Torrent encryption policy mapped to Aria2's
-  `bt-force-encryption`, `bt-require-crypto`, and `bt-min-crypto-level`:
-  disabled, required obfuscated handshake, or forced ARC4 payload encryption.
-  The policy is persisted and reapplied when a Torrent starts or retries.
-- Optional tracker timing controls through `bt-tracker-connect-timeout`,
-  `bt-tracker-timeout`, and `bt-tracker-interval`. Connect and request
-  timeouts are bounded to 1–604800 seconds; interval 0 restores Aria2's
-  response/progress-driven scheduling. Timing is persisted and reapplied when
-  a Torrent starts or retries.
-- Generic Aria2 downloads explicitly disable `follow-torrent` and
-  `follow-metalink`, so a URL that happens to return Torrent or Metalink
-  metadata cannot create an unmanaged child GID. Generic follow behavior is
-  not exposed until parent/child GID ownership is represented across queue
-  admission, progress, cancellation, retry, and restart recovery.
-- Global `bt-max-open-files` control for multi-file Torrents, bounded to
-  1–4096 with Aria2's default of 100. The setting is persisted, applied at
-  daemon startup, and updateable through Aria2's global-option RPC; changes
-  affect newly added Torrents without restarting Aria2.
-- Optional `bt-remove-unselected-file` cleanup after completion when a
-  selected-file subset is configured. Firelink requires explicit confirmation,
-  reserves the unselected paths against competing downloads, keeps those
-  paths separate from removable download ownership, and clears the reservation
-  after observing Aria2's completion cleanup (or on terminal failure,
-  cancellation, or reconfiguration).
-- Deterministic local Aria2 smoke coverage for metadata resolution, selected
-  output, piece priority, encryption policy, tracker timing, pause/resume,
-  ownership, cancellation/removal, unavailable trackers, daemon failure, and
-  `bt-stop-timeout` terminal behavior; RPC-boundary coverage is separate.
+  Remote metadata is bounded, redirect/SSRF checked, credential-free, parsed,
+  and cached before enqueue.
+- Strict bencode parsing, sorted-key validation, size/depth bounds, UTF-8
+  validation, canonical info-hash verification, safe output components, and
+  managed metadata retention/rekeying.
+- Selected-file preview and validated `select-file` handling. Firelink derives
+  the Torrent output contract with Aria2 `index-out`; it does not use the
+  generic `out` option for Torrent files.
+- Torrent metadata probing uses Aria2 `bt-metadata-only` and `bt-save-metadata`
+  internally, validates the returned hash, and conservatively cleans probe
+  directories. It is not exposed as a separate metadata-only download mode.
+- `addTorrent` passes validated web-seed/mirror URIs when supplied through the
+  existing download input. There is no separate Torrent web-seed manager.
 
-## Priority tiers for remaining work
+### Queue and lifecycle ownership
 
-### Tier 0 — reliability and user-visible control
+- Torrents use the existing Firelink queue admission, global/per-queue permits,
+  pause/resume, cancellation, retry/GID replacement, restart recovery, and
+  terminal reconciliation.
+- A Torrent's Aria2 GID is paired with the Firelink download ID and lifecycle
+  epoch. Late RPC results and stale terminal events cannot revive a removed or
+  newer lifecycle.
+- Exactly one queue permit remains parked for the complete Aria2 lifecycle,
+  including seeding, and release is idempotent.
+- Aria2 `getFiles` reconciliation establishes output ownership for Torrent
+  files. Ownership and optional unselected-file removal reservations are
+  canonicalized, persisted, collision-checked, and kept separate.
+- Generic `addUri` explicitly sets both `follow-torrent=false` and
+  `follow-metalink=false`. This prevents an HTTP download from creating an
+  unmanaged child GID outside Firelink's queue, ownership, cancellation, retry,
+  and restart model.
 
-No remaining Tier 0 items.
+### Transfer, seeding, and integrity controls
 
-### Tier 1 — transfer policy and storage behavior
+- Optional `seed-time` and/or `seed-ratio` policies, including ratio-only and
+  unlimited-ratio semantics; upload progress and seeding status are reflected
+  in the UI.
+- Per-Torrent upload limit through Aria2 `max-upload-limit`, with a live,
+  lifecycle-fenced update path.
+- Global Aria2 aggregate upload limit through
+  `max-overall-upload-limit`. It is persisted, validated, applied at daemon
+  startup, and changeable through `aria2.changeGlobalOption`; in Firelink it
+  primarily controls Torrent seeding traffic, and blank means Aria2's
+  unlimited value (`0`).
+- Per-Torrent maximum peers (`bt-max-peers`) and low-speed peer expansion
+  threshold (`bt-request-peer-speed-limit`), including live updates.
+- Optional piece-integrity verification through `check-integrity` and a safe
+  `bt-hash-check-seed`/`bt-seed-unverified=false` policy. Firelink does not
+  silently seed unverified data when the user requests verification.
+- Optional `bt-stop-timeout` stall policy, persisted per Torrent and reapplied
+  on start/retry.
+- Optional `bt-prioritize-piece` head/tail preview policy, normalized and
+  reapplied on start/retry.
+- Validated encryption policies mapped consistently to
+  `bt-force-encryption`, `bt-require-crypto`, and `bt-min-crypto-level`.
+- Optional `bt-remove-unselected-file` cleanup after successful completion,
+  only with an explicit partial selection and confirmation. Cancellation,
+  failure, replacement, and cleanup races are conservative.
 
-No remaining Tier 1 items.
+### Trackers, peers, and network identity
 
-### Tier 2 — advanced networking and daemon tuning
+- Additional `bt-tracker` URLs and `bt-exclude-tracker`, including the explicit
+  `*` wildcard. URLs are bounded, normalized, credential-free, and limited to
+  HTTP(S)/UDP schemes.
+- `bt-tracker-connect-timeout`, `bt-tracker-timeout`, and
+  `bt-tracker-interval`, persisted per Torrent and reapplied on start/retry.
+- Bounded read-only `aria2.getPeers` diagnostics. Firelink discards peer IPs,
+  ports, IDs, and bitfields at the native boundary and exposes only bounded
+  operational speeds and choking/seeder flags.
+- Global DHT, IPv6 DHT, PEX, and LPD toggles. Private-Torrent behavior remains
+  Aria2-controlled.
+- Launch-scoped TCP/UDP listen-port ranges, external BitTorrent IP, IPv4/IPv6
+  DHT entry points, IPv6 DHT listen address, and LPD interface. Settings are
+  validated, persisted, and applied only after Firelink restart.
+- Optional bounded peer-ID prefix and peer-agent overrides. They are disabled
+  by default and carry identity/privacy/compatibility warnings.
+- Global `bt-max-open-files`, bounded to 1–4096, applied at startup and
+  updateable for newly added Torrents through `aria2.changeGlobalOption`.
 
-1. Aria2 `follow-torrent`/in-memory follow behavior for generic downloads only
-   if the resulting child-GID ownership model can be represented safely; the
-   current explicit metadata path intentionally avoids unmapped child jobs.
-   Generic `addUri` now forces both follow options to `false` as the safe
-   default; the child-GID feature remains pending until the end-to-end
-   ownership model is implemented. Enabling it for raw generic URLs would
-   also bypass Firelink's bounded remote-metadata validation and would require
-   re-discovering child jobs from durable request identity after an Aria2
-   restart; session-scoped GID strings cannot be persisted as ownership.
+### Evidence already present in the tree
 
-The first implementation in this task was remote `.torrent` metadata intake;
-follow-up implementations add stall-timeout control, bounded peer diagnostics,
-persisted tracker exclusion, piece-preview priority, safe unselected-file
-removal, the validated encryption policy, tracker timing controls, the global
-Torrent open-file limit, launch-scoped Torrent network binding controls, and
-peer identity/agent controls.
+- Rust unit coverage for bencode/hash/path validation, option normalization,
+  queue ownership, lifecycle fencing, persistence sanitization, and native
+  startup argument construction.
+- `src-tauri/tests/torrent_rpc.rs` covers the production authenticated JSON-RPC
+  HTTP boundary in a Windows-compatible integration-test target.
+- `npm run smoke:torrent` and `npm run smoke:torrent:failure-paths` cover
+  deterministic local seeding, magnet metadata resolution, selected output,
+  pause/resume, ownership, cancellation/removal, unavailable trackers,
+  daemon failure, integrity, encryption, tracker/piece policies, open-file and
+  aggregate-upload limits, and stall-timeout behavior.
+
+## Aria2 comparison: available but not exposed or only partially represented
+
+| Aria2 capability | Firelink status | Reason / next step |
+| --- | --- | --- |
+| `bt-load-saved-metadata` | Not exposed | Firelink has managed metadata files, but a new magnet currently probes metadata instead of reusing an info-hash-keyed cache. Add hash-keyed reuse with validation and stale-cache invalidation. |
+| `dht-message-timeout` | Not exposed | Global DHT/UDP timeout tuning is not yet represented in settings. Add only with bounded validation and a runtime/startup contract. |
+| `dht-file-path`, `dht-file-path6` | Not explicitly controlled | Aria2 can persist DHT routing tables, but Firelink does not choose app-managed paths or report their health. Decide whether portable-mode and privacy behavior justify exposing this. |
+| `bt-detach-seed-only` | Not used | Aria2's concurrent-download accounting does not replace Firelink's permit ownership. Enabling it blindly would create two competing concurrency models. Revisit only with an explicit seed-slot policy. |
+| `follow-torrent=true/mem` | Intentionally disabled for generic URLs | The child GID has no durable Firelink identity, permit, output ownership, or restart recovery record. Implement only after a parent/child lifecycle model exists and remote metadata validation is preserved. |
+| `bt-metadata-only` / `bt-save-metadata` as user actions | Internal probe only | The Add window resolves metadata before enqueue; a separate user-visible metadata-only job is not currently a product need. |
+| `on-bt-download-complete` and other hooks | Out of scope | Aria2 executes arbitrary commands. Firelink does not expose a shell-command injection surface; any future automation should be a bounded, app-owned event system. |
+| `bt-enable-hook-after-hash-check` | Out of scope with hooks | It has no useful standalone meaning while arbitrary hooks are excluded. |
+| `rpc-save-upload-metadata`, `save-session`, and other daemon-admin RPC policy | Out of scope / replaced | Firelink owns metadata retention and durable download state; enabling Aria2's uploaded-metadata persistence would create a second storage contract. |
+| Aria2 CLI-only `show-files` / `torrent-file` controls | Product-equivalent path exists | Firelink provides a validated Add-window preview and managed `addTorrent` path rather than exposing CLI flags. |
+
+The comparison intentionally does not treat Aria2 defaults as Firelink
+features. For example, Aria2 defaults `follow-torrent` to true, but Firelink
+must override it to false on every generic `addUri` path until child ownership
+is durable.
+
+## Priority tiers for future work
+
+### Tier 0 — correctness and safety gates
+
+No unstarted Tier 0 feature is approved. The global aggregate upload ceiling
+was the highest-impact missing control and is now implemented as a persisted,
+startup, and live-RPC contract.
+
+Before any new Torrent feature is promoted, keep these gates mandatory:
+
+1. Every Aria2 GID must remain attached to one Firelink identity, lifecycle
+   epoch, permit, and owned-path contract.
+2. Every awaited RPC must re-check lifecycle ownership before mutating UI,
+   persistence, or queue state.
+3. Any cleanup that can delete files must prove ownership and remain
+   conservative after cancellation, daemon loss, restart, and missed events.
+4. Generic followed child GIDs remain disabled until their full lifecycle is
+   modeled and tested.
+
+### Tier 1 — high-value user behavior
+
+1. **Info-hash-keyed magnet metadata reuse.** Reuse a previously validated
+   managed `.torrent` by info hash before probing DHT/trackers. Revalidate the
+   bencode and exact hash, bind the result to the current draft/download
+   identity, and delete only invalid or unretained cache entries.
+2. **Unselected-file removal crash/restart audit.** Add post-crash tests around
+   the persisted removal reservation, Aria2 completion cleanup, path reuse, and
+   case-insensitive path equality. Do not change cleanup ordering until the
+   ownership postconditions are proven.
+3. **DHT routing-table persistence policy.** Decide and implement app-managed
+   `dht-file-path`/`dht-file-path6` behavior, especially for portable mode,
+   permissions, reset, and privacy. This should be opt-in if it expands data
+   retention beyond the current download metadata contract.
+
+### Tier 2 — advanced tuning and ownership expansion
+
+1. Expose bounded `dht-message-timeout` if real tracker/DHT diagnostics show a
+   user-visible need; validate it at startup and document that it affects DHT
+   and UDP tracker waits, not HTTP metadata fetches.
+2. Add an explicit seed-slot policy only if Firelink wants seeding to stop
+   consuming a queue permit. Aria2 `bt-detach-seed-only` alone is insufficient;
+   Firelink's queue and power-management semantics must agree first.
+3. Model generic followed Torrent children (`true` or `mem`) with durable
+   parent/child IDs, admission accounting, output ownership, cancellation,
+   retry/GID replacement, restart discovery, and bounded metadata validation.
+   This remains a substantial architecture change, not a one-line option.
+
+## Deliberately not planned
+
+- Arbitrary shell hooks from Aria2.
+- Direct daemon-admin/session-management controls that duplicate Firelink's
+  persistence and ownership system.
+- Claims of public tracker/DHT readiness from local deterministic fixtures.
+- A second Torrent engine. Firelink's existing Aria2 queue, permit, GID, and
+  recovery contracts are the intended transfer architecture.
+
+## Validation commands
+
+Run focused checks first, then the relevant broader gates:
+
+```sh
+npm test -- --run
+npm run check:i18n
+npm run bindings
+cd src-tauri
+cargo test --test torrent_rpc -- --nocapture
+cargo test --all-targets
+cd ..
+npm run smoke:torrent
+npm run smoke:torrent:failure-paths
+git diff --check
+```
+
+Native Windows/Linux behavior, packaged-app startup, public magnets, and
+router/firewall port forwarding remain separate evidence slices and must not be
+implied by these local checks.

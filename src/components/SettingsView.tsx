@@ -37,6 +37,7 @@ import { normalizeCustomProxy } from '../store/useDownloadStore';
 import {
   MAX_TORRENT_MAX_OPEN_FILES,
   MIN_TORRENT_MAX_OPEN_FILES,
+  normalizeSpeedLimitForBackend,
   normalizeTorrentMaxOpenFiles
 } from '../utils/downloads';
 import { useTranslation } from 'react-i18next';
@@ -326,7 +327,11 @@ const engineRunId = useRef(0);
   const [torrentMaxOpenFilesInput, setTorrentMaxOpenFilesInput] = useState(
     () => String(settings.torrentMaxOpenFiles)
   );
+  const [torrentOverallUploadLimitInput, setTorrentOverallUploadLimitInput] = useState(
+    () => settings.torrentOverallUploadLimit
+  );
   const torrentMaxOpenFilesCommitRef = useRef(0);
+  const torrentOverallUploadLimitCommitRef = useRef(0);
 
   useEffect(() => {
     setPerServerConnectionsInput(String(settings.perServerConnections));
@@ -343,6 +348,10 @@ const engineRunId = useRef(0);
   useEffect(() => {
     setTorrentMaxOpenFilesInput(String(settings.torrentMaxOpenFiles));
   }, [settings.torrentMaxOpenFiles]);
+
+  useEffect(() => {
+    setTorrentOverallUploadLimitInput(settings.torrentOverallUploadLimit);
+  }, [settings.torrentOverallUploadLimit]);
 
   // Local state for adding site login
   const [loginPattern, setLoginPattern] = useState('');
@@ -368,6 +377,32 @@ const engineRunId = useRef(0);
       setTorrentMaxOpenFilesInput(String(settings.torrentMaxOpenFiles));
       addToast({
         message: t($ => $.settings.network.torrentMaxOpenFilesUpdateFailed, {
+          detail: error instanceof Error ? error.message : String(error)
+        }),
+        variant: 'error',
+        isActionable: true
+      });
+    });
+  };
+  const commitTorrentOverallUploadLimit = (raw: string) => {
+    const trimmed = raw.trim();
+    const normalized = trimmed ? (normalizeSpeedLimitForBackend(trimmed) ?? '') : '';
+    if (trimmed && !normalized) {
+      setTorrentOverallUploadLimitInput(settings.torrentOverallUploadLimit);
+      addToast({
+        message: t($ => $.settings.network.torrentOverallUploadLimitInvalid),
+        variant: 'error',
+        isActionable: true
+      });
+      return;
+    }
+    const requestId = ++torrentOverallUploadLimitCommitRef.current;
+    setTorrentOverallUploadLimitInput(normalized);
+    void settings.setTorrentOverallUploadLimit(normalized).catch(error => {
+      if (requestId !== torrentOverallUploadLimitCommitRef.current) return;
+      setTorrentOverallUploadLimitInput(settings.torrentOverallUploadLimit);
+      addToast({
+        message: t($ => $.settings.network.torrentOverallUploadLimitUpdateFailed, {
           detail: error instanceof Error ? error.message : String(error)
         }),
         variant: 'error',
@@ -1393,6 +1428,21 @@ runEngineChecks(false);
                     onBlur={(event) => commitTorrentMaxOpenFiles(event.target.value)}
                     className="app-control settings-port-input text-center"
                     aria-label={t($ => $.settings.network.torrentMaxOpenFiles)}
+                  />
+                </div>
+                <div className="mac-settings-row settings-network-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentOverallUploadLimit)}</span>
+                    <small>{t($ => $.settings.network.torrentOverallUploadLimitDescription)}</small>
+                  </div>
+                  <input
+                    type="text"
+                    value={torrentOverallUploadLimitInput}
+                    onChange={(event) => setTorrentOverallUploadLimitInput(event.target.value)}
+                    onBlur={(event) => commitTorrentOverallUploadLimit(event.target.value)}
+                    placeholder="1M"
+                    className="app-control settings-network-input text-center"
+                    aria-label={t($ => $.settings.network.torrentOverallUploadLimit)}
                   />
                 </div>
               </div>

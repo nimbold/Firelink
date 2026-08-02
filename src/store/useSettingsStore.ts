@@ -37,6 +37,7 @@ import {
 
 let settingsQueue: Promise<void> = Promise.resolve();
 let torrentMaxOpenFilesQueue: Promise<void> = Promise.resolve();
+let torrentOverallUploadLimitQueue: Promise<void> = Promise.resolve();
 let pairingTokenHydrationRequest: Promise<PairingTokenHydration> | null = null;
 const settingsPersistenceErrorListeners = new Set<() => void>();
 let settingsPersistenceFailed = false;
@@ -212,6 +213,7 @@ export interface SettingsState {
   approvedDownloadRoots: string[];
   maxConcurrentDownloads: number;
   globalSpeedLimit: string;
+  torrentOverallUploadLimit: string;
   speedLimitPresetValues: number[];
   logsEnabled: boolean;
   isSidebarVisible: boolean;
@@ -279,6 +281,7 @@ export interface SettingsState {
   approveDownloadRoot: (path: string) => Promise<string>;
   setMaxConcurrentDownloads: (count: number) => void;
   setGlobalSpeedLimit: (limit: string) => Promise<void>;
+  setTorrentOverallUploadLimit: (limit: string) => Promise<void>;
   setSpeedLimitPresetValues: (values: number[]) => void;
   setLogsEnabled: (enabled: boolean) => void;
   setSidebarPosition: (position: SidebarPosition) => void;
@@ -358,6 +361,7 @@ export const useSettingsStore = create<SettingsState>()(
       approvedDownloadRoots: [],
       maxConcurrentDownloads: 3,
       globalSpeedLimit: '',
+      torrentOverallUploadLimit: '',
       speedLimitPresetValues: DEFAULT_SPEED_LIMIT_PRESET_VALUES,
       logsEnabled: false,
       activeView: 'downloads',
@@ -463,6 +467,23 @@ export const useSettingsStore = create<SettingsState>()(
         });
         info('Settings updated: globalSpeedLimit');
         set({ globalSpeedLimit: limit });
+      },
+      setTorrentOverallUploadLimit: (limit) => {
+        const normalizedLimit = normalizeSpeedLimitForBackend(limit);
+        if (limit.trim() && !normalizedLimit) {
+          return Promise.reject(new Error('Torrent overall upload limit is invalid'));
+        }
+        const normalized = normalizedLimit ?? '';
+        const apply = async () => {
+          await invoke('set_torrent_overall_upload_limit', {
+            limit: normalized || null
+          });
+          info('Settings updated: torrentOverallUploadLimit');
+          set({ torrentOverallUploadLimit: normalized });
+        };
+        const result = torrentOverallUploadLimitQueue.then(apply, apply);
+        torrentOverallUploadLimitQueue = result.then(() => undefined, () => undefined);
+        return result;
       },
       setSpeedLimitPresetValues: (speedLimitPresetValues) => set({ speedLimitPresetValues }),
       setLogsEnabled: (logsEnabled) => set({ logsEnabled }),
@@ -688,6 +709,7 @@ export const useSettingsStore = create<SettingsState>()(
         approvedDownloadRoots: state.approvedDownloadRoots,
         maxConcurrentDownloads: state.maxConcurrentDownloads,
         globalSpeedLimit: state.globalSpeedLimit,
+        torrentOverallUploadLimit: state.torrentOverallUploadLimit,
         speedLimitPresetValues: state.speedLimitPresetValues,
         logsEnabled: state.logsEnabled,
         isSidebarVisible: state.isSidebarVisible,
@@ -859,6 +881,9 @@ export const useSettingsStore = create<SettingsState>()(
             12,
             currentState.maxConcurrentDownloads
           ),
+          torrentOverallUploadLimit: typeof persisted.torrentOverallUploadLimit === 'string'
+            ? normalizeSpeedLimitForBackend(persisted.torrentOverallUploadLimit) ?? ''
+            : currentState.torrentOverallUploadLimit,
           perServerConnections: clampSettingInteger(
             persisted.perServerConnections,
             1,

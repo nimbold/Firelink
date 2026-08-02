@@ -462,6 +462,8 @@ pub struct PersistedSettings {
     pub approved_download_roots: Vec<String>,
     pub max_concurrent_downloads: usize,
     pub global_speed_limit: String,
+    #[serde(default)]
+    pub torrent_overall_upload_limit: String,
     pub speed_limit_preset_values: Vec<f64>,
     pub logs_enabled: bool,
     pub is_sidebar_visible: bool,

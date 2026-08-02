@@ -78,6 +78,7 @@ type CommandMap = {
   };
   get_torrent_peers: { args: { id: string }; result: TorrentPeerDiagnostics };
   set_torrent_max_open_files: { args: { max_open_files: number }; result: void };
+  set_torrent_overall_upload_limit: { args: { limit: string | null }; result: void };
   set_global_speed_limit: { args: { limit: string | null }; result: void };
   request_automation_permission: { args: undefined; result: void };
   check_automation_permission: { args: undefined; result: void };

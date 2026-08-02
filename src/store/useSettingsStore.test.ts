@@ -155,6 +155,53 @@ describe('useSettingsStore global speed limit persistence', () => {
   });
 });
 
+describe('useSettingsStore Torrent overall upload limit persistence', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useSettingsStore.setState({ torrentOverallUploadLimit: '2M' });
+  });
+
+  it('applies a normalized limit before updating local state', async () => {
+    await useSettingsStore.getState().setTorrentOverallUploadLimit('1.5 MB/s');
+
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('set_torrent_overall_upload_limit', {
+      limit: '1.5M'
+    });
+    expect(useSettingsStore.getState().torrentOverallUploadLimit).toBe('1.5M');
+  });
+
+  it('keeps the saved value when the native global option rejects an update', async () => {
+    vi.mocked(ipc.invokeCommand).mockRejectedValueOnce(new Error('aria2 unavailable'));
+
+    await expect(
+      useSettingsStore.getState().setTorrentOverallUploadLimit('3M')
+    ).rejects.toThrow('aria2 unavailable');
+
+    expect(useSettingsStore.getState().torrentOverallUploadLimit).toBe('2M');
+  });
+
+  it('uses null to restore Aria2 unlimited upload', async () => {
+    await useSettingsStore.getState().setTorrentOverallUploadLimit('');
+
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('set_torrent_overall_upload_limit', {
+      limit: null
+    });
+    expect(useSettingsStore.getState().torrentOverallUploadLimit).toBe('');
+  });
+
+  it('rejects malformed limits without clearing the saved value', async () => {
+    await expect(
+      useSettingsStore.getState().setTorrentOverallUploadLimit('not-a-rate')
+    ).rejects.toThrow('Torrent overall upload limit is invalid');
+
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith(
+      'set_torrent_overall_upload_limit',
+      expect.anything()
+    );
+    expect(useSettingsStore.getState().torrentOverallUploadLimit).toBe('2M');
+  });
+});
+
 describe('useSettingsStore dock badge synchronization', () => {
   it('increments the badge sync version for every toggle without issuing out-of-band clears', () => {
     vi.clearAllMocks();

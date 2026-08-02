@@ -712,6 +712,21 @@ async function main() {
       globalOptions['bt-max-open-files'] === '256',
       `Aria2 did not retain the global Torrent open-file limit: ${JSON.stringify(globalOptions['bt-max-open-files'])}`,
     );
+    const previousOverallUploadLimit = globalOptions['max-overall-upload-limit'] ?? '0';
+    try {
+      await rpc(client.rpcPort, client.secret, 'aria2.changeGlobalOption', [
+        { 'max-overall-upload-limit': '256K' },
+      ]);
+      const uploadLimitedOptions = await rpc(client.rpcPort, client.secret, 'aria2.getGlobalOption', []);
+      assert(
+        Number(uploadLimitedOptions['max-overall-upload-limit']) === 256 * 1024,
+        `Aria2 did not retain the global Torrent upload limit: ${JSON.stringify(uploadLimitedOptions['max-overall-upload-limit'])}`,
+      );
+    } finally {
+      await rpc(client.rpcPort, client.secret, 'aria2.changeGlobalOption', [
+        { 'max-overall-upload-limit': previousOverallUploadLimit },
+      ]);
+    }
     const probeRemoved = await forceRemoveIfPresent(client, probeGid);
     if (probeRemoved) await waitForRemoved(client, probeGid);
     fs.rmSync(probeDir, { recursive: true, force: true });
@@ -757,7 +772,7 @@ async function main() {
     const reportedSelected = reportedFiles.find(file => file.path === selectedPath || file.path.endsWith('/selected.bin'));
     assert(reportedSelected, `Aria2 ownership list did not report ${selectedPath}`);
     assert(finalStatus.files?.some(file => file.path === selectedPath || file.path.endsWith('/selected.bin')), 'terminal status omitted selected output');
-    console.log('[OK] global open-file limit, tracker injection, piece priority, selected output, pause/resume, and Aria2 file ownership passed');
+    console.log('[OK] global open-file/upload limits, tracker injection, piece priority, selected output, pause/resume, and Aria2 file ownership passed');
 
     const integrityPath = path.join(integrityDir, torrent.name, 'selected.bin');
     fs.mkdirSync(path.dirname(integrityPath), { recursive: true });
