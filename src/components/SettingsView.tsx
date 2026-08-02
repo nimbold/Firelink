@@ -1241,6 +1241,141 @@ runEngineChecks(false);
                 </p>
               </div>
 
+              <h2 className="settings-section-title">{t($ => $.settings.network.torrentNetwork)}</h2>
+              <div className="mac-settings-group">
+                <div className="mac-settings-row settings-network-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentListenPort)}</span>
+                    <small>{t($ => $.settings.network.torrentListenPortDescription)}</small>
+                  </div>
+                  <input
+                    type="text"
+                    value={settings.torrentListenPort}
+                    onChange={(event) => settings.setTorrentListenPort(event.target.value)}
+                    placeholder="6881-6999"
+                    className="app-control settings-port-input text-center"
+                    aria-label={t($ => $.settings.network.torrentListenPort)}
+                  />
+                </div>
+                <div className="mac-settings-row settings-network-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentDhtListenPort)}</span>
+                    <small>{t($ => $.settings.network.torrentDhtListenPortDescription)}</small>
+                  </div>
+                  <input
+                    type="text"
+                    value={settings.torrentDhtListenPort}
+                    onChange={(event) => settings.setTorrentDhtListenPort(event.target.value)}
+                    placeholder="6881-6999"
+                    className="app-control settings-port-input text-center"
+                    aria-label={t($ => $.settings.network.torrentDhtListenPort)}
+                  />
+                </div>
+                <div className="mac-settings-row settings-network-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentExternalIp)}</span>
+                    <small>{t($ => $.settings.network.torrentExternalIpDescription)}</small>
+                  </div>
+                  <input
+                    type="text"
+                    value={settings.torrentExternalIp}
+                    onChange={(event) => settings.setTorrentExternalIp(event.target.value)}
+                    placeholder={t($ => $.settings.network.torrentExternalIpPlaceholder)}
+                    className="app-control settings-network-input"
+                    aria-label={t($ => $.settings.network.torrentExternalIp)}
+                  />
+                </div>
+                <div className="mac-settings-row settings-network-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentDhtEntryPoint)}</span>
+                    <small>{t($ => $.settings.network.torrentDhtEntryPointDescription)}</small>
+                  </div>
+                  <input
+                    type="text"
+                    value={settings.torrentDhtEntryPoint}
+                    onChange={(event) => settings.setTorrentDhtEntryPoint(event.target.value)}
+                    placeholder="router.example:6881"
+                    className="app-control settings-network-input"
+                    aria-label={t($ => $.settings.network.torrentDhtEntryPoint)}
+                  />
+                </div>
+                <div className="mac-settings-row settings-network-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentDhtEntryPoint6)}</span>
+                    <small>{t($ => $.settings.network.torrentDhtEntryPoint6Description)}</small>
+                  </div>
+                  <input
+                    type="text"
+                    value={settings.torrentDhtEntryPoint6}
+                    onChange={(event) => settings.setTorrentDhtEntryPoint6(event.target.value)}
+                    placeholder="[2001:db8::1]:6881"
+                    className="app-control settings-network-input"
+                    aria-label={t($ => $.settings.network.torrentDhtEntryPoint6)}
+                  />
+                </div>
+                <div className="mac-settings-row settings-network-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentDhtListenAddr6)}</span>
+                    <small>{t($ => $.settings.network.torrentDhtListenAddr6Description)}</small>
+                  </div>
+                  <input
+                    type="text"
+                    value={settings.torrentDhtListenAddr6}
+                    onChange={(event) => settings.setTorrentDhtListenAddr6(event.target.value)}
+                    placeholder="2001:db8::2"
+                    className="app-control settings-network-input"
+                    aria-label={t($ => $.settings.network.torrentDhtListenAddr6)}
+                  />
+                </div>
+                <div className="mac-settings-row settings-network-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentLpdInterface)}</span>
+                    <small>{t($ => $.settings.network.torrentLpdInterfaceDescription)}</small>
+                  </div>
+                  <input
+                    type="text"
+                    value={settings.torrentLpdInterface}
+                    onChange={(event) => settings.setTorrentLpdInterface(event.target.value)}
+                    placeholder="en0"
+                    className="app-control settings-network-input"
+                    aria-label={t($ => $.settings.network.torrentLpdInterface)}
+                  />
+                </div>
+                <div className="mac-settings-row settings-network-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentPeerIdPrefix)}</span>
+                    <small>{t($ => $.settings.network.torrentPeerIdPrefixDescription)}</small>
+                  </div>
+                  <input
+                    type="text"
+                    value={settings.torrentPeerIdPrefix}
+                    onChange={(event) => settings.setTorrentPeerIdPrefix(event.target.value)}
+                    placeholder="-FL-1-3-1-"
+                    maxLength={20}
+                    className="app-control settings-network-input"
+                    aria-label={t($ => $.settings.network.torrentPeerIdPrefix)}
+                  />
+                </div>
+                <div className="mac-settings-row settings-network-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentPeerAgent)}</span>
+                    <small>{t($ => $.settings.network.torrentPeerAgentDescription)}</small>
+                  </div>
+                  <input
+                    type="text"
+                    value={settings.torrentPeerAgent}
+                    onChange={(event) => settings.setTorrentPeerAgent(event.target.value)}
+                    placeholder="Firelink/1.3.1"
+                    maxLength={128}
+                    className="app-control settings-network-input"
+                    aria-label={t($ => $.settings.network.torrentPeerAgent)}
+                  />
+                </div>
+                <p className="settings-group-footer">
+                  {t($ => $.settings.network.torrentNetworkRestartNote)}
+                </p>
+              </div>
+
               <h2 className="settings-section-title">{t($ => $.settings.network.torrentResourceLimits)}</h2>
               <div className="mac-settings-group">
                 <div className="mac-settings-row settings-network-row">

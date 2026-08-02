@@ -499,6 +499,24 @@ pub struct PersistedSettings {
     pub torrent_enable_lpd: bool,
     #[serde(default = "default_torrent_max_open_files")]
     pub torrent_max_open_files: u32,
+    #[serde(default)]
+    pub torrent_listen_port: String,
+    #[serde(default)]
+    pub torrent_dht_listen_port: String,
+    #[serde(default)]
+    pub torrent_external_ip: String,
+    #[serde(default)]
+    pub torrent_dht_entry_point: String,
+    #[serde(default)]
+    pub torrent_dht_entry_point6: String,
+    #[serde(default)]
+    pub torrent_dht_listen_addr6: String,
+    #[serde(default)]
+    pub torrent_lpd_interface: String,
+    #[serde(default)]
+    pub torrent_peer_id_prefix: String,
+    #[serde(default)]
+    pub torrent_peer_agent: String,
     pub custom_user_agent: String,
     pub ask_where_to_save_each_file: bool,
     pub remember_last_used_download_directory: bool,

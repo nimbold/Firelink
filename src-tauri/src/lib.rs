@@ -6626,6 +6626,52 @@ fn apply_aria2_torrent_peer_discovery_options(
         .arg(format!("--bt-enable-lpd={enable_lpd}"));
 }
 
+fn apply_aria2_torrent_network_options(
+    command: &mut std::process::Command,
+    listen_port: &str,
+    dht_listen_port: &str,
+    external_ip: &str,
+    dht_entry_point: &str,
+    dht_entry_point6: &str,
+    dht_listen_addr6: &str,
+    lpd_interface: &str,
+) {
+    for (option, value) in [
+        ("--listen-port", listen_port),
+        ("--dht-listen-port", dht_listen_port),
+        ("--bt-external-ip", external_ip),
+        ("--dht-entry-point", dht_entry_point),
+        ("--dht-entry-point6", dht_entry_point6),
+        ("--dht-listen-addr6", dht_listen_addr6),
+        ("--bt-lpd-interface", lpd_interface),
+    ] {
+        let value = value.trim();
+        if !value.is_empty() {
+            command.arg(format!("{option}={value}"));
+        }
+    }
+}
+
+fn apply_aria2_torrent_peer_identity_options(
+    command: &mut std::process::Command,
+    peer_id_prefix: &str,
+    peer_agent: &str,
+) {
+    for (option, value) in [
+        ("--peer-id-prefix", peer_id_prefix),
+        ("--peer-agent", peer_agent),
+    ] {
+        let value = value.trim();
+        if !value.is_empty() {
+            command.arg(format!("{option}={value}"));
+        }
+    }
+}
+
+fn aria2_rpc_port_is_occupied(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
+}
+
 fn apply_aria2_torrent_global_options(
     command: &mut std::process::Command,
     max_open_files: u32,
@@ -7265,6 +7311,7 @@ fn db_save_settings(
         let sanitized = crate::db::strip_pairing_token_from_settings(&merged)?;
         crate::db::preserve_legacy_pairing_token(existing.as_deref(), &sanitized)?
     };
+    let merged = crate::settings::canonicalize_torrent_network_settings(&merged)?;
     crate::db::save_settings(&connection, &merged)?;
     let decoded = crate::settings::decode_stored_settings(&serde_json::Value::String(merged))?;
     let prevent_system_sleep = decoded.prevents_sleep_while_downloading;
@@ -7286,10 +7333,14 @@ fn db_load_settings(state: tauri::State<'_, crate::db::DbState>) -> Result<Optio
     let connection = state.lock()?;
     let settings = crate::db::load_settings(&connection)?;
     if state.is_portable() {
-        return Ok(settings);
+        return settings
+            .map(|data| crate::settings::canonicalize_torrent_network_settings(&data))
+            .transpose();
     }
     settings
         .map(|data| crate::db::strip_pairing_token_from_settings(&data))
+        .transpose()?
+        .map(|data| crate::settings::canonicalize_torrent_network_settings(&data))
         .transpose()
 }
 
@@ -7745,7 +7796,10 @@ mod tests {
         metadata_headers, metadata_response_error,
         normalize_speed_limit_for_aria2,
         apply_aria2_torrent_global_options,
+        apply_aria2_torrent_network_options,
+        apply_aria2_torrent_peer_identity_options,
         apply_aria2_torrent_peer_discovery_options,
+        aria2_rpc_port_is_occupied,
         parse_firelink_deep_link, parse_ffmpeg_version, parse_media_progress_line,
         redact_log_line, redact_log_line_for_output, sanitize_ytdlp_config_value,
         has_resumable_download_assets, is_media_artifact_name,
@@ -7819,6 +7873,74 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["--bt-max-open-files=100"]
         );
+    }
+
+    #[test]
+    fn aria2_torrent_network_options_are_explicit_and_omit_defaults() {
+        let mut command = std::process::Command::new("aria2c");
+        apply_aria2_torrent_network_options(
+            &mut command,
+            "6881-6999",
+            "6881",
+            "203.0.113.7",
+            "router.example:6881",
+            "[2001:db8::1]:6881",
+            "2001:db8::2",
+            "en0",
+        );
+        assert_eq!(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec![
+                "--listen-port=6881-6999",
+                "--dht-listen-port=6881",
+                "--bt-external-ip=203.0.113.7",
+                "--dht-entry-point=router.example:6881",
+                "--dht-entry-point6=[2001:db8::1]:6881",
+                "--dht-listen-addr6=2001:db8::2",
+                "--bt-lpd-interface=en0",
+            ]
+        );
+
+        let mut defaults = std::process::Command::new("aria2c");
+        apply_aria2_torrent_network_options(&mut defaults, "", "", "", "", "", "", "");
+        assert!(defaults.get_args().next().is_none());
+    }
+
+    #[test]
+    fn aria2_torrent_peer_identity_options_are_explicit_and_omit_defaults() {
+        let mut command = std::process::Command::new("aria2c");
+        apply_aria2_torrent_peer_identity_options(
+            &mut command,
+            "-FL-1-3-1-",
+            "Firelink/1.3.1",
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "--peer-id-prefix=-FL-1-3-1-",
+                "--peer-agent=Firelink/1.3.1",
+            ]
+        );
+
+        let mut defaults = std::process::Command::new("aria2c");
+        apply_aria2_torrent_peer_identity_options(&mut defaults, "", "");
+        assert!(defaults.get_args().next().is_none());
+    }
+
+    #[test]
+    fn aria2_rpc_port_occupancy_is_detected_without_claiming_free_ports() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(aria2_rpc_port_is_occupied(port));
+        drop(listener);
+        assert!(!aria2_rpc_port_is_occupied(port));
     }
 
     #[test]
@@ -10487,6 +10609,8 @@ pub fn run() {
                     queue::DEFAULT_TORRENT_MAX_OPEN_FILES
                 }
             };
+            let torrent_startup_settings =
+                crate::settings::torrent_startup_settings(persisted_settings.as_ref());
 
             let aria2_secret_clone = aria2_secret.clone();
             let app_handle_bg = app.handle().clone();
@@ -10496,7 +10620,20 @@ pub fn run() {
                 match resolve_bundled_binary_path(&app_handle_bg, "aria2c") {
                     Ok(binary_path) => {
                         let mut success = false;
+                        let mut attempted_rpc_port = false;
+                        let mut startup_failure = None;
                         for attempt_port in 6800..6900 {
+                            if queue::torrent_port_spec_contains(
+                                if torrent_startup_settings.listen_port.is_empty() {
+                                    queue::DEFAULT_TORRENT_LISTEN_PORT_SPEC
+                                } else {
+                                    &torrent_startup_settings.listen_port
+                                },
+                                attempt_port,
+                            ) {
+                                continue;
+                            }
+                            attempted_rpc_port = true;
                             let mut cmd = std::process::Command::new(&binary_path);
                             crate::platform::hide_child_console(&mut cmd);
                             crate::engines::apply_aria2_environment(&mut cmd, &binary_path);
@@ -10530,6 +10667,21 @@ pub fn run() {
                                 torrent_peer_discovery.2,
                                 torrent_peer_discovery.3,
                             );
+                            apply_aria2_torrent_network_options(
+                                &mut cmd,
+                                &torrent_startup_settings.listen_port,
+                                &torrent_startup_settings.dht_listen_port,
+                                &torrent_startup_settings.external_ip,
+                                &torrent_startup_settings.dht_entry_point,
+                                &torrent_startup_settings.dht_entry_point6,
+                                &torrent_startup_settings.dht_listen_addr6,
+                                &torrent_startup_settings.lpd_interface,
+                            );
+                            apply_aria2_torrent_peer_identity_options(
+                                &mut cmd,
+                                &torrent_startup_settings.peer_id_prefix,
+                                &torrent_startup_settings.peer_agent,
+                            );
 
                             if let Some(limit) = normalize_speed_limit_for_aria2(&global_speed_limit) {
                                 cmd.arg(format!("--max-overall-download-limit={}", limit));
@@ -10542,9 +10694,34 @@ pub fn run() {
                                 Ok(mut child) => {
                                     // Give it a moment to fail if port is in use
                                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                                    if let Ok(Some(_)) = child.try_wait() {
-                                        // Process exited, likely port collision, try next
-                                        continue;
+                                    if let Ok(Some(status)) = child.try_wait() {
+                                        use std::io::Read;
+                                        let mut stderr = String::new();
+                                        if let Some(pipe) = child.stderr.take() {
+                                            // A failed child is not trusted to produce a bounded
+                                            // diagnostic. Keep startup error handling bounded so a
+                                            // pathological stderr stream cannot stall or exhaust
+                                            // the launcher while it is deciding whether to retry.
+                                            let _ = pipe.take(4096).read_to_string(&mut stderr);
+                                        }
+                                        let stderr = stderr.trim().to_string();
+                                        if aria2_rpc_port_is_occupied(attempt_port) {
+                                            // The RPC port is occupied by another process; retry
+                                            // with the next candidate. A configured Torrent port
+                                            // cannot cause this branch because overlapping RPC
+                                            // candidates are skipped above.
+                                            continue;
+                                        }
+                                        startup_failure = Some(if stderr.is_empty() {
+                                            format!(
+                                                "aria2 exited before startup on RPC port {attempt_port} with status {status}"
+                                            )
+                                        } else {
+                                            format!(
+                                                "aria2 exited before startup on RPC port {attempt_port}: {stderr}"
+                                            )
+                                        });
+                                        break;
                                     }
 
                                     log::info!("aria2c spawned successfully on port {}", attempt_port);
@@ -10605,16 +10782,20 @@ pub fn run() {
                                     break;
                                 }
                                 Err(e) => {
-                                    log::error!("Failed to spawn aria2c: {}", e);
-                                    let guard = app_handle_bg.state::<Aria2DaemonGuard>();
-                                    *guard.startup_error.lock().unwrap() = Some(format!("Failed to spawn aria2c: {e}"));
+                                    startup_failure = Some(format!("Failed to spawn aria2c: {e}"));
                                     break;
                                 }
                             }
                         }
                         if !success {
                             let guard = app_handle_bg.state::<Aria2DaemonGuard>();
-                            *guard.startup_error.lock().unwrap() = Some("Failed to find open port for aria2c".to_string());
+                            *guard.startup_error.lock().unwrap() = Some(startup_failure.unwrap_or_else(|| {
+                                if attempted_rpc_port {
+                                    "Failed to find open RPC port for aria2c".to_string()
+                                } else {
+                                    "No Aria2 RPC port is available outside the configured Torrent TCP listen ports".to_string()
+                                }
+                            }));
                         }
                     }
                     Err(e) => {

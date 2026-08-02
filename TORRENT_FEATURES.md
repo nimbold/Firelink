@@ -23,6 +23,13 @@ belong in the download UI. The Aria2 reference is the [1.37.0 manual](https://ar
   the selected-Torrent detail view exposes only operational speeds, seeder,
   and choking flags, with a bounded display count.
 - Global DHT, IPv6 DHT, PEX, and Local Peer Discovery toggles.
+- Configurable TCP and UDP listen-port ranges, external BitTorrent IP,
+  IPv4/IPv6 DHT entry points, IPv6 DHT listen address, and LPD interface.
+  Values are validated, persisted, applied at Aria2 startup, and accompanied
+  by platform and firewall/port-forwarding warnings.
+- Optional peer-ID prefix and BitTorrent peer-agent controls. Values are
+  bounded and validated, remain disabled by default, and include explicit
+  privacy, protocol-identity, and compatibility warnings.
 - Optional piece-integrity verification, including the explicit policy that
   disables unverified seeding when verification is requested.
 - Optional stall timeout through `bt-stop-timeout`, persisted with each
@@ -69,24 +76,17 @@ No remaining Tier 0 items.
 
 ### Tier 1 — transfer policy and storage behavior
 
-1. **File priority beyond selection** — Aria2 exposes only the binary
-   `selected` file state through its Torrent file API and has no supported
-   per-file priority option. Firelink therefore does not pretend that
-   `select-file` is file priority; this remains pending an engine capability or
-   a safe product-level model.
+No remaining Tier 1 items.
 
 ### Tier 2 — advanced networking and daemon tuning
 
-1. Configurable TCP/UDP listen ports, external IP, DHT entry points, IPv6 DHT
-   listen address, and LPD interface, with platform/firewall warnings.
-2. Peer identity/agent controls, with explicit privacy and protocol-identity
-   warnings.
-3. Aria2 `follow-torrent`/in-memory follow behavior for generic downloads only
+1. Aria2 `follow-torrent`/in-memory follow behavior for generic downloads only
    if the resulting child-GID ownership model can be represented safely; the
    current explicit metadata path intentionally avoids unmapped child jobs.
 
 The first implementation in this task was remote `.torrent` metadata intake;
 follow-up implementations add stall-timeout control, bounded peer diagnostics,
 persisted tracker exclusion, piece-preview priority, safe unselected-file
-removal, the validated encryption policy, tracker timing controls, and the
-global Torrent open-file limit.
+removal, the validated encryption policy, tracker timing controls, the global
+Torrent open-file limit, launch-scoped Torrent network binding controls, and
+peer identity/agent controls.

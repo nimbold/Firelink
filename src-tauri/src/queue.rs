@@ -27,6 +27,11 @@ pub const MAX_TORRENT_TRACKER_INTERVAL: u32 = 604_800;
 pub const DEFAULT_TORRENT_MAX_OPEN_FILES: u32 = 100;
 pub const MIN_TORRENT_MAX_OPEN_FILES: u32 = 1;
 pub const MAX_TORRENT_MAX_OPEN_FILES: u32 = 4_096;
+pub const MAX_TORRENT_NETWORK_VALUE_LENGTH: usize = 256;
+pub const MAX_TORRENT_PEER_ID_PREFIX_BYTES: usize = 20;
+pub const MAX_TORRENT_PEER_AGENT_LENGTH: usize = 128;
+pub const MIN_TORRENT_LISTEN_PORT: u16 = 1024;
+pub const DEFAULT_TORRENT_LISTEN_PORT_SPEC: &str = "6881-6999";
 
 pub fn clamp_download_connections(connections: i32) -> i32 {
     connections.clamp(DOWNLOAD_CONNECTIONS_MIN, DOWNLOAD_CONNECTIONS_MAX)
@@ -39,6 +44,184 @@ pub fn normalize_torrent_max_open_files(value: u32) -> Result<u32, String> {
         ));
     }
     Ok(value)
+}
+
+fn normalize_optional_torrent_network_value(
+    value: Option<&str>,
+    field: &str,
+) -> Result<Option<String>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > MAX_TORRENT_NETWORK_VALUE_LENGTH
+        || value.chars().any(|character| character.is_control())
+    {
+        return Err(format!("{field} is too long or contains control characters"));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn normalize_torrent_port(value: &str, field: &str) -> Result<u16, String> {
+    let port = value
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| format!("{field} contains an invalid port"))?;
+    if !(1..=u16::MAX as u32).contains(&port) {
+        return Err(format!("{field} ports must be between 1 and 65535"));
+    }
+    Ok(port as u16)
+}
+
+fn normalize_torrent_listen_port(value: &str, field: &str) -> Result<u16, String> {
+    let port = normalize_torrent_port(value, field)?;
+    if port < MIN_TORRENT_LISTEN_PORT {
+        return Err(format!(
+            "{field} ports must be between {MIN_TORRENT_LISTEN_PORT} and 65535"
+        ));
+    }
+    Ok(port)
+}
+
+pub(crate) fn normalize_torrent_port_spec(
+    value: Option<&str>,
+    field: &str,
+) -> Result<Option<String>, String> {
+    let Some(value) = normalize_optional_torrent_network_value(value, field)? else {
+        return Ok(None);
+    };
+    let mut normalized = Vec::new();
+    for entry in value.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return Err(format!("{field} contains an empty port entry"));
+        }
+        if let Some((start, end)) = entry.split_once('-') {
+            let start = normalize_torrent_listen_port(start, field)?;
+            let end = normalize_torrent_listen_port(end, field)?;
+            if start > end {
+                return Err(format!("{field} contains a reversed port range"));
+            }
+            normalized.push(format!("{start}-{end}"));
+        } else {
+            normalized.push(normalize_torrent_listen_port(entry, field)?.to_string());
+        }
+    }
+    Ok(Some(normalized.join(",")))
+}
+
+pub(crate) fn torrent_port_spec_contains(spec: &str, port: u16) -> bool {
+    spec.split(',').any(|entry| {
+        let entry = entry.trim();
+        if let Some((start, end)) = entry.split_once('-') {
+            matches!((start.parse::<u16>(), end.parse::<u16>()), (Ok(start), Ok(end)) if start <= port && port <= end)
+        } else {
+            entry.parse::<u16>() == Ok(port)
+        }
+    })
+}
+
+pub(crate) fn normalize_torrent_external_ip(
+    value: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(value) = normalize_optional_torrent_network_value(value, "Torrent external IP")?
+    else {
+        return Ok(None);
+    };
+    let address = value
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| "Torrent external IP must be a valid IPv4 or IPv6 address".to_string())?;
+    Ok(Some(address.to_string()))
+}
+
+pub(crate) fn normalize_torrent_dht_entry_point(
+    value: Option<&str>,
+    ipv6: bool,
+) -> Result<Option<String>, String> {
+    let field = if ipv6 {
+        "IPv6 DHT entry point"
+    } else {
+        "IPv4 DHT entry point"
+    };
+    let Some(value) = normalize_optional_torrent_network_value(value, field)? else {
+        return Ok(None);
+    };
+    let (host, port) = if let Some(rest) = value.strip_prefix('[') {
+        let (host, port) = rest
+            .split_once(']')
+            .and_then(|(host, suffix)| suffix.strip_prefix(':').map(|port| (host, port)))
+            .ok_or_else(|| format!("{field} must use host:port syntax"))?;
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(format!("{field} has an invalid IPv6 host"));
+        }
+        (format!("[{host}]"), normalize_torrent_port(port, field)?)
+    } else {
+        let (host, port) = value
+            .rsplit_once(':')
+            .ok_or_else(|| format!("{field} must use host:port syntax"))?;
+        if host.is_empty() || host.contains(':') || host.contains(['/', '\\', '@']) {
+            return Err(format!("{field} has an invalid host"));
+        }
+        if url::Host::parse(host).is_err() {
+            return Err(format!("{field} has an invalid host"));
+        }
+        (host.to_ascii_lowercase(), normalize_torrent_port(port, field)?)
+    };
+    if ipv6 && !host.starts_with('[') {
+        return Err(format!("{field} must use an IPv6 host"));
+    }
+    if !ipv6 && host.starts_with('[') {
+        return Err(format!("{field} must use an IPv4 or hostname host"));
+    }
+    Ok(Some(format!("{host}:{port}")))
+}
+
+pub(crate) fn normalize_torrent_dht_listen_addr6(
+    value: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(value) = normalize_optional_torrent_network_value(value, "IPv6 DHT listen address")?
+    else {
+        return Ok(None);
+    };
+    let address = value
+        .parse::<std::net::Ipv6Addr>()
+        .map_err(|_| "IPv6 DHT listen address must be a valid IPv6 address".to_string())?;
+    Ok(Some(address.to_string()))
+}
+
+pub(crate) fn normalize_torrent_lpd_interface(
+    value: Option<&str>,
+) -> Result<Option<String>, String> {
+    normalize_optional_torrent_network_value(value, "Torrent LPD interface")
+}
+
+pub(crate) fn normalize_torrent_peer_id_prefix(
+    value: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(value) = normalize_optional_torrent_network_value(value, "Torrent peer ID prefix")?
+    else {
+        return Ok(None);
+    };
+    if !value.is_ascii() || value.len() > MAX_TORRENT_PEER_ID_PREFIX_BYTES {
+        return Err(format!(
+            "Torrent peer ID prefix must be printable ASCII and at most {MAX_TORRENT_PEER_ID_PREFIX_BYTES} bytes"
+        ));
+    }
+    Ok(Some(value))
+}
+
+pub(crate) fn normalize_torrent_peer_agent(
+    value: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(value) = normalize_optional_torrent_network_value(value, "Torrent peer agent")?
+    else {
+        return Ok(None);
+    };
+    if value.len() > MAX_TORRENT_PEER_AGENT_LENGTH {
+        return Err(format!(
+            "Torrent peer agent must be at most {MAX_TORRENT_PEER_AGENT_LENGTH} bytes"
+        ));
+    }
+    Ok(Some(value))
 }
 
 fn reorder_selected_queue_tasks(
@@ -4728,6 +4911,76 @@ mod tests {
         assert_eq!(payload.torrent_tracker_connect_timeout, Some(11));
         assert_eq!(payload.torrent_tracker_timeout, Some(22));
         assert_eq!(payload.torrent_tracker_interval, Some(33));
+    }
+
+    #[test]
+    fn torrent_network_settings_are_normalized_and_bounded() {
+        assert_eq!(
+            normalize_torrent_port_spec(Some(" 6881-6999, 7000 "), "TCP listen ports").unwrap(),
+            Some("6881-6999,7000".to_string())
+        );
+        assert_eq!(
+            normalize_torrent_external_ip(Some(" 2001:db8::1 ")).unwrap(),
+            Some("2001:db8::1".to_string())
+        );
+        assert_eq!(
+            normalize_torrent_dht_entry_point(Some("Bootstrap.Example:6881"), false).unwrap(),
+            Some("bootstrap.example:6881".to_string())
+        );
+        assert_eq!(
+            normalize_torrent_dht_entry_point(Some("[2001:db8::1]:6881"), true).unwrap(),
+            Some("[2001:db8::1]:6881".to_string())
+        );
+        assert_eq!(
+            normalize_torrent_dht_listen_addr6(Some("2001:db8::2")).unwrap(),
+            Some("2001:db8::2".to_string())
+        );
+        assert_eq!(
+            normalize_torrent_lpd_interface(Some("en0")).unwrap(),
+            Some("en0".to_string())
+        );
+        assert_eq!(
+            normalize_torrent_peer_id_prefix(Some("-FL-1-3-1-")).unwrap(),
+            Some("-FL-1-3-1-".to_string())
+        );
+        assert_eq!(
+            normalize_torrent_peer_agent(Some("Firelink/1.3.1")).unwrap(),
+            Some("Firelink/1.3.1".to_string())
+        );
+        assert!(torrent_port_spec_contains("6800-6802,6881", 6801));
+        assert!(!torrent_port_spec_contains("6800-6802,6881", 6803));
+        assert_eq!(normalize_torrent_port_spec(Some(" "), "TCP listen ports").unwrap(), None);
+        assert_eq!(
+            normalize_torrent_port_spec(Some("1024"), "TCP listen ports").unwrap(),
+            Some("1024".to_string())
+        );
+    }
+
+    #[test]
+    fn torrent_network_settings_reject_unsafe_or_malformed_values() {
+        for value in ["0", "1023", "65536", "7000-6999", "6881,", "6881-"] {
+            assert!(
+                normalize_torrent_port_spec(Some(value), "TCP listen ports").is_err(),
+                "{value}"
+            );
+        }
+        assert!(normalize_torrent_external_ip(Some("example.com")).is_err());
+        assert!(normalize_torrent_dht_entry_point(Some("example.com"), false).is_err());
+        assert!(normalize_torrent_dht_entry_point(Some("[2001:db8::1]:6881"), false).is_err());
+        assert!(normalize_torrent_dht_entry_point(Some("2001:db8::1:6881"), true).is_err());
+        assert!(normalize_torrent_dht_listen_addr6(Some("127.0.0.1")).is_err());
+        assert!(normalize_torrent_lpd_interface(Some("en0\n--bad")).is_err());
+        assert!(normalize_torrent_peer_id_prefix(Some("é")).is_err());
+        assert!(normalize_torrent_peer_id_prefix(Some("123456789012345678901")).is_err());
+        assert!(normalize_torrent_peer_agent(Some("agent\nname")).is_err());
+        assert!(normalize_torrent_peer_agent(Some(&"a".repeat(MAX_TORRENT_PEER_AGENT_LENGTH + 1))).is_err());
+        assert!(
+            normalize_torrent_port_spec(
+                Some(&"1".repeat(MAX_TORRENT_NETWORK_VALUE_LENGTH + 1)),
+                "TCP listen ports"
+            )
+            .is_err()
+        );
     }
 
     #[test]

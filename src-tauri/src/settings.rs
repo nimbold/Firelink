@@ -7,6 +7,87 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use tauri::{AppHandle, Manager};
 
+#[derive(Clone, Debug, Default)]
+pub struct TorrentStartupSettings {
+    pub listen_port: String,
+    pub dht_listen_port: String,
+    pub external_ip: String,
+    pub dht_entry_point: String,
+    pub dht_entry_point6: String,
+    pub dht_listen_addr6: String,
+    pub lpd_interface: String,
+    pub peer_id_prefix: String,
+    pub peer_agent: String,
+}
+
+fn normalize_torrent_startup_value(
+    field: &str,
+    value: &str,
+    normalize: impl Fn(Option<&str>) -> Result<Option<String>, String>,
+) -> String {
+    match normalize(Some(value)) {
+        Ok(Some(value)) => value,
+        Ok(None) => String::new(),
+        Err(error) => {
+            log::error!("invalid persisted {field}; using Aria2 default: {error}");
+            String::new()
+        }
+    }
+}
+
+pub fn torrent_startup_settings(settings: Option<&PersistedSettings>) -> TorrentStartupSettings {
+    let Some(settings) = settings else {
+        return TorrentStartupSettings::default();
+    };
+    TorrentStartupSettings {
+        listen_port: normalize_torrent_startup_value(
+            "TCP listen ports",
+            &settings.torrent_listen_port,
+            |value| crate::queue::normalize_torrent_port_spec(value, "TCP listen ports"),
+        ),
+        dht_listen_port: normalize_torrent_startup_value(
+            "UDP listen ports",
+            &settings.torrent_dht_listen_port,
+            |value| crate::queue::normalize_torrent_port_spec(value, "UDP listen ports"),
+        ),
+        external_ip: normalize_torrent_startup_value(
+            "Torrent external IP",
+            &settings.torrent_external_ip,
+            crate::queue::normalize_torrent_external_ip,
+        ),
+        dht_entry_point: normalize_torrent_startup_value(
+            "IPv4 DHT entry point",
+            &settings.torrent_dht_entry_point,
+            |value| crate::queue::normalize_torrent_dht_entry_point(value, false),
+        ),
+        dht_entry_point6: normalize_torrent_startup_value(
+            "IPv6 DHT entry point",
+            &settings.torrent_dht_entry_point6,
+            |value| crate::queue::normalize_torrent_dht_entry_point(value, true),
+        ),
+        dht_listen_addr6: normalize_torrent_startup_value(
+            "IPv6 DHT listen address",
+            &settings.torrent_dht_listen_addr6,
+            crate::queue::normalize_torrent_dht_listen_addr6,
+        ),
+        lpd_interface: normalize_torrent_startup_value(
+            "Torrent LPD interface",
+            &settings.torrent_lpd_interface,
+            crate::queue::normalize_torrent_lpd_interface,
+        ),
+        peer_id_prefix: normalize_torrent_startup_value(
+            "Torrent peer ID prefix",
+            &settings.torrent_peer_id_prefix,
+            crate::queue::normalize_torrent_peer_id_prefix,
+        ),
+        peer_agent: normalize_torrent_startup_value(
+            "Torrent peer agent",
+            &settings.torrent_peer_agent,
+            crate::queue::normalize_torrent_peer_agent,
+        ),
+    }
+}
+
 pub fn load_settings<R: tauri::Runtime>(
     app_handle: &AppHandle<R>,
 ) -> Result<PersistedSettings, String> {
@@ -30,6 +111,42 @@ pub fn decode_stored_settings(stored: &Value) -> Result<PersistedSettings, Strin
         .map_err(|error| format!("invalid persisted settings: {error}"))?;
     validate_settings(&mut settings);
     Ok(settings)
+}
+
+fn canonicalize_torrent_network_value(
+    state: &mut Map<String, Value>,
+    key: &str,
+    normalize: impl Fn(Option<&str>) -> Result<Option<String>, String>,
+) {
+    let Some(value) = state.get(key).and_then(Value::as_str) else {
+        return;
+    };
+    let normalized = normalize(Some(value)).ok().flatten().unwrap_or_default();
+    state.insert(key.to_string(), Value::String(normalized));
+}
+
+pub fn canonicalize_torrent_network_settings(stored: &str) -> Result<String, String> {
+    let mut document = decode_document(&Value::String(stored.to_string()))?;
+    let state = settings_state_mut(&mut document)?;
+    canonicalize_torrent_network_value(state, "torrentListenPort", |value| {
+        crate::queue::normalize_torrent_port_spec(value, "TCP listen ports")
+    });
+    canonicalize_torrent_network_value(state, "torrentDhtListenPort", |value| {
+        crate::queue::normalize_torrent_port_spec(value, "UDP listen ports")
+    });
+    canonicalize_torrent_network_value(state, "torrentExternalIp", crate::queue::normalize_torrent_external_ip);
+    canonicalize_torrent_network_value(state, "torrentDhtEntryPoint", |value| {
+        crate::queue::normalize_torrent_dht_entry_point(value, false)
+    });
+    canonicalize_torrent_network_value(state, "torrentDhtEntryPoint6", |value| {
+        crate::queue::normalize_torrent_dht_entry_point(value, true)
+    });
+    canonicalize_torrent_network_value(state, "torrentDhtListenAddr6", crate::queue::normalize_torrent_dht_listen_addr6);
+    canonicalize_torrent_network_value(state, "torrentLpdInterface", crate::queue::normalize_torrent_lpd_interface);
+    canonicalize_torrent_network_value(state, "torrentPeerIdPrefix", crate::queue::normalize_torrent_peer_id_prefix);
+    canonicalize_torrent_network_value(state, "torrentPeerAgent", crate::queue::normalize_torrent_peer_agent);
+    serde_json::to_string(&document)
+        .map_err(|error| format!("failed to encode canonical settings: {error}"))
 }
 
 pub fn update_settings_state(
@@ -205,6 +322,33 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
     ] {
         sanitize_boolean_setting(state, key);
     }
+    sanitize_torrent_network_string(state, "torrentListenPort", |value| {
+        crate::queue::normalize_torrent_port_spec(Some(value), "TCP listen ports").is_ok()
+    });
+    sanitize_torrent_network_string(state, "torrentDhtListenPort", |value| {
+        crate::queue::normalize_torrent_port_spec(Some(value), "UDP listen ports").is_ok()
+    });
+    sanitize_torrent_network_string(state, "torrentExternalIp", |value| {
+        crate::queue::normalize_torrent_external_ip(Some(value)).is_ok()
+    });
+    sanitize_torrent_network_string(state, "torrentDhtEntryPoint", |value| {
+        crate::queue::normalize_torrent_dht_entry_point(Some(value), false).is_ok()
+    });
+    sanitize_torrent_network_string(state, "torrentDhtEntryPoint6", |value| {
+        crate::queue::normalize_torrent_dht_entry_point(Some(value), true).is_ok()
+    });
+    sanitize_torrent_network_string(state, "torrentDhtListenAddr6", |value| {
+        crate::queue::normalize_torrent_dht_listen_addr6(Some(value)).is_ok()
+    });
+    sanitize_torrent_network_string(state, "torrentLpdInterface", |value| {
+        crate::queue::normalize_torrent_lpd_interface(Some(value)).is_ok()
+    });
+    sanitize_torrent_network_string(state, "torrentPeerIdPrefix", |value| {
+        crate::queue::normalize_torrent_peer_id_prefix(Some(value)).is_ok()
+    });
+    sanitize_torrent_network_string(state, "torrentPeerAgent", |value| {
+        crate::queue::normalize_torrent_peer_agent(Some(value)).is_ok()
+    });
     sanitize_allowed_string(
         state,
         "theme",
@@ -296,6 +440,20 @@ fn sanitize_boolean_setting(state: &mut serde_json::Map<String, Value>, key: &st
     }
 }
 
+fn sanitize_torrent_network_string(
+    state: &mut serde_json::Map<String, Value>,
+    key: &str,
+    is_valid: impl Fn(&str) -> bool,
+) {
+    if state
+        .get(key)
+        .and_then(Value::as_str)
+        .is_some_and(|value| !is_valid(value))
+    {
+        state.remove(key);
+    }
+}
+
 fn sanitize_allowed_string(
     state: &mut serde_json::Map<String, Value>,
     key: &str,
@@ -321,6 +479,64 @@ fn validate_settings(settings: &mut PersistedSettings) {
         settings.torrent_max_open_files,
     )
     .unwrap_or(crate::queue::DEFAULT_TORRENT_MAX_OPEN_FILES);
+    settings.torrent_listen_port = crate::queue::normalize_torrent_port_spec(
+        Some(&settings.torrent_listen_port),
+        "TCP listen ports",
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    settings.torrent_dht_listen_port = crate::queue::normalize_torrent_port_spec(
+        Some(&settings.torrent_dht_listen_port),
+        "UDP listen ports",
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    settings.torrent_external_ip = crate::queue::normalize_torrent_external_ip(
+        Some(&settings.torrent_external_ip),
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    settings.torrent_dht_entry_point = crate::queue::normalize_torrent_dht_entry_point(
+        Some(&settings.torrent_dht_entry_point),
+        false,
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    settings.torrent_dht_entry_point6 = crate::queue::normalize_torrent_dht_entry_point(
+        Some(&settings.torrent_dht_entry_point6),
+        true,
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    settings.torrent_dht_listen_addr6 = crate::queue::normalize_torrent_dht_listen_addr6(
+        Some(&settings.torrent_dht_listen_addr6),
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    settings.torrent_lpd_interface = crate::queue::normalize_torrent_lpd_interface(
+        Some(&settings.torrent_lpd_interface),
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    settings.torrent_peer_id_prefix = crate::queue::normalize_torrent_peer_id_prefix(
+        Some(&settings.torrent_peer_id_prefix),
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    settings.torrent_peer_agent = crate::queue::normalize_torrent_peer_agent(
+        Some(&settings.torrent_peer_agent),
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default();
     if !matches!(
         settings.last_custom_speed_limit_unit.as_str(),
         "KB/s" | "MB/s"
@@ -514,6 +730,15 @@ fn default_settings() -> PersistedSettings {
         torrent_enable_pex: true,
         torrent_enable_lpd: false,
         torrent_max_open_files: crate::queue::DEFAULT_TORRENT_MAX_OPEN_FILES,
+        torrent_listen_port: String::new(),
+        torrent_dht_listen_port: String::new(),
+        torrent_external_ip: String::new(),
+        torrent_dht_entry_point: String::new(),
+        torrent_dht_entry_point6: String::new(),
+        torrent_dht_listen_addr6: String::new(),
+        torrent_lpd_interface: String::new(),
+        torrent_peer_id_prefix: String::new(),
+        torrent_peer_agent: String::new(),
         custom_user_agent: String::new(),
         ask_where_to_save_each_file: false,
         remember_last_used_download_directory: false,
@@ -530,8 +755,9 @@ fn default_settings() -> PersistedSettings {
 mod tests {
     use crate::ipc::{FontFamily, WindowControlStyle};
     use super::{
-        decode_stored_settings, default_settings, preserve_portable_pairing_token,
-        preserve_scheduler_runtime_keys,
+        canonicalize_torrent_network_settings, decode_stored_settings, default_settings,
+        preserve_portable_pairing_token, preserve_scheduler_runtime_keys,
+        torrent_startup_settings,
     };
     use serde_json::{json, Value};
 
@@ -807,6 +1033,15 @@ mod tests {
                 "torrentEnablePex": null,
                 "torrentEnableLpd": [],
                 "torrentMaxOpenFiles": 0,
+                "torrentListenPort": "7000-6999",
+                "torrentDhtListenPort": "6881,\n",
+                "torrentExternalIp": "not-an-ip",
+                "torrentDhtEntryPoint": "bootstrap.example",
+                "torrentDhtEntryPoint6": "2001:db8::1:6881",
+                "torrentDhtListenAddr6": "127.0.0.1",
+                "torrentLpdInterface": "en0\n--bad",
+                "torrentPeerIdPrefix": "123456789012345678901",
+                "torrentPeerAgent": "agent\nname",
                 "theme": "not-a-theme",
                 "calendarPreference": "lunar",
                 "siteLogins": [{"id": "valid", "urlPattern": "example.com", "username": "user"}, {"id": 3}]
@@ -828,6 +1063,15 @@ mod tests {
             settings.torrent_max_open_files,
             crate::queue::DEFAULT_TORRENT_MAX_OPEN_FILES
         );
+        assert!(settings.torrent_listen_port.is_empty());
+        assert!(settings.torrent_dht_listen_port.is_empty());
+        assert!(settings.torrent_external_ip.is_empty());
+        assert!(settings.torrent_dht_entry_point.is_empty());
+        assert!(settings.torrent_dht_entry_point6.is_empty());
+        assert!(settings.torrent_dht_listen_addr6.is_empty());
+        assert!(settings.torrent_lpd_interface.is_empty());
+        assert!(settings.torrent_peer_id_prefix.is_empty());
+        assert!(settings.torrent_peer_agent.is_empty());
         assert!(matches!(settings.theme, crate::ipc::Theme::System));
         assert!(matches!(
             settings.calendar_preference,
@@ -835,6 +1079,71 @@ mod tests {
         ));
         assert_eq!(settings.site_logins.len(), 1);
         assert_eq!(settings.site_logins[0].id, "valid");
+    }
+
+    #[test]
+    fn preserves_valid_torrent_network_settings() {
+        let stored = json!({
+            "state": {
+                "torrentListenPort": " 6881-6999 ",
+                "torrentDhtListenPort": "6881",
+                "torrentExternalIp": "203.0.113.7",
+                "torrentDhtEntryPoint": "Bootstrap.Example:6881",
+                "torrentDhtEntryPoint6": "[2001:db8::1]:6881",
+                "torrentDhtListenAddr6": "2001:db8::2",
+                "torrentLpdInterface": "en0",
+                "torrentPeerIdPrefix": "-FL-1-3-1-",
+                "torrentPeerAgent": "Firelink/1.3.1"
+            }
+        });
+
+        let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
+
+        assert_eq!(settings.torrent_listen_port, "6881-6999");
+        assert_eq!(settings.torrent_dht_listen_port, "6881");
+        assert_eq!(settings.torrent_external_ip, "203.0.113.7");
+        assert_eq!(settings.torrent_dht_entry_point, "bootstrap.example:6881");
+        assert_eq!(settings.torrent_dht_entry_point6, "[2001:db8::1]:6881");
+        assert_eq!(settings.torrent_dht_listen_addr6, "2001:db8::2");
+        assert_eq!(settings.torrent_lpd_interface, "en0");
+        assert_eq!(settings.torrent_peer_id_prefix, "-FL-1-3-1-");
+        assert_eq!(settings.torrent_peer_agent, "Firelink/1.3.1");
+    }
+
+    #[test]
+    fn canonicalizes_torrent_network_settings_for_frontend_hydration() {
+        let stored = json!({
+            "state": {
+                "torrentListenPort": " 6881-6999 ",
+                "torrentExternalIp": "not-an-ip",
+                "torrentPeerIdPrefix": "123456789012345678901",
+                "torrentPeerAgent": " Firelink/1.3.1 "
+            },
+            "version": 6
+        });
+
+        let canonical = canonicalize_torrent_network_settings(&stored.to_string()).unwrap();
+        let canonical: Value = serde_json::from_str(&canonical).unwrap();
+        assert_eq!(canonical["state"]["torrentListenPort"], "6881-6999");
+        assert_eq!(canonical["state"]["torrentExternalIp"], "");
+        assert_eq!(canonical["state"]["torrentPeerIdPrefix"], "");
+        assert_eq!(canonical["state"]["torrentPeerAgent"], "Firelink/1.3.1");
+    }
+
+    #[test]
+    fn startup_settings_revalidate_values_at_the_aria2_boundary() {
+        let stored = json!({
+            "state": {
+                "torrentListenPort": "not-a-port",
+                "torrentPeerIdPrefix": "123456789012345678901",
+                "torrentPeerAgent": "Firelink/1.3.1"
+            }
+        });
+        let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
+        let startup = torrent_startup_settings(Some(&settings));
+        assert!(startup.listen_port.is_empty());
+        assert!(startup.peer_id_prefix.is_empty());
+        assert_eq!(startup.peer_agent, "Firelink/1.3.1");
     }
 
     #[test]

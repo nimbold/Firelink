@@ -246,6 +246,15 @@ export interface SettingsState {
   torrentEnablePex: boolean;
   torrentEnableLpd: boolean;
   torrentMaxOpenFiles: number;
+  torrentListenPort: string;
+  torrentDhtListenPort: string;
+  torrentExternalIp: string;
+  torrentDhtEntryPoint: string;
+  torrentDhtEntryPoint6: string;
+  torrentDhtListenAddr6: string;
+  torrentLpdInterface: string;
+  torrentPeerIdPrefix: string;
+  torrentPeerAgent: string;
   customUserAgent: string;
   askWhereToSaveEachFile: boolean;
   preventsSleepWhileDownloading: boolean;
@@ -301,6 +310,15 @@ export interface SettingsState {
   setTorrentEnablePex: (enabled: boolean) => void;
   setTorrentEnableLpd: (enabled: boolean) => void;
   setTorrentMaxOpenFiles: (value: number) => Promise<void>;
+  setTorrentListenPort: (value: string) => void;
+  setTorrentDhtListenPort: (value: string) => void;
+  setTorrentExternalIp: (value: string) => void;
+  setTorrentDhtEntryPoint: (value: string) => void;
+  setTorrentDhtEntryPoint6: (value: string) => void;
+  setTorrentDhtListenAddr6: (value: string) => void;
+  setTorrentLpdInterface: (value: string) => void;
+  setTorrentPeerIdPrefix: (value: string) => void;
+  setTorrentPeerAgent: (value: string) => void;
   setCustomUserAgent: (userAgent: string) => void;
   setAskWhereToSaveEachFile: (ask: boolean) => void;
   setPreventsSleepWhileDownloading: (prevent: boolean) => void;
@@ -382,6 +400,15 @@ export const useSettingsStore = create<SettingsState>()(
       torrentEnablePex: true,
       torrentEnableLpd: false,
       torrentMaxOpenFiles: DEFAULT_TORRENT_MAX_OPEN_FILES,
+      torrentListenPort: '',
+      torrentDhtListenPort: '',
+      torrentExternalIp: '',
+      torrentDhtEntryPoint: '',
+      torrentDhtEntryPoint6: '',
+      torrentDhtListenAddr6: '',
+      torrentLpdInterface: '',
+      torrentPeerIdPrefix: '',
+      torrentPeerAgent: '',
       customUserAgent: '',
       askWhereToSaveEachFile: false,
       preventsSleepWhileDownloading: true,
@@ -480,6 +507,15 @@ export const useSettingsStore = create<SettingsState>()(
       setTorrentEnableDht6: (torrentEnableDht6) => set({ torrentEnableDht6 }),
       setTorrentEnablePex: (torrentEnablePex) => set({ torrentEnablePex }),
       setTorrentEnableLpd: (torrentEnableLpd) => set({ torrentEnableLpd }),
+      setTorrentListenPort: (torrentListenPort) => set({ torrentListenPort }),
+      setTorrentDhtListenPort: (torrentDhtListenPort) => set({ torrentDhtListenPort }),
+      setTorrentExternalIp: (torrentExternalIp) => set({ torrentExternalIp }),
+      setTorrentDhtEntryPoint: (torrentDhtEntryPoint) => set({ torrentDhtEntryPoint }),
+      setTorrentDhtEntryPoint6: (torrentDhtEntryPoint6) => set({ torrentDhtEntryPoint6 }),
+      setTorrentDhtListenAddr6: (torrentDhtListenAddr6) => set({ torrentDhtListenAddr6 }),
+      setTorrentLpdInterface: (torrentLpdInterface) => set({ torrentLpdInterface }),
+      setTorrentPeerIdPrefix: (torrentPeerIdPrefix) => set({ torrentPeerIdPrefix }),
+      setTorrentPeerAgent: (torrentPeerAgent) => set({ torrentPeerAgent }),
       setTorrentMaxOpenFiles: (value) => {
         const normalized = normalizeTorrentMaxOpenFiles(value);
         if (normalized === undefined) {
@@ -682,6 +718,15 @@ export const useSettingsStore = create<SettingsState>()(
         torrentEnablePex: state.torrentEnablePex,
         torrentEnableLpd: state.torrentEnableLpd,
         torrentMaxOpenFiles: state.torrentMaxOpenFiles,
+        torrentListenPort: state.torrentListenPort,
+        torrentDhtListenPort: state.torrentDhtListenPort,
+        torrentExternalIp: state.torrentExternalIp,
+        torrentDhtEntryPoint: state.torrentDhtEntryPoint,
+        torrentDhtEntryPoint6: state.torrentDhtEntryPoint6,
+        torrentDhtListenAddr6: state.torrentDhtListenAddr6,
+        torrentLpdInterface: state.torrentLpdInterface,
+        torrentPeerIdPrefix: state.torrentPeerIdPrefix,
+        torrentPeerAgent: state.torrentPeerAgent,
         customUserAgent: state.customUserAgent,
         askWhereToSaveEachFile: state.askWhereToSaveEachFile,
         preventsSleepWhileDownloading: state.preventsSleepWhileDownloading,
@@ -733,6 +778,33 @@ export const useSettingsStore = create<SettingsState>()(
           torrentEnableLpd: persistedBoolean(persisted.torrentEnableLpd, currentState.torrentEnableLpd),
           torrentMaxOpenFiles: normalizeTorrentMaxOpenFiles(persisted.torrentMaxOpenFiles)
             ?? currentState.torrentMaxOpenFiles,
+          torrentListenPort: typeof persisted.torrentListenPort === 'string'
+            ? persisted.torrentListenPort
+            : currentState.torrentListenPort,
+          torrentDhtListenPort: typeof persisted.torrentDhtListenPort === 'string'
+            ? persisted.torrentDhtListenPort
+            : currentState.torrentDhtListenPort,
+          torrentExternalIp: typeof persisted.torrentExternalIp === 'string'
+            ? persisted.torrentExternalIp
+            : currentState.torrentExternalIp,
+          torrentDhtEntryPoint: typeof persisted.torrentDhtEntryPoint === 'string'
+            ? persisted.torrentDhtEntryPoint
+            : currentState.torrentDhtEntryPoint,
+          torrentDhtEntryPoint6: typeof persisted.torrentDhtEntryPoint6 === 'string'
+            ? persisted.torrentDhtEntryPoint6
+            : currentState.torrentDhtEntryPoint6,
+          torrentDhtListenAddr6: typeof persisted.torrentDhtListenAddr6 === 'string'
+            ? persisted.torrentDhtListenAddr6
+            : currentState.torrentDhtListenAddr6,
+          torrentLpdInterface: typeof persisted.torrentLpdInterface === 'string'
+            ? persisted.torrentLpdInterface
+            : currentState.torrentLpdInterface,
+          torrentPeerIdPrefix: typeof persisted.torrentPeerIdPrefix === 'string'
+            ? persisted.torrentPeerIdPrefix
+            : currentState.torrentPeerIdPrefix,
+          torrentPeerAgent: typeof persisted.torrentPeerAgent === 'string'
+            ? persisted.torrentPeerAgent
+            : currentState.torrentPeerAgent,
           sidebarPosition: isAllowedSetting(SIDEBAR_POSITION_VALUES, persisted.sidebarPosition)
             ? persisted.sidebarPosition
             : currentState.sidebarPosition,
