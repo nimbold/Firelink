@@ -90,7 +90,10 @@ No remaining Tier 1 items.
    current explicit metadata path intentionally avoids unmapped child jobs.
    Generic `addUri` now forces both follow options to `false` as the safe
    default; the child-GID feature remains pending until the end-to-end
-   ownership model is implemented.
+   ownership model is implemented. Enabling it for raw generic URLs would
+   also bypass Firelink's bounded remote-metadata validation and would require
+   re-discovering child jobs from durable request identity after an Aria2
+   restart; session-scoped GID strings cannot be persisted as ownership.
 
 The first implementation in this task was remote `.torrent` metadata intake;
 follow-up implementations add stall-timeout control, bounded peer diagnostics,
