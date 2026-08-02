@@ -5976,6 +5976,23 @@ async fn resolve_magnet_metadata(
         .map(crate::queue::aria2_all_proxy_value)
         .transpose()?
         .flatten();
+    if cache && crate::torrent::magnet_allows_cached_metadata(source) {
+        match crate::torrent::read_cached_torrent_by_info_hash(app_handle, &expected.info_hash)
+            .await
+        {
+            Ok(Some(bytes)) => {
+                let parsed = crate::torrent::parse_torrent_bytes(&bytes)?;
+                crate::torrent::validate_info_hash(Some(&expected.info_hash), &parsed.info_hash)?;
+                let torrent_path =
+                    crate::torrent::cache_torrent_bytes(app_handle, id, &bytes).await?;
+                return Ok(crate::torrent::to_metadata(parsed, Some(torrent_path)));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                log::warn!("could not inspect canonical torrent metadata cache: {error}");
+            }
+        }
+    }
     let storage_root = managed_path
         .parent()
         .ok_or_else(|| "torrent storage has no parent directory".to_string())?;
@@ -6045,7 +6062,11 @@ async fn resolve_magnet_metadata(
     let parsed = crate::torrent::parse_torrent_bytes(&bytes)?;
     crate::torrent::validate_info_hash(Some(&expected.info_hash), &parsed.info_hash)?;
     let torrent_path = if cache {
-        Some(crate::torrent::cache_torrent_bytes(app_handle, id, &bytes).await?)
+        let torrent_path = crate::torrent::cache_torrent_bytes(app_handle, id, &bytes).await?;
+        if let Err(error) = crate::torrent::cache_torrent_info_hash(app_handle, &bytes).await {
+            log::warn!("could not cache canonical torrent metadata: {error}");
+        }
+        Some(torrent_path)
     } else {
         None
     };
@@ -6080,11 +6101,15 @@ async fn inspect_torrent(
             .map_err(AppError::Internal)?;
         let parsed = crate::torrent::parse_torrent_bytes(&bytes).map_err(AppError::Internal)?;
         let torrent_path = if cache != Some(false) {
-            Some(
-                crate::torrent::cache_torrent_bytes(&app_handle, &id, &bytes)
-                    .await
-                    .map_err(AppError::Internal)?,
-            )
+            let torrent_path = crate::torrent::cache_torrent_bytes(&app_handle, &id, &bytes)
+                .await
+                .map_err(AppError::Internal)?;
+            if let Err(error) =
+                crate::torrent::cache_torrent_info_hash(&app_handle, &bytes).await
+            {
+                log::warn!("could not cache canonical torrent metadata: {error}");
+            }
+            Some(torrent_path)
         } else {
             None
         };
@@ -6124,6 +6149,9 @@ async fn rekey_torrent_metadata(
     let target = crate::torrent::cache_torrent_bytes(&app_handle, &target_id, &bytes)
         .await
         .map_err(AppError::Internal)?;
+    if let Err(error) = crate::torrent::cache_torrent_info_hash(&app_handle, &bytes).await {
+        log::warn!("could not cache canonical torrent metadata during rekey: {error}");
+    }
     let target = crate::torrent::validate_managed_torrent_path(
         &app_handle,
         &target_id,
@@ -7402,6 +7430,20 @@ fn retained_torrent_id_from_persisted_record(record: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn retained_torrent_info_hash_from_persisted_record(record: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(record).ok()?;
+    let object = value.as_object()?;
+    if object.get("isTorrent").and_then(serde_json::Value::as_bool) != Some(true)
+        || object.get("torrentPath").is_none_or(serde_json::Value::is_null)
+    {
+        return None;
+    }
+    object
+        .get("torrentInfoHash")
+        .and_then(serde_json::Value::as_str)
+        .and_then(crate::torrent::canonical_info_hash)
+}
+
 #[tauri::command]
 fn db_replace_downloads(
     state: tauri::State<'_, crate::db::DbState>,
@@ -7851,6 +7893,7 @@ mod tests {
         normalize_media_connections,
         validate_enqueue_url, validate_enqueue_uris, validate_keychain_grant_request_id,
         retained_torrent_id_from_persisted_record,
+        retained_torrent_info_hash_from_persisted_record,
     };
     #[cfg(target_os = "macos")]
     use super::should_apply_dock_badge_update;
@@ -8022,6 +8065,41 @@ mod tests {
         assert!(retained_torrent_id_from_persisted_record("not-json").is_none());
         assert!(retained_torrent_id_from_persisted_record(
             &json!({ "id": "ordinary", "isTorrent": false }).to_string()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn retained_torrent_info_hash_is_canonicalized_only_for_live_torrents() {
+        let record = json!({
+            "id": "retained-torrent",
+            "isTorrent": true,
+            "torrentPath": "/tmp/retained-torrent.torrent",
+            "torrentInfoHash": "AERUKZ4JVPG66AJDIVTYTK6N54ASGRLH"
+        })
+        .to_string();
+
+        assert_eq!(
+            retained_torrent_info_hash_from_persisted_record(&record).as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        assert!(retained_torrent_info_hash_from_persisted_record(
+            &json!({
+                "id": "not-live",
+                "isTorrent": true,
+                "torrentInfoHash": "0123456789abcdef0123456789abcdef01234567"
+            })
+            .to_string()
+        )
+        .is_none());
+        assert!(retained_torrent_info_hash_from_persisted_record(
+            &json!({
+                "id": "invalid-hash",
+                "isTorrent": true,
+                "torrentPath": "/tmp/invalid-hash.torrent",
+                "torrentInfoHash": "not-a-hash"
+            })
+            .to_string()
         )
         .is_none());
     }
@@ -10485,30 +10563,40 @@ pub fn run() {
             if let Err(error) = crate::torrent::remove_orphaned_probe_dirs(app.handle()) {
                 log::warn!("could not remove orphaned torrent probes: {error}");
             }
-            let retained_torrent_ids = database
+            let retained_torrent_metadata = database
                 .lock()
                 .and_then(|connection| crate::db::load_downloads(&connection))
                 .map(|records| {
-                    records
-                        .into_iter()
-                        .filter_map(|record| {
-                            let retained = retained_torrent_id_from_persisted_record(&record);
-                            if retained.is_none() {
-                                if serde_json::from_str::<crate::ipc::DownloadItem>(&record).is_err() {
-                                    log::warn!(
-                                        "skipping malformed persisted download during torrent metadata retention"
-                                    );
-                                }
-                            }
-                            retained
-                        })
-                        .collect::<HashSet<_>>()
+                    let mut retained_ids = HashSet::new();
+                    let mut retained_info_hashes = HashSet::new();
+                    for record in records {
+                        let retained_id = retained_torrent_id_from_persisted_record(&record);
+                        let retained_info_hash =
+                            retained_torrent_info_hash_from_persisted_record(&record);
+                        let has_retained_metadata =
+                            retained_id.is_some() || retained_info_hash.is_some();
+                        if let Some(id) = retained_id {
+                            retained_ids.insert(id);
+                        }
+                        if let Some(info_hash) = retained_info_hash {
+                            retained_info_hashes.insert(info_hash);
+                        }
+                        if !has_retained_metadata
+                            && serde_json::from_str::<crate::ipc::DownloadItem>(&record).is_err()
+                        {
+                            log::warn!(
+                                "skipping malformed persisted download during torrent metadata retention"
+                            );
+                        }
+                    }
+                    (retained_ids, retained_info_hashes)
                 });
-            match retained_torrent_ids {
-                Ok(retained_torrent_ids) => {
+            match retained_torrent_metadata {
+                Ok((retained_torrent_ids, retained_torrent_info_hashes)) => {
                     if let Err(error) = crate::torrent::remove_orphaned_cached_torrents(
                         app.handle(),
                         &retained_torrent_ids,
+                        &retained_torrent_info_hashes,
                     ) {
                         log::warn!("could not remove orphaned torrent metadata: {error}");
                     }

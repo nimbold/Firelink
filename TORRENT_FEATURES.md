@@ -11,7 +11,8 @@ Reference: [Aria2 1.37.0 manual](https://aria2.github.io/manual/en/html/aria2c.h
 
 ## Audit basis
 
-- Audited on 2026-08-02 at Firelink `b2c86a2` (`main`), with the cumulative
+- Audited on 2026-08-03 at Firelink `cba485e` (`main`) plus the current working
+  tree, with the cumulative
   Torrent work reviewed from `edc76a7`.
 - Source of truth: `src-tauri/src/torrent.rs`, `torrent_probe.rs`, `queue.rs`,
   `lib.rs`, `settings.rs`, `download_ownership.rs`, `db.rs`, the IPC bindings,
@@ -39,6 +40,19 @@ Reference: [Aria2 1.37.0 manual](https://aria2.github.io/manual/en/html/aria2c.h
 - Torrent metadata probing uses Aria2 `bt-metadata-only` and `bt-save-metadata`
   internally, validates the returned hash, and conservatively cleans probe
   directories. It is not exposed as a separate metadata-only download mode.
+- Validated metadata is also stored under a canonical lowercase hexadecimal
+  info-hash key. Plain magnets containing only `xt` and optional `dn` reuse
+  that cache before probing when the cached file has no tracker, web-seed, or
+  other source-specific outer metadata; tracker, web-seed, source, and unknown
+  query parameters conservatively force a fresh probe. Cache hits are
+  revalidated against bencode and the exact hash, copied into the current
+  draft ID, and therefore remain compatible with Add-window rekeying.
+- Canonical metadata writes use a same-directory temporary file and rename;
+  invalid entries and abandoned canonical temporary files are removed safely.
+  Canonical files use a separate `.info-<hash>.torrent` namespace from
+  draft/final IDs, and reads are bounded before parsing. Startup retention
+  keeps canonical files referenced by persisted Torrent records'
+  `torrentInfoHash`, as well as draft/final ID-keyed files.
 - `addTorrent` passes validated web-seed/mirror URIs when supplied through the
   existing download input. There is no separate Torrent web-seed manager.
 
@@ -124,7 +138,7 @@ Reference: [Aria2 1.37.0 manual](https://aria2.github.io/manual/en/html/aria2c.h
 
 | Aria2 capability | Firelink status | Reason / next step |
 | --- | --- | --- |
-| `bt-load-saved-metadata` | Not exposed | Firelink has managed metadata files, but a new magnet currently probes metadata instead of reusing an info-hash-keyed cache. Add hash-keyed reuse with validation and stale-cache invalidation. |
+| `bt-load-saved-metadata` | App-equivalent implemented | Firelink owns a validated, atomic, info-hash-keyed metadata cache for plain magnets, limited to metadata without source-specific outer tracker/web-seed fields, while preserving the current draft-ID/rekey contract. Source-specific magnet parameters intentionally bypass reuse; Aria2's daemon option is not exposed directly. |
 | `dht-message-timeout` | Not exposed | Global DHT/UDP timeout tuning is not yet represented in settings. Add only with bounded validation and a runtime/startup contract. |
 | `dht-file-path`, `dht-file-path6` | Not explicitly controlled | Aria2 can persist DHT routing tables, but Firelink does not choose app-managed paths or report their health. Decide whether portable-mode and privacy behavior justify exposing this. |
 | `bt-detach-seed-only` | Not used | Aria2's concurrent-download accounting does not replace Firelink's permit ownership. Enabling it blindly would create two competing concurrency models. Revisit only with an explicit seed-slot policy. |
@@ -161,15 +175,11 @@ Before any new Torrent feature is promoted, keep these gates mandatory:
 
 ### Tier 1 — high-value user behavior
 
-1. **Info-hash-keyed magnet metadata reuse.** Reuse a previously validated
-   managed `.torrent` by info hash before probing DHT/trackers. Revalidate the
-   bencode and exact hash, bind the result to the current draft/download
-   identity, and delete only invalid or unretained cache entries.
-2. **Unselected-file removal crash/restart audit.** Add post-crash tests around
+1. **Unselected-file removal crash/restart audit.** Add post-crash tests around
    the persisted removal reservation, Aria2 completion cleanup, path reuse, and
    case-insensitive path equality. Do not change cleanup ordering until the
    ownership postconditions are proven.
-3. **DHT routing-table persistence policy.** Decide and implement app-managed
+2. **DHT routing-table persistence policy.** Decide and implement app-managed
    `dht-file-path`/`dht-file-path6` behavior, especially for portable mode,
    permissions, reset, and privacy. This should be opt-in if it expands data
    retention beyond the current download metadata contract.

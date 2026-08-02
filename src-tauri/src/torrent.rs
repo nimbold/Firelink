@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use tauri::Manager;
+use tokio::io::AsyncReadExt;
 
 use crate::ipc::{TorrentFile, TorrentMetadata};
 
@@ -329,6 +330,10 @@ fn canonical_btih(value: &str) -> Option<String> {
     Some(decoded.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+pub fn canonical_info_hash(value: &str) -> Option<String> {
+    canonical_btih(value)
+}
+
 pub fn validate_info_hash(expected: Option<&str>, actual: &str) -> Result<(), String> {
     let Some(expected) = expected else {
         return Ok(());
@@ -356,6 +361,39 @@ pub fn parse_torrent_bytes(bytes: &[u8]) -> Result<ParsedTorrent, String> {
     parse_info(info)
 }
 
+pub fn torrent_metadata_is_safe_for_plain_magnet_reuse(bytes: &[u8]) -> Result<bool, String> {
+    if bytes.is_empty() || bytes.len() > MAX_TORRENT_BYTES {
+        return Err(format!(
+            "torrent metadata must be between 1 byte and {MAX_TORRENT_BYTES} bytes"
+        ));
+    }
+    let root = Parser::new(bytes).parse()?;
+    let root = match root {
+        BencodeValue::Dict(value) => value,
+        _ => return Err("torrent root is not a dictionary".to_string()),
+    };
+    let info = root
+        .get(b"info".as_slice())
+        .ok_or_else(|| "torrent metadata is missing info".to_string())?;
+    parse_info(info)?;
+
+    Ok(root.keys().all(|key| {
+        matches!(
+            key.as_slice(),
+            b"info"
+                | b"comment"
+                | b"comment.utf-8"
+                | b"created by"
+                | b"created by.utf-8"
+                | b"creation date"
+                | b"encoding"
+                | b"publisher"
+                | b"publisher-url"
+                | b"publisher-url.utf-8"
+        )
+    }))
+}
+
 fn magnet_metadata(source: &str) -> Result<ParsedTorrent, String> {
     let parsed = url::Url::parse(source).map_err(|_| "invalid magnet URI".to_string())?;
     if parsed.scheme() != "magnet" {
@@ -378,6 +416,33 @@ fn magnet_metadata(source: &str) -> Result<ParsedTorrent, String> {
         .map(|value| crate::download_ownership::canonical_download_filename(&value))
         .unwrap_or_else(|| format!("torrent-{info_hash}"));
     Ok(ParsedTorrent { name, total_bytes: 0, files: Vec::new(), info_hash })
+}
+
+pub fn magnet_allows_cached_metadata(source: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(source.trim()) else {
+        return false;
+    };
+    if parsed.scheme() != "magnet" {
+        return false;
+    }
+
+    let mut has_info_hash = false;
+    for (key, value) in parsed.query_pairs() {
+        match key.as_ref() {
+            "xt" => {
+                let Some(info_hash) = value.strip_prefix("urn:btih:") else {
+                    return false;
+                };
+                if canonical_btih(info_hash).is_none() {
+                    return false;
+                }
+                has_info_hash = true;
+            }
+            "dn" => {}
+            _ => return false,
+        }
+    }
+    has_info_hash
 }
 
 fn local_torrent_path(source: &str) -> Result<PathBuf, String> {
@@ -468,11 +533,25 @@ pub fn managed_torrent_path<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     id: &str,
 ) -> Result<PathBuf, String> {
-    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
         return Err("invalid torrent download id".to_string());
     }
     let root = managed_torrent_storage_root(app_handle)?;
     Ok(root.join(format!("{id}.torrent")))
+}
+
+pub fn managed_torrent_info_hash_path<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    info_hash: &str,
+) -> Result<PathBuf, String> {
+    let info_hash = canonical_btih(info_hash)
+        .ok_or_else(|| "invalid torrent info hash cache key".to_string())?;
+    let root = managed_torrent_storage_root(app_handle)?;
+    Ok(root.join(format!(".info-{info_hash}.torrent")))
 }
 
 pub fn managed_torrent_storage_root<R: tauri::Runtime>(
@@ -525,14 +604,16 @@ fn remove_orphaned_probe_dirs_at(root: &Path) -> Result<usize, String> {
 pub fn remove_orphaned_cached_torrents<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     retained_ids: &HashSet<String>,
+    retained_info_hashes: &HashSet<String>,
 ) -> Result<usize, String> {
     let root = managed_torrent_storage_root(app_handle)?;
-    remove_orphaned_cached_torrents_at(&root, retained_ids)
+    remove_orphaned_cached_torrents_at(&root, retained_ids, retained_info_hashes)
 }
 
 fn remove_orphaned_cached_torrents_at(
     root: &Path,
     retained_ids: &HashSet<String>,
+    retained_info_hashes: &HashSet<String>,
 ) -> Result<usize, String> {
     let entries = match std::fs::read_dir(&root) {
         Ok(entries) => entries,
@@ -541,11 +622,50 @@ fn remove_orphaned_cached_torrents_at(
     };
     let mut removed = 0;
     for entry in entries {
-        let entry = entry.map_err(|error| format!("could not inspect torrent metadata storage: {error}"))?;
+        let entry = entry
+            .map_err(|error| format!("could not inspect torrent metadata storage: {error}"))?;
         let file_type = entry
             .file_type()
             .map_err(|error| format!("could not inspect torrent metadata entry: {error}"))?;
-        if !file_type.is_file() || entry.path().extension().and_then(|ext| ext.to_str()) != Some("torrent") {
+        let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+            continue;
+        };
+        if file_type.is_file() && is_canonical_torrent_temp_file(&name) {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "could not remove orphaned torrent metadata temporary file: {error}"
+                    ));
+                }
+            }
+            continue;
+        }
+        if file_type.is_file() && name.starts_with(".info-") && name.ends_with(".torrent") {
+            let retained = name
+                .strip_prefix(".info-")
+                .and_then(|name| name.strip_suffix(".torrent"))
+                .and_then(canonical_btih)
+                .is_some_and(|info_hash| {
+                    name == format!(".info-{info_hash}.torrent")
+                        && retained_info_hashes.contains(&info_hash)
+                });
+            if retained {
+                continue;
+            }
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!("could not remove orphaned torrent metadata: {error}"));
+                }
+            }
+            continue;
+        }
+        if !file_type.is_file()
+            || entry.path().extension().and_then(|ext| ext.to_str()) != Some("torrent")
+        {
             continue;
         }
         let path = entry.path();
@@ -596,11 +716,14 @@ pub async fn prepare_local_torrent<R: tauri::Runtime>(
             "torrent metadata must be between 1 byte and {MAX_TORRENT_BYTES} bytes"
         ));
     }
-    let bytes = tokio::fs::read(&source_path)
+    let bytes = read_bounded_torrent_bytes(&source_path)
         .await
         .map_err(|error| format!("could not read torrent file: {error}"))?;
     let parsed = parse_torrent_bytes(&bytes)?;
     let destination = cache_torrent_bytes(app_handle, id, &bytes).await?;
+    if let Err(error) = cache_torrent_info_hash(app_handle, &bytes).await {
+        log::warn!("could not cache canonical torrent metadata: {error}");
+    }
     Ok((parsed, destination))
 }
 
@@ -626,19 +749,182 @@ pub async fn cache_torrent_bytes<R: tauri::Runtime>(
     Ok(destination.to_string_lossy().to_string())
 }
 
+fn is_canonical_torrent_temp_file(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(".cache-") else {
+        return false;
+    };
+    let Some((info_hash, temporary_id)) = rest.split_once(".torrent.") else {
+        return false;
+    };
+    let Some(temporary_id) = temporary_id.strip_suffix(".tmp") else {
+        return false;
+    };
+    canonical_btih(info_hash).as_deref() == Some(info_hash)
+        && temporary_id.len() == 32
+        && temporary_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+async fn read_bounded_torrent_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+    let file = tokio::fs::File::open(path).await?;
+    let mut bytes = Vec::with_capacity(std::cmp::min(MAX_TORRENT_BYTES, 64 * 1024));
+    file.take((MAX_TORRENT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await?;
+    if bytes.len() > MAX_TORRENT_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("torrent metadata exceeds {MAX_TORRENT_BYTES} bytes"),
+        ));
+    }
+    Ok(bytes)
+}
+
+static CANONICAL_TORRENT_CACHE_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+fn canonical_torrent_cache_lock() -> &'static tokio::sync::Mutex<()> {
+    CANONICAL_TORRENT_CACHE_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+async fn read_cached_torrent_by_info_hash_unlocked<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    info_hash: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let info_hash = canonical_btih(info_hash)
+        .ok_or_else(|| "invalid torrent info hash cache key".to_string())?;
+    let path = managed_torrent_info_hash_path(app_handle, &info_hash)?;
+    let metadata = match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("could not inspect cached torrent metadata: {error}")),
+    };
+    if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
+        return Ok(None);
+    }
+
+    let validated_path = match validate_managed_torrent_info_hash_path(
+        app_handle,
+        &info_hash,
+        &path.to_string_lossy(),
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&path).await;
+            log::warn!("discarding invalid cached torrent metadata: {error}");
+            return Ok(None);
+        }
+    };
+    let bytes = match read_bounded_torrent_bytes(&validated_path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            let _ = tokio::fs::remove_file(&path).await;
+            return Ok(None);
+        }
+        Err(error) => return Err(format!("could not read cached torrent metadata: {error}")),
+    };
+    let reusable = torrent_metadata_is_safe_for_plain_magnet_reuse(&bytes).is_ok_and(|safe| safe);
+    match parse_torrent_bytes(&bytes) {
+        Ok(parsed) if reusable && parsed.info_hash == info_hash => {}
+        Ok(_) | Err(_) => {
+            let _ = tokio::fs::remove_file(&path).await;
+            return Ok(None);
+        }
+    }
+    Ok(Some(bytes))
+}
+
+pub async fn read_cached_torrent_by_info_hash<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    info_hash: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let _guard = canonical_torrent_cache_lock().lock().await;
+    read_cached_torrent_by_info_hash_unlocked(app_handle, info_hash).await
+}
+
+pub async fn cache_torrent_info_hash<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    bytes: &[u8],
+) -> Result<Option<String>, String> {
+    let _guard = canonical_torrent_cache_lock().lock().await;
+    let parsed = parse_torrent_bytes(bytes)?;
+    if !torrent_metadata_is_safe_for_plain_magnet_reuse(bytes)? {
+        return Ok(None);
+    }
+    let info_hash = parsed.info_hash;
+    let destination = managed_torrent_info_hash_path(app_handle, &info_hash)?;
+    if read_cached_torrent_by_info_hash_unlocked(app_handle, &info_hash)
+        .await?
+        .is_some()
+    {
+        return Ok(Some(destination.to_string_lossy().to_string()));
+    }
+
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "torrent storage has no parent directory".to_string())?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|error| format!("could not create torrent storage: {error}"))?;
+    let temporary = parent.join(format!(
+        ".cache-{info_hash}.torrent.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    if let Err(error) = tokio::fs::write(&temporary, bytes).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(format!("could not stage canonical torrent metadata: {error}"));
+    }
+    match tokio::fs::rename(&temporary, &destination).await {
+        Ok(()) => Ok(Some(destination.to_string_lossy().to_string())),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            if read_cached_torrent_by_info_hash_unlocked(app_handle, &info_hash)
+                .await?
+                .is_some()
+            {
+                Ok(Some(destination.to_string_lossy().to_string()))
+            } else {
+                Err("canonical torrent metadata already exists but is invalid".to_string())
+            }
+        }
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            Err(format!("could not commit canonical torrent metadata: {error}"))
+        }
+    }
+}
+
 pub fn validate_managed_torrent_path<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     id: &str,
     path: &str,
 ) -> Result<PathBuf, String> {
     let expected = managed_torrent_path(app_handle, id)?;
+    validate_managed_torrent_path_against_expected(&expected, path)
+}
+
+pub fn validate_managed_torrent_info_hash_path<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    info_hash: &str,
+    path: &str,
+) -> Result<PathBuf, String> {
+    let expected = managed_torrent_info_hash_path(app_handle, info_hash)?;
+    validate_managed_torrent_path_against_expected(&expected, path)
+}
+
+fn validate_managed_torrent_path_against_expected(
+    expected: &Path,
+    path: &str,
+) -> Result<PathBuf, String> {
     let candidate = std::fs::canonicalize(path)
         .map_err(|error| format!("could not access cached torrent metadata: {error}"))?;
     let expected_parent = expected
         .parent()
         .and_then(|parent| std::fs::canonicalize(parent).ok())
         .ok_or_else(|| "cached torrent storage is unavailable".to_string())?;
-    if candidate.parent() != Some(expected_parent.as_path()) || candidate.file_name() != expected.file_name() {
+    if candidate.parent() != Some(expected_parent.as_path())
+        || candidate.file_name() != expected.file_name()
+    {
         return Err("cached torrent metadata path is invalid".to_string());
     }
     Ok(candidate)
@@ -697,6 +983,81 @@ mod tests {
     }
 
     #[test]
+    fn plain_magnet_reuse_rejects_tracker_and_web_seed_metadata() {
+        assert!(torrent_metadata_is_safe_for_plain_magnet_reuse(
+            b"d4:infod6:lengthi5e4:name4:testee"
+        )
+        .expect("plain torrent metadata should parse"));
+        assert!(!torrent_metadata_is_safe_for_plain_magnet_reuse(
+            b"d8:announce1:x4:infod6:lengthi5e4:name4:testee"
+        )
+        .expect("tracker-bearing torrent metadata should parse"));
+        assert!(!torrent_metadata_is_safe_for_plain_magnet_reuse(
+            b"d4:infod6:lengthi5e4:name4:teste8:url-list1:xe"
+        )
+        .expect("web-seed-bearing torrent metadata should parse"));
+    }
+
+    #[test]
+    fn canonical_cache_temporary_names_are_strictly_recognized() {
+        assert!(is_canonical_torrent_temp_file(
+            ".cache-0123456789abcdef0123456789abcdef01234567.torrent.0123456789abcdef0123456789abcdef.tmp"
+        ));
+        assert!(!is_canonical_torrent_temp_file(
+            ".cache-orphan.torrent.temporary.tmp"
+        ));
+        assert!(!is_canonical_torrent_temp_file(
+            ".cache-0123456789abcdef0123456789abcdef01234567.torrent.tmp"
+        ));
+    }
+
+    #[tokio::test]
+    async fn canonical_cache_round_trip_rejects_invalid_bytes_and_source_metadata() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let bytes = b"d4:infod6:lengthi5e4:name4:testee";
+        let parsed = parse_torrent_bytes(bytes).expect("test torrent should parse");
+        let path = managed_torrent_info_hash_path(app.handle(), &parsed.info_hash)
+            .expect("canonical cache path should resolve");
+        let _ = tokio::fs::remove_file(&path).await;
+
+        assert!(
+            cache_torrent_info_hash(app.handle(), bytes)
+                .await
+                .expect("canonical cache write should succeed")
+                .is_some()
+        );
+        assert_eq!(
+            read_cached_torrent_by_info_hash(app.handle(), &parsed.info_hash)
+                .await
+                .expect("canonical cache read should succeed"),
+            Some(bytes.to_vec())
+        );
+
+        tokio::fs::write(&path, b"not a torrent")
+            .await
+            .expect("invalid cache fixture should be writable");
+        assert!(
+            read_cached_torrent_by_info_hash(app.handle(), &parsed.info_hash)
+                .await
+                .expect("invalid cache should be handled")
+                .is_none()
+        );
+        assert!(!path.exists());
+
+        assert!(
+            cache_torrent_info_hash(
+                app.handle(),
+                b"d8:announce1:x4:infod6:lengthi5e4:name4:testee"
+            )
+            .await
+            .expect("source-specific metadata should be handled")
+            .is_none()
+        );
+    }
+
+    #[test]
     fn canonicalizes_base32_magnet_hashes_to_hex() {
         let parsed = inspect_source(
             "magnet:?xt=urn:btih:AERUKZ4JVPG66AJDIVTYTK6N54ASGRLH&dn=Base32",
@@ -718,6 +1079,35 @@ mod tests {
         )
         .is_err());
         validate_info_hash(None, "not-used").expect("missing legacy identity should remain compatible");
+        assert_eq!(
+            canonical_info_hash("AERUKZ4JVPG66AJDIVTYTK6N54ASGRLH").as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+    }
+
+    #[test]
+    fn only_plain_magnets_can_reuse_hash_keyed_metadata() {
+        assert!(magnet_allows_cached_metadata(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+        ));
+        assert!(magnet_allows_cached_metadata(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Example%20Torrent"
+        ));
+        assert!(!magnet_allows_cached_metadata(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=https%3A%2F%2Ftracker.invalid%2Fannounce"
+        ));
+        assert!(!magnet_allows_cached_metadata(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&ws=https%3A%2F%2Fexample.invalid%2Ffile"
+        ));
+        assert!(!magnet_allows_cached_metadata(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&as=https%3A%2F%2Fexample.invalid%2Ffile"
+        ));
+        assert!(!magnet_allows_cached_metadata(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&unknown=value"
+        ));
+        assert!(!magnet_allows_cached_metadata(
+            "magnet:?xt=urn:btih:not-a-valid-hash"
+        ));
     }
 
     #[test]
@@ -793,17 +1183,48 @@ mod tests {
     fn removes_unretained_torrent_files_but_preserves_retained_and_unrelated_entries() {
         let temporary = tempfile::tempdir().expect("temporary torrent storage should exist");
         let root = temporary.path();
+        let retained_hash = "0123456789abcdef0123456789abcdef01234567";
         std::fs::write(root.join("keep-id.torrent"), b"retained")
             .expect("retained metadata should exist");
         std::fs::write(root.join("orphan-id.torrent"), b"orphan")
             .expect("orphan metadata should exist");
+        std::fs::write(root.join(format!(".info-{retained_hash}.torrent")), b"retained hash")
+            .expect("retained hash metadata should exist");
+        std::fs::write(root.join(format!("{retained_hash}.torrent")), b"legacy hash")
+            .expect("legacy hash metadata should exist");
+        std::fs::write(
+            root.join(".info-fedcba9876543210fedcba9876543210fedcba98.torrent"),
+            b"orphan hash",
+        )
+            .expect("orphan hash metadata should exist");
+        std::fs::write(
+            root.join(format!(
+                ".cache-{retained_hash}.torrent.0123456789abcdef0123456789abcdef.tmp"
+            )),
+            b"orphan temporary",
+        )
+            .expect("orphan temporary metadata should exist");
         std::fs::write(root.join("notes.txt"), b"unrelated")
             .expect("unrelated file should exist");
         let retained = HashSet::from(["keep-id".to_string()]);
+        let retained_hashes = HashSet::from([retained_hash.to_string()]);
 
-        assert_eq!(remove_orphaned_cached_torrents_at(root, &retained).unwrap(), 1);
+        assert_eq!(
+            remove_orphaned_cached_torrents_at(root, &retained, &retained_hashes).unwrap(),
+            4
+        );
         assert!(root.join("keep-id.torrent").is_file());
         assert!(!root.join("orphan-id.torrent").exists());
+        assert!(root.join(format!(".info-{retained_hash}.torrent")).is_file());
+        assert!(!root.join(format!("{retained_hash}.torrent")).exists());
+        assert!(!root
+            .join(".info-fedcba9876543210fedcba9876543210fedcba98.torrent")
+            .exists());
+        assert!(!root
+            .join(format!(
+                ".cache-{retained_hash}.torrent.0123456789abcdef0123456789abcdef.tmp"
+            ))
+            .exists());
         assert!(root.join("notes.txt").is_file());
     }
 }
