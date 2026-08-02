@@ -53,6 +53,11 @@ belong in the download UI. The Aria2 reference is the [1.37.0 manual](https://ar
   timeouts are bounded to 1–604800 seconds; interval 0 restores Aria2's
   response/progress-driven scheduling. Timing is persisted and reapplied when
   a Torrent starts or retries.
+- Generic Aria2 downloads explicitly disable `follow-torrent` and
+  `follow-metalink`, so a URL that happens to return Torrent or Metalink
+  metadata cannot create an unmanaged child GID. Generic follow behavior is
+  not exposed until parent/child GID ownership is represented across queue
+  admission, progress, cancellation, retry, and restart recovery.
 - Global `bt-max-open-files` control for multi-file Torrents, bounded to
   1–4096 with Aria2's default of 100. The setting is persisted, applied at
   daemon startup, and updateable through Aria2's global-option RPC; changes
@@ -83,6 +88,9 @@ No remaining Tier 1 items.
 1. Aria2 `follow-torrent`/in-memory follow behavior for generic downloads only
    if the resulting child-GID ownership model can be represented safely; the
    current explicit metadata path intentionally avoids unmapped child jobs.
+   Generic `addUri` now forces both follow options to `false` as the safe
+   default; the child-GID feature remains pending until the end-to-end
+   ownership model is implemented.
 
 The first implementation in this task was remote `.torrent` metadata intake;
 follow-up implementations add stall-timeout control, bounded peer diagnostics,

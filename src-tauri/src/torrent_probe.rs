@@ -23,11 +23,16 @@ pub(crate) enum ProbeFailure {
 pub(crate) async fn run_metadata_probe<C: RpcClient + 'static>(
     client: Arc<C>,
     source: &str,
-    options: Map<String, Value>,
+    mut options: Map<String, Value>,
     metadata_path: &Path,
     timeout: Duration,
     poll_interval: Duration,
 ) -> Result<Vec<u8>, ProbeFailure> {
+    // This probe only resolves magnet metadata. It must never allow Aria2 to
+    // interpret a downloaded metadata file as another child download because
+    // the probe cleanup guard owns exactly one GID.
+    options.insert("follow-torrent".to_string(), json!("false"));
+    options.insert("follow-metalink".to_string(), json!("false"));
     let mut cleanup_guard = ProbeCleanupGuard::new(Arc::clone(&client), metadata_path);
     let result = match client
         .call("aria2.addUri", json!([[source], options]))
@@ -1016,6 +1021,16 @@ mod tests {
         assert_eq!(
             options.get("bt-save-metadata"),
             Some(&json!("true")),
+            "recorded addUri params: {add_params:?}"
+        );
+        assert_eq!(
+            options.get("follow-torrent"),
+            Some(&json!("false")),
+            "recorded addUri params: {add_params:?}"
+        );
+        assert_eq!(
+            options.get("follow-metalink"),
+            Some(&json!("false")),
             "recorded addUri params: {add_params:?}"
         );
         tokio::fs::remove_dir_all(&probe_dir)

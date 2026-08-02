@@ -3408,6 +3408,27 @@ fn apply_aria2_connection_options(
     );
 }
 
+fn apply_aria2_follow_options(
+    options: &mut serde_json::Map<String, serde_json::Value>,
+    payload: &SpawnPayload,
+) {
+    if !payload.is_torrent {
+        // A generic addUri can point at a .torrent or Metalink file. Aria2
+        // may then create a second, followed child GID, but Firelink
+        // currently owns exactly one GID per download. Keep that unmanaged
+        // child lifecycle impossible until parent/child ownership is modeled
+        // end to end.
+        options.insert(
+            "follow-torrent".to_string(),
+            serde_json::json!("false"),
+        );
+        options.insert(
+            "follow-metalink".to_string(),
+            serde_json::json!("false"),
+        );
+    }
+}
+
 fn format_aria2_torrent_number(value: f64, field: &str) -> Result<String, String> {
     if !value.is_finite() || value < 0.0 {
         return Err(format!("torrent {field} must be a finite non-negative number"));
@@ -3981,6 +4002,7 @@ impl SidecarSpawner for ProductionSpawner {
         }
         let conn = effective_aria2_connections(id, payload).await;
         apply_aria2_connection_options(&mut options, conn);
+        apply_aria2_follow_options(&mut options, payload);
         apply_aria2_torrent_options(&mut options, payload)?;
         let mt = aria2_attempt_limit(payload.max_tries);
         options.insert("max-tries".to_string(), serde_json::json!(mt.to_string()));
@@ -4673,6 +4695,35 @@ mod tests {
             options.get("bt-min-crypto-level"),
             Some(&serde_json::json!("plain"))
         );
+    }
+
+    #[test]
+    fn generic_aria2_downloads_disable_followed_child_gids() {
+        let mut options = serde_json::Map::new();
+        apply_aria2_follow_options(&mut options, &SpawnPayload::default());
+
+        assert_eq!(
+            options.get("follow-torrent"),
+            Some(&serde_json::json!("false"))
+        );
+        assert_eq!(
+            options.get("follow-metalink"),
+            Some(&serde_json::json!("false"))
+        );
+    }
+
+    #[test]
+    fn explicit_torrent_downloads_do_not_override_follow_policy() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            ..Default::default()
+        };
+
+        apply_aria2_follow_options(&mut options, &payload);
+
+        assert!(!options.contains_key("follow-torrent"));
+        assert!(!options.contains_key("follow-metalink"));
     }
 
     #[test]
