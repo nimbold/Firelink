@@ -5803,6 +5803,9 @@ async fn validate_torrent_enqueue(
     item.torrent_exclude_trackers =
         queue::normalize_torrent_exclude_trackers(item.torrent_exclude_trackers.as_deref())?;
     item.torrent_stop_timeout = queue::normalize_torrent_stop_timeout(item.torrent_stop_timeout)?;
+    item.torrent_prioritize_piece = queue::normalize_torrent_prioritize_piece(
+        item.torrent_prioritize_piece.as_deref(),
+    )?;
     validate_enqueue_uris("", item.mirrors.as_deref()).await?;
     if let Some(path) = item.torrent_path.as_deref() {
         let path = crate::torrent::validate_managed_torrent_path(app_handle, &item.id, path)?;

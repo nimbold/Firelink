@@ -19,7 +19,7 @@ import {
   formatDownloadTotal,
   resolveDownloadSizeDisplay
 } from '../utils/downloadProgress';
-import { isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, resolveDownloadConnections } from '../utils/downloads';
+import { isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentPrioritizePiece, resolveDownloadConnections } from '../utils/downloads';
 import { useTranslation } from 'react-i18next';
 import { formatDateTime, type CalendarPreference } from '../utils/dateTime';
 import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
@@ -90,6 +90,7 @@ export const PropertiesModal = () => {
   const [torrentTrackers, setTorrentTrackers] = useState('');
   const [torrentExcludeTrackers, setTorrentExcludeTrackers] = useState('');
   const [torrentStopTimeout, setTorrentStopTimeout] = useState('0');
+  const [torrentPrioritizePiece, setTorrentPrioritizePiece] = useState('');
   const [torrentPeerDiagnostics, setTorrentPeerDiagnostics] = useState<TorrentPeerDiagnostics | null>(null);
   const [torrentPeerDiagnosticsError, setTorrentPeerDiagnosticsError] = useState(false);
   const [isTorrentPeerDiagnosticsPending, setIsTorrentPeerDiagnosticsPending] = useState(false);
@@ -193,6 +194,7 @@ export const PropertiesModal = () => {
         setTorrentTrackers(activeItem.torrentTrackers || '');
         setTorrentExcludeTrackers(activeItem.torrentExcludeTrackers || '');
         setTorrentStopTimeout(activeItem.torrentStopTimeout === undefined ? '0' : String(activeItem.torrentStopTimeout));
+        setTorrentPrioritizePiece(activeItem.torrentPrioritizePiece || '');
         setErrorMessage('');
       } else {
         setSelectedPropertiesDownloadId(null);
@@ -343,6 +345,10 @@ export const PropertiesModal = () => {
       setErrorMessage(t($ => $.properties.torrentExcludeTrackersInvalid));
       return;
     }
+    if (item.isTorrent && torrentPrioritizePiece.trim() && !normalizeTorrentPrioritizePiece(torrentPrioritizePiece)) {
+      setErrorMessage(t($ => $.properties.torrentPrioritizePieceInvalid));
+      return;
+    }
     const normalizedStopTimeout = torrentStopTimeout.trim()
       ? Number(torrentStopTimeout)
       : undefined;
@@ -374,6 +380,7 @@ export const PropertiesModal = () => {
             torrentTrackers: torrentTrackers.trim() || undefined,
             torrentExcludeTrackers: torrentExcludeTrackers.trim() || undefined,
             torrentStopTimeout: normalizedStopTimeout,
+            torrentPrioritizePiece: normalizeTorrentPrioritizePiece(torrentPrioritizePiece) || undefined,
           }
         : {}),
       ...(connectionsDirty
@@ -928,6 +935,24 @@ export const PropertiesModal = () => {
                     </div>
                     <p id="torrent-stop-timeout-properties-hint" className="mt-1 text-[11px] text-text-muted">
                       {t($ => $.properties.torrentStopTimeoutHint)}
+                    </p>
+                  </div>
+                  <label className="text-xs text-text-muted text-right" htmlFor="torrent-prioritize-piece-properties">
+                    {t($ => $.properties.torrentPrioritizePiece)}
+                  </label>
+                  <div>
+                    <input
+                      id="torrent-prioritize-piece-properties"
+                      type="text"
+                      value={torrentPrioritizePiece}
+                      onChange={event => setTorrentPrioritizePiece(event.currentTarget.value)}
+                      placeholder="head=1M,tail=1M"
+                      disabled={transferLocked}
+                      aria-describedby="torrent-prioritize-piece-properties-hint"
+                      className="app-control w-full px-2.5 py-1.5 text-xs font-mono disabled:opacity-50"
+                    />
+                    <p id="torrent-prioritize-piece-properties-hint" className="mt-1 text-[11px] text-text-muted">
+                      {t($ => $.properties.torrentPrioritizePieceHint)}
                     </p>
                   </div>
                   <label className="text-xs text-text-muted text-right" htmlFor="torrent-check-integrity">

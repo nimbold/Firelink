@@ -715,6 +715,7 @@ async function main() {
         dir: finalDir,
         'bt-tracker': `http://127.0.0.1:${trackerPort}/announce`,
         'select-file': '1',
+        'bt-prioritize-piece': 'head=32K,tail=16K',
         'index-out': indexOut,
         'max-download-limit': '32K',
         'seed-time': '0',
@@ -722,6 +723,11 @@ async function main() {
       },
     ]);
     await waitForStatus(client, finalGid, 'active', 10000);
+    const finalOptions = await rpc(client.rpcPort, client.secret, 'aria2.getOption', [finalGid]);
+    assert(
+      finalOptions['bt-prioritize-piece'] === 'head=32K,tail=16K',
+      `Aria2 did not retain the piece-priority option: ${JSON.stringify(finalOptions['bt-prioritize-piece'])}`,
+    );
     await rpc(client.rpcPort, client.secret, 'aria2.forcePause', [finalGid]);
     await waitForStatus(client, finalGid, 'paused', 10000);
     await rpc(client.rpcPort, client.secret, 'aria2.unpause', [finalGid]);
@@ -735,7 +741,7 @@ async function main() {
     const reportedSelected = reportedFiles.find(file => file.path === selectedPath || file.path.endsWith('/selected.bin'));
     assert(reportedSelected, `Aria2 ownership list did not report ${selectedPath}`);
     assert(finalStatus.files?.some(file => file.path === selectedPath || file.path.endsWith('/selected.bin')), 'terminal status omitted selected output');
-    console.log('[OK] additional tracker injection, selected output, pause/resume, and Aria2 file ownership passed');
+    console.log('[OK] additional tracker injection, piece priority, selected output, pause/resume, and Aria2 file ownership passed');
 
     const integrityPath = path.join(integrityDir, torrent.name, 'selected.bin');
     fs.mkdirSync(path.dirname(integrityPath), { recursive: true });

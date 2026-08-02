@@ -8,6 +8,7 @@ import {
   canonicalizeDownloadFileName,
   isValidTorrentExcludeTrackerList,
   isValidTorrentTrackerList,
+  normalizeTorrentPrioritizePiece,
   redactDownloadForPersistence,
   resolveDownloadConnections
 } from './downloads';
@@ -74,6 +75,20 @@ describe('Torrent tracker input validation', () => {
     expect(isValidTorrentExcludeTrackerList('*,https://tracker.example/announce')).toBe(false);
     expect(isValidTorrentExcludeTrackerList('https://tracker.example/announce,*')).toBe(false);
     expect(isValidTorrentExcludeTrackerList('https://user:pass@tracker.example/announce')).toBe(false);
+  });
+});
+
+describe('Torrent piece priority validation', () => {
+  it('normalizes head and tail preview policies', () => {
+    expect(normalizeTorrentPrioritizePiece(' tail = 64k, HEAD ')).toBe('head,tail=64K');
+    expect(normalizeTorrentPrioritizePiece('head=1m,tail=1024M')).toBe('head=1M,tail=1024M');
+    expect(normalizeTorrentPrioritizePiece('')).toBeNull();
+  });
+
+  it('rejects duplicate, unsupported, malformed, and oversized policies', () => {
+    for (const value of ['head,head', 'middle', 'head=0K', 'tail=1G', 'head=1K,', 'head=1025M']) {
+      expect(normalizeTorrentPrioritizePiece(value)).toBeNull();
+    }
   });
 });
 

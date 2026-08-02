@@ -13,7 +13,7 @@ import { FolderPlus, Save, Settings, Shield, RefreshCw, FileText, HardDrive, Dat
 import { open } from '@tauri-apps/plugin-dialog';
 import { invokeCommand as invoke } from '../ipc';
 import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResolutionModal';
-import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentPrioritizePiece } from '../utils/downloads';
 import { fetchMediaMetadataDeduped, fetchMediaPlaylistMetadataDeduped } from '../utils/mediaMetadata';
 import {
   expandTilde,
@@ -236,6 +236,7 @@ export const AddDownloadsModal = () => {
   const [torrentTrackers, setTorrentTrackers] = useState('');
   const [torrentExcludeTrackers, setTorrentExcludeTrackers] = useState('');
   const [torrentStopTimeout, setTorrentStopTimeout] = useState('0');
+  const [torrentPrioritizePiece, setTorrentPrioritizePiece] = useState('');
   const [freeSpace, setFreeSpace] = useState('Unknown');
   const freeSpaceRequestRef = useRef(0);
 
@@ -984,6 +985,10 @@ export const AddDownloadsModal = () => {
       addToast({ message: t($ => $.addDownloads.torrentExcludeTrackersInvalid), variant: 'error', isActionable: true });
       return;
     }
+    if (hasSelectedTorrent && torrentPrioritizePiece.trim() && !normalizeTorrentPrioritizePiece(torrentPrioritizePiece)) {
+      addToast({ message: t($ => $.addDownloads.torrentPrioritizePieceInvalid), variant: 'error', isActionable: true });
+      return;
+    }
     if (
       hasSelectedTorrent
       && torrentStopTimeout.trim()
@@ -1474,6 +1479,7 @@ export const AddDownloadsModal = () => {
           torrentTrackers: item.isTorrent ? torrentTrackers.trim() || undefined : undefined,
           torrentExcludeTrackers: item.isTorrent ? torrentExcludeTrackers.trim() || undefined : undefined,
           torrentStopTimeout: item.isTorrent && torrentStopTimeout.trim() ? Number(torrentStopTimeout) : undefined,
+          torrentPrioritizePiece: item.isTorrent ? normalizeTorrentPrioritizePiece(torrentPrioritizePiece) || undefined : undefined,
           size: item.size || (item.sizeBytes ? formatBytes(item.sizeBytes) : undefined),
           sizeBytes: item.sizeBytes
         }, action);
@@ -2221,6 +2227,23 @@ export const AddDownloadsModal = () => {
                       </div>
                       <p id="torrent-stop-timeout-hint" className="col-span-2 text-[10px] text-text-muted">
                         {t($ => $.addDownloads.torrentStopTimeoutHint)}
+                      </p>
+                    </div>
+                    <div className="pt-2 border-t border-border-modal/50">
+                      <label htmlFor="torrent-prioritize-piece" className="block text-text-muted">
+                        {t($ => $.addDownloads.torrentPrioritizePiece)}
+                      </label>
+                      <input
+                        id="torrent-prioritize-piece"
+                        type="text"
+                        value={torrentPrioritizePiece}
+                        onChange={event => setTorrentPrioritizePiece(event.currentTarget.value)}
+                        placeholder="head=1M,tail=1M"
+                        aria-describedby="torrent-prioritize-piece-hint"
+                        className="app-control mt-1 w-full px-2.5 py-1.5 text-xs font-mono"
+                      />
+                      <p id="torrent-prioritize-piece-hint" className="mt-1 text-[10px] text-text-muted">
+                        {t($ => $.addDownloads.torrentPrioritizePieceHint)}
                       </p>
                     </div>
                   </div>

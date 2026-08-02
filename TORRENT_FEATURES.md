@@ -34,10 +34,13 @@ belong in the download UI. The Aria2 reference is the [1.37.0 manual](https://ar
 - Per-Torrent tracker exclusion through `bt-exclude-tracker`, including Aria2's
   explicit `*` value for excluding all announce URLs. Exclusions are persisted,
   normalized, reapplied on retries, and do not change DHT or PEX settings.
+- Optional `bt-prioritize-piece` preview policy for the head, tail, or both
+  ends of every selected file. The constrained policy is validated, persisted,
+  normalized, and reapplied when a Torrent starts or retries.
 - Deterministic local Aria2 smoke coverage for metadata resolution, selected
-  output, pause/resume, ownership, cancellation/removal, unavailable trackers,
-  daemon failure, and `bt-stop-timeout` terminal behavior; RPC-boundary
-  coverage is separate.
+  output, piece priority, pause/resume, ownership, cancellation/removal,
+  unavailable trackers, daemon failure, and `bt-stop-timeout` terminal behavior;
+  RPC-boundary coverage is separate.
 
 ## Priority tiers for remaining work
 
@@ -47,9 +50,11 @@ No remaining Tier 0 items.
 
 ### Tier 1 — transfer policy and storage behavior
 
-1. **Piece/file priority** — expose `bt-prioritize-piece` for head/tail
-   previewing and a deliberate file-priority model beyond the current binary
-   selected/unselected state.
+1. **File priority beyond selection** — Aria2 exposes only the binary
+   `selected` file state through its Torrent file API and has no supported
+   per-file priority option. Firelink therefore does not pretend that
+   `select-file` is file priority; this remains pending an engine capability or
+   a safe product-level model.
 2. **Safe removal of unselected files** — expose
    `bt-remove-unselected-file` only as an explicit destructive choice, with
    ownership-aware confirmation and tests for cancellation, retry, and
@@ -72,4 +77,4 @@ No remaining Tier 0 items.
 
 The first implementation in this task was remote `.torrent` metadata intake;
 follow-up implementations add stall-timeout control, bounded peer diagnostics,
-and persisted tracker exclusion.
+persisted tracker exclusion, and piece-preview priority.

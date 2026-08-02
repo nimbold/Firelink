@@ -121,6 +121,59 @@ export const normalizeSpeedLimitForBackend = (value?: string | null): string | n
 const MAX_TORRENT_TRACKERS = 64;
 const MAX_TORRENT_TRACKER_BYTES = 16 * 1024;
 export const MAX_TORRENT_STOP_TIMEOUT = 7 * 24 * 60 * 60;
+const MAX_TORRENT_PIECE_PRIORITY_SIZE_MIB = 1024;
+
+const normalizeTorrentPiecePrioritySize = (value: string): string | null => {
+  const match = value.trim().match(/^(\d+)\s*([km])$/i);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  const unit = match[2].toUpperCase();
+  const maximum = unit === 'M'
+    ? MAX_TORRENT_PIECE_PRIORITY_SIZE_MIB
+    : MAX_TORRENT_PIECE_PRIORITY_SIZE_MIB * 1024;
+  if (!Number.isSafeInteger(amount) || amount <= 0 || amount > maximum) return null;
+  return `${amount}${unit}`;
+};
+
+/**
+ * Normalize the constrained subset of Aria2's bt-prioritize-piece syntax
+ * that Firelink persists. The native validator remains authoritative because
+ * persisted state and older clients can bypass this helper.
+ */
+export const normalizeTorrentPrioritizePiece = (value?: string | null): string | null => {
+  const raw = value?.trim();
+  if (!raw) return null;
+  if (utf8ByteLength(raw) > 64) return null;
+
+  let head: string | undefined;
+  let tail: string | undefined;
+  for (const rawToken of raw.split(',')) {
+    const token = rawToken.trim();
+    if (!token) return null;
+    const separator = token.indexOf('=');
+    const keyword = (separator === -1 ? token : token.slice(0, separator)).trim().toLowerCase();
+    const size = separator === -1 ? undefined : token.slice(separator + 1);
+    if (!['head', 'tail'].includes(keyword) || (separator !== -1 && token.indexOf('=', separator + 1) !== -1)) {
+      return null;
+    }
+    const normalized = size === undefined
+      ? keyword
+      : (() => {
+          const normalizedSize = normalizeTorrentPiecePrioritySize(size);
+          return normalizedSize ? `${keyword}=${normalizedSize}` : null;
+        })();
+    if (!normalized) return null;
+    if (keyword === 'head') {
+      if (head) return null;
+      head = normalized;
+    } else {
+      if (tail) return null;
+      tail = normalized;
+    }
+  }
+
+  return [head, tail].filter((part): part is string => Boolean(part)).join(',') || null;
+};
 
 /**
  * Performs the same user-facing safety checks as the native tracker boundary.

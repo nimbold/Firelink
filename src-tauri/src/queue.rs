@@ -21,6 +21,7 @@ pub const MAX_QUEUE_CONCURRENT: usize = 12;
 pub const MEDIA_RUN_CANCELLED: &str = "__firelink_media_run_cancelled__";
 pub const DOWNLOAD_CONNECTIONS_MIN: i32 = 1;
 pub const DOWNLOAD_CONNECTIONS_MAX: i32 = 16;
+pub const MAX_TORRENT_PIECE_PRIORITY_SIZE_MIB: u64 = 1024;
 
 pub fn clamp_download_connections(connections: i32) -> i32 {
     connections.clamp(DOWNLOAD_CONNECTIONS_MIN, DOWNLOAD_CONNECTIONS_MAX)
@@ -218,6 +219,7 @@ pub struct SpawnPayload {
     pub torrent_trackers: Option<String>,
     pub torrent_exclude_trackers: Option<String>,
     pub torrent_stop_timeout: Option<u32>,
+    pub torrent_prioritize_piece: Option<String>,
 }
 
 /// A sidecar spawner. In production this calls the real aria2/yt-dlp
@@ -3192,6 +3194,93 @@ pub(crate) fn normalize_torrent_stop_timeout(value: Option<u32>) -> Result<Optio
     Ok(Some(value))
 }
 
+fn normalize_torrent_piece_priority_size(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("torrent piece priority size must use a positive K or M value".to_string());
+    }
+    let Some((unit_start, unit)) = value.char_indices().next_back() else {
+        return Err("torrent piece priority size must use a positive K or M value".to_string());
+    };
+    let amount = &value[..unit_start];
+    let unit = unit.to_ascii_uppercase();
+    if !matches!(unit, 'K' | 'M') || amount.is_empty() {
+        return Err("torrent piece priority size must use a positive K or M value".to_string());
+    }
+    let amount = amount
+        .parse::<u64>()
+        .map_err(|_| "torrent piece priority size must use a positive K or M value".to_string())?;
+    if amount == 0
+        || (unit == 'M' && amount > MAX_TORRENT_PIECE_PRIORITY_SIZE_MIB)
+        || (unit == 'K' && amount > MAX_TORRENT_PIECE_PRIORITY_SIZE_MIB * 1024)
+    {
+        return Err(format!(
+            "torrent piece priority size must be between 1K and {}M",
+            MAX_TORRENT_PIECE_PRIORITY_SIZE_MIB
+        ));
+    }
+    Ok(format!("{amount}{unit}"))
+}
+
+pub(crate) fn normalize_torrent_prioritize_piece(
+    value: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if raw.len() > 64 {
+        return Err("torrent piece priority is too long".to_string());
+    }
+
+    let mut head = None;
+    let mut tail = None;
+    for token in raw.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            return Err("torrent piece priority contains an empty entry".to_string());
+        }
+        let (keyword, size) = token
+            .split_once('=')
+            .map_or((token, None), |(keyword, size)| {
+                (keyword.trim(), Some(size))
+            });
+        let keyword = keyword.to_ascii_lowercase();
+        let normalized_size = size
+            .map(normalize_torrent_piece_priority_size)
+            .transpose()?;
+        let normalized = normalized_size
+            .map(|size| format!("{keyword}={size}"))
+            .unwrap_or_else(|| keyword.clone());
+        match keyword.as_str() {
+            "head" => {
+                if head.is_some() {
+                    return Err("torrent piece priority cannot repeat head".to_string());
+                }
+                head = Some(normalized);
+            }
+            "tail" => {
+                if tail.is_some() {
+                    return Err("torrent piece priority cannot repeat tail".to_string());
+                }
+                tail = Some(normalized);
+            }
+            _ => return Err("torrent piece priority must use head and/or tail".to_string()),
+        }
+    }
+
+    let mut normalized = Vec::with_capacity(2);
+    if let Some(head) = head {
+        normalized.push(head);
+    }
+    if let Some(tail) = tail {
+        normalized.push(tail);
+    }
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(normalized.join(",")))
+}
+
 fn aria2_peer_number(value: Option<&serde_json::Value>) -> u64 {
     match value {
         Some(serde_json::Value::String(value)) => value.parse().unwrap_or_default(),
@@ -3434,6 +3523,14 @@ fn apply_aria2_torrent_options(
         options.insert(
             "bt-stop-timeout".to_string(),
             serde_json::json!(stop_timeout.to_string()),
+        );
+    }
+    if let Some(piece_priority) =
+        normalize_torrent_prioritize_piece(payload.torrent_prioritize_piece.as_deref())?
+    {
+        options.insert(
+            "bt-prioritize-piece".to_string(),
+            serde_json::json!(piece_priority),
         );
     }
     if payload.torrent_check_integrity {
@@ -4053,6 +4150,9 @@ pub struct EnqueueItem {
     pub torrent_stop_timeout: Option<u32>,
     #[serde(default)]
     #[ts(optional)]
+    pub torrent_prioritize_piece: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
     pub lifecycle_generation: Option<String>,
 }
 
@@ -4104,6 +4204,7 @@ impl EnqueueItem {
                 torrent_trackers: self.torrent_trackers,
                 torrent_exclude_trackers: self.torrent_exclude_trackers,
                 torrent_stop_timeout: self.torrent_stop_timeout,
+                torrent_prioritize_piece: self.torrent_prioritize_piece,
             },
         }
     }
@@ -4437,6 +4538,65 @@ mod tests {
     }
 
     #[test]
+    fn torrent_piece_priority_is_normalized_and_bounded() {
+        assert_eq!(
+            normalize_torrent_prioritize_piece(Some(" tail = 64k, HEAD ")).unwrap(),
+            Some("head,tail=64K".to_string())
+        );
+        assert_eq!(
+            normalize_torrent_prioritize_piece(Some("head=1m,tail=1024M")).unwrap(),
+            Some("head=1M,tail=1024M".to_string())
+        );
+        assert_eq!(normalize_torrent_prioritize_piece(Some(" ")).unwrap(), None);
+
+        for value in [
+            "head,head",
+            "tail,tail",
+            "middle",
+            "head=0K",
+            "tail=1G",
+            "head=1🙂",
+            "head=1K,",
+        ] {
+            assert!(
+                normalize_torrent_prioritize_piece(Some(value)).is_err(),
+                "{value}"
+            );
+        }
+        assert!(normalize_torrent_prioritize_piece(Some("head=1025M")).is_err());
+    }
+
+    #[test]
+    fn torrent_piece_priority_is_emitted_as_the_aria2_option() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_prioritize_piece: Some("tail=2m,head".to_string()),
+            ..Default::default()
+        };
+
+        apply_aria2_torrent_options(&mut options, &payload).unwrap();
+
+        assert_eq!(
+            options.get("bt-prioritize-piece"),
+            Some(&serde_json::json!("head,tail=2M"))
+        );
+    }
+
+    #[test]
+    fn torrent_piece_priority_is_not_applied_to_non_torrent_payloads() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            torrent_prioritize_piece: Some("head".to_string()),
+            ..Default::default()
+        };
+
+        apply_aria2_torrent_options(&mut options, &payload).unwrap();
+
+        assert!(!options.contains_key("bt-prioritize-piece"));
+    }
+
+    #[test]
     fn torrent_peer_diagnostics_are_redacted_and_bounded() {
         let mut result = vec![serde_json::json!({
             "peerId": "secret-peer-id",
@@ -4527,6 +4687,26 @@ mod tests {
         assert_eq!(
             item.into_task().payload.torrent_stop_timeout,
             Some(300)
+        );
+    }
+
+    #[test]
+    fn enqueue_item_carries_torrent_piece_priority_into_the_spawn_payload() {
+        let item: EnqueueItem = serde_json::from_value(serde_json::json!({
+            "id": "torrent-piece-priority",
+            "queue_id": "main",
+            "url": "magnet:?xt=urn:btih:0123456789012345678901234567890123456789",
+            "destination": "/tmp/downloads",
+            "filename": "payload",
+            "is_media": false,
+            "is_torrent": true,
+            "torrent_prioritize_piece": "head=2M,tail=1M"
+        }))
+        .expect("frontend enqueue payload should deserialize");
+
+        assert_eq!(
+            item.into_task().payload.torrent_prioritize_piece.as_deref(),
+            Some("head=2M,tail=1M")
         );
     }
 

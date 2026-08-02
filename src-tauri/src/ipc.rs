@@ -203,6 +203,9 @@ pub struct DownloadItem {
     #[serde(default)]
     #[ts(optional)]
     pub torrent_stop_timeout: Option<u32>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_prioritize_piece: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, TS)]
