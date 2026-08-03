@@ -361,6 +361,133 @@ pub fn parse_torrent_bytes(bytes: &[u8]) -> Result<ParsedTorrent, String> {
     parse_info(info)
 }
 
+fn bounded_optional_text(value: Option<&BencodeValue>, limit: usize) -> Option<String> {
+    let BencodeValue::Bytes(bytes) = value? else {
+        return None;
+    };
+    if bytes.len() > limit {
+        return None;
+    }
+    String::from_utf8(bytes.clone())
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn bounded_uri(value: &str, schemes: &[&str]) -> Option<String> {
+    if value.len() > 2_048 || value.chars().any(char::is_control) {
+        return None;
+    }
+    let parsed = url::Url::parse(value).ok()?;
+    if !schemes.contains(&parsed.scheme())
+        || parsed.host_str().is_none_or(str::is_empty)
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    Some(parsed.to_string())
+}
+
+fn collect_torrent_uris(value: Option<&BencodeValue>, schemes: &[&str]) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut append = |value: &BencodeValue| {
+        if let BencodeValue::Bytes(bytes) = value {
+            if let Ok(value) = String::from_utf8(bytes.clone()) {
+                if let Some(uri) = bounded_uri(value.trim(), schemes) {
+                    if !values.contains(&uri) && values.len() < 256 {
+                        values.push(uri);
+                    }
+                }
+            }
+        }
+    };
+    match value {
+        Some(BencodeValue::Bytes(_)) => append(value.unwrap()),
+        Some(BencodeValue::List(entries)) => {
+            for entry in entries {
+                append(entry);
+            }
+        }
+        _ => {}
+    }
+    values
+}
+
+pub fn torrent_details_from_bytes(bytes: &[u8]) -> Result<crate::ipc::TorrentDetails, String> {
+    if bytes.is_empty() || bytes.len() > MAX_TORRENT_BYTES {
+        return Err(format!(
+            "torrent metadata must be between 1 byte and {MAX_TORRENT_BYTES} bytes"
+        ));
+    }
+    let root = match Parser::new(bytes).parse()? {
+        BencodeValue::Dict(value) => value,
+        _ => return Err("torrent root is not a dictionary".to_string()),
+    };
+    let info = root
+        .get(b"info".as_slice())
+        .ok_or_else(|| "torrent metadata is missing info".to_string())?;
+    let parsed = parse_info(info)?;
+    let info_dict = match info {
+        BencodeValue::Dict(value) => value,
+        _ => return Err("torrent info dictionary is invalid".to_string()),
+    };
+    let piece_length = positive_length(info_dict.get(b"piece length".as_slice()), "piece length")?;
+    let piece_count = match info_dict.get(b"pieces".as_slice()) {
+        Some(BencodeValue::Bytes(pieces)) if pieces.len() % 20 == 0 => (pieces.len() / 20) as u64,
+        _ => return Err("torrent pieces field is invalid".to_string()),
+    };
+    let creation_date = root
+        .get(b"creation date".as_slice())
+        .and_then(|value| match value {
+            BencodeValue::Integer(value) if *value >= 0 => chrono::DateTime::<chrono::Utc>::from_timestamp(*value, 0)
+                .map(|date| date.to_rfc3339()),
+            _ => None,
+        });
+    let trackers = collect_torrent_uris(root.get(b"announce".as_slice()), &["http", "https", "udp"])
+        .into_iter()
+        .chain(root.get(b"announce-list".as_slice()).into_iter().flat_map(|value| {
+            let mut trackers = Vec::new();
+            if let BencodeValue::List(tiers) = value {
+                for tier in tiers {
+                    if let BencodeValue::List(entries) = tier {
+                        for entry in entries {
+                            trackers.extend(collect_torrent_uris(Some(entry), &["http", "https", "udp"]));
+                        }
+                    }
+                }
+            }
+            trackers
+        }))
+        .fold(Vec::new(), |mut result, tracker| {
+            if !result.contains(&tracker) && result.len() < 256 {
+                result.push(tracker);
+            }
+            result
+        });
+    Ok(crate::ipc::TorrentDetails {
+        info_hash: parsed.info_hash,
+        display_name: parsed.name,
+        total_bytes: parsed.total_bytes,
+        file_count: parsed.files.len() as u32,
+        piece_length,
+        piece_count,
+        private: matches!(info_dict.get(b"private".as_slice()), Some(BencodeValue::Integer(1))),
+        creation_date,
+        creator: bounded_optional_text(
+            root.get(b"created by.utf-8".as_slice()).or_else(|| root.get(b"created by".as_slice())),
+            256,
+        ),
+        comment: bounded_optional_text(
+            root.get(b"comment.utf-8".as_slice()).or_else(|| root.get(b"comment".as_slice())),
+            4_096,
+        ),
+        trackers,
+        web_seeds: collect_torrent_uris(root.get(b"url-list".as_slice()), &["http", "https"]),
+    })
+}
+
 pub fn torrent_metadata_is_safe_for_plain_magnet_reuse(bytes: &[u8]) -> Result<bool, String> {
     if bytes.is_empty() || bytes.len() > MAX_TORRENT_BYTES {
         return Err(format!(
@@ -499,31 +626,53 @@ pub fn to_metadata(parsed: ParsedTorrent, torrent_path: Option<String>) -> Torre
 /// Aria2's BitTorrent output is controlled by `index-out`, not `out`. Keep
 /// these values derived from the validated, canonical paths so the daemon's
 /// actual files stay aligned with Firelink's ownership registry.
-pub fn aria2_index_outputs(parsed: &ParsedTorrent) -> Vec<String> {
+pub fn validate_output_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name != name.trim()
+        || name == "."
+        || name == ".."
+        || name.ends_with(['.', ' '])
+        || name.chars().any(|character| {
+            character.is_control()
+                || matches!(character, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*')
+        })
+        || crate::platform::is_windows_reserved_filename(name)
+        || crate::download_ownership::canonical_download_filename(name) != name
+    {
+        return Err("Torrent output name is not a safe single path component".to_string());
+    }
+    Ok(())
+}
+
+pub fn aria2_index_outputs(parsed: &ParsedTorrent, output_name: &str) -> Vec<String> {
     parsed
         .files
         .iter()
         .map(|file| {
             let output = if parsed.files.len() == 1 {
-                file.path.clone()
+                output_name.to_string()
             } else {
-                format!("{}/{}", parsed.name, file.path)
+                format!("{output_name}/{}", file.path)
             };
             format!("{}={output}", file.index)
         })
         .collect()
 }
 
-pub fn aria2_output_paths(parsed: &ParsedTorrent, selected: Option<&[u32]>) -> Vec<String> {
+pub fn aria2_output_paths(
+    parsed: &ParsedTorrent,
+    selected: Option<&[u32]>,
+    output_name: &str,
+) -> Vec<String> {
     parsed
         .files
         .iter()
         .filter(|file| selected.is_none_or(|indices| indices.contains(&file.index)))
         .map(|file| {
             if parsed.files.len() == 1 {
-                file.path.clone()
+                output_name.to_string()
             } else {
-                format!("{}/{}", parsed.name, file.path)
+                format!("{output_name}/{}", file.path)
             }
         })
         .collect()
@@ -699,7 +848,11 @@ pub fn validate_selected_indices(
     let mut normalized = selected.to_vec();
     normalized.sort_unstable();
     normalized.dedup();
-    Ok(Some(normalized))
+    if normalized.len() == file_count {
+        Ok(None)
+    } else {
+        Ok(Some(normalized))
+    }
 }
 
 pub async fn prepare_local_torrent<R: tauri::Runtime>(
@@ -955,6 +1108,32 @@ mod tests {
     }
 
     #[test]
+    fn validates_torrent_output_names_as_single_safe_components() {
+        for name in ["test", "My Torrent (1)", "archive.tar"] {
+            validate_output_name(name).expect("ordinary output names should be accepted");
+        }
+        for name in ["", " test", "test ", ".", "..", "a/b", "a\\b", "CON", "a?.bin"] {
+            assert!(validate_output_name(name).is_err(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn exposes_bounded_torrent_details_from_metadata() {
+        let mut bytes = b"d4:infod6:lengthi5e4:name4:test12:piece lengthi2e6:pieces20:".to_vec();
+        bytes.extend([0_u8; 20]);
+        bytes.extend_from_slice(b"ee");
+
+        let details = torrent_details_from_bytes(&bytes).expect("details should parse");
+
+        assert_eq!(details.display_name, "test");
+        assert_eq!(details.total_bytes, 5);
+        assert_eq!(details.file_count, 1);
+        assert_eq!(details.piece_length, 2);
+        assert_eq!(details.piece_count, 1);
+        assert!(!details.private);
+    }
+
+    #[test]
     fn parses_multi_file_torrent_and_rejects_traversal() {
         let parsed = parse_torrent_bytes(
             b"d4:infod5:filesld6:lengthi2e4:pathl4:root5:a.txteed6:lengthi3e4:pathl4:root5:b.bineee4:name4:rootee",
@@ -1142,8 +1321,11 @@ mod tests {
         )
         .expect("multi-file torrent should parse");
         assert_eq!(
-            aria2_index_outputs(&parsed),
-            vec!["1=root/root/a.txt".to_string(), "2=root/root/b.bin".to_string()]
+            aria2_index_outputs(&parsed, "custom-name"),
+            vec![
+                "1=custom-name/root/a.txt".to_string(),
+                "2=custom-name/root/b.bin".to_string(),
+            ]
         );
     }
 

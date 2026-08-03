@@ -6,6 +6,8 @@ import { useSettingsStore } from '../store/useSettingsStore';
 import type { TorrentPeerDiagnostics } from '../bindings/TorrentPeerDiagnostics';
 import type { TorrentFileProgressSnapshot } from '../bindings/TorrentFileProgressSnapshot';
 import type { TorrentPieceProgressSnapshot } from '../bindings/TorrentPieceProgressSnapshot';
+import type { TorrentFileSelectionSnapshot } from '../bindings/TorrentFileSelectionSnapshot';
+import type { TorrentDetails } from '../bindings/TorrentDetails';
 import type { TorrentWebSeed } from '../bindings/TorrentWebSeed';
 import { invokeCommand as invoke } from '../ipc';
 import { ChevronDown, ChevronRight, FolderPlus, Info, CheckCircle, AlertCircle, Play, Pause } from 'lucide-react';
@@ -22,7 +24,7 @@ import {
   formatDownloadTotal,
   resolveDownloadSizeDisplay
 } from '../utils/downloadProgress';
-import { isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, MAX_TORRENT_TRACKER_INTERVAL, MAX_TORRENT_TRACKER_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, resolveDownloadConnections, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type TorrentEncryptionPolicy } from '../utils/downloads';
+import { isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, MAX_TORRENT_TRACKER_INTERVAL, MAX_TORRENT_TRACKER_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, resolveDownloadConnections, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type TorrentEncryptionPolicy, type TorrentFileAllocation } from '../utils/downloads';
 import { useTranslation } from 'react-i18next';
 import { formatDateTime, type CalendarPreference } from '../utils/dateTime';
 import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
@@ -43,10 +45,10 @@ const formatLastTry = (
 };
 
 const isPeerDiagnosticsStatus = (status: string): boolean =>
-  ['downloading', 'seeding', 'retrying'].includes(status);
+  ['downloading', 'verifying', 'seeding', 'retrying'].includes(status);
 
 const isTorrentFileProgressStatus = (status: string): boolean =>
-  ['downloading', 'seeding', 'waitingToSeed', 'retrying', 'paused'].includes(status);
+  ['downloading', 'verifying', 'seeding', 'waitingToSeed', 'retrying', 'paused'].includes(status);
 
 const formatPeerSpeed = (bytesPerSecond: number): string =>
   `${formatDownloadBytes(bytesPerSecond)}/s`;
@@ -95,6 +97,7 @@ export const PropertiesModal = () => {
   const [torrentCheckIntegrity, setTorrentCheckIntegrity] = useState(false);
   const [torrentRemoveUnselectedFile, setTorrentRemoveUnselectedFile] = useState(false);
   const [torrentEncryptionPolicy, setTorrentEncryptionPolicy] = useState<TorrentEncryptionPolicy>(TORRENT_ENCRYPTION_POLICY_DISABLED);
+  const [torrentFileAllocation, setTorrentFileAllocation] = useState<TorrentFileAllocation>('prealloc');
   const [torrentTrackers, setTorrentTrackers] = useState('');
   const [torrentExcludeTrackers, setTorrentExcludeTrackers] = useState('');
   const [torrentTrackerConnectTimeout, setTorrentTrackerConnectTimeout] = useState('');
@@ -106,6 +109,11 @@ export const PropertiesModal = () => {
   const [torrentPeerDiagnosticsError, setTorrentPeerDiagnosticsError] = useState(false);
   const [isTorrentPeerDiagnosticsPending, setIsTorrentPeerDiagnosticsPending] = useState(false);
   const [torrentFileProgress, setTorrentFileProgress] = useState<TorrentFileProgressSnapshot | null>(null);
+  const [torrentFileSelection, setTorrentFileSelection] = useState<TorrentFileSelectionSnapshot | null>(null);
+  const [torrentDetails, setTorrentDetails] = useState<TorrentDetails | null>(null);
+  const [torrentDetailsError, setTorrentDetailsError] = useState(false);
+  const [isTorrentDetailsPending, setIsTorrentDetailsPending] = useState(false);
+  const [isTorrentVerifyPending, setIsTorrentVerifyPending] = useState(false);
   const [torrentFileProgressError, setTorrentFileProgressError] = useState(false);
   const [isTorrentFileProgressPending, setIsTorrentFileProgressPending] = useState(false);
   const [torrentPieceProgress, setTorrentPieceProgress] = useState<TorrentPieceProgressSnapshot | null>(null);
@@ -132,9 +140,14 @@ export const PropertiesModal = () => {
 
   const [errorMessage, setErrorMessage] = useState('');
   const [isPauseResumePending, setIsPauseResumePending] = useState(false);
+  const torrentFileProgressByIndex = new Map(
+    (torrentFileProgress?.files ?? []).map(file => [file.index, file])
+  );
   const actionRequestRef = useRef(0);
   const peerDiagnosticsRequestRef = useRef(0);
   const torrentFileProgressRequestRef = useRef(0);
+  const torrentFileSelectionRequestRef = useRef(0);
+  const torrentDetailsRequestRef = useRef(0);
   const torrentPieceProgressRequestRef = useRef(0);
   const torrentWebSeedsRequestRef = useRef(0);
   const modalRef = useModalFocus(Boolean(selectedPropertiesDownloadId && item));
@@ -154,6 +167,10 @@ export const PropertiesModal = () => {
     setTorrentFileProgress(null);
     setTorrentFileProgressError(false);
     setIsTorrentFileProgressPending(false);
+    torrentDetailsRequestRef.current += 1;
+    setTorrentDetails(null);
+    setTorrentDetailsError(false);
+    setIsTorrentDetailsPending(false);
     torrentPieceProgressRequestRef.current += 1;
     setTorrentPieceProgress(null);
     setTorrentPieceProgressError(false);
@@ -227,6 +244,7 @@ export const PropertiesModal = () => {
         setTorrentCheckIntegrity(activeItem.torrentCheckIntegrity === true);
         setTorrentRemoveUnselectedFile(activeItem.torrentRemoveUnselectedFile === true);
         setTorrentEncryptionPolicy(normalizeTorrentEncryptionPolicy(activeItem.torrentEncryptionPolicy) || TORRENT_ENCRYPTION_POLICY_DISABLED);
+        setTorrentFileAllocation(normalizeTorrentFileAllocation(activeItem.torrentFileAllocation) || 'prealloc');
         setTorrentTrackers(activeItem.torrentTrackers || '');
         setTorrentExcludeTrackers(activeItem.torrentExcludeTrackers || '');
         setTorrentTrackerConnectTimeout(activeItem.torrentTrackerConnectTimeout === undefined ? '' : String(activeItem.torrentTrackerConnectTimeout));
@@ -243,6 +261,58 @@ export const PropertiesModal = () => {
       }
     }
   }, [selectedPropertiesDownloadId, setSelectedPropertiesDownloadId]);
+
+  useEffect(() => {
+    torrentFileSelectionRequestRef.current += 1;
+    setTorrentFileSelection(null);
+    if (!selectedPropertiesDownloadId || !item?.isTorrent) return;
+    const requestId = torrentFileSelectionRequestRef.current;
+    const propertiesDownloadId = item.id;
+    void invoke('get_torrent_file_selection', { id: propertiesDownloadId })
+      .then(snapshot => {
+        if (
+          requestId === torrentFileSelectionRequestRef.current
+          && useDownloadStore.getState().selectedPropertiesDownloadId === propertiesDownloadId
+        ) {
+          setTorrentFileSelection(snapshot);
+        }
+      })
+      .catch(() => {
+        if (requestId === torrentFileSelectionRequestRef.current) setTorrentFileSelection(null);
+      });
+  }, [item?.id, item?.isTorrent, item?.torrentPath, selectedPropertiesDownloadId]);
+
+  useEffect(() => {
+    torrentDetailsRequestRef.current += 1;
+    setTorrentDetails(null);
+    setTorrentDetailsError(false);
+    setIsTorrentDetailsPending(false);
+    if (!selectedPropertiesDownloadId || !item?.isTorrent || !item.torrentPath) return;
+
+    const requestId = torrentDetailsRequestRef.current;
+    const propertiesDownloadId = item.id;
+    setIsTorrentDetailsPending(true);
+    void invoke('get_torrent_details', { id: propertiesDownloadId })
+      .then(details => {
+        if (
+          requestId === torrentDetailsRequestRef.current
+          && useDownloadStore.getState().selectedPropertiesDownloadId === propertiesDownloadId
+        ) {
+          setTorrentDetails(details);
+        }
+      })
+      .catch(() => {
+        if (
+          requestId === torrentDetailsRequestRef.current
+          && useDownloadStore.getState().selectedPropertiesDownloadId === propertiesDownloadId
+        ) {
+          setTorrentDetailsError(true);
+        }
+      })
+      .finally(() => {
+        if (requestId === torrentDetailsRequestRef.current) setIsTorrentDetailsPending(false);
+      });
+  }, [item?.id, item?.isTorrent, item?.torrentPath, selectedPropertiesDownloadId]);
 
   useEffect(() => {
     const activeLimit = item?.speedLimit?.trim();
@@ -569,6 +639,32 @@ export const PropertiesModal = () => {
     }
   };
 
+  const handleVerifyTorrentData = async () => {
+    if (!item?.isTorrent || isTorrentVerifyPending) return;
+    const restoreStatus = item.status;
+    const previousVerifyOnly = item.torrentVerifyOnly;
+    const previousRestoreStatus = item.torrentVerifyRestoreStatus;
+    // Mark the maintenance lifecycle before invoking the command so a very
+    // fast queued/completed event cannot be mistaken for the normal download
+    // lifecycle. The backend persists the same markers before dispatching.
+    useDownloadStore.getState().updateDownload(item.id, {
+      torrentVerifyOnly: true,
+      torrentVerifyRestoreStatus: restoreStatus
+    });
+    setIsTorrentVerifyPending(true);
+    try {
+      await invoke('verify_torrent_data', { id: item.id });
+    } catch (error) {
+      useDownloadStore.getState().updateDownload(item.id, {
+        torrentVerifyOnly: previousVerifyOnly,
+        torrentVerifyRestoreStatus: previousRestoreStatus
+      });
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsTorrentVerifyPending(false);
+    }
+  };
+
   const handleSave = async () => {
     if (!url.trim()) {
       setErrorMessage(t($ => $.properties.enterValidUrl));
@@ -638,6 +734,21 @@ export const PropertiesModal = () => {
       setErrorMessage(t($ => $.properties.torrentEncryptionPolicyInvalid));
       return;
     }
+    const selectedTorrentIndices = torrentFileSelection
+      ? torrentFileSelection.files.filter(file => file.selected).map(file => file.index)
+      : [];
+    const allTorrentFilesSelected = Boolean(
+      torrentFileSelection
+      && selectedTorrentIndices?.length === torrentFileSelection.files.length
+    );
+    if (torrentFileSelection && selectedTorrentIndices?.length === 0) {
+      setErrorMessage(t($ => $.properties.torrentFileSelectionRequired));
+      return;
+    }
+    if (item.isTorrent && torrentRemoveUnselectedFile && torrentFileSelection && allTorrentFilesSelected) {
+      setErrorMessage(t($ => $.properties.torrentRemoveUnselectedFileSelectionRequired));
+      return;
+    }
     if (
       item.isTorrent
       && torrentRemoveUnselectedFile
@@ -676,12 +787,18 @@ export const PropertiesModal = () => {
               : undefined,
             torrentStopTimeout: normalizedStopTimeout,
             torrentPrioritizePiece: normalizeTorrentPrioritizePiece(torrentPrioritizePiece) || undefined,
-            torrentRemoveUnselectedFile: item.torrentFileIndices !== undefined
+            torrentFileIndices: torrentFileSelection
+              ? (allTorrentFilesSelected ? undefined : selectedTorrentIndices)
+              : item.torrentFileIndices,
+            torrentRemoveUnselectedFile: (torrentFileSelection
+              ? !allTorrentFilesSelected
+              : item.torrentFileIndices !== undefined)
               ? torrentRemoveUnselectedFile
               : undefined,
             torrentEncryptionPolicy: torrentEncryptionPolicy !== TORRENT_ENCRYPTION_POLICY_DISABLED
               ? torrentEncryptionPolicy
               : undefined,
+            torrentFileAllocation,
           }
         : {}),
       ...(connectionsDirty
@@ -839,6 +956,9 @@ export const PropertiesModal = () => {
   const liveTorrentUploadLimitAvailable = item.isTorrent && ['downloading', 'seeding', 'retrying'].includes(item.status);
   const liveTorrentPeerOptionsAvailable = item.isTorrent && ['downloading', 'seeding', 'retrying'].includes(item.status);
   const torrentPeerDiagnosticsAvailable = item.isTorrent && isPeerDiagnosticsStatus(item.status);
+  const torrentFileSelectionIsEmpty = item.isTorrent
+    && torrentFileSelection !== null
+    && !torrentFileSelection.files.some(file => file.selected);
   const configuredConnections = resolveDownloadConnections(item.connections, perServerConnections);
   const observedConnectionTotal = Math.max(
     1,
@@ -919,7 +1039,7 @@ export const PropertiesModal = () => {
   let statusColor = 'text-text-secondary';
   let StatusIcon = Info;
   if (item.status === 'completed') { statusColor = 'text-green-500'; StatusIcon = CheckCircle; }
-  else if (item.status === 'downloading' || item.status === 'seeding' || item.status === 'retrying') { statusColor = 'text-blue-500'; StatusIcon = Play; }
+  else if (item.status === 'downloading' || item.status === 'verifying' || item.status === 'seeding' || item.status === 'retrying') { statusColor = 'text-blue-500'; StatusIcon = Play; }
   else if (item.status === 'processing') { statusColor = 'text-sky-500'; StatusIcon = Play; }
   else if (item.status === 'paused') { statusColor = 'text-orange-500'; StatusIcon = Pause; }
   else if (item.status === 'failed') { statusColor = 'text-red-500'; StatusIcon = AlertCircle; }
@@ -1105,6 +1225,72 @@ export const PropertiesModal = () => {
                   <div className="col-start-2 text-[11px] text-text-muted">
                     {t($ => $.properties.torrentPeerOptionsSavedHint)}
                   </div>
+                  {torrentFileSelection && (
+                    <div className="col-start-2 rounded-lg border border-border-modal bg-bg-input/30 p-3 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-xs font-semibold text-text-primary">
+                          {t($ => $.properties.torrentFileSelection)}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            className="app-button px-2.5 text-[11px] disabled:opacity-50"
+                            disabled={transferLocked || torrentFileSelection.files.length === 0}
+                            onClick={() => setTorrentFileSelection(current => current
+                              ? { ...current, files: current.files.map(file => ({ ...file, selected: true })) }
+                              : current)}
+                          >
+                            {t($ => $.properties.torrentFileSelectionAll)}
+                          </button>
+                          <button
+                            type="button"
+                            className="app-button px-2.5 text-[11px] disabled:opacity-50"
+                            disabled={transferLocked || torrentFileSelection.files.length === 0}
+                            onClick={() => setTorrentFileSelection(current => current
+                              ? { ...current, files: current.files.map(file => ({ ...file, selected: false })) }
+                              : current)}
+                          >
+                            {t($ => $.properties.torrentFileSelectionClear)}
+                          </button>
+                        </div>
+                      </div>
+                      <p className="text-[11px] text-text-muted">
+                        {t($ => $.properties.torrentFileSelectionHint)}
+                      </p>
+                      <div className="max-h-48 overflow-auto rounded border border-border-modal/60">
+                        {torrentFileSelection.files.map(file => (
+                          <label key={file.index} className="flex items-center gap-2 border-b border-border-modal/40 px-2 py-1.5 text-[11px] last:border-b-0">
+                            <input
+                              type="checkbox"
+                              checked={file.selected}
+                              disabled={transferLocked}
+                              onChange={event => setTorrentFileSelection(current => current
+                                ? {
+                                    ...current,
+                                    files: current.files.map(candidate => candidate.index === file.index
+                                      ? { ...candidate, selected: event.currentTarget.checked }
+                                      : candidate)
+                                  }
+                                : current)}
+                              className="accent-accent disabled:opacity-50"
+                            />
+                            <span className="font-mono text-text-muted">{file.index}</span>
+                            <span className="min-w-0 flex-1 truncate" dir="auto" title={file.relativePath}>{file.relativePath}</span>
+                            <span className="text-end text-text-muted whitespace-nowrap">
+                              {(() => {
+                                const progress = torrentFileProgressByIndex.get(file.index);
+                                const completedLength = progress?.completedLength ?? file.completedLength ?? 0;
+                                const percentage = file.length === 0
+                                  ? 100
+                                  : Math.round((completedLength / file.length) * 100);
+                                return `${formatDownloadBytes(completedLength)} / ${formatDownloadBytes(file.length)} (${percentage}%)`;
+                              })()}
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <div className="col-start-2 rounded-lg border border-border-modal bg-bg-input/30 p-3 space-y-2">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="text-xs font-semibold text-text-primary">
@@ -1442,6 +1628,25 @@ export const PropertiesModal = () => {
                       {t($ => $.properties.torrentPrioritizePieceHint)}
                     </p>
                   </div>
+                  <label className="text-xs text-text-muted text-right" htmlFor="torrent-file-allocation-properties">
+                    {t($ => $.properties.torrentFileAllocation)}
+                  </label>
+                  <div>
+                    <select
+                      id="torrent-file-allocation-properties"
+                      value={torrentFileAllocation}
+                      onChange={event => setTorrentFileAllocation(event.currentTarget.value as TorrentFileAllocation)}
+                      disabled={transferLocked}
+                      aria-describedby="torrent-file-allocation-properties-hint"
+                      className="app-control max-w-56 px-2.5 py-1.5 text-xs disabled:opacity-50"
+                    >
+                      <option value="prealloc">{t($ => $.properties.torrentFileAllocationPrealloc)}</option>
+                      <option value="none">{t($ => $.properties.torrentFileAllocationNone)}</option>
+                    </select>
+                    <p id="torrent-file-allocation-properties-hint" className="mt-1 text-[11px] text-text-muted">
+                      {t($ => $.properties.torrentFileAllocationHint)}
+                    </p>
+                  </div>
                   <label className="text-xs text-text-muted text-right" htmlFor="torrent-encryption-policy-properties">
                     {t($ => $.properties.torrentEncryptionPolicy)}
                   </label>
@@ -1485,6 +1690,18 @@ export const PropertiesModal = () => {
                       {t($ => $.properties.torrentVerifyIntegrityHint)}
                     </span>
                   </label>
+                  <div className="col-start-2">
+                    <button
+                      type="button"
+                      onClick={() => void handleVerifyTorrentData()}
+                      disabled={isTorrentVerifyPending || getTransferLocked(item.status) || !['completed', 'paused', 'failed'].includes(item.status)}
+                      className="app-button px-3 text-xs disabled:opacity-50"
+                    >
+                      {isTorrentVerifyPending
+                        ? t($ => $.properties.torrentVerifyNowLoading)
+                        : t($ => $.properties.torrentVerifyNow)}
+                    </button>
+                  </div>
                   <label className="text-xs text-text-muted text-right" htmlFor="torrent-remove-unselected-file">
                     {t($ => $.properties.torrentRemoveUnselectedFile)}
                   </label>
@@ -1685,6 +1902,73 @@ export const PropertiesModal = () => {
           {item.isTorrent && (
             <section>
               <h3 className="text-sm font-semibold text-text-primary mb-4 pb-1 border-b border-border-modal/50">
+                {t($ => $.properties.torrentDetails)}
+              </h3>
+              {isTorrentDetailsPending && (
+                <p className="text-xs text-text-muted">{t($ => $.properties.torrentDetailsLoading)}</p>
+              )}
+              {torrentDetailsError && (
+                <p className="text-xs text-red-400">{t($ => $.properties.torrentDetailsUnavailable)}</p>
+              )}
+              {torrentDetails && (
+                <div className="grid grid-cols-[100px_1fr] gap-x-4 gap-y-2 rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs">
+                  <span className="text-text-muted text-right">{t($ => $.properties.torrentDetailsDisplayName)}</span>
+                  <span className="text-text-primary break-words" dir="auto">{torrentDetails.displayName}</span>
+                  <span className="text-text-muted text-right">{t($ => $.properties.torrentDetailsInfoHash)}</span>
+                  <span className="font-mono text-text-primary break-all">{torrentDetails.infoHash}</span>
+                  <span className="text-text-muted text-right">{t($ => $.properties.torrentDetailsSize)}</span>
+                  <span className="text-text-primary">{formatDownloadBytes(torrentDetails.totalBytes)}</span>
+                  <span className="text-text-muted text-right">{t($ => $.properties.torrentDetailsFiles)}</span>
+                  <span className="text-text-primary">{torrentDetails.fileCount}</span>
+                  <span className="text-text-muted text-right">{t($ => $.properties.torrentDetailsPieces)}</span>
+                  <span className="text-text-primary">{torrentDetails.pieceCount} × {formatDownloadBytes(torrentDetails.pieceLength)}</span>
+                  <span className="text-text-muted text-right">{t($ => $.properties.torrentDetailsPrivate)}</span>
+                  <span className="text-text-primary">{torrentDetails.private
+                    ? t($ => $.properties.torrentDetailsPrivateYes)
+                    : t($ => $.properties.torrentDetailsPrivateNo)}</span>
+                  {torrentDetails.creationDate && (
+                    <>
+                      <span className="text-text-muted text-right">{t($ => $.properties.torrentDetailsCreated)}</span>
+                      <span className="text-text-primary">{formatDateTime(torrentDetails.creationDate, {
+                        locale: i18n.language,
+                        calendar: calendarPreference,
+                        options: { dateStyle: 'medium', timeStyle: 'short' }
+                      })}</span>
+                    </>
+                  )}
+                  {torrentDetails.creator && (
+                    <>
+                      <span className="text-text-muted text-right">{t($ => $.properties.torrentDetailsCreator)}</span>
+                      <span className="text-text-primary break-words" dir="auto">{torrentDetails.creator}</span>
+                    </>
+                  )}
+                  {torrentDetails.comment && (
+                    <>
+                      <span className="text-text-muted text-right">{t($ => $.properties.torrentDetailsComment)}</span>
+                      <span className="whitespace-pre-wrap break-words text-text-primary" dir="auto">{torrentDetails.comment}</span>
+                    </>
+                  )}
+                  <span className="text-text-muted text-right">{t($ => $.properties.torrentDetailsTrackers)}</span>
+                  <span className="text-text-primary break-words" dir="auto">
+                    {torrentDetails.trackers.length > 0 ? torrentDetails.trackers.join(', ') : '—'}
+                  </span>
+                  <span className="text-text-muted text-right">{t($ => $.properties.torrentDetailsWebSeeds)}</span>
+                  <span className="text-text-primary break-words" dir="auto">
+                    {torrentDetails.webSeeds.length > 0 ? torrentDetails.webSeeds.join(', ') : '—'}
+                  </span>
+                  {torrentDetails.private && (
+                    <p className="col-span-2 text-[11px] text-text-muted">
+                      {t($ => $.properties.torrentDetailsPrivateHint)}
+                    </p>
+                  )}
+                </div>
+              )}
+            </section>
+          )}
+
+          {item.isTorrent && (
+            <section>
+              <h3 className="text-sm font-semibold text-text-primary mb-4 pb-1 border-b border-border-modal/50">
                 {t($ => $.properties.torrentWebSeeds)}
               </h3>
               <p className="text-xs text-text-muted mb-2">{t($ => $.properties.torrentWebSeedsHint)}</p>
@@ -1794,8 +2078,8 @@ export const PropertiesModal = () => {
             <button 
               type="button"
               onClick={handleSave} 
-              disabled={transferLocked}
-              className={`app-button app-button-primary px-4 text-xs ${transferLocked ? 'opacity-50 cursor-not-allowed' : ''}`}
+              disabled={transferLocked || torrentFileSelectionIsEmpty}
+              className={`app-button app-button-primary px-4 text-xs ${transferLocked || torrentFileSelectionIsEmpty ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
               <CheckCircle size={14} />
               {t($ => $.properties.save)}

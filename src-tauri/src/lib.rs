@@ -350,7 +350,7 @@ fn parse_media_playlist_metadata(
     let playlist_id = value
         .get("id")
         .and_then(|id| id.as_str())
-        .map(str::trim)
+        .map(|value| value.trim())
         .filter(|id| !id.is_empty())
         .map(ToOwned::to_owned);
 
@@ -472,7 +472,7 @@ fn json_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     value
         .get(key)
         .and_then(|v| v.as_str())
-        .map(str::trim)
+        .map(|value| value.trim())
         .filter(|v| !v.is_empty())
 }
 
@@ -5343,21 +5343,36 @@ async fn detach_download_for_reconfigure(
     id: String,
 ) -> Result<(), String> {
     log::info!("detach_download_for_reconfigure called for id: {}", id);
-    let _control_guard = state.queue_manager.acquire_aria2_control(&id).await;
-    let active_kind = state.queue_manager.active_kind(&id).await;
+    let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    detach_download_for_reconfigure_locked(
+        &app_handle,
+        state.inner(),
+        &id,
+        &control_guard,
+    )
+    .await
+}
+
+async fn detach_download_for_reconfigure_locked(
+    app_handle: &tauri::AppHandle,
+    state: &AppState,
+    id: &str,
+    _control_guard: &queue::Aria2ControlGuard,
+) -> Result<(), String> {
+    let active_kind = state.queue_manager.active_kind(id).await;
     let media_lifecycle_generation = state
         .queue_manager
-        .registered_lifecycle_generation(&id)
+        .registered_lifecycle_generation(id)
         .await
         .unwrap_or_default();
-    state.queue_manager.remove_from_pending(&id).await;
-    let gid = state.queue_manager.aria2_gid_for_download(&id);
+    state.queue_manager.remove_from_pending(id).await;
+    let gid = state.queue_manager.aria2_gid_for_download(id);
 
     if let Some(gid) = gid.as_deref() {
         // Do not invalidate the mapped lifecycle until the daemon confirms
         // the detach. A failed pause must leave terminal-event reconciliation
         // and permit ownership intact.
-        state.queue_manager.cancel_aria2_retries(&id).await;
+        state.queue_manager.cancel_aria2_retries(id).await;
         let removal_result = async {
             let pause_res = rpc_call(
                 state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
@@ -5382,24 +5397,24 @@ async fn detach_download_for_reconfigure(
         }
         .await;
         if let Err(error) = removal_result {
-            state.queue_manager.allow_aria2_retries(&id).await;
+            state.queue_manager.allow_aria2_retries(id).await;
             return Err(error);
         }
-        state.queue_manager.next_aria2_control_epoch(&id).await;
-        state.queue_manager.clear_aria2_retry_state(&id).await;
-        state.queue_manager.forget_aria2_gid(&id).await;
-        state.queue_manager.release_permit(&id).await;
-        state.queue_manager.release_registered_id(&id).await;
+        state.queue_manager.next_aria2_control_epoch(id).await;
+        state.queue_manager.clear_aria2_retry_state(id).await;
+        state.queue_manager.forget_aria2_gid(id).await;
+        state.queue_manager.release_permit(id).await;
+        state.queue_manager.release_registered_id(id).await;
         log::info!("aria2 detach [{}]: gid {} stopped and forgotten", id, gid);
     } else {
         // Invalidate a queued/addUri lifecycle that has not published a GID.
-        state.queue_manager.next_aria2_control_epoch(&id).await;
-        state.queue_manager.cancel_aria2_retries(&id).await;
+        state.queue_manager.next_aria2_control_epoch(id).await;
+        state.queue_manager.cancel_aria2_retries(id).await;
         let (tx, rx) = tokio::sync::oneshot::channel();
         if matches!(active_kind, Some(crate::queue::TaskKind::Media)) {
             state
                 .download_coordinator
-                .pause_media_with_ack(id.clone(), media_lifecycle_generation, tx)
+                .pause_media_with_ack(id.to_string(), media_lifecycle_generation, tx)
                 .await?;
         } else {
             let _ = tx.send(false); // Fallback if no task exists
@@ -5408,20 +5423,20 @@ async fn detach_download_for_reconfigure(
         if matches!(active_kind, Some(crate::queue::TaskKind::Media)) && !media_was_registered {
             state
                 .download_coordinator
-                .finish_media(id.clone(), media_lifecycle_generation)
+                .finish_media(id.to_string(), media_lifecycle_generation)
                 .await;
         }
 
-        state.queue_manager.release_permit(&id).await;
-        state.queue_manager.clear_aria2_retry_state(&id).await;
-        state.queue_manager.forget_aria2_gid(&id).await;
-        state.queue_manager.release_registered_id(&id).await;
+        state.queue_manager.release_permit(id).await;
+        state.queue_manager.clear_aria2_retry_state(id).await;
+        state.queue_manager.forget_aria2_gid(id).await;
+        state.queue_manager.release_registered_id(id).await;
     }
 
     use tauri::Emitter;
     let _ = app_handle.emit(
         "download-state",
-        crate::ipc::DownloadStateEvent::new(id.clone(), crate::ipc::DownloadStatus::Paused),
+        crate::ipc::DownloadStateEvent::new(id, crate::ipc::DownloadStatus::Paused),
     );
 
     Ok(())
@@ -5819,6 +5834,7 @@ async fn validate_torrent_enqueue(
     if item.is_media.unwrap_or(false) {
         return Err("torrent transfer cannot be a media download".to_string());
     }
+    crate::torrent::validate_output_name(&item.filename)?;
     item.torrent_trackers = queue::normalize_torrent_trackers(item.torrent_trackers.as_deref())?;
     item.torrent_exclude_trackers =
         queue::normalize_torrent_exclude_trackers(item.torrent_exclude_trackers.as_deref())?;
@@ -5850,6 +5866,7 @@ async fn validate_torrent_enqueue(
             item.torrent_file_indices.as_deref(),
             metadata.files.len(),
         )?;
+        item.torrent_file_indices = selected.clone();
         if item.torrent_remove_unselected_file.unwrap_or(false) {
             let Some(selected) = selected else {
                 return Err(
@@ -5884,61 +5901,107 @@ async fn validate_torrent_enqueue(
 }
 
 struct ExpectedTorrentOutputPaths {
+    primary: std::path::PathBuf,
     selected: Vec<std::path::PathBuf>,
     unselected: Vec<std::path::PathBuf>,
 }
 
+struct DownloadOwnershipSnapshot {
+    primary: Option<std::path::PathBuf>,
+    owned: Vec<std::path::PathBuf>,
+    removal: Vec<std::path::PathBuf>,
+}
+
+fn snapshot_download_ownership(
+    app_handle: &tauri::AppHandle,
+    id: &str,
+) -> Result<DownloadOwnershipSnapshot, String> {
+    Ok(DownloadOwnershipSnapshot {
+        primary: crate::download_ownership::primary_path_for_id(app_handle, id)?,
+        owned: crate::download_ownership::owned_paths_for_id(app_handle, id)?,
+        removal: crate::download_ownership::torrent_removal_paths_for_id(app_handle, id)?,
+    })
+}
+
+fn restore_download_ownership(
+    app_handle: &tauri::AppHandle,
+    id: &str,
+    snapshot: DownloadOwnershipSnapshot,
+) -> Result<(), String> {
+    let Some(primary) = snapshot.primary else {
+        return crate::download_ownership::remove(app_handle, id);
+    };
+    let owned = if snapshot.owned.is_empty() {
+        vec![primary.clone()]
+    } else {
+        snapshot.owned
+    };
+    crate::download_ownership::set_owned_paths_with_primary_and_removal(
+        app_handle,
+        id,
+        &primary,
+        &owned,
+        &snapshot.removal,
+    )
+}
+
 fn expected_torrent_output_paths(
     app_handle: &tauri::AppHandle,
-    item: &queue::EnqueueItem,
+    id: &str,
+    destination: &str,
+    filename: &str,
+    torrent_path: Option<&str>,
+    torrent_file_indices: Option<&[u32]>,
+    torrent_remove_unselected_file: bool,
 ) -> Result<Option<ExpectedTorrentOutputPaths>, String> {
-    if !item.is_torrent.unwrap_or(false) {
-        return Ok(None);
-    }
-    let Some(torrent_path) = item.torrent_path.as_deref() else {
+    let Some(torrent_path) = torrent_path else {
         return Ok(None);
     };
-    let torrent_path = crate::torrent::validate_managed_torrent_path(app_handle, &item.id, torrent_path)?;
+    let torrent_path = crate::torrent::validate_managed_torrent_path(app_handle, id, torrent_path)?;
     let bytes = std::fs::read(torrent_path)
         .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
     let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
     let selected = crate::torrent::validate_selected_indices(
-        item.torrent_file_indices.as_deref(),
+        torrent_file_indices,
         metadata.files.len(),
     )?;
-    let destination = crate::resolve_path(&item.destination, app_handle);
+    let destination = crate::resolve_path(destination, app_handle);
     if !crate::is_safe_path(&destination, app_handle) {
         return Err("Path traversal blocked".to_string());
     }
     let canonical_destination = crate::canonicalize_with_missing_components(&destination)
         .ok_or_else(|| "torrent destination could not be canonicalized".to_string())?;
-    let selected_relative = crate::torrent::aria2_output_paths(&metadata, selected.as_deref());
+    let selected_relative = crate::torrent::aria2_output_paths(
+        &metadata,
+        selected.as_deref(),
+        filename,
+    );
     let resolve_paths = |relative_paths: Vec<String>| -> Result<Vec<std::path::PathBuf>, String> {
         let mut paths = Vec::new();
         for relative in relative_paths {
-        let relative = std::path::PathBuf::from(relative);
-        if relative.is_absolute()
-            || relative.components().any(|component| {
-                matches!(
-                    component,
-                    std::path::Component::ParentDir | std::path::Component::CurDir
-                )
-            })
-        {
-            return Err("torrent output path is unsafe".to_string());
-        }
-        let path = destination.join(relative);
-        let canonical_path = crate::canonicalize_with_missing_components(&path)
-            .ok_or_else(|| "torrent output path could not be canonicalized".to_string())?;
-        if !crate::platform::path_is_within(&canonical_path, &canonical_destination) {
-            return Err("torrent output path is outside its destination".to_string());
-        }
-        paths.push(canonical_path);
+            let relative = std::path::PathBuf::from(relative);
+            if relative.is_absolute()
+                || relative.components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::ParentDir | std::path::Component::CurDir
+                    )
+                })
+            {
+                return Err("torrent output path is unsafe".to_string());
+            }
+            let path = destination.join(relative);
+            let canonical_path = crate::canonicalize_with_missing_components(&path)
+                .ok_or_else(|| "torrent output path could not be canonicalized".to_string())?;
+            if !crate::platform::path_is_within(&canonical_path, &canonical_destination) {
+                return Err("torrent output path is outside its destination".to_string());
+            }
+            paths.push(canonical_path);
         }
         Ok(paths)
     };
     let selected_paths = resolve_paths(selected_relative)?;
-    let unselected_paths = if item.torrent_remove_unselected_file.unwrap_or(false) {
+    let unselected_paths = if torrent_remove_unselected_file {
         let selected_indices = selected
             .as_deref()
             .ok_or_else(|| "torrent file selection is required for unselected-file removal".to_string())?;
@@ -5951,7 +6014,7 @@ fn expected_torrent_output_paths(
                 if metadata.files.len() == 1 {
                     file.path.clone()
                 } else {
-                    format!("{}/{}", metadata.name, file.path)
+                    format!("{}/{}", filename, file.path)
                 }
             })
             .collect::<Vec<_>>();
@@ -5965,7 +6028,19 @@ fn expected_torrent_output_paths(
     } else {
         Vec::new()
     };
+    let primary = if metadata.files.len() == 1 {
+        selected_paths
+            .first()
+            .cloned()
+            .ok_or_else(|| "Torrent selection produced no output path".to_string())?
+    } else {
+        resolve_paths(vec![filename.to_string()])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "Torrent output name is invalid".to_string())?
+    };
     Ok(Some(ExpectedTorrentOutputPaths {
+        primary,
         selected: selected_paths,
         unselected: unselected_paths,
     }))
@@ -5979,27 +6054,85 @@ fn register_download_ownership(
     app_handle: &tauri::AppHandle,
     item: &queue::EnqueueItem,
 ) -> Result<(), String> {
-    let torrent_paths = expected_torrent_output_paths(app_handle, item)?;
+    if item.is_torrent.unwrap_or(false) {
+        return register_torrent_output_ownership(
+            app_handle,
+            &item.id,
+            &item.destination,
+            &item.filename,
+            item.torrent_path.as_deref(),
+            item.torrent_file_indices.as_deref(),
+            item.torrent_remove_unselected_file.unwrap_or(false),
+        );
+    }
     let primary = crate::download_ownership::expected_primary_path(
         app_handle,
         &item.destination,
         &item.filename,
     )?;
-    let (owned_paths, removal_paths) = match torrent_paths {
-        Some(paths) => (
-            paths.selected,
-            if item.torrent_remove_unselected_file.unwrap_or(false) {
-                paths.unselected
-            } else {
-                Vec::new()
-            },
-        ),
-        None => (vec![primary.clone()], Vec::new()),
-    };
-
-    crate::download_ownership::set_owned_paths_with_primary_and_removal(
+    set_download_output_ownership(
         app_handle,
         &item.id,
+        primary.clone(),
+        vec![primary],
+        Vec::new(),
+    )
+}
+
+fn register_torrent_output_ownership(
+    app_handle: &tauri::AppHandle,
+    id: &str,
+    destination: &str,
+    filename: &str,
+    torrent_path: Option<&str>,
+    torrent_file_indices: Option<&[u32]>,
+    torrent_remove_unselected_file: bool,
+) -> Result<(), String> {
+    let Some(paths) = expected_torrent_output_paths(
+        app_handle,
+        id,
+        destination,
+        filename,
+        torrent_path,
+        torrent_file_indices,
+        torrent_remove_unselected_file,
+    )? else {
+        let primary = crate::download_ownership::expected_primary_path(
+            app_handle,
+            destination,
+            filename,
+        )?;
+        return set_download_output_ownership(
+            app_handle,
+            id,
+            primary.clone(),
+            vec![primary],
+            Vec::new(),
+        );
+    };
+    set_download_output_ownership(
+        app_handle,
+        id,
+        paths.primary,
+        paths.selected,
+        if torrent_remove_unselected_file {
+            paths.unselected
+        } else {
+            Vec::new()
+        },
+    )
+}
+
+fn set_download_output_ownership(
+    app_handle: &tauri::AppHandle,
+    id: &str,
+    primary: std::path::PathBuf,
+    owned_paths: Vec<std::path::PathBuf>,
+    removal_paths: Vec<std::path::PathBuf>,
+) -> Result<(), String> {
+    crate::download_ownership::set_owned_paths_with_primary_and_removal(
+        app_handle,
+        id,
         &primary,
         &owned_paths,
         &removal_paths,
@@ -6234,10 +6367,21 @@ async fn remove_torrent_metadata(
 async fn enqueue_download(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
+    item: queue::EnqueueItem,
+) -> Result<crate::ipc::EnqueueAccepted, AppError> {
+    let id = item.id.clone();
+    let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    enqueue_download_locked(&app_handle, state.inner(), item, &control_guard).await
+}
+
+async fn enqueue_download_locked(
+    app_handle: &tauri::AppHandle,
+    state: &AppState,
     mut item: queue::EnqueueItem,
+    _control_guard: &queue::Aria2ControlGuard,
 ) -> Result<crate::ipc::EnqueueAccepted, AppError> {
     if item.is_torrent.unwrap_or(false) {
-        validate_torrent_enqueue(&app_handle, &mut item)
+        validate_torrent_enqueue(app_handle, &mut item)
             .await
             .map_err(AppError::Internal)?;
     } else {
@@ -6254,8 +6398,24 @@ async fn enqueue_download(
         .reserve_enqueue_generation(&id, lifecycle_generation)
         .await
         .map_err(AppError::Internal)?;
-    if let Err(error) = register_download_ownership(&app_handle, &item) {
-        let _ = crate::download_ownership::remove(&app_handle, &id);
+    let previous_ownership = match snapshot_download_ownership(app_handle, &id) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            state
+                .queue_manager
+                .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
+                .await;
+            return Err(AppError::Internal(error));
+        }
+    };
+    if let Err(error) = register_download_ownership(app_handle, &item) {
+        if let Err(restore_error) = restore_download_ownership(app_handle, &id, previous_ownership) {
+            log::error!(
+                "download ownership [{}]: failed to restore the previous mapping after enqueue registration failed: {}",
+                id,
+                restore_error
+            );
+        }
         state
             .queue_manager
             .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
@@ -6267,7 +6427,13 @@ async fn enqueue_download(
         .commit_reserved_enqueue(item.into_task(), lifecycle_generation)
         .await
     {
-        let _ = crate::download_ownership::remove(&app_handle, &id);
+        if let Err(restore_error) = restore_download_ownership(app_handle, &id, previous_ownership) {
+            log::error!(
+                "download ownership [{}]: failed to restore the previous mapping after enqueue commit failed: {}",
+                id,
+                restore_error
+            );
+        }
         state
             .queue_manager
             .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
@@ -6305,6 +6471,10 @@ async fn enqueue_many(
     let mut results = Vec::with_capacity(items.len());
     for mut item in items {
         let id = item.id.clone();
+        // Keep validation, ownership replacement, and enqueue reservation
+        // serialized with pause/resume/remove for this download. The guard is
+        // intentionally held through every early-continue path below.
+        let _control_guard = state.queue_manager.acquire_aria2_control(&id).await;
         let validation = if item.is_torrent.unwrap_or(false) {
             validate_torrent_enqueue(&app_handle, &mut item).await
         } else {
@@ -6349,8 +6519,30 @@ async fn enqueue_many(
                 continue;
             }
         };
+        let previous_ownership = match snapshot_download_ownership(&app_handle, &id) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                state
+                    .queue_manager
+                    .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
+                    .await;
+                results.push(crate::ipc::EnqueueResult {
+                    id,
+                    success: false,
+                    filename: None,
+                    error: Some(error),
+                });
+                continue;
+            }
+        };
         if let Err(error) = register_download_ownership(&app_handle, &item) {
-            let _ = crate::download_ownership::remove(&app_handle, &id);
+            if let Err(restore_error) = restore_download_ownership(&app_handle, &id, previous_ownership) {
+                log::error!(
+                    "download ownership [{}]: failed to restore the previous mapping after batch enqueue registration failed: {}",
+                    id,
+                    restore_error
+                );
+            }
             state
                 .queue_manager
                 .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
@@ -6368,7 +6560,13 @@ async fn enqueue_many(
             .commit_reserved_enqueue(item.into_task(), lifecycle_generation)
             .await
         {
-            let _ = crate::download_ownership::remove(&app_handle, &id);
+            if let Err(restore_error) = restore_download_ownership(&app_handle, &id, previous_ownership) {
+                log::error!(
+                    "download ownership [{}]: failed to restore the previous mapping after batch enqueue commit failed: {}",
+                    id,
+                    restore_error
+                );
+            }
             state
                 .queue_manager
                 .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
@@ -6529,6 +6727,554 @@ async fn get_torrent_piece_progress(
         .queue_manager
         .get_aria2_torrent_piece_progress(&id)
         .await
+}
+
+fn torrent_file_selection_snapshot(
+    metadata: &crate::torrent::ParsedTorrent,
+    selected: Option<&[u32]>,
+) -> crate::ipc::TorrentFileSelectionSnapshot {
+    crate::ipc::TorrentFileSelectionSnapshot {
+        files: metadata
+            .files
+            .iter()
+            .map(|file| crate::ipc::TorrentFileSelectionEntry {
+                index: file.index,
+                relative_path: file.path.clone(),
+                length: file.length,
+                selected: selected.is_none_or(|indices| indices.contains(&file.index)),
+                completed_length: None,
+            })
+            .collect(),
+    }
+}
+
+fn load_persisted_torrent_item(
+    database: &crate::db::DbState,
+    id: &str,
+) -> Result<crate::ipc::DownloadItem, String> {
+    let connection = database.lock()?;
+    crate::db::load_downloads(&connection)?
+        .into_iter()
+        .find_map(|record| {
+            serde_json::from_str::<crate::ipc::DownloadItem>(&record)
+                .ok()
+                .filter(|item| item.id == id)
+        })
+        .ok_or_else(|| "download is not persisted".to_string())
+}
+
+fn persist_torrent_file_selection(
+    database: &crate::db::DbState,
+    id: &str,
+    expected: Option<&[u32]>,
+    selected: Option<&[u32]>,
+) -> Result<(), String> {
+    let mut connection = database.lock()?;
+    let records = crate::db::load_downloads(&connection)?;
+    let mut changed = false;
+    let next = records
+        .into_iter()
+        .map(|record| {
+            let mut value: serde_json::Value = match serde_json::from_str(&record) {
+                Ok(value) => value,
+                Err(_) => return Ok(record),
+            };
+            if value.get("id").and_then(serde_json::Value::as_str) == Some(id) {
+                let current = match value.get("torrentFileIndices") {
+                    None => None,
+                    Some(serde_json::Value::Array(indices)) => Some(
+                        indices
+                            .iter()
+                            .map(serde_json::Value::as_u64)
+                            .collect::<Option<Vec<_>>>()
+                            .ok_or_else(|| {
+                                "persisted Torrent file selection is malformed".to_string()
+                            })?
+                            .into_iter()
+                            .map(|index| {
+                                u32::try_from(index).map_err(|_| {
+                                    "persisted Torrent file selection is out of range".to_string()
+                                })
+                            })
+                            .collect::<Result<Vec<_>, String>>()?,
+                    ),
+                    Some(_) => {
+                        return Err("persisted Torrent file selection is malformed".to_string())
+                    }
+                };
+                if current.as_deref() != expected {
+                    return Err("Torrent file selection changed; reload before applying".to_string());
+                }
+                let object = value
+                    .as_object_mut()
+                    .ok_or_else(|| "persisted download is not an object".to_string())?;
+                if let Some(selected) = selected {
+                    object.insert("torrentFileIndices".to_string(), serde_json::json!(selected));
+                } else {
+                    object.remove("torrentFileIndices");
+                }
+                changed = true;
+                serde_json::to_string(&value)
+                    .map_err(|error| format!("failed to encode persisted download: {error}"))
+            } else {
+                Ok(record)
+            }
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if !changed {
+        return Err("download is no longer persisted".to_string());
+    }
+    let next_data = serde_json::to_string(&next)
+        .map_err(|error| format!("failed to encode persisted downloads: {error}"))?;
+    crate::db::replace_downloads(&mut connection, &next_data, database.is_portable())
+}
+
+#[tauri::command]
+async fn get_torrent_file_selection(
+    state: tauri::State<'_, crate::db::DbState>,
+    app_handle: tauri::AppHandle,
+    id: String,
+) -> Result<crate::ipc::TorrentFileSelectionSnapshot, String> {
+    let item = load_persisted_torrent_item(state.inner(), &id)?;
+    if item.is_torrent != Some(true) {
+        return Err("file selection is available only for Torrent downloads".to_string());
+    }
+    let path = item
+        .torrent_path
+        .as_deref()
+        .ok_or_else(|| "Torrent metadata is not resolved yet".to_string())?;
+    let path = crate::torrent::validate_managed_torrent_path(&app_handle, &id, path)?;
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
+    let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
+    let selected = crate::torrent::validate_selected_indices(
+        item.torrent_file_indices.as_deref(),
+        metadata.files.len(),
+    )?;
+    Ok(torrent_file_selection_snapshot(&metadata, selected.as_deref()))
+}
+
+#[tauri::command]
+async fn set_torrent_file_selection(
+    state: tauri::State<'_, AppState>,
+    database: tauri::State<'_, crate::db::DbState>,
+    app_handle: tauri::AppHandle,
+    id: String,
+    selected_indices: Option<Vec<u32>>,
+) -> Result<crate::ipc::TorrentFileSelectionSnapshot, String> {
+    let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    let item = load_persisted_torrent_item(database.inner(), &id)?;
+    if item.is_torrent != Some(true) {
+        return Err("file selection is available only for Torrent downloads".to_string());
+    }
+    if !matches!(
+        item.status,
+        crate::ipc::DownloadStatus::Ready
+            | crate::ipc::DownloadStatus::Staged
+            | crate::ipc::DownloadStatus::Queued
+            | crate::ipc::DownloadStatus::Paused
+            | crate::ipc::DownloadStatus::Failed
+    ) {
+        return Err("pause the Torrent before changing file selection".to_string());
+    }
+    let path = item
+        .torrent_path
+        .as_deref()
+        .ok_or_else(|| "Torrent metadata is not resolved yet".to_string())?;
+    let path = crate::torrent::validate_managed_torrent_path(&app_handle, &id, path)?;
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
+    let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
+    let selected = crate::torrent::validate_selected_indices(
+        selected_indices.as_deref(),
+        metadata.files.len(),
+    )?;
+    if item.torrent_remove_unselected_file == Some(true) && selected.is_none() {
+        return Err("removing unselected Torrent files requires selecting a subset of files".to_string());
+    }
+
+    // Queued tasks already contain the fully resolved payload (proxy,
+    // credentials, destination, and retry settings) that the frontend cannot
+    // safely reconstruct in this native command. Remove that exact task from
+    // the admission queue while ownership and persistence are updated, then
+    // restore it at its original position with only the selection changed.
+    let pending_task = if matches!(item.status, crate::ipc::DownloadStatus::Queued) {
+        let pending_task =
+            state
+                .queue_manager
+                .take_pending_task(&id)
+                .await
+                .ok_or_else(|| {
+                    "Torrent lifecycle changed; retry selection after the queued task settles"
+                        .to_string()
+                })?;
+        if pending_task
+            .1
+            .payload
+            .torrent_file_indices
+            .as_deref()
+            != item.torrent_file_indices.as_deref()
+        {
+            state
+                .queue_manager
+                .restore_pending_task(pending_task.0, pending_task.1)
+                .await;
+            return Err("Torrent lifecycle changed; reload before changing file selection".to_string());
+        }
+        Some(pending_task)
+    } else {
+        None
+    };
+
+    if matches!(item.status, crate::ipc::DownloadStatus::Paused) {
+        if let Err(error) = detach_download_for_reconfigure_locked(
+            &app_handle,
+            state.inner(),
+            &id,
+            &control_guard,
+        )
+        .await
+        {
+            return Err(error);
+        }
+    }
+
+    let (destination, filename) = pending_task
+        .as_ref()
+        .map(|(_, task)| (task.payload.destination.as_str(), task.payload.filename.as_str()))
+        .unwrap_or_else(|| {
+            let destination = item.destination.as_deref().unwrap_or("");
+            (destination, item.file_name.as_str())
+        });
+    let destination = if destination.trim().is_empty() {
+        verification_destination(&app_handle, &item)?
+    } else {
+        destination.to_string()
+    };
+    let previous_ownership = snapshot_download_ownership(&app_handle, &id)?;
+    if let Err(error) = register_torrent_output_ownership(
+        &app_handle,
+        &id,
+        &destination,
+        filename,
+        item.torrent_path.as_deref(),
+        selected.as_deref(),
+        item.torrent_remove_unselected_file.unwrap_or(false),
+    ) {
+        if let Some((index, task)) = pending_task.as_ref() {
+            state
+                .queue_manager
+                .restore_pending_task(*index, task.clone())
+                .await;
+        }
+        return Err(error);
+    }
+
+    if let Err(error) = persist_torrent_file_selection(
+        database.inner(),
+        &id,
+        item.torrent_file_indices.as_deref(),
+        selected.as_deref(),
+    ) {
+        if let Err(restore_error) = restore_download_ownership(
+            &app_handle,
+            &id,
+            previous_ownership,
+        ) {
+            log::error!(
+                "torrent selection [{}]: failed to restore ownership after persistence failure: {}",
+                id,
+                restore_error
+            );
+        }
+        if let Some((index, task)) = pending_task.as_ref() {
+            state
+                .queue_manager
+                .restore_pending_task(*index, task.clone())
+                .await;
+        }
+        return Err(error);
+    }
+
+    if let Some((index, mut task)) = pending_task {
+        task.payload.torrent_file_indices = selected.clone();
+        state.queue_manager.restore_pending_task(index, task).await;
+    }
+    Ok(torrent_file_selection_snapshot(&metadata, selected.as_deref()))
+}
+
+#[tauri::command]
+async fn get_torrent_details(
+    state: tauri::State<'_, crate::db::DbState>,
+    app_handle: tauri::AppHandle,
+    id: String,
+) -> Result<crate::ipc::TorrentDetails, String> {
+    let item = load_persisted_torrent_item(state.inner(), &id)?;
+    if item.is_torrent != Some(true) {
+        return Err("details are available only for Torrent downloads".to_string());
+    }
+    let path = item
+        .torrent_path
+        .as_deref()
+        .ok_or_else(|| "Torrent metadata is not resolved yet".to_string())?;
+    let path = crate::torrent::validate_managed_torrent_path(&app_handle, &id, path)?;
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
+    crate::torrent::torrent_details_from_bytes(&bytes)
+}
+
+fn verification_destination(
+    app_handle: &tauri::AppHandle,
+    item: &crate::ipc::DownloadItem,
+) -> Result<String, String> {
+    if let Some(destination) = item
+        .destination
+        .as_deref()
+        .map(str::trim)
+        .filter(|destination| !destination.is_empty())
+    {
+        return Ok(destination.to_string());
+    }
+
+    let settings = crate::settings::load_settings(app_handle)?;
+    let base = settings.base_download_folder.trim();
+    let base = if base.is_empty() { "~/Downloads" } else { base };
+    let base_path = crate::resolve_path(base, app_handle);
+    if !settings.category_subfolders_enabled {
+        return Ok(base_path.to_string_lossy().to_string());
+    }
+
+    let category = format!("{:?}", item.category);
+    if let Some(override_path) = settings
+        .category_directory_overrides
+        .get(&category)
+        .map(|value| value.trim())
+        .filter(|override_path| !override_path.is_empty())
+    {
+        return Ok(crate::resolve_path(override_path, app_handle)
+            .to_string_lossy()
+            .to_string());
+    }
+    let subfolder = settings
+        .category_subfolders
+        .get(&category)
+        .map(|value| value.trim())
+        .unwrap_or("");
+    if subfolder.is_empty() {
+        Ok(base_path.to_string_lossy().to_string())
+    } else {
+        Ok(base_path.join(subfolder).to_string_lossy().to_string())
+    }
+}
+
+#[tauri::command]
+async fn verify_torrent_data(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    database: tauri::State<'_, crate::db::DbState>,
+    id: String,
+) -> Result<(), String> {
+    // Verification replaces the current Aria2 lifecycle. Serialize that
+    // replacement with pause/resume/remove so a paused GID cannot reject the
+    // maintenance enqueue as a duplicate task or race it with a late event.
+    let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    let item = load_persisted_torrent_item(database.inner(), &id)?;
+    if item.is_torrent != Some(true) {
+        return Err("integrity verification is available only for Torrent downloads".to_string());
+    }
+    if !matches!(
+        item.status,
+        crate::ipc::DownloadStatus::Completed
+            | crate::ipc::DownloadStatus::Paused
+            | crate::ipc::DownloadStatus::Failed
+    ) {
+        return Err("pause the Torrent before verifying its data".to_string());
+    }
+    let path = item
+        .torrent_path
+        .as_deref()
+        .ok_or_else(|| "Torrent metadata is not resolved yet".to_string())?;
+    let path = crate::torrent::validate_managed_torrent_path(&app_handle, &id, path)?;
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
+    let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
+    crate::torrent::validate_info_hash(item.torrent_info_hash.as_deref(), &metadata.info_hash)?;
+    let restore_status = item.status.as_str().to_string();
+    let destination = verification_destination(&app_handle, &item)?;
+    if matches!(item.status, crate::ipc::DownloadStatus::Paused) {
+        detach_download_for_reconfigure_locked(
+            &app_handle,
+            state.inner(),
+            &id,
+            &control_guard,
+        )
+        .await?;
+    } else if state.queue_manager.is_registered(&id).await
+        || state.queue_manager.aria2_gid_for_download(&id).is_some()
+    {
+        return Err("Torrent lifecycle changed; pause it before verifying its data".to_string());
+    }
+    let enqueue_item = queue::EnqueueItem {
+        id: item.id.clone(),
+        queue_id: item
+            .queue_id
+            .clone()
+            .unwrap_or_else(|| "00000000-0000-0000-0000-000000000001".to_string()),
+        url: item.url.clone(),
+        destination,
+        filename: item.file_name.clone(),
+        connections: item.connections,
+        speed_limit: item.speed_limit.clone(),
+        username: item.username.clone(),
+        password: item.password.clone(),
+        headers: item.headers.clone(),
+        checksum: item.checksum.clone(),
+        cookies: item.cookies.clone(),
+        mirrors: None,
+        user_agent: None,
+        max_tries: Some(0),
+        proxy: None,
+        format_selector: None,
+        cookie_source: None,
+        is_media: Some(false),
+        is_torrent: Some(true),
+        torrent_path: item.torrent_path.clone(),
+        torrent_file_indices: item.torrent_file_indices.clone(),
+        torrent_info_hash: item.torrent_info_hash.clone(),
+        torrent_seed_time: None,
+        torrent_seed_ratio: None,
+        torrent_seed_remaining: None,
+        torrent_web_seeds: None,
+        torrent_upload_limit: None,
+        torrent_max_peers: None,
+        torrent_peer_speed_limit: None,
+        torrent_check_integrity: Some(true),
+        torrent_trackers: None,
+        torrent_exclude_trackers: None,
+        torrent_tracker_connect_timeout: None,
+        torrent_tracker_timeout: None,
+        torrent_tracker_interval: None,
+        torrent_stop_timeout: None,
+        torrent_prioritize_piece: None,
+        // Preserve the existing removal reservation in the ownership record,
+        // but the verify-only option path returns before emitting
+        // bt-remove-unselected-file, so this maintenance lifecycle cannot
+        // delete data.
+        torrent_remove_unselected_file: item.torrent_remove_unselected_file,
+        torrent_encryption_policy: None,
+        torrent_file_allocation: item.torrent_file_allocation.clone(),
+        torrent_verify_only: Some(true),
+        torrent_verify_restore_status: Some(restore_status.clone()),
+        lifecycle_generation: None,
+    };
+
+    let original_records = {
+        let connection = database.lock()?;
+        crate::db::load_downloads(&connection)?
+    };
+    let mut next_records = Vec::with_capacity(original_records.len());
+    let mut changed = false;
+    for record in &original_records {
+        let mut value: serde_json::Value = match serde_json::from_str(record) {
+            Ok(value) => value,
+            Err(_) => {
+                next_records.push(record.clone());
+                continue;
+            }
+        };
+        if value.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str()) {
+            let object = value
+                .as_object_mut()
+                .ok_or_else(|| "persisted download is not an object".to_string())?;
+            object.insert("status".to_string(), serde_json::json!("queued"));
+            object.insert("hasBeenDispatched".to_string(), serde_json::json!(false));
+            object.insert("torrentVerifyOnly".to_string(), serde_json::json!(true));
+            object.insert(
+                "torrentVerifyRestoreStatus".to_string(),
+                serde_json::json!(restore_status),
+            );
+            changed = true;
+        }
+        next_records.push(
+            serde_json::to_string(&value)
+                .map_err(|error| format!("failed to encode persisted download: {error}"))?,
+        );
+    }
+    if !changed {
+        return Err("download is no longer persisted".to_string());
+    }
+    {
+        let mut connection = database.lock()?;
+        let next_data = serde_json::to_string(&next_records)
+            .map_err(|error| format!("failed to encode persisted downloads: {error}"))?;
+        crate::db::replace_downloads(&mut connection, &next_data, database.is_portable())?;
+    }
+
+    if let Err(error) =
+        enqueue_download_locked(&app_handle, state.inner(), enqueue_item, &control_guard).await
+    {
+        // Roll back only this verification marker, and only while the row is
+        // still the queued verification lifecycle. Never restore the stale
+        // full array captured before enqueue: frontend persistence or another
+        // command may have changed unrelated rows in the meantime.
+        if let Ok(mut connection) = database.lock() {
+            if let Ok(records) = crate::db::load_downloads(&connection) {
+                let mut changed = false;
+                let next = records
+                    .into_iter()
+                    .map(|record| {
+                        let mut value: serde_json::Value = match serde_json::from_str(&record) {
+                            Ok(value) => value,
+                            Err(_) => return record,
+                        };
+                        let is_target = value
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(id.as_str());
+                        let is_verification_marker = value
+                            .get("status")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("queued")
+                            && value
+                                .get("torrentVerifyOnly")
+                                .and_then(serde_json::Value::as_bool)
+                                == Some(true)
+                            && value
+                                .get("torrentVerifyRestoreStatus")
+                                .and_then(serde_json::Value::as_str)
+                                == Some(restore_status.as_str());
+                        if is_target && is_verification_marker {
+                            if let Some(object) = value.as_object_mut() {
+                                object.insert(
+                                    "status".to_string(),
+                                    serde_json::json!(restore_status),
+                                );
+                                object.remove("torrentVerifyOnly");
+                                object.remove("torrentVerifyRestoreStatus");
+                                changed = true;
+                            }
+                        }
+                        serde_json::to_string(&value).unwrap_or(record)
+                    })
+                    .collect::<Vec<_>>();
+                if changed {
+                    if let Ok(data) = serde_json::to_string(&next) {
+                        let _ = crate::db::replace_downloads(
+                            &mut connection,
+                            &data,
+                            database.is_portable(),
+                        );
+                    }
+                }
+            }
+        }
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
 fn replace_persisted_torrent_web_seeds(
@@ -6862,6 +7608,8 @@ fn apply_aria2_torrent_network_options(
     dht_entry_point6: &str,
     dht_listen_addr6: &str,
     lpd_interface: &str,
+    bind_address: &str,
+    ipv6_enabled: bool,
 ) {
     for (option, value) in [
         ("--listen-port", listen_port),
@@ -6876,6 +7624,12 @@ fn apply_aria2_torrent_network_options(
         if !value.is_empty() {
             command.arg(format!("{option}={value}"));
         }
+    }
+    if !bind_address.trim().is_empty() {
+        command.arg(format!("--interface={}", bind_address.trim()));
+    }
+    if !ipv6_enabled {
+        command.arg("--disable-ipv6=true");
     }
 }
 
@@ -6922,10 +7676,14 @@ fn apply_aria2_torrent_global_options(
     command: &mut std::process::Command,
     max_open_files: u32,
     overall_upload_limit: Option<&str>,
+    disk_cache: &str,
 ) {
     let max_open_files = queue::normalize_torrent_max_open_files(max_open_files)
         .unwrap_or(queue::DEFAULT_TORRENT_MAX_OPEN_FILES);
     command.arg(format!("--bt-max-open-files={max_open_files}"));
+    let disk_cache = queue::normalize_aria2_disk_cache(Some(disk_cache))
+        .unwrap_or_else(|_| queue::DEFAULT_ARIA2_DISK_CACHE.to_string());
+    command.arg(format!("--disk-cache={disk_cache}"));
     if let Some(limit) = overall_upload_limit.and_then(normalize_speed_limit_for_aria2) {
         command.arg(format!("--max-overall-upload-limit={limit}"));
     }
@@ -8217,35 +8975,40 @@ mod tests {
     #[test]
     fn aria2_torrent_global_options_are_bounded_and_explicit() {
         let mut command = std::process::Command::new("aria2c");
-        apply_aria2_torrent_global_options(&mut command, 256, Some("2M"));
+        apply_aria2_torrent_global_options(&mut command, 256, Some("2M"), "16M");
         assert_eq!(
             command
                 .get_args()
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<_>>(),
-            vec!["--bt-max-open-files=256", "--max-overall-upload-limit=2M"]
+            vec![
+                "--bt-max-open-files=256",
+                "--disk-cache=16M",
+                "--max-overall-upload-limit=2M",
+            ]
         );
         let mut fallback_command = std::process::Command::new("aria2c");
         apply_aria2_torrent_global_options(
             &mut fallback_command,
             queue::MAX_TORRENT_MAX_OPEN_FILES + 1,
             Some("not-a-rate"),
+            "not-a-cache",
         );
         assert_eq!(
             fallback_command
                 .get_args()
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<_>>(),
-            vec!["--bt-max-open-files=100"]
+            vec!["--bt-max-open-files=100", "--disk-cache=16M"]
         );
         let mut unlimited_command = std::process::Command::new("aria2c");
-        apply_aria2_torrent_global_options(&mut unlimited_command, 256, None);
+        apply_aria2_torrent_global_options(&mut unlimited_command, 256, None, "0");
         assert_eq!(
             unlimited_command
                 .get_args()
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<_>>(),
-            vec!["--bt-max-open-files=256"]
+            vec!["--bt-max-open-files=256", "--disk-cache=0"]
         );
     }
 
@@ -8278,6 +9041,8 @@ mod tests {
             "[2001:db8::1]:6881",
             "2001:db8::2",
             "en0",
+            "192.0.2.10",
+            true,
         );
         assert_eq!(
             command
@@ -8292,12 +9057,23 @@ mod tests {
                 "--dht-entry-point6=[2001:db8::1]:6881",
                 "--dht-listen-addr6=2001:db8::2",
                 "--bt-lpd-interface=en0",
+                "--interface=192.0.2.10",
             ]
         );
 
         let mut defaults = std::process::Command::new("aria2c");
-        apply_aria2_torrent_network_options(&mut defaults, "", "", "", "", "", "", "");
+        apply_aria2_torrent_network_options(&mut defaults, "", "", "", "", "", "", "", "", true);
         assert!(defaults.get_args().next().is_none());
+
+        let mut ipv4_only = std::process::Command::new("aria2c");
+        apply_aria2_torrent_network_options(&mut ipv4_only, "", "", "", "", "", "", "", "192.0.2.10", false);
+        assert_eq!(
+            ipv4_only
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["--interface=192.0.2.10", "--disable-ipv6=true"]
+        );
     }
 
     #[test]
@@ -10482,6 +11258,7 @@ struct Aria2ConnectionObservation {
     peak_speed_bytes: f64,
     last_completed: u64,
     seeder: bool,
+    verifying: bool,
 }
 
 struct Aria2ConnectionSample<'a> {
@@ -11040,7 +11817,7 @@ pub fn run() {
                 .map(|settings| {
                     (
                         settings.torrent_enable_dht,
-                        settings.torrent_enable_dht6,
+                        settings.torrent_enable_dht6 && settings.torrent_ipv6_enabled,
                         settings.torrent_enable_pex,
                         settings.torrent_enable_lpd,
                     )
@@ -11114,6 +11891,7 @@ pub fn run() {
                                 &mut cmd,
                                 torrent_max_open_files,
                                 Some(&torrent_overall_upload_limit),
+                                &torrent_startup_settings.disk_cache,
                             );
                             apply_aria2_torrent_dht_paths(
                                 &mut cmd,
@@ -11141,6 +11919,8 @@ pub fn run() {
                                 &torrent_startup_settings.dht_entry_point6,
                                 &torrent_startup_settings.dht_listen_addr6,
                                 &torrent_startup_settings.lpd_interface,
+                                &torrent_startup_settings.bind_address,
+                                torrent_startup_settings.ipv6_enabled,
                             );
                             apply_aria2_torrent_peer_identity_options(
                                 &mut cmd,
@@ -11396,7 +12176,9 @@ pub fn run() {
                         "numSeeders",
                         "seeder",
                         "connections",
-                        "errorMessage"
+                        "errorMessage",
+                        "verifiedLength",
+                        "verifyIntegrityPending"
                     ]]);
                     if let Ok(active_list) = rpc_call(poll_port.load(std::sync::atomic::Ordering::Relaxed), &poll_secret, "aria2.tellActive", params).await {
                         if let Some(active_arr) = active_list.as_array() {
@@ -11412,6 +12194,20 @@ pub fn run() {
                                     let status = status_info.get("status").and_then(|value| value.as_str()).unwrap_or("");
                                     let total = status_info.get("totalLength").and_then(|s| s.as_str()).unwrap_or("0").parse::<u64>().unwrap_or(0);
                                     let completed = status_info.get("completedLength").and_then(|s| s.as_str()).unwrap_or("0").parse::<u64>().unwrap_or(0);
+                                    let verified_length = status_info
+                                        .get("verifiedLength")
+                                        .and_then(|value| {
+                                            value
+                                                .as_str()
+                                                .and_then(|value| value.parse::<u64>().ok())
+                                                .or_else(|| value.as_u64())
+                                        });
+                                    let verify_pending = status_info
+                                        .get("verifyIntegrityPending")
+                                        .is_some_and(|value| {
+                                            value.as_bool() == Some(true)
+                                                || value.as_str() == Some("true")
+                                        });
                                     let speed_bytes = status_info.get("downloadSpeed").and_then(|s| s.as_str()).unwrap_or("0").parse::<f64>().unwrap_or(0.0);
                                     let uploaded_bytes = status_info.get("uploadLength").and_then(|s| s.as_str()).and_then(|value| value.parse::<u64>().ok());
                                     let upload_speed_bytes = status_info.get("uploadSpeed").and_then(|s| s.as_str()).and_then(|value| value.parse::<f64>().ok());
@@ -11463,10 +12259,83 @@ pub fn run() {
                                     let entering_seeding = is_seeder && !observation.seeder;
                                     observation.seeder = is_seeder;
 
-                                    let fraction = if total > 0 { completed as f64 / total as f64 } else { 0.0 };
-                                    let speed = crate::download::format_speed(speed_bytes);
+                                    let is_torrent = poll_mgr.aria2_is_torrent(&id).await;
+                                    let is_verification =
+                                        poll_mgr.aria2_is_torrent_verification(&id).await;
+                                    if !poll_mgr.is_current_aria2_gid_mapping(gid, &mapping)
+                                        || !poll_mgr
+                                            .is_aria2_control_epoch_current(&id, control_epoch)
+                                            .await
+                                    {
+                                        continue;
+                                    }
+                                    let is_verifying = is_torrent
+                                        && (verify_pending
+                                            || (status == "active"
+                                                && total > 0
+                                                && completed >= total
+                                                && verified_length.is_some_and(|value| value < total)));
+                                    let entering_verifying = is_verifying && !observation.verifying;
+                                    let leaving_verifying = !is_verifying && observation.verifying;
+                                    observation.verifying = is_verifying;
+                                    if is_verification
+                                        && leaving_verifying
+                                        && total > 0
+                                        && verified_length.is_some_and(|value| value >= total)
+                                    {
+                                        // A verification lifecycle is considered
+                                        // observed only after Aria2 leaves its
+                                        // pending/hash-check phase for this
+                                        // same GID epoch. This evidence is used
+                                        // by terminal reconciliation instead
+                                        // of treating a bare complete event as
+                                        // proof that data was verified.
+                                        poll_mgr
+                                            .record_torrent_verified_length(
+                                                &id,
+                                                control_epoch,
+                                                total,
+                                            )
+                                            .await;
+                                    }
+
+                                    if entering_verifying {
+                                        let _ = app_handle_poll.emit(
+                                            "download-state",
+                                            crate::ipc::DownloadStateEvent::new(
+                                                &id,
+                                                crate::ipc::DownloadStatus::Verifying,
+                                            ),
+                                        );
+                                    } else if leaving_verifying && matches!(status, "active" | "waiting") {
+                                        let _ = app_handle_poll.emit(
+                                            "download-state",
+                                            crate::ipc::DownloadStateEvent::new(
+                                                &id,
+                                                crate::ipc::DownloadStatus::Downloading,
+                                            ),
+                                        );
+                                    }
+
+                                    let fraction = if is_verifying {
+                                        if total > 0 {
+                                            (verified_length.unwrap_or(0).min(total) as f64 / total as f64)
+                                                .clamp(0.0, 1.0)
+                                        } else {
+                                            0.0
+                                        }
+                                    } else if total > 0 {
+                                        (completed.min(total) as f64 / total as f64).clamp(0.0, 1.0)
+                                    } else {
+                                        0.0
+                                    };
+                                    let speed = if is_verifying {
+                                        "0 B/s".to_string()
+                                    } else {
+                                        crate::download::format_speed(speed_bytes)
+                                    };
                                     let upload_speed = upload_speed_bytes.map(crate::download::format_speed);
-                                    let eta = if speed_bytes > 0.0 && total > completed {
+                                    let eta = if !is_verifying && speed_bytes > 0.0 && total > completed {
                                         crate::download::format_duration((total - completed) as f64 / speed_bytes)
                                     } else {
                                         "-".to_string()
@@ -11733,7 +12602,7 @@ pub fn run() {
             authorize_keychain_access,
             acknowledge_pairing_token_change,
             check_file_exists, toggle_tray_icon, set_extension_pairing_token,
-            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, get_torrent_file_progress, get_torrent_piece_progress, get_torrent_web_seeds, set_torrent_web_seeds, set_torrent_max_open_files, set_torrent_overall_upload_limit, set_global_speed_limit, remove_download, get_download_primary_path,
+            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, get_torrent_file_progress, get_torrent_piece_progress, get_torrent_file_selection, set_torrent_file_selection, get_torrent_details, verify_torrent_data, get_torrent_web_seeds, set_torrent_web_seeds, set_torrent_max_open_files, set_torrent_overall_upload_limit, set_global_speed_limit, remove_download, get_download_primary_path,
             detach_download_for_reconfigure,
             enqueue_download, enqueue_many, cancel_enqueue_generation, move_in_queue, move_many_in_queue, remove_from_queue, get_pending_order,
             commands::reveal_in_file_manager, commands::open_downloaded_file,

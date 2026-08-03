@@ -20,7 +20,7 @@ describe('download action policy', () => {
       expect(canStartDownload(status)).toBe(true);
       expect(canPauseDownload(status)).toBe(false);
     }
-    for (const status of ['staged', 'queued', 'downloading', 'seeding', 'processing', 'retrying'] as const) {
+    for (const status of ['staged', 'queued', 'downloading', 'seeding', 'processing', 'verifying', 'retrying'] as const) {
       expect(canPauseDownload(status)).toBe(true);
     }
     for (const status of ['queued', 'downloading', 'processing', 'retrying'] as const) {
@@ -40,6 +40,7 @@ describe('download action policy', () => {
     expect(getPauseResumeAction('queued')).toBe('pause');
     expect(getPauseResumeAction('downloading')).toBe('pause');
     expect(getPauseResumeAction('processing')).toBe('pause');
+    expect(getPauseResumeAction('verifying')).toBe('pause');
     expect(getPauseResumeAction('seeding')).toBe('pause');
     expect(getPauseResumeAction('retrying')).toBe('pause');
     expect(getPauseResumeAction('paused')).toBe('resume');

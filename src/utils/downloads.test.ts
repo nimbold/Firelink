@@ -56,6 +56,14 @@ describe('download persistence progress snapshots', () => {
       expect(persisted.totalIsEstimate).toBe(false);
     }
   );
+
+  it('does not persist verification byte counters across restart', () => {
+    const persisted = redactDownloadForPersistence(item('verifying'));
+
+    expect(persisted.downloadedBytes).toBeUndefined();
+    expect(persisted.totalBytes).toBeUndefined();
+    expect(persisted.totalIsEstimate).toBeUndefined();
+  });
 });
 
 describe('Torrent tracker input validation', () => {

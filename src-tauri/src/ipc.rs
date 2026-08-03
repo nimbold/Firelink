@@ -46,6 +46,14 @@ fn default_torrent_max_concurrent_seeds() -> u32 {
     crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS
 }
 
+fn default_torrent_ipv6_enabled() -> bool {
+    true
+}
+
+fn default_aria2_disk_cache() -> String {
+    crate::queue::DEFAULT_ARIA2_DISK_CACHE.to_string()
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../src/bindings/")]
@@ -72,6 +80,9 @@ pub enum DownloadStatus {
     /// Transient state: a connection-aware retry is in progress with
     /// exponential backoff. The download slot/permit is still held.
     Retrying,
+    /// Aria2 is verifying already-present Torrent data before transfer or
+    /// after an explicit integrity check.
+    Verifying,
 }
 
 impl DownloadStatus {
@@ -88,6 +99,7 @@ impl DownloadStatus {
             Self::Failed => "failed",
             Self::Queued => "queued",
             Self::Retrying => "retrying",
+            Self::Verifying => "verifying",
         }
     }
 }
@@ -248,6 +260,15 @@ pub struct DownloadItem {
     #[serde(default)]
     #[ts(optional)]
     pub torrent_encryption_policy: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_file_allocation: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_verify_only: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_verify_restore_status: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, TS)]
@@ -306,6 +327,49 @@ pub struct TorrentPieceProgressSnapshot {
     #[ts(type = "number")]
     pub completed_pieces: u64,
     pub buckets: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TorrentFileSelectionEntry {
+    pub index: u32,
+    pub relative_path: String,
+    #[ts(type = "number")]
+    pub length: u64,
+    pub selected: bool,
+    #[ts(type = "number")]
+    #[ts(optional)]
+    pub completed_length: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TorrentFileSelectionSnapshot {
+    pub files: Vec<TorrentFileSelectionEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TorrentDetails {
+    pub info_hash: String,
+    pub display_name: String,
+    #[ts(type = "number")]
+    pub total_bytes: u64,
+    #[ts(type = "number")]
+    pub file_count: u32,
+    #[ts(type = "number")]
+    pub piece_length: u64,
+    #[ts(type = "number")]
+    pub piece_count: u64,
+    pub private: bool,
+    pub creation_date: Option<String>,
+    pub creator: Option<String>,
+    pub comment: Option<String>,
+    pub trackers: Vec<String>,
+    pub web_seeds: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -572,6 +636,8 @@ pub struct PersistedSettings {
     pub torrent_separate_seed_slots: bool,
     #[serde(default = "default_torrent_max_concurrent_seeds")]
     pub torrent_max_concurrent_seeds: u32,
+    #[serde(default = "default_torrent_ipv6_enabled")]
+    pub torrent_ipv6_enabled: bool,
     #[serde(default)]
     pub torrent_listen_port: String,
     #[serde(default)]
@@ -590,6 +656,10 @@ pub struct PersistedSettings {
     pub torrent_peer_id_prefix: String,
     #[serde(default)]
     pub torrent_peer_agent: String,
+    #[serde(default)]
+    pub torrent_bind_address: String,
+    #[serde(default = "default_aria2_disk_cache")]
+    pub aria2_disk_cache: String,
     pub custom_user_agent: String,
     pub ask_where_to_save_each_file: bool,
     pub remember_last_used_download_directory: bool,

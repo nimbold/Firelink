@@ -1280,6 +1280,19 @@ runEngineChecks(false);
                     type="checkbox"
                     checked={settings.torrentEnableDht6}
                     onChange={(event) => settings.setTorrentEnableDht6(event.target.checked)}
+                    disabled={!settings.torrentIpv6Enabled}
+                    className="mac-switch disabled:opacity-50"
+                  />
+                </label>
+                <label className="mac-settings-row cursor-default">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentIpv6Enabled)}</span>
+                    <small>{t($ => $.settings.network.torrentIpv6EnabledDescription)}</small>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.torrentIpv6Enabled}
+                    onChange={(event) => settings.setTorrentIpv6Enabled(event.target.checked)}
                     className="mac-switch"
                   />
                 </label>
@@ -1326,6 +1339,20 @@ runEngineChecks(false);
                     placeholder="6881-6999"
                     className="app-control settings-port-input text-center"
                     aria-label={t($ => $.settings.network.torrentListenPort)}
+                  />
+                </div>
+                <div className="mac-settings-row settings-network-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentBindAddress)}</span>
+                    <small>{t($ => $.settings.network.torrentBindAddressDescription)}</small>
+                  </div>
+                  <input
+                    type="text"
+                    value={settings.torrentBindAddress}
+                    onChange={(event) => settings.setTorrentBindAddress(event.target.value)}
+                    placeholder="192.0.2.10 or 2001:db8::10"
+                    className="app-control settings-network-input"
+                    aria-label={t($ => $.settings.network.torrentBindAddress)}
                   />
                 </div>
                 <div className="mac-settings-row settings-network-row">
@@ -1517,6 +1544,20 @@ runEngineChecks(false);
                     onBlur={(event) => commitTorrentMaxOpenFiles(event.target.value)}
                     className="app-control settings-port-input text-center"
                     aria-label={t($ => $.settings.network.torrentMaxOpenFiles)}
+                  />
+                </div>
+                <div className="mac-settings-row settings-network-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.aria2DiskCache)}</span>
+                    <small>{t($ => $.settings.network.aria2DiskCacheDescription)}</small>
+                  </div>
+                  <input
+                    type="text"
+                    value={settings.aria2DiskCache}
+                    onChange={(event) => settings.setAria2DiskCache(event.target.value)}
+                    placeholder="16M"
+                    className="app-control settings-network-input text-center"
+                    aria-label={t($ => $.settings.network.aria2DiskCache)}
                   />
                 </div>
                 <div className="mac-settings-row settings-network-row">

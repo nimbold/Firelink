@@ -167,6 +167,33 @@ describe('useDownloadStore', () => {
     expect(useDownloadStore.getState().downloads[0].torrentRemoveUnselectedFile).toBe(false);
   });
 
+  it('detaches a paused backend lifecycle even when the frontend registration set is stale', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'paused-stale-registration',
+        url: 'magnet:?xt=urn:btih:abc',
+        fileName: 'torrent',
+        status: 'paused',
+        category: 'Other',
+        dateAdded: '',
+        isTorrent: true,
+        torrentFileIndices: [1]
+      }] as any[],
+      backendRegisteredIds: new Set()
+    });
+    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
+
+    await useDownloadStore.getState().applyProperties('paused-stale-registration', {
+      torrentFileIndices: [2]
+    });
+
+    expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'detach_download_for_reconfigure',
+      { id: 'paused-stale-registration' }
+    );
+    expect(useDownloadStore.getState().downloads[0].torrentFileIndices).toEqual([2]);
+  });
+
   it('replaces stale media intent when an appended handoff reuses a URL', () => {
     useDownloadStore.getState().openAddModalWithUrls(
       'https://example.com/file.bin', '', '', '', '', true

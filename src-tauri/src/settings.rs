@@ -19,6 +19,9 @@ pub struct TorrentStartupSettings {
     pub peer_id_prefix: String,
     pub peer_agent: String,
     pub dht_message_timeout: u32,
+    pub ipv6_enabled: bool,
+    pub bind_address: String,
+    pub disk_cache: String,
 }
 
 fn normalize_torrent_startup_value(
@@ -40,6 +43,22 @@ pub fn torrent_startup_settings(settings: Option<&PersistedSettings>) -> Torrent
     let Some(settings) = settings else {
         return TorrentStartupSettings::default();
     };
+    let bind_address = normalize_torrent_startup_value(
+        "Torrent bind address",
+        &settings.torrent_bind_address,
+        crate::queue::normalize_torrent_bind_address,
+    );
+    let bind_address = if !settings.torrent_ipv6_enabled
+        && bind_address
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_ipv6())
+    {
+        log::error!("IPv6 Torrent bind address ignored while IPv6 transport is disabled");
+        String::new()
+    } else {
+        bind_address
+    };
+
     TorrentStartupSettings {
         listen_port: normalize_torrent_startup_value(
             "TCP listen ports",
@@ -90,6 +109,13 @@ pub fn torrent_startup_settings(settings: Option<&PersistedSettings>) -> Torrent
             settings.torrent_dht_message_timeout,
         )
         .unwrap_or(crate::queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT),
+        ipv6_enabled: settings.torrent_ipv6_enabled,
+        bind_address,
+        disk_cache: crate::queue::normalize_aria2_disk_cache(Some(&settings.aria2_disk_cache))
+            .unwrap_or_else(|error| {
+                log::error!("invalid persisted Aria2 disk cache; using default: {error}");
+                crate::queue::DEFAULT_ARIA2_DISK_CACHE.to_string()
+            }),
     }
 }
 
@@ -150,6 +176,13 @@ pub fn canonicalize_torrent_network_settings(stored: &str) -> Result<String, Str
     canonicalize_torrent_network_value(state, "torrentLpdInterface", crate::queue::normalize_torrent_lpd_interface);
     canonicalize_torrent_network_value(state, "torrentPeerIdPrefix", crate::queue::normalize_torrent_peer_id_prefix);
     canonicalize_torrent_network_value(state, "torrentPeerAgent", crate::queue::normalize_torrent_peer_agent);
+    canonicalize_torrent_network_value(state, "torrentBindAddress", crate::queue::normalize_torrent_bind_address);
+    let disk_cache = state
+        .get("aria2DiskCache")
+        .and_then(Value::as_str)
+        .and_then(|value| crate::queue::normalize_aria2_disk_cache(Some(value)).ok())
+        .unwrap_or_else(|| crate::queue::DEFAULT_ARIA2_DISK_CACHE.to_string());
+    state.insert("aria2DiskCache".to_string(), Value::String(disk_cache));
     let dht_message_timeout = state
         .get("torrentDhtMessageTimeout")
         .and_then(Value::as_u64)
@@ -175,6 +208,26 @@ pub fn canonicalize_torrent_network_settings(stored: &str) -> Result<String, Str
         .is_some_and(Value::is_boolean)
     {
         state.insert("torrentSeparateSeedSlots".to_string(), Value::Bool(false));
+    }
+    if !state
+        .get("torrentIpv6Enabled")
+        .is_some_and(Value::is_boolean)
+    {
+        state.insert("torrentIpv6Enabled".to_string(), Value::Bool(true));
+    }
+    if state
+        .get("torrentIpv6Enabled")
+        .and_then(Value::as_bool)
+        == Some(false)
+        && state
+            .get("torrentBindAddress")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<std::net::IpAddr>().ok())
+            .is_some_and(|address| address.is_ipv6())
+    {
+        return Err(
+            "IPv6 Torrent bind address requires IPv6 transport to remain enabled".to_string(),
+        );
     }
     serde_json::to_string(&document)
         .map_err(|error| format!("failed to encode canonical settings: {error}"))
@@ -365,6 +418,7 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
         "torrentEnablePex",
         "torrentEnableLpd",
         "torrentSeparateSeedSlots",
+        "torrentIpv6Enabled",
     ] {
         sanitize_boolean_setting(state, key);
     }
@@ -394,6 +448,12 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
     });
     sanitize_torrent_network_string(state, "torrentPeerAgent", |value| {
         crate::queue::normalize_torrent_peer_agent(Some(value)).is_ok()
+    });
+    sanitize_torrent_network_string(state, "torrentBindAddress", |value| {
+        crate::queue::normalize_torrent_bind_address(Some(value)).is_ok()
+    });
+    sanitize_torrent_network_string(state, "aria2DiskCache", |value| {
+        crate::queue::normalize_aria2_disk_cache(Some(value)).is_ok()
     });
     sanitize_allowed_string(
         state,
@@ -536,7 +596,24 @@ fn validate_settings(settings: &mut PersistedSettings) {
     settings.torrent_max_concurrent_seeds = crate::queue::normalize_torrent_max_concurrent_seeds(
         settings.torrent_max_concurrent_seeds,
     )
-    .unwrap_or(crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS);
+        .unwrap_or(crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS);
+    settings.torrent_bind_address = crate::queue::normalize_torrent_bind_address(
+        Some(&settings.torrent_bind_address),
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    if !settings.torrent_ipv6_enabled
+        && settings
+            .torrent_bind_address
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_ipv6())
+    {
+        log::warn!("clearing IPv6 Torrent bind address while IPv6 transport is disabled");
+        settings.torrent_bind_address.clear();
+    }
+    settings.aria2_disk_cache = crate::queue::normalize_aria2_disk_cache(Some(&settings.aria2_disk_cache))
+        .unwrap_or_else(|_| crate::queue::DEFAULT_ARIA2_DISK_CACHE.to_string());
     settings.torrent_listen_port = crate::queue::normalize_torrent_port_spec(
         Some(&settings.torrent_listen_port),
         "TCP listen ports",
@@ -792,6 +869,7 @@ fn default_settings() -> PersistedSettings {
         torrent_dht_message_timeout: crate::queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT,
         torrent_separate_seed_slots: false,
         torrent_max_concurrent_seeds: crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS,
+        torrent_ipv6_enabled: true,
         torrent_listen_port: String::new(),
         torrent_dht_listen_port: String::new(),
         torrent_external_ip: String::new(),
@@ -801,6 +879,8 @@ fn default_settings() -> PersistedSettings {
         torrent_lpd_interface: String::new(),
         torrent_peer_id_prefix: String::new(),
         torrent_peer_agent: String::new(),
+        torrent_bind_address: String::new(),
+        aria2_disk_cache: crate::queue::DEFAULT_ARIA2_DISK_CACHE.to_string(),
         custom_user_agent: String::new(),
         ask_where_to_save_each_file: false,
         remember_last_used_download_directory: false,
@@ -1223,6 +1303,20 @@ mod tests {
             crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS
         );
         assert_eq!(canonical["state"]["torrentSeparateSeedSlots"], false);
+    }
+
+    #[test]
+    fn rejects_ipv6_bind_address_when_transport_is_disabled() {
+        let stored = json!({
+            "state": {
+                "torrentIpv6Enabled": false,
+                "torrentBindAddress": "2001:db8::10"
+            }
+        });
+
+        let error = canonicalize_torrent_network_settings(&stored.to_string())
+            .expect_err("IPv6 bind must not be accepted with IPv6 transport disabled");
+        assert!(error.contains("IPv6 Torrent bind address"));
     }
 
     #[test]

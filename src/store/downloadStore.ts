@@ -45,14 +45,14 @@ const startDownloadListeners = async () => {
       // A sidecar can flush one last progress chunk after a pause, failure,
       // completion, or lifecycle reset. Do not let that stale chunk repopulate
       // the live progress map or overwrite a later lifecycle's first frame.
-      if (!['downloading', 'processing', 'seeding'].includes(current.status)) {
+      if (!['downloading', 'processing', 'verifying', 'seeding'].includes(current.status)) {
         useDownloadProgressStore.getState().clearDownloadProgress(payload.id);
         return;
       }
       useDownloadProgressStore.getState().updateDownloadProgress(payload.id, payload);
       const shouldUpdateSize = Boolean(payload.size && (!current.isMedia || payload.size_is_final));
       const updates: Partial<DownloadItem> = {};
-      if (current.status === 'downloading' || current.status === 'processing' || current.status === 'seeding') {
+      if (current.status === 'downloading' || current.status === 'processing' || current.status === 'verifying' || current.status === 'seeding') {
         updates.fraction = payload.fraction;
         updates.speed = current.status === 'seeding'
           ? payload.upload_speed ?? '-'
@@ -121,7 +121,7 @@ const startDownloadListeners = async () => {
         return;
       }
       if (status === 'downloading' || status === 'processing' ||
-          status === 'seeding' || status === 'waitingToSeed' ||
+          status === 'verifying' || status === 'seeding' || status === 'waitingToSeed' ||
           status === 'completed' || status === 'failed') {
         clearDownloadControlIntent(payload.id, 'resume');
       }
@@ -173,7 +173,7 @@ const startDownloadListeners = async () => {
             : {})
         } : {}),
         ...(payload.error ? { lastError: payload.error } : {}),
-        ...((status === 'downloading' || status === 'retrying')
+        ...((status === 'downloading' || status === 'verifying' || status === 'retrying')
           ? { lastTry: new Date().toISOString() }
           : {})
       };
@@ -189,9 +189,19 @@ const startDownloadListeners = async () => {
         updates.fileName = payload.fileName;
         updates.category = categoryForFileName(payload.fileName);
       }
-      if (status !== 'downloading') {
+      if (status !== 'downloading' && status !== 'verifying') {
         updates.speed = '-';
         updates.eta = '-';
+      }
+      if (
+        current.torrentVerifyOnly === true &&
+        ['ready', 'staged', 'paused', 'completed', 'failed'].includes(status)
+      ) {
+        // Verification is a maintenance lifecycle layered over the existing
+        // row. Clear its markers once Aria2 has reached the restored terminal
+        // state so restart cannot replay verification indefinitely.
+        updates.torrentVerifyOnly = undefined;
+        updates.torrentVerifyRestoreStatus = undefined;
       }
       mainStore.updateDownload(payload.id, updates);
 
@@ -205,7 +215,7 @@ const startDownloadListeners = async () => {
           : { pendingOrder: [...state.pendingOrder, payload.id] });
       }
 
-      if (status === 'queued' || status === 'downloading' || status === 'processing' || status === 'seeding' || status === 'waitingToSeed' || status === 'retrying') {
+      if (status === 'queued' || status === 'downloading' || status === 'processing' || status === 'verifying' || status === 'seeding' || status === 'waitingToSeed' || status === 'retrying') {
         mainStore.registerBackendIds([payload.id]);
       } else if (status === 'completed' || status === 'failed') {
         mainStore.unregisterBackendIds([payload.id]);

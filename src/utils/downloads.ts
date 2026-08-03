@@ -30,6 +30,7 @@ const ACTIVE_DOWNLOAD_STATUSES: ReadonlySet<DownloadStatus> = new Set([
   'queued',
   'downloading',
   'processing',
+  'verifying',
   'seeding',
   'waitingToSeed',
   'retrying',
@@ -40,7 +41,7 @@ export const isActiveDownloadStatus = (status: DownloadStatus): boolean =>
 
 /** Transfer states that consume a worker/permit. Queued is intentionally excluded. */
 export const isTransferActiveStatus = (status: DownloadStatus): boolean =>
-  status === 'downloading' || status === 'processing' || status === 'seeding' || status === 'retrying';
+  status === 'downloading' || status === 'processing' || status === 'verifying' || status === 'seeding' || status === 'retrying';
 
 export const DOWNLOAD_CONNECTIONS_MIN = 1;
 export const DOWNLOAD_CONNECTIONS_MAX = 16;
@@ -65,6 +66,11 @@ export const normalizeTorrentEncryptionPolicy = (
   }
   return undefined;
 };
+
+export type TorrentFileAllocation = 'prealloc' | 'none';
+
+export const normalizeTorrentFileAllocation = (value: unknown): TorrentFileAllocation | undefined =>
+  value === 'prealloc' || value === 'none' ? value : undefined;
 
 export const MAX_TORRENT_TRACKER_TIMEOUT = 604800;
 export const MAX_TORRENT_TRACKER_INTERVAL = 604800;
@@ -456,6 +462,7 @@ export const isMediaUrl = (rawUrl: string): boolean => {
 const DOWNLOAD_SECRET_FIELDS = ['password', 'cookies', 'headers'] as const;
 const VOLATILE_PROGRESS_STATUSES = new Set([
   'downloading',
+  'verifying',
   'seeding'
 ]);
 

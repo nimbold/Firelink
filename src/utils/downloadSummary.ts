@@ -22,6 +22,7 @@ const isFreshDownloadStatus = (status: DownloadItem['status']): boolean =>
   status === 'downloading' ||
   status === 'seeding' ||
   status === 'processing' ||
+  status === 'verifying' ||
   status === 'retrying';
 
 const hasPositiveProgress = (download: DownloadItem): boolean =>

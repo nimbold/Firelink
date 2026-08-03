@@ -15,6 +15,7 @@ const PAUSABLE_STATUSES: ReadonlySet<DownloadStatus> = new Set([
   'seeding',
   'waitingToSeed',
   'processing',
+  'verifying',
   'retrying',
 ]);
 
@@ -66,7 +67,7 @@ export const startActionLabel = (status: DownloadStatus): 'Start' | 'Resume' =>
   status === 'ready' || status === 'staged' || status === 'failed' ? 'Start' : 'Resume';
 
 export const isTransferLocked = (status: DownloadStatus): boolean =>
-  status === 'downloading' || status === 'processing' || status === 'seeding' || status === 'waitingToSeed' || status === 'retrying';
+  status === 'downloading' || status === 'processing' || status === 'verifying' || status === 'seeding' || status === 'waitingToSeed' || status === 'retrying';
 
 export const isIdentityLocked = (status: DownloadStatus): boolean =>
   isTransferLocked(status) || status === 'completed';

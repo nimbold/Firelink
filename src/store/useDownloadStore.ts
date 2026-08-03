@@ -9,7 +9,7 @@ import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
 import type { Queue } from '../bindings/Queue';
 import { useSettingsStore } from './useSettingsStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
-import { canonicalizeDownloadFileName, categoryForFileName, isActiveDownloadStatus, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, isActiveDownloadStatus, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
 import {
   resolveCategoryDestination
 } from '../utils/downloadLocations';
@@ -362,6 +362,9 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
         torrent_prioritize_piece: item.torrentPrioritizePiece || undefined,
         torrent_remove_unselected_file: item.torrentRemoveUnselectedFile,
         torrent_encryption_policy: item.torrentEncryptionPolicy || undefined,
+        torrent_file_allocation: item.torrentFileAllocation || undefined,
+        torrent_verify_only: item.torrentVerifyOnly,
+        torrent_verify_restore_status: item.torrentVerifyRestoreStatus,
         lifecycle_generation: lifecycleGeneration.toString(),
       };
 
@@ -690,6 +693,16 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
     : undefined;
   const rawEncryptionPolicy = download.torrentEncryptionPolicy as unknown;
   const normalizedEncryptionPolicy = normalizeTorrentEncryptionPolicy(rawEncryptionPolicy);
+  const rawFileAllocation = download.torrentFileAllocation as unknown;
+  const normalizedFileAllocation = normalizeTorrentFileAllocation(rawFileAllocation);
+  const rawVerifyOnly = download.torrentVerifyOnly as unknown;
+  const normalizedVerifyOnly = rawVerifyOnly === true ? true : undefined;
+  const rawVerifyRestoreStatus = download.torrentVerifyRestoreStatus as unknown;
+  const normalizedVerifyRestoreStatus = normalizedVerifyOnly === true
+    && typeof rawVerifyRestoreStatus === 'string'
+    && ['paused', 'failed', 'completed'].includes(rawVerifyRestoreStatus)
+    ? rawVerifyRestoreStatus
+    : undefined;
   const normalizedOptions = rawSeedRemaining !== normalizedSeedRemaining ||
     rawWebSeeds !== normalizedWebSeeds ||
     rawMaxPeers !== normalizedMaxPeers ||
@@ -703,7 +716,10 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
     rawStopTimeout !== normalizedStopTimeout ||
     rawPrioritizePiece !== normalizedPrioritizePiece ||
     rawRemoveUnselectedFile !== normalizedRemoveUnselectedFile ||
-    rawEncryptionPolicy !== normalizedEncryptionPolicy
+    rawEncryptionPolicy !== normalizedEncryptionPolicy ||
+    rawFileAllocation !== normalizedFileAllocation ||
+    rawVerifyOnly !== normalizedVerifyOnly ||
+    rawVerifyRestoreStatus !== normalizedVerifyRestoreStatus
     ? {
         ...download,
         torrentSeedRemaining: normalizedSeedRemaining,
@@ -719,7 +735,10 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
         torrentStopTimeout: normalizedStopTimeout,
         torrentPrioritizePiece: normalizedPrioritizePiece,
         torrentRemoveUnselectedFile: normalizedRemoveUnselectedFile,
-        torrentEncryptionPolicy: normalizedEncryptionPolicy
+        torrentEncryptionPolicy: normalizedEncryptionPolicy,
+        torrentFileAllocation: normalizedFileAllocation,
+        torrentVerifyOnly: normalizedVerifyOnly,
+        torrentVerifyRestoreStatus: normalizedVerifyRestoreStatus
       }
     : download;
 
@@ -940,7 +959,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       && normalizedUpdates.torrentRemoveUnselectedFile === false
       && item.torrentRemoveUnselectedFile !== false;
 
-    if (item.status === 'downloading' || item.status === 'processing' || item.status === 'seeding' || item.status === 'retrying') {
+    if (item.status === 'downloading' || item.status === 'processing' || item.status === 'verifying' || item.status === 'seeding' || item.status === 'retrying') {
       throw new Error(i18n.t($ => $.downloadTable.transferActive));
     }
 
@@ -974,15 +993,18 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         }
       }
     } else if (item.status === 'paused') {
-      if (isRegistered) {
-        try {
-          await invoke('detach_download_for_reconfigure', { id });
-        } catch (e) {
-          console.error("Failed to detach for reconfigure:", e);
-          throw e; // Preserve old properties if detach fails
-        }
-        state.unregisterBackendIds([id]);
+      // The frontend deliberately removes paused rows from
+      // backendRegisteredIds, but the backend keeps a paused Aria2 GID and
+      // its old payload alive for an in-place resume. Any property change,
+      // especially Torrent selection/output changes, must retire that
+      // lifecycle or resume will silently use stale daemon options.
+      try {
+        await invoke('detach_download_for_reconfigure', { id });
+      } catch (e) {
+        console.error("Failed to detach for reconfigure:", e);
+        throw e; // Preserve old properties if detach fails
       }
+      if (isRegistered) state.unregisterBackendIds([id]);
       if (disablingTorrentRemoval) {
         await invoke('clear_torrent_removal_paths', { id });
       }
@@ -2288,6 +2310,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             torrent_prioritize_piece: item.torrentPrioritizePiece || undefined,
             torrent_remove_unselected_file: item.torrentRemoveUnselectedFile,
             torrent_encryption_policy: item.torrentEncryptionPolicy || undefined,
+            torrent_file_allocation: item.torrentFileAllocation || undefined,
+            torrent_verify_only: item.torrentVerifyOnly,
+            torrent_verify_restore_status: item.torrentVerifyRestoreStatus,
             lifecycle_generation: currentDownloadLifecycle(item.id).toString(),
           });
         }

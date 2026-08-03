@@ -254,6 +254,7 @@ export interface SettingsState {
   torrentDhtMessageTimeout: number;
   torrentSeparateSeedSlots: boolean;
   torrentMaxConcurrentSeeds: number;
+  torrentIpv6Enabled: boolean;
   torrentListenPort: string;
   torrentDhtListenPort: string;
   torrentExternalIp: string;
@@ -263,6 +264,8 @@ export interface SettingsState {
   torrentLpdInterface: string;
   torrentPeerIdPrefix: string;
   torrentPeerAgent: string;
+  torrentBindAddress: string;
+  aria2DiskCache: string;
   customUserAgent: string;
   askWhereToSaveEachFile: boolean;
   preventsSleepWhileDownloading: boolean;
@@ -322,6 +325,7 @@ export interface SettingsState {
   setTorrentDhtMessageTimeout: (value: number) => void;
   setTorrentSeparateSeedSlots: (enabled: boolean) => void;
   setTorrentMaxConcurrentSeeds: (value: number) => void;
+  setTorrentIpv6Enabled: (enabled: boolean) => void;
   setTorrentListenPort: (value: string) => void;
   setTorrentDhtListenPort: (value: string) => void;
   setTorrentExternalIp: (value: string) => void;
@@ -331,6 +335,8 @@ export interface SettingsState {
   setTorrentLpdInterface: (value: string) => void;
   setTorrentPeerIdPrefix: (value: string) => void;
   setTorrentPeerAgent: (value: string) => void;
+  setTorrentBindAddress: (value: string) => void;
+  setAria2DiskCache: (value: string) => void;
   setCustomUserAgent: (userAgent: string) => void;
   setAskWhereToSaveEachFile: (ask: boolean) => void;
   setPreventsSleepWhileDownloading: (prevent: boolean) => void;
@@ -416,6 +422,7 @@ export const useSettingsStore = create<SettingsState>()(
       torrentDhtMessageTimeout: DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT,
       torrentSeparateSeedSlots: false,
       torrentMaxConcurrentSeeds: DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS,
+      torrentIpv6Enabled: true,
       torrentListenPort: '',
       torrentDhtListenPort: '',
       torrentExternalIp: '',
@@ -425,6 +432,8 @@ export const useSettingsStore = create<SettingsState>()(
       torrentLpdInterface: '',
       torrentPeerIdPrefix: '',
       torrentPeerAgent: '',
+      torrentBindAddress: '',
+      aria2DiskCache: '16M',
       customUserAgent: '',
       askWhereToSaveEachFile: false,
       preventsSleepWhileDownloading: true,
@@ -549,6 +558,8 @@ export const useSettingsStore = create<SettingsState>()(
       setTorrentLpdInterface: (torrentLpdInterface) => set({ torrentLpdInterface }),
       setTorrentPeerIdPrefix: (torrentPeerIdPrefix) => set({ torrentPeerIdPrefix }),
       setTorrentPeerAgent: (torrentPeerAgent) => set({ torrentPeerAgent }),
+      setTorrentBindAddress: (torrentBindAddress) => set({ torrentBindAddress }),
+      setAria2DiskCache: (aria2DiskCache) => set({ aria2DiskCache }),
       setTorrentMaxOpenFiles: (value) => {
         const normalized = normalizeTorrentMaxOpenFiles(value);
         if (normalized === undefined) {
@@ -578,6 +589,7 @@ export const useSettingsStore = create<SettingsState>()(
           ? value
           : DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS
       }),
+      setTorrentIpv6Enabled: (torrentIpv6Enabled) => set({ torrentIpv6Enabled }),
       setCustomUserAgent: (customUserAgent) => set({ customUserAgent }),
       setAskWhereToSaveEachFile: (askWhereToSaveEachFile) => set({ askWhereToSaveEachFile }),
       setPreventsSleepWhileDownloading: (preventsSleepWhileDownloading) => {
@@ -768,6 +780,7 @@ export const useSettingsStore = create<SettingsState>()(
         torrentDhtMessageTimeout: state.torrentDhtMessageTimeout,
         torrentSeparateSeedSlots: state.torrentSeparateSeedSlots,
         torrentMaxConcurrentSeeds: state.torrentMaxConcurrentSeeds,
+        torrentIpv6Enabled: state.torrentIpv6Enabled,
         torrentListenPort: state.torrentListenPort,
         torrentDhtListenPort: state.torrentDhtListenPort,
         torrentExternalIp: state.torrentExternalIp,
@@ -777,6 +790,8 @@ export const useSettingsStore = create<SettingsState>()(
         torrentLpdInterface: state.torrentLpdInterface,
         torrentPeerIdPrefix: state.torrentPeerIdPrefix,
         torrentPeerAgent: state.torrentPeerAgent,
+        torrentBindAddress: state.torrentBindAddress,
+        aria2DiskCache: state.aria2DiskCache,
         customUserAgent: state.customUserAgent,
         askWhereToSaveEachFile: state.askWhereToSaveEachFile,
         preventsSleepWhileDownloading: state.preventsSleepWhileDownloading,
@@ -840,6 +855,10 @@ export const useSettingsStore = create<SettingsState>()(
             && persisted.torrentMaxConcurrentSeeds <= 64
             ? persisted.torrentMaxConcurrentSeeds
             : currentState.torrentMaxConcurrentSeeds,
+          torrentIpv6Enabled: persistedBoolean(
+            persisted.torrentIpv6Enabled,
+            currentState.torrentIpv6Enabled
+          ),
           torrentListenPort: typeof persisted.torrentListenPort === 'string'
             ? persisted.torrentListenPort
             : currentState.torrentListenPort,
@@ -867,6 +886,12 @@ export const useSettingsStore = create<SettingsState>()(
           torrentPeerAgent: typeof persisted.torrentPeerAgent === 'string'
             ? persisted.torrentPeerAgent
             : currentState.torrentPeerAgent,
+          torrentBindAddress: typeof persisted.torrentBindAddress === 'string'
+            ? persisted.torrentBindAddress
+            : currentState.torrentBindAddress,
+          aria2DiskCache: typeof persisted.aria2DiskCache === 'string'
+            ? persisted.aria2DiskCache
+            : currentState.aria2DiskCache,
           sidebarPosition: isAllowedSetting(SIDEBAR_POSITION_VALUES, persisted.sidebarPosition)
             ? persisted.sidebarPosition
             : currentState.sidebarPosition,

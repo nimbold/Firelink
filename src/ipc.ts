@@ -23,6 +23,8 @@ import type { TorrentPeerDiagnostics } from './bindings/TorrentPeerDiagnostics';
 import type { TorrentFileProgressSnapshot } from './bindings/TorrentFileProgressSnapshot';
 import type { TorrentPieceProgressSnapshot } from './bindings/TorrentPieceProgressSnapshot';
 import type { TorrentWebSeed } from './bindings/TorrentWebSeed';
+import type { TorrentDetails } from './bindings/TorrentDetails';
+import type { TorrentFileSelectionSnapshot } from './bindings/TorrentFileSelectionSnapshot';
 
 type CommandMap = {
   fetch_metadata: {
@@ -84,6 +86,10 @@ type CommandMap = {
   get_torrent_peers: { args: { id: string }; result: TorrentPeerDiagnostics };
   get_torrent_file_progress: { args: { id: string }; result: TorrentFileProgressSnapshot };
   get_torrent_piece_progress: { args: { id: string }; result: TorrentPieceProgressSnapshot };
+  get_torrent_file_selection: { args: { id: string }; result: TorrentFileSelectionSnapshot };
+  set_torrent_file_selection: { args: { id: string; selected_indices: number[] | null }; result: TorrentFileSelectionSnapshot };
+  get_torrent_details: { args: { id: string }; result: TorrentDetails };
+  verify_torrent_data: { args: { id: string }; result: void };
   get_torrent_web_seeds: { args: { id: string }; result: TorrentWebSeed[] };
   set_torrent_web_seeds: { args: { id: string; seeds: TorrentWebSeed[] }; result: TorrentWebSeed[] };
   set_torrent_max_open_files: { args: { max_open_files: number }; result: void };

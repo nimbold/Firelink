@@ -73,6 +73,8 @@ export const downloadProgressColorClass = (status: string): string => {
       return 'download-status-failed';
     case 'processing':
       return 'download-status-processing';
+    case 'verifying':
+      return 'download-status-processing';
     case 'seeding':
       return 'download-status-seeding';
     case 'queued':

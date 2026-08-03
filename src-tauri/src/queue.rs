@@ -41,6 +41,59 @@ pub const MAX_TORRENT_WEB_SEEDS: usize = 256;
 pub const MAX_TORRENT_WEB_SEED_URI_LENGTH: usize = 2_048;
 pub const MIN_TORRENT_LISTEN_PORT: u16 = 1024;
 pub const DEFAULT_TORRENT_LISTEN_PORT_SPEC: &str = "6881-6999";
+pub const DEFAULT_ARIA2_DISK_CACHE: &str = "16M";
+pub const MAX_ARIA2_DISK_CACHE_MIB: u64 = 1024;
+
+pub fn normalize_torrent_bind_address(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > MAX_TORRENT_NETWORK_VALUE_LENGTH
+        || value.chars().any(char::is_control)
+    {
+        return Err("Torrent bind address is too long or contains control characters".to_string());
+    }
+    let address = value
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| "Torrent bind address must be a valid IPv4 or IPv6 address".to_string())?;
+    Ok(Some(address.to_string()))
+}
+
+pub fn normalize_aria2_disk_cache(value: Option<&str>) -> Result<String, String> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty()).unwrap_or(DEFAULT_ARIA2_DISK_CACHE);
+    if value == "0" {
+        return Ok("0".to_string());
+    }
+    let (digits, multiplier, suffix) = match value.as_bytes().last().copied() {
+        Some(b'k' | b'K') => (&value[..value.len() - 1], 1_u64, "K"),
+        Some(b'm' | b'M') => (&value[..value.len() - 1], 1024_u64, "M"),
+        _ => return Err("Aria2 disk cache must be 0 or a positive value ending in K or M".to_string()),
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("Aria2 disk cache must be 0 or a positive value ending in K or M".to_string());
+    }
+    let amount = digits
+        .parse::<u64>()
+        .map_err(|_| "Aria2 disk cache is too large".to_string())?;
+    let kib = amount
+        .checked_mul(multiplier)
+        .ok_or_else(|| "Aria2 disk cache is too large".to_string())?;
+    if kib == 0 || kib > MAX_ARIA2_DISK_CACHE_MIB * 1024 {
+        return Err(format!(
+            "Aria2 disk cache must be between 1K and {MAX_ARIA2_DISK_CACHE_MIB}M"
+        ));
+    }
+    Ok(format!("{amount}{suffix}"))
+}
+
+pub fn normalize_torrent_file_allocation(value: Option<&str>) -> Result<String, String> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok("prealloc".to_string()),
+        Some("prealloc") => Ok("prealloc".to_string()),
+        Some("none") => Ok("none".to_string()),
+        Some(_) => Err("Torrent file allocation must be prealloc or none".to_string()),
+    }
+}
 
 pub fn clamp_download_connections(connections: i32) -> i32 {
     connections.clamp(DOWNLOAD_CONNECTIONS_MIN, DOWNLOAD_CONNECTIONS_MAX)
@@ -596,6 +649,10 @@ pub struct SpawnPayload {
     pub torrent_prioritize_piece: Option<String>,
     pub torrent_remove_unselected_file: bool,
     pub torrent_encryption_policy: Option<String>,
+    pub torrent_file_allocation: Option<String>,
+    pub torrent_verify_only: bool,
+    pub torrent_verify_restore_status: Option<String>,
+    pub torrent_verified_length: Option<u64>,
 }
 
 /// A sidecar spawner. In production this calls the real aria2/yt-dlp
@@ -1251,6 +1308,27 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .collect()
     }
 
+    /// Temporarily remove one not-yet-admitted task while a caller performs a
+    /// lifecycle-safe reconfiguration. The admission gate prevents the
+    /// dispatcher from popping the same task between the caller's validation
+    /// and mutation of its payload.
+    pub async fn take_pending_task(&self, id: &str) -> Option<(usize, QueuedTask)> {
+        let _admission_gate = self.admission_gate.lock().await;
+        let mut pending = self.pending.lock().await;
+        let index = pending.iter().position(|task| task.id == id)?;
+        pending.remove(index).map(|task| (index, task))
+    }
+
+    /// Restore a task removed by `take_pending_task`, preserving its queue
+    /// position even when another queue's work was admitted meanwhile.
+    pub async fn restore_pending_task(&self, index: usize, task: QueuedTask) {
+        let _admission_gate = self.admission_gate.lock().await;
+        let mut pending = self.pending.lock().await;
+        let insert_at = index.min(pending.len());
+        pending.insert(insert_at, task);
+        self.notify.notify_one();
+    }
+
     /// Explicitly release a backend registry id (e.g. on un-resumable false paths, removals, or detach).
     pub async fn release_registered_id(&self, id: &str) {
         self.registered_ids.lock().await.remove(id);
@@ -1523,6 +1601,104 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .await
             .get(id)
             .is_some_and(torrent_seeding_requested)
+    }
+
+    pub async fn aria2_is_torrent(&self, id: &str) -> bool {
+        self.aria2_payloads
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|payload| payload.is_torrent)
+    }
+
+    pub async fn aria2_is_torrent_verification(&self, id: &str) -> bool {
+        self.aria2_payloads
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|payload| payload.torrent_verify_only)
+    }
+
+    async fn capture_torrent_verification_evidence(&self, id: &str) {
+        if !self.aria2_is_torrent_verification(id).await {
+            return;
+        }
+        let Some(gid) = self.aria2_gid_for_download(id) else {
+            return;
+        };
+        let Some(mapping) = self.aria2_gid_mapping(&gid) else {
+            return;
+        };
+        let Some(state) = self.app_handle.try_state::<crate::AppState>() else {
+            return;
+        };
+        let port = state.aria2_port.load(std::sync::atomic::Ordering::Relaxed);
+        let secret = state.aria2_secret.clone();
+        drop(state);
+        let Ok(status) = crate::rpc_call(
+            port,
+            &secret,
+            "aria2.tellStatus",
+            serde_json::json!([gid, ["status", "totalLength", "verifiedLength", "verifyIntegrityPending"]]),
+        )
+        .await else {
+            return;
+        };
+        if !self.is_current_aria2_gid_mapping(&gid, &mapping)
+            || !self
+                .is_aria2_control_epoch_current(id, mapping.epoch)
+                .await
+        {
+            return;
+        }
+        let status_name = status.get("status").and_then(|value| value.as_str());
+        let total = status
+            .get("totalLength")
+            .and_then(|value| value.as_str().and_then(|value| value.parse::<u64>().ok()).or_else(|| value.as_u64()));
+        let verified = status
+            .get("verifiedLength")
+            .and_then(|value| value.as_str().and_then(|value| value.parse::<u64>().ok()).or_else(|| value.as_u64()));
+        let pending = status
+            .get("verifyIntegrityPending")
+            .is_some_and(|value| value.as_bool() == Some(true) || value.as_str() == Some("true"));
+        if let Some(total) = Self::complete_torrent_verification_length(
+            status_name,
+            pending,
+            total,
+            verified,
+        ) {
+            self.record_torrent_verified_length(id, mapping.epoch, total)
+                .await;
+        }
+    }
+
+    fn complete_torrent_verification_length(
+        status: Option<&str>,
+        verify_pending: bool,
+        total: Option<u64>,
+        verified: Option<u64>,
+    ) -> Option<u64> {
+        if matches!(status, Some("complete" | "active" | "waiting"))
+            && !verify_pending
+        {
+            return verified
+                .zip(total)
+                .filter(|(verified, total)| verified >= total)
+                .map(|(_, total)| total);
+        }
+        None
+    }
+
+    pub async fn record_torrent_verified_length(&self, id: &str, epoch: u64, length: u64) {
+        if !self.is_aria2_control_epoch_current(id, epoch).await {
+            return;
+        }
+        if let Some(payload) = self.aria2_payloads.lock().await.get_mut(id) {
+            if payload.torrent_verify_only {
+                let current = payload.torrent_verified_length.unwrap_or(0);
+                payload.torrent_verified_length = Some(current.max(length));
+            }
+        }
     }
 
     async fn torrent_files_for_payload(
@@ -3005,6 +3181,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                         let buffered_outcome = self.remember_gid(id.clone(), gid.clone()).await;
                         let install_web_seeds = buffered_outcome.is_none()
                             && task.payload.is_torrent
+                            && !task.payload.torrent_verify_only
                             && task.payload.torrent_web_seeds.is_some();
                         self.finish_aria2_dispatch(&id, lifecycle_epoch).await;
                         drop(control_guard);
@@ -3150,6 +3327,14 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .emit("download-state", DownloadStateEvent::failed(id, error));
     }
 
+    fn emit_paused_with_error(&self, id: &str, error: String) {
+        use tauri::Emitter;
+        let _ = self.app_handle.emit(
+            "download-state",
+            DownloadStateEvent::paused_with_error(id, error),
+        );
+    }
+
     /// Store gid -> id and return any buffered terminal event for the caller
     /// to reconcile against the correct event path. In particular, buffered
     /// errors must still pass through transient retry classification.
@@ -3224,7 +3409,30 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// and lets commands reconcile an Aria2 terminal status without releasing
     /// the lock first.
     pub(crate) async fn apply_completion_locked(&self, id: &str, outcome: PendingOutcome) {
+        if matches!(&outcome, PendingOutcome::Complete) {
+            self.capture_torrent_verification_evidence(id).await;
+        }
+        let (verification_restore_status, verification_only, verification_observed) = {
+            let payloads = self.aria2_payloads.lock().await;
+            payloads
+                .get(id)
+                .filter(|payload| payload.torrent_verify_only)
+                .map(|payload| {
+                    (
+                        payload.torrent_verify_restore_status.clone(),
+                        true,
+                        payload.torrent_verified_length.is_some(),
+                    )
+                })
+                .unwrap_or((None, false, false))
+        };
         let outcome = match outcome {
+            PendingOutcome::Complete if verification_only && !verification_observed => {
+                PendingOutcome::Error(
+                    "Torrent integrity verification did not produce a complete hash-check result"
+                        .to_string(),
+                )
+            }
             PendingOutcome::Seeding if self.aria2_torrent_seeding_requested(id).await => {
                 if !self.seed_capacity_enabled() {
                     // Keep a budget record even when the legacy single-pool
@@ -3308,10 +3516,26 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 }
                 self.release_registered_id(id).await;
                 self.release_permit(id).await;
-                self.emit_state(id, DownloadStatus::Completed);
+                let restored_status = if verification_only {
+                    if verification_restore_status.as_deref() == Some("completed") {
+                        DownloadStatus::Completed
+                    } else {
+                        DownloadStatus::Paused
+                    }
+                } else {
+                    match verification_restore_status.as_deref() {
+                        Some("paused") => DownloadStatus::Paused,
+                        Some("failed") => DownloadStatus::Failed,
+                        Some("ready") => DownloadStatus::Ready,
+                        Some("staged") => DownloadStatus::Staged,
+                        Some("completed") => DownloadStatus::Completed,
+                        _ => DownloadStatus::Completed,
+                    }
+                };
+                self.emit_state(id, restored_status);
             }
             PendingOutcome::Error(error) => {
-                if error.to_ascii_lowercase().contains("checksum") {
+                if !verification_only && error.to_ascii_lowercase().contains("checksum") {
                     log::warn!("Checksum error detected for {}, cleaning up assets", id);
                     if let Ok(paths) =
                         crate::download_ownership::owned_paths_for_id(&self.app_handle, id)
@@ -3322,7 +3546,13 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     }
                 }
 
-                log::error!("aria2 download {} failed: {}", id, error);
+                let error = if verification_only {
+                    format!(
+                        "Torrent integrity verification failed; resume the Torrent to repair it: {error}"
+                    )
+                } else {
+                    error
+                };
 
                 self.clear_aria2_retry_state(id).await;
                 self.forget_aria2_gid(id).await;
@@ -3345,7 +3575,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 }
                 self.release_registered_id(id).await;
                 self.release_permit(id).await;
-                self.emit_failed(id, error);
+                if verification_only {
+                    self.emit_paused_with_error(id, error);
+                } else {
+                    log::error!("aria2 download {} failed: {}", id, error);
+                    self.emit_failed(id, error);
+                }
             }
             PendingOutcome::Seeding => unreachable!("seeding outcomes are normalized before terminal cleanup"),
         }
@@ -5143,6 +5378,16 @@ fn apply_aria2_torrent_options(
         return Ok(());
     }
 
+    if payload.torrent_verify_only {
+        options.insert("check-integrity".to_string(), serde_json::json!("true"));
+        options.insert("hash-check-only".to_string(), serde_json::json!("true"));
+        options.insert("seed-time".to_string(), serde_json::json!("0"));
+        options.insert("seed-ratio".to_string(), serde_json::json!("0"));
+        options.insert("bt-hash-check-seed".to_string(), serde_json::json!("false"));
+        options.insert("bt-seed-unverified".to_string(), serde_json::json!("false"));
+        return Ok(());
+    }
+
     let encryption_policy =
         normalize_torrent_encryption_policy(payload.torrent_encryption_policy.as_deref())?;
     let (force_encryption, require_crypto, min_crypto_level) =
@@ -5276,6 +5521,8 @@ fn apply_aria2_torrent_options(
             serde_json::json!("true"),
         );
     }
+    let allocation = normalize_torrent_file_allocation(payload.torrent_file_allocation.as_deref())?;
+    options.insert("file-allocation".to_string(), serde_json::json!(allocation));
     if payload.torrent_check_integrity {
         options.insert(
             "check-integrity".to_string(),
@@ -5379,6 +5626,9 @@ impl SidecarSpawner for ProductionSpawner {
         if !crate::is_safe_path(&resolved_dest, &self.app_handle) {
             return Err("Path traversal blocked".to_string());
         }
+        if payload.is_torrent {
+            crate::torrent::validate_output_name(&payload.filename)?;
+        }
         let proxy_value = payload
             .proxy
             .as_deref()
@@ -5461,7 +5711,7 @@ impl SidecarSpawner for ProductionSpawner {
                 let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
                 options.insert(
                     "index-out".to_string(),
-                    serde_json::json!(crate::torrent::aria2_index_outputs(&metadata)),
+                    serde_json::json!(crate::torrent::aria2_index_outputs(&metadata, &payload.filename)),
                 );
                 let selected = crate::torrent::validate_selected_indices(
                     payload.torrent_file_indices.as_deref(),
@@ -6017,6 +6267,15 @@ pub struct EnqueueItem {
     pub torrent_encryption_policy: Option<String>,
     #[serde(default)]
     #[ts(optional)]
+    pub torrent_file_allocation: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_verify_only: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_verify_restore_status: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
     pub lifecycle_generation: Option<String>,
 }
 
@@ -6078,6 +6337,10 @@ impl EnqueueItem {
                     .torrent_remove_unselected_file
                     .unwrap_or(false),
                 torrent_encryption_policy: self.torrent_encryption_policy,
+                torrent_file_allocation: self.torrent_file_allocation,
+                torrent_verify_only: self.torrent_verify_only.unwrap_or(false),
+                torrent_verify_restore_status: self.torrent_verify_restore_status,
+                torrent_verified_length: None,
             },
         }
     }
@@ -6157,6 +6420,59 @@ mod tests {
         assert_eq!(
             options.get("stream-piece-selector"),
             Some(&serde_json::json!("inorder"))
+        );
+    }
+
+    #[test]
+    fn torrent_network_and_storage_settings_are_normalized_at_the_boundary() {
+        assert_eq!(
+            normalize_torrent_bind_address(Some(" 2001:db8::1 ")).unwrap(),
+            Some("2001:db8::1".to_string())
+        );
+        assert_eq!(normalize_torrent_bind_address(Some(" ")).unwrap(), None);
+        assert!(normalize_torrent_bind_address(Some("localhost")).is_err());
+        assert!(normalize_torrent_bind_address(Some("127.0.0.1\n--bad")).is_err());
+
+        assert_eq!(normalize_aria2_disk_cache(None).unwrap(), "16M");
+        assert_eq!(normalize_aria2_disk_cache(Some(" 256m ")).unwrap(), "256M");
+        assert_eq!(normalize_aria2_disk_cache(Some("1024K")).unwrap(), "1024K");
+        assert_eq!(normalize_aria2_disk_cache(Some("0")).unwrap(), "0");
+        assert!(normalize_aria2_disk_cache(Some("1025M")).is_err());
+        assert!(normalize_aria2_disk_cache(Some("16")).is_err());
+
+        assert_eq!(normalize_torrent_file_allocation(None).unwrap(), "prealloc");
+        assert_eq!(normalize_torrent_file_allocation(Some(" none ")).unwrap(), "none");
+        assert!(normalize_torrent_file_allocation(Some("truncate")).is_err());
+    }
+
+    #[test]
+    fn torrent_verification_evidence_requires_matching_lengths_but_accepts_empty_data() {
+        assert_eq!(
+            QueueManager::<tauri::Wry>::complete_torrent_verification_length(
+                Some("complete"),
+                false,
+                Some(0),
+                Some(0),
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            QueueManager::<tauri::Wry>::complete_torrent_verification_length(
+                Some("complete"),
+                false,
+                Some(100),
+                Some(99),
+            ),
+            None
+        );
+        assert_eq!(
+            QueueManager::<tauri::Wry>::complete_torrent_verification_length(
+                Some("complete"),
+                true,
+                Some(100),
+                Some(100),
+            ),
+            None
         );
     }
 
@@ -6352,6 +6668,28 @@ mod tests {
             options.get("bt-seed-unverified"),
             Some(&serde_json::json!("false"))
         );
+    }
+
+    #[test]
+    fn torrent_verification_uses_hash_only_options_and_ignores_transfer_policy() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            is_torrent: true,
+            torrent_verify_only: true,
+            torrent_trackers: Some("https://tracker.example/announce".to_string()),
+            torrent_seed_ratio: Some(1.0),
+            torrent_file_allocation: Some("none".to_string()),
+            ..Default::default()
+        };
+
+        apply_aria2_torrent_options(&mut options, &payload).unwrap();
+
+        assert_eq!(options.get("check-integrity"), Some(&serde_json::json!("true")));
+        assert_eq!(options.get("hash-check-only"), Some(&serde_json::json!("true")));
+        assert_eq!(options.get("seed-time"), Some(&serde_json::json!("0")));
+        assert_eq!(options.get("seed-ratio"), Some(&serde_json::json!("0")));
+        assert!(!options.contains_key("bt-tracker"));
+        assert!(!options.contains_key("file-allocation"));
     }
 
     #[test]
@@ -7277,6 +7615,47 @@ mod tests {
             .capture_seed_remaining("torrent")
             .await
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn pending_torrent_reconfiguration_restores_position_and_payload() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
+        for id in ["first", "target", "last"] {
+            manager
+                .push(QueuedTask {
+                    id: id.to_string(),
+                    queue_id: "queue".to_string(),
+                    kind: TaskKind::Aria2,
+                    lifecycle_generation: 0,
+                    payload: SpawnPayload {
+                        is_torrent: true,
+                        ..Default::default()
+                    },
+                })
+                .await
+                .unwrap();
+        }
+
+        let (index, mut task) = manager
+            .take_pending_task("target")
+            .await
+            .expect("target remains pending");
+        assert_eq!(manager.pending_order(None).await, ["first", "last"]);
+        task.payload.torrent_file_indices = Some(vec![2]);
+        manager.restore_pending_task(index, task).await;
+
+        assert_eq!(
+            manager.pending_order(None).await,
+            ["first", "target", "last"]
+        );
+        let (_, restored) = manager
+            .take_pending_task("target")
+            .await
+            .expect("target was restored");
+        assert_eq!(restored.payload.torrent_file_indices, Some(vec![2]));
     }
 
     #[tokio::test]
