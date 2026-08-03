@@ -1194,9 +1194,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     self.abandon_seed_start(&id);
                     return;
                 }
-                self.finish_seed_start(&id);
                 self.record_seed_started(&id).await;
+                // Keep the lifecycle visibly in the starting state until its
+                // download permit has been released. Otherwise observers can
+                // see a resumed seeder before the permit transition finishes.
                 self.release_download_permit_for_seed(&id).await;
+                self.finish_seed_start(&id);
                 self.emit_state(&id, DownloadStatus::Seeding);
             }
             Ok(Aria2SeedControlOutcome::Complete) => {
