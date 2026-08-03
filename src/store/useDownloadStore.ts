@@ -913,12 +913,18 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     const normalizedUpdates = updates.fileName === undefined
       ? updates
       : { ...updates, fileName: canonicalizeDownloadFileName(updates.fileName) };
+    const disablingTorrentRemoval = item.isTorrent === true
+      && normalizedUpdates.torrentRemoveUnselectedFile === false
+      && item.torrentRemoveUnselectedFile !== false;
 
     if (item.status === 'downloading' || item.status === 'processing' || item.status === 'seeding' || item.status === 'retrying') {
       throw new Error(i18n.t($ => $.downloadTable.transferActive));
     }
 
     if (item.status === 'ready' || item.status === 'staged' || item.status === 'completed' || item.status === 'failed') {
+      if (disablingTorrentRemoval) {
+        await invoke('clear_torrent_removal_paths', { id });
+      }
       state.updateDownload(id, normalizedUpdates);
       return;
     }
@@ -931,6 +937,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         await invoke('detach_download_for_reconfigure', { id });
         state.unregisterBackendIds([id]);
         set(current => ({ pendingOrder: current.pendingOrder.filter(value => value !== id) }));
+      }
+      if (disablingTorrentRemoval) {
+        await invoke('clear_torrent_removal_paths', { id });
       }
       state.updateDownload(id, normalizedUpdates);
       if (isRegistered || wasDispatching) {
@@ -950,6 +959,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
           throw e; // Preserve old properties if detach fails
         }
         state.unregisterBackendIds([id]);
+      }
+      if (disablingTorrentRemoval) {
+        await invoke('clear_torrent_removal_paths', { id });
       }
       state.updateDownload(id, normalizedUpdates);
     }
@@ -2385,6 +2397,16 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
           ? normalizeQueuePositions(downloads)
           : state.downloads
       }));
+
+      // A process can die after Aria2 has removed the unselected files but
+      // before the terminal event clears Firelink's reservation. Reclaim
+      // only the conservative terminal cases in the backend before queued
+      // downloads are allowed to claim paths on startup.
+      try {
+        await invoke('reconcile_torrent_removal_reservations');
+      } catch (error) {
+        console.warn('Could not reconcile Torrent removal reservations during startup:', error);
+      }
 
       // The backend dispatcher is live before the frontend finishes startup.
       // Synchronize the normalized queue policy before any saved download is

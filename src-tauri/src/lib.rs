@@ -5951,6 +5951,41 @@ fn expected_torrent_output_paths(
     }))
 }
 
+/// Register the complete output ownership for one enqueue in a single
+/// ownership transaction.  In particular, do not first register only the
+/// primary path and then add Torrent paths: a crash between those writes can
+/// leave a partial ownership record that no longer describes the queued task.
+fn register_download_ownership(
+    app_handle: &tauri::AppHandle,
+    item: &queue::EnqueueItem,
+) -> Result<(), String> {
+    let torrent_paths = expected_torrent_output_paths(app_handle, item)?;
+    let primary = crate::download_ownership::expected_primary_path(
+        app_handle,
+        &item.destination,
+        &item.filename,
+    )?;
+    let (owned_paths, removal_paths) = match torrent_paths {
+        Some(paths) => (
+            paths.selected,
+            if item.torrent_remove_unselected_file.unwrap_or(false) {
+                paths.unselected
+            } else {
+                Vec::new()
+            },
+        ),
+        None => (vec![primary.clone()], Vec::new()),
+    };
+
+    crate::download_ownership::set_owned_paths_with_primary_and_removal(
+        app_handle,
+        &item.id,
+        &primary,
+        &owned_paths,
+        &removal_paths,
+    )
+}
+
 async fn remove_magnet_metadata_probe_dir(path: &std::path::Path) -> Result<(), String> {
     match tokio::fs::remove_dir_all(path).await {
         Ok(()) => Ok(()),
@@ -6199,80 +6234,13 @@ async fn enqueue_download(
         .reserve_enqueue_generation(&id, lifecycle_generation)
         .await
         .map_err(AppError::Internal)?;
-    if let Err(error) = crate::download_ownership::register_expected(
-        &app_handle,
-        &item.id,
-        &item.destination,
-        &item.filename,
-    ) {
+    if let Err(error) = register_download_ownership(&app_handle, &item) {
+        let _ = crate::download_ownership::remove(&app_handle, &id);
         state
             .queue_manager
             .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
             .await;
         return Err(AppError::Internal(error));
-    }
-    match expected_torrent_output_paths(&app_handle, &item) {
-        Ok(Some(paths)) => {
-            let primary = match crate::download_ownership::expected_primary_path(
-                &app_handle,
-                &item.destination,
-                &item.filename,
-            ) {
-                Ok(primary) => primary,
-                Err(error) => {
-                    let _ = crate::download_ownership::remove(&app_handle, &id);
-                    state
-                        .queue_manager
-                        .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
-                        .await;
-                    return Err(AppError::Internal(error));
-                }
-            };
-            let ownership_result = if item.torrent_remove_unselected_file.unwrap_or(false) {
-                crate::download_ownership::set_owned_paths_with_primary_and_removal(
-                    &app_handle,
-                    &item.id,
-                    &primary,
-                    &paths.selected,
-                    &paths.unselected,
-                )
-            } else {
-                crate::download_ownership::set_owned_paths_with_primary(
-                    &app_handle,
-                    &item.id,
-                    &primary,
-                    &paths.selected,
-                )
-            };
-            if let Err(error) = ownership_result {
-                let _ = crate::download_ownership::remove(&app_handle, &id);
-                state
-                    .queue_manager
-                    .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
-                    .await;
-                return Err(AppError::Internal(error));
-            }
-        }
-        Ok(None) => {}
-        Err(error) => {
-            let _ = crate::download_ownership::remove(&app_handle, &id);
-            state
-                .queue_manager
-                .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
-                .await;
-            return Err(AppError::Internal(error));
-        }
-    }
-    if !item.torrent_remove_unselected_file.unwrap_or(false) {
-        if let Err(error) = crate::download_ownership::clear_torrent_removal_paths(&app_handle, &id)
-        {
-            let _ = crate::download_ownership::remove(&app_handle, &id);
-            state
-                .queue_manager
-                .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
-                .await;
-            return Err(AppError::Internal(error));
-        }
     }
     if let Err(error) = state
         .queue_manager
@@ -6361,12 +6329,8 @@ async fn enqueue_many(
                 continue;
             }
         };
-        if let Err(error) = crate::download_ownership::register_expected(
-            &app_handle,
-            &item.id,
-            &item.destination,
-            &item.filename,
-        ) {
+        if let Err(error) = register_download_ownership(&app_handle, &item) {
+            let _ = crate::download_ownership::remove(&app_handle, &id);
             state
                 .queue_manager
                 .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
@@ -6378,94 +6342,6 @@ async fn enqueue_many(
                 error: Some(error),
             });
             continue;
-        }
-        match expected_torrent_output_paths(&app_handle, &item) {
-            Ok(Some(paths)) => {
-                let primary = match crate::download_ownership::expected_primary_path(
-                    &app_handle,
-                    &item.destination,
-                    &item.filename,
-                ) {
-                    Ok(primary) => primary,
-                    Err(error) => {
-                        let _ = crate::download_ownership::remove(&app_handle, &id);
-                        state
-                            .queue_manager
-                            .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
-                            .await;
-                        results.push(crate::ipc::EnqueueResult {
-                            id,
-                            success: false,
-                            filename: None,
-                            error: Some(error),
-                        });
-                        continue;
-                    }
-                };
-                let ownership_result = if item.torrent_remove_unselected_file.unwrap_or(false) {
-                    crate::download_ownership::set_owned_paths_with_primary_and_removal(
-                        &app_handle,
-                        &item.id,
-                        &primary,
-                        &paths.selected,
-                        &paths.unselected,
-                    )
-                } else {
-                    crate::download_ownership::set_owned_paths_with_primary(
-                        &app_handle,
-                        &item.id,
-                        &primary,
-                        &paths.selected,
-                    )
-                };
-                if let Err(error) = ownership_result {
-                    let _ = crate::download_ownership::remove(&app_handle, &id);
-                    state
-                        .queue_manager
-                        .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
-                        .await;
-                    results.push(crate::ipc::EnqueueResult {
-                        id,
-                        success: false,
-                        filename: None,
-                        error: Some(error),
-                    });
-                    continue;
-                }
-            }
-            Ok(None) => {}
-            Err(error) => {
-                let _ = crate::download_ownership::remove(&app_handle, &id);
-                state
-                    .queue_manager
-                    .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
-                    .await;
-                results.push(crate::ipc::EnqueueResult {
-                    id,
-                    success: false,
-                    filename: None,
-                    error: Some(error),
-                });
-                continue;
-            }
-        }
-        if !item.torrent_remove_unselected_file.unwrap_or(false) {
-            if let Err(error) =
-                crate::download_ownership::clear_torrent_removal_paths(&app_handle, &id)
-            {
-                let _ = crate::download_ownership::remove(&app_handle, &id);
-                state
-                    .queue_manager
-                    .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
-                    .await;
-                results.push(crate::ipc::EnqueueResult {
-                    id,
-                    success: false,
-                    filename: None,
-                    error: Some(error),
-                });
-                continue;
-            }
         }
         if let Err(error) = state
             .queue_manager
@@ -7412,6 +7288,36 @@ fn db_get_all_downloads(
 ) -> Result<Vec<String>, String> {
     let connection = state.lock()?;
     crate::db::load_downloads(&connection)
+}
+
+#[tauri::command]
+async fn clear_torrent_removal_paths(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    // This command is reached from the trusted renderer, but it still owns a
+    // destructive reservation boundary. Serialize it with terminal/control
+    // transitions and refuse to clear a lifecycle that the backend still
+    // owns. The frontend's registration set is only a hint and must not be
+    // the safety check.
+    let _control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    if state.queue_manager.aria2_gid_for_download(&id).is_some()
+        || state.queue_manager.is_registered(&id).await
+    {
+        return Err(
+            "cannot clear Torrent removal paths while the backend owns the download".to_string(),
+        );
+    }
+    crate::download_ownership::clear_torrent_removal_paths(&app_handle, &id)
+}
+
+#[tauri::command]
+fn reconcile_torrent_removal_reservations(
+    state: tauri::State<'_, crate::db::DbState>,
+) -> Result<usize, String> {
+    let connection = state.lock()?;
+    crate::db::reconcile_torrent_removal_paths_after_restart(&connection)
 }
 
 fn retained_torrent_id_from_persisted_record(record: &str) -> Option<String> {
@@ -11433,6 +11339,7 @@ pub fn run() {
             parity::get_system_proxy, parity::get_file_category, parity::check_for_updates, parity::is_supported_media, parity::get_supported_media_domains,
             parity::create_category_directories,
             db_save_settings, db_load_settings, db_get_all_downloads, db_replace_downloads,
+            clear_torrent_removal_paths, reconcile_torrent_removal_reservations,
             db_get_all_queues, db_replace_queues,
             read_logs, export_logs, toggle_log_pause, is_log_paused, clear_logs,
             set_log_stream_active

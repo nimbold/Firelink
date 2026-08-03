@@ -1,7 +1,7 @@
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::Value;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
 const DATABASE_NAME: &str = "firelink.sqlite";
@@ -1356,9 +1356,15 @@ pub fn set_ownership_and_removal_paths(
     paths: &[String],
     removal_paths: &[String],
 ) -> Result<(), String> {
-    set_ownership_paths_checked(connection, id, primary_path, paths, removal_paths)?;
+    // Ownership and the planned deletion reservation are one safety
+    // boundary.  Do not leave a partially-written reservation behind if the
+    // second table write fails or the process crashes between writes.
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("failed to begin torrent ownership transaction: {error}"))?;
+    set_ownership_paths_checked(&transaction, id, primary_path, paths, removal_paths)?;
     if removal_paths.is_empty() {
-        connection
+        transaction
             .execute(
                 "DELETE FROM download_removal_paths WHERE id = ?1",
                 params![id],
@@ -1367,7 +1373,7 @@ pub fn set_ownership_and_removal_paths(
     } else {
         let encoded_paths = serde_json::to_string(removal_paths)
             .map_err(|error| format!("failed to encode torrent removal paths: {error}"))?;
-        connection
+        transaction
             .execute(
                 "INSERT INTO download_removal_paths (id, paths) VALUES (?1, ?2)
                  ON CONFLICT(id) DO UPDATE SET paths = excluded.paths",
@@ -1375,7 +1381,89 @@ pub fn set_ownership_and_removal_paths(
             )
             .map_err(|error| format!("failed to save torrent removal paths: {error}"))?;
     }
-    Ok(())
+    transaction
+        .commit()
+        .map_err(|error| format!("failed to commit torrent ownership transaction: {error}"))
+}
+
+/// Reclaim reservations left behind by a process crash after a terminal
+/// Torrent outcome.  Active, queued, and paused records remain reserved: a
+/// future lifecycle may still ask Aria2 to remove those paths.  A terminal
+/// record is reclaimed only after every reserved path is absent, proving that
+/// Aria2's unselected-file cleanup was observed.  Failed records are treated
+/// conservatively as well because Aria2 may leave unselected files behind on
+/// an error.
+pub fn reconcile_torrent_removal_paths_after_restart(
+    connection: &Connection,
+) -> Result<usize, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT removal.id, removal.paths, downloads.status
+             FROM download_removal_paths AS removal
+             LEFT JOIN downloads ON downloads.id = removal.id",
+        )
+        .map_err(|error| format!("failed to prepare torrent removal recovery query: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let paths: String = row.get(1)?;
+            let status: Option<String> = row.get(2)?;
+            Ok((id, paths, status))
+        })
+        .map_err(|error| format!("failed to query torrent removal recovery data: {error}"))?;
+
+    let mut reclaim = Vec::new();
+    for row in rows {
+        let (id, encoded_paths, status) =
+            row.map_err(|error| format!("failed to read torrent removal recovery data: {error}"))?;
+        let paths = match serde_json::from_str::<Vec<String>>(&encoded_paths) {
+            Ok(paths)
+                if !paths.is_empty()
+                    && paths.iter().all(|path| {
+                        let path = Path::new(path);
+                        path.is_absolute()
+                            && !path.components().any(|component| {
+                                matches!(component, Component::CurDir | Component::ParentDir)
+                            })
+                    }) =>
+            {
+                paths
+            }
+            // Malformed or empty reservations are retained for conservative
+            // manual recovery rather than being silently discarded.
+            _ => continue,
+        };
+        let Some(status) = status else {
+            continue;
+        };
+        let should_reclaim = match status.as_str() {
+            "failed" | "completed" => paths
+                .iter()
+                .all(|path| torrent_removal_path_is_absent(Path::new(path))),
+            _ => false,
+        };
+        if should_reclaim {
+            reclaim.push(id);
+        }
+    }
+
+    let mut reclaimed = 0;
+    for id in reclaim {
+        reclaimed += connection
+            .execute(
+                "DELETE FROM download_removal_paths WHERE id = ?1",
+                params![id],
+            )
+            .map_err(|error| format!("failed to reclaim torrent removal paths: {error}"))?;
+    }
+    Ok(reclaimed)
+}
+
+fn torrent_removal_path_is_absent(path: &Path) -> bool {
+    matches!(
+        fs::symlink_metadata(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
 }
 
 pub fn remove_ownership(connection: &Connection, id: &str) -> Result<(), String> {
@@ -2586,5 +2674,186 @@ mod tests {
             &["/downloads/unselected.bin".to_string()],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn torrent_ownership_and_removal_reservation_commit_atomically() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let connection = state.lock().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_torrent_removal
+                 BEFORE INSERT ON download_removal_paths
+                 BEGIN SELECT RAISE(ABORT, 'test rejection'); END;",
+            )
+            .unwrap();
+
+        let error = set_ownership_and_removal_paths(
+            &connection,
+            "torrent",
+            "/downloads/selected.bin",
+            &["/downloads/selected.bin".to_string()],
+            &["/downloads/unselected.bin".to_string()],
+        )
+        .expect_err("the injected reservation failure must abort the transaction");
+
+        assert!(error.contains("test rejection"));
+        assert!(load_ownership(&connection).unwrap().is_empty());
+        assert!(load_torrent_removal_paths(&connection, "torrent")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn restart_reclaims_only_observed_terminal_torrent_reservations() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let connection = state.lock().unwrap();
+        let completed_missing = temp.path().join("completed-missing.bin");
+        let completed_present = temp.path().join("completed-present.bin");
+        let failed_present = temp.path().join("failed-present.bin");
+        let queued_missing = temp.path().join("queued-missing.bin");
+        fs::write(&completed_present, b"old").unwrap();
+        fs::write(&failed_present, b"old").unwrap();
+
+        for (id, status, path) in [
+            ("completed-missing", "completed", &completed_missing),
+            ("completed-present", "completed", &completed_present),
+            ("failed-present", "failed", &failed_present),
+            ("queued-missing", "queued", &queued_missing),
+        ] {
+            let selected_path = temp.path().join(format!("{id}-selected.bin"));
+            set_ownership_and_removal_paths(
+                &connection,
+                id,
+                &selected_path.to_string_lossy(),
+                &[selected_path.to_string_lossy().to_string()],
+                &[path.to_string_lossy().to_string()],
+            )
+            .unwrap();
+            let record = json!({
+                "id": id,
+                "status": status,
+                "isTorrent": true,
+                "torrentRemoveUnselectedFile": true
+            })
+            .to_string();
+            connection
+                .execute(
+                    "INSERT INTO downloads (id, status, queue_id, data) VALUES (?1, ?2, ?3, ?4)",
+                    params![id, status, "main", record],
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            reconcile_torrent_removal_paths_after_restart(&connection).unwrap(),
+            1
+        );
+        assert!(load_torrent_removal_paths(&connection, "completed-missing")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            load_torrent_removal_paths(&connection, "failed-present").unwrap(),
+            vec![failed_present.to_string_lossy().to_string()]
+        );
+        assert_eq!(
+            load_torrent_removal_paths(&connection, "completed-present")
+                .unwrap(),
+            vec![completed_present.to_string_lossy().to_string()]
+        );
+        assert_eq!(
+            load_torrent_removal_paths(&connection, "queued-missing")
+                .unwrap(),
+            vec![queued_missing.to_string_lossy().to_string()]
+        );
+
+        set_ownership_paths(
+            &connection,
+            "replacement",
+            &completed_missing.to_string_lossy(),
+            &[completed_missing.to_string_lossy().to_string()],
+        )
+        .unwrap();
+
+        let error = set_ownership_paths(
+            &connection,
+            "failed-replacement",
+            &failed_present.to_string_lossy(),
+            &[failed_present.to_string_lossy().to_string()],
+        )
+        .expect_err("an unobserved failed Torrent cleanup must keep its path reserved");
+        assert!(error.contains("already owned"));
+    }
+
+    #[test]
+    fn restart_keeps_orphaned_torrent_removal_reservations_conservative() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let connection = state.lock().unwrap();
+        let reserved = temp.path().join("orphaned-unselected.bin");
+        set_ownership_and_removal_paths(
+            &connection,
+            "orphaned",
+            &temp.path().join("orphaned-selected.bin").to_string_lossy(),
+            &[temp
+                .path()
+                .join("orphaned-selected.bin")
+                .to_string_lossy()
+                .to_string()],
+            &[reserved.to_string_lossy().to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            reconcile_torrent_removal_paths_after_restart(&connection).unwrap(),
+            0
+        );
+        assert_eq!(
+            load_torrent_removal_paths(&connection, "orphaned").unwrap(),
+            vec![reserved.to_string_lossy().to_string()]
+        );
+    }
+
+    #[test]
+    fn restart_keeps_malformed_torrent_removal_reservations_conservative() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let connection = state.lock().unwrap();
+        for (id, encoded_paths) in [
+            ("empty", "[]"),
+            ("relative", r#"["relative-file.bin"]"#),
+            ("empty-path", r#"[""]"#),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO download_removal_paths (id, paths) VALUES (?1, ?2)",
+                    params![id, encoded_paths],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO downloads (id, status, queue_id, data) VALUES
+                     (?1, 'completed', 'main', '{}')",
+                    params![id],
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            reconcile_torrent_removal_paths_after_restart(&connection).unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM download_removal_paths",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            3
+        );
     }
 }

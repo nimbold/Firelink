@@ -110,16 +110,6 @@ pub fn expected_primary_path<R: tauri::Runtime>(
         .ok_or_else(|| "Download path could not be canonicalized".to_string())
 }
 
-pub fn register_expected<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    id: &str,
-    destination: &str,
-    filename: &str,
-) -> Result<(), String> {
-    let path = expected_primary_path(app_handle, destination, filename)?;
-    set_primary_path(app_handle, id, &path)
-}
-
 pub fn set_primary_path<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     id: &str,
@@ -290,6 +280,27 @@ pub fn clear_torrent_removal_paths<R: tauri::Runtime>(
     let database = app_handle.state::<crate::db::DbState>();
     let connection = database.lock()?;
     crate::db::remove_torrent_removal_paths(&connection, id)
+}
+
+/// Clear a Torrent removal reservation only after every reserved path is
+/// absent.  The reservation protects paths that Aria2 may still remove after
+/// a terminal event has been observed; callers must not release it merely
+/// because the daemon reported completion or failure.
+pub fn clear_torrent_removal_paths_if_absent<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    id: &str,
+) -> Result<bool, String> {
+    let paths = torrent_removal_paths_for_id(app_handle, id)?;
+    if paths.iter().any(|path| {
+        !matches!(
+            std::fs::symlink_metadata(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+    }) {
+        return Ok(false);
+    }
+    clear_torrent_removal_paths(app_handle, id)?;
+    Ok(true)
 }
 
 pub fn torrent_removal_paths_for_id<R: tauri::Runtime>(

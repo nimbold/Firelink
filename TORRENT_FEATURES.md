@@ -11,7 +11,7 @@ Reference: [Aria2 1.37.0 manual](https://aria2.github.io/manual/en/html/aria2c.h
 
 ## Audit basis
 
-- Audited on 2026-08-03 at Firelink `cba485e` (`main`) plus the current working
+- Audited on 2026-08-03 at Firelink `32034e9` (`main`) plus the current working
   tree, with the cumulative
   Torrent work reviewed from `edc76a7`.
 - Source of truth: `src-tauri/src/torrent.rs`, `torrent_probe.rs`, `queue.rs`,
@@ -98,8 +98,13 @@ Reference: [Aria2 1.37.0 manual](https://aria2.github.io/manual/en/html/aria2c.h
 - Validated encryption policies mapped consistently to
   `bt-force-encryption`, `bt-require-crypto`, and `bt-min-crypto-level`.
 - Optional `bt-remove-unselected-file` cleanup after successful completion,
-  only with an explicit partial selection and confirmation. Cancellation,
-  failure, replacement, and cleanup races are conservative.
+  only with an explicit partial selection and confirmation. The selected-file
+  ownership and unselected-file reservation are committed atomically; Firelink
+  clears the reservation only after Aria2's reserved paths are absent,
+  including when a transfer fails. Restart recovery preserves queued/paused
+  and orphaned reservations while reclaiming only observed failed or completed
+  cleanup. Disabling the option after a detach clears the reservation before
+  the edited item is persisted.
 
 ### Trackers, peers, and network identity
 
@@ -124,8 +129,9 @@ Reference: [Aria2 1.37.0 manual](https://aria2.github.io/manual/en/html/aria2c.h
 ### Evidence already present in the tree
 
 - Rust unit coverage for bencode/hash/path validation, option normalization,
-  queue ownership, lifecycle fencing, persistence sanitization, and native
-  startup argument construction.
+  queue ownership, lifecycle fencing, persistence sanitization, atomic Torrent
+  removal reservations, conservative restart recovery, host case-insensitive
+  path identity, and native startup argument construction.
 - `src-tauri/tests/torrent_rpc.rs` covers the production authenticated JSON-RPC
   HTTP boundary in a Windows-compatible integration-test target.
 - `npm run smoke:torrent` and `npm run smoke:torrent:failure-paths` cover
@@ -175,11 +181,7 @@ Before any new Torrent feature is promoted, keep these gates mandatory:
 
 ### Tier 1 — high-value user behavior
 
-1. **Unselected-file removal crash/restart audit.** Add post-crash tests around
-   the persisted removal reservation, Aria2 completion cleanup, path reuse, and
-   case-insensitive path equality. Do not change cleanup ordering until the
-   ownership postconditions are proven.
-2. **DHT routing-table persistence policy.** Decide and implement app-managed
+1. **DHT routing-table persistence policy.** Decide and implement app-managed
    `dht-file-path`/`dht-file-path6` behavior, especially for portable mode,
    permissions, reset, and privacy. This should be opt-in if it expands data
    retention beyond the current download metadata contract.

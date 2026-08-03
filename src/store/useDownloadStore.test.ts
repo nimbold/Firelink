@@ -135,6 +135,38 @@ describe('useDownloadStore', () => {
     expect(fileName.endsWith('.mp4')).toBe(true);
   });
 
+  it('clears a persisted Torrent removal reservation when a paused item disables cleanup', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'paused-torrent-removal',
+        url: 'magnet:?xt=urn:btih:abc',
+        fileName: 'torrent',
+        status: 'paused',
+        category: 'Other',
+        dateAdded: '',
+        isTorrent: true,
+        torrentFileIndices: [0],
+        torrentRemoveUnselectedFile: true
+      }] as any[],
+      backendRegisteredIds: new Set(['paused-torrent-removal'])
+    });
+    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
+
+    await useDownloadStore.getState().applyProperties('paused-torrent-removal', {
+      torrentRemoveUnselectedFile: false
+    });
+
+    expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'detach_download_for_reconfigure',
+      { id: 'paused-torrent-removal' }
+    );
+    expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'clear_torrent_removal_paths',
+      { id: 'paused-torrent-removal' }
+    );
+    expect(useDownloadStore.getState().downloads[0].torrentRemoveUnselectedFile).toBe(false);
+  });
+
   it('replaces stale media intent when an appended handoff reuses a URL', () => {
     useDownloadStore.getState().openAddModalWithUrls(
       'https://example.com/file.bin', '', '', '', '', true

@@ -2120,29 +2120,15 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 self.clear_aria2_retry_state(id).await;
                 self.forget_aria2_gid(id).await;
                 if torrent_removal_requested {
-                    match crate::download_ownership::torrent_removal_paths_for_id(
+                    match crate::download_ownership::clear_torrent_removal_paths_if_absent(
                         &self.app_handle,
                         id,
                     ) {
-                        Ok(paths) if paths.iter().all(|path| !path.exists()) => {
-                            if let Err(error) =
-                                crate::download_ownership::clear_torrent_removal_paths(
-                                    &self.app_handle,
-                                    id,
-                                )
-                            {
-                                log::warn!(
-                                    "aria2 torrent removal reservation [{}]: could not clear after completion: {}",
-                                    id,
-                                    error
-                                );
-                            }
-                        }
-                        Ok(paths) => {
+                        Ok(true) => {}
+                        Ok(false) => {
                             log::warn!(
-                                "aria2 torrent removal reservation [{}]: keeping {} path(s) reserved because Aria2 cleanup was not observed",
-                                id,
-                                paths.len()
+                                "aria2 torrent removal reservation [{}]: keeping paths reserved because Aria2 cleanup was not observed",
+                                id
                             );
                         }
                         Err(error) => {
@@ -2175,14 +2161,20 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 self.clear_aria2_retry_state(id).await;
                 self.forget_aria2_gid(id).await;
                 if torrent_removal_requested {
-                    if let Err(clear_error) =
-                        crate::download_ownership::clear_torrent_removal_paths(&self.app_handle, id)
-                    {
-                        log::warn!(
-                            "aria2 torrent removal reservation [{}]: could not clear after terminal failure: {}",
+                    match crate::download_ownership::clear_torrent_removal_paths_if_absent(
+                        &self.app_handle,
+                        id,
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) => log::warn!(
+                            "aria2 torrent removal reservation [{}]: keeping paths reserved because cleanup was not observed after failure",
+                            id
+                        ),
+                        Err(clear_error) => log::warn!(
+                            "aria2 torrent removal reservation [{}]: could not verify cleanup after terminal failure: {}",
                             id,
                             clear_error
-                        );
+                        ),
                     }
                 }
                 self.release_registered_id(id).await;

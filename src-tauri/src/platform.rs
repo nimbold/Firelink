@@ -123,10 +123,20 @@ pub fn path_is_within(path: &Path, root: &Path) -> bool {
 }
 
 pub fn paths_equal(left: &Path, right: &Path) -> bool {
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
         left.to_string_lossy()
-            .eq_ignore_ascii_case(&right.to_string_lossy())
+            .to_lowercase()
+            == right.to_string_lossy().to_lowercase()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use unicode_normalization::UnicodeNormalization;
+
+        let normalize = |path: &Path| {
+            path.to_string_lossy().to_lowercase().nfc().collect::<String>()
+        };
+        normalize(left) == normalize(right)
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
@@ -155,7 +165,8 @@ fn numbered_windows_device(stem: &str, prefix: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{engine_binary_name, is_windows_reserved_filename, target_triple};
+    use super::{engine_binary_name, is_windows_reserved_filename, paths_equal, target_triple};
+    use std::path::Path;
 
     #[test]
     fn target_engine_name_uses_current_rust_target() {
@@ -184,6 +195,39 @@ mod tests {
             "movie.mp4",
         ] {
             assert!(!is_windows_reserved_filename(filename), "{filename}");
+        }
+    }
+
+    #[test]
+    fn path_identity_matches_the_host_filesystem_case_contract() {
+        let left = Path::new("/downloads/Selected/File.bin");
+        let right = Path::new("/Downloads/selected/file.BIN");
+        if cfg!(any(target_os = "windows", target_os = "macos")) {
+            assert!(paths_equal(left, right));
+        } else {
+            assert!(!paths_equal(left, right));
+        }
+    }
+
+    #[test]
+    fn path_identity_handles_non_ascii_case_differences() {
+        let left = Path::new("/downloads/Ärt/File.bin");
+        let right = Path::new("/DOWNLOADS/ärt/file.BIN");
+        if cfg!(any(target_os = "windows", target_os = "macos")) {
+            assert!(paths_equal(left, right));
+        } else {
+            assert!(!paths_equal(left, right));
+        }
+    }
+
+    #[test]
+    fn path_identity_handles_macos_unicode_normalization() {
+        let composed = Path::new("/downloads/café/File.bin");
+        let decomposed = Path::new("/DOWNLOADS/cafe\u{301}/file.BIN");
+        if cfg!(target_os = "macos") {
+            assert!(paths_equal(composed, decomposed));
+        } else {
+            assert!(!paths_equal(composed, decomposed));
         }
     }
 }
