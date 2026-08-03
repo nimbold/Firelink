@@ -16,6 +16,7 @@ export { useDownloadProgressStore } from './downloadProgressStore';
 
 let unlistenProgress: UnlistenFn | null = null;
 let unlistenState: UnlistenFn | null = null;
+let unlistenMoveProgress: UnlistenFn | null = null;
 let unlistenTray: UnlistenFn | null = null;
 let listenerSetup: Promise<void> | null = null;
 let listenerConsumers = 0;
@@ -25,6 +26,8 @@ const disposeDownloadListeners = () => {
   unlistenProgress = null;
   unlistenState?.();
   unlistenState = null;
+  unlistenMoveProgress?.();
+  unlistenMoveProgress = null;
   unlistenTray?.();
   unlistenTray = null;
   listenerSetup = null;
@@ -71,6 +74,20 @@ const startDownloadListeners = async () => {
       if (payload.total_is_estimate !== null && payload.total_is_estimate !== undefined) {
         updates.totalIsEstimate = payload.total_is_estimate;
       }
+      if (current.isTorrent) {
+        if (payload.uploaded_bytes !== null
+            && payload.uploaded_bytes !== undefined
+            && Number.isSafeInteger(payload.uploaded_bytes)
+            && payload.uploaded_bytes >= 0) {
+          updates.torrentUploadedBytes = payload.uploaded_bytes;
+        }
+        if (payload.torrent_seeded_seconds !== null
+            && payload.torrent_seeded_seconds !== undefined
+            && Number.isSafeInteger(payload.torrent_seeded_seconds)
+            && payload.torrent_seeded_seconds >= 0) {
+          updates.torrentSeededSeconds = payload.torrent_seeded_seconds;
+        }
+      }
       const observedDownloadedBytes = Math.max(
         current.downloadedBytes ?? 0,
         payload.downloaded_bytes ?? 0
@@ -103,6 +120,9 @@ const startDownloadListeners = async () => {
         return;
       }
       const status = payload.status as DownloadStatus;
+      if (status !== 'moving') {
+        useDownloadProgressStore.getState().clearMoveProgress(payload.id);
+      }
 
       // resume_download queues the row before the backend can emit its new
       // active state. Paused events already emitted by the old lifecycle may
@@ -120,7 +140,7 @@ const startDownloadListeners = async () => {
         // applied while the transition is in flight.
         return;
       }
-      if (status === 'downloading' || status === 'processing' ||
+      if (status === 'downloading' || status === 'processing' || status === 'moving' ||
           status === 'verifying' || status === 'seeding' || status === 'waitingToSeed' ||
           status === 'completed' || status === 'failed') {
         clearDownloadControlIntent(payload.id, 'resume');
@@ -136,13 +156,14 @@ const startDownloadListeners = async () => {
       // before asking the backend to resume, so an active event arriving while
       // the row is still paused cannot represent a new lifecycle.
       if ((current.status === 'completed' || current.status === 'failed') &&
-          status !== current.status) {
+          status !== current.status && status !== 'moving') {
         return;
       }
       if (current.status === 'paused' &&
           status !== 'paused' &&
           status !== 'completed' &&
-          status !== 'failed') {
+          status !== 'failed' &&
+          status !== 'moving') {
         return;
       }
       if (current.status === 'seeding' &&
@@ -150,7 +171,8 @@ const startDownloadListeners = async () => {
           status !== 'waitingToSeed' &&
           status !== 'paused' &&
           status !== 'completed' &&
-          status !== 'failed') {
+          status !== 'failed' &&
+          status !== 'moving') {
         return;
       }
 
@@ -158,8 +180,14 @@ const startDownloadListeners = async () => {
       if (['queued', 'retrying', 'completed', 'failed', 'paused', 'waitingToSeed'].includes(status)) {
         useDownloadProgressStore.getState().clearDownloadProgress(payload.id);
       }
+      const moveRestoreStatus = status === 'moving'
+        ? current.status === 'paused' || current.status === 'completed' || current.status === 'failed'
+          ? current.status
+          : current.torrentMoveRestoreStatus
+        : undefined;
       const updates: Partial<DownloadItem> = {
         status,
+        torrentMoveRestoreStatus: moveRestoreStatus,
         ...(progress ? {
           fraction: progress.fraction,
           ...(progress.downloaded_bytes != null
@@ -221,6 +249,17 @@ const startDownloadListeners = async () => {
         mainStore.unregisterBackendIds([payload.id]);
       }
     }),
+    listen('torrent-move-progress', (event) => {
+      const payload = event.payload;
+      const current = useDownloadStore.getState().downloads.find(d => d.id === payload.id);
+      if (!current || current.status !== 'moving') {
+        useDownloadProgressStore.getState().clearMoveProgress(payload.id);
+        return;
+      }
+      if (Number.isFinite(payload.fraction) && payload.fraction >= 0 && payload.fraction <= 1) {
+        useDownloadProgressStore.getState().setMoveProgress(payload.id, payload.fraction);
+      }
+    }),
     listen('tray-action', (event) => {
       const mainStore = useDownloadStore.getState();
       if (event.payload === 'pause-all') {
@@ -241,13 +280,15 @@ const startDownloadListeners = async () => {
     throw failedRegistration.reason;
   }
 
-  const [progress, state, tray] = registrations as [
+  const [progress, state, moveProgress, tray] = registrations as [
+    PromiseFulfilledResult<UnlistenFn>,
     PromiseFulfilledResult<UnlistenFn>,
     PromiseFulfilledResult<UnlistenFn>,
     PromiseFulfilledResult<UnlistenFn>,
   ];
   unlistenProgress = progress.value;
   unlistenState = state.value;
+  unlistenMoveProgress = moveProgress.value;
   unlistenTray = tray.value;
 };
 

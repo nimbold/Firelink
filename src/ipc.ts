@@ -25,6 +25,7 @@ import type { TorrentPieceProgressSnapshot } from './bindings/TorrentPieceProgre
 import type { TorrentWebSeed } from './bindings/TorrentWebSeed';
 import type { TorrentDetails } from './bindings/TorrentDetails';
 import type { TorrentFileSelectionSnapshot } from './bindings/TorrentFileSelectionSnapshot';
+import type { TorrentAvailabilitySnapshot } from './bindings/TorrentAvailabilitySnapshot';
 
 type CommandMap = {
   fetch_metadata: {
@@ -89,7 +90,12 @@ type CommandMap = {
   get_torrent_file_selection: { args: { id: string }; result: TorrentFileSelectionSnapshot };
   set_torrent_file_selection: { args: { id: string; selected_indices: number[] | null }; result: TorrentFileSelectionSnapshot };
   get_torrent_details: { args: { id: string }; result: TorrentDetails };
+  get_torrent_availability: { args: { id: string }; result: TorrentAvailabilitySnapshot };
   verify_torrent_data: { args: { id: string }; result: void };
+  get_torrent_magnet_link: { args: { id: string }; result: string };
+  export_torrent_metadata: { args: { id: string; destination: string }; result: void };
+  move_torrent_data: { args: { id: string; destination: string }; result: void };
+  cancel_torrent_move_data: { args: { id: string }; result: void };
   get_torrent_web_seeds: { args: { id: string }; result: TorrentWebSeed[] };
   set_torrent_web_seeds: { args: { id: string; seeds: TorrentWebSeed[] }; result: TorrentWebSeed[] };
   set_torrent_max_open_files: { args: { max_open_files: number }; result: void };
@@ -169,6 +175,7 @@ type EventMap = {
   'schedule-trigger': { action: 'start' | 'stop'; key: string };
   'download-progress': DownloadProgressEvent;
   'download-state': DownloadStateEvent;
+  'torrent-move-progress': import('./bindings/TorrentMoveProgressEvent').TorrentMoveProgressEvent;
   'download-complete': string;
   'download-failed': string;
   'extension-add-download': ExtensionDownload;

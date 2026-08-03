@@ -14,6 +14,7 @@
     "log:default",
     "notification:default",
     "notification:allow-is-permission-granted",
-    "clipboard-manager:allow-read-text"
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text"
   ]
 }

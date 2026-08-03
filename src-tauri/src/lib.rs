@@ -1472,6 +1472,7 @@ fn emit_media_progress(
                 uploaded_bytes: None,
                 upload_speed: None,
                 num_seeders: None,
+                torrent_seeded_seconds: None,
             },
         );
         state.last_progress_at = now;
@@ -3167,6 +3168,8 @@ pub struct DownloadProgressEvent {
     upload_speed: Option<String>,
     #[ts(optional)]
     num_seeders: Option<i32>,
+    #[ts(optional)]
+    torrent_seeded_seconds: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -4340,6 +4343,7 @@ pub(crate) async fn start_media_download_internal(
                                         uploaded_bytes: None,
                                         upload_speed: None,
                                         num_seeders: None,
+                                        torrent_seeded_seconds: None,
                                     });
                                 }
                                 let lower = line.to_lowercase();
@@ -4416,6 +4420,7 @@ pub(crate) async fn start_media_download_internal(
                                             uploaded_bytes: None,
                                             upload_speed: None,
                                             num_seeders: None,
+                                            torrent_seeded_seconds: None,
                                         });
                                     }
                                 }
@@ -5136,6 +5141,7 @@ async fn remove_download(
         }
         state.queue_manager.next_aria2_control_epoch(&id).await;
         state.queue_manager.clear_aria2_retry_state(&id).await;
+        state.queue_manager.forget_torrent_telemetry(&id).await;
         state.queue_manager.forget_aria2_gid(&id).await;
         state.queue_manager.release_permit(&id).await;
         log::info!("aria2 remove [{}]: gid {} stopped and forgotten", id, gid);
@@ -5217,6 +5223,7 @@ async fn remove_download(
             }
             state.queue_manager.next_aria2_control_epoch(&id).await;
             state.queue_manager.clear_aria2_retry_state(&id).await;
+            state.queue_manager.forget_torrent_telemetry(&id).await;
             state.queue_manager.forget_aria2_gid(&id).await;
         } else if !state
             .queue_manager
@@ -5230,6 +5237,7 @@ async fn remove_download(
         }
         state.queue_manager.release_permit(&id).await;
         state.queue_manager.clear_aria2_retry_state(&id).await;
+        state.queue_manager.forget_torrent_telemetry(&id).await;
         state.queue_manager.forget_aria2_gid(&id).await;
     }
 
@@ -5906,6 +5914,7 @@ struct ExpectedTorrentOutputPaths {
     unselected: Vec<std::path::PathBuf>,
 }
 
+#[derive(Clone)]
 struct DownloadOwnershipSnapshot {
     primary: Option<std::path::PathBuf>,
     owned: Vec<std::path::PathBuf>,
@@ -6708,6 +6717,14 @@ async fn get_torrent_peers(
 }
 
 #[tauri::command]
+async fn get_torrent_availability(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<crate::ipc::TorrentAvailabilitySnapshot, String> {
+    state.queue_manager.get_aria2_torrent_availability(&id).await
+}
+
+#[tauri::command]
 async fn get_torrent_file_progress(
     state: tauri::State<'_, AppState>,
     id: String,
@@ -6761,6 +6778,137 @@ fn load_persisted_torrent_item(
                 .filter(|item| item.id == id)
         })
         .ok_or_else(|| "download is not persisted".to_string())
+}
+
+fn persist_torrent_destination(
+    database: &crate::db::DbState,
+    id: &str,
+    destination: &str,
+    relocation_check_pending: bool,
+) -> Result<(), String> {
+    let mut connection = database.lock()?;
+    let records = crate::db::load_downloads(&connection)?;
+    let mut changed = false;
+    let next_records = records
+        .into_iter()
+        .map(|record| {
+            let mut value: serde_json::Value = serde_json::from_str(&record)
+                .map_err(|error| format!("persisted download is malformed: {error}"))?;
+            if value.get("id").and_then(serde_json::Value::as_str) == Some(id) {
+                let object = value
+                    .as_object_mut()
+                    .ok_or_else(|| "persisted download is not an object".to_string())?;
+                object.insert(
+                    "destination".to_string(),
+                    serde_json::Value::String(destination.to_string()),
+                );
+                if relocation_check_pending {
+                    object.insert(
+                        "torrentRelocationCheckPending".to_string(),
+                        serde_json::Value::Bool(true),
+                    );
+                } else {
+                    object.remove("torrentRelocationCheckPending");
+                }
+                object.insert(
+                    "torrentMoveDestination".to_string(),
+                    serde_json::Value::String(destination.to_string()),
+                );
+                changed = true;
+            }
+            serde_json::to_string(&value)
+                .map_err(|error| format!("failed to encode persisted download: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if !changed {
+        return Err("download is no longer persisted".to_string());
+    }
+    let data = serde_json::to_string(&next_records)
+        .map_err(|error| format!("failed to encode persisted downloads: {error}"))?;
+    crate::db::replace_downloads(&mut connection, &data, database.is_portable())
+}
+
+fn persist_torrent_telemetry(
+    database: &crate::db::DbState,
+    id: &str,
+    snapshot: crate::queue::TorrentTelemetrySnapshot,
+) -> Result<(), String> {
+    let mut connection = database.lock()?;
+    let records = crate::db::load_downloads(&connection)?;
+    let mut changed = false;
+    let next_records = records
+        .into_iter()
+        .map(|record| {
+            let mut value: serde_json::Value = serde_json::from_str(&record)
+                .map_err(|error| format!("persisted download is malformed: {error}"))?;
+            if value.get("id").and_then(serde_json::Value::as_str) == Some(id) {
+                let object = value
+                    .as_object_mut()
+                    .ok_or_else(|| "persisted download is not an object".to_string())?;
+                let uploaded = serde_json::Value::from(snapshot.uploaded_bytes);
+                let seeded = serde_json::Value::from(snapshot.seeded_seconds);
+                if object.get("torrentUploadedBytes") != Some(&uploaded) {
+                    object.insert("torrentUploadedBytes".to_string(), uploaded);
+                    changed = true;
+                }
+                if object.get("torrentSeededSeconds") != Some(&seeded) {
+                    object.insert("torrentSeededSeconds".to_string(), seeded);
+                    changed = true;
+                }
+            }
+            serde_json::to_string(&value)
+                .map_err(|error| format!("failed to encode persisted download: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if !changed {
+        return Ok(());
+    }
+    let data = serde_json::to_string(&next_records)
+        .map_err(|error| format!("failed to encode persisted downloads: {error}"))?;
+    crate::db::replace_downloads(&mut connection, &data, database.is_portable())
+}
+
+fn persist_torrent_relocation_check(
+    database: &crate::db::DbState,
+    id: &str,
+    pending: bool,
+) -> Result<(), String> {
+    let mut connection = database.lock()?;
+    let records = crate::db::load_downloads(&connection)?;
+    let mut changed = false;
+    let next_records = records
+        .into_iter()
+        .map(|record| {
+            let mut value: serde_json::Value = serde_json::from_str(&record)
+                .map_err(|error| format!("persisted download is malformed: {error}"))?;
+            if value.get("id").and_then(serde_json::Value::as_str) == Some(id) {
+                let object = value
+                    .as_object_mut()
+                    .ok_or_else(|| "persisted download is not an object".to_string())?;
+                if pending {
+                    if object.get("torrentRelocationCheckPending")
+                        != Some(&serde_json::Value::Bool(true))
+                    {
+                        object.insert(
+                            "torrentRelocationCheckPending".to_string(),
+                            serde_json::Value::Bool(true),
+                        );
+                        changed = true;
+                    }
+                } else if object.remove("torrentRelocationCheckPending").is_some() {
+                    changed = true;
+                }
+            }
+            serde_json::to_string(&value)
+                .map_err(|error| format!("failed to encode persisted download: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if !changed {
+        return Ok(());
+    }
+    let data = serde_json::to_string(&next_records)
+        .map_err(|error| format!("failed to encode persisted downloads: {error}"))?;
+    crate::db::replace_downloads(&mut connection, &data, database.is_portable())
 }
 
 fn persist_torrent_file_selection(
@@ -7024,6 +7172,1068 @@ async fn get_torrent_details(
         .await
         .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
     crate::torrent::torrent_details_from_bytes(&bytes)
+}
+
+fn torrent_identity_magnet(details: &crate::ipc::TorrentDetails) -> Result<String, String> {
+    let info_hash = crate::torrent::canonical_info_hash(&details.info_hash)
+        .ok_or_else(|| "Torrent metadata has an invalid info hash".to_string())?;
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("xt", &format!("urn:btih:{info_hash}"));
+    if let Some(name) = sanitize_metadata_filename(&details.display_name) {
+        let bounded = name.chars().take(255).collect::<String>();
+        if !bounded.is_empty() {
+            serializer.append_pair("dn", &bounded);
+        }
+    }
+    Ok(format!("magnet:?{}", serializer.finish()))
+}
+
+#[tauri::command]
+async fn get_torrent_magnet_link(
+    state: tauri::State<'_, crate::db::DbState>,
+    app_handle: tauri::AppHandle,
+    id: String,
+) -> Result<String, String> {
+    let item = load_persisted_torrent_item(state.inner(), &id)?;
+    if item.is_torrent != Some(true) {
+        return Err("magnet links are available only for Torrent downloads".to_string());
+    }
+    let path = item
+        .torrent_path
+        .as_deref()
+        .ok_or_else(|| "Torrent metadata is not resolved yet".to_string())?;
+    let path = crate::torrent::validate_managed_torrent_path(&app_handle, &id, path)?;
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|_| "Torrent metadata is unavailable".to_string())?;
+    let details = crate::torrent::torrent_details_from_bytes(&bytes)?;
+    crate::torrent::validate_info_hash(item.torrent_info_hash.as_deref(), &details.info_hash)?;
+    torrent_identity_magnet(&details)
+}
+
+#[tauri::command]
+async fn export_torrent_metadata(
+    state: tauri::State<'_, crate::db::DbState>,
+    app_handle: tauri::AppHandle,
+    id: String,
+    destination: String,
+) -> Result<(), String> {
+    let destination = std::path::PathBuf::from(destination.trim());
+    if !destination.is_absolute()
+        || destination.extension().and_then(|value| value.to_str())
+            .is_none_or(|value| !value.eq_ignore_ascii_case("torrent"))
+    {
+        return Err("Choose an absolute .torrent destination".to_string());
+    }
+    let metadata = std::fs::symlink_metadata(&destination);
+    if let Ok(metadata) = metadata {
+        if metadata.file_type().is_symlink() {
+            return Err("The export destination cannot be a symbolic link".to_string());
+        }
+        return Err("The export destination already exists".to_string());
+    }
+    if let Err(error) = metadata {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err("The export destination cannot be accessed".to_string());
+        }
+    }
+    let parent = destination
+        .parent()
+        .filter(|path| path.is_dir())
+        .ok_or_else(|| "The export destination folder is unavailable".to_string())?;
+    let _canonical_parent = std::fs::canonicalize(parent)
+        .map_err(|_| "The export destination folder is unavailable".to_string())?;
+
+    let item = load_persisted_torrent_item(state.inner(), &id)?;
+    if item.is_torrent != Some(true) {
+        return Err("metadata export is available only for Torrent downloads".to_string());
+    }
+    let path = item
+        .torrent_path
+        .as_deref()
+        .ok_or_else(|| "Torrent metadata is not resolved yet".to_string())?;
+    let path = crate::torrent::validate_managed_torrent_path(&app_handle, &id, path)?;
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|_| "Torrent metadata is unavailable".to_string())?;
+    let details = crate::torrent::torrent_details_from_bytes(&bytes)?;
+    crate::torrent::validate_info_hash(item.torrent_info_hash.as_deref(), &details.info_hash)?;
+
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&destination)
+        .await
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::AlreadyExists => "The export destination already exists".to_string(),
+            _ => "The Torrent metadata could not be exported".to_string(),
+        })?;
+    if file.write_all(&bytes).await.is_err() {
+        let _ = tokio::fs::remove_file(&destination).await;
+        return Err("The Torrent metadata could not be exported".to_string());
+    }
+    if file.sync_all().await.is_err() {
+        let _ = tokio::fs::remove_file(&destination).await;
+        return Err("The Torrent metadata could not be exported".to_string());
+    }
+    Ok(())
+}
+
+fn torrent_move_journal_path(state: &AppState, id: &str) -> Result<std::path::PathBuf, String> {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err("invalid Torrent download id".to_string());
+    }
+    Ok(state
+        .storage_layout
+        .data_dir()
+        .join("torrent-moves")
+        .join(format!("{id}.json")))
+}
+
+async fn write_torrent_move_journal(
+    path: &std::path::Path,
+    phase: &str,
+    id: &str,
+    old_destination: &std::path::Path,
+    new_destination: &std::path::Path,
+    old_primary: Option<&std::path::Path>,
+    old_removal_paths: &[std::path::PathBuf],
+    new_primary: &std::path::Path,
+    new_removal_paths: &[std::path::PathBuf],
+    staging_root: &std::path::Path,
+    staging_paths: &[std::path::PathBuf],
+    old_paths: &[std::path::PathBuf],
+    new_paths: &[std::path::PathBuf],
+    total_bytes: u64,
+) -> Result<(), String> {
+    let data = serde_json::json!({
+        "phase": phase,
+        "id": id,
+        "oldDestination": old_destination,
+        "newDestination": new_destination,
+        "oldPrimary": old_primary,
+        "oldRemovalPaths": old_removal_paths,
+        "newPrimary": new_primary,
+        "newRemovalPaths": new_removal_paths,
+        "stagingRoot": staging_root,
+        "stagingPaths": staging_paths,
+        "oldPaths": old_paths,
+        "newPaths": new_paths,
+        "totalBytes": total_bytes,
+    });
+    let bytes = serde_json::to_vec_pretty(&data)
+        .map_err(|_| "could not encode Torrent move journal".to_string())?;
+    let temporary = path.with_extension("json.tmp");
+    tokio::fs::write(&temporary, bytes)
+        .await
+        .map_err(|_| "could not write Torrent move journal".to_string())?;
+    tokio::fs::rename(&temporary, path)
+        .await
+        .map_err(|_| "could not commit Torrent move journal".to_string())
+}
+
+#[derive(serde::Deserialize)]
+struct TorrentMoveJournal {
+    phase: String,
+    id: String,
+    old_destination: std::path::PathBuf,
+    new_destination: std::path::PathBuf,
+    #[serde(default)]
+    old_primary: Option<std::path::PathBuf>,
+    #[serde(default)]
+    old_removal_paths: Vec<std::path::PathBuf>,
+    #[serde(default)]
+    new_primary: Option<std::path::PathBuf>,
+    #[serde(default)]
+    new_removal_paths: Vec<std::path::PathBuf>,
+    #[serde(default)]
+    staging_root: Option<std::path::PathBuf>,
+    #[serde(default)]
+    staging_paths: Vec<std::path::PathBuf>,
+    old_paths: Vec<std::path::PathBuf>,
+    new_paths: Vec<std::path::PathBuf>,
+}
+
+fn validate_torrent_move_recovery_path(
+    app_handle: &tauri::AppHandle,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    if !path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+        || crate::path_has_symlink_component(path)
+        || !crate::is_safe_path(path, app_handle)
+    {
+        return Err("Torrent move journal contains an unsafe path".to_string());
+    }
+    Ok(())
+}
+
+fn remove_torrent_move_file(path: &std::path::Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("Torrent move recovery could not inspect a managed path".to_string()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err("Torrent move recovery found a non-file managed path".to_string())
+        }
+        Ok(_) => std::fs::remove_file(path)
+            .map_err(|_| "Torrent move recovery could not remove a managed file".to_string()),
+    }
+}
+
+fn remove_torrent_move_staging_root(path: &std::path::Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("Torrent move recovery could not inspect staging".to_string()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err("Torrent move recovery found an unsafe staging path".to_string())
+        }
+        Ok(_) => {
+            let mut entries = std::fs::read_dir(path)
+                .map_err(|_| "Torrent move recovery could not inspect staging".to_string())?;
+            if entries.next().is_some() {
+                return Err("Torrent move recovery found unexpected staging data".to_string());
+            }
+            std::fs::remove_dir(path)
+                .map_err(|_| "Torrent move recovery could not remove staging".to_string())
+        }
+    }
+}
+
+fn remove_empty_torrent_move_directories(
+    files: &[std::path::PathBuf],
+    boundary: &std::path::Path,
+) -> Result<(), String> {
+    let mut directories = Vec::new();
+    for file in files {
+        let mut current = file.parent();
+        while let Some(directory) = current {
+            if crate::platform::paths_equal(directory, boundary)
+                || !crate::platform::path_is_within(directory, boundary)
+            {
+                break;
+            }
+            if !directories
+                .iter()
+                .any(|existing: &std::path::PathBuf| {
+                    crate::platform::paths_equal(existing, directory)
+                })
+            {
+                directories.push(directory.to_path_buf());
+            }
+            current = directory.parent();
+        }
+    }
+    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for directory in directories {
+        match std::fs::symlink_metadata(&directory) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err("Torrent move cleanup could not inspect a directory".to_string()),
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err("Torrent move cleanup found an unsafe directory".to_string());
+            }
+            Ok(_) => {
+                let mut entries = std::fs::read_dir(&directory)
+                    .map_err(|_| "Torrent move cleanup could not inspect a directory".to_string())?;
+                if entries.next().is_some() {
+                    continue;
+                }
+                std::fs::remove_dir(&directory).map_err(|_| {
+                    "Torrent move cleanup could not remove an empty directory".to_string()
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn copy_torrent_move_file(
+    source: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<(), String> {
+    let source_metadata = tokio::fs::symlink_metadata(source)
+        .await
+        .map_err(|_| "Torrent source changed during relocation".to_string())?;
+    if !source_metadata.is_file() || source_metadata.file_type().is_symlink() {
+        return Err("Torrent source changed to a non-file during relocation".to_string());
+    }
+    let mut input = tokio::fs::File::open(source)
+        .await
+        .map_err(|_| "Torrent source could not be opened".to_string())?;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut output = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .await
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::AlreadyExists => {
+                "the Torrent move destination already contains managed output".to_string()
+            }
+            _ => "Torrent move destination could not be created".to_string(),
+        })?;
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .await
+            .map_err(|_| "Torrent source could not be read".to_string())?;
+        if read == 0 {
+            break;
+        }
+        output
+            .write_all(&buffer[..read])
+            .await
+            .map_err(|_| "Torrent move destination could not be written".to_string())?;
+    }
+    output
+        .sync_all()
+        .await
+        .map_err(|_| "Torrent move destination could not be synchronized".to_string())
+}
+
+async fn cleanup_torrent_move_outputs(
+    new_paths: &[std::path::PathBuf],
+    staging_paths: &[std::path::PathBuf],
+    staging_root: &std::path::Path,
+) {
+    for path in new_paths.iter().chain(staging_paths.iter()) {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    let _ = tokio::fs::remove_dir(staging_root).await;
+}
+
+async fn digest_torrent_move_file(path: &std::path::Path) -> Result<[u8; 32], String> {
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|_| "Torrent move file could not be verified".to_string())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("Torrent move file is not a regular file".to_string());
+    }
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| "Torrent move file could not be opened for verification".to_string())?;
+    use sha2::Digest;
+    use tokio::io::AsyncReadExt;
+    let mut digest = sha2::Sha256::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|_| "Torrent move file could not be read for verification".to_string())?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest.finalize().into())
+}
+
+fn recover_torrent_move_journals(
+    app_handle: &tauri::AppHandle,
+    database: &crate::db::DbState,
+    storage_layout: &crate::storage::StorageLayout,
+) -> Result<(), String> {
+    let directory = storage_layout.data_dir().join("torrent-moves");
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("could not inspect Torrent move recovery".to_string()),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let journal: TorrentMoveJournal = match std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        {
+            Some(journal) => journal,
+            None => {
+                log::warn!("leaving malformed Torrent move journal for manual recovery");
+                continue;
+            }
+        };
+        if journal.id.is_empty()
+            || path.file_stem().and_then(|value| value.to_str()) != Some(journal.id.as_str())
+            || journal.old_paths.is_empty()
+            || journal.new_paths.len() != journal.old_paths.len()
+        {
+            log::warn!("leaving invalid Torrent move journal for manual recovery");
+            continue;
+        }
+        let all_paths = journal
+            .old_paths
+            .iter()
+            .chain(journal.new_paths.iter())
+            .chain(journal.old_removal_paths.iter())
+            .chain(journal.new_removal_paths.iter())
+            .chain(journal.old_primary.iter())
+            .chain(journal.new_primary.iter());
+        if all_paths
+            .chain([&journal.old_destination, &journal.new_destination])
+            .any(|path| validate_torrent_move_recovery_path(app_handle, path).is_err())
+        {
+            log::warn!("leaving unsafe Torrent move journal for manual recovery");
+            continue;
+        }
+        if journal.staging_root.as_ref().is_some_and(|root| {
+            validate_torrent_move_recovery_path(app_handle, root).is_err()
+                || !crate::platform::path_is_within(root, &journal.new_destination)
+        }) || journal.staging_paths.iter().any(|path| {
+            validate_torrent_move_recovery_path(app_handle, path).is_err()
+                || journal
+                    .staging_root
+                    .as_ref()
+                    .is_none_or(|root| !crate::platform::path_is_within(path, root))
+        }) {
+            log::warn!("leaving unsafe Torrent staging journal for manual recovery");
+            continue;
+        }
+        let mut old_owned_paths = journal
+            .old_paths
+            .iter()
+            .chain(journal.old_removal_paths.iter())
+            .chain(journal.old_primary.iter());
+        let mut new_owned_paths = journal
+            .new_paths
+            .iter()
+            .chain(journal.new_removal_paths.iter())
+            .chain(journal.new_primary.iter());
+        if old_owned_paths.any(|path| {
+            !crate::platform::path_is_within(path, &journal.old_destination)
+        }) || new_owned_paths.any(|path| {
+            !crate::platform::path_is_within(path, &journal.new_destination)
+        }) {
+            log::warn!("leaving Torrent move journal with paths outside its roots");
+            continue;
+        }
+        let item = match load_persisted_torrent_item(database, &journal.id) {
+            Ok(item) => item,
+            Err(_) => {
+                log::warn!(
+                    "leaving Torrent move journal {} because its download row is absent",
+                    journal.id
+                );
+                continue;
+            }
+        };
+        let current_destination = item
+            .destination
+            .as_deref()
+            .map(|value| crate::resolve_path(value, app_handle));
+        let database_committed = current_destination
+            .as_deref()
+            .is_some_and(|value| crate::platform::paths_equal(value, &journal.new_destination));
+        if database_committed
+            || matches!(journal.phase.as_str(), "databaseCommitted" | "sourceCleanupPending")
+        {
+            let mut cleanup_error = None;
+            for old_path in &journal.old_paths {
+                if let Err(error) = remove_torrent_move_file(old_path) {
+                    cleanup_error = Some(error);
+                    break;
+                }
+            }
+            if cleanup_error.is_none() {
+                if let Err(error) = remove_empty_torrent_move_directories(
+                    &journal.old_paths,
+                    &journal.old_destination,
+                ) {
+                    cleanup_error = Some(error);
+                }
+            }
+            if cleanup_error.is_none() {
+                for staging_path in &journal.staging_paths {
+                    if let Err(error) = remove_torrent_move_file(staging_path) {
+                        cleanup_error = Some(error);
+                        break;
+                    }
+                }
+            }
+            if cleanup_error.is_none() {
+                if let Some(root) = journal.staging_root.as_ref() {
+                    if let Err(error) = remove_torrent_move_staging_root(root) {
+                        cleanup_error = Some(error);
+                    }
+                }
+            }
+            if let Some(error) = cleanup_error {
+                log::warn!(
+                    "Torrent move recovery [{}] retained the journal: {}",
+                    journal.id,
+                    error
+                );
+                let _ = persist_torrent_relocation_check(database, &journal.id, true);
+                continue;
+            }
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        let database_is_old = current_destination
+            .as_deref()
+            .is_some_and(|value| crate::platform::paths_equal(value, &journal.old_destination));
+        if !database_is_old {
+            log::warn!(
+                "leaving Torrent move journal {} because its destination is neither transaction endpoint",
+                journal.id
+            );
+            continue;
+        }
+        let mut cleanup_error = None;
+        for new_path in &journal.new_paths {
+            if let Err(error) = remove_torrent_move_file(new_path) {
+                cleanup_error = Some(error);
+                break;
+            }
+        }
+        if cleanup_error.is_none() {
+            for staging_path in &journal.staging_paths {
+                if let Err(error) = remove_torrent_move_file(staging_path) {
+                    cleanup_error = Some(error);
+                    break;
+                }
+            }
+        }
+        if cleanup_error.is_none() {
+            if let Some(root) = journal.staging_root.as_ref() {
+                if let Err(error) = remove_torrent_move_staging_root(root) {
+                    cleanup_error = Some(error);
+                }
+            }
+        }
+        if let Some(error) = cleanup_error {
+            log::warn!(
+                "Torrent move recovery [{}] retained the journal: {}",
+                journal.id,
+                error
+            );
+            continue;
+        }
+        let old_primary = journal
+            .old_primary
+            .as_ref()
+            .or_else(|| journal.old_paths.first());
+        let old_owned_paths = journal
+            .old_paths
+            .iter()
+            .filter(|path| {
+                !journal
+                    .old_removal_paths
+                    .iter()
+                    .any(|removal| crate::platform::paths_equal(path, removal))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(old_primary) = old_primary {
+            if let Err(error) = crate::download_ownership::set_owned_paths_with_primary_and_removal(
+                app_handle,
+                &journal.id,
+                old_primary,
+                &old_owned_paths,
+                &journal.old_removal_paths,
+            ) {
+                log::warn!(
+                    "Torrent move recovery [{}] could not restore ownership: {}",
+                    journal.id,
+                    error
+                );
+                continue;
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+    Ok(())
+}
+
+fn torrent_move_path_pair(
+    old_root: &std::path::Path,
+    new_root: &std::path::Path,
+    path: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    if crate::platform::paths_equal(path, old_root) {
+        if crate::path_has_symlink_component(new_root) {
+            return Err("Torrent move destination contains a symbolic link".to_string());
+        }
+        return crate::canonicalize_with_missing_components(new_root)
+            .ok_or_else(|| "Torrent move destination could not be canonicalized".to_string());
+    }
+    let relative = path
+        .strip_prefix(old_root)
+        .map_err(|_| "managed Torrent output is outside its current root".to_string())?;
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err("managed Torrent output path is unsafe".to_string());
+    }
+    let target = new_root.join(relative);
+    if crate::path_has_symlink_component(&target) {
+        return Err("Torrent move destination contains a symbolic link".to_string());
+    }
+    Ok(crate::canonicalize_with_missing_components(&target)
+        .ok_or_else(|| "Torrent move destination could not be canonicalized".to_string())?)
+}
+
+#[tauri::command]
+async fn move_torrent_data(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    database: tauri::State<'_, crate::db::DbState>,
+    id: String,
+    destination: String,
+) -> Result<(), String> {
+    let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    let item = load_persisted_torrent_item(database.inner(), &id)?;
+    if item.is_torrent != Some(true) {
+        return Err("data relocation is available only for Torrent downloads".to_string());
+    }
+    if !matches!(item.status, crate::ipc::DownloadStatus::Paused | crate::ipc::DownloadStatus::Completed | crate::ipc::DownloadStatus::Failed) {
+        return Err("pause the Torrent before moving its data".to_string());
+    }
+    if state.queue_manager.aria2_gid_for_download(&id).is_some() {
+        return Err("the Torrent still has an active daemon lifecycle".to_string());
+    }
+    let old_destination = crate::resolve_path(
+        item.destination
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "Torrent data has no current destination".to_string())?,
+        &app_handle,
+    );
+    if !old_destination.is_absolute()
+        || crate::path_has_symlink_component(&old_destination)
+        || !crate::is_safe_path(&old_destination, &app_handle)
+    {
+        return Err("Torrent current destination is unsafe".to_string());
+    }
+    let old_destination = std::fs::canonicalize(&old_destination)
+        .map_err(|_| "Torrent current destination is unavailable".to_string())?;
+    let new_destination = std::path::PathBuf::from(destination.trim());
+    if !new_destination.is_absolute()
+        || !new_destination.is_dir()
+        || crate::path_has_symlink_component(&new_destination)
+        || !crate::is_safe_path(&new_destination, &app_handle)
+    {
+        return Err("choose an existing managed destination folder without symbolic links".to_string());
+    }
+    let new_destination = std::fs::canonicalize(&new_destination)
+        .map_err(|_| "Torrent move destination could not be canonicalized".to_string())?;
+    if crate::platform::paths_equal(&old_destination, &new_destination) {
+        return Err("the Torrent is already in that destination".to_string());
+    }
+
+    let torrent_path = item
+        .torrent_path
+        .as_deref()
+        .ok_or_else(|| "Torrent metadata is not resolved yet".to_string())?;
+    let torrent_path = crate::torrent::validate_managed_torrent_path(&app_handle, &id, torrent_path)?;
+    let bytes = tokio::fs::read(&torrent_path)
+        .await
+        .map_err(|_| "Torrent metadata is unavailable".to_string())?;
+    let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
+    crate::torrent::validate_info_hash(item.torrent_info_hash.as_deref(), &metadata.info_hash)?;
+
+    let ownership = snapshot_download_ownership(&app_handle, &id)?;
+    let old_paths = ownership.owned.clone();
+    if old_paths.is_empty() {
+        return Err("Torrent data has no managed output files".to_string());
+    }
+    let old_root = if metadata.files.len() == 1 {
+        old_destination.clone()
+    } else {
+        old_destination.join(&item.file_name)
+    };
+    let new_root = if metadata.files.len() == 1 {
+        new_destination.clone()
+    } else {
+        new_destination.join(&item.file_name)
+    };
+    let new_paths = old_paths
+        .iter()
+        .map(|path| {
+            if !path.is_file()
+                || std::fs::symlink_metadata(path)
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return Err("managed Torrent output is missing or symbolic".to_string());
+            }
+            torrent_move_path_pair(&old_root, &new_root, path)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let old_primary = ownership
+        .primary
+        .as_ref()
+        .ok_or_else(|| "Torrent ownership is unavailable".to_string())?;
+    let new_primary = torrent_move_path_pair(&old_root, &new_root, old_primary)?;
+    let new_removal_paths = ownership
+        .removal
+        .iter()
+        .map(|path| torrent_move_path_pair(&old_root, &new_root, path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut move_old_paths = old_paths.clone();
+    let mut move_new_paths = new_paths.clone();
+    for (old_path, new_path) in ownership.removal.iter().zip(new_removal_paths.iter()) {
+        match std::fs::symlink_metadata(old_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err("managed Torrent removal path is not a regular file".to_string());
+            }
+            Ok(_) => {
+                if !move_old_paths
+                    .iter()
+                    .any(|path| crate::platform::paths_equal(path, old_path))
+                {
+                    move_old_paths.push(old_path.clone());
+                    move_new_paths.push(new_path.clone());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("managed Torrent removal path could not be inspected".to_string()),
+        }
+    }
+    if new_paths.iter().any(|path| std::fs::symlink_metadata(path).is_ok())
+        || new_removal_paths
+            .iter()
+            .any(|path| std::fs::symlink_metadata(path).is_ok())
+    {
+        return Err("the Torrent move destination already contains managed output".to_string());
+    }
+    let total_bytes = move_old_paths
+        .iter()
+        .map(|path| std::fs::metadata(path).map(|metadata| metadata.len()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "could not read Torrent data size".to_string())?
+        .into_iter()
+        .try_fold(0u64, u64::checked_add)
+        .ok_or_else(|| "Torrent move size overflowed".to_string())?;
+    let staging_root = new_destination.join(format!(".firelink-torrent-move-{id}"));
+    if crate::path_has_symlink_component(&staging_root)
+        || std::fs::symlink_metadata(&staging_root).is_ok()
+    {
+        return Err("the Torrent move staging location is unavailable".to_string());
+    }
+    let staging_paths = move_new_paths
+        .iter()
+        .enumerate()
+        .map(|(index, _)| staging_root.join(format!("{index:08}.part")))
+        .collect::<Vec<_>>();
+    for path in &move_new_paths {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|_| "could not prepare the Torrent move destination".to_string())?;
+        }
+    }
+
+    let journal = torrent_move_journal_path(&state, &id)?;
+    if let Some(parent) = journal.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|_| "could not prepare Torrent move recovery".to_string())?;
+    }
+    state.queue_manager.begin_torrent_move(&id).await;
+    if let Err(error) = write_torrent_move_journal(
+        &journal,
+        "reserved",
+        &id,
+        &old_destination,
+        &new_destination,
+        ownership.primary.as_deref(),
+        &ownership.removal,
+        &new_primary,
+        &new_removal_paths,
+        &staging_root,
+        &staging_paths,
+        &move_old_paths,
+        &move_new_paths,
+        total_bytes,
+    )
+    .await
+    {
+        state.queue_manager.finish_torrent_move(&id).await;
+        return Err(error);
+    }
+    if let Err(error) = tokio::fs::create_dir(&staging_root).await {
+        let _ = tokio::fs::remove_file(&journal).await;
+        state.queue_manager.finish_torrent_move(&id).await;
+        return Err(format!("could not prepare Torrent move staging: {error}"));
+    }
+    if let Err(error) = crate::download_ownership::set_owned_paths_with_primary_and_removal(
+        &app_handle,
+        &id,
+        &new_primary,
+        &new_paths,
+        &new_removal_paths,
+    ) {
+        let _ = tokio::fs::remove_file(&journal).await;
+        state.queue_manager.finish_torrent_move(&id).await;
+        return Err(error);
+    }
+
+    use tauri::Emitter;
+    let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, crate::ipc::DownloadStatus::Moving));
+    let mut copied_bytes = 0u64;
+    for (source, target) in move_old_paths.iter().zip(staging_paths.iter()) {
+        if state.queue_manager.torrent_move_cancelled(&id).await {
+            cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
+            let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
+            let _ = tokio::fs::remove_file(&journal).await;
+            state.queue_manager.finish_torrent_move(&id).await;
+            let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, item.status));
+            return Err("Torrent move canceled".to_string());
+        }
+        if let Err(error) = copy_torrent_move_file(source, target).await {
+            cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
+            let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
+            let _ = tokio::fs::remove_file(&journal).await;
+            state.queue_manager.finish_torrent_move(&id).await;
+            let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, item.status));
+            return Err(error);
+        }
+        let source_size = match tokio::fs::metadata(source).await {
+            Ok(metadata) => metadata.len(),
+            Err(_) => {
+                cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
+                let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
+                let _ = tokio::fs::remove_file(&journal).await;
+                state.queue_manager.finish_torrent_move(&id).await;
+                let _ = app_handle.emit(
+                    "download-state",
+                    crate::ipc::DownloadStateEvent::new(&id, item.status),
+                );
+                return Err("Torrent source changed during relocation".to_string());
+            }
+        };
+        let target_size = match tokio::fs::metadata(target).await {
+            Ok(metadata) => metadata.len(),
+            Err(_) => {
+                cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
+                let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
+                let _ = tokio::fs::remove_file(&journal).await;
+                state.queue_manager.finish_torrent_move(&id).await;
+                let _ = app_handle.emit(
+                    "download-state",
+                    crate::ipc::DownloadStateEvent::new(&id, item.status),
+                );
+                return Err("Torrent destination could not be verified".to_string());
+            }
+        };
+        if source_size != target_size {
+            cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
+            let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
+            let _ = tokio::fs::remove_file(&journal).await;
+            let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, item.status));
+            return Err("Torrent data changed during relocation".to_string());
+        }
+        let source_digest = digest_torrent_move_file(source).await;
+        let target_digest = digest_torrent_move_file(target).await;
+        if source_digest.is_err() || target_digest.is_err() || source_digest.ok() != target_digest.ok() {
+            cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
+            let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
+            let _ = tokio::fs::remove_file(&journal).await;
+            let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, item.status));
+            return Err("Torrent data changed during relocation".to_string());
+        }
+        copied_bytes = copied_bytes.saturating_add(target_size);
+        let _ = app_handle.emit("torrent-move-progress", crate::ipc::TorrentMoveProgressEvent {
+            id: id.clone(),
+            fraction: if total_bytes == 0 { 1.0 } else { copied_bytes as f64 / total_bytes as f64 },
+            copied_bytes,
+            total_bytes,
+        });
+    }
+    if state.queue_manager.torrent_move_cancelled(&id).await {
+        cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
+        let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
+        let _ = tokio::fs::remove_file(&journal).await;
+        state.queue_manager.finish_torrent_move(&id).await;
+        let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, item.status));
+        return Err("Torrent move canceled".to_string());
+    }
+    for (staged, target) in staging_paths.iter().zip(move_new_paths.iter()) {
+        if tokio::fs::rename(staged, target).await.is_err() {
+            cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
+            let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
+            let _ = tokio::fs::remove_file(&journal).await;
+            state.queue_manager.finish_torrent_move(&id).await;
+            let _ = app_handle.emit(
+                "download-state",
+                crate::ipc::DownloadStateEvent::new(&id, item.status),
+            );
+            return Err("Torrent move destination could not be published".to_string());
+        }
+    }
+    if tokio::fs::remove_dir(&staging_root).await.is_err() {
+        cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
+        let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
+        let _ = tokio::fs::remove_file(&journal).await;
+        state.queue_manager.finish_torrent_move(&id).await;
+        let _ = app_handle.emit(
+            "download-state",
+            crate::ipc::DownloadStateEvent::new(&id, item.status),
+        );
+        return Err("Torrent move staging could not be finalized".to_string());
+    }
+    if let Err(error) = write_torrent_move_journal(
+        &journal,
+        "copied",
+        &id,
+        &old_destination,
+        &new_destination,
+        ownership.primary.as_deref(),
+        &ownership.removal,
+        &new_primary,
+        &new_removal_paths,
+        &staging_root,
+        &staging_paths,
+        &move_old_paths,
+        &move_new_paths,
+        total_bytes,
+    )
+    .await
+    {
+        cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
+        let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
+        let _ = tokio::fs::remove_file(&journal).await;
+        state.queue_manager.finish_torrent_move(&id).await;
+        let _ = app_handle.emit(
+            "download-state",
+            crate::ipc::DownloadStateEvent::new(&id, item.status),
+        );
+        return Err(error);
+    }
+    let relocation_check_pending = item.torrent_relocation_check_pending == Some(true)
+        || matches!(
+            item.status,
+            crate::ipc::DownloadStatus::Paused | crate::ipc::DownloadStatus::Failed
+        );
+    if let Err(error) = persist_torrent_destination(
+        database.inner(),
+        &id,
+        &new_destination.to_string_lossy(),
+        relocation_check_pending,
+    ) {
+        cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
+        let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
+        let _ = tokio::fs::remove_file(&journal).await;
+        state.queue_manager.finish_torrent_move(&id).await;
+        let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, item.status));
+        return Err(error);
+    }
+    if let Err(error) = write_torrent_move_journal(
+        &journal,
+        "databaseCommitted",
+        &id,
+        &old_destination,
+        &new_destination,
+        ownership.primary.as_deref(),
+        &ownership.removal,
+        &new_primary,
+        &new_removal_paths,
+        &staging_root,
+        &staging_paths,
+        &move_old_paths,
+        &move_new_paths,
+        total_bytes,
+    )
+    .await
+    {
+        // The database is already authoritative. Keep the prior journal and
+        // let startup recovery finish old-source cleanup from the committed
+        // destination rather than rolling the row back after commit.
+        let _ = persist_torrent_relocation_check(database.inner(), &id, true);
+        state.queue_manager.finish_torrent_move(&id).await;
+        let _ = app_handle.emit(
+            "download-state",
+            crate::ipc::DownloadStateEvent::new(&id, item.status),
+        );
+        return Err(format!("Torrent data moved; cleanup recovery remains pending: {error}"));
+    }
+    let mut cleanup_error: Option<String> = None;
+    for path in &move_old_paths {
+        if let Err(error) = tokio::fs::remove_file(path).await {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                cleanup_error = Some(error.to_string());
+            }
+        }
+    }
+    if cleanup_error.is_none() {
+        if let Err(error) = remove_empty_torrent_move_directories(
+            &move_old_paths,
+            &old_destination,
+        ) {
+            cleanup_error = Some(error);
+        }
+    }
+    if let Some(error) = cleanup_error {
+        let _ = persist_torrent_destination(database.inner(), &id, &new_destination.to_string_lossy(), true);
+        if let Err(journal_error) = write_torrent_move_journal(
+            &journal,
+            "sourceCleanupPending",
+            &id,
+            &old_destination,
+            &new_destination,
+            ownership.primary.as_deref(),
+            &ownership.removal,
+            &new_primary,
+            &new_removal_paths,
+            &staging_root,
+            &staging_paths,
+            &move_old_paths,
+            &move_new_paths,
+            total_bytes,
+        ).await {
+            state.queue_manager.finish_torrent_move(&id).await;
+            let _ = app_handle.emit(
+                "download-state",
+                crate::ipc::DownloadStateEvent::new(&id, item.status),
+            );
+            return Err(format!(
+                "Torrent data moved, but cleanup recovery could not be recorded: {journal_error}"
+            ));
+        }
+        state.queue_manager.finish_torrent_move(&id).await;
+        let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, item.status));
+        drop(control_guard);
+        return Err(format!("Torrent data moved, but old files need cleanup: {error}"));
+    }
+    let _ = tokio::fs::remove_file(&journal).await;
+    state.queue_manager.finish_torrent_move(&id).await;
+    let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, item.status));
+    drop(control_guard);
+    Ok(())
+}
+
+#[tauri::command]
+async fn cancel_torrent_move_data(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    if id.trim().is_empty() {
+        return Err("invalid Torrent download id".to_string());
+    }
+    state.queue_manager.cancel_torrent_move(&id).await;
+    Ok(())
 }
 
 fn verification_destination(
@@ -7310,6 +8520,7 @@ fn replace_persisted_torrent_web_seeds(
                 .ok_or_else(|| "persisted download is not an object".to_string())?;
             previous_seeds = object.get("torrentWebSeeds").cloned();
             object.insert("torrentWebSeeds".to_string(), next_seeds.clone());
+            object.insert("torrentWebSeedsNative".to_string(), next_seeds.clone());
             changed = true;
         }
         next.push(
@@ -7365,6 +8576,7 @@ fn restore_persisted_torrent_web_seeds(
                         object.remove("torrentWebSeeds");
                     }
                 }
+                object.remove("torrentWebSeedsNative");
                 changed = true;
             } else {
                 log::warn!(
@@ -7424,10 +8636,14 @@ async fn get_torrent_web_seeds(
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<Vec<crate::ipc::TorrentWebSeed>, String> {
+    let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     if state.queue_manager.is_registered(&id).await
         && matches!(state.queue_manager.active_kind(&id).await, Some(crate::queue::TaskKind::Aria2))
     {
-        return state.queue_manager.get_aria2_torrent_web_seeds(&id).await;
+        return state
+            .queue_manager
+            .get_aria2_torrent_web_seeds_locked(&id, &control_guard)
+            .await;
     }
     let persisted_seeds = {
         let connection = database.lock()?;
@@ -7463,12 +8679,13 @@ async fn set_torrent_web_seeds(
     id: String,
     seeds: Vec<crate::ipc::TorrentWebSeed>,
 ) -> Result<Vec<crate::ipc::TorrentWebSeed>, String> {
+    let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     let active = state.queue_manager.is_registered(&id).await
         && matches!(state.queue_manager.active_kind(&id).await, Some(crate::queue::TaskKind::Aria2));
     let normalized = if active {
         state
             .queue_manager
-            .normalize_aria2_torrent_web_seeds(&id, &seeds)
+            .normalize_aria2_torrent_web_seeds_locked(&id, &seeds, &control_guard)
             .await?
     } else {
         normalize_persisted_torrent_web_seeds(
@@ -7492,7 +8709,7 @@ async fn set_torrent_web_seeds(
     }
     match state
         .queue_manager
-        .set_aria2_torrent_web_seeds(&id, normalized.clone())
+        .set_aria2_torrent_web_seeds_locked(&id, normalized.clone(), &control_guard)
         .await
     {
         Ok((result, previous_live_seeds)) => {
@@ -7505,7 +8722,11 @@ async fn set_torrent_web_seeds(
                 // persistence failure to the caller.
                 if let Err(rollback_error) = state
                     .queue_manager
-                    .set_aria2_torrent_web_seeds(&id, previous_live_seeds)
+                    .set_aria2_torrent_web_seeds_locked(
+                        &id,
+                        previous_live_seeds,
+                        &control_guard,
+                    )
                     .await
                 {
                     log::error!(
@@ -8449,7 +9670,131 @@ fn db_replace_downloads(
 ) -> Result<(), String> {
     let portable = state.is_portable();
     let mut connection = state.lock()?;
+    let existing = crate::db::load_downloads(&connection)?;
+    let data = merge_durable_torrent_telemetry(&existing, &data)?;
     crate::db::replace_downloads(&mut connection, &data, portable)
+}
+
+fn persisted_destinations_equal(left: &str, right: &str) -> bool {
+    let left = std::path::Path::new(left.trim());
+    let right = std::path::Path::new(right.trim());
+    crate::platform::paths_equal(left, right)
+        || std::fs::canonicalize(left)
+            .ok()
+            .zip(std::fs::canonicalize(right).ok())
+            .is_some_and(|(left, right)| crate::platform::paths_equal(&left, &right))
+}
+
+/// The renderer saves complete download snapshots, while native commands and
+/// the poller checkpoint Torrent state independently. Merge these writers at
+/// the persistence boundary so an older renderer snapshot cannot lower native
+/// lifetime totals or roll back a just-committed relocation.
+fn merge_durable_torrent_telemetry(existing: &[String], data: &str) -> Result<String, String> {
+    let mut native_state: HashMap<
+        String,
+        (u64, u64, Option<String>, Option<serde_json::Value>),
+    > = HashMap::new();
+    for record in existing {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(record) else {
+            continue;
+        };
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+        let Some(id) = object.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let uploaded = object
+            .get("torrentUploadedBytes")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let seeded = object
+            .get("torrentSeededSeconds")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        native_state.insert(
+            id.to_string(),
+            (
+                uploaded,
+                seeded,
+                object
+                    .get("torrentMoveDestination")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string),
+                object.get("torrentWebSeedsNative").cloned(),
+            ),
+        );
+    }
+
+    let mut values: serde_json::Value = serde_json::from_str(data)
+        .map_err(|error| format!("failed to decode downloads: {error}"))?;
+    let records = values
+        .as_array_mut()
+        .ok_or_else(|| "persisted downloads must be an array".to_string())?;
+    for value in records {
+        let Some(object) = value.as_object_mut() else {
+            continue;
+        };
+        let Some(id) = object.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some((existing_uploaded, existing_seeded, native_destination, native_web_seeds)) =
+            native_state.get(id).cloned()
+        else {
+            continue;
+        };
+        if let Some(native_destination) = native_destination {
+            let incoming_destination = object
+                .get("destination")
+                .and_then(serde_json::Value::as_str);
+            if incoming_destination
+                .is_some_and(|value| persisted_destinations_equal(value, &native_destination))
+            {
+                object.remove("torrentMoveDestination");
+            } else {
+                object.insert(
+                    "destination".to_string(),
+                    serde_json::Value::String(native_destination.clone()),
+                );
+                object.insert(
+                    "torrentMoveDestination".to_string(),
+                    serde_json::Value::String(native_destination),
+                );
+            }
+        }
+        if let Some(native_web_seeds) = native_web_seeds {
+            if object.get("torrentWebSeeds") == Some(&native_web_seeds) {
+                object.remove("torrentWebSeedsNative");
+            } else {
+                object.insert("torrentWebSeeds".to_string(), native_web_seeds.clone());
+                object.insert("torrentWebSeedsNative".to_string(), native_web_seeds);
+            }
+        }
+        let uploaded = object
+            .get("torrentUploadedBytes")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+            .max(existing_uploaded);
+        let seeded = object
+            .get("torrentSeededSeconds")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+            .max(existing_seeded);
+        if existing_uploaded > 0 || object.contains_key("torrentUploadedBytes") {
+            object.insert(
+                "torrentUploadedBytes".to_string(),
+                serde_json::Value::from(uploaded),
+            );
+        }
+        if existing_seeded > 0 || object.contains_key("torrentSeededSeconds") {
+            object.insert(
+                "torrentSeededSeconds".to_string(),
+                serde_json::Value::from(seeded),
+            );
+        }
+    }
+    serde_json::to_string(&values)
+        .map_err(|error| format!("failed to encode downloads: {error}"))
 }
 
 #[tauri::command]
@@ -8894,6 +10239,7 @@ mod tests {
         validate_enqueue_url, validate_enqueue_uris, validate_keychain_grant_request_id,
         retained_torrent_id_from_persisted_record,
         retained_torrent_info_hash_from_persisted_record,
+        merge_durable_torrent_telemetry, torrent_identity_magnet, torrent_move_path_pair,
     };
     #[cfg(target_os = "macos")]
     use super::should_apply_dock_badge_update;
@@ -8907,6 +10253,128 @@ mod tests {
         assert!(validate_keychain_grant_request_id("").is_err());
         assert!(validate_keychain_grant_request_id("   ").is_err());
         assert!(validate_keychain_grant_request_id(&"x".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn renderer_download_snapshots_cannot_lower_native_torrent_totals() {
+        let existing = vec![
+            json!({
+                "id": "torrent-1",
+                "torrentUploadedBytes": 900,
+                "torrentSeededSeconds": 45
+            })
+            .to_string(),
+        ];
+        let merged = merge_durable_torrent_telemetry(
+            &existing,
+            &json!([
+                { "id": "torrent-1", "torrentUploadedBytes": 12, "torrentSeededSeconds": 90 },
+                { "id": "file-1" }
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let records: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(records[0]["torrentUploadedBytes"], 900);
+        assert_eq!(records[0]["torrentSeededSeconds"], 90);
+    }
+
+    #[test]
+    fn renderer_download_snapshots_cannot_roll_back_a_native_relocation() {
+        let existing = vec![
+            json!({
+                "id": "torrent-1",
+                "destination": "/downloads/new",
+                "torrentMoveDestination": "/downloads/new"
+            })
+            .to_string(),
+        ];
+        let merged = merge_durable_torrent_telemetry(
+            &existing,
+            &json!([{ "id": "torrent-1", "destination": "/downloads/old" }]).to_string(),
+        )
+        .unwrap();
+        let records: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(records[0]["destination"], "/downloads/new");
+        assert_eq!(records[0]["torrentMoveDestination"], "/downloads/new");
+
+        let acknowledged = merge_durable_torrent_telemetry(
+            &existing,
+            &json!([{ "id": "torrent-1", "destination": "/downloads/new" }]).to_string(),
+        )
+        .unwrap();
+        let acknowledged: serde_json::Value = serde_json::from_str(&acknowledged).unwrap();
+        assert!(acknowledged[0].get("torrentMoveDestination").is_none());
+    }
+
+    #[test]
+    fn renderer_download_snapshots_cannot_roll_back_native_web_seed_changes() {
+        let native_seeds = json!([{ "fileIndex": 0, "uri": "https://mirror.example/file" }]);
+        let existing = vec![
+            json!({
+                "id": "torrent-1",
+                "torrentWebSeeds": native_seeds.clone(),
+                "torrentWebSeedsNative": native_seeds.clone()
+            })
+            .to_string(),
+        ];
+        let merged = merge_durable_torrent_telemetry(
+            &existing,
+            &json!([{ "id": "torrent-1", "torrentWebSeeds": [] }]).to_string(),
+        )
+        .unwrap();
+        let records: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(records[0]["torrentWebSeeds"][0]["uri"], "https://mirror.example/file");
+        assert!(records[0].get("torrentWebSeedsNative").is_some());
+
+        let acknowledged = merge_durable_torrent_telemetry(
+            &existing,
+            &json!([{ "id": "torrent-1", "torrentWebSeeds": native_seeds }]).to_string(),
+        )
+        .unwrap();
+        let acknowledged: serde_json::Value = serde_json::from_str(&acknowledged).unwrap();
+        assert!(acknowledged[0].get("torrentWebSeedsNative").is_none());
+    }
+
+    #[test]
+    fn torrent_identity_magnet_is_bounded_and_credential_free() {
+        let details = crate::ipc::TorrentDetails {
+            info_hash: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            display_name: "folder/preview & name".to_string(),
+            total_bytes: 1,
+            file_count: 1,
+            piece_length: 1,
+            piece_count: 1,
+            private: true,
+            creation_date: None,
+            creator: None,
+            comment: None,
+            trackers: vec!["https://tracker.example/passkey".to_string()],
+            web_seeds: vec!["https://cdn.example/file".to_string()],
+        };
+        let magnet = torrent_identity_magnet(&details).unwrap();
+        assert_eq!(
+            magnet,
+            "magnet:?xt=urn%3Abtih%3A0123456789abcdef0123456789abcdef01234567&dn=preview+%26+name"
+        );
+        assert!(!magnet.contains("tracker"));
+        assert!(!magnet.contains("passkey"));
+    }
+
+    #[test]
+    fn torrent_move_root_mapping_handles_single_file_output() {
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let old_root = root.path().join("old");
+        let new_root = root.path().join("new");
+        std::fs::create_dir_all(&old_root).unwrap();
+        std::fs::create_dir_all(&new_root).unwrap();
+        let mapped = torrent_move_path_pair(&old_root, &new_root, &old_root).unwrap();
+        assert_eq!(mapped, new_root.canonicalize().unwrap());
+        let child = old_root.join("file.bin");
+        assert_eq!(
+            torrent_move_path_pair(&old_root, &new_root, &child).unwrap(),
+            new_root.join("file.bin")
+        );
     }
 
     #[test]
@@ -11623,6 +13091,13 @@ pub fn run() {
 
             let database = crate::db::init(&storage_layout)
                 .map_err(|error| format!("failed to initialize persistence: {error}"))?;
+            if let Err(error) = recover_torrent_move_journals(
+                app.handle(),
+                &database,
+                &storage_layout,
+            ) {
+                log::warn!("Torrent move recovery did not complete: {error}");
+            }
             // Establish Firelink-owned Aria2 routing-table paths after the
             // existing data-root initializer has created the selected storage
             // directory, but before the daemon launcher is scheduled. A
@@ -12153,6 +13628,12 @@ pub fn run() {
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(1000));
                 let mut observations: HashMap<String, Aria2ConnectionObservation> = HashMap::new();
                 let mut missing_gid_recovery_at: HashMap<String, Instant> = HashMap::new();
+                let mut telemetry_hydrated = HashSet::new();
+                let mut telemetry_persisted: HashMap<
+                    String,
+                    crate::queue::TorrentTelemetrySnapshot,
+                > = HashMap::new();
+                let mut relocation_checks = HashSet::new();
                 loop {
                     interval.tick().await;
                     // Terminal cleanup removes a download's GID mapping. Do
@@ -12165,6 +13646,9 @@ pub fn run() {
                         .collect();
                     observations.retain(|id, _| mapped_ids.contains(id));
                     missing_gid_recovery_at.retain(|id, _| mapped_ids.contains(id));
+                    telemetry_hydrated.retain(|id| mapped_ids.contains(id));
+                    telemetry_persisted.retain(|id, _| mapped_ids.contains(id));
+                    relocation_checks.retain(|id| mapped_ids.contains(id));
                     let params = serde_json::json!([[
                         "gid",
                         "status",
@@ -12269,6 +13753,78 @@ pub fn run() {
                                     {
                                         continue;
                                     }
+                                    let torrent_telemetry = if is_torrent {
+                                        if !telemetry_hydrated.contains(&id) {
+                                            match load_persisted_torrent_item(
+                                                &app_handle_poll.state::<crate::db::DbState>(),
+                                                &id,
+                                            ) {
+                                                Ok(item) => {
+                                                    poll_mgr
+                                                        .hydrate_torrent_telemetry(
+                                                            &id,
+                                                            item.torrent_uploaded_bytes.unwrap_or(0),
+                                                            item.torrent_seeded_seconds.unwrap_or(0),
+                                                        )
+                                                        .await;
+                                                    if item.torrent_relocation_check_pending
+                                                        == Some(true)
+                                                    {
+                                                        relocation_checks.insert(id.clone());
+                                                    }
+                                                    telemetry_hydrated.insert(id.clone());
+                                                }
+                                                Err(error) => {
+                                                    log::debug!(
+                                                        "aria2 telemetry [{}]: could not hydrate durable totals: {}",
+                                                        id,
+                                                        error
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        let seed_permit_owned = poll_mgr
+                                            .aria2_torrent_seed_permit_owned(&id)
+                                            .await;
+                                        Some(
+                                            poll_mgr
+                                                .observe_torrent_telemetry(
+                                                    &id,
+                                                    gid,
+                                                    control_epoch,
+                                                    uploaded_bytes,
+                                                    is_seeder && seed_permit_owned,
+                                                    Instant::now(),
+                                                )
+                                                .await,
+                                        )
+                                    } else {
+                                        None
+                                    };
+                                    if !poll_mgr.is_current_aria2_gid_mapping(gid, &mapping)
+                                        || !poll_mgr
+                                            .is_aria2_control_epoch_current(&id, control_epoch)
+                                            .await
+                                    {
+                                        continue;
+                                    }
+                                    if let Some(snapshot) = torrent_telemetry {
+                                        if telemetry_persisted.get(&id) != Some(&snapshot) {
+                                            if let Err(error) = persist_torrent_telemetry(
+                                                &app_handle_poll.state::<crate::db::DbState>(),
+                                                &id,
+                                                snapshot,
+                                            ) {
+                                                log::debug!(
+                                                    "aria2 telemetry [{}]: could not persist durable totals: {}",
+                                                    id,
+                                                    error
+                                                );
+                                            } else {
+                                                telemetry_persisted.insert(id.clone(), snapshot);
+                                            }
+                                        }
+                                    }
                                     let is_verifying = is_torrent
                                         && (verify_pending
                                             || (status == "active"
@@ -12278,6 +13834,31 @@ pub fn run() {
                                     let entering_verifying = is_verifying && !observation.verifying;
                                     let leaving_verifying = !is_verifying && observation.verifying;
                                     observation.verifying = is_verifying;
+                                    if relocation_checks.contains(&id)
+                                        && leaving_verifying
+                                        && matches!(status, "active" | "waiting")
+                                        && poll_mgr.is_current_aria2_gid_mapping(gid, &mapping)
+                                        && poll_mgr
+                                            .is_aria2_control_epoch_current(&id, control_epoch)
+                                            .await
+                                    {
+                                        if let Err(error) = persist_torrent_relocation_check(
+                                            &app_handle_poll.state::<crate::db::DbState>(),
+                                            &id,
+                                            false,
+                                        ) {
+                                            log::debug!(
+                                                "aria2 relocation check [{}]: could not clear one-shot marker: {}",
+                                                id,
+                                                error
+                                            );
+                                        } else {
+                                            let _ = poll_mgr
+                                                .clear_torrent_relocation_check(&id, control_epoch)
+                                                .await;
+                                            relocation_checks.remove(&id);
+                                        }
+                                    }
                                     if is_verification
                                         && leaving_verifying
                                         && total > 0
@@ -12359,9 +13940,13 @@ pub fn run() {
                                         total_is_estimate: Some(false),
                                         active_connections: Some(active_connections),
                                         requested_connections: Some(requested_connections),
-                                        uploaded_bytes: uploaded_bytes.map(|value| value as f64),
+                                        uploaded_bytes: torrent_telemetry
+                                            .map(|value| value.uploaded_bytes as f64)
+                                            .or_else(|| uploaded_bytes.map(|value| value as f64)),
                                         upload_speed,
                                         num_seeders,
+                                        torrent_seeded_seconds: torrent_telemetry
+                                            .map(|value| value.seeded_seconds as f64),
                                     });
 
                                     if entering_seeding
@@ -12472,6 +14057,59 @@ pub fn run() {
                                         continue;
                                     }
                                 };
+                                if let Some(mapping) = poll_mgr
+                                    .aria2_gid_mapping(&gid)
+                                    .filter(|mapping| mapping.id == id)
+                                {
+                                    let is_torrent = poll_mgr.aria2_is_torrent(&id).await;
+                                    if is_torrent
+                                        && poll_mgr
+                                            .is_aria2_control_epoch_current(&id, mapping.epoch)
+                                            .await
+                                    {
+                                        let upload_length = status
+                                            .get("uploadLength")
+                                            .and_then(|value| value.as_str())
+                                            .and_then(|value| value.parse::<u64>().ok());
+                                        let is_seeder = status.get("seeder").is_some_and(|value| {
+                                            value.as_str() == Some("true")
+                                                || value.as_bool() == Some(true)
+                                        });
+                                        let seed_permit_owned = poll_mgr
+                                            .aria2_torrent_seed_permit_owned(&id)
+                                            .await;
+                                        let snapshot = poll_mgr
+                                            .observe_torrent_telemetry(
+                                                &id,
+                                                &gid,
+                                                mapping.epoch,
+                                                upload_length,
+                                                is_seeder && seed_permit_owned,
+                                                Instant::now(),
+                                            )
+                                            .await;
+                                        if poll_mgr.is_current_aria2_gid_mapping(&gid, &mapping)
+                                            && poll_mgr
+                                                .is_aria2_control_epoch_current(&id, mapping.epoch)
+                                                .await
+                                            && telemetry_persisted.get(&id) != Some(&snapshot)
+                                        {
+                                            if let Err(error) = persist_torrent_telemetry(
+                                                &app_handle_poll.state::<crate::db::DbState>(),
+                                                &id,
+                                                snapshot,
+                                            ) {
+                                                log::debug!(
+                                                    "aria2 terminal telemetry [{}]: could not persist durable totals: {}",
+                                                    id,
+                                                    error
+                                                );
+                                            } else {
+                                                telemetry_persisted.insert(id.clone(), snapshot);
+                                            }
+                                        }
+                                    }
+                                }
                                 let status_name = status
                                     .get("status")
                                     .and_then(|value| value.as_str())
@@ -12602,7 +14240,7 @@ pub fn run() {
             authorize_keychain_access,
             acknowledge_pairing_token_change,
             check_file_exists, toggle_tray_icon, set_extension_pairing_token,
-            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, get_torrent_file_progress, get_torrent_piece_progress, get_torrent_file_selection, set_torrent_file_selection, get_torrent_details, verify_torrent_data, get_torrent_web_seeds, set_torrent_web_seeds, set_torrent_max_open_files, set_torrent_overall_upload_limit, set_global_speed_limit, remove_download, get_download_primary_path,
+            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, get_torrent_availability, get_torrent_file_progress, get_torrent_piece_progress, get_torrent_file_selection, set_torrent_file_selection, get_torrent_details, get_torrent_magnet_link, export_torrent_metadata, move_torrent_data, cancel_torrent_move_data, verify_torrent_data, get_torrent_web_seeds, set_torrent_web_seeds, set_torrent_max_open_files, set_torrent_overall_upload_limit, set_global_speed_limit, remove_download, get_download_primary_path,
             detach_download_for_reconfigure,
             enqueue_download, enqueue_many, cancel_enqueue_generation, move_in_queue, move_many_in_queue, remove_from_queue, get_pending_order,
             commands::reveal_in_file_manager, commands::open_downloaded_file,

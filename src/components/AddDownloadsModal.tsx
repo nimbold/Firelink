@@ -13,7 +13,7 @@ import { FolderPlus, Save, Settings, Shield, RefreshCw, FileText, HardDrive, Dat
 import { open } from '@tauri-apps/plugin-dialog';
 import { invokeCommand as invoke } from '../ipc';
 import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResolutionModal';
-import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, MAX_TORRENT_TRACKER_INTERVAL, MAX_TORRENT_TRACKER_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type TorrentEncryptionPolicy } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, MAX_TORRENT_TRACKER_INTERVAL, MAX_TORRENT_TRACKER_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentWebSeedDrafts, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, serializeTorrentPreviewPriority, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type TorrentEncryptionPolicy, type TorrentFileAllocation } from '../utils/downloads';
 import { fetchMediaMetadataDeduped, fetchMediaPlaylistMetadataDeduped } from '../utils/mediaMetadata';
 import {
   expandTilde,
@@ -52,6 +52,7 @@ import {
   type MediaSelection
 } from '../utils/addDownloadMetadata';
 import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
+import { TorrentWebSeedEditor } from './TorrentWebSeedEditor';
 
 const formatBytes = (bytes: number) => {
   const k = 1024;
@@ -241,7 +242,17 @@ export const AddDownloadsModal = () => {
   const [torrentTrackerTimeout, setTorrentTrackerTimeout] = useState('');
   const [torrentTrackerInterval, setTorrentTrackerInterval] = useState('0');
   const [torrentStopTimeout, setTorrentStopTimeout] = useState('0');
-  const [torrentPrioritizePiece, setTorrentPrioritizePiece] = useState('');
+  const [torrentFileAllocation, setTorrentFileAllocation] = useState<TorrentFileAllocation>('prealloc');
+  const [torrentPreviewHeadEnabled, setTorrentPreviewHeadEnabled] = useState(false);
+  const [torrentPreviewHeadSize, setTorrentPreviewHeadSize] = useState('1M');
+  const [torrentPreviewTailEnabled, setTorrentPreviewTailEnabled] = useState(false);
+  const [torrentPreviewTailSize, setTorrentPreviewTailSize] = useState('1M');
+  const torrentPreviewPriority = serializeTorrentPreviewPriority(
+    torrentPreviewHeadEnabled,
+    torrentPreviewHeadSize,
+    torrentPreviewTailEnabled,
+    torrentPreviewTailSize
+  );
   const [freeSpace, setFreeSpace] = useState('Unknown');
   const freeSpaceRequestRef = useRef(0);
 
@@ -389,6 +400,11 @@ export const AddDownloadsModal = () => {
     setTorrentTrackerTimeout('');
     setTorrentTrackerInterval('0');
     setTorrentStopTimeout('0');
+    setTorrentFileAllocation('prealloc');
+    setTorrentPreviewHeadEnabled(false);
+    setTorrentPreviewHeadSize('1M');
+    setTorrentPreviewTailEnabled(false);
+    setTorrentPreviewTailSize('1M');
     setUseAuth(false);
     setUsername('');
     setPassword('');
@@ -1005,9 +1021,17 @@ export const AddDownloadsModal = () => {
       addToast({ message: t($ => $.addDownloads.torrentTrackerIntervalInvalid), variant: 'error', isActionable: true });
       return;
     }
-    if (hasSelectedTorrent && torrentPrioritizePiece.trim() && !normalizeTorrentPrioritizePiece(torrentPrioritizePiece)) {
+    if (hasSelectedTorrent && (torrentPreviewHeadEnabled || torrentPreviewTailEnabled) && !torrentPreviewPriority) {
       addToast({ message: t($ => $.addDownloads.torrentPrioritizePieceInvalid), variant: 'error', isActionable: true });
       return;
+    }
+    for (const item of selectedItems) {
+      if (!item.isTorrent || !item.torrentFiles?.length) continue;
+      const rows = item.torrentWebSeedRows ?? [];
+      if (!normalizeTorrentWebSeedDrafts(rows, item.torrentFiles)) {
+        addToast({ message: t($ => $.properties.torrentWebSeedsFailed), variant: 'error', isActionable: true });
+        return;
+      }
     }
     if (
       hasSelectedTorrent
@@ -1529,7 +1553,11 @@ export const AddDownloadsModal = () => {
             ? Number(torrentTrackerInterval)
             : undefined,
           torrentStopTimeout: item.isTorrent && torrentStopTimeout.trim() ? Number(torrentStopTimeout) : undefined,
-          torrentPrioritizePiece: item.isTorrent ? normalizeTorrentPrioritizePiece(torrentPrioritizePiece) || undefined : undefined,
+          torrentPrioritizePiece: item.isTorrent ? torrentPreviewPriority || undefined : undefined,
+          torrentFileAllocation: item.isTorrent ? torrentFileAllocation : undefined,
+          torrentWebSeeds: item.isTorrent && item.torrentFiles
+            ? normalizeTorrentWebSeedDrafts(item.torrentWebSeedRows ?? [], item.torrentFiles) || undefined
+            : undefined,
           size: item.size || (item.sizeBytes ? formatBytes(item.sizeBytes) : undefined),
           sizeBytes: item.sizeBytes
         }, action);
@@ -2115,6 +2143,24 @@ export const AddDownloadsModal = () => {
               {selectedItemIndex !== null && parsedItems[selectedItemIndex]?.isTorrent && (
                 <section className="add-download-section relative overflow-hidden p-4">
                   <div className="add-download-section-title flex items-center gap-2 mb-3">
+                    <Link size={16} className="text-blue-500" /> {t($ => $.properties.torrentWebSeeds)}
+                  </div>
+                  <p className="text-[11px] text-text-muted mb-3">{t($ => $.properties.torrentWebSeedsHint)}</p>
+                  <TorrentWebSeedEditor
+                    files={parsedItems[selectedItemIndex].torrentFiles ?? []}
+                    rows={parsedItems[selectedItemIndex].torrentWebSeedRows ?? []}
+                    onChange={rows => setParsedItems(items => items.map((item, index) => index === selectedItemIndex
+                      ? { ...item, torrentWebSeedRows: rows }
+                      : item
+                    ))}
+                    idPrefix="add-torrent-web-seed"
+                  />
+                </section>
+              )}
+
+              {selectedItemIndex !== null && parsedItems[selectedItemIndex]?.isTorrent && (
+                <section className="add-download-section relative overflow-hidden p-4">
+                  <div className="add-download-section-title flex items-center gap-2 mb-3">
                     <HardDrive size={16} className="text-blue-500" /> {t($ => $.addDownloads.torrentSeeding)}
                   </div>
                   <div className="space-y-3 text-xs">
@@ -2195,6 +2241,64 @@ export const AddDownloadsModal = () => {
                         </span>
                       </span>
                     </label>
+                    <div className="grid grid-cols-[1fr_auto] gap-2 items-center pt-2 border-t border-border-modal/50">
+                      <label htmlFor="torrent-file-allocation" className="text-text-muted">
+                        {t($ => $.properties.torrentFileAllocation)}
+                      </label>
+                      <select
+                        id="torrent-file-allocation"
+                        value={torrentFileAllocation}
+                        onChange={event => setTorrentFileAllocation(event.currentTarget.value as TorrentFileAllocation)}
+                        aria-describedby="torrent-file-allocation-hint"
+                        className="app-control max-w-56 px-2 py-1 text-xs"
+                      >
+                        <option value="prealloc">{t($ => $.properties.torrentFileAllocationPrealloc)}</option>
+                        <option value="none">{t($ => $.properties.torrentFileAllocationNone)}</option>
+                      </select>
+                      <p id="torrent-file-allocation-hint" className="col-span-2 text-[10px] text-text-muted">
+                        {t($ => $.properties.torrentFileAllocationHint)}
+                      </p>
+                    </div>
+                    <div className="space-y-2 pt-2 border-t border-border-modal/50">
+                      <span className="block text-text-muted">{t($ => $.properties.torrentPrioritizePiece)}</span>
+                      <label className="flex items-center gap-2 text-text-primary">
+                        <input
+                          type="checkbox"
+                          checked={torrentPreviewHeadEnabled}
+                          onChange={event => setTorrentPreviewHeadEnabled(event.target.checked)}
+                          className="accent-blue-500"
+                        />
+                        {t($ => $.properties.torrentPrioritizePieceHead)}
+                        <input
+                          type="text"
+                          value={torrentPreviewHeadSize}
+                          onChange={event => setTorrentPreviewHeadSize(event.currentTarget.value)}
+                          disabled={!torrentPreviewHeadEnabled}
+                          aria-label={t($ => $.properties.torrentPrioritizePieceSize)}
+                          className="app-control w-20 px-2 py-1 text-end font-mono disabled:opacity-50"
+                        />
+                      </label>
+                      <label className="flex items-center gap-2 text-text-primary">
+                        <input
+                          type="checkbox"
+                          checked={torrentPreviewTailEnabled}
+                          onChange={event => setTorrentPreviewTailEnabled(event.target.checked)}
+                          className="accent-blue-500"
+                        />
+                        {t($ => $.properties.torrentPrioritizePieceTail)}
+                        <input
+                          type="text"
+                          value={torrentPreviewTailSize}
+                          onChange={event => setTorrentPreviewTailSize(event.currentTarget.value)}
+                          disabled={!torrentPreviewTailEnabled}
+                          aria-label={t($ => $.properties.torrentPrioritizePieceSize)}
+                          className="app-control w-20 px-2 py-1 text-end font-mono disabled:opacity-50"
+                        />
+                      </label>
+                      <p id="torrent-prioritize-piece-hint" className="text-[10px] text-text-muted">
+                        {t($ => $.properties.torrentPrioritizePieceHint)}
+                      </p>
+                    </div>
                     <div className="grid grid-cols-[1fr_auto] gap-2 items-center pt-2 border-t border-border-modal/50">
                       <label htmlFor="torrent-encryption-policy" className="text-text-muted">
                         {t($ => $.addDownloads.torrentEncryptionPolicy)}
@@ -2380,23 +2484,6 @@ export const AddDownloadsModal = () => {
                       </div>
                       <p id="torrent-stop-timeout-hint" className="col-span-2 text-[10px] text-text-muted">
                         {t($ => $.addDownloads.torrentStopTimeoutHint)}
-                      </p>
-                    </div>
-                    <div className="pt-2 border-t border-border-modal/50">
-                      <label htmlFor="torrent-prioritize-piece" className="block text-text-muted">
-                        {t($ => $.addDownloads.torrentPrioritizePiece)}
-                      </label>
-                      <input
-                        id="torrent-prioritize-piece"
-                        type="text"
-                        value={torrentPrioritizePiece}
-                        onChange={event => setTorrentPrioritizePiece(event.currentTarget.value)}
-                        placeholder="head=1M,tail=1M"
-                        aria-describedby="torrent-prioritize-piece-hint"
-                        className="app-control mt-1 w-full px-2.5 py-1.5 text-xs font-mono"
-                      />
-                      <p id="torrent-prioritize-piece-hint" className="mt-1 text-[10px] text-text-muted">
-                        {t($ => $.addDownloads.torrentPrioritizePieceHint)}
                       </p>
                     </div>
                   </div>

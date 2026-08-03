@@ -8,10 +8,11 @@ import type { TorrentFileProgressSnapshot } from '../bindings/TorrentFileProgres
 import type { TorrentPieceProgressSnapshot } from '../bindings/TorrentPieceProgressSnapshot';
 import type { TorrentFileSelectionSnapshot } from '../bindings/TorrentFileSelectionSnapshot';
 import type { TorrentDetails } from '../bindings/TorrentDetails';
-import type { TorrentWebSeed } from '../bindings/TorrentWebSeed';
+import type { TorrentAvailabilitySnapshot } from '../bindings/TorrentAvailabilitySnapshot';
 import { invokeCommand as invoke } from '../ipc';
 import { ChevronDown, ChevronRight, FolderPlus, Info, CheckCircle, AlertCircle, Play, Pause } from 'lucide-react';
-import { open } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
+import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import { resolveCategoryDestination } from '../utils/downloadLocations';
 import {
   getPauseResumeAction,
@@ -22,12 +23,15 @@ import {
   downloadProgressColorClass,
   formatDownloadBytes,
   formatDownloadTotal,
+  formatTorrentDuration,
+  formatTorrentRatio,
   resolveDownloadSizeDisplay
 } from '../utils/downloadProgress';
-import { isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, MAX_TORRENT_TRACKER_INTERVAL, MAX_TORRENT_TRACKER_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, resolveDownloadConnections, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type TorrentEncryptionPolicy, type TorrentFileAllocation } from '../utils/downloads';
+import { isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, MAX_TORRENT_TRACKER_INTERVAL, MAX_TORRENT_TRACKER_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentWebSeedDrafts, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, parseTorrentPreviewPriority, serializeTorrentPreviewPriority, torrentWebSeedDraftsFromSeeds, resolveDownloadConnections, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type TorrentEncryptionPolicy, type TorrentFileAllocation, type TorrentWebSeedDraft } from '../utils/downloads';
 import { useTranslation } from 'react-i18next';
 import { formatDateTime, type CalendarPreference } from '../utils/dateTime';
 import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
+import { TorrentWebSeedEditor } from './TorrentWebSeedEditor';
 
 type LoginMode = 'matching' | 'custom' | 'none';
 
@@ -49,6 +53,9 @@ const isPeerDiagnosticsStatus = (status: string): boolean =>
 
 const isTorrentFileProgressStatus = (status: string): boolean =>
   ['downloading', 'verifying', 'seeding', 'waitingToSeed', 'retrying', 'paused'].includes(status);
+
+const isTorrentAvailabilityStatus = (status: string): boolean =>
+  ['downloading', 'verifying', 'seeding', 'retrying', 'paused'].includes(status);
 
 const formatPeerSpeed = (bytesPerSecond: number): string =>
   `${formatDownloadBytes(bytesPerSecond)}/s`;
@@ -78,6 +85,9 @@ export const PropertiesModal = () => {
       ? state.progressMap[selectedPropertiesDownloadId]
       : undefined
   ));
+  const moveProgress = useDownloadProgressStore(state =>
+    selectedPropertiesDownloadId ? state.moveProgressMap[selectedPropertiesDownloadId] : undefined
+  );
 
   const { baseDownloadFolder, perServerConnections, calendarPreference } = useSettingsStore();
 
@@ -104,7 +114,10 @@ export const PropertiesModal = () => {
   const [torrentTrackerTimeout, setTorrentTrackerTimeout] = useState('');
   const [torrentTrackerInterval, setTorrentTrackerInterval] = useState('0');
   const [torrentStopTimeout, setTorrentStopTimeout] = useState('0');
-  const [torrentPrioritizePiece, setTorrentPrioritizePiece] = useState('');
+  const [torrentPreviewHeadEnabled, setTorrentPreviewHeadEnabled] = useState(false);
+  const [torrentPreviewHeadSize, setTorrentPreviewHeadSize] = useState('1M');
+  const [torrentPreviewTailEnabled, setTorrentPreviewTailEnabled] = useState(false);
+  const [torrentPreviewTailSize, setTorrentPreviewTailSize] = useState('1M');
   const [torrentPeerDiagnostics, setTorrentPeerDiagnostics] = useState<TorrentPeerDiagnostics | null>(null);
   const [torrentPeerDiagnosticsError, setTorrentPeerDiagnosticsError] = useState(false);
   const [isTorrentPeerDiagnosticsPending, setIsTorrentPeerDiagnosticsPending] = useState(false);
@@ -119,10 +132,15 @@ export const PropertiesModal = () => {
   const [torrentPieceProgress, setTorrentPieceProgress] = useState<TorrentPieceProgressSnapshot | null>(null);
   const [torrentPieceProgressError, setTorrentPieceProgressError] = useState(false);
   const [isTorrentPieceProgressPending, setIsTorrentPieceProgressPending] = useState(false);
+  const [torrentAvailability, setTorrentAvailability] = useState<TorrentAvailabilitySnapshot | null>(null);
+  const [torrentAvailabilityError, setTorrentAvailabilityError] = useState(false);
+  const [isTorrentAvailabilityPending, setIsTorrentAvailabilityPending] = useState(false);
+  const [torrentShareMessage, setTorrentShareMessage] = useState('');
+  const [isTorrentMovePending, setIsTorrentMovePending] = useState(false);
   const [isLiveSpeedLimitPending, setIsLiveSpeedLimitPending] = useState(false);
   const [isLiveTorrentUploadLimitPending, setIsLiveTorrentUploadLimitPending] = useState(false);
   const [isLiveTorrentPeerOptionsPending, setIsLiveTorrentPeerOptionsPending] = useState(false);
-  const [torrentWebSeedsText, setTorrentWebSeedsText] = useState('');
+  const [torrentWebSeedRows, setTorrentWebSeedRows] = useState<TorrentWebSeedDraft[]>([]);
   const [torrentWebSeedsError, setTorrentWebSeedsError] = useState(false);
   const [isTorrentWebSeedsPending, setIsTorrentWebSeedsPending] = useState(false);
 
@@ -149,6 +167,7 @@ export const PropertiesModal = () => {
   const torrentFileSelectionRequestRef = useRef(0);
   const torrentDetailsRequestRef = useRef(0);
   const torrentPieceProgressRequestRef = useRef(0);
+  const torrentAvailabilityRequestRef = useRef(0);
   const torrentWebSeedsRequestRef = useRef(0);
   const modalRef = useModalFocus(Boolean(selectedPropertiesDownloadId && item));
 
@@ -175,9 +194,16 @@ export const PropertiesModal = () => {
     setTorrentPieceProgress(null);
     setTorrentPieceProgressError(false);
     setIsTorrentPieceProgressPending(false);
+    torrentAvailabilityRequestRef.current += 1;
+    setTorrentAvailability(null);
+    setTorrentAvailabilityError(false);
+    setIsTorrentAvailabilityPending(false);
+    setTorrentShareMessage('');
+    setIsTorrentMovePending(false);
     torrentWebSeedsRequestRef.current += 1;
     setTorrentWebSeedsError(false);
     setIsTorrentWebSeedsPending(false);
+    setTorrentWebSeedRows([]);
   }, [selectedPropertiesDownloadId]);
 
   useEffect(() => {
@@ -251,10 +277,12 @@ export const PropertiesModal = () => {
         setTorrentTrackerTimeout(activeItem.torrentTrackerTimeout === undefined ? '' : String(activeItem.torrentTrackerTimeout));
         setTorrentTrackerInterval(activeItem.torrentTrackerInterval === undefined ? '0' : String(activeItem.torrentTrackerInterval));
         setTorrentStopTimeout(activeItem.torrentStopTimeout === undefined ? '0' : String(activeItem.torrentStopTimeout));
-        setTorrentPrioritizePiece(activeItem.torrentPrioritizePiece || '');
-        setTorrentWebSeedsText((activeItem.torrentWebSeeds || [])
-          .map(seed => `${seed.fileIndex}|${seed.uri}`)
-          .join('\n'));
+        const previewPriority = parseTorrentPreviewPriority(activeItem.torrentPrioritizePiece);
+        setTorrentPreviewHeadEnabled(Boolean(previewPriority.head));
+        setTorrentPreviewHeadSize(previewPriority.head || '1M');
+        setTorrentPreviewTailEnabled(Boolean(previewPriority.tail));
+        setTorrentPreviewTailSize(previewPriority.tail || '1M');
+        setTorrentWebSeedRows(torrentWebSeedDraftsFromSeeds(activeItem.torrentWebSeeds));
         setErrorMessage('');
       } else {
         setSelectedPropertiesDownloadId(null);
@@ -389,7 +417,7 @@ export const PropertiesModal = () => {
           requestId === torrentWebSeedsRequestRef.current
           && useDownloadStore.getState().selectedPropertiesDownloadId === propertiesDownloadId
         ) {
-          setTorrentWebSeedsText(seeds.map(seed => `${seed.fileIndex}|${seed.uri}`).join('\n'));
+          setTorrentWebSeedRows(torrentWebSeedDraftsFromSeeds(seeds));
           useDownloadStore.getState().updateDownload(propertiesDownloadId, { torrentWebSeeds: seeds });
         }
       })
@@ -611,26 +639,126 @@ export const PropertiesModal = () => {
     }
   };
 
+  const handleRefreshTorrentAvailability = async () => {
+    if (
+      isTorrentAvailabilityPending
+      || !item.isTorrent
+      || !isTorrentAvailabilityStatus(item.status)
+    ) return;
+    const requestId = ++torrentAvailabilityRequestRef.current;
+    const propertiesDownloadId = item.id;
+    setIsTorrentAvailabilityPending(true);
+    setTorrentAvailabilityError(false);
+    try {
+      const snapshot = await invoke('get_torrent_availability', { id: propertiesDownloadId });
+      const currentItem = useDownloadStore.getState().downloads.find(download => download.id === propertiesDownloadId);
+      if (
+        requestId === torrentAvailabilityRequestRef.current
+        && useDownloadStore.getState().selectedPropertiesDownloadId === propertiesDownloadId
+        && currentItem?.isTorrent
+        && isTorrentAvailabilityStatus(currentItem.status)
+      ) {
+        setTorrentAvailability(snapshot);
+      }
+    } catch {
+      if (
+        requestId === torrentAvailabilityRequestRef.current
+        && useDownloadStore.getState().selectedPropertiesDownloadId === propertiesDownloadId
+      ) {
+        setTorrentAvailabilityError(true);
+        setTorrentAvailability(null);
+      }
+    } finally {
+      if (requestId === torrentAvailabilityRequestRef.current) setIsTorrentAvailabilityPending(false);
+    }
+  };
+
+  const handleCopyTorrentMagnet = async () => {
+    if (!item.isTorrent) return;
+    setTorrentShareMessage('');
+    try {
+      const magnet = await invoke('get_torrent_magnet_link', { id: item.id });
+      await writeClipboardText(magnet);
+      setTorrentShareMessage(t($ => $.properties.torrentMagnetCopied));
+    } catch {
+      setTorrentShareMessage(t($ => $.properties.torrentMagnetCopyFailed));
+    }
+  };
+
+  const handleExportTorrentMetadata = async () => {
+    if (!item.isTorrent) return;
+    setTorrentShareMessage('');
+    try {
+      const destination = await save({
+        defaultPath: `${item.fileName.replace(/\.torrent$/i, '')}.torrent`,
+        filters: [{ name: 'Torrent metadata', extensions: ['torrent'] }]
+      });
+      if (!destination) return;
+      await invoke('export_torrent_metadata', { id: item.id, destination });
+      setTorrentShareMessage(t($ => $.properties.torrentMetadataExported));
+    } catch {
+      setTorrentShareMessage(t($ => $.properties.torrentMetadataExportFailed));
+    }
+  };
+
+  const handleMoveTorrentData = async () => {
+    if (!item.isTorrent || isTorrentMovePending || !['paused', 'completed', 'failed'].includes(item.status)) return;
+    const propertiesDownloadId = item.id;
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      defaultPath: saveLocation.startsWith('~') ? undefined : saveLocation
+    });
+    if (!selected || typeof selected !== 'string') return;
+    if (!window.confirm(t($ => $.properties.torrentMoveConfirm))) return;
+    setIsTorrentMovePending(true);
+    setTorrentShareMessage('');
+    try {
+      await invoke('move_torrent_data', { id: propertiesDownloadId, destination: selected });
+      useDownloadStore.getState().updateDownload(propertiesDownloadId, {
+        destination: selected,
+        torrentRelocationCheckPending: item.torrentRelocationCheckPending === true
+          || item.status === 'paused'
+          || item.status === 'failed'
+          ? true
+          : undefined
+      });
+      setSaveLocation(selected);
+      setTorrentShareMessage(t($ => $.properties.torrentMoveCompleted));
+    } catch {
+      setTorrentShareMessage(t($ => $.properties.torrentMoveFailed));
+    } finally {
+      setIsTorrentMovePending(false);
+    }
+  };
+
+  const handleCancelTorrentMove = async () => {
+    if (!item?.isTorrent || !isTorrentMovePending) return;
+    try {
+      await invoke('cancel_torrent_move_data', { id: item.id });
+      setTorrentShareMessage(t($ => $.properties.torrentMoveCancelRequested));
+    } catch {
+      setTorrentShareMessage(t($ => $.properties.torrentMoveFailed));
+    }
+  };
+
+  const torrentWebSeedFiles = (torrentFileSelection?.files ?? torrentFileProgress?.files ?? [])
+    .map(file => ({ index: file.index, relativePath: file.relativePath }));
+  const torrentWebSeedsMetadataPending = torrentWebSeedRows.length > 0 && torrentWebSeedFiles.length === 0;
+
   const handleTorrentWebSeedsSave = async () => {
     if (!item?.isTorrent || isTorrentWebSeedsPending) return;
-    const seeds: TorrentWebSeed[] = [];
-    for (const line of torrentWebSeedsText.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      const separator = trimmed.indexOf('|');
-      const fileIndex = Number(separator >= 0 ? trimmed.slice(0, separator).trim() : '');
-      const uri = separator >= 0 ? trimmed.slice(separator + 1).trim() : '';
-      if (!Number.isInteger(fileIndex) || fileIndex < 0 || !uri) {
-        setTorrentWebSeedsError(true);
-        return;
-      }
-      seeds.push({ fileIndex, uri });
+    const files = torrentWebSeedFiles.map(file => ({ index: file.index }));
+    const seeds = normalizeTorrentWebSeedDrafts(torrentWebSeedRows, files);
+    if (!seeds) {
+      setTorrentWebSeedsError(true);
+      return;
     }
     setIsTorrentWebSeedsPending(true);
     setTorrentWebSeedsError(false);
     try {
       const normalized = await invoke('set_torrent_web_seeds', { id: item.id, seeds });
-      setTorrentWebSeedsText(normalized.map(seed => `${seed.fileIndex}|${seed.uri}`).join('\n'));
+      setTorrentWebSeedRows(torrentWebSeedDraftsFromSeeds(normalized));
       useDownloadStore.getState().updateDownload(item.id, { torrentWebSeeds: normalized });
     } catch {
       setTorrentWebSeedsError(true);
@@ -711,7 +839,13 @@ export const PropertiesModal = () => {
       setErrorMessage(t($ => $.properties.torrentTrackerIntervalInvalid));
       return;
     }
-    if (item.isTorrent && torrentPrioritizePiece.trim() && !normalizeTorrentPrioritizePiece(torrentPrioritizePiece)) {
+    const torrentPrioritizePiece = serializeTorrentPreviewPriority(
+      torrentPreviewHeadEnabled,
+      torrentPreviewHeadSize,
+      torrentPreviewTailEnabled,
+      torrentPreviewTailSize
+    );
+    if (item.isTorrent && (torrentPreviewHeadEnabled || torrentPreviewTailEnabled) && !torrentPrioritizePiece) {
       setErrorMessage(t($ => $.properties.torrentPrioritizePieceInvalid));
       return;
     }
@@ -786,7 +920,7 @@ export const PropertiesModal = () => {
               ? Number(torrentTrackerInterval)
               : undefined,
             torrentStopTimeout: normalizedStopTimeout,
-            torrentPrioritizePiece: normalizeTorrentPrioritizePiece(torrentPrioritizePiece) || undefined,
+            torrentPrioritizePiece: torrentPrioritizePiece || undefined,
             torrentFileIndices: torrentFileSelection
               ? (allTorrentFilesSelected ? undefined : selectedTorrentIndices)
               : item.torrentFileIndices,
@@ -1018,6 +1152,20 @@ export const PropertiesModal = () => {
     const value = item.status === 'completed' ? formatDownloadTotal(sizeDisplay) : sizeDisplay.fallback;
     return value === 'Unknown' ? t($ => $.addDownloads.unknown) : value;
   })();
+  const torrentUploadedBytes = item.isTorrent
+    ? liveProgress?.uploaded_bytes ?? item.torrentUploadedBytes ?? 0
+    : 0;
+  const torrentSeededSeconds = item.isTorrent
+    ? liveProgress?.torrent_seeded_seconds ?? item.torrentSeededSeconds ?? 0
+    : 0;
+  const torrentRatioDenominator = item.isTorrent
+    ? torrentFileSelection?.files.length
+      ? torrentFileSelection.files.reduce((total, file) => total + (file.selected ? file.length : 0), 0)
+      : torrentDetails?.totalBytes ?? item.totalBytes ?? 0
+    : 0;
+  const torrentRatio = formatTorrentRatio(torrentUploadedBytes, torrentRatioDenominator, i18n.language);
+  const torrentSeederCount = liveProgress?.num_seeders ?? torrentPeerDiagnostics?.totalSeeders;
+  const torrentConnectedPeerCount = torrentPeerDiagnostics?.totalPeers;
   const statusLabel = t($ => $.downloads.status[item.status]);
   const pauseResumeAction = getPauseResumeAction(item.status);
   const pauseResumeLabel = pauseResumeAction === 'pause'
@@ -1040,7 +1188,7 @@ export const PropertiesModal = () => {
   let StatusIcon = Info;
   if (item.status === 'completed') { statusColor = 'text-green-500'; StatusIcon = CheckCircle; }
   else if (item.status === 'downloading' || item.status === 'verifying' || item.status === 'seeding' || item.status === 'retrying') { statusColor = 'text-blue-500'; StatusIcon = Play; }
-  else if (item.status === 'processing') { statusColor = 'text-sky-500'; StatusIcon = Play; }
+  else if (item.status === 'processing' || item.status === 'moving') { statusColor = 'text-sky-500'; StatusIcon = Play; }
   else if (item.status === 'paused') { statusColor = 'text-orange-500'; StatusIcon = Pause; }
   else if (item.status === 'failed') { statusColor = 'text-red-500'; StatusIcon = AlertCircle; }
 
@@ -1113,6 +1261,19 @@ export const PropertiesModal = () => {
               </div>
             )}
           </div>
+          {item.isTorrent && (
+            <div className="mt-3 rounded-lg border border-border-modal/70 bg-bg-input/20 p-2.5" aria-label={t($ => $.properties.torrentStatistics)}>
+              <div className="mb-2 text-[11px] font-semibold text-text-primary">{t($ => $.properties.torrentStatistics)}</div>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px] sm:grid-cols-3">
+                <div className="flex min-w-0 gap-1.5"><span className="text-text-muted">{t($ => $.properties.torrentUploaded)}</span><span className="truncate text-text-secondary">{formatDownloadBytes(torrentUploadedBytes)}</span></div>
+                <div className="flex min-w-0 gap-1.5"><span className="text-text-muted">{t($ => $.properties.torrentRatio)}</span><span className="truncate text-text-secondary">{torrentRatio}</span></div>
+                <div className="flex min-w-0 gap-1.5"><span className="text-text-muted">{t($ => $.properties.torrentSeededDuration)}</span><span className="truncate text-text-secondary">{formatTorrentDuration(torrentSeededSeconds, i18n.language)}</span></div>
+                <div className="flex min-w-0 gap-1.5"><span className="text-text-muted">{t($ => $.properties.torrentConnectedPeers)}</span><span className="truncate text-text-secondary">{torrentConnectedPeerCount ?? '—'}</span></div>
+                <div className="flex min-w-0 gap-1.5"><span className="text-text-muted">{t($ => $.properties.torrentSeeders)}</span><span className="truncate text-text-secondary">{torrentSeederCount ?? '—'}</span></div>
+                <div className="flex min-w-0 gap-1.5"><span className="text-text-muted">{t($ => $.properties.torrentUploadSpeed)}</span><span className="truncate text-text-secondary">{liveProgress?.upload_speed ?? '—'}</span></div>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="h-[1px] bg-border-modal w-full shrink-0"></div>
@@ -1341,6 +1502,54 @@ export const PropertiesModal = () => {
                               className="aspect-square min-w-1 rounded-sm bg-blue-500 motion-safe:transition-opacity motion-reduce:transition-none"
                               style={{ opacity: Math.max(0.15, percentage / 100) }}
                               title={`${percentage}%`}
+                            />
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  <div className="col-start-2 rounded-lg border border-border-modal bg-bg-input/30 p-3 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-xs font-semibold text-text-primary">{t($ => $.properties.torrentAvailability)}</div>
+                      <button
+                        type="button"
+                        onClick={() => void handleRefreshTorrentAvailability()}
+                        disabled={!isTorrentAvailabilityStatus(item.status) || isTorrentAvailabilityPending}
+                        className="app-button px-3 text-xs disabled:opacity-50"
+                      >
+                        {isTorrentAvailabilityPending
+                          ? t($ => $.properties.torrentAvailabilityLoading)
+                          : t($ => $.properties.torrentAvailabilityRefresh)}
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-text-muted">{t($ => $.properties.torrentAvailabilityHint)}</p>
+                    {!isTorrentAvailabilityStatus(item.status) && (
+                      <p className="text-[11px] text-text-muted">{t($ => $.properties.torrentAvailabilityUnavailable)}</p>
+                    )}
+                    {torrentAvailabilityError && (
+                      <p className="text-[11px] text-red-400">{t($ => $.properties.torrentAvailabilityFailed)}</p>
+                    )}
+                    {torrentAvailability && (
+                      <>
+                        <div className="text-[11px] text-text-secondary">
+                          {t($ => $.properties.torrentAvailabilitySummary, {
+                            availability: new Intl.NumberFormat(i18n.language, { maximumFractionDigits: 2 }).format(torrentAvailability.availability),
+                            peers: torrentAvailability.connectedPeers,
+                            pieces: torrentAvailability.pieceCount
+                          })}
+                        </div>
+                        <div
+                          className="grid gap-0.5 rounded border border-border-modal/60 bg-bg-input p-1"
+                          style={{ gridTemplateColumns: `repeat(${Math.min(16, Math.max(1, torrentAvailability.buckets.length))}, minmax(0, 1fr))` }}
+                          role="img"
+                          aria-label={t($ => $.properties.torrentAvailabilityMap)}
+                        >
+                          {torrentAvailability.buckets.map((bucket, index) => (
+                            <span
+                              key={index}
+                              className="aspect-square min-w-1 rounded-sm bg-emerald-500 motion-safe:transition-opacity motion-reduce:transition-none"
+                              style={{ opacity: Math.min(1, 0.2 + bucket.minimumCopies / Math.max(1, torrentAvailability.availability + 1)) }}
+                              title={t($ => $.properties.torrentAvailabilityBucket, { copies: bucket.minimumCopies })}
                             />
                           ))}
                         </div>
@@ -1610,21 +1819,45 @@ export const PropertiesModal = () => {
                       {t($ => $.properties.torrentStopTimeoutHint)}
                     </p>
                   </div>
-                  <label className="text-xs text-text-muted text-right" htmlFor="torrent-prioritize-piece-properties">
-                    {t($ => $.properties.torrentPrioritizePiece)}
-                  </label>
-                  <div>
-                    <input
-                      id="torrent-prioritize-piece-properties"
-                      type="text"
-                      value={torrentPrioritizePiece}
-                      onChange={event => setTorrentPrioritizePiece(event.currentTarget.value)}
-                      placeholder="head=1M,tail=1M"
-                      disabled={transferLocked}
-                      aria-describedby="torrent-prioritize-piece-properties-hint"
-                      className="app-control w-full px-2.5 py-1.5 text-xs font-mono disabled:opacity-50"
-                    />
-                    <p id="torrent-prioritize-piece-properties-hint" className="mt-1 text-[11px] text-text-muted">
+                  <div className="col-span-2 space-y-2">
+                    <span className="block text-xs text-text-muted">{t($ => $.properties.torrentPrioritizePiece)}</span>
+                    <label className="flex items-center gap-2 text-xs text-text-primary">
+                      <input
+                        type="checkbox"
+                        checked={torrentPreviewHeadEnabled}
+                        onChange={event => setTorrentPreviewHeadEnabled(event.target.checked)}
+                        disabled={transferLocked}
+                        className="accent-blue-500"
+                      />
+                      {t($ => $.properties.torrentPrioritizePieceHead)}
+                      <input
+                        type="text"
+                        value={torrentPreviewHeadSize}
+                        onChange={event => setTorrentPreviewHeadSize(event.currentTarget.value)}
+                        disabled={transferLocked || !torrentPreviewHeadEnabled}
+                        aria-label={t($ => $.properties.torrentPrioritizePieceSize)}
+                        className="app-control w-20 px-2 py-1 text-end font-mono disabled:opacity-50"
+                      />
+                    </label>
+                    <label className="flex items-center gap-2 text-xs text-text-primary">
+                      <input
+                        type="checkbox"
+                        checked={torrentPreviewTailEnabled}
+                        onChange={event => setTorrentPreviewTailEnabled(event.target.checked)}
+                        disabled={transferLocked}
+                        className="accent-blue-500"
+                      />
+                      {t($ => $.properties.torrentPrioritizePieceTail)}
+                      <input
+                        type="text"
+                        value={torrentPreviewTailSize}
+                        onChange={event => setTorrentPreviewTailSize(event.currentTarget.value)}
+                        disabled={transferLocked || !torrentPreviewTailEnabled}
+                        aria-label={t($ => $.properties.torrentPrioritizePieceSize)}
+                        className="app-control w-20 px-2 py-1 text-end font-mono disabled:opacity-50"
+                      />
+                    </label>
+                    <p className="text-[11px] text-text-muted">
                       {t($ => $.properties.torrentPrioritizePieceHint)}
                     </p>
                   </div>
@@ -1904,6 +2137,29 @@ export const PropertiesModal = () => {
               <h3 className="text-sm font-semibold text-text-primary mb-4 pb-1 border-b border-border-modal/50">
                 {t($ => $.properties.torrentDetails)}
               </h3>
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <button type="button" onClick={() => void handleCopyTorrentMagnet()} className="app-button px-3 text-xs">
+                  {t($ => $.properties.torrentCopyMagnet)}
+                </button>
+                <button type="button" onClick={() => void handleExportTorrentMetadata()} className="app-button px-3 text-xs">
+                  {t($ => $.properties.torrentExportMetadata)}
+                </button>
+                {(isTorrentMovePending || ['paused', 'completed', 'failed'].includes(item.status)) && (
+                  <button
+                    type="button"
+                    onClick={() => void (isTorrentMovePending ? handleCancelTorrentMove() : handleMoveTorrentData())}
+                    className="app-button px-3 text-xs disabled:opacity-50"
+                  >
+                    {isTorrentMovePending ? t($ => $.properties.torrentMoveCancel) : t($ => $.properties.torrentMove)}
+                  </button>
+                )}
+                {isTorrentMovePending && moveProgress !== undefined && (
+                  <span className="text-[11px] text-text-secondary tabular-nums" role="status">
+                    {Math.round(moveProgress * 100)}%
+                  </span>
+                )}
+                {torrentShareMessage && <span className="text-[11px] text-text-secondary" role="status">{torrentShareMessage}</span>}
+              </div>
               {isTorrentDetailsPending && (
                 <p className="text-xs text-text-muted">{t($ => $.properties.torrentDetailsLoading)}</p>
               )}
@@ -1972,13 +2228,12 @@ export const PropertiesModal = () => {
                 {t($ => $.properties.torrentWebSeeds)}
               </h3>
               <p className="text-xs text-text-muted mb-2">{t($ => $.properties.torrentWebSeedsHint)}</p>
-              <textarea
-                value={torrentWebSeedsText}
-                onChange={event => setTorrentWebSeedsText(event.target.value)}
-                placeholder={t($ => $.properties.torrentWebSeedsPlaceholder)}
+              <TorrentWebSeedEditor
+                files={torrentWebSeedFiles}
+                rows={torrentWebSeedRows}
+                onChange={setTorrentWebSeedRows}
                 disabled={isTorrentWebSeedsPending}
-                aria-label={t($ => $.properties.torrentWebSeeds)}
-                className="w-full h-20 bg-bg-input border border-border-modal rounded-lg px-2.5 py-1.5 text-xs text-text-primary font-mono focus:outline-none focus:border-accent disabled:opacity-50 resize-none"
+                idPrefix="properties-torrent-web-seed"
               />
               <div className="flex items-center justify-between mt-2 gap-2">
                 <span className="text-xs text-red-500">
@@ -1987,7 +2242,7 @@ export const PropertiesModal = () => {
                 <button
                   type="button"
                   onClick={() => void handleTorrentWebSeedsSave()}
-                  disabled={isTorrentWebSeedsPending}
+                  disabled={isTorrentWebSeedsPending || torrentWebSeedsMetadataPending}
                   className="app-button px-3 text-xs"
                 >
                   {isTorrentWebSeedsPending ? t($ => $.properties.torrentWebSeedsLoading) : t($ => $.properties.torrentWebSeedsApply)}

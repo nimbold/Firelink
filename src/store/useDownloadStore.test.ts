@@ -938,6 +938,24 @@ describe('useDownloadStore', () => {
     expect(normalized.torrentEncryptionPolicy).toBeUndefined();
   });
 
+  it('recovers an interrupted Torrent move without discarding the native destination marker', () => {
+    const normalized = normalizePersistedDownloadProgress({
+      id: 'interrupted-torrent-move',
+      url: 'magnet:?xt=urn:btih:bad',
+      fileName: 'payload',
+      status: 'moving',
+      category: 'Other',
+      dateAdded: '',
+      destination: '/downloads/new',
+      torrentMoveDestination: '/downloads/new',
+      torrentMoveRestoreStatus: 'paused'
+    });
+
+    expect(normalized.status).toBe('paused');
+    expect(normalized.torrentMoveDestination).toBe('/downloads/new');
+    expect(normalized.torrentMoveRestoreStatus).toBe('paused');
+  });
+
   it('normalizes proxy settings for download dispatch', async () => {
     expect(normalizeCustomProxy('127.0.0.1', 8080)).toBe('http://127.0.0.1:8080');
     expect(normalizeCustomProxy('http://proxy.local:9000', 8080)).toBe('http://proxy.local:9000');

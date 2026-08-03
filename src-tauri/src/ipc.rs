@@ -83,6 +83,8 @@ pub enum DownloadStatus {
     /// Aria2 is verifying already-present Torrent data before transfer or
     /// after an explicit integrity check.
     Verifying,
+    /// Firelink is moving owned Torrent data between managed destinations.
+    Moving,
 }
 
 impl DownloadStatus {
@@ -100,6 +102,7 @@ impl DownloadStatus {
             Self::Queued => "queued",
             Self::Retrying => "retrying",
             Self::Verifying => "verifying",
+            Self::Moving => "moving",
         }
     }
 }
@@ -219,8 +222,26 @@ pub struct DownloadItem {
     #[ts(optional)]
     pub torrent_seed_remaining: Option<f64>,
     #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub torrent_uploaded_bytes: Option<u64>,
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub torrent_seeded_seconds: Option<u64>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_relocation_check_pending: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_move_destination: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_move_restore_status: Option<DownloadStatus>,
+    #[serde(default)]
     #[ts(optional)]
     pub torrent_web_seeds: Option<Vec<TorrentWebSeed>>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_web_seeds_native: Option<Vec<TorrentWebSeed>>,
     #[serde(default)]
     #[ts(optional)]
     pub torrent_upload_limit: Option<String>,
@@ -370,6 +391,38 @@ pub struct TorrentDetails {
     pub comment: Option<String>,
     pub trackers: Vec<String>,
     pub web_seeds: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TorrentAvailabilityBucket {
+    #[ts(type = "number")]
+    pub minimum_copies: u16,
+}
+
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TorrentAvailabilitySnapshot {
+    #[ts(type = "number")]
+    pub piece_count: u64,
+    pub availability: f64,
+    #[ts(type = "number")]
+    pub connected_peers: u32,
+    pub buckets: Vec<TorrentAvailabilityBucket>,
+}
+
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TorrentMoveProgressEvent {
+    pub id: String,
+    pub fraction: f64,
+    #[ts(type = "number")]
+    pub copied_bytes: u64,
+    #[ts(type = "number")]
+    pub total_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]

@@ -34,6 +34,30 @@ export const formatDownloadBytes = (bytes: number): string => {
   return `${formatDownloadBytesInUnit(bytes, unitIndex)} ${BYTE_UNITS[unitIndex]}`;
 };
 
+export const formatTorrentDuration = (seconds: number, locale: string): string => {
+  if (!Number.isFinite(seconds) || seconds < 0) return '—';
+  const rounded = Math.round(seconds);
+  const unit = (value: number, name: 'hour' | 'minute' | 'second') =>
+    new Intl.NumberFormat(locale, { style: 'unit', unit: name, unitDisplay: 'short' }).format(value);
+  if (rounded >= 3600) {
+    return `${unit(Math.floor(rounded / 3600), 'hour')} ${unit(Math.floor((rounded % 3600) / 60), 'minute')}`;
+  }
+  if (rounded >= 60) {
+    return `${unit(Math.floor(rounded / 60), 'minute')} ${unit(rounded % 60, 'second')}`;
+  }
+  return unit(rounded, 'second');
+};
+
+export const formatTorrentRatio = (uploadedBytes: number, denominatorBytes: number, locale: string): string => {
+  if (!Number.isFinite(uploadedBytes) || uploadedBytes < 0 || !Number.isFinite(denominatorBytes) || denominatorBytes <= 0) {
+    return '—';
+  }
+  return new Intl.NumberFormat(locale, {
+    maximumFractionDigits: 2,
+    minimumFractionDigits: 2
+  }).format(uploadedBytes / denominatorBytes);
+};
+
 export const formatDownloadTotal = (display: DownloadSizeDisplay): string =>
   display.total && display.unit
     ? `${display.totalIsEstimate ? '~' : ''}${display.total} ${display.unit}`
@@ -72,6 +96,7 @@ export const downloadProgressColorClass = (status: string): string => {
     case 'failed':
       return 'download-status-failed';
     case 'processing':
+    case 'moving':
       return 'download-status-processing';
     case 'verifying':
       return 'download-status-processing';

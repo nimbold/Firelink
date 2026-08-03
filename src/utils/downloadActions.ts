@@ -67,7 +67,7 @@ export const startActionLabel = (status: DownloadStatus): 'Start' | 'Resume' =>
   status === 'ready' || status === 'staged' || status === 'failed' ? 'Start' : 'Resume';
 
 export const isTransferLocked = (status: DownloadStatus): boolean =>
-  status === 'downloading' || status === 'processing' || status === 'verifying' || status === 'seeding' || status === 'waitingToSeed' || status === 'retrying';
+  status === 'downloading' || status === 'processing' || status === 'verifying' || status === 'seeding' || status === 'waitingToSeed' || status === 'retrying' || status === 'moving';
 
 export const isIdentityLocked = (status: DownloadStatus): boolean =>
   isTransferLocked(status) || status === 'completed';

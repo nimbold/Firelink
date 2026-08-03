@@ -10,7 +10,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 use ts_rs::TS;
@@ -37,6 +37,10 @@ pub const MAX_TORRENT_NETWORK_VALUE_LENGTH: usize = 256;
 pub const MAX_TORRENT_PEER_ID_PREFIX_BYTES: usize = 20;
 pub const MAX_TORRENT_PEER_AGENT_LENGTH: usize = 128;
 pub const MAX_TORRENT_PIECES_FOR_PROGRESS: u64 = 10_000_000;
+pub const MAX_TORRENT_AVAILABILITY_PEERS: usize = 4_096;
+/// Poller gaps beyond this bounded interval are treated conservatively. In
+/// particular, a suspended machine must not accrue wall-clock seed time.
+pub const MAX_TORRENT_SEED_ACCOUNTING_INTERVAL_SECS: u64 = 5;
 pub const MAX_TORRENT_WEB_SEEDS: usize = 256;
 pub const MAX_TORRENT_WEB_SEED_URI_LENGTH: usize = 2_048;
 pub const MIN_TORRENT_LISTEN_PORT: u16 = 1024;
@@ -479,6 +483,97 @@ pub struct Aria2GidMapping {
     pub epoch: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TorrentTelemetrySnapshot {
+    pub uploaded_bytes: u64,
+    pub seeded_seconds: u64,
+}
+
+#[derive(Debug, Clone)]
+struct TorrentTelemetryState {
+    gid: String,
+    epoch: u64,
+    last_upload_length: Option<u64>,
+    uploaded_bytes: u64,
+    seeded_seconds: u64,
+    last_observed_at: Option<Instant>,
+    last_was_seeding: bool,
+}
+
+impl TorrentTelemetryState {
+    fn new(gid: &str, epoch: u64, now: Instant) -> Self {
+        Self {
+            gid: gid.to_string(),
+            epoch,
+            last_upload_length: None,
+            uploaded_bytes: 0,
+            seeded_seconds: 0,
+            last_observed_at: Some(now),
+            last_was_seeding: false,
+        }
+    }
+
+    fn snapshot(&self) -> TorrentTelemetrySnapshot {
+        TorrentTelemetrySnapshot {
+            uploaded_bytes: self.uploaded_bytes,
+            seeded_seconds: self.seeded_seconds,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        gid: &str,
+        epoch: u64,
+        upload_length: Option<u64>,
+        is_seeding: bool,
+        now: Instant,
+    ) -> TorrentTelemetrySnapshot {
+        if self.gid != gid || self.epoch != epoch {
+            // A new GID or control epoch is a new daemon counter lifecycle.
+            // Preserve Firelink totals, but never interpret the new counter
+            // as a continuation of the old one.
+            if self.last_was_seeding {
+                if let Some(previous) = self.last_observed_at {
+                    let seconds = now
+                        .saturating_duration_since(previous)
+                        .min(Duration::from_secs(MAX_TORRENT_SEED_ACCOUNTING_INTERVAL_SECS))
+                        .as_secs();
+                    self.seeded_seconds = self.seeded_seconds.saturating_add(seconds);
+                }
+            }
+            self.gid = gid.to_string();
+            self.epoch = epoch;
+            self.last_upload_length = None;
+            self.last_observed_at = Some(now);
+            self.last_was_seeding = false;
+        } else if self.last_was_seeding {
+            if let Some(previous) = self.last_observed_at {
+                let seconds = now
+                    .saturating_duration_since(previous)
+                    .min(Duration::from_secs(MAX_TORRENT_SEED_ACCOUNTING_INTERVAL_SECS))
+                    .as_secs();
+                self.seeded_seconds = self.seeded_seconds.saturating_add(seconds);
+            }
+        }
+
+        if let Some(current) = upload_length {
+            if let Some(previous) = self.last_upload_length {
+                if current >= previous {
+                    self.uploaded_bytes = self
+                        .uploaded_bytes
+                        .saturating_add(current.saturating_sub(previous));
+                }
+                // A decreased Aria2 counter is a daemon/lifecycle reset. The
+                // current value becomes the new baseline, without adding it.
+            }
+            self.last_upload_length = Some(current);
+        }
+        self.last_observed_at = Some(now);
+        self.last_was_seeding = is_seeding;
+        self.snapshot()
+    }
+}
+
 /// Owns one per-download control lock and removes its idle map entry when the
 /// last operation for that download finishes.
 pub struct Aria2ControlGuard {
@@ -786,6 +881,11 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
     /// alive, but release the download semaphore while they own a seed slot.
     seed_capacity: StdMutex<SeedCapacityState>,
     seed_budgets: StdMutex<HashMap<String, SeedBudget>>,
+    /// Firelink lifetime Torrent upload/seed accounting. Raw Aria2 counters
+    /// are scoped to the current GID and control epoch and never leave this
+    /// process as durable state.
+    torrent_telemetry: Mutex<HashMap<String, TorrentTelemetryState>>,
+    torrent_move_cancellations: Mutex<HashSet<String>>,
 
     /// aria2 gid -> download id map (shared with the WS poller).
     pub aria2_gids: Arc<std::sync::RwLock<HashMap<String, Aria2GidMapping>>>,
@@ -882,6 +982,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 ..SeedCapacityState::default()
             }),
             seed_budgets: StdMutex::new(HashMap::new()),
+            torrent_telemetry: Mutex::new(HashMap::new()),
+            torrent_move_cancellations: Mutex::new(HashSet::new()),
             aria2_gids: Arc::new(std::sync::RwLock::new(HashMap::new())),
             pending_completion: Arc::new(Mutex::new(HashMap::new())),
             aria2_payloads: Mutex::new(HashMap::new()),
@@ -905,6 +1007,86 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
     pub fn power_manager(&self) -> Arc<PowerManager> {
         Arc::clone(&self.power_manager)
+    }
+
+    /// Accept one lifecycle-fenced Aria2 status sample and return Firelink's
+    /// monotonic lifetime counters. Poller callers must already have checked
+    /// the mapping; the key and epoch checks here provide a second fence at
+    /// the accounting owner itself.
+    pub async fn observe_torrent_telemetry(
+        &self,
+        id: &str,
+        gid: &str,
+        epoch: u64,
+        upload_length: Option<u64>,
+        is_seeding: bool,
+        now: Instant,
+    ) -> TorrentTelemetrySnapshot {
+        let mut telemetry = self.torrent_telemetry.lock().await;
+        let state = telemetry
+            .entry(id.to_string())
+            .or_insert_with(|| TorrentTelemetryState::new(gid, epoch, now));
+        state.observe(gid, epoch, upload_length, is_seeding, now)
+    }
+
+    /// Restore the durable Firelink totals before the first raw Aria2 sample
+    /// for a download. Raw upload counters are intentionally not restored;
+    /// the next observation establishes a fresh GID/epoch baseline.
+    pub async fn hydrate_torrent_telemetry(
+        &self,
+        id: &str,
+        uploaded_bytes: u64,
+        seeded_seconds: u64,
+    ) {
+        let mut telemetry = self.torrent_telemetry.lock().await;
+        let state = telemetry
+            .entry(id.to_string())
+            .or_insert_with(|| TorrentTelemetryState::new("", 0, Instant::now()));
+        state.uploaded_bytes = state.uploaded_bytes.max(uploaded_bytes);
+        state.seeded_seconds = state.seeded_seconds.max(seeded_seconds);
+    }
+
+    /// Clear the one-shot integrity override only for the still-current
+    /// lifecycle. A normal user integrity preference is never changed here.
+    pub async fn clear_torrent_relocation_check(&self, id: &str, epoch: u64) -> bool {
+        if !self.is_aria2_control_epoch_current(id, epoch).await {
+            return false;
+        }
+        let mut payloads = self.aria2_payloads.lock().await;
+        let Some(payload) = payloads.get_mut(id) else {
+            return false;
+        };
+        if !payload.is_torrent {
+            return false;
+        }
+        payload.torrent_check_integrity = false;
+        true
+    }
+
+    pub async fn begin_torrent_move(&self, id: &str) {
+        self.torrent_move_cancellations.lock().await.remove(id);
+    }
+
+    pub async fn cancel_torrent_move(&self, id: &str) {
+        self.torrent_move_cancellations
+            .lock()
+            .await
+            .insert(id.to_string());
+    }
+
+    pub async fn torrent_move_cancelled(&self, id: &str) -> bool {
+        self.torrent_move_cancellations.lock().await.contains(id)
+    }
+
+    pub async fn finish_torrent_move(&self, id: &str) {
+        self.torrent_move_cancellations.lock().await.remove(id);
+    }
+
+    /// Drop counters after terminal cleanup/removal. Persisted lifetime
+    /// totals remain owned by the DownloadItem row; this only removes raw
+    /// process-local lifecycle state.
+    pub async fn forget_torrent_telemetry(&self, id: &str) {
+        self.torrent_telemetry.lock().await.remove(id);
     }
 
     pub fn app_handle(&self) -> AppHandle<R> {
@@ -1603,6 +1785,17 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .is_some_and(torrent_seeding_requested)
     }
 
+    /// Whether a currently seeding Torrent owns the Firelink permit that
+    /// allows seed-time accounting. Separate seed slots require explicit
+    /// ownership; legacy single-pool mode keeps the transfer permit live.
+    pub async fn aria2_torrent_seed_permit_owned(&self, id: &str) -> bool {
+        if self.seed_capacity_enabled() {
+            self.seed_owner(id)
+        } else {
+            self.aria2_torrent_seeding_requested(id).await
+        }
+    }
+
     pub async fn aria2_is_torrent(&self, id: &str) -> bool {
         self.aria2_payloads
             .lock()
@@ -1740,7 +1933,16 @@ impl<R: tauri::Runtime> QueueManager<R> {
         &self,
         id: &str,
     ) -> Result<Vec<crate::ipc::TorrentWebSeed>, String> {
-        let _control_guard = self.acquire_aria2_control(id).await;
+        let control_guard = self.acquire_aria2_control(id).await;
+        self.get_aria2_torrent_web_seeds_locked(id, &control_guard)
+            .await
+    }
+
+    pub async fn get_aria2_torrent_web_seeds_locked(
+        &self,
+        id: &str,
+        _control_guard: &Aria2ControlGuard,
+    ) -> Result<Vec<crate::ipc::TorrentWebSeed>, String> {
         let payload = self
             .aria2_payloads
             .lock()
@@ -1776,7 +1978,17 @@ impl<R: tauri::Runtime> QueueManager<R> {
         id: &str,
         seeds: &[crate::ipc::TorrentWebSeed],
     ) -> Result<Vec<crate::ipc::TorrentWebSeed>, String> {
-        let _control_guard = self.acquire_aria2_control(id).await;
+        let control_guard = self.acquire_aria2_control(id).await;
+        self.normalize_aria2_torrent_web_seeds_locked(id, seeds, &control_guard)
+            .await
+    }
+
+    pub async fn normalize_aria2_torrent_web_seeds_locked(
+        &self,
+        id: &str,
+        seeds: &[crate::ipc::TorrentWebSeed],
+        _control_guard: &Aria2ControlGuard,
+    ) -> Result<Vec<crate::ipc::TorrentWebSeed>, String> {
         let payload = self
             .aria2_payloads
             .lock()
@@ -1847,7 +2059,23 @@ impl<R: tauri::Runtime> QueueManager<R> {
         ),
         String,
     > {
-        let _control_guard = self.acquire_aria2_control(id).await;
+        let control_guard = self.acquire_aria2_control(id).await;
+        self.set_aria2_torrent_web_seeds_locked(id, seeds, &control_guard)
+            .await
+    }
+
+    pub async fn set_aria2_torrent_web_seeds_locked(
+        &self,
+        id: &str,
+        seeds: Vec<crate::ipc::TorrentWebSeed>,
+        _control_guard: &Aria2ControlGuard,
+    ) -> Result<
+        (
+            Vec<crate::ipc::TorrentWebSeed>,
+            Vec<crate::ipc::TorrentWebSeed>,
+        ),
+        String,
+    > {
         let old_payload = self
             .aria2_payloads
             .lock()
@@ -2347,6 +2575,87 @@ impl<R: tauri::Runtime> QueueManager<R> {
         }
 
         Ok(diagnostics)
+    }
+
+    /// Compute bounded, anonymized swarm availability for the current
+    /// Torrent lifecycle. The raw local/peer bitfields are consumed in native
+    /// memory and never returned to the frontend.
+    pub async fn get_aria2_torrent_availability(
+        &self,
+        id: &str,
+    ) -> Result<crate::ipc::TorrentAvailabilitySnapshot, String> {
+        let _control_guard = self.acquire_aria2_control(id).await;
+        if !self.is_registered(id).await
+            || !matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
+        {
+            return Err("Torrent availability is unavailable for this lifecycle".to_string());
+        }
+        if !self
+            .aria2_payloads
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|payload| payload.is_torrent)
+        {
+            return Err("download is not a Torrent transfer".to_string());
+        }
+        let gid = self
+            .aria2_gid_for_download(id)
+            .ok_or_else(|| "active Torrent has no gid".to_string())?;
+        let expected_mapping = self
+            .aria2_gid_mapping(&gid)
+            .ok_or_else(|| "active Torrent has no current gid mapping".to_string())?;
+        if expected_mapping.id != id
+            || !self
+                .is_aria2_control_epoch_current(id, expected_mapping.epoch)
+                .await
+        {
+            return Err("active Torrent has a stale control epoch".to_string());
+        }
+        let state = self.app_handle.state::<crate::AppState>();
+        let status = crate::rpc_call(
+            state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+            &state.aria2_secret,
+            "aria2.tellStatus",
+            serde_json::json!([gid, ["bitfield", "numPieces"]]),
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "aria2.tellStatus failed: {}",
+                crate::redact_sensitive_text(&error)
+            )
+        })?;
+        if !self.is_current_aria2_gid_mapping(&gid, &expected_mapping)
+            || !self
+                .is_aria2_control_epoch_current(id, expected_mapping.epoch)
+                .await
+        {
+            return Err("Torrent lifecycle changed while reading availability".to_string());
+        }
+        let peers = crate::rpc_call(
+            state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+            &state.aria2_secret,
+            "aria2.getPeers",
+            serde_json::json!([gid]),
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "aria2.getPeers failed: {}",
+                crate::redact_sensitive_text(&error)
+            )
+        })?;
+        let snapshot = parse_torrent_availability(status, peers)?;
+        if !self.is_registered(id).await
+            || !self.is_current_aria2_gid_mapping(&gid, &expected_mapping)
+            || !self
+                .is_aria2_control_epoch_current(id, expected_mapping.epoch)
+                .await
+        {
+            return Err("Torrent lifecycle changed while reading availability".to_string());
+        }
+        Ok(snapshot)
     }
 
     /// Return a lifecycle-fenced, metadata-derived projection of Aria2's
@@ -3491,6 +3800,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .is_some_and(|payload| payload.is_torrent && payload.torrent_remove_unselected_file);
         match outcome {
             PendingOutcome::Complete => {
+                self.forget_torrent_telemetry(id).await;
                 self.clear_aria2_retry_state(id).await;
                 self.forget_aria2_gid(id).await;
                 if torrent_removal_requested {
@@ -3535,6 +3845,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 self.emit_state(id, restored_status);
             }
             PendingOutcome::Error(error) => {
+                self.forget_torrent_telemetry(id).await;
                 if !verification_only && error.to_ascii_lowercase().contains("checksum") {
                     log::warn!("Checksum error detected for {}, cleaning up assets", id);
                     if let Ok(paths) =
@@ -4965,6 +5276,140 @@ fn aria2_peer_bool(value: Option<&serde_json::Value>) -> bool {
         }
         _ => false,
     }
+}
+
+fn parse_torrent_availability_decimal(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<u64, String> {
+    let value = object
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("aria2.tellStatus returned an invalid {field}"))?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!("aria2.tellStatus returned an invalid {field}"));
+    }
+    value
+        .parse::<u64>()
+        .map_err(|_| format!("aria2.tellStatus returned an invalid {field}"))
+}
+
+fn decode_torrent_availability_bitfield(
+    value: &str,
+    piece_count: u64,
+) -> Result<Vec<u8>, String> {
+    if piece_count == 0 || piece_count > MAX_TORRENT_PIECES_FOR_PROGRESS {
+        return Err("Torrent availability has an unsupported piece count".to_string());
+    }
+    let byte_count = piece_count
+        .checked_add(7)
+        .and_then(|value| value.checked_div(8))
+        .ok_or_else(|| "Torrent availability bitfield is oversized".to_string())?;
+    let expected_hex_length = byte_count
+        .checked_mul(2)
+        .ok_or_else(|| "Torrent availability bitfield is oversized".to_string())?;
+    if value.len() != usize::try_from(expected_hex_length).unwrap_or(usize::MAX)
+        || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("Torrent availability bitfield is malformed".to_string());
+    }
+    let mut bytes = Vec::with_capacity(byte_count as usize);
+    for pair in value.as_bytes().chunks_exact(2) {
+        let high = char::from(pair[0])
+            .to_digit(16)
+            .ok_or_else(|| "Torrent availability bitfield is malformed".to_string())?;
+        let low = char::from(pair[1])
+            .to_digit(16)
+            .ok_or_else(|| "Torrent availability bitfield is malformed".to_string())?;
+        bytes.push(((high << 4) | low) as u8);
+    }
+    if piece_count % 8 != 0 {
+        let overflow_mask = (1u8 << (8 - piece_count as u8 % 8)) - 1;
+        if bytes.last().is_some_and(|byte| byte & overflow_mask != 0) {
+            return Err("Torrent availability bitfield has overflow bits".to_string());
+        }
+    }
+    Ok(bytes)
+}
+
+fn torrent_availability_piece_is_set(bitfield: &[u8], index: usize) -> bool {
+    bitfield[index / 8] & (1 << (7 - index % 8)) != 0
+}
+
+pub(crate) fn parse_torrent_availability(
+    status: serde_json::Value,
+    peers: serde_json::Value,
+) -> Result<crate::ipc::TorrentAvailabilitySnapshot, String> {
+    let status = status
+        .as_object()
+        .ok_or_else(|| "aria2.tellStatus returned malformed Torrent availability".to_string())?;
+    let piece_count = parse_torrent_availability_decimal(status, "numPieces")?;
+    let local_bitfield = status
+        .get("bitfield")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "aria2.tellStatus has no Torrent availability bitfield yet".to_string())?;
+    let local_bitfield = decode_torrent_availability_bitfield(local_bitfield, piece_count)?;
+    let peers = peers
+        .as_array()
+        .ok_or_else(|| "aria2.getPeers returned a non-array result".to_string())?;
+    if peers.len() > MAX_TORRENT_AVAILABILITY_PEERS {
+        return Err("aria2.getPeers returned too many peers for availability".to_string());
+    }
+    let mut copies = vec![0u16; piece_count as usize];
+    for index in 0..piece_count as usize {
+        if torrent_availability_piece_is_set(&local_bitfield, index) {
+            copies[index] = 1;
+        }
+    }
+    for peer in peers {
+        let Some(peer) = peer.as_object() else {
+            // Peer projections are network-derived and may be incomplete
+            // while Aria2 refreshes its peer table. Preserve the connected
+            // count but omit an unusable contribution rather than failing
+            // availability for the whole swarm.
+            continue;
+        };
+        let Some(bitfield_value) = peer.get("bitfield") else {
+            // Aria2 can report a connected peer before the handshake has
+            // supplied its piece bitfield. Keep that peer in the connected
+            // count, but do not let it make the whole availability snapshot
+            // unavailable. A present, non-string bitfield remains malformed.
+            continue;
+        };
+        let Some(bitfield) = bitfield_value.as_str() else {
+            continue;
+        };
+        let Ok(bitfield) = decode_torrent_availability_bitfield(bitfield, piece_count) else {
+            continue;
+        };
+        for index in 0..piece_count as usize {
+            if torrent_availability_piece_is_set(&bitfield, index) {
+                copies[index] = copies[index].saturating_add(1);
+            }
+        }
+    }
+
+    let minimum = copies.iter().copied().min().unwrap_or(0);
+    let above_minimum = copies.iter().filter(|count| **count > minimum).count();
+    let availability = minimum as f64 + above_minimum as f64 / piece_count as f64;
+    let bucket_count = piece_count.min(256) as usize;
+    let mut buckets = Vec::with_capacity(bucket_count);
+    for bucket_index in 0..bucket_count {
+        let start = piece_count * bucket_index as u64 / bucket_count as u64;
+        let end = piece_count * (bucket_index as u64 + 1) / bucket_count as u64;
+        let minimum_copies = copies[start as usize..end as usize]
+            .iter()
+            .copied()
+            .min()
+            .unwrap_or(0);
+        buckets.push(crate::ipc::TorrentAvailabilityBucket { minimum_copies });
+    }
+    Ok(crate::ipc::TorrentAvailabilitySnapshot {
+        piece_count,
+        availability,
+        connected_peers: peers.len().try_into().unwrap_or(u32::MAX),
+        buckets,
+    })
 }
 
 pub(crate) fn parse_torrent_peer_diagnostics(
@@ -7906,5 +8351,171 @@ mod tests {
         assert_eq!(automatic_retry_limit(None), MAX_RETRIES);
         assert_eq!(automatic_retry_limit(Some(0)), 0);
         assert_eq!(automatic_retry_limit(Some(2)), 2);
+    }
+
+    #[test]
+    fn torrent_availability_aggregates_local_and_peer_copies_without_exposing_bitfields() {
+        let snapshot = parse_torrent_availability(
+            serde_json::json!({ "numPieces": "4", "bitfield": "f0" }),
+            serde_json::json!([
+                { "bitfield": "30", "ip": "192.0.2.1" }
+            ]),
+        )
+        .expect("availability should parse");
+        assert_eq!(snapshot.piece_count, 4);
+        assert_eq!(snapshot.connected_peers, 1);
+        assert!((snapshot.availability - 1.5).abs() < f64::EPSILON);
+        assert_eq!(snapshot.buckets.len(), 4);
+        assert_eq!(snapshot.buckets[0].minimum_copies, 1);
+    }
+
+    #[test]
+    fn torrent_availability_rejects_malformed_and_overflow_bitfields() {
+        assert!(parse_torrent_availability(
+            serde_json::json!({ "numPieces": "4", "bitfield": "f1" }),
+            serde_json::json!([]),
+        )
+        .is_err());
+        let snapshot = parse_torrent_availability(
+            serde_json::json!({ "numPieces": "4", "bitfield": "f0" }),
+            serde_json::json!([{ "bitfield": "0" }]),
+        )
+        .expect("malformed peer data should be omitted");
+        assert_eq!(snapshot.connected_peers, 1);
+        assert_eq!(snapshot.availability, 1.0);
+    }
+
+    #[test]
+    fn torrent_availability_ignores_peers_before_their_bitfield_handshake() {
+        let snapshot = parse_torrent_availability(
+            serde_json::json!({ "numPieces": "4", "bitfield": "f0" }),
+            serde_json::json!([
+                { "ip": "192.0.2.1" },
+                { "bitfield": "30" }
+            ]),
+        )
+        .expect("a peer without a handshake bitfield is not malformed");
+        assert_eq!(snapshot.connected_peers, 2);
+        assert!((snapshot.availability - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn torrent_telemetry_counts_only_monotonic_upload_deltas() {
+        let start = Instant::now();
+        let mut state = TorrentTelemetryState::new("gid-1", 7, start);
+        assert_eq!(
+            state.observe("gid-1", 7, Some(100), false, start),
+            TorrentTelemetrySnapshot {
+                uploaded_bytes: 0,
+                seeded_seconds: 0
+            }
+        );
+        assert_eq!(
+            state.observe(
+                "gid-1",
+                7,
+                Some(180),
+                false,
+                start + Duration::from_secs(1)
+            )
+            .uploaded_bytes,
+            80
+        );
+        // A daemon counter reset establishes a new baseline and contributes
+        // no bytes from the reset itself.
+        assert_eq!(
+            state.observe(
+                "gid-1",
+                7,
+                Some(12),
+                false,
+                start + Duration::from_secs(2)
+            )
+            .uploaded_bytes,
+            80
+        );
+        assert_eq!(
+            state.observe(
+                "gid-1",
+                7,
+                Some(20),
+                false,
+                start + Duration::from_secs(3)
+            )
+            .uploaded_bytes,
+            88
+        );
+    }
+
+    #[test]
+    fn torrent_telemetry_restarts_baseline_on_gid_or_epoch_replacement() {
+        let start = Instant::now();
+        let mut state = TorrentTelemetryState::new("gid-1", 1, start);
+        state.observe("gid-1", 1, Some(500), false, start);
+        state.observe("gid-1", 1, Some(525), false, start + Duration::from_secs(1));
+        let snapshot = state.observe("gid-2", 2, Some(4), false, start + Duration::from_secs(2));
+        assert_eq!(snapshot.uploaded_bytes, 25);
+        assert_eq!(
+            state.observe("gid-2", 2, Some(9), false, start + Duration::from_secs(3))
+                .uploaded_bytes,
+            30
+        );
+    }
+
+    #[test]
+    fn torrent_telemetry_closes_the_previous_seed_interval_on_lifecycle_replacement() {
+        let start = Instant::now();
+        let mut state = TorrentTelemetryState::new("gid-1", 1, start);
+        state.observe("gid-1", 1, Some(0), true, start);
+        let snapshot = state.observe("gid-2", 2, Some(4), false, start + Duration::from_secs(3));
+        assert_eq!(snapshot.seeded_seconds, 3);
+        assert_eq!(snapshot.uploaded_bytes, 0);
+    }
+
+    #[test]
+    fn torrent_telemetry_counts_seed_seconds_only_for_the_previous_seed_interval() {
+        let start = Instant::now();
+        let mut state = TorrentTelemetryState::new("gid-1", 1, start);
+        state.observe("gid-1", 1, Some(0), true, start);
+        assert_eq!(
+            state.observe(
+                "gid-1",
+                1,
+                Some(10),
+                true,
+                start + Duration::from_secs(4)
+            )
+            .seeded_seconds,
+            4
+        );
+        assert_eq!(
+            state.observe(
+                "gid-1",
+                1,
+                Some(10),
+                false,
+                start + Duration::from_secs(9)
+            )
+            .seeded_seconds,
+            9
+        );
+    }
+
+    #[test]
+    fn torrent_telemetry_caps_long_observer_gaps() {
+        let start = Instant::now();
+        let mut state = TorrentTelemetryState::new("gid-1", 1, start);
+        state.observe("gid-1", 1, Some(0), true, start);
+        let snapshot = state.observe(
+            "gid-1",
+            1,
+            Some(1),
+            true,
+            start + Duration::from_secs(MAX_TORRENT_SEED_ACCOUNTING_INTERVAL_SECS + 3600),
+        );
+        assert_eq!(
+            snapshot.seeded_seconds,
+            MAX_TORRENT_SEED_ACCOUNTING_INTERVAL_SECS
+        );
     }
 }

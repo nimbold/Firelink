@@ -1,6 +1,7 @@
 import type { DownloadCategory } from '../bindings/DownloadCategory';
 import type { DownloadStatus } from '../bindings/DownloadStatus';
 import type { DownloadItem } from '../bindings/DownloadItem';
+import type { TorrentWebSeed } from '../bindings/TorrentWebSeed';
 export type { DownloadCategory } from '../bindings/DownloadCategory';
 
 import { invokeCommand as invoke } from '../ipc';
@@ -34,6 +35,7 @@ const ACTIVE_DOWNLOAD_STATUSES: ReadonlySet<DownloadStatus> = new Set([
   'seeding',
   'waitingToSeed',
   'retrying',
+  'moving',
 ]);
 
 export const isActiveDownloadStatus = (status: DownloadStatus): boolean =>
@@ -214,6 +216,8 @@ const MAX_TORRENT_TRACKERS = 64;
 const MAX_TORRENT_TRACKER_BYTES = 16 * 1024;
 export const MAX_TORRENT_STOP_TIMEOUT = 7 * 24 * 60 * 60;
 const MAX_TORRENT_PIECE_PRIORITY_SIZE_MIB = 1024;
+const MAX_TORRENT_WEB_SEEDS = 64;
+const MAX_TORRENT_WEB_SEED_URI_BYTES = 2048;
 
 const normalizeTorrentPiecePrioritySize = (value: string): string | null => {
   const match = value.trim().match(/^(\d+)\s*([km])$/i);
@@ -265,6 +269,85 @@ export const normalizeTorrentPrioritizePiece = (value?: string | null): string |
   }
 
   return [head, tail].filter((part): part is string => Boolean(part)).join(',') || null;
+};
+
+export type TorrentPreviewPriority = {
+  head: string;
+  tail: string;
+};
+
+export const parseTorrentPreviewPriority = (value?: string | null): TorrentPreviewPriority => {
+  const normalized = normalizeTorrentPrioritizePiece(value);
+  const result: TorrentPreviewPriority = { head: '', tail: '' };
+  for (const token of normalized?.split(',') ?? []) {
+    const [keyword, size] = token.split('=', 2);
+    result[keyword as 'head' | 'tail'] = size || '1M';
+  }
+  return result;
+};
+
+export const serializeTorrentPreviewPriority = (
+  headEnabled: boolean,
+  headSize: string,
+  tailEnabled: boolean,
+  tailSize: string
+): string | null => normalizeTorrentPrioritizePiece([
+  headEnabled ? `head=${headSize.trim() || '1M'}` : '',
+  tailEnabled ? `tail=${tailSize.trim() || '1M'}` : ''
+].filter(Boolean).join(','));
+
+export type TorrentWebSeedDraft = {
+  fileIndex: number | null;
+  uri: string;
+};
+
+export const torrentWebSeedDraftsFromSeeds = (
+  seeds: readonly TorrentWebSeed[] | undefined
+): TorrentWebSeedDraft[] => (seeds ?? []).map(seed => ({
+  fileIndex: seed.fileIndex,
+  uri: seed.uri
+}));
+
+type TorrentWebSeedFile = { index: number };
+
+export const normalizeTorrentWebSeedDrafts = (
+  drafts: readonly TorrentWebSeedDraft[],
+  files: readonly TorrentWebSeedFile[]
+): TorrentWebSeed[] | null => {
+  if (drafts.length > MAX_TORRENT_WEB_SEEDS) return null;
+  const fileIndices = new Set(files.map(file => file.index));
+  const normalized: TorrentWebSeed[] = [];
+  const seen = new Set<string>();
+  for (const draft of drafts) {
+    const fileIndex = files.length === 1 ? files[0].index : draft.fileIndex;
+    const uri = draft.uri.trim();
+    if (
+      fileIndex === null
+      || !fileIndices.has(fileIndex)
+      || !uri
+      || new TextEncoder().encode(uri).length > MAX_TORRENT_WEB_SEED_URI_BYTES
+    ) return null;
+    let parsed: URL;
+    try {
+      parsed = new URL(uri);
+    } catch {
+      return null;
+    }
+    if (
+      !['http:', 'https:'].includes(parsed.protocol)
+      || !parsed.hostname
+      || parsed.username
+      || parsed.password
+      || parsed.hash
+      || /[\u0000-\u001f\u007f]/u.test(uri)
+    ) return null;
+    const normalizedUri = parsed.toString();
+    const key = `${fileIndex}\u0000${normalizedUri}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push({ fileIndex, uri: normalizedUri });
+  }
+  return normalized;
 };
 
 /**

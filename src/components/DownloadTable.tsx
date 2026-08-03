@@ -25,6 +25,7 @@ import {
 import { isActiveDownloadStatus, isTransferActiveStatus } from '../utils/downloads';
 import { summarizeDownloads, type DownloadSummary } from '../utils/downloadSummary';
 import { readClipboardDownloadUrls } from '../utils/clipboard';
+import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import { useTranslation } from 'react-i18next';
 import {
   sortDownloads,
@@ -2551,6 +2552,23 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
               >
                 {t($ => $.downloadTable.copyAddress)}
               </button>
+
+              {contextItem.isTorrent && (
+                <button
+                  onClick={async () => {
+                    setContextMenu(null);
+                    try {
+                      const magnet = await invoke('get_torrent_magnet_link', { id: contextItem.id });
+                      await writeClipboardText(magnet);
+                    } catch (error) {
+                      showInteractionError(t($ => $.downloadTable.copyMagnetFailed), error);
+                    }
+                  }}
+                  className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
+                >
+                  {t($ => $.downloadTable.copyMagnet)}
+                </button>
+              )}
 
               {contextItem.status === 'completed' && (
                 <button

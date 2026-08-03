@@ -5,6 +5,7 @@ import {
 } from './downloads';
 import type { MediaPlaylistMetadata } from '../bindings/MediaPlaylistMetadata';
 import type { TorrentFile } from '../bindings/TorrentFile';
+import type { TorrentWebSeedDraft } from './downloads';
 import i18n from '../i18n';
 import { localePluralVariant } from '../i18n/locales';
 
@@ -67,6 +68,7 @@ export interface AddDownloadDraftRow {
   torrentCheckIntegrity?: boolean;
   torrentTrackers?: string;
   torrentExcludeTrackers?: string;
+  torrentWebSeedRows?: TorrentWebSeedDraft[];
 }
 
 /**

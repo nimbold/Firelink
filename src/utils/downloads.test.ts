@@ -11,6 +11,10 @@ import {
   normalizeTorrentEncryptionPolicy,
   normalizeTorrentMaxOpenFiles,
   normalizeTorrentPrioritizePiece,
+  normalizeTorrentWebSeedDrafts,
+  parseTorrentPreviewPriority,
+  serializeTorrentPreviewPriority,
+  torrentWebSeedDraftsFromSeeds,
   normalizeTorrentTrackerInterval,
   normalizeTorrentTrackerTimeout,
   redactDownloadForPersistence,
@@ -101,6 +105,52 @@ describe('Torrent piece priority validation', () => {
     for (const value of ['head,head', 'middle', 'head=0K', 'tail=1G', 'head=1K,', 'head=1025M']) {
       expect(normalizeTorrentPrioritizePiece(value)).toBeNull();
     }
+  });
+});
+
+describe('Torrent preview controls', () => {
+  it('hydrates legacy head and tail syntax into independent controls', () => {
+    expect(parseTorrentPreviewPriority('tail=64k, HEAD')).toEqual({ head: '1M', tail: '64K' });
+  });
+
+  it('serializes enabled controls with native-compatible defaults', () => {
+    expect(serializeTorrentPreviewPriority(true, '', true, '2m')).toBe('head=1M,tail=2M');
+    expect(serializeTorrentPreviewPriority(false, '1M', false, '1M')).toBeNull();
+  });
+});
+
+describe('Torrent web-seed row normalization', () => {
+  const files = [{ index: 1 }, { index: 2 }];
+
+  it('round-trips rows and removes exact duplicates', () => {
+    const rows = torrentWebSeedDraftsFromSeeds([
+      { fileIndex: 1, uri: 'https://mirror.example/a' },
+      { fileIndex: 1, uri: 'https://mirror.example/a' }
+    ]);
+    expect(normalizeTorrentWebSeedDrafts(rows, files)).toEqual([
+      { fileIndex: 1, uri: 'https://mirror.example/a' }
+    ]);
+  });
+
+  it('uses the only file for a fixed single-file selector', () => {
+    expect(normalizeTorrentWebSeedDrafts([{ fileIndex: null, uri: 'https://mirror.example/a' }], [{ index: 1 }])).toEqual([
+      { fileIndex: 1, uri: 'https://mirror.example/a' }
+    ]);
+  });
+
+  it('rejects unsafe, incomplete, and out-of-range rows', () => {
+    expect(normalizeTorrentWebSeedDrafts([{ fileIndex: 1, uri: 'ftp://mirror.example/a' }], files)).toBeNull();
+    expect(normalizeTorrentWebSeedDrafts([{ fileIndex: null, uri: 'https://mirror.example/a' }], files)).toBeNull();
+    expect(normalizeTorrentWebSeedDrafts([{ fileIndex: 9, uri: 'https://mirror.example/a' }], files)).toBeNull();
+    expect(normalizeTorrentWebSeedDrafts([{ fileIndex: 1, uri: 'https://user:pass@mirror.example/a' }], files)).toBeNull();
+    expect(normalizeTorrentWebSeedDrafts([{ fileIndex: 1, uri: `https://mirror.example/${'é'.repeat(1100)}` }], files)).toBeNull();
+  });
+
+  it('bounds the number of rows before they reach the native boundary', () => {
+    expect(normalizeTorrentWebSeedDrafts(
+      Array.from({ length: 65 }, (_, index) => ({ fileIndex: 1, uri: `https://mirror.example/${index}` })),
+      files
+    )).toBeNull();
   });
 });
 

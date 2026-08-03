@@ -23,7 +23,8 @@ const isFreshDownloadStatus = (status: DownloadItem['status']): boolean =>
   status === 'seeding' ||
   status === 'processing' ||
   status === 'verifying' ||
-  status === 'retrying';
+  status === 'retrying' ||
+  status === 'moving';
 
 const hasPositiveProgress = (download: DownloadItem): boolean =>
   typeof download.fraction === 'number' &&
@@ -81,7 +82,7 @@ export const summarizeDownloads = (
 
   for (const download of downloads) {
     const state = effectiveByteState(download, progressMap[download.id]);
-    if (isTransferActiveStatus(download.status)) activeCount += 1;
+    if (isTransferActiveStatus(download.status) || download.status === 'moving') activeCount += 1;
     if (state.downloadedBytes === undefined) {
       downloadedKnown = false;
     } else {

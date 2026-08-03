@@ -352,7 +352,7 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
         torrent_upload_limit: item.torrentUploadLimit || undefined,
         torrent_max_peers: item.torrentMaxPeers,
         torrent_peer_speed_limit: item.torrentPeerSpeedLimit || undefined,
-        torrent_check_integrity: item.torrentCheckIntegrity,
+        torrent_check_integrity: item.torrentCheckIntegrity || item.torrentRelocationCheckPending,
         torrent_trackers: item.torrentTrackers || undefined,
         torrent_exclude_trackers: item.torrentExcludeTrackers || undefined,
         torrent_tracker_connect_timeout: item.torrentTrackerConnectTimeout,
@@ -636,6 +636,18 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
     rawSeedRemaining >= 0
     ? rawSeedRemaining
     : undefined;
+  const rawUploadedBytes = download.torrentUploadedBytes as unknown;
+  const normalizedUploadedBytes = typeof rawUploadedBytes === 'number'
+    && Number.isSafeInteger(rawUploadedBytes)
+    && rawUploadedBytes >= 0
+    ? rawUploadedBytes
+    : rawUploadedBytes === undefined ? undefined : 0;
+  const rawSeededSeconds = download.torrentSeededSeconds as unknown;
+  const normalizedSeededSeconds = typeof rawSeededSeconds === 'number'
+    && Number.isSafeInteger(rawSeededSeconds)
+    && rawSeededSeconds >= 0
+    ? rawSeededSeconds
+    : rawSeededSeconds === undefined ? undefined : 0;
   const rawMaxPeers = download.torrentMaxPeers as unknown;
   const normalizedMaxPeers = typeof rawMaxPeers === 'number' &&
     Number.isInteger(rawMaxPeers) &&
@@ -646,6 +658,17 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
   const rawWebSeeds = download.torrentWebSeeds as unknown;
   const normalizedWebSeeds = Array.isArray(rawWebSeeds)
     ? rawWebSeeds.filter((seed): seed is { fileIndex: number; uri: string } =>
+      !!seed && typeof seed === 'object' &&
+      typeof (seed as { fileIndex?: unknown }).fileIndex === 'number' &&
+      Number.isInteger((seed as { fileIndex: number }).fileIndex) &&
+      (seed as { fileIndex: number }).fileIndex >= 0 &&
+      typeof (seed as { uri?: unknown }).uri === 'string' &&
+      (seed as { uri: string }).uri.length <= 2048
+    ).slice(0, 256)
+    : undefined;
+  const rawNativeWebSeeds = download.torrentWebSeedsNative as unknown;
+  const normalizedNativeWebSeeds = Array.isArray(rawNativeWebSeeds)
+    ? rawNativeWebSeeds.filter((seed): seed is { fileIndex: number; uri: string } =>
       !!seed && typeof seed === 'object' &&
       typeof (seed as { fileIndex?: unknown }).fileIndex === 'number' &&
       Number.isInteger((seed as { fileIndex: number }).fileIndex) &&
@@ -697,6 +720,24 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
   const normalizedFileAllocation = normalizeTorrentFileAllocation(rawFileAllocation);
   const rawVerifyOnly = download.torrentVerifyOnly as unknown;
   const normalizedVerifyOnly = rawVerifyOnly === true ? true : undefined;
+  const rawRelocationCheckPending = download.torrentRelocationCheckPending as unknown;
+  const normalizedRelocationCheckPending = rawRelocationCheckPending === true ? true : undefined;
+  const rawMoveDestination = download.torrentMoveDestination as unknown;
+  const normalizedMoveDestination = typeof rawMoveDestination === 'string'
+    && rawMoveDestination.trim()
+    ? rawMoveDestination
+    : undefined;
+  const rawMoveRestoreStatus = download.torrentMoveRestoreStatus as unknown;
+  const normalizedMoveRestoreStatus: DownloadStatus | undefined = download.status === 'moving' && (
+    rawMoveRestoreStatus === 'paused'
+    || rawMoveRestoreStatus === 'completed'
+    || rawMoveRestoreStatus === 'failed'
+  )
+    ? rawMoveRestoreStatus as DownloadStatus
+    : undefined;
+  const recoveredMoveStatus = download.status === 'moving'
+    ? normalizedMoveRestoreStatus || 'failed'
+    : download.status;
   const rawVerifyRestoreStatus = download.torrentVerifyRestoreStatus as unknown;
   const normalizedVerifyRestoreStatus = normalizedVerifyOnly === true
     && typeof rawVerifyRestoreStatus === 'string'
@@ -704,7 +745,10 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
     ? rawVerifyRestoreStatus
     : undefined;
   const normalizedOptions = rawSeedRemaining !== normalizedSeedRemaining ||
+    rawUploadedBytes !== normalizedUploadedBytes ||
+    rawSeededSeconds !== normalizedSeededSeconds ||
     rawWebSeeds !== normalizedWebSeeds ||
+    rawNativeWebSeeds !== normalizedNativeWebSeeds ||
     rawMaxPeers !== normalizedMaxPeers ||
     rawPeerSpeedLimit !== normalizedPeerSpeedLimit ||
     rawCheckIntegrity !== normalizedCheckIntegrity ||
@@ -719,11 +763,19 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
     rawEncryptionPolicy !== normalizedEncryptionPolicy ||
     rawFileAllocation !== normalizedFileAllocation ||
     rawVerifyOnly !== normalizedVerifyOnly ||
+    rawRelocationCheckPending !== normalizedRelocationCheckPending ||
+    rawMoveDestination !== normalizedMoveDestination ||
+    rawMoveRestoreStatus !== normalizedMoveRestoreStatus ||
+    recoveredMoveStatus !== download.status ||
     rawVerifyRestoreStatus !== normalizedVerifyRestoreStatus
-    ? {
+      ? {
         ...download,
+        status: recoveredMoveStatus,
         torrentSeedRemaining: normalizedSeedRemaining,
+        torrentUploadedBytes: normalizedUploadedBytes,
+        torrentSeededSeconds: normalizedSeededSeconds,
         torrentWebSeeds: normalizedWebSeeds,
+        torrentWebSeedsNative: normalizedNativeWebSeeds,
         torrentMaxPeers: normalizedMaxPeers,
         torrentPeerSpeedLimit: normalizedPeerSpeedLimit,
         torrentCheckIntegrity: normalizedCheckIntegrity,
@@ -738,9 +790,14 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
         torrentEncryptionPolicy: normalizedEncryptionPolicy,
         torrentFileAllocation: normalizedFileAllocation,
         torrentVerifyOnly: normalizedVerifyOnly,
+        torrentRelocationCheckPending: normalizedRelocationCheckPending,
+        torrentMoveDestination: normalizedMoveDestination,
+        torrentMoveRestoreStatus: normalizedMoveRestoreStatus,
         torrentVerifyRestoreStatus: normalizedVerifyRestoreStatus
       }
-    : download;
+    : recoveredMoveStatus !== download.status
+      ? { ...download, status: recoveredMoveStatus, torrentMoveRestoreStatus: normalizedMoveRestoreStatus }
+      : download;
 
   return hasStaleTemporaryMediaEstimate(normalizedOptions)
     ? {
@@ -2300,7 +2357,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             torrent_upload_limit: item.torrentUploadLimit || undefined,
             torrent_max_peers: item.torrentMaxPeers,
             torrent_peer_speed_limit: item.torrentPeerSpeedLimit || undefined,
-            torrent_check_integrity: item.torrentCheckIntegrity,
+            torrent_check_integrity: item.torrentCheckIntegrity || item.torrentRelocationCheckPending,
             torrent_trackers: item.torrentTrackers || undefined,
             torrent_exclude_trackers: item.torrentExcludeTrackers || undefined,
             torrent_tracker_connect_timeout: item.torrentTrackerConnectTimeout,

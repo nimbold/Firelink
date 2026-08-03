@@ -13,6 +13,7 @@ import { useSettingsStore } from '../store/useSettingsStore';
 import { formatDateTime } from '../utils/dateTime';
 import {
   downloadProgressColorClass,
+  formatTorrentDuration,
   formatDownloadTotal,
   resolveDownloadSizeDisplay
 } from '../utils/downloadProgress';
@@ -72,6 +73,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   const { t, i18n } = useTranslation();
   const calendarPreference = useSettingsStore(state => state.calendarPreference);
   const liveProgress = useDownloadProgressStore(state => state.progressMap[download.id]);
+  const moveProgress = useDownloadProgressStore(state => state.moveProgressMap[download.id]);
   const rowRef = React.useRef<HTMLDivElement>(null);
   const [isRowHovered, setIsRowHovered] = React.useState(false);
   const [isRowKeyboardFocused, setIsRowKeyboardFocused] = React.useState(false);
@@ -178,7 +180,9 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     };
   }, [isActionVisible, updateActionPosition]);
 
-  const displayFraction = download.status === 'downloading' || download.status === 'verifying' || download.status === 'seeding'
+  const displayFraction = download.status === 'moving'
+    ? moveProgress ?? download.fraction ?? 0
+    : download.status === 'downloading' || download.status === 'verifying' || download.status === 'seeding'
     ? liveProgress?.fraction ?? download.fraction ?? 0
     : download.fraction ?? 0;
   const displayPercent = `${(displayFraction * 100).toFixed(0)}%`;
@@ -190,7 +194,9 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
       ? t($ => $.downloads.values.processing)
       : '-';
   const displayEta = download.status === 'seeding'
-    ? '-'
+    ? typeof download.torrentSeedRemaining === 'number' && Number.isFinite(download.torrentSeedRemaining) && download.torrentSeedRemaining > 0
+      ? formatTorrentDuration(download.torrentSeedRemaining * 60, i18n.language)
+      : '-'
     : download.status === 'downloading' || download.status === 'verifying'
     ? liveProgress?.eta ?? download.eta
     : download.status === 'processing'
@@ -298,6 +304,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                   download.status === 'seeding' ? 'seeding' :
                   download.status === 'processing' ? 'processing' :
                   download.status === 'verifying' ? 'processing' :
+                  download.status === 'moving' ? 'processing' :
                   download.status === 'queued' || download.status === 'staged' ? 'queued' :
                   download.status === 'retrying' ? 'retrying' : ''
                 }`}
@@ -322,6 +329,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                 download.status === 'failed' ? 'download-status-failed' :
                   download.status === 'processing' ? 'download-status-processing' :
                 download.status === 'verifying' ? 'download-status-processing' :
+                download.status === 'moving' ? 'download-status-processing' :
                 download.status === 'downloading' ? 'download-status-downloading' :
                 download.status === 'queued' || download.status === 'staged' ? 'download-status-queued' :
                 download.status === 'retrying' ? 'download-status-retrying' : ''
@@ -334,7 +342,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                     {downloadStatusLabel} #{queueIndex + 1}
                   </span>
                 </>
-              ) : download.status === 'downloading' || download.status === 'verifying' ? (
+              ) : download.status === 'downloading' || download.status === 'verifying' || download.status === 'moving' ? (
                 displayPercent
               ) : download.status === 'seeding' ? (
                 displayPercent

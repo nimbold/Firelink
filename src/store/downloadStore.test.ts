@@ -17,7 +17,7 @@ describe('useDownloadProgressStore', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined);
-    useDownloadProgressStore.setState({ progressMap: {} });
+    useDownloadProgressStore.setState({ progressMap: {}, moveProgressMap: {} });
     clearDownloadControlIntents();
   });
 
@@ -43,7 +43,7 @@ describe('useDownloadProgressStore', () => {
     const first = initDownloadListener();
     const second = initDownloadListener();
 
-    expect(ipc.listenEvent).toHaveBeenCalledTimes(3);
+    expect(ipc.listenEvent).toHaveBeenCalledTimes(4);
 
     const releaseFirst = await first;
     const releaseSecond = await second;
@@ -51,7 +51,7 @@ describe('useDownloadProgressStore', () => {
     expect(unlisten).not.toHaveBeenCalled();
 
     releaseSecond();
-    expect(unlisten).toHaveBeenCalledTimes(3);
+    expect(unlisten).toHaveBeenCalledTimes(4);
   });
 
   it('ignores late progress and opposite terminal events from an older lifecycle', async () => {
