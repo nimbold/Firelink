@@ -34,6 +34,18 @@ fn default_torrent_max_open_files() -> u32 {
     crate::queue::DEFAULT_TORRENT_MAX_OPEN_FILES
 }
 
+fn default_torrent_dht_message_timeout() -> u32 {
+    crate::queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT
+}
+
+fn default_torrent_separate_seed_slots() -> bool {
+    false
+}
+
+fn default_torrent_max_concurrent_seeds() -> u32 {
+    crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../src/bindings/")]
@@ -49,6 +61,10 @@ pub enum DownloadStatus {
     /// A BitTorrent download has all selected data and is still seeding.
     /// The Aria2 GID and queue permit remain live until seeding ends.
     Seeding,
+    /// A BitTorrent download is complete but paused while waiting for a
+    /// Firelink-owned seeding slot.
+    #[serde(rename = "waitingToSeed")]
+    WaitingToSeed,
     Paused,
     Completed,
     Failed,
@@ -66,6 +82,7 @@ impl DownloadStatus {
             Self::Downloading => "downloading",
             Self::Processing => "processing",
             Self::Seeding => "seeding",
+            Self::WaitingToSeed => "waitingToSeed",
             Self::Paused => "paused",
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -188,6 +205,12 @@ pub struct DownloadItem {
     pub torrent_seed_ratio: Option<f64>,
     #[serde(default)]
     #[ts(optional)]
+    pub torrent_seed_remaining: Option<f64>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_web_seeds: Option<Vec<TorrentWebSeed>>,
+    #[serde(default)]
+    #[ts(optional)]
     pub torrent_upload_limit: Option<String>,
     #[serde(default)]
     #[ts(optional)]
@@ -250,6 +273,48 @@ pub struct TorrentPeerDiagnostics {
     pub total_seeders: u32,
     pub peers: Vec<TorrentPeer>,
     pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TorrentFileProgress {
+    pub index: u32,
+    pub relative_path: String,
+    #[ts(type = "number")]
+    pub length: u64,
+    #[ts(type = "number")]
+    pub completed_length: u64,
+    pub selected: bool,
+}
+
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TorrentFileProgressSnapshot {
+    pub files: Vec<TorrentFileProgress>,
+}
+
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TorrentPieceProgressSnapshot {
+    #[ts(type = "number")]
+    pub piece_length: u64,
+    #[ts(type = "number")]
+    pub num_pieces: u64,
+    #[ts(type = "number")]
+    pub completed_pieces: u64,
+    pub buckets: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TorrentWebSeed {
+    #[ts(type = "number")]
+    pub file_index: u32,
+    pub uri: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
@@ -501,6 +566,12 @@ pub struct PersistedSettings {
     pub torrent_enable_lpd: bool,
     #[serde(default = "default_torrent_max_open_files")]
     pub torrent_max_open_files: u32,
+    #[serde(default = "default_torrent_dht_message_timeout")]
+    pub torrent_dht_message_timeout: u32,
+    #[serde(default = "default_torrent_separate_seed_slots")]
+    pub torrent_separate_seed_slots: bool,
+    #[serde(default = "default_torrent_max_concurrent_seeds")]
+    pub torrent_max_concurrent_seeds: u32,
     #[serde(default)]
     pub torrent_listen_port: String,
     #[serde(default)]
@@ -559,6 +630,8 @@ pub struct DownloadStateEvent {
     pub error: Option<String>,
     #[ts(optional)]
     pub file_name: Option<String>,
+    #[ts(optional)]
+    pub torrent_seed_remaining: Option<f64>,
 }
 
 impl DownloadStateEvent {
@@ -568,6 +641,7 @@ impl DownloadStateEvent {
             status: status.as_str().to_string(),
             error: None,
             file_name: None,
+            torrent_seed_remaining: None,
         }
     }
 
@@ -577,6 +651,7 @@ impl DownloadStateEvent {
             status: DownloadStatus::Failed.as_str().to_string(),
             error: Some(error.into()),
             file_name: None,
+            torrent_seed_remaining: None,
         }
     }
 
@@ -586,6 +661,17 @@ impl DownloadStateEvent {
             status: DownloadStatus::Paused.as_str().to_string(),
             error: Some(error.into()),
             file_name: None,
+            torrent_seed_remaining: None,
+        }
+    }
+
+    pub fn paused_with_seed_remaining(id: impl Into<String>, remaining: Option<f64>) -> Self {
+        Self {
+            id: id.into(),
+            status: DownloadStatus::Paused.as_str().to_string(),
+            error: None,
+            file_name: None,
+            torrent_seed_remaining: remaining,
         }
     }
 
@@ -595,6 +681,7 @@ impl DownloadStateEvent {
             status: DownloadStatus::Completed.as_str().to_string(),
             error: None,
             file_name: Some(file_name.into()),
+            torrent_seed_remaining: None,
         }
     }
 
@@ -606,6 +693,17 @@ impl DownloadStateEvent {
             status: DownloadStatus::Retrying.as_str().to_string(),
             error: Some(reason.into()),
             file_name: None,
+            torrent_seed_remaining: None,
+        }
+    }
+
+    pub fn waiting_to_seed(id: impl Into<String>, remaining: Option<f64>) -> Self {
+        Self {
+            id: id.into(),
+            status: DownloadStatus::WaitingToSeed.as_str().to_string(),
+            error: None,
+            file_name: None,
+            torrent_seed_remaining: remaining,
         }
     }
 }

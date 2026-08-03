@@ -121,7 +121,8 @@ const startDownloadListeners = async () => {
         return;
       }
       if (status === 'downloading' || status === 'processing' ||
-          status === 'seeding' || status === 'completed' || status === 'failed') {
+          status === 'seeding' || status === 'waitingToSeed' ||
+          status === 'completed' || status === 'failed') {
         clearDownloadControlIntent(payload.id, 'resume');
       }
       if (status === 'paused') {
@@ -146,6 +147,7 @@ const startDownloadListeners = async () => {
       }
       if (current.status === 'seeding' &&
           status !== 'seeding' &&
+          status !== 'waitingToSeed' &&
           status !== 'paused' &&
           status !== 'completed' &&
           status !== 'failed') {
@@ -153,7 +155,7 @@ const startDownloadListeners = async () => {
       }
 
       const progress = useDownloadProgressStore.getState().progressMap[payload.id];
-      if (['queued', 'retrying', 'completed', 'failed', 'paused'].includes(status)) {
+      if (['queued', 'retrying', 'completed', 'failed', 'paused', 'waitingToSeed'].includes(status)) {
         useDownloadProgressStore.getState().clearDownloadProgress(payload.id);
       }
       const updates: Partial<DownloadItem> = {
@@ -175,6 +177,11 @@ const startDownloadListeners = async () => {
           ? { lastTry: new Date().toISOString() }
           : {})
       };
+      if (payload.torrentSeedRemaining != null) {
+        updates.torrentSeedRemaining = payload.torrentSeedRemaining;
+      } else if (status === 'seeding' || status === 'completed' || status === 'failed') {
+        updates.torrentSeedRemaining = undefined;
+      }
       if (!payload.error && status !== 'failed' && status !== 'retrying') {
         updates.lastError = undefined;
       }
@@ -188,7 +195,7 @@ const startDownloadListeners = async () => {
       }
       mainStore.updateDownload(payload.id, updates);
 
-      if (status === 'completed' || status === 'failed' || status === 'paused' || status === 'seeding') {
+      if (status === 'completed' || status === 'failed' || status === 'paused' || status === 'seeding' || status === 'waitingToSeed') {
         useDownloadStore.setState(state => ({
           pendingOrder: state.pendingOrder.filter(id => id !== payload.id)
         }));
@@ -198,7 +205,7 @@ const startDownloadListeners = async () => {
           : { pendingOrder: [...state.pendingOrder, payload.id] });
       }
 
-      if (status === 'queued' || status === 'downloading' || status === 'processing' || status === 'seeding' || status === 'retrying') {
+      if (status === 'queued' || status === 'downloading' || status === 'processing' || status === 'seeding' || status === 'waitingToSeed' || status === 'retrying') {
         mainStore.registerBackendIds([payload.id]);
       } else if (status === 'completed' || status === 'failed') {
         mainStore.unregisterBackendIds([payload.id]);

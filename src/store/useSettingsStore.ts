@@ -24,7 +24,10 @@ import {
   DEFAULT_TORRENT_MAX_OPEN_FILES,
   MAX_TORRENT_MAX_OPEN_FILES,
   MIN_TORRENT_MAX_OPEN_FILES,
+  DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT,
+  DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS,
   normalizeSpeedLimitForBackend,
+  normalizeTorrentDhtMessageTimeout,
   normalizeTorrentMaxOpenFiles
 } from '../utils/downloads';
 import i18n from '../i18n';
@@ -248,6 +251,9 @@ export interface SettingsState {
   torrentEnablePex: boolean;
   torrentEnableLpd: boolean;
   torrentMaxOpenFiles: number;
+  torrentDhtMessageTimeout: number;
+  torrentSeparateSeedSlots: boolean;
+  torrentMaxConcurrentSeeds: number;
   torrentListenPort: string;
   torrentDhtListenPort: string;
   torrentExternalIp: string;
@@ -313,6 +319,9 @@ export interface SettingsState {
   setTorrentEnablePex: (enabled: boolean) => void;
   setTorrentEnableLpd: (enabled: boolean) => void;
   setTorrentMaxOpenFiles: (value: number) => Promise<void>;
+  setTorrentDhtMessageTimeout: (value: number) => void;
+  setTorrentSeparateSeedSlots: (enabled: boolean) => void;
+  setTorrentMaxConcurrentSeeds: (value: number) => void;
   setTorrentListenPort: (value: string) => void;
   setTorrentDhtListenPort: (value: string) => void;
   setTorrentExternalIp: (value: string) => void;
@@ -404,6 +413,9 @@ export const useSettingsStore = create<SettingsState>()(
       torrentEnablePex: true,
       torrentEnableLpd: false,
       torrentMaxOpenFiles: DEFAULT_TORRENT_MAX_OPEN_FILES,
+      torrentDhtMessageTimeout: DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT,
+      torrentSeparateSeedSlots: false,
+      torrentMaxConcurrentSeeds: DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS,
       torrentListenPort: '',
       torrentDhtListenPort: '',
       torrentExternalIp: '',
@@ -553,6 +565,19 @@ export const useSettingsStore = create<SettingsState>()(
         torrentMaxOpenFilesQueue = result.then(() => undefined, () => undefined);
         return result;
       },
+      setTorrentDhtMessageTimeout: (value) => {
+        const normalized = normalizeTorrentDhtMessageTimeout(value);
+        set({
+          torrentDhtMessageTimeout: normalized
+            ?? DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT
+        });
+      },
+      setTorrentSeparateSeedSlots: (torrentSeparateSeedSlots) => set({ torrentSeparateSeedSlots }),
+      setTorrentMaxConcurrentSeeds: (value) => set({
+        torrentMaxConcurrentSeeds: Number.isInteger(value) && value >= 1 && value <= 64
+          ? value
+          : DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS
+      }),
       setCustomUserAgent: (customUserAgent) => set({ customUserAgent }),
       setAskWhereToSaveEachFile: (askWhereToSaveEachFile) => set({ askWhereToSaveEachFile }),
       setPreventsSleepWhileDownloading: (preventsSleepWhileDownloading) => {
@@ -740,6 +765,9 @@ export const useSettingsStore = create<SettingsState>()(
         torrentEnablePex: state.torrentEnablePex,
         torrentEnableLpd: state.torrentEnableLpd,
         torrentMaxOpenFiles: state.torrentMaxOpenFiles,
+        torrentDhtMessageTimeout: state.torrentDhtMessageTimeout,
+        torrentSeparateSeedSlots: state.torrentSeparateSeedSlots,
+        torrentMaxConcurrentSeeds: state.torrentMaxConcurrentSeeds,
         torrentListenPort: state.torrentListenPort,
         torrentDhtListenPort: state.torrentDhtListenPort,
         torrentExternalIp: state.torrentExternalIp,
@@ -800,6 +828,18 @@ export const useSettingsStore = create<SettingsState>()(
           torrentEnableLpd: persistedBoolean(persisted.torrentEnableLpd, currentState.torrentEnableLpd),
           torrentMaxOpenFiles: normalizeTorrentMaxOpenFiles(persisted.torrentMaxOpenFiles)
             ?? currentState.torrentMaxOpenFiles,
+          torrentDhtMessageTimeout: normalizeTorrentDhtMessageTimeout(persisted.torrentDhtMessageTimeout)
+            ?? currentState.torrentDhtMessageTimeout,
+          torrentSeparateSeedSlots: persistedBoolean(
+            persisted.torrentSeparateSeedSlots,
+            currentState.torrentSeparateSeedSlots
+          ),
+          torrentMaxConcurrentSeeds: typeof persisted.torrentMaxConcurrentSeeds === 'number'
+            && Number.isInteger(persisted.torrentMaxConcurrentSeeds)
+            && persisted.torrentMaxConcurrentSeeds >= 1
+            && persisted.torrentMaxConcurrentSeeds <= 64
+            ? persisted.torrentMaxConcurrentSeeds
+            : currentState.torrentMaxConcurrentSeeds,
           torrentListenPort: typeof persisted.torrentListenPort === 'string'
             ? persisted.torrentListenPort
             : currentState.torrentListenPort,

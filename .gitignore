@@ -11,6 +11,8 @@ skills-lock.json
 # Local agent and planning notes
 AGENT.md
 AGENTS.md
+TORRENT_FEATURES.md
+torrent_features.md
 CLAUDE.md
 GEMINI.md
 implementation_plan.md

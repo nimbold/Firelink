@@ -18,6 +18,7 @@ pub struct TorrentStartupSettings {
     pub lpd_interface: String,
     pub peer_id_prefix: String,
     pub peer_agent: String,
+    pub dht_message_timeout: u32,
 }
 
 fn normalize_torrent_startup_value(
@@ -85,6 +86,10 @@ pub fn torrent_startup_settings(settings: Option<&PersistedSettings>) -> Torrent
             &settings.torrent_peer_agent,
             crate::queue::normalize_torrent_peer_agent,
         ),
+        dht_message_timeout: crate::queue::normalize_torrent_dht_message_timeout(
+            settings.torrent_dht_message_timeout,
+        )
+        .unwrap_or(crate::queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT),
     }
 }
 
@@ -145,6 +150,32 @@ pub fn canonicalize_torrent_network_settings(stored: &str) -> Result<String, Str
     canonicalize_torrent_network_value(state, "torrentLpdInterface", crate::queue::normalize_torrent_lpd_interface);
     canonicalize_torrent_network_value(state, "torrentPeerIdPrefix", crate::queue::normalize_torrent_peer_id_prefix);
     canonicalize_torrent_network_value(state, "torrentPeerAgent", crate::queue::normalize_torrent_peer_agent);
+    let dht_message_timeout = state
+        .get("torrentDhtMessageTimeout")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .and_then(|value| crate::queue::normalize_torrent_dht_message_timeout(value).ok())
+        .unwrap_or(crate::queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT);
+    state.insert(
+        "torrentDhtMessageTimeout".to_string(),
+        Value::Number(serde_json::Number::from(dht_message_timeout)),
+    );
+    let max_concurrent_seeds = state
+        .get("torrentMaxConcurrentSeeds")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .and_then(|value| crate::queue::normalize_torrent_max_concurrent_seeds(value).ok())
+        .unwrap_or(crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS);
+    state.insert(
+        "torrentMaxConcurrentSeeds".to_string(),
+        Value::Number(serde_json::Number::from(max_concurrent_seeds)),
+    );
+    if !state
+        .get("torrentSeparateSeedSlots")
+        .is_some_and(Value::is_boolean)
+    {
+        state.insert("torrentSeparateSeedSlots".to_string(), Value::Bool(false));
+    }
     serde_json::to_string(&document)
         .map_err(|error| format!("failed to encode canonical settings: {error}"))
 }
@@ -314,11 +345,26 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
                     .contains(&value)
             })
     });
+    sanitize_integer_setting(state, "torrentDhtMessageTimeout", |value| {
+        value.as_u64().and_then(|value| u32::try_from(value).ok()).is_some_and(|value| {
+            (crate::queue::MIN_TORRENT_DHT_MESSAGE_TIMEOUT
+                ..=crate::queue::MAX_TORRENT_DHT_MESSAGE_TIMEOUT)
+                .contains(&value)
+        })
+    });
+    sanitize_integer_setting(state, "torrentMaxConcurrentSeeds", |value| {
+        value.as_u64().and_then(|value| u32::try_from(value).ok()).is_some_and(|value| {
+            (crate::queue::MIN_TORRENT_MAX_CONCURRENT_SEEDS
+                ..=crate::queue::MAX_TORRENT_MAX_CONCURRENT_SEEDS)
+                .contains(&value)
+        })
+    });
     for key in [
         "torrentEnableDht",
         "torrentEnableDht6",
         "torrentEnablePex",
         "torrentEnableLpd",
+        "torrentSeparateSeedSlots",
     ] {
         sanitize_boolean_setting(state, key);
     }
@@ -483,6 +529,14 @@ fn validate_settings(settings: &mut PersistedSettings) {
         settings.torrent_max_open_files,
     )
     .unwrap_or(crate::queue::DEFAULT_TORRENT_MAX_OPEN_FILES);
+    settings.torrent_dht_message_timeout = crate::queue::normalize_torrent_dht_message_timeout(
+        settings.torrent_dht_message_timeout,
+    )
+    .unwrap_or(crate::queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT);
+    settings.torrent_max_concurrent_seeds = crate::queue::normalize_torrent_max_concurrent_seeds(
+        settings.torrent_max_concurrent_seeds,
+    )
+    .unwrap_or(crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS);
     settings.torrent_listen_port = crate::queue::normalize_torrent_port_spec(
         Some(&settings.torrent_listen_port),
         "TCP listen ports",
@@ -735,6 +789,9 @@ fn default_settings() -> PersistedSettings {
         torrent_enable_pex: true,
         torrent_enable_lpd: false,
         torrent_max_open_files: crate::queue::DEFAULT_TORRENT_MAX_OPEN_FILES,
+        torrent_dht_message_timeout: crate::queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT,
+        torrent_separate_seed_slots: false,
+        torrent_max_concurrent_seeds: crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS,
         torrent_listen_port: String::new(),
         torrent_dht_listen_port: String::new(),
         torrent_external_ip: String::new(),
@@ -1085,6 +1142,10 @@ mod tests {
             settings.torrent_max_open_files,
             crate::queue::DEFAULT_TORRENT_MAX_OPEN_FILES
         );
+        assert_eq!(
+            settings.torrent_dht_message_timeout,
+            crate::queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT
+        );
         assert!(settings.torrent_listen_port.is_empty());
         assert!(settings.torrent_dht_listen_port.is_empty());
         assert!(settings.torrent_external_ip.is_empty());
@@ -1139,7 +1200,10 @@ mod tests {
                 "torrentListenPort": " 6881-6999 ",
                 "torrentExternalIp": "not-an-ip",
                 "torrentPeerIdPrefix": "123456789012345678901",
-                "torrentPeerAgent": " Firelink/1.3.1 "
+                "torrentPeerAgent": " Firelink/1.3.1 ",
+                "torrentDhtMessageTimeout": 601,
+                "torrentMaxConcurrentSeeds": 65,
+                "torrentSeparateSeedSlots": "yes"
             },
             "version": 6
         });
@@ -1150,6 +1214,15 @@ mod tests {
         assert_eq!(canonical["state"]["torrentExternalIp"], "");
         assert_eq!(canonical["state"]["torrentPeerIdPrefix"], "");
         assert_eq!(canonical["state"]["torrentPeerAgent"], "Firelink/1.3.1");
+        assert_eq!(
+            canonical["state"]["torrentDhtMessageTimeout"],
+            crate::queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT
+        );
+        assert_eq!(
+            canonical["state"]["torrentMaxConcurrentSeeds"],
+            crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS
+        );
+        assert_eq!(canonical["state"]["torrentSeparateSeedSlots"], false);
     }
 
     #[test]
@@ -1166,12 +1239,21 @@ mod tests {
         assert!(startup.listen_port.is_empty());
         assert!(startup.peer_id_prefix.is_empty());
         assert_eq!(startup.peer_agent, "Firelink/1.3.1");
+        assert_eq!(
+            startup.dht_message_timeout,
+            crate::queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT
+        );
     }
 
     #[test]
     fn opt_in_defaults_match_the_frontend_defaults() {
         assert!(!default_settings().play_completion_sound);
         assert!(!default_settings().auto_add_clipboard_links);
+        assert!(!default_settings().torrent_separate_seed_slots);
+        assert_eq!(
+            default_settings().torrent_max_concurrent_seeds,
+            crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS
+        );
     }
 
     #[test]

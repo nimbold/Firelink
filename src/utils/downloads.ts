@@ -31,6 +31,7 @@ const ACTIVE_DOWNLOAD_STATUSES: ReadonlySet<DownloadStatus> = new Set([
   'downloading',
   'processing',
   'seeding',
+  'waitingToSeed',
   'retrying',
 ]);
 
@@ -70,6 +71,12 @@ export const MAX_TORRENT_TRACKER_INTERVAL = 604800;
 export const DEFAULT_TORRENT_MAX_OPEN_FILES = 100;
 export const MIN_TORRENT_MAX_OPEN_FILES = 1;
 export const MAX_TORRENT_MAX_OPEN_FILES = 4096;
+export const DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT = 10;
+export const MIN_TORRENT_DHT_MESSAGE_TIMEOUT = 1;
+export const MAX_TORRENT_DHT_MESSAGE_TIMEOUT = 600;
+export const DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS = 2;
+export const MIN_TORRENT_MAX_CONCURRENT_SEEDS = 1;
+export const MAX_TORRENT_MAX_CONCURRENT_SEEDS = 64;
 
 const parseIntegerOption = (value: unknown): number | undefined => {
   if (typeof value === 'number') {
@@ -101,6 +108,24 @@ export const normalizeTorrentMaxOpenFiles = (value: unknown): number | undefined
   return parsed !== undefined
     && parsed >= MIN_TORRENT_MAX_OPEN_FILES
     && parsed <= MAX_TORRENT_MAX_OPEN_FILES
+    ? parsed
+    : undefined;
+};
+
+export const normalizeTorrentDhtMessageTimeout = (value: unknown): number | undefined => {
+  const parsed = parseIntegerOption(value);
+  return parsed !== undefined
+    && parsed >= MIN_TORRENT_DHT_MESSAGE_TIMEOUT
+    && parsed <= MAX_TORRENT_DHT_MESSAGE_TIMEOUT
+    ? parsed
+    : undefined;
+};
+
+export const normalizeTorrentMaxConcurrentSeeds = (value: unknown): number | undefined => {
+  const parsed = parseIntegerOption(value);
+  return parsed !== undefined
+    && parsed >= MIN_TORRENT_MAX_CONCURRENT_SEEDS
+    && parsed <= MAX_TORRENT_MAX_CONCURRENT_SEEDS
     ? parsed
     : undefined;
 };

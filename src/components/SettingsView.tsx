@@ -35,9 +35,17 @@ import { usePlatformInfo } from '../utils/platform';
 import { isTrustedFirelinkReleaseUrl } from '../utils/releaseUrls';
 import { normalizeCustomProxy } from '../store/useDownloadStore';
 import {
+  DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT,
+  MAX_TORRENT_DHT_MESSAGE_TIMEOUT,
+  MIN_TORRENT_DHT_MESSAGE_TIMEOUT,
+  DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS,
+  MAX_TORRENT_MAX_CONCURRENT_SEEDS,
+  MIN_TORRENT_MAX_CONCURRENT_SEEDS,
   MAX_TORRENT_MAX_OPEN_FILES,
   MIN_TORRENT_MAX_OPEN_FILES,
   normalizeSpeedLimitForBackend,
+  normalizeTorrentDhtMessageTimeout,
+  normalizeTorrentMaxConcurrentSeeds,
   normalizeTorrentMaxOpenFiles
 } from '../utils/downloads';
 import { useTranslation } from 'react-i18next';
@@ -327,6 +335,12 @@ const engineRunId = useRef(0);
   const [torrentMaxOpenFilesInput, setTorrentMaxOpenFilesInput] = useState(
     () => String(settings.torrentMaxOpenFiles)
   );
+  const [torrentDhtMessageTimeoutInput, setTorrentDhtMessageTimeoutInput] = useState(
+    () => String(settings.torrentDhtMessageTimeout)
+  );
+  const [torrentMaxConcurrentSeedsInput, setTorrentMaxConcurrentSeedsInput] = useState(
+    () => String(settings.torrentMaxConcurrentSeeds)
+  );
   const [torrentOverallUploadLimitInput, setTorrentOverallUploadLimitInput] = useState(
     () => settings.torrentOverallUploadLimit
   );
@@ -348,6 +362,14 @@ const engineRunId = useRef(0);
   useEffect(() => {
     setTorrentMaxOpenFilesInput(String(settings.torrentMaxOpenFiles));
   }, [settings.torrentMaxOpenFiles]);
+
+  useEffect(() => {
+    setTorrentDhtMessageTimeoutInput(String(settings.torrentDhtMessageTimeout));
+  }, [settings.torrentDhtMessageTimeout]);
+
+  useEffect(() => {
+    setTorrentMaxConcurrentSeedsInput(String(settings.torrentMaxConcurrentSeeds));
+  }, [settings.torrentMaxConcurrentSeeds]);
 
   useEffect(() => {
     setTorrentOverallUploadLimitInput(settings.torrentOverallUploadLimit);
@@ -383,6 +405,20 @@ const engineRunId = useRef(0);
         isActionable: true
       });
     });
+  };
+  const commitTorrentDhtMessageTimeout = (raw: string) => {
+    const next = normalizeTorrentDhtMessageTimeout(raw)
+      ?? settings.torrentDhtMessageTimeout
+      ?? DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT;
+    setTorrentDhtMessageTimeoutInput(String(next));
+    settings.setTorrentDhtMessageTimeout(next);
+  };
+  const commitTorrentMaxConcurrentSeeds = (raw: string) => {
+    const next = normalizeTorrentMaxConcurrentSeeds(raw)
+      ?? settings.torrentMaxConcurrentSeeds
+      ?? DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS;
+    setTorrentMaxConcurrentSeedsInput(String(next));
+    settings.setTorrentMaxConcurrentSeeds(next);
   };
   const commitTorrentOverallUploadLimit = (raw: string) => {
     const trimmed = raw.trim();
@@ -1404,6 +1440,59 @@ runEngineChecks(false);
                     maxLength={128}
                     className="app-control settings-network-input"
                     aria-label={t($ => $.settings.network.torrentPeerAgent)}
+                  />
+                </div>
+                <div className="mac-settings-row settings-network-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentSeparateSeedSlots)}</span>
+                    <small>{t($ => $.settings.network.torrentSeparateSeedSlotsDescription)}</small>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.torrentSeparateSeedSlots}
+                    onChange={(event) => settings.setTorrentSeparateSeedSlots(event.target.checked)}
+                    aria-label={t($ => $.settings.network.torrentSeparateSeedSlots)}
+                  />
+                </div>
+                <div className="mac-settings-row settings-network-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentMaxConcurrentSeeds)}</span>
+                    <small>{t($ => $.settings.network.torrentMaxConcurrentSeedsDescription)}</small>
+                  </div>
+                  <input
+                    type="number"
+                    min={MIN_TORRENT_MAX_CONCURRENT_SEEDS}
+                    max={MAX_TORRENT_MAX_CONCURRENT_SEEDS}
+                    step={1}
+                    value={torrentMaxConcurrentSeedsInput}
+                    onChange={(event) => setTorrentMaxConcurrentSeedsInput(event.target.value)}
+                    onBlur={(event) => commitTorrentMaxConcurrentSeeds(event.target.value)}
+                    className="app-control settings-port-input text-center"
+                    aria-label={t($ => $.settings.network.torrentMaxConcurrentSeeds)}
+                  />
+                </div>
+                <p className="settings-group-footer">
+                  {t($ => $.settings.network.torrentNetworkRestartNote)}
+                </p>
+              </div>
+
+              <h2 className="settings-section-title">{t($ => $.settings.network.torrentAdvanced)}</h2>
+              <div className="mac-settings-group">
+                <div className="mac-settings-row settings-network-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentDhtMessageTimeout)}</span>
+                    <small>{t($ => $.settings.network.torrentDhtMessageTimeoutDescription)}</small>
+                  </div>
+                  <input
+                    type="number"
+                    min={MIN_TORRENT_DHT_MESSAGE_TIMEOUT}
+                    max={MAX_TORRENT_DHT_MESSAGE_TIMEOUT}
+                    step={1}
+                    value={torrentDhtMessageTimeoutInput}
+                    onChange={(event) => setTorrentDhtMessageTimeoutInput(event.target.value)}
+                    onBlur={(event) => commitTorrentDhtMessageTimeout(event.target.value)}
+                    className="app-control settings-port-input text-center"
+                    aria-label={t($ => $.settings.network.torrentDhtMessageTimeout)}
                   />
                 </div>
                 <p className="settings-group-footer">

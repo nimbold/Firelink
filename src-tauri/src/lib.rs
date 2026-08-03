@@ -4633,11 +4633,17 @@ async fn pause_download(
             }
         }
 
+        let seed_remaining = if state.queue_manager.is_seed_owner(&id) {
+            state.queue_manager.capture_seed_remaining(&id).await
+        } else {
+            None
+        };
+        state.queue_manager.release_seed_tracking(&id);
         state.queue_manager.release_permit(&id).await;
         use tauri::Emitter;
         let _ = app_handle.emit(
             "download-state",
-            crate::ipc::DownloadStateEvent::new(id, crate::ipc::DownloadStatus::Paused),
+            crate::ipc::DownloadStateEvent::paused_with_seed_remaining(id, seed_remaining),
         );
         return Ok(());
     }
@@ -4677,6 +4683,12 @@ async fn pause_download(
             .await;
     }
 
+    let seed_remaining = if state.queue_manager.is_seed_owner(&id) {
+        state.queue_manager.capture_seed_remaining(&id).await
+    } else {
+        None
+    };
+    state.queue_manager.release_seed_tracking(&id);
     state.queue_manager.release_permit(&id).await;
     if registered_lifecycle_generation.is_some()
         || removed_pending
@@ -4694,7 +4706,7 @@ async fn pause_download(
     use tauri::Emitter;
     let _ = app_handle.emit(
         "download-state",
-        crate::ipc::DownloadStateEvent::new(id, crate::ipc::DownloadStatus::Paused),
+        crate::ipc::DownloadStateEvent::paused_with_seed_remaining(id, seed_remaining),
     );
     Ok(())
 }
@@ -4723,6 +4735,14 @@ async fn resume_download(
         state.queue_manager.release_registered_id(&id).await;
         return Ok(false);
     };
+    if state.queue_manager.is_waiting_to_seed(&id) {
+        // WaitingToSeed is an intentional paused GID with no download
+        // permit. A resume request only wakes the Firelink seed scheduler;
+        // it must not bypass the seed-slot admission gate.
+        state.queue_manager.wake_seed_waiters();
+        drop(control_guard);
+        return Ok(true);
+    }
     let status = aria2_download_status(
         state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
         &state.aria2_secret,
@@ -6489,6 +6509,297 @@ async fn get_torrent_peers(
     state.queue_manager.get_aria2_torrent_peers(&id).await
 }
 
+#[tauri::command]
+async fn get_torrent_file_progress(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<crate::ipc::TorrentFileProgressSnapshot, String> {
+    state
+        .queue_manager
+        .get_aria2_torrent_file_progress(&id)
+        .await
+}
+
+#[tauri::command]
+async fn get_torrent_piece_progress(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<crate::ipc::TorrentPieceProgressSnapshot, String> {
+    state
+        .queue_manager
+        .get_aria2_torrent_piece_progress(&id)
+        .await
+}
+
+fn replace_persisted_torrent_web_seeds(
+    database: &crate::db::DbState,
+    id: &str,
+    seeds: &[crate::ipc::TorrentWebSeed],
+) -> Result<Option<serde_json::Value>, String> {
+    let mut connection = database.lock()?;
+    let records = crate::db::load_downloads(&connection)?;
+    let next_seeds = serde_json::to_value(seeds)
+        .map_err(|error| format!("failed to encode Torrent web seeds: {error}"))?;
+    let mut previous_seeds = None;
+    let mut changed = false;
+    let mut next = Vec::with_capacity(records.len());
+    for record in records {
+        let mut value: serde_json::Value = match serde_json::from_str(&record) {
+            Ok(value) => value,
+            Err(_) => {
+                // Preserve unrelated legacy/corrupt rows byte-for-byte. A
+                // web-seed update must not fail its own transaction merely
+                // because another download cannot be decoded.
+                next.push(record);
+                continue;
+            }
+        };
+        if value
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            == Some(id)
+        {
+            let object = value
+                .as_object_mut()
+                .ok_or_else(|| "persisted download is not an object".to_string())?;
+            previous_seeds = object.get("torrentWebSeeds").cloned();
+            object.insert("torrentWebSeeds".to_string(), next_seeds.clone());
+            changed = true;
+        }
+        next.push(
+            serde_json::to_string(&value)
+                .map_err(|error| format!("failed to encode persisted download: {error}"))?,
+        );
+    }
+    if !changed {
+        return Err("download is not persisted".to_string());
+    }
+    let next_data = serde_json::to_string(&next)
+        .map_err(|error| format!("failed to encode persisted downloads: {error}"))?;
+    crate::db::replace_downloads(&mut connection, &next_data, database.is_portable())?;
+    Ok(previous_seeds)
+}
+
+fn restore_persisted_torrent_web_seeds(
+    database: &crate::db::DbState,
+    id: &str,
+    expected_seeds: &[crate::ipc::TorrentWebSeed],
+    previous_seeds: Option<serde_json::Value>,
+) -> Result<(), String> {
+    let mut connection = database.lock()?;
+    let records = crate::db::load_downloads(&connection)?;
+    let expected_value = serde_json::to_value(expected_seeds)
+        .map_err(|error| format!("failed to encode expected Torrent web seeds: {error}"))?;
+    let mut found = false;
+    let mut changed = false;
+    let mut next = Vec::with_capacity(records.len());
+    for record in records {
+        let mut value: serde_json::Value = match serde_json::from_str(&record) {
+            Ok(value) => value,
+            Err(_) => {
+                next.push(record);
+                continue;
+            }
+        };
+        if value
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            == Some(id)
+        {
+            found = true;
+            let object = value
+                .as_object_mut()
+                .ok_or_else(|| "persisted download is not an object".to_string())?;
+            if object.get("torrentWebSeeds") == Some(&expected_value) {
+                match previous_seeds.clone() {
+                    Some(previous) => {
+                        object.insert("torrentWebSeeds".to_string(), previous);
+                    }
+                    None => {
+                        object.remove("torrentWebSeeds");
+                    }
+                }
+                changed = true;
+            } else {
+                log::warn!(
+                    "Torrent web-seed rollback [{}] skipped because persisted state changed concurrently",
+                    id
+                );
+            }
+        }
+        next.push(
+            serde_json::to_string(&value)
+                .map_err(|error| format!("failed to encode persisted download: {error}"))?,
+        );
+    }
+    if !found {
+        return Err("download is no longer persisted".to_string());
+    }
+    if changed {
+        let next_data = serde_json::to_string(&next)
+            .map_err(|error| format!("failed to encode persisted downloads: {error}"))?;
+        crate::db::replace_downloads(&mut connection, &next_data, database.is_portable())?;
+    }
+    Ok(())
+}
+
+async fn normalize_persisted_torrent_web_seeds(
+    database: &crate::db::DbState,
+    app_handle: &tauri::AppHandle,
+    id: &str,
+    seeds: &[crate::ipc::TorrentWebSeed],
+) -> Result<Vec<crate::ipc::TorrentWebSeed>, String> {
+    let record = {
+        let connection = database.lock()?;
+        crate::db::load_downloads(&connection)?
+            .into_iter()
+            .find_map(|record| {
+                serde_json::from_str::<crate::ipc::DownloadItem>(&record)
+                    .ok()
+                    .filter(|item| item.id == id)
+            })
+            .ok_or_else(|| "download is not persisted".to_string())?
+    };
+    let path = record
+        .torrent_path
+        .as_deref()
+        .ok_or_else(|| "Torrent metadata is unavailable for web-seed management".to_string())?;
+    let path = crate::torrent::validate_managed_torrent_path(app_handle, id, path)?;
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|error| format!("could not read cached Torrent metadata: {error}"))?;
+    let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
+    crate::queue::normalize_torrent_web_seeds(Some(seeds), &metadata.files)
+}
+
+#[tauri::command]
+async fn get_torrent_web_seeds(
+    database: tauri::State<'_, crate::db::DbState>,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<Vec<crate::ipc::TorrentWebSeed>, String> {
+    if state.queue_manager.is_registered(&id).await
+        && matches!(state.queue_manager.active_kind(&id).await, Some(crate::queue::TaskKind::Aria2))
+    {
+        return state.queue_manager.get_aria2_torrent_web_seeds(&id).await;
+    }
+    let persisted_seeds = {
+        let connection = database.lock()?;
+        crate::db::load_downloads(&connection)?
+            .into_iter()
+            .find_map(|record| {
+                serde_json::from_str::<crate::ipc::DownloadItem>(&record)
+                    .ok()
+                    .filter(|item| item.id == id)
+                    .map(|item| item.torrent_web_seeds)
+            })
+            .ok_or_else(|| "download is not persisted".to_string())?
+    };
+    let Some(seeds) = persisted_seeds else {
+        return Ok(Vec::new());
+    };
+    if seeds.is_empty() {
+        return Ok(seeds);
+    }
+    normalize_persisted_torrent_web_seeds(
+        database.inner(),
+        &state.queue_manager.app_handle(),
+        &id,
+        &seeds,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn set_torrent_web_seeds(
+    database: tauri::State<'_, crate::db::DbState>,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    seeds: Vec<crate::ipc::TorrentWebSeed>,
+) -> Result<Vec<crate::ipc::TorrentWebSeed>, String> {
+    let active = state.queue_manager.is_registered(&id).await
+        && matches!(state.queue_manager.active_kind(&id).await, Some(crate::queue::TaskKind::Aria2));
+    let normalized = if active {
+        state
+            .queue_manager
+            .normalize_aria2_torrent_web_seeds(&id, &seeds)
+            .await?
+    } else {
+        normalize_persisted_torrent_web_seeds(
+            database.inner(),
+            &state.queue_manager.app_handle(),
+            &id,
+            &seeds,
+        )
+        .await?
+    };
+    let previous_seeds =
+        replace_persisted_torrent_web_seeds(database.inner(), &id, &normalized)?;
+    // The download can cross the queued/active boundary while metadata is
+    // being normalized and persistence is updated. Recheck before returning
+    // so a newly active Torrent receives the live Aria2 change instead of
+    // waiting for a restart to apply its persisted value.
+    let active_now = state.queue_manager.is_registered(&id).await
+        && matches!(state.queue_manager.active_kind(&id).await, Some(crate::queue::TaskKind::Aria2));
+    if !active_now {
+        return Ok(normalized);
+    }
+    match state
+        .queue_manager
+        .set_aria2_torrent_web_seeds(&id, normalized.clone())
+        .await
+    {
+        Ok((result, previous_live_seeds)) => {
+            if let Err(persist_error) =
+                replace_persisted_torrent_web_seeds(database.inner(), &id, &result)
+            {
+                // The live operation succeeded, but the durable value must
+                // remain transactional. Try to restore the exact value that
+                // was persisted before this command before reporting the
+                // persistence failure to the caller.
+                if let Err(rollback_error) = state
+                    .queue_manager
+                    .set_aria2_torrent_web_seeds(&id, previous_live_seeds)
+                    .await
+                {
+                    log::error!(
+                        "Torrent web-seed live rollback [{}] failed after persistence error: {}",
+                        id,
+                        rollback_error
+                    );
+                }
+                if let Err(restore_error) = restore_persisted_torrent_web_seeds(
+                    database.inner(),
+                    &id,
+                    &normalized,
+                    previous_seeds.clone(),
+                ) {
+                    log::error!(
+                        "Torrent web-seed persistence rollback [{}] failed: {}",
+                        id,
+                        restore_error
+                    );
+                }
+                return Err(format!(
+                    "Torrent web seeds changed live but could not be persisted: {persist_error}"
+                ));
+            }
+            Ok(result)
+        }
+        Err(error) => {
+            if let Err(restore_error) = restore_persisted_torrent_web_seeds(
+                database.inner(),
+                &id,
+                &normalized,
+                previous_seeds,
+            ) {
+                log::error!("Torrent web-seed rollback [{}] failed: {}", id, restore_error);
+            }
+            Err(error)
+        }
+    }
+}
+
 pub(crate) fn normalize_speed_limit_for_aria2(limit: &str) -> Option<String> {
     let trimmed = limit.trim();
     if trimmed.is_empty() {
@@ -6566,6 +6877,25 @@ fn apply_aria2_torrent_network_options(
             command.arg(format!("{option}={value}"));
         }
     }
+}
+
+fn apply_aria2_torrent_dht_paths(
+    command: &mut std::process::Command,
+    dht_path: &std::path::Path,
+    dht6_path: &std::path::Path,
+) {
+    command
+        .arg(format!("--dht-file-path={}", dht_path.display()))
+        .arg(format!("--dht-file-path6={}", dht6_path.display()));
+}
+
+fn apply_aria2_torrent_dht_options(
+    command: &mut std::process::Command,
+    message_timeout: u32,
+) {
+    let timeout = queue::normalize_torrent_dht_message_timeout(message_timeout)
+        .unwrap_or(queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT);
+    command.arg(format!("--dht-message-timeout={timeout}"));
 }
 
 fn apply_aria2_torrent_peer_identity_options(
@@ -7255,8 +7585,12 @@ fn db_save_settings(
     let prevent_system_sleep = decoded.prevents_sleep_while_downloading;
     let prevent_display_sleep = decoded.prevents_display_sleep_while_downloading;
     if let Ok(mut cached) = app_state.scheduler_settings.write() {
-        *cached = Some(decoded);
+        *cached = Some(decoded.clone());
     }
+    app_state.queue_manager.configure_seed_capacity(
+        decoded.torrent_separate_seed_slots,
+        decoded.torrent_max_concurrent_seeds,
+    );
     if let Err(error) = app_state
         .power_manager
         .set_preferences(prevent_system_sleep, prevent_display_sleep)
@@ -7782,6 +8116,8 @@ mod tests {
         apply_aria2_torrent_network_options,
         apply_aria2_torrent_peer_identity_options,
         apply_aria2_torrent_peer_discovery_options,
+        apply_aria2_torrent_dht_paths,
+        apply_aria2_torrent_dht_options,
         aria2_rpc_port_is_occupied,
         parse_firelink_deep_link, parse_ffmpeg_version, parse_media_progress_line,
         redact_log_line, redact_log_line_for_output, sanitize_ytdlp_config_value,
@@ -7831,6 +8167,50 @@ mod tests {
                 "--enable-peer-exchange=false",
                 "--bt-enable-lpd=true",
             ]
+        );
+    }
+
+    #[test]
+    fn aria2_torrent_dht_paths_are_explicit_and_owned_by_firelink() {
+        let root = tempfile::tempdir().unwrap();
+        let dht_path = root.path().join("aria2/dht.dat");
+        let dht6_path = root.path().join("aria2/dht6.dat");
+        let mut command = std::process::Command::new("aria2c");
+
+        apply_aria2_torrent_dht_paths(&mut command, &dht_path, &dht6_path);
+
+        assert_eq!(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec![
+                format!("--dht-file-path={}", dht_path.display()),
+                format!("--dht-file-path6={}", dht6_path.display()),
+            ]
+        );
+    }
+
+    #[test]
+    fn aria2_torrent_dht_message_timeout_is_bounded_and_launch_scoped() {
+        let mut command = std::process::Command::new("aria2c");
+        apply_aria2_torrent_dht_options(&mut command, 42);
+        assert_eq!(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["--dht-message-timeout=42"]
+        );
+
+        let mut command = std::process::Command::new("aria2c");
+        apply_aria2_torrent_dht_options(&mut command, 0);
+        assert_eq!(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["--dht-message-timeout=10"]
         );
     }
 
@@ -10466,6 +10846,12 @@ pub fn run() {
 
             let database = crate::db::init(&storage_layout)
                 .map_err(|error| format!("failed to initialize persistence: {error}"))?;
+            // Establish Firelink-owned Aria2 routing-table paths after the
+            // existing data-root initializer has created the selected storage
+            // directory, but before the daemon launcher is scheduled. A
+            // conflict must fail startup; silently allowing Aria2 to fall back
+            // to a user-global dht.dat would escape the storage boundary.
+            let aria2_dht_paths = storage_layout.prepare_aria2_dht_paths()?;
             if let Err(error) = crate::torrent::remove_orphaned_probe_dirs(app.handle()) {
                 log::warn!("could not remove orphaned torrent probes: {error}");
             }
@@ -10564,6 +10950,12 @@ pub fn run() {
             let scheduler_settings = Arc::new(RwLock::new(persisted_settings.clone()));
 
             let queue_manager = Arc::new(queue::QueueManager::new(app.handle().clone(), max_concurrent));
+            if let Some(settings) = persisted_settings.as_ref() {
+                queue_manager.configure_seed_capacity(
+                    settings.torrent_separate_seed_slots,
+                    settings.torrent_max_concurrent_seeds,
+                );
+            }
             let power_manager = queue_manager.power_manager();
             if let Some(settings) = persisted_settings.as_ref() {
                 let _ = power_manager.set_preferences(
@@ -10722,6 +11114,15 @@ pub fn run() {
                                 &mut cmd,
                                 torrent_max_open_files,
                                 Some(&torrent_overall_upload_limit),
+                            );
+                            apply_aria2_torrent_dht_paths(
+                                &mut cmd,
+                                &aria2_dht_paths.0,
+                                &aria2_dht_paths.1,
+                            );
+                            apply_aria2_torrent_dht_options(
+                                &mut cmd,
+                                torrent_startup_settings.dht_message_timeout,
                             );
 
                             apply_aria2_torrent_peer_discovery_options(
@@ -11332,7 +11733,7 @@ pub fn run() {
             authorize_keychain_access,
             acknowledge_pairing_token_change,
             check_file_exists, toggle_tray_icon, set_extension_pairing_token,
-            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, set_torrent_max_open_files, set_torrent_overall_upload_limit, set_global_speed_limit, remove_download, get_download_primary_path,
+            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, get_torrent_file_progress, get_torrent_piece_progress, get_torrent_web_seeds, set_torrent_web_seeds, set_torrent_max_open_files, set_torrent_overall_upload_limit, set_global_speed_limit, remove_download, get_download_primary_path,
             detach_download_for_reconfigure,
             enqueue_download, enqueue_many, cancel_enqueue_generation, move_in_queue, move_many_in_queue, remove_from_queue, get_pending_order,
             commands::reveal_in_file_manager, commands::open_downloaded_file,

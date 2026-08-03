@@ -347,6 +347,8 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
         torrent_info_hash: item.torrentInfoHash || undefined,
         torrent_seed_time: item.torrentSeedTime,
         torrent_seed_ratio: item.torrentSeedRatio,
+        torrent_seed_remaining: item.torrentSeedRemaining,
+        torrent_web_seeds: item.torrentWebSeeds,
         torrent_upload_limit: item.torrentUploadLimit || undefined,
         torrent_max_peers: item.torrentMaxPeers,
         torrent_peer_speed_limit: item.torrentPeerSpeedLimit || undefined,
@@ -625,12 +627,29 @@ export const hasStaleTemporaryMediaEstimate = (
 };
 
 export const normalizePersistedDownloadProgress = (download: DownloadItem): DownloadItem => {
+  const rawSeedRemaining = download.torrentSeedRemaining as unknown;
+  const normalizedSeedRemaining = typeof rawSeedRemaining === 'number' &&
+    Number.isFinite(rawSeedRemaining) &&
+    rawSeedRemaining >= 0
+    ? rawSeedRemaining
+    : undefined;
   const rawMaxPeers = download.torrentMaxPeers as unknown;
   const normalizedMaxPeers = typeof rawMaxPeers === 'number' &&
     Number.isInteger(rawMaxPeers) &&
     rawMaxPeers >= 0 &&
     rawMaxPeers <= 1000
     ? rawMaxPeers
+    : undefined;
+  const rawWebSeeds = download.torrentWebSeeds as unknown;
+  const normalizedWebSeeds = Array.isArray(rawWebSeeds)
+    ? rawWebSeeds.filter((seed): seed is { fileIndex: number; uri: string } =>
+      !!seed && typeof seed === 'object' &&
+      typeof (seed as { fileIndex?: unknown }).fileIndex === 'number' &&
+      Number.isInteger((seed as { fileIndex: number }).fileIndex) &&
+      (seed as { fileIndex: number }).fileIndex >= 0 &&
+      typeof (seed as { uri?: unknown }).uri === 'string' &&
+      (seed as { uri: string }).uri.length <= 2048
+    ).slice(0, 256)
     : undefined;
   const rawPeerSpeedLimit = download.torrentPeerSpeedLimit as unknown;
   const normalizedPeerSpeedLimit = typeof rawPeerSpeedLimit === 'string'
@@ -671,7 +690,9 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
     : undefined;
   const rawEncryptionPolicy = download.torrentEncryptionPolicy as unknown;
   const normalizedEncryptionPolicy = normalizeTorrentEncryptionPolicy(rawEncryptionPolicy);
-  const normalizedOptions = rawMaxPeers !== normalizedMaxPeers ||
+  const normalizedOptions = rawSeedRemaining !== normalizedSeedRemaining ||
+    rawWebSeeds !== normalizedWebSeeds ||
+    rawMaxPeers !== normalizedMaxPeers ||
     rawPeerSpeedLimit !== normalizedPeerSpeedLimit ||
     rawCheckIntegrity !== normalizedCheckIntegrity ||
     rawTrackers !== normalizedTrackers ||
@@ -685,6 +706,8 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
     rawEncryptionPolicy !== normalizedEncryptionPolicy
     ? {
         ...download,
+        torrentSeedRemaining: normalizedSeedRemaining,
+        torrentWebSeeds: normalizedWebSeeds,
         torrentMaxPeers: normalizedMaxPeers,
         torrentPeerSpeedLimit: normalizedPeerSpeedLimit,
         torrentCheckIntegrity: normalizedCheckIntegrity,
@@ -2171,6 +2194,20 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     if (pendingStartupResume) return pendingStartupResume;
 
     const operation = (async () => {
+      // WaitingToSeed is a paused Aria2 GID owned by the previous process;
+      // that GID cannot survive an app restart. Reconstruct the row as a
+      // queued Torrent using its persisted remaining seed budget, then let
+      // the normal backend admission path assign a fresh lifecycle/GID.
+      const waitingToSeedIds = get().downloads
+        .filter(download => download.status === 'waitingToSeed')
+        .map(download => download.id);
+      if (waitingToSeedIds.length > 0) {
+        set(state => ({
+          downloads: state.downloads.map(download => waitingToSeedIds.includes(download.id)
+            ? { ...download, status: 'queued' }
+            : download)
+        }));
+      }
       const active = get().downloads
         .filter(d => d.status === 'queued')
         .sort((a, b) => (a.queuePosition ?? 0) - (b.queuePosition ?? 0));
@@ -2236,6 +2273,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             torrent_info_hash: item.torrentInfoHash || undefined,
             torrent_seed_time: item.torrentSeedTime,
             torrent_seed_ratio: item.torrentSeedRatio,
+            torrent_seed_remaining: item.torrentSeedRemaining,
+            torrent_web_seeds: item.torrentWebSeeds,
             torrent_upload_limit: item.torrentUploadLimit || undefined,
             torrent_max_peers: item.torrentMaxPeers,
             torrent_peer_speed_limit: item.torrentPeerSpeedLimit || undefined,

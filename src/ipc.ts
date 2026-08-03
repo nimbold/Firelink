@@ -20,6 +20,9 @@ import type { PlatformInfo } from './bindings/PlatformInfo';
 import type { QueueConcurrencyConfig } from './bindings/QueueConcurrencyConfig';
 import type { TorrentMetadata } from './bindings/TorrentMetadata';
 import type { TorrentPeerDiagnostics } from './bindings/TorrentPeerDiagnostics';
+import type { TorrentFileProgressSnapshot } from './bindings/TorrentFileProgressSnapshot';
+import type { TorrentPieceProgressSnapshot } from './bindings/TorrentPieceProgressSnapshot';
+import type { TorrentWebSeed } from './bindings/TorrentWebSeed';
 
 type CommandMap = {
   fetch_metadata: {
@@ -79,6 +82,10 @@ type CommandMap = {
     result: void;
   };
   get_torrent_peers: { args: { id: string }; result: TorrentPeerDiagnostics };
+  get_torrent_file_progress: { args: { id: string }; result: TorrentFileProgressSnapshot };
+  get_torrent_piece_progress: { args: { id: string }; result: TorrentPieceProgressSnapshot };
+  get_torrent_web_seeds: { args: { id: string }; result: TorrentWebSeed[] };
+  set_torrent_web_seeds: { args: { id: string; seeds: TorrentWebSeed[] }; result: TorrentWebSeed[] };
   set_torrent_max_open_files: { args: { max_open_files: number }; result: void };
   set_torrent_overall_upload_limit: { args: { limit: string | null }; result: void };
   set_global_speed_limit: { args: { limit: string | null }; result: void };

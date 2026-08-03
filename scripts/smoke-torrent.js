@@ -632,7 +632,37 @@ async function main() {
     const cancelDir = path.join(tempRoot, 'cancel');
     const removeUnselectedDir = path.join(tempRoot, 'remove-unselected');
     const stallDir = path.join(tempRoot, 'stall');
-    for (const directory of [seedRoot, probeDir, finalDir, integrityDir, encryptionDir, cancelDir, removeUnselectedDir, stallDir]) fs.mkdirSync(directory, { recursive: true });
+    const dhtStateDir = path.join(tempRoot, 'aria2-state');
+    for (const directory of [seedRoot, probeDir, finalDir, integrityDir, encryptionDir, cancelDir, removeUnselectedDir, stallDir, dhtStateDir]) fs.mkdirSync(directory, { recursive: true });
+
+    const dhtPath = path.join(dhtStateDir, 'dht.dat');
+    const dht6Path = path.join(dhtStateDir, 'dht6.dat');
+    const dhtFirst = await startDaemon({
+      name: 'dht-paths-first',
+      rpcPort: await findAvailablePort(),
+      listenPort: await findAvailablePort(),
+      directory: dhtStateDir,
+      extraArgs: [`--dht-file-path=${dhtPath}`, `--dht-file-path6=${dht6Path}`, '--enable-dht=true', '--enable-dht6=true', '--dht-message-timeout=42'],
+    });
+    const firstDhtOptions = await rpc(dhtFirst.rpcPort, dhtFirst.secret, 'aria2.getGlobalOption');
+    assert(firstDhtOptions['dht-file-path'] === dhtPath, `first daemon did not retain dht-file-path: ${JSON.stringify(firstDhtOptions['dht-file-path'])}`);
+    assert(firstDhtOptions['dht-file-path6'] === dht6Path, `first daemon did not retain dht-file-path6: ${JSON.stringify(firstDhtOptions['dht-file-path6'])}`);
+    assert(firstDhtOptions['dht-message-timeout'] === '42', `first daemon did not retain dht-message-timeout: ${JSON.stringify(firstDhtOptions['dht-message-timeout'])}`);
+    await stopDaemon(dhtFirst);
+
+    const dhtSecond = await startDaemon({
+      name: 'dht-paths-second',
+      rpcPort: await findAvailablePort(),
+      listenPort: await findAvailablePort(),
+      directory: dhtStateDir,
+      extraArgs: [`--dht-file-path=${dhtPath}`, `--dht-file-path6=${dht6Path}`, '--enable-dht=true', '--enable-dht6=true', '--dht-message-timeout=42'],
+    });
+    const secondDhtOptions = await rpc(dhtSecond.rpcPort, dhtSecond.secret, 'aria2.getGlobalOption');
+    assert(secondDhtOptions['dht-file-path'] === dhtPath, `second daemon did not retain dht-file-path: ${JSON.stringify(secondDhtOptions['dht-file-path'])}`);
+    assert(secondDhtOptions['dht-file-path6'] === dht6Path, `second daemon did not retain dht-file-path6: ${JSON.stringify(secondDhtOptions['dht-file-path6'])}`);
+    assert(secondDhtOptions['dht-message-timeout'] === '42', `second daemon did not retain dht-message-timeout: ${JSON.stringify(secondDhtOptions['dht-message-timeout'])}`);
+    await stopDaemon(dhtSecond);
+    console.log('[OK] Aria2 DHT routing-table paths and message timeout remained explicit across two launches');
 
     const seederListenPort = await findAvailablePort();
     const clientListenPort = await findAvailablePort();

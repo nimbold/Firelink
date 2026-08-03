@@ -27,9 +27,18 @@ pub const MAX_TORRENT_TRACKER_INTERVAL: u32 = 604_800;
 pub const DEFAULT_TORRENT_MAX_OPEN_FILES: u32 = 100;
 pub const MIN_TORRENT_MAX_OPEN_FILES: u32 = 1;
 pub const MAX_TORRENT_MAX_OPEN_FILES: u32 = 4_096;
+pub const DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT: u32 = 10;
+pub const MIN_TORRENT_DHT_MESSAGE_TIMEOUT: u32 = 1;
+pub const MAX_TORRENT_DHT_MESSAGE_TIMEOUT: u32 = 600;
+pub const DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS: u32 = 2;
+pub const MIN_TORRENT_MAX_CONCURRENT_SEEDS: u32 = 1;
+pub const MAX_TORRENT_MAX_CONCURRENT_SEEDS: u32 = 64;
 pub const MAX_TORRENT_NETWORK_VALUE_LENGTH: usize = 256;
 pub const MAX_TORRENT_PEER_ID_PREFIX_BYTES: usize = 20;
 pub const MAX_TORRENT_PEER_AGENT_LENGTH: usize = 128;
+pub const MAX_TORRENT_PIECES_FOR_PROGRESS: u64 = 10_000_000;
+pub const MAX_TORRENT_WEB_SEEDS: usize = 256;
+pub const MAX_TORRENT_WEB_SEED_URI_LENGTH: usize = 2_048;
 pub const MIN_TORRENT_LISTEN_PORT: u16 = 1024;
 pub const DEFAULT_TORRENT_LISTEN_PORT_SPEC: &str = "6881-6999";
 
@@ -41,6 +50,133 @@ pub fn normalize_torrent_max_open_files(value: u32) -> Result<u32, String> {
     if !(MIN_TORRENT_MAX_OPEN_FILES..=MAX_TORRENT_MAX_OPEN_FILES).contains(&value) {
         return Err(format!(
             "torrent maximum open files must be between {MIN_TORRENT_MAX_OPEN_FILES} and {MAX_TORRENT_MAX_OPEN_FILES}"
+        ));
+    }
+    Ok(value)
+}
+
+pub fn normalize_torrent_dht_message_timeout(value: u32) -> Result<u32, String> {
+    if !(MIN_TORRENT_DHT_MESSAGE_TIMEOUT..=MAX_TORRENT_DHT_MESSAGE_TIMEOUT).contains(&value) {
+        return Err(format!(
+            "DHT message timeout must be between {MIN_TORRENT_DHT_MESSAGE_TIMEOUT} and {MAX_TORRENT_DHT_MESSAGE_TIMEOUT} seconds"
+        ));
+    }
+    Ok(value)
+}
+
+fn normalize_torrent_web_seed_uri(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > MAX_TORRENT_WEB_SEED_URI_LENGTH {
+        return Err(format!(
+            "Torrent web-seed URIs must be between 1 and {MAX_TORRENT_WEB_SEED_URI_LENGTH} bytes"
+        ));
+    }
+    if value.chars().any(char::is_control) {
+        return Err("Torrent web-seed URIs must not contain control characters".to_string());
+    }
+    let parsed = url::Url::parse(value).map_err(|_| "Torrent web-seed URI is invalid".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Torrent web-seed URI must use HTTP or HTTPS".to_string());
+    }
+    if parsed.host_str().is_none_or(str::is_empty)
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err("Torrent web-seed URI must have a host and no credentials or fragment".to_string());
+    }
+    Ok(parsed.to_string())
+}
+
+pub fn normalize_torrent_web_seeds(
+    seeds: Option<&[crate::ipc::TorrentWebSeed]>,
+    files: &[crate::ipc::TorrentFile],
+) -> Result<Vec<crate::ipc::TorrentWebSeed>, String> {
+    let Some(seeds) = seeds else {
+        return Ok(Vec::new());
+    };
+    if seeds.len() > MAX_TORRENT_WEB_SEEDS {
+        return Err(format!("a Torrent may have at most {MAX_TORRENT_WEB_SEEDS} web seeds"));
+    }
+    let mut normalized = Vec::with_capacity(seeds.len());
+    let mut seen = HashSet::new();
+    for seed in seeds {
+        if !files.iter().any(|file| file.index == seed.file_index) {
+            return Err(format!("Torrent web-seed file index {} is out of range", seed.file_index));
+        }
+        let uri = normalize_torrent_web_seed_uri(&seed.uri)?;
+        if seen.insert((seed.file_index, uri.clone())) {
+            normalized.push(crate::ipc::TorrentWebSeed {
+                file_index: seed.file_index,
+                uri,
+            });
+        }
+    }
+    Ok(normalized)
+}
+
+fn expand_torrent_web_seed_uri(
+    seed: &crate::ipc::TorrentWebSeed,
+    files: &[crate::ipc::TorrentFile],
+) -> Result<String, String> {
+    let uri = normalize_torrent_web_seed_uri(&seed.uri)?;
+    if files.len() <= 1 {
+        return Ok(uri);
+    }
+    let file = files
+        .iter()
+        .find(|file| file.index == seed.file_index)
+        .ok_or_else(|| "Torrent web-seed file index is out of range".to_string())?;
+    let mut parsed = url::Url::parse(&uri).map_err(|_| "Torrent web-seed URI is invalid".to_string())?;
+    let base_path = parsed.path().trim_end_matches('/').to_string();
+    parsed.set_path(&base_path);
+    {
+        let mut path = parsed
+            .path_segments_mut()
+            .map_err(|_| "Torrent web-seed URI cannot accept a file path".to_string())?;
+        for segment in file.path.replace('\\', "/").split('/') {
+            if !segment.is_empty() && segment != "." && segment != ".." {
+                path.push(segment);
+            }
+        }
+    }
+    Ok(parsed.to_string())
+}
+
+pub fn expand_torrent_web_seeds(
+    seeds: &[crate::ipc::TorrentWebSeed],
+    files: &[crate::ipc::TorrentFile],
+) -> Result<Vec<(u32, String)>, String> {
+    let normalized = normalize_torrent_web_seeds(Some(seeds), files)?;
+    normalized
+        .iter()
+        .map(|seed| Ok((seed.file_index, expand_torrent_web_seed_uri(seed, files)?)))
+        .collect()
+}
+
+fn parse_aria2_web_seed_uris(value: &serde_json::Value) -> Result<Vec<String>, String> {
+    let entries = value
+        .as_array()
+        .ok_or_else(|| "aria2.getUris returned a non-array result".to_string())?;
+    let mut uris = Vec::with_capacity(entries.len());
+    let mut seen = HashSet::new();
+    for entry in entries {
+        let uri = entry
+            .get("uri")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "aria2.getUris returned a malformed URI entry".to_string())?;
+        let uri = normalize_torrent_web_seed_uri(uri)?;
+        if seen.insert(uri.clone()) {
+            uris.push(uri);
+        }
+    }
+    Ok(uris)
+}
+
+pub fn normalize_torrent_max_concurrent_seeds(value: u32) -> Result<u32, String> {
+    if !(MIN_TORRENT_MAX_CONCURRENT_SEEDS..=MAX_TORRENT_MAX_CONCURRENT_SEEDS).contains(&value) {
+        return Err(format!(
+            "maximum concurrent Torrent seeds must be between {MIN_TORRENT_MAX_CONCURRENT_SEEDS} and {MAX_TORRENT_MAX_CONCURRENT_SEEDS}"
         ));
     }
     Ok(value)
@@ -337,6 +473,13 @@ pub enum Aria2RefreshOutcome {
     Complete,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Aria2SeedControlOutcome {
+    Resumed,
+    Paused,
+    Complete,
+}
+
 /// Result of rebuilding an aria2 job while retaining its partial file and
 /// queue permit. `Refresh` is the compatibility path for test/alternate
 /// spawners that do not own aria2's addUri options.
@@ -383,6 +526,35 @@ struct QueuePermitOwnership {
     active: bool,
 }
 
+#[derive(Debug, Clone)]
+struct SeedWaiter {
+    id: String,
+    queue_id: String,
+    lifecycle_generation: u64,
+}
+
+#[derive(Debug, Default)]
+struct SeedCapacityState {
+    enabled: bool,
+    max_concurrent: usize,
+    owners: HashSet<String>,
+    waiting: VecDeque<SeedWaiter>,
+    starting: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SeedBudget {
+    remaining_minutes: Option<f64>,
+    started_at: std::time::Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeedAdmissionOutcome {
+    Seeding,
+    Waiting,
+    Complete,
+}
+
 /// Args mirroring start_download / start_media_download. Kept untyped-loose
 /// (String/Option) to match the existing command signatures exactly.
 #[derive(Debug, Clone, Default)]
@@ -409,6 +581,8 @@ pub struct SpawnPayload {
     pub torrent_file_indices: Option<Vec<u32>>,
     pub torrent_seed_time: Option<f64>,
     pub torrent_seed_ratio: Option<f64>,
+    pub torrent_seed_remaining: Option<f64>,
+    pub torrent_web_seeds: Option<Vec<crate::ipc::TorrentWebSeed>>,
     pub torrent_upload_limit: Option<String>,
     pub torrent_max_peers: Option<u32>,
     pub torrent_peer_speed_limit: Option<String>,
@@ -489,6 +663,31 @@ pub trait SidecarSpawner: Send + Sync + 'static {
         Err("live torrent peer options are unavailable".to_string())
     }
 
+    /// Pause a completed Torrent before releasing its download permit to the
+    /// Firelink-owned seed-slot pool.
+    async fn pause_for_seed(&self, _gid: &str) -> Result<Aria2SeedControlOutcome, String> {
+        Err("live Torrent seed-slot pausing is unavailable".to_string())
+    }
+
+    /// Resume a Torrent after a Firelink seed slot has been reserved.
+    async fn resume_for_seed(&self, _gid: &str) -> Result<Aria2SeedControlOutcome, String> {
+        Err("live Torrent seed-slot resuming is unavailable".to_string())
+    }
+
+    async fn get_torrent_uris(&self, _gid: &str) -> Result<Vec<String>, String> {
+        Err("live Torrent web-seed inspection is unavailable".to_string())
+    }
+
+    async fn change_torrent_uris(
+        &self,
+        _gid: &str,
+        _file_index: u32,
+        _delete: &[String],
+        _add: &[String],
+    ) -> Result<(), String> {
+        Err("live Torrent web-seed changes are unavailable".to_string())
+    }
+
     /// Run a media download to completion. The permit is parked for the full
     /// duration; release is handled by QueueManager on the runner's exit.
     async fn run_media(
@@ -526,6 +725,10 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
     target_capacity: AtomicUsize,
     slots_to_retire: AtomicUsize,
     notify: Notify,
+    /// Firelink-owned seed capacity. Seeders keep the Aria2 GID and mapping
+    /// alive, but release the download semaphore while they own a seed slot.
+    seed_capacity: StdMutex<SeedCapacityState>,
+    seed_budgets: StdMutex<HashMap<String, SeedBudget>>,
 
     /// aria2 gid -> download id map (shared with the WS poller).
     pub aria2_gids: Arc<std::sync::RwLock<HashMap<String, Aria2GidMapping>>>,
@@ -616,6 +819,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
             target_capacity: AtomicUsize::new(capacity),
             slots_to_retire: AtomicUsize::new(0),
             notify: Notify::new(),
+            seed_capacity: StdMutex::new(SeedCapacityState {
+                enabled: false,
+                max_concurrent: DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS as usize,
+                ..SeedCapacityState::default()
+            }),
+            seed_budgets: StdMutex::new(HashMap::new()),
             aria2_gids: Arc::new(std::sync::RwLock::new(HashMap::new())),
             pending_completion: Arc::new(Mutex::new(HashMap::new())),
             aria2_payloads: Mutex::new(HashMap::new()),
@@ -641,6 +850,10 @@ impl<R: tauri::Runtime> QueueManager<R> {
         Arc::clone(&self.power_manager)
     }
 
+    pub fn app_handle(&self) -> AppHandle<R> {
+        self.app_handle.clone()
+    }
+
     pub fn activate_power_management(&self) -> Result<(), String> {
         self.power_manager.activate()
     }
@@ -656,6 +869,366 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
     pub fn set_system_sleep_prevention(&self, enabled: bool) -> Result<(), String> {
         self.power_manager.set_system_prevention(enabled)
+    }
+
+    /// Apply the persisted seed policy to the live queue manager. Existing
+    /// seeders are not paused when the setting changes; the new limit applies
+    /// to the next seed admission and to waiting seeders.
+    pub fn configure_seed_capacity(&self, enabled: bool, max_concurrent: u32) {
+        let max_concurrent = normalize_torrent_max_concurrent_seeds(max_concurrent)
+            .unwrap_or(DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS) as usize;
+        if let Ok(mut state) = self.seed_capacity.lock() {
+            state.enabled = enabled;
+            state.max_concurrent = max_concurrent;
+            if enabled {
+                if let Ok(budgets) = self.seed_budgets.lock() {
+                    state.owners.extend(budgets.keys().cloned());
+                }
+            }
+        }
+        self.notify.notify_waiters();
+    }
+
+    fn seed_capacity_enabled(&self) -> bool {
+        self.seed_capacity
+            .lock()
+            .map(|state| state.enabled)
+            .unwrap_or(false)
+    }
+
+    fn seed_owner(&self, id: &str) -> bool {
+        self.seed_capacity
+            .lock()
+            .map(|state| state.owners.contains(id))
+            .unwrap_or(false)
+    }
+
+    pub fn is_seed_owner(&self, id: &str) -> bool {
+        self.seed_owner(id)
+    }
+
+    fn seed_waiting(&self, id: &str) -> bool {
+        self.seed_capacity.lock().map_or(false, |state| {
+            state.waiting.iter().any(|waiter| waiter.id == id)
+                || state.starting.contains(id)
+        })
+    }
+
+    fn add_seed_waiter(&self, waiter: SeedWaiter) {
+        if let Ok(mut state) = self.seed_capacity.lock() {
+            if !state.owners.contains(&waiter.id)
+                && !state.starting.contains(&waiter.id)
+                && !state.waiting.iter().any(|candidate| candidate.id == waiter.id)
+            {
+                state.waiting.push_back(waiter);
+            }
+        }
+        self.notify.notify_waiters();
+    }
+
+    fn reserve_seed_slot(&self, id: &str) -> bool {
+        let Ok(mut state) = self.seed_capacity.lock() else {
+            return false;
+        };
+        if state.owners.contains(id) {
+            return true;
+        }
+        if !state.enabled || state.owners.len() >= state.max_concurrent {
+            return false;
+        }
+        state.owners.insert(id.to_string());
+        true
+    }
+
+    fn reserve_seed_waiter(&self) -> Option<SeedWaiter> {
+        let Ok(mut state) = self.seed_capacity.lock() else {
+            return None;
+        };
+        if state.enabled && state.owners.len() >= state.max_concurrent {
+            return None;
+        }
+        let waiter = state.waiting.pop_front()?;
+        state.owners.insert(waiter.id.clone());
+        state.starting.insert(waiter.id.clone());
+        Some(waiter)
+    }
+
+    fn finish_seed_start(&self, id: &str) {
+        if let Ok(mut state) = self.seed_capacity.lock() {
+            state.starting.remove(id);
+        }
+    }
+
+    fn abandon_seed_start(&self, id: &str) {
+        if let Ok(mut state) = self.seed_capacity.lock() {
+            state.starting.remove(id);
+            state.owners.remove(id);
+        }
+        self.notify.notify_waiters();
+    }
+
+    /// Stop tracking a seed lifecycle. This is called for terminal, manual
+    /// pause, and remove paths; releasing a download permit while a seed slot
+    /// is merely changing hands deliberately does not call it.
+    pub fn release_seed_tracking(&self, id: &str) {
+        if let Ok(mut state) = self.seed_capacity.lock() {
+            state.owners.remove(id);
+            state.starting.remove(id);
+            state.waiting.retain(|waiter| waiter.id != id);
+        }
+        if let Ok(mut budgets) = self.seed_budgets.lock() {
+            budgets.remove(id);
+        }
+        self.notify.notify_waiters();
+    }
+
+    pub fn is_waiting_to_seed(&self, id: &str) -> bool {
+        self.seed_waiting(id)
+    }
+
+    pub fn wake_seed_waiters(&self) {
+        self.notify.notify_waiters();
+    }
+
+    async fn record_seed_started(&self, id: &str) {
+        let remaining_minutes = self
+            .aria2_payloads
+            .lock()
+            .await
+            .get(id)
+            .and_then(|payload| {
+                payload
+                    .torrent_seed_remaining
+                    .or(payload.torrent_seed_time)
+                    .filter(|minutes| minutes.is_finite() && *minutes > 0.0)
+            });
+        if let Ok(mut budgets) = self.seed_budgets.lock() {
+            budgets.insert(
+                id.to_string(),
+                SeedBudget {
+                    remaining_minutes,
+                    started_at: std::time::Instant::now(),
+                },
+            );
+        }
+    }
+
+    /// Persist the remaining time in the in-memory payload before a seeder is
+    /// parked or manually paused. The frontend persistence path receives the
+    /// same value through the WaitingToSeed event and can restore it after a
+    /// restart.
+    pub async fn capture_seed_remaining(&self, id: &str) -> Option<f64> {
+        let remaining = self.seed_budgets.lock().ok().and_then(|mut budgets| {
+            let budget = budgets.get_mut(id)?;
+            let elapsed = budget.started_at.elapsed().as_secs_f64() / 60.0;
+            budget.remaining_minutes.map(|minutes| (minutes - elapsed).max(0.0))
+        });
+        if let Some(remaining) = remaining {
+            if let Some(payload) = self.aria2_payloads.lock().await.get_mut(id) {
+                payload.torrent_seed_time = Some(remaining);
+                payload.torrent_seed_remaining = Some(remaining);
+            }
+        }
+        remaining
+    }
+
+    async fn release_download_permit_for_seed(&self, id: &str) {
+        let _admission_gate = self.admission_gate.lock().await;
+        let removed = self.active_permits.lock().await.remove(id).is_some();
+        self.active_permit_generations.lock().await.remove(id);
+        self.queue_permit_ownership.lock().await.remove(id);
+        if removed {
+            self.notify.notify_waiters();
+        }
+        drop(_admission_gate);
+        if removed {
+            self.sync_power_activity().await;
+        }
+    }
+
+    async fn admit_seed_after_completion(&self, id: &str) -> SeedAdmissionOutcome {
+        if self.seed_owner(id) {
+            return SeedAdmissionOutcome::Seeding;
+        }
+        if self.seed_waiting(id) {
+            return SeedAdmissionOutcome::Waiting;
+        }
+        if self.reserve_seed_slot(id) {
+            self.release_download_permit_for_seed(id).await;
+            self.record_seed_started(id).await;
+            return SeedAdmissionOutcome::Seeding;
+        }
+
+        let Some(gid) = self.aria2_gid_for_download(id) else {
+            return SeedAdmissionOutcome::Seeding;
+        };
+        match self.spawner.pause_for_seed(&gid).await {
+            Ok(Aria2SeedControlOutcome::Paused) => {
+                self.record_seed_started(id).await;
+                let remaining = self.capture_seed_remaining(id).await;
+                let ownership = self.queue_permit_ownership.lock().await.get(id).cloned();
+                let lifecycle_generation = ownership
+                    .as_ref()
+                    .map(|ownership| ownership.lifecycle_generation)
+                    .or(self.registered_lifecycle_generation(id).await)
+                    .unwrap_or_default();
+                self.release_download_permit_for_seed(id).await;
+                self.add_seed_waiter(SeedWaiter {
+                    id: id.to_string(),
+                    queue_id: ownership
+                        .as_ref()
+                        .map(|ownership| ownership.queue_id.clone())
+                        .unwrap_or_else(|| "main".to_string()),
+                    lifecycle_generation,
+                });
+                let _ = remaining;
+                SeedAdmissionOutcome::Waiting
+            }
+            Ok(Aria2SeedControlOutcome::Complete) => SeedAdmissionOutcome::Complete,
+            Ok(Aria2SeedControlOutcome::Resumed) | Err(_) => {
+                // An ambiguous pause must retain the download permit and GID;
+                // treating the transfer as a live seeder is the conservative
+                // choice until the next daemon status event resolves it.
+                self.reserve_seed_slot_even_if_full(id);
+                self.record_seed_started(id).await;
+                SeedAdmissionOutcome::Seeding
+            }
+        }
+    }
+
+    fn reserve_seed_slot_even_if_full(&self, id: &str) {
+        if let Ok(mut state) = self.seed_capacity.lock() {
+            state.owners.insert(id.to_string());
+        }
+    }
+
+    fn emit_waiting_to_seed(&self, id: &str, remaining: Option<f64>) {
+        use tauri::Emitter;
+        let _ = self.app_handle.emit(
+            "download-state",
+            DownloadStateEvent::waiting_to_seed(id, remaining),
+        );
+    }
+
+    async fn try_start_waiting_seed(self: &Arc<Self>) -> bool {
+        let Some(waiter) = self.reserve_seed_waiter() else {
+            return false;
+        };
+        let manager = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            manager.resume_waiting_seed(waiter).await;
+        });
+        true
+    }
+
+    async fn resume_waiting_seed(self: Arc<Self>, waiter: SeedWaiter) {
+        let id = waiter.id.clone();
+        let Some(gid) = self.aria2_gid_for_download(&id) else {
+            self.abandon_seed_start(&id);
+            return;
+        };
+        if !self
+            .is_registered_generation_or_legacy(&id, waiter.lifecycle_generation)
+            .await
+            || !self.seed_waiting(&id)
+            || !matches!(self.active_kind(&id).await, Some(TaskKind::Aria2))
+        {
+            self.abandon_seed_start(&id);
+            return;
+        }
+        let control_epoch = self.current_aria2_control_epoch(&id).await;
+        let Some(permit_candidate) = self
+            .acquire_aria2_permit_candidate_for_queue(
+                &id,
+                &waiter.queue_id,
+                waiter.lifecycle_generation,
+                control_epoch,
+            )
+            .await
+        else {
+            self.abandon_seed_start(&id);
+            return;
+        };
+        let _control_guard = self.acquire_aria2_control(&id).await;
+        if !self
+            .is_registered_generation_or_legacy(&id, waiter.lifecycle_generation)
+            .await
+            || !self.seed_waiting(&id)
+            || !matches!(self.active_kind(&id).await, Some(TaskKind::Aria2))
+            || self.aria2_gid_for_download(&id).as_deref() != Some(gid.as_str())
+            || !self.is_aria2_control_epoch_current(&id, control_epoch).await
+        {
+            self.release_aria2_permit_candidate(&id, waiter.lifecycle_generation)
+                .await;
+            self.abandon_seed_start(&id);
+            return;
+        }
+        let epoch = self.next_aria2_control_epoch(&id).await;
+        if !self.rebind_aria2_gid_epoch(&id, &gid, epoch).await {
+            self.release_aria2_permit_candidate(&id, waiter.lifecycle_generation)
+                .await;
+            self.abandon_seed_start(&id);
+            return;
+        }
+        if !self
+            .park_aria2_permit_if_missing_for_queue(
+                &id,
+                &waiter.queue_id,
+                waiter.lifecycle_generation,
+                permit_candidate,
+            )
+            .await
+        {
+            self.release_aria2_permit_candidate(&id, waiter.lifecycle_generation)
+                .await;
+            self.abandon_seed_start(&id);
+            return;
+        }
+        match self.spawner.resume_for_seed(&gid).await {
+            Ok(Aria2SeedControlOutcome::Resumed) => {
+                if !self.is_aria2_control_epoch_current(&id, epoch).await
+                    || !self.is_current_aria2_gid_mapping(&gid, &Aria2GidMapping { id: id.clone(), epoch })
+                {
+                    let _ = self.spawner.pause_for_seed(&gid).await;
+                    self.release_download_permit_for_seed(&id).await;
+                    self.abandon_seed_start(&id);
+                    return;
+                }
+                self.finish_seed_start(&id);
+                self.record_seed_started(&id).await;
+                self.release_download_permit_for_seed(&id).await;
+                self.emit_state(&id, DownloadStatus::Seeding);
+            }
+            Ok(Aria2SeedControlOutcome::Complete) => {
+                self.finish_seed_start(&id);
+                self.apply_completion_locked(&id, PendingOutcome::Complete).await;
+            }
+            Ok(Aria2SeedControlOutcome::Paused) => {
+                let remaining = self.capture_seed_remaining(&id).await;
+                self.release_download_permit_for_seed(&id).await;
+                self.finish_seed_start(&id);
+                self.abandon_seed_start(&id);
+                self.add_seed_waiter(SeedWaiter {
+                    id: id.clone(),
+                    queue_id: waiter.queue_id,
+                    lifecycle_generation: waiter.lifecycle_generation,
+                });
+                self.emit_waiting_to_seed(&id, remaining);
+            }
+            Err(error) => {
+                // An unverified unpause must not release either the seed
+                // owner or its download permit: the daemon may already be
+                // active even though the RPC/status check was unavailable.
+                // Keep the item fenced in the starting state until a
+                // terminal event or an explicit user pause resolves it.
+                log::warn!(
+                    "Torrent seed resume [{}] could not be verified; retaining seed ownership and permit: {}",
+                    id,
+                    error
+                );
+                self.emit_waiting_to_seed(&id, None);
+            }
+        }
     }
 
     async fn sync_power_activity(&self) {
@@ -683,6 +1256,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         // Epoch checks remain the authoritative guard; removing this marker
         // prevents terminal downloads from accumulating cancellation entries.
         self.aria2_retry_cancelled.lock().await.remove(id);
+        self.release_seed_tracking(id);
         self.notify.notify_waiters();
     }
 
@@ -707,6 +1281,13 @@ impl<R: tauri::Runtime> QueueManager<R> {
             == Some(generation)
     }
 
+    async fn is_registered_generation_or_legacy(&self, id: &str, generation: u64) -> bool {
+        self.is_registered_generation(id, generation).await
+            || (generation == 0
+                && self.registered_lifecycle_generation(id).await.is_none()
+                && self.is_registered(id).await)
+    }
+
     pub(crate) async fn release_registered_id_for_generation(&self, id: &str, generation: u64) {
         let released = {
             let mut registered = self.registered_ids.lock().await;
@@ -721,6 +1302,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         };
         if released {
             self.aria2_retry_cancelled.lock().await.remove(id);
+            self.release_seed_tracking(id);
             self.notify.notify_waiters();
         }
     }
@@ -938,6 +1520,358 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .await
             .get(id)
             .is_some_and(torrent_seeding_requested)
+    }
+
+    async fn torrent_files_for_payload(
+        &self,
+        id: &str,
+        payload: &SpawnPayload,
+    ) -> Result<Vec<crate::ipc::TorrentFile>, String> {
+        let path = payload
+            .torrent_path
+            .as_deref()
+            .ok_or_else(|| "Torrent metadata is unavailable for web-seed management".to_string())?;
+        let path = crate::torrent::validate_managed_torrent_path(&self.app_handle, id, path)?;
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|error| format!("could not read cached Torrent metadata: {error}"))?;
+        Ok(crate::torrent::parse_torrent_bytes(&bytes)?.files)
+    }
+
+    async fn current_torrent_mapping(
+        &self,
+        id: &str,
+    ) -> Result<(String, Aria2GidMapping), String> {
+        if !self.is_registered(id).await || !matches!(self.active_kind(id).await, Some(TaskKind::Aria2)) {
+            return Err("download is not an active Aria2 Torrent".to_string());
+        }
+        let gid = self
+            .aria2_gid_for_download(id)
+            .ok_or_else(|| "active Torrent transfer has no GID".to_string())?;
+        let mapping = self
+            .aria2_gid_mapping(&gid)
+            .ok_or_else(|| "active Torrent transfer has no current GID mapping".to_string())?;
+        if mapping.id != id || !self.is_aria2_control_epoch_current(id, mapping.epoch).await {
+            return Err("Torrent lifecycle changed before web-seed inspection".to_string());
+        }
+        Ok((gid, mapping))
+    }
+
+    pub async fn get_aria2_torrent_web_seeds(
+        &self,
+        id: &str,
+    ) -> Result<Vec<crate::ipc::TorrentWebSeed>, String> {
+        let _control_guard = self.acquire_aria2_control(id).await;
+        let payload = self
+            .aria2_payloads
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| "Torrent retry payload is unavailable".to_string())?;
+        let files = self.torrent_files_for_payload(id, &payload).await?;
+        let desired = normalize_torrent_web_seeds(payload.torrent_web_seeds.as_deref(), &files)?;
+        let (gid, mapping) = self.current_torrent_mapping(id).await?;
+        let current = self.spawner.get_torrent_uris(&gid).await?;
+        if !self.is_aria2_control_epoch_current(id, mapping.epoch).await
+            || !self.is_current_aria2_gid_mapping(&gid, &mapping)
+        {
+            return Err("Torrent lifecycle changed while reading web seeds".to_string());
+        }
+        let expected = expand_torrent_web_seeds(&desired, &files)?;
+        if expected.iter().any(|(_, uri)| !current.iter().any(|candidate| candidate == uri)) {
+            return Err("Aria2 web-seed state differs from Firelink's persisted state".to_string());
+        }
+        Ok(desired
+            .into_iter()
+            .filter(|seed| {
+                expand_torrent_web_seed_uri(seed, &files)
+                    .ok()
+                    .is_some_and(|uri| current.iter().any(|candidate| candidate == &uri))
+            })
+            .collect())
+    }
+
+    pub async fn normalize_aria2_torrent_web_seeds(
+        &self,
+        id: &str,
+        seeds: &[crate::ipc::TorrentWebSeed],
+    ) -> Result<Vec<crate::ipc::TorrentWebSeed>, String> {
+        let _control_guard = self.acquire_aria2_control(id).await;
+        let payload = self
+            .aria2_payloads
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| "Torrent retry payload is unavailable".to_string())?;
+        let files = self.torrent_files_for_payload(id, &payload).await?;
+        normalize_torrent_web_seeds(Some(seeds), &files)
+    }
+
+    async fn rollback_torrent_web_seed_changes(
+        &self,
+        id: &str,
+        gid: &str,
+        mapping: &Aria2GidMapping,
+        changes: &[(u32, Vec<String>, Vec<String>)],
+    ) -> bool {
+        if !self.is_aria2_control_epoch_current(id, mapping.epoch).await
+            || !self.is_current_aria2_gid_mapping(gid, mapping)
+        {
+            return false;
+        }
+        let mut restored = true;
+        for (file_index, delete, add) in changes.iter().rev() {
+            if let Err(error) = self
+                .spawner
+                .change_torrent_uris(gid, *file_index, add, delete)
+                .await
+            {
+                restored = false;
+                log::warn!(
+                    "Torrent web-seed rollback [{}] failed for gid {} file {}: {}",
+                    id,
+                    gid,
+                    file_index,
+                    error
+                );
+            }
+        }
+        restored
+    }
+
+    async fn restore_torrent_web_seed_payload_if_current(
+        &self,
+        id: &str,
+        gid: &str,
+        mapping: &Aria2GidMapping,
+        old_payload: &SpawnPayload,
+    ) {
+        if self.is_aria2_control_epoch_current(id, mapping.epoch).await
+            && self.is_current_aria2_gid_mapping(gid, mapping)
+        {
+            if let Some(payload) = self.aria2_payloads.lock().await.get_mut(id) {
+                payload.torrent_web_seeds = old_payload.torrent_web_seeds.clone();
+            }
+        }
+    }
+
+    pub async fn set_aria2_torrent_web_seeds(
+        &self,
+        id: &str,
+        seeds: Vec<crate::ipc::TorrentWebSeed>,
+    ) -> Result<
+        (
+            Vec<crate::ipc::TorrentWebSeed>,
+            Vec<crate::ipc::TorrentWebSeed>,
+        ),
+        String,
+    > {
+        let _control_guard = self.acquire_aria2_control(id).await;
+        let old_payload = self
+            .aria2_payloads
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| "Torrent retry payload is unavailable".to_string())?;
+        let files = self.torrent_files_for_payload(id, &old_payload).await?;
+        let desired = normalize_torrent_web_seeds(Some(&seeds), &files)?;
+        let old = normalize_torrent_web_seeds(old_payload.torrent_web_seeds.as_deref(), &files)?;
+        let (gid, mapping) = self.current_torrent_mapping(id).await?;
+        let current = self.spawner.get_torrent_uris(&gid).await?;
+        let old_expanded = expand_torrent_web_seeds(&old, &files)?;
+        let new_expanded = expand_torrent_web_seeds(&desired, &files)?;
+        if !self.is_aria2_control_epoch_current(id, mapping.epoch).await
+            || !self.is_current_aria2_gid_mapping(&gid, &mapping)
+        {
+            return Err("Torrent lifecycle changed while reading web seeds".to_string());
+        }
+        if old_expanded.iter().any(|(_, uri)| !current.iter().any(|candidate| candidate == uri)) {
+            return Err("Aria2 web-seed state differs from Firelink's persisted state".to_string());
+        }
+
+        if let Some(payload) = self.aria2_payloads.lock().await.get_mut(id) {
+            payload.torrent_web_seeds = Some(desired.clone());
+        }
+        let mut changes = Vec::<(u32, Vec<String>, Vec<String>)>::new();
+        let mut current_set = current.into_iter().collect::<HashSet<_>>();
+        let mut file_indices = old_expanded.iter().map(|(index, _)| *index).collect::<HashSet<_>>();
+        file_indices.extend(new_expanded.iter().map(|(index, _)| *index));
+        let mut file_indices = file_indices.into_iter().collect::<Vec<_>>();
+        file_indices.sort_unstable();
+        for file_index in file_indices {
+            let delete = old_expanded
+                .iter()
+                .filter(|(index, uri)| *index == file_index && current_set.contains(uri))
+                .map(|(_, uri)| uri.clone())
+                .collect::<Vec<_>>();
+            let add = new_expanded
+                .iter()
+                .filter(|(index, uri)| *index == file_index && !current_set.contains(uri))
+                .map(|(_, uri)| uri.clone())
+                .collect::<Vec<_>>();
+            if delete.is_empty() && add.is_empty() {
+                continue;
+            }
+            changes.push((file_index, delete.clone(), add.clone()));
+            if let Err(error) = self.spawner.change_torrent_uris(&gid, file_index, &delete, &add).await {
+                self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
+                    .await;
+                self.restore_torrent_web_seed_payload_if_current(
+                    id,
+                    &gid,
+                    &mapping,
+                    &old_payload,
+                )
+                .await;
+                return Err(error);
+            }
+            for uri in &delete {
+                current_set.remove(uri);
+            }
+            current_set.extend(add.iter().cloned());
+            if !self.is_aria2_control_epoch_current(id, mapping.epoch).await
+                || !self.is_current_aria2_gid_mapping(&gid, &mapping)
+            {
+                self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
+                    .await;
+                self.restore_torrent_web_seed_payload_if_current(
+                    id,
+                    &gid,
+                    &mapping,
+                    &old_payload,
+                )
+                .await;
+                return Err("Torrent lifecycle changed while changing web seeds".to_string());
+            }
+        }
+        let readback = match self.spawner.get_torrent_uris(&gid).await {
+            Ok(readback) => readback,
+            Err(error) => {
+                self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
+                    .await;
+                self.restore_torrent_web_seed_payload_if_current(
+                    id,
+                    &gid,
+                    &mapping,
+                    &old_payload,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        if !self.is_aria2_control_epoch_current(id, mapping.epoch).await
+            || !self.is_current_aria2_gid_mapping(&gid, &mapping)
+        {
+            self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
+                .await;
+            self.restore_torrent_web_seed_payload_if_current(
+                id,
+                &gid,
+                &mapping,
+                &old_payload,
+            )
+            .await;
+            return Err("Torrent lifecycle changed while reading back web seeds".to_string());
+        }
+        let expected = new_expanded.into_iter().map(|(_, uri)| uri).collect::<HashSet<_>>();
+        if readback.iter().cloned().collect::<HashSet<_>>() != expected {
+            self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
+                .await;
+            self.restore_torrent_web_seed_payload_if_current(
+                id,
+                &gid,
+                &mapping,
+                &old_payload,
+            )
+            .await;
+            return Err("Aria2 web-seed readback did not match the requested state".to_string());
+        }
+        Ok((desired, old))
+    }
+
+    /// Attach the persisted typed seed set after addTorrent returns its GID.
+    /// The addTorrent URI parameter is intentionally left unscoped; this
+    /// method is the only path that supplies the required Aria2 file index.
+    pub async fn install_initial_torrent_web_seeds(&self, id: &str) -> Result<(), String> {
+        let _control_guard = self.acquire_aria2_control(id).await;
+        let payload = self
+            .aria2_payloads
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| "Torrent retry payload is unavailable".to_string())?;
+        let desired = payload.torrent_web_seeds.clone().unwrap_or_default();
+        if desired.is_empty() {
+            return Ok(());
+        }
+        let files = self.torrent_files_for_payload(id, &payload).await?;
+        let (gid, mapping) = self.current_torrent_mapping(id).await?;
+        let current = self.spawner.get_torrent_uris(&gid).await?;
+        if !self.is_aria2_control_epoch_current(id, mapping.epoch).await
+            || !self.is_current_aria2_gid_mapping(&gid, &mapping)
+        {
+            return Err("Torrent lifecycle changed while reading initial web seeds".to_string());
+        }
+        let expanded = expand_torrent_web_seeds(&desired, &files)?;
+        let mut current_set = current.into_iter().collect::<HashSet<_>>();
+        let mut changes = Vec::<(u32, Vec<String>, Vec<String>)>::new();
+        for (file_index, uri) in &expanded {
+            if current_set.contains(uri) {
+                continue;
+            }
+            if !self.is_aria2_control_epoch_current(id, mapping.epoch).await
+                || !self.is_current_aria2_gid_mapping(&gid, &mapping)
+            {
+                self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
+                    .await;
+                return Err("Torrent lifecycle changed while attaching web seeds".to_string());
+            }
+            let add = vec![uri.clone()];
+            changes.push((*file_index, Vec::new(), add.clone()));
+            if let Err(error) = self
+                .spawner
+                .change_torrent_uris(&gid, *file_index, &[], &add)
+                .await
+            {
+                self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
+                    .await;
+                return Err(error);
+            }
+            current_set.insert(uri.clone());
+            if !self.is_aria2_control_epoch_current(id, mapping.epoch).await
+                || !self.is_current_aria2_gid_mapping(&gid, &mapping)
+            {
+                self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
+                    .await;
+                return Err("Torrent lifecycle changed while attaching web seeds".to_string());
+            }
+        }
+        let readback = match self.spawner.get_torrent_uris(&gid).await {
+            Ok(readback) => readback,
+            Err(error) => {
+                self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
+                    .await;
+                return Err(error);
+            }
+        };
+        if !self.is_aria2_control_epoch_current(id, mapping.epoch).await
+            || !self.is_current_aria2_gid_mapping(&gid, &mapping)
+        {
+            self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
+                .await;
+            return Err("Torrent lifecycle changed while reading initial web seeds".to_string());
+        }
+        let expected = expanded.into_iter().map(|(_, uri)| uri).collect::<HashSet<_>>();
+        if readback.into_iter().collect::<HashSet<_>>() != expected {
+            self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
+                .await;
+            return Err("Aria2 did not retain the persisted Torrent web-seed set".to_string());
+        }
+        Ok(())
     }
 
     pub fn set_aria2_global_speed_limit(&self, limit: Option<String>) {
@@ -1236,6 +2170,152 @@ impl<R: tauri::Runtime> QueueManager<R> {
         Ok(diagnostics)
     }
 
+    /// Return a lifecycle-fenced, metadata-derived projection of Aria2's
+    /// per-file progress. The daemon's absolute paths and URI lists are never
+    /// copied across the boundary.
+    pub async fn get_aria2_torrent_file_progress(
+        &self,
+        id: &str,
+    ) -> Result<crate::ipc::TorrentFileProgressSnapshot, String> {
+        let _control_guard = self.acquire_aria2_control(id).await;
+        if !self.is_registered(id).await
+            || !matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
+        {
+            return Err("live Torrent file progress is unavailable".to_string());
+        }
+        let payload = self
+            .aria2_payloads
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| "live Torrent file progress is unavailable".to_string())?;
+        if !payload.is_torrent {
+            return Err("download is not a Torrent transfer".to_string());
+        }
+        let torrent_path = payload
+            .torrent_path
+            .as_deref()
+            .ok_or_else(|| "live Torrent file progress is unavailable".to_string())?;
+        let torrent_path = crate::torrent::validate_managed_torrent_path(
+            &self.app_handle,
+            id,
+            torrent_path,
+        )?;
+        let bytes = tokio::fs::read(&torrent_path)
+            .await
+            .map_err(|_| "live Torrent file progress is unavailable".to_string())?;
+        let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
+        let gid = self
+            .aria2_gid_for_download(id)
+            .ok_or_else(|| "live Torrent file progress is unavailable".to_string())?;
+        let expected_mapping = self
+            .aria2_gid_mapping(&gid)
+            .ok_or_else(|| "live Torrent file progress is unavailable".to_string())?;
+        if expected_mapping.id != id
+            || !self
+                .is_aria2_control_epoch_current(id, expected_mapping.epoch)
+                .await
+        {
+            return Err("live Torrent file progress is unavailable".to_string());
+        }
+
+        let state = self.app_handle.state::<crate::AppState>();
+        let result = crate::rpc_call(
+            state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+            &state.aria2_secret,
+            "aria2.getFiles",
+            serde_json::json!([gid]),
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "aria2.getFiles failed: {}",
+                crate::redact_sensitive_text(&error)
+            )
+        })?;
+        let snapshot = parse_torrent_file_progress(result, &metadata.files)?;
+
+        let still_current = self.is_registered(id).await
+            && matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
+            && self
+                .is_aria2_control_epoch_current(id, expected_mapping.epoch)
+                .await
+            && self.is_current_aria2_gid_mapping(&gid, &expected_mapping)
+            && self.aria2_gid_for_download(id).as_deref() == Some(gid.as_str());
+        if !still_current {
+            return Err("Torrent lifecycle changed while reading file progress".to_string());
+        }
+
+        Ok(snapshot)
+    }
+
+    /// Return a bounded, lifecycle-fenced projection of Aria2's piece
+    /// bitfield. The raw bitfield never crosses the native boundary; the UI
+    /// receives only exact counts and balanced percentage buckets.
+    pub async fn get_aria2_torrent_piece_progress(
+        &self,
+        id: &str,
+    ) -> Result<crate::ipc::TorrentPieceProgressSnapshot, String> {
+        let _control_guard = self.acquire_aria2_control(id).await;
+        if !self.is_registered(id).await
+            || !matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
+        {
+            return Err("live Torrent piece progress is unavailable".to_string());
+        }
+        let is_torrent = self
+            .aria2_payloads
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|payload| payload.is_torrent);
+        if !is_torrent {
+            return Err("download is not a Torrent transfer".to_string());
+        }
+        let gid = self
+            .aria2_gid_for_download(id)
+            .ok_or_else(|| "live Torrent piece progress is unavailable".to_string())?;
+        let expected_mapping = self
+            .aria2_gid_mapping(&gid)
+            .ok_or_else(|| "live Torrent piece progress is unavailable".to_string())?;
+        if expected_mapping.id != id
+            || !self
+                .is_aria2_control_epoch_current(id, expected_mapping.epoch)
+                .await
+        {
+            return Err("live Torrent piece progress is unavailable".to_string());
+        }
+
+        let state = self.app_handle.state::<crate::AppState>();
+        let result = crate::rpc_call(
+            state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+            &state.aria2_secret,
+            "aria2.tellStatus",
+            serde_json::json!([gid, ["bitfield", "pieceLength", "numPieces"]]),
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "aria2.tellStatus failed: {}",
+                crate::redact_sensitive_text(&error)
+            )
+        })?;
+        let snapshot = parse_torrent_piece_progress(result)?;
+
+        let still_current = self.is_registered(id).await
+            && matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
+            && self
+                .is_aria2_control_epoch_current(id, expected_mapping.epoch)
+                .await
+            && self.is_current_aria2_gid_mapping(&gid, &expected_mapping)
+            && self.aria2_gid_for_download(id).as_deref() == Some(gid.as_str());
+        if !still_current {
+            return Err("Torrent lifecycle changed while reading piece progress".to_string());
+        }
+
+        Ok(snapshot)
+    }
+
     /// Pop the next task, or None if empty.
     pub async fn pop_front(&self) -> Option<QueuedTask> {
         self.pending.lock().await.pop_front()
@@ -1287,7 +2367,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
         control_epoch: u64,
     ) -> Option<OwnedSemaphorePermit> {
         loop {
-            if !self.is_registered_generation(id, lifecycle_generation).await
+            if !self
+                .is_registered_generation_or_legacy(id, lifecycle_generation)
+                .await
                 || self.is_aria2_retry_cancelled(id).await
                 || !self.is_aria2_control_epoch_current(id, control_epoch).await
             {
@@ -1300,7 +2382,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 .try_reserve_queue_slot(id, queue_id, lifecycle_generation)
                 .await
             {
-                if self.is_registered_generation(id, lifecycle_generation).await
+                if self
+                    .is_registered_generation_or_legacy(id, lifecycle_generation)
+                    .await
                     && !self.is_aria2_retry_cancelled(id).await
                     && self
                         .is_aria2_control_epoch_current(id, control_epoch)
@@ -1783,6 +2867,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
             let notified = self.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
+            if self.try_start_waiting_seed().await {
+                continue;
+            }
             if let Some((permit, task)) = self.try_admit_next_task().await {
                 // Admission owns the global and per-queue reservation before
                 // this task is spawned. Keep the dispatcher free to admit
@@ -1913,8 +3000,59 @@ impl<R: tauri::Runtime> QueueManager<R> {
                             return;
                         }
                         let buffered_outcome = self.remember_gid(id.clone(), gid.clone()).await;
+                        let install_web_seeds = buffered_outcome.is_none()
+                            && task.payload.is_torrent
+                            && task.payload.torrent_web_seeds.is_some();
                         self.finish_aria2_dispatch(&id, lifecycle_epoch).await;
                         drop(control_guard);
+                        if install_web_seeds {
+                            if let Err(error) = self.install_initial_torrent_web_seeds(&id).await {
+                                // Initial web-seed installation is a
+                                // post-GID lifecycle step. Reacquire the
+                                // control lock and fence the failure against
+                                // the dispatch epoch before retiring the GID;
+                                // an old install error must never fail a
+                                // newer retry/resume lifecycle.
+                                let _control_guard = self.acquire_aria2_control(&id).await;
+                                let current_gid = self.aria2_gid_for_download(&id);
+                                let current = self
+                                    .is_aria2_control_epoch_current(&id, lifecycle_epoch)
+                                    .await
+                                    && self.is_registered(&id).await
+                                    && matches!(self.active_kind(&id).await, Some(TaskKind::Aria2))
+                                    && current_gid.as_deref().is_some_and(|gid| {
+                                        self.aria2_gid_mapping(gid).is_some_and(|mapping| {
+                                            mapping.id == id && mapping.epoch == lifecycle_epoch
+                                        })
+                                    });
+                                if current {
+                                    if let Some(current_gid) = current_gid {
+                                        if let Err(remove_error) = self.spawner.remove_uri(&current_gid).await {
+                                            log::warn!(
+                                                "aria2 dispatch web-seed failure [{}]: could not remove gid {}: {}",
+                                                id,
+                                                current_gid,
+                                                remove_error
+                                            );
+                                        }
+                                        self.ignore_aria2_gid(&current_gid).await;
+                                    }
+                                    self.apply_completion_locked(
+                                        &id,
+                                        PendingOutcome::Error(format!(
+                                            "could not attach Torrent web seeds: {error}"
+                                        )),
+                                    )
+                                    .await;
+                                } else {
+                                    log::info!(
+                                        "aria2 dispatch web-seed failure [{}]: ignoring stale install error after a newer lifecycle took ownership",
+                                        id
+                                    );
+                                }
+                                return;
+                            }
+                        }
                         if let Some(outcome) = buffered_outcome {
                             self.handle_aria2_event(&gid, outcome).await;
                         }
@@ -2085,8 +3223,33 @@ impl<R: tauri::Runtime> QueueManager<R> {
     pub(crate) async fn apply_completion_locked(&self, id: &str, outcome: PendingOutcome) {
         let outcome = match outcome {
             PendingOutcome::Seeding if self.aria2_torrent_seeding_requested(id).await => {
-                self.emit_state(id, DownloadStatus::Seeding);
-                return;
+                if !self.seed_capacity_enabled() {
+                    // Keep a budget record even when the legacy single-pool
+                    // mode is active. If the user enables separate seed
+                    // capacity while this Torrent is already seeding, the
+                    // existing seeder must be counted before admitting new
+                    // seeders.
+                    self.record_seed_started(id).await;
+                    self.emit_state(id, DownloadStatus::Seeding);
+                    return;
+                }
+                match self.admit_seed_after_completion(id).await {
+                    SeedAdmissionOutcome::Seeding => {
+                        self.emit_state(id, DownloadStatus::Seeding);
+                        return;
+                    }
+                    SeedAdmissionOutcome::Waiting => {
+                        let remaining = self
+                            .aria2_payloads
+                            .lock()
+                            .await
+                            .get(id)
+                            .and_then(|payload| payload.torrent_seed_remaining);
+                        self.emit_waiting_to_seed(id, remaining);
+                        return;
+                    }
+                    SeedAdmissionOutcome::Complete => PendingOutcome::Complete,
+                }
             }
             // `onBtDownloadComplete` means that Aria2 is still seeding. If
             // Firelink has no seeding policy for this payload, reconcile it
@@ -3619,6 +4782,200 @@ pub(crate) fn parse_torrent_peer_diagnostics(
     })
 }
 
+fn parse_aria2_decimal(value: Option<&serde_json::Value>, field: &str) -> Result<u64, String> {
+    let value = value
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("aria2.getFiles returned an invalid {field}"))?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!("aria2.getFiles returned an invalid {field}"));
+    }
+    value
+        .parse::<u64>()
+        .map_err(|_| format!("aria2.getFiles returned an invalid {field}"))
+}
+
+fn parse_aria2_selected(value: Option<&serde_json::Value>) -> Result<bool, String> {
+    match value {
+        Some(serde_json::Value::String(value)) if value == "true" => Ok(true),
+        Some(serde_json::Value::String(value)) if value == "false" => Ok(false),
+        Some(serde_json::Value::Bool(value)) => Ok(*value),
+        _ => Err("aria2.getFiles returned an invalid selected flag".to_string()),
+    }
+}
+
+pub(crate) fn parse_torrent_file_progress(
+    result: serde_json::Value,
+    metadata_files: &[crate::ipc::TorrentFile],
+) -> Result<crate::ipc::TorrentFileProgressSnapshot, String> {
+    let files = result
+        .as_array()
+        .ok_or_else(|| "aria2.getFiles returned a non-array result".to_string())?;
+    if files.len() != metadata_files.len() {
+        return Err("aria2.getFiles returned an unexpected file count".to_string());
+    }
+
+    let mut parsed = HashMap::<u32, crate::ipc::TorrentFileProgress>::with_capacity(files.len());
+    for file in files {
+        let object = file
+            .as_object()
+            .ok_or_else(|| "aria2.getFiles returned malformed file data".to_string())?;
+        let index = parse_aria2_decimal(object.get("index"), "file index")?
+            .try_into()
+            .map_err(|_| "aria2.getFiles returned an invalid file index".to_string())?;
+        let metadata = metadata_files
+            .iter()
+            .find(|metadata| metadata.index == index)
+            .ok_or_else(|| "aria2.getFiles returned an unknown file index".to_string())?;
+        if parsed.contains_key(&index) {
+            return Err("aria2.getFiles returned a duplicate file index".to_string());
+        }
+        let length = parse_aria2_decimal(object.get("length"), "file length")?;
+        if length != metadata.length {
+            return Err("aria2.getFiles returned a mismatched file length".to_string());
+        }
+        let completed_length = parse_aria2_decimal(
+            object.get("completedLength"),
+            "completed file length",
+        )?;
+        if completed_length > length {
+            return Err("aria2.getFiles returned over-complete file data".to_string());
+        }
+        parsed.insert(
+            index,
+            crate::ipc::TorrentFileProgress {
+                index,
+                relative_path: metadata.path.clone(),
+                length,
+                completed_length,
+                selected: parse_aria2_selected(object.get("selected"))?,
+            },
+        );
+    }
+
+    let files = metadata_files
+        .iter()
+        .map(|metadata| {
+            parsed
+                .remove(&metadata.index)
+                .ok_or_else(|| "aria2.getFiles returned a missing file index".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if !parsed.is_empty() {
+        return Err("aria2.getFiles returned unexpected file data".to_string());
+    }
+    Ok(crate::ipc::TorrentFileProgressSnapshot { files })
+}
+
+fn parse_aria2_status_decimal(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<u64, String> {
+    let value = object
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("aria2.tellStatus returned an invalid {field}"))?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!("aria2.tellStatus returned an invalid {field}"));
+    }
+    value
+        .parse::<u64>()
+        .map_err(|_| format!("aria2.tellStatus returned an invalid {field}"))
+}
+
+fn decode_torrent_piece_bitfield(
+    value: &str,
+    num_pieces: u64,
+) -> Result<Vec<u8>, String> {
+    if num_pieces == 0 {
+        return Err("aria2.tellStatus returned a non-positive piece count".to_string());
+    }
+    if num_pieces > MAX_TORRENT_PIECES_FOR_PROGRESS {
+        return Err("aria2.tellStatus returned an unsupported piece count".to_string());
+    }
+    let byte_count = num_pieces
+        .checked_add(7)
+        .and_then(|value| value.checked_div(8))
+        .ok_or_else(|| "aria2.tellStatus returned an unsupported piece count".to_string())?;
+    let hex_length = byte_count
+        .checked_mul(2)
+        .ok_or_else(|| "aria2.tellStatus returned an oversized bitfield".to_string())?;
+    if value.len() != usize::try_from(hex_length).unwrap_or(usize::MAX)
+        || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("aria2.tellStatus returned an invalid piece bitfield".to_string());
+    }
+
+    let mut bytes = Vec::with_capacity(usize::try_from(byte_count).unwrap_or_default());
+    for pair in value.as_bytes().chunks_exact(2) {
+        let high = char::from(pair[0]).to_digit(16).ok_or_else(|| {
+            "aria2.tellStatus returned an invalid piece bitfield".to_string()
+        })?;
+        let low = char::from(pair[1]).to_digit(16).ok_or_else(|| {
+            "aria2.tellStatus returned an invalid piece bitfield".to_string()
+        })?;
+        bytes.push(((high << 4) | low) as u8);
+    }
+
+    let remainder = (num_pieces % 8) as u8;
+    if remainder != 0 {
+        let overflow_mask = (1u8 << (8 - remainder)) - 1;
+        if bytes.last().is_some_and(|byte| byte & overflow_mask != 0) {
+            return Err("aria2.tellStatus returned set overflow bits".to_string());
+        }
+    }
+    Ok(bytes)
+}
+
+fn torrent_piece_is_complete(bitfield: &[u8], index: u64) -> bool {
+    let byte = bitfield[(index / 8) as usize];
+    byte & (1 << (7 - (index % 8))) != 0
+}
+
+pub(crate) fn parse_torrent_piece_progress(
+    result: serde_json::Value,
+) -> Result<crate::ipc::TorrentPieceProgressSnapshot, String> {
+    let object = result
+        .as_object()
+        .ok_or_else(|| "aria2.tellStatus returned malformed piece progress".to_string())?;
+    let piece_length = parse_aria2_status_decimal(object, "pieceLength")?;
+    let num_pieces = parse_aria2_status_decimal(object, "numPieces")?;
+    if piece_length == 0 {
+        return Err("aria2.tellStatus returned a non-positive piece length".to_string());
+    }
+    let bitfield = object
+        .get("bitfield")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "aria2.tellStatus has no piece bitfield yet".to_string())?;
+    let bitfield = decode_torrent_piece_bitfield(bitfield, num_pieces)?;
+    let completed_pieces = (0..num_pieces)
+        .filter(|index| torrent_piece_is_complete(&bitfield, *index))
+        .count() as u64;
+
+    let bucket_count = num_pieces.min(256) as usize;
+    let mut buckets = Vec::with_capacity(bucket_count);
+    for bucket_index in 0..bucket_count {
+        let start = num_pieces * bucket_index as u64 / bucket_count as u64;
+        let end = num_pieces * (bucket_index as u64 + 1) / bucket_count as u64;
+        let bucket_length = end.saturating_sub(start);
+        let completed = (start..end)
+            .filter(|index| torrent_piece_is_complete(&bitfield, *index))
+            .count() as u64;
+        let percentage = if bucket_length == 0 {
+            0
+        } else {
+            ((completed * 100) / bucket_length).min(100) as u8
+        };
+        buckets.push(percentage);
+    }
+
+    Ok(crate::ipc::TorrentPieceProgressSnapshot {
+        piece_length,
+        num_pieces,
+        completed_pieces,
+        buckets,
+    })
+}
+
 fn normalize_torrent_tracker_list(
     value: Option<&str>,
     allow_wildcard: bool,
@@ -3966,6 +5323,48 @@ impl ProductionSpawner {
             }
         }
     }
+
+    async fn control_seed_rpc(
+        &self,
+        gid: &str,
+        method: &str,
+    ) -> Result<Aria2SeedControlOutcome, String> {
+        let state = self.app_handle.state::<crate::AppState>();
+        let port = state.aria2_port.load(std::sync::atomic::Ordering::Relaxed);
+        let secret = &state.aria2_secret;
+        let rpc_error = match crate::rpc_call(port, secret, method, serde_json::json!([gid])).await {
+            Ok(result) => crate::ensure_aria2_gid_result(method, gid, &result)
+                .err()
+                .map(|error| error.to_string()),
+            Err(error) => Some(crate::redact_sensitive_text(&error.to_string())),
+        };
+        let status = crate::aria2_download_status(port, secret, gid)
+            .await
+            .map_err(|error| {
+                rpc_error
+                    .as_ref()
+                    .map(|rpc_error| format!("{rpc_error}; status verification failed: {error}"))
+                    .unwrap_or_else(|| format!("status verification failed: {error}"))
+            })?;
+        let outcome = match status.as_str() {
+            "active" | "waiting" => Aria2SeedControlOutcome::Resumed,
+            "paused" => Aria2SeedControlOutcome::Paused,
+            "complete" => Aria2SeedControlOutcome::Complete,
+            other => {
+                return Err(format!(
+                    "aria2 {method} left gid {gid} in unhandled state {other}"
+                ));
+            }
+        };
+        if let Some(error) = rpc_error {
+            log::warn!(
+                "aria2 {method} for seed gid {} returned an error after status verification: {}",
+                gid,
+                error
+            );
+        }
+        Ok(outcome)
+    }
 }
 
 #[async_trait::async_trait]
@@ -4072,11 +5471,18 @@ impl SidecarSpawner for ProductionSpawner {
                     );
                 }
                 let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-                let uris = payload
-                    .mirrors
-                    .as_deref()
-                    .map(|mirrors| crate::collect_download_uris("", Some(mirrors)))
-                    .unwrap_or_default();
+                let uris = if payload.torrent_web_seeds.is_some() {
+                    // Typed per-file web seeds are attached after the GID is
+                    // known through changeUri. addTorrent accepts only one
+                    // unscoped URI list, which cannot represent fileIndex.
+                    Vec::new()
+                } else {
+                    payload
+                        .mirrors
+                        .as_deref()
+                        .map(|mirrors| crate::collect_download_uris("", Some(mirrors)))
+                        .unwrap_or_default()
+                };
                 ("aria2.addTorrent", serde_json::json!([encoded, uris, options]))
             } else {
                 let parsed = url::Url::parse(&payload.url)
@@ -4213,6 +5619,56 @@ impl SidecarSpawner for ProductionSpawner {
                 "aria2.changeOption returned unexpected result {value} for gid {gid}"
             )),
             None => Err("aria2.changeOption returned a non-string result".to_string()),
+        }
+    }
+
+    async fn pause_for_seed(
+        &self,
+        gid: &str,
+    ) -> Result<Aria2SeedControlOutcome, String> {
+        self.control_seed_rpc(gid, "aria2.forcePause").await
+    }
+
+    async fn resume_for_seed(
+        &self,
+        gid: &str,
+    ) -> Result<Aria2SeedControlOutcome, String> {
+        self.control_seed_rpc(gid, "aria2.unpause").await
+    }
+
+    async fn get_torrent_uris(&self, gid: &str) -> Result<Vec<String>, String> {
+        let state = self.app_handle.state::<crate::AppState>();
+        let result = crate::rpc_call(
+            state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+            &state.aria2_secret,
+            "aria2.getUris",
+            serde_json::json!([gid]),
+        )
+        .await
+        .map_err(|error| format!("aria2.getUris failed for gid {gid}: {}", crate::redact_sensitive_text(&error.to_string())))?;
+        parse_aria2_web_seed_uris(&result)
+    }
+
+    async fn change_torrent_uris(
+        &self,
+        gid: &str,
+        file_index: u32,
+        delete: &[String],
+        add: &[String],
+    ) -> Result<(), String> {
+        let state = self.app_handle.state::<crate::AppState>();
+        let result = crate::rpc_call(
+            state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+            &state.aria2_secret,
+            "aria2.changeUri",
+            serde_json::json!([gid, file_index, delete, add]),
+        )
+        .await
+        .map_err(|error| format!("aria2.changeUri failed for gid {gid}: {}", crate::redact_sensitive_text(&error.to_string())))?;
+        match result.as_str() {
+            Some("OK") => Ok(()),
+            Some(value) => Err(format!("aria2.changeUri returned unexpected result {value}")),
+            None => Err("aria2.changeUri returned a non-string result".to_string()),
         }
     }
 
@@ -4513,6 +5969,12 @@ pub struct EnqueueItem {
     pub torrent_seed_ratio: Option<f64>,
     #[serde(default)]
     #[ts(optional)]
+    pub torrent_seed_remaining: Option<f64>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub torrent_web_seeds: Option<Vec<crate::ipc::TorrentWebSeed>>,
+    #[serde(default)]
+    #[ts(optional)]
     pub torrent_upload_limit: Option<String>,
     #[serde(default)]
     #[ts(optional)]
@@ -4594,8 +6056,10 @@ impl EnqueueItem {
                 is_torrent: self.is_torrent.unwrap_or(false),
                 torrent_path: self.torrent_path,
                 torrent_file_indices: self.torrent_file_indices,
-                torrent_seed_time: self.torrent_seed_time,
+                torrent_seed_time: self.torrent_seed_remaining.or(self.torrent_seed_time),
                 torrent_seed_ratio: self.torrent_seed_ratio,
+                torrent_seed_remaining: self.torrent_seed_remaining,
+                torrent_web_seeds: self.torrent_web_seeds,
                 torrent_upload_limit: self.torrent_upload_limit,
                 torrent_max_peers: self.torrent_max_peers,
                 torrent_peer_speed_limit: self.torrent_peer_speed_limit,
@@ -4630,6 +6094,36 @@ mod tests {
 
         async fn remove_uri(&self, _gid: &str) -> Result<(), String> {
             Ok(())
+        }
+
+        async fn run_media(
+            &self,
+            _id: &str,
+            _payload: &SpawnPayload,
+            _lifecycle_generation: u64,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct SeedSpawner;
+
+    #[async_trait::async_trait]
+    impl SidecarSpawner for SeedSpawner {
+        async fn add_uri(&self, id: &str, _payload: &SpawnPayload) -> Result<String, String> {
+            Ok(format!("gid-{id}"))
+        }
+
+        async fn remove_uri(&self, _gid: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn pause_for_seed(&self, _gid: &str) -> Result<Aria2SeedControlOutcome, String> {
+            Ok(Aria2SeedControlOutcome::Paused)
+        }
+
+        async fn resume_for_seed(&self, _gid: &str) -> Result<Aria2SeedControlOutcome, String> {
+            Ok(Aria2SeedControlOutcome::Resumed)
         }
 
         async fn run_media(
@@ -5388,6 +6882,246 @@ mod tests {
         assert!(error.contains("malformed"));
     }
 
+    fn test_torrent_progress_metadata() -> Vec<crate::ipc::TorrentFile> {
+        vec![
+            crate::ipc::TorrentFile {
+                index: 1,
+                path: "folder/one.bin".to_string(),
+                length: 12,
+            },
+            crate::ipc::TorrentFile {
+                index: 2,
+                path: "folder/two.bin".to_string(),
+                length: 7,
+            },
+        ]
+    }
+
+    #[test]
+    fn torrent_file_progress_uses_validated_metadata_and_discards_daemon_paths() {
+        let result = serde_json::json!([
+            {
+                "index": "2",
+                "path": "/private/secret/two.bin",
+                "uris": [{"uri": "https://secret.example/file"}],
+                "length": "7",
+                "completedLength": "3",
+                "selected": "false"
+            },
+            {
+                "index": "1",
+                "path": "/private/secret/one.bin",
+                "length": "12",
+                "completedLength": "12",
+                "selected": "true"
+            }
+        ]);
+
+        let snapshot = parse_torrent_file_progress(result, &test_torrent_progress_metadata()).unwrap();
+        assert_eq!(snapshot.files[0].relative_path, "folder/one.bin");
+        assert_eq!(snapshot.files[0].completed_length, 12);
+        assert!(snapshot.files[0].selected);
+        assert_eq!(snapshot.files[1].relative_path, "folder/two.bin");
+        assert_eq!(snapshot.files[1].completed_length, 3);
+        assert!(!snapshot.files[1].selected);
+        let serialized = serde_json::to_string(&snapshot).unwrap();
+        assert!(!serialized.contains("/private/secret"));
+        assert!(!serialized.contains("secret.example"));
+    }
+
+    #[test]
+    fn torrent_file_progress_rejects_malformed_and_inconsistent_rows() {
+        let metadata = test_torrent_progress_metadata();
+        let cases = [
+            (
+                serde_json::json!([{
+                    "index": "1",
+                    "length": "not-a-number",
+                    "completedLength": "0",
+                    "selected": "true"
+                }, {
+                    "index": "2",
+                    "length": "7",
+                    "completedLength": "0",
+                    "selected": "true"
+                }]),
+                "invalid file length",
+            ),
+            (
+                serde_json::json!([{
+                    "index": "1",
+                    "length": "12",
+                    "completedLength": "13",
+                    "selected": "true"
+                }, {
+                    "index": "2",
+                    "length": "7",
+                    "completedLength": "0",
+                    "selected": "true"
+                }]),
+                "over-complete",
+            ),
+            (
+                serde_json::json!([{
+                    "index": "1",
+                    "length": "12",
+                    "completedLength": "0",
+                    "selected": "true"
+                }, {
+                    "index": "1",
+                    "length": "12",
+                    "completedLength": "0",
+                    "selected": "true"
+                }]),
+                "duplicate",
+            ),
+            (
+                serde_json::json!([{
+                    "index": "3",
+                    "length": "12",
+                    "completedLength": "0",
+                    "selected": "true"
+                }, {
+                    "index": "2",
+                    "length": "7",
+                    "completedLength": "0",
+                    "selected": "true"
+                }]),
+                "unknown",
+            ),
+        ];
+
+        for (result, expected) in cases {
+            let error = parse_torrent_file_progress(result, &metadata).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+        let error = parse_torrent_file_progress(serde_json::json!([]), &metadata).unwrap_err();
+        assert!(error.contains("file count"));
+    }
+
+    #[test]
+    fn torrent_piece_progress_decodes_high_bit_first_and_buckets_small_torrents() {
+        let snapshot = parse_torrent_piece_progress(serde_json::json!({
+            "pieceLength": "16384",
+            "numPieces": "10",
+            "bitfield": "9040"
+        }))
+        .unwrap();
+
+        assert_eq!(snapshot.piece_length, 16_384);
+        assert_eq!(snapshot.num_pieces, 10);
+        assert_eq!(snapshot.completed_pieces, 3);
+        assert_eq!(snapshot.buckets, vec![100, 0, 0, 100, 0, 0, 0, 0, 0, 100]);
+    }
+
+    #[test]
+    fn torrent_piece_progress_aggregates_to_at_most_256_balanced_buckets() {
+        let bitfield = "ff".repeat(64);
+        let snapshot = parse_torrent_piece_progress(serde_json::json!({
+            "pieceLength": "1",
+            "numPieces": "512",
+            "bitfield": bitfield
+        }))
+        .unwrap();
+
+        assert_eq!(snapshot.completed_pieces, 512);
+        assert_eq!(snapshot.buckets.len(), 256);
+        assert!(snapshot.buckets.iter().all(|value| *value == 100));
+    }
+
+    #[test]
+    fn torrent_piece_progress_rejects_missing_fields_malformed_hex_and_overflow_bits() {
+        let cases = [
+            (serde_json::json!({}), "invalid pieceLength"),
+            (
+                serde_json::json!({
+                    "pieceLength": "16384",
+                    "numPieces": "0",
+                    "bitfield": ""
+                }),
+                "non-positive",
+            ),
+            (
+                serde_json::json!({
+                    "pieceLength": "16384",
+                    "numPieces": "8",
+                    "bitfield": "xz"
+                }),
+                "invalid piece bitfield",
+            ),
+            (
+                serde_json::json!({
+                    "pieceLength": "16384",
+                    "numPieces": "10",
+                    "bitfield": "904f"
+                }),
+                "overflow",
+            ),
+        ];
+
+        for (result, expected) in cases {
+            let error = parse_torrent_piece_progress(result).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn torrent_network_limits_and_web_seed_normalization_are_bounded() {
+        assert_eq!(normalize_torrent_dht_message_timeout(1).unwrap(), 1);
+        assert_eq!(normalize_torrent_dht_message_timeout(600).unwrap(), 600);
+        assert!(normalize_torrent_dht_message_timeout(0).is_err());
+        assert_eq!(normalize_torrent_max_concurrent_seeds(2).unwrap(), 2);
+        assert!(normalize_torrent_max_concurrent_seeds(65).is_err());
+
+        let files = vec![
+            crate::ipc::TorrentFile {
+                index: 1,
+                path: "folder/file.bin".to_string(),
+                length: 3,
+            },
+            crate::ipc::TorrentFile {
+                index: 2,
+                path: "other.txt".to_string(),
+                length: 4,
+            },
+        ];
+        let seeds = normalize_torrent_web_seeds(
+            Some(&[
+                crate::ipc::TorrentWebSeed {
+                    file_index: 1,
+                    uri: " https://mirror.example/base/ ".to_string(),
+                },
+                crate::ipc::TorrentWebSeed {
+                    file_index: 1,
+                    uri: "https://mirror.example/base/".to_string(),
+                },
+            ]),
+            &files,
+        )
+        .unwrap();
+        assert_eq!(seeds.len(), 1);
+        assert_eq!(
+            expand_torrent_web_seeds(&seeds, &files).unwrap()[0].1,
+            "https://mirror.example/base/folder/file.bin"
+        );
+        assert!(normalize_torrent_web_seeds(
+            Some(&[crate::ipc::TorrentWebSeed {
+                file_index: 1,
+                uri: "ftp://mirror.example/file".to_string(),
+            }]),
+            &files,
+        )
+        .is_err());
+        assert!(normalize_torrent_web_seeds(
+            Some(&[crate::ipc::TorrentWebSeed {
+                file_index: 9,
+                uri: "https://mirror.example/file".to_string(),
+            }]),
+            &files,
+        )
+        .is_err());
+    }
+
     #[test]
     fn enqueue_item_carries_torrent_trackers_into_the_spawn_payload() {
         let item: EnqueueItem = serde_json::from_value(serde_json::json!({
@@ -5536,6 +7270,102 @@ mod tests {
 
         assert_eq!(manager.aria2_gid_for_download("torrent").as_deref(), Some("test-gid"));
         assert_eq!(manager.available_permits(), 0);
+        assert!(manager
+            .capture_seed_remaining("torrent")
+            .await
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn enabling_separate_seed_capacity_counts_existing_seeders() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(SeedSpawner));
+        assert!(manager.ensure_aria2_permit("existing").await);
+        manager
+            .aria2_payloads
+            .lock()
+            .await
+            .insert(
+                "existing".to_string(),
+                SpawnPayload {
+                    is_torrent: true,
+                    torrent_seed_time: Some(5.0),
+                    ..Default::default()
+                },
+            );
+        manager
+            .remember_gid("existing".to_string(), "gid-existing".to_string())
+            .await;
+        manager
+            .apply_completion("existing", PendingOutcome::Seeding)
+            .await;
+
+        assert!(!manager.is_seed_owner("existing"));
+        manager.configure_seed_capacity(true, 1);
+        assert!(manager.is_seed_owner("existing"));
+        assert!(manager.has_active_permit("existing").await);
+    }
+
+    #[tokio::test]
+    async fn separate_seed_capacity_pauses_fairly_and_rebinds_before_resume() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(QueueManager::test_new(
+            app.handle().clone(),
+            1,
+            Arc::new(SeedSpawner),
+        ));
+        manager.configure_seed_capacity(true, 1);
+        for id in ["first", "second"] {
+            manager.reserve_enqueue_generation(id, 0).await.unwrap();
+            assert!(manager.ensure_aria2_permit(id).await);
+            manager
+                .aria2_payloads
+                .lock()
+                .await
+                .insert(
+                    id.to_string(),
+                    SpawnPayload {
+                        is_torrent: true,
+                        torrent_seed_time: Some(5.0),
+                        ..Default::default()
+                    },
+                );
+            manager
+                .remember_gid(id.to_string(), format!("gid-{id}"))
+                .await;
+            if id == "first" {
+                manager
+                    .apply_completion(id, PendingOutcome::Seeding)
+                    .await;
+                assert!(manager.is_seed_owner(id));
+                assert!(!manager.has_active_permit(id).await);
+            } else {
+                manager
+                    .apply_completion(id, PendingOutcome::Seeding)
+                    .await;
+                assert!(manager.is_waiting_to_seed(id));
+                assert!(!manager.has_active_permit(id).await);
+            }
+        }
+
+        manager.release_registered_id("first").await;
+        assert!(manager.try_start_waiting_seed().await);
+        let result = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if manager.is_seed_owner("second") && !manager.is_waiting_to_seed("second") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(result.is_ok(), "waiting seed did not resume after capacity was released");
+        assert!(!manager.has_active_permit("second").await);
+        assert_eq!(manager.current_aria2_control_epoch("second").await, 1);
     }
 
     #[tokio::test]
