@@ -4,9 +4,11 @@ use tauri_plugin_opener::OpenerExt;
 
 #[tauri::command]
 pub async fn reveal_in_file_manager(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     path: String,
 ) -> Result<(), String> {
+    crate::properties_window::ensure_main_window(&caller)?;
     let primary = authorize_reveal_path(&app_handle, &path)?;
     let path = existing_download_asset(&primary).ok_or_else(|| {
         format!(
@@ -29,9 +31,11 @@ pub async fn reveal_in_file_manager(
 
 #[tauri::command]
 pub async fn open_downloaded_file(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     path: String,
 ) -> Result<(), String> {
+    crate::properties_window::ensure_main_window(&caller)?;
     let path = authorize_download_path(&app_handle, &path)?;
     if !path.exists() {
         return Err(format!("Downloaded file is missing: {}", path.display()));

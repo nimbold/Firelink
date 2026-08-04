@@ -2589,27 +2589,42 @@ async function processQueuesSave() {
   isSavingQueues = false;
 }
 
-useDownloadStore.subscribe((state, prevState) => {
-  if (state.queues !== prevState.queues) {
-    const data = JSON.stringify(state.queues);
-    if (data !== lastSavedQueues) {
-      lastSavedQueues = data;
-      nextQueuesData = data;
-      processQueuesSave();
-    }
-  }
+let downloadPersistenceUnsubscribe: (() => void) | null = null;
 
-  if (state.downloads !== prevState.downloads) {
-    // Strip secret fields (password/cookies/headers) and volatile progress
-    // before writing to disk. Secrets remain on the in-memory item for the
-    // active session only.
-    const staticDownloads = state.downloads.map(redactDownloadForPersistence);
-    
-    const currentSerialized = JSON.stringify(staticDownloads);
-    if (currentSerialized !== lastSavedDownloads) {
-      lastSavedDownloads = currentSerialized;
-      nextDownloadsData = currentSerialized;
-      processDownloadsSave();
+/**
+ * Persistence is a main-webview service. Properties windows import the
+ * download types and bridge helpers but must never install this subscription
+ * or write whole-store snapshots from a child webview.
+ */
+export const initializeDownloadPersistence = (windowLabel: string): (() => void) => {
+  if (windowLabel !== 'main' || downloadPersistenceUnsubscribe) return () => undefined;
+
+  downloadPersistenceUnsubscribe = useDownloadStore.subscribe((state, prevState) => {
+    if (state.queues !== prevState.queues) {
+      const data = JSON.stringify(state.queues);
+      if (data !== lastSavedQueues) {
+        lastSavedQueues = data;
+        nextQueuesData = data;
+        void processQueuesSave();
+      }
     }
-  }
-});
+
+    if (state.downloads !== prevState.downloads) {
+      // Strip secret fields (password/cookies/headers) and volatile progress
+      // before writing to disk. Secrets remain on the in-memory item for the
+      // active session only.
+      const staticDownloads = state.downloads.map(redactDownloadForPersistence);
+      const currentSerialized = JSON.stringify(staticDownloads);
+      if (currentSerialized !== lastSavedDownloads) {
+        lastSavedDownloads = currentSerialized;
+        nextDownloadsData = currentSerialized;
+        void processDownloadsSave();
+      }
+    }
+  });
+
+  return () => {
+    downloadPersistenceUnsubscribe?.();
+    downloadPersistenceUnsubscribe = null;
+  };
+};

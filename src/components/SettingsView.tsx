@@ -99,6 +99,27 @@ type ManualUpdateStatus =
 
 type SystemProxyStatus = 'idle' | 'checking' | 'detected' | 'none' | 'error';
 
+export type NetworkSettingsSection = 'general' | 'discovery' | 'connection' | 'limits' | 'advanced';
+
+const networkSettingsSections: NetworkSettingsSection[] = [
+  'general',
+  'discovery',
+  'connection',
+  'limits',
+  'advanced',
+];
+
+const networkSettingsSectionFromStorage = (): NetworkSettingsSection => {
+  try {
+    const stored = window.localStorage.getItem('firelink-network-settings-section');
+    return networkSettingsSections.includes(stored as NetworkSettingsSection)
+      ? stored as NetworkSettingsSection
+      : 'general';
+  } catch {
+    return 'general';
+  }
+};
+
 const engineStatusCache = new Map<string, EngineStatusItem>();
 const engineStatusInFlight = new Map<string, Promise<EngineStatusItem>>();
 
@@ -288,6 +309,7 @@ export default function SettingsView() {
   const { i18n, t } = useTranslation();
   const settings = useSettingsStore();
   const activeTab = settings.activeSettingsTab;
+  const [networkSection, setNetworkSection] = useState<NetworkSettingsSection>(networkSettingsSectionFromStorage);
   const isRtl = localeDirection(resolveAppLocale(i18n.language)) === 'rtl';
   const isSidebarOnRight = settings.sidebarPosition === 'right'
     || (settings.sidebarPosition === 'auto' && isRtl);
@@ -316,6 +338,14 @@ export default function SettingsView() {
           : t($ => $.settings.lookAndFeel.defaultTrayDescription);
   const userAgentMenuRef = useRef<HTMLDivElement>(null);
   const [isUserAgentMenuOpen, setIsUserAgentMenuOpen] = useState(false);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('firelink-network-settings-section', networkSection);
+    } catch {
+      // Restricted WebViews may not expose local storage.
+    }
+  }, [networkSection]);
 
   // Local state for engine status
 const [engineStatus, setEngineStatus] = useState<EngineStatusItem[] | null>(null);
@@ -1170,6 +1200,49 @@ runEngineChecks(false);
           {/* Network Pane */}
           {activeTab === 'network' && (
             <div className="settings-pane max-w-[720px]">
+              <nav className="network-settings-tabs mb-4 flex gap-1 overflow-x-auto border-b border-border-color/60" role="tablist" aria-label={t($ => $.settings.tabs.network)}>
+                {networkSettingsSections.map(section => {
+                  const label = section === 'general'
+                    ? t($ => $.settings.network.proxy)
+                    : section === 'discovery'
+                      ? t($ => $.settings.network.torrentPeerDiscovery)
+                      : section === 'connection'
+                        ? t($ => $.settings.network.torrentNetwork)
+                        : section === 'limits'
+                          ? t($ => $.settings.network.torrentResourceLimits)
+                          : t($ => $.settings.network.torrentAdvanced);
+                  return (
+                    <button
+                      key={section}
+                      type="button"
+                      role="tab"
+                      aria-selected={networkSection === section}
+                      aria-controls={`network-settings-panel-${section}`}
+                      tabIndex={networkSection === section ? 0 : -1}
+                      className={`whitespace-nowrap border-b-2 px-3 py-2 text-xs font-medium ${networkSection === section ? 'border-accent text-text-primary' : 'border-transparent text-text-muted hover:text-text-primary'}`}
+                      onClick={() => setNetworkSection(section)}
+                      onKeyDown={event => {
+                        const index = networkSettingsSections.indexOf(section);
+                        const nextIndex = (event.key === (isRtl ? 'ArrowLeft' : 'ArrowRight'))
+                          ? (index + 1) % networkSettingsSections.length
+                          : event.key === (isRtl ? 'ArrowRight' : 'ArrowLeft')
+                            ? (index - 1 + networkSettingsSections.length) % networkSettingsSections.length
+                            : event.key === 'Home' ? 0 : event.key === 'End' ? networkSettingsSections.length - 1 : -1;
+                        if (nextIndex < 0) return;
+                        event.preventDefault();
+                        const next = networkSettingsSections[nextIndex];
+                        setNetworkSection(next);
+                        window.setTimeout(() => document.getElementById(`network-settings-tab-${next}`)?.focus(), 0);
+                      }}
+                      id={`network-settings-tab-${section}`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </nav>
+
+              <div id="network-settings-panel-general" role="tabpanel" aria-labelledby="network-settings-tab-general" hidden={networkSection !== 'general'} tabIndex={0}>
               <h2 className="settings-section-title">{t($ => $.settings.network.proxy)}</h2>
               <div className="mac-settings-group">
                 <div className="mac-settings-row settings-network-row settings-choice-row">
@@ -1256,7 +1329,9 @@ runEngineChecks(false);
                   </p>
                 )}
               </div>
+              </div>
 
+              <div id="network-settings-panel-discovery" role="tabpanel" aria-labelledby="network-settings-tab-discovery" hidden={networkSection !== 'discovery'} tabIndex={0}>
               <h2 className="settings-section-title">{t($ => $.settings.network.torrentPeerDiscovery)}</h2>
               <div className="mac-settings-group">
                 <label className="mac-settings-row cursor-default">
@@ -1324,7 +1399,9 @@ runEngineChecks(false);
                   {t($ => $.settings.network.torrentPeerDiscoveryRestartNote)}
                 </p>
               </div>
+              </div>
 
+              <div id="network-settings-panel-connection" role="tabpanel" aria-labelledby="network-settings-tab-connection" hidden={networkSection !== 'connection'} tabIndex={0}>
               <h2 className="settings-section-title">{t($ => $.settings.network.torrentNetwork)}</h2>
               <div className="mac-settings-group">
                 <div className="mac-settings-row settings-network-row">
@@ -1502,31 +1579,9 @@ runEngineChecks(false);
                   {t($ => $.settings.network.torrentNetworkRestartNote)}
                 </p>
               </div>
-
-              <h2 className="settings-section-title">{t($ => $.settings.network.torrentAdvanced)}</h2>
-              <div className="mac-settings-group">
-                <div className="mac-settings-row settings-network-row">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.network.torrentDhtMessageTimeout)}</span>
-                    <small>{t($ => $.settings.network.torrentDhtMessageTimeoutDescription)}</small>
-                  </div>
-                  <input
-                    type="number"
-                    min={MIN_TORRENT_DHT_MESSAGE_TIMEOUT}
-                    max={MAX_TORRENT_DHT_MESSAGE_TIMEOUT}
-                    step={1}
-                    value={torrentDhtMessageTimeoutInput}
-                    onChange={(event) => setTorrentDhtMessageTimeoutInput(event.target.value)}
-                    onBlur={(event) => commitTorrentDhtMessageTimeout(event.target.value)}
-                    className="app-control settings-port-input text-center"
-                    aria-label={t($ => $.settings.network.torrentDhtMessageTimeout)}
-                  />
-                </div>
-                <p className="settings-group-footer">
-                  {t($ => $.settings.network.torrentNetworkRestartNote)}
-                </p>
               </div>
 
+              <div id="network-settings-panel-limits" role="tabpanel" aria-labelledby="network-settings-tab-limits" hidden={networkSection !== 'limits'} tabIndex={0}>
               <h2 className="settings-section-title">{t($ => $.settings.network.torrentResourceLimits)}</h2>
               <div className="mac-settings-group">
                 <div className="mac-settings-row settings-network-row">
@@ -1576,7 +1631,35 @@ runEngineChecks(false);
                   />
                 </div>
               </div>
+              </div>
 
+              <div id="network-settings-panel-advanced" role="tabpanel" aria-labelledby="network-settings-tab-advanced" hidden={networkSection !== 'advanced'} tabIndex={0}>
+              <h2 className="settings-section-title">{t($ => $.settings.network.torrentAdvanced)}</h2>
+              <div className="mac-settings-group">
+                <div className="mac-settings-row settings-network-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.network.torrentDhtMessageTimeout)}</span>
+                    <small>{t($ => $.settings.network.torrentDhtMessageTimeoutDescription)}</small>
+                  </div>
+                  <input
+                    type="number"
+                    min={MIN_TORRENT_DHT_MESSAGE_TIMEOUT}
+                    max={MAX_TORRENT_DHT_MESSAGE_TIMEOUT}
+                    step={1}
+                    value={torrentDhtMessageTimeoutInput}
+                    onChange={(event) => setTorrentDhtMessageTimeoutInput(event.target.value)}
+                    onBlur={(event) => commitTorrentDhtMessageTimeout(event.target.value)}
+                    className="app-control settings-port-input text-center"
+                    aria-label={t($ => $.settings.network.torrentDhtMessageTimeout)}
+                  />
+                </div>
+                <p className="settings-group-footer">
+                  {t($ => $.settings.network.torrentNetworkRestartNote)}
+                </p>
+              </div>
+              </div>
+
+              <section id="network-settings-group-general-identity" role="region" aria-label={t($ => $.settings.network.identity)} hidden={networkSection !== 'general'}>
               <h2 className="settings-section-title">{t($ => $.settings.network.identity)}</h2>
               <div className="mac-settings-group settings-popup-group">
                 <div className="mac-settings-row settings-network-row">
@@ -1640,6 +1723,7 @@ runEngineChecks(false);
                 </div>
                 <p className="settings-group-footer">{t($ => $.settings.network.userAgentOverrides)}</p>
               </div>
+              </section>
             </div>
           )}
 

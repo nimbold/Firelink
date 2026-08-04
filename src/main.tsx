@@ -12,6 +12,10 @@ import { i18nReady } from "./i18n";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ToastProvider } from "./contexts/ToastContext";
 import { error as logError, warn as logWarn, initLogger } from "./utils/logger";
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { PropertiesWindowApp } from './components/PropertiesWindowApp';
+
+const isPropertiesWindow = getCurrentWindow().label.startsWith('properties-');
 
 void initLogger();
 
@@ -48,7 +52,7 @@ const renderApp = () => {
     <StrictMode>
       <ErrorBoundary>
         <ToastProvider>
-          <App />
+          {isPropertiesWindow ? <PropertiesWindowApp /> : <App />}
         </ToastProvider>
       </ErrorBoundary>
     </StrictMode>,

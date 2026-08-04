@@ -231,6 +231,7 @@ const ru = {
     liveSpeedLimitClear: 'Очистить',
     liveSpeedLimitFailed: 'Не удалось обновить текущее ограничение скорости: {{detail}}',
     liveSpeedLimitUnavailable: 'Изменение скорости медиазагрузок во время работы недоступно.',
+    editingUnavailable: 'Эти свойства нельзя изменять во время активной загрузки.',
     liveTorrentUploadLimit: 'Текущий лимит отдачи торрента',
     liveTorrentUploadLimitHint: 'Применяется к активным торрентам и раздаче. Очистите поле, чтобы убрать лимит отдачи для торрента.',
     liveTorrentUploadLimitPlaceholder: 'например, 1024K',

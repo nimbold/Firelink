@@ -231,6 +231,7 @@ const uk = {
     liveSpeedLimitClear: 'Очистити',
     liveSpeedLimitFailed: 'Не вдалося оновити поточне обмеження швидкості: {{detail}}',
     liveSpeedLimitUnavailable: 'Зміна швидкості медіазавантажень під час роботи недоступна.',
+    editingUnavailable: 'Ці властивості не можна змінювати під час активного завантаження.',
     liveTorrentUploadLimit: 'Поточний ліміт віддачі торрента',
     liveTorrentUploadLimitHint: 'Застосовується до активних торрентів і роздачі. Очистіть поле, щоб прибрати ліміт віддачі торрента.',
     liveTorrentUploadLimitPlaceholder: 'наприклад, 1024K',

@@ -231,6 +231,7 @@ const he = {
     liveSpeedLimitClear: 'נקה',
     liveSpeedLimitFailed: 'לא ניתן לעדכן את הגבלת המהירות בזמן אמת: {{detail}}',
     liveSpeedLimitUnavailable: 'שליטה במהירות בזמן אמת אינה זמינה להורדות מדיה בזמן שהן פועלות.',
+    editingUnavailable: 'לא ניתן לערוך את המאפיינים האלה בזמן שההורדה פעילה.',
     liveTorrentUploadLimit: 'הגבלת העלאת טורנט בזמן אמת',
     liveTorrentUploadLimitHint: 'חל על הורדות טורנט פעילות ושיתוף. נקה כדי להסיר את הגבלת ההעלאה של הטורנט.',
     liveTorrentUploadLimitPlaceholder: 'לדוגמה 1024K',

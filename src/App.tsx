@@ -10,11 +10,13 @@ import { KeychainPermissionModal } from './components/KeychainPermissionModal';
 import { extractValidDownloadUrls } from './utils/url';
 import { readClipboardDownloadUrls } from './utils/clipboard';
 import { listenEvent as listen, invokeCommand as invoke } from "./ipc";
-import { useDownloadStore, MAIN_QUEUE_ID, type ExtensionDownloadRequest } from './store/useDownloadStore';
+import { initializeDownloadPersistence, useDownloadStore, MAIN_QUEUE_ID, type ExtensionDownloadRequest } from './store/useDownloadStore';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { initDownloadListener } from './store/downloadStore';
 import { subscribeToSettingsPersistenceErrors, useSettingsStore } from "./store/useSettingsStore";
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { WindowControls } from "./components/WindowControls";
+import { PropertiesWindowBridgeHost } from "./components/PropertiesWindowBridgeHost";
 import { useToast } from "./contexts/ToastContext";
 import { setLogStreamActive } from './utils/logger';
 import { updateDockBadge } from './utils/dockBadge';
@@ -49,9 +51,6 @@ const SettingsView = lazy(loadSettingsView);
 const SchedulerView = lazy(loadSchedulerView);
 const SpeedLimiterView = lazy(loadSpeedLimiterView);
 const LogsView = lazy(loadLogsView);
-const PropertiesModal = lazy(() => import('./components/PropertiesModal').then(module => ({
-  default: module.PropertiesModal,
-})));
 const DeleteConfirmationModal = lazy(() => import('./components/DeleteConfirmationModal').then(module => ({
   default: module.DeleteConfirmationModal,
 })));
@@ -226,7 +225,6 @@ function App() {
   const extensionPairingToken = useSettingsStore(state => state.extensionPairingToken);
   const showKeychainModal = useSettingsStore(state => state.showKeychainModal);
   const isAddModalOpen = useDownloadStore(state => state.isAddModalOpen);
-  const selectedPropertiesDownloadId = useDownloadStore(state => state.selectedPropertiesDownloadId);
   const isDeleteModalOpen = useDownloadStore(state => state.deleteModalState.isOpen);
   const downloads = useDownloadStore(state => state.downloads);
   const activeDownloadCount = downloads.filter(download => isTransferActiveStatus(download.status)).length;
@@ -409,6 +407,7 @@ function App() {
   }, [sidebarWidth]);
 
   useEffect(() => {
+    const disposePersistence = initializeDownloadPersistence(getCurrentWindow().label);
     let active = true;
     let cleanupListeners: (() => void) | null = null;
     const initialize = async () => {
@@ -624,6 +623,7 @@ function App() {
       pendingStartupInputs.current = [];
       cleanupListeners?.();
       cleanupListeners = null;
+      disposePersistence();
     };
   }, [addToast, queueFrontendReadyUpdate]);
 
@@ -1166,11 +1166,7 @@ function App() {
       
       {isAddModalOpen && <AddDownloadsModal />}
 
-      {selectedPropertiesDownloadId !== null && (
-        <Suspense fallback={null}>
-          <PropertiesModal />
-        </Suspense>
-      )}
+      <PropertiesWindowBridgeHost />
       {isDeleteModalOpen && (
         <Suspense fallback={null}>
           <DeleteConfirmationModal />

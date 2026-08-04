@@ -1919,6 +1919,7 @@ fn metadata_authentication_error(current_url: &str, content_type: Option<&str>) 
 #[allow(clippy::too_many_arguments)] // Keep the metadata IPC fields explicit and independently typed.
 #[tauri::command]
 async fn fetch_metadata(
+    caller: tauri::WebviewWindow,
     url: String,
     user_agent: Option<String>,
     username: Option<String>,
@@ -1929,6 +1930,7 @@ async fn fetch_metadata(
     proxy: Option<String>,
     defer_cookies: Option<bool>,
 ) -> Result<MetadataResponse, String> {
+    properties_window::ensure_main_window(&caller)?;
     ensure_reqwest_crypto_provider();
 
     let mut current_url = url.clone();
@@ -2363,6 +2365,7 @@ fn build_ytdlp_config_content(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // Keep the generated TypeScript IPC contract flat and stable.
 async fn fetch_media_metadata(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     url: String,
     cookie_browser: Option<String>,
@@ -2373,6 +2376,7 @@ async fn fetch_media_metadata(
     cookies: Option<String>,
     proxy: Option<String>,
 ) -> Result<MediaMetadata, String> {
+    properties_window::ensure_main_window(&caller)?;
     validate_url_ssrf(&url).await?;
     let cache_key = media_metadata_cache_key(
         &url,
@@ -2498,6 +2502,7 @@ async fn fetch_media_metadata(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn fetch_media_playlist_metadata(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     url: String,
     cookie_browser: Option<String>,
@@ -2508,6 +2513,7 @@ async fn fetch_media_playlist_metadata(
     cookies: Option<String>,
     proxy: Option<String>,
 ) -> Result<MediaPlaylistMetadata, String> {
+    properties_window::ensure_main_window(&caller)?;
     validate_url_ssrf(&url).await?;
 
     let result = fetch_media_playlist_metadata_uncached(
@@ -2800,7 +2806,8 @@ async fn fetch_media_metadata_uncached(
 }
 
 #[tauri::command]
-async fn test_ytdlp(app_handle: tauri::AppHandle) -> Result<String, String> {
+async fn test_ytdlp(caller: tauri::WebviewWindow, app_handle: tauri::AppHandle) -> Result<String, String> {
+    properties_window::ensure_main_window(&caller)?;
     let (version, error, _) = run_sidecar_version(&app_handle, "yt-dlp", &["--version"]).await;
     match (version, error) {
         (Some(version), None) => Ok(version),
@@ -2810,7 +2817,8 @@ async fn test_ytdlp(app_handle: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn test_ffmpeg(app_handle: tauri::AppHandle) -> Result<String, String> {
+async fn test_ffmpeg(caller: tauri::WebviewWindow, app_handle: tauri::AppHandle) -> Result<String, String> {
+    properties_window::ensure_main_window(&caller)?;
     let (version, error, _) = run_sidecar_version(&app_handle, "ffmpeg", &["-version"]).await;
     version
         .as_deref()
@@ -2819,7 +2827,8 @@ async fn test_ffmpeg(app_handle: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn test_deno(app_handle: tauri::AppHandle) -> Result<String, String> {
+async fn test_deno(caller: tauri::WebviewWindow, app_handle: tauri::AppHandle) -> Result<String, String> {
+    properties_window::ensure_main_window(&caller)?;
     let (version, error, _) = run_sidecar_version(&app_handle, "deno", &["--version"]).await;
     if let Some(text) = version {
         let re = regex::Regex::new(r"deno\s+(\d+\.\d+\.\d+)").unwrap();
@@ -2945,7 +2954,12 @@ fn approved_download_roots<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) 
 }
 
 #[tauri::command]
-fn approve_download_root(app_handle: tauri::AppHandle, path: String) -> Result<String, String> {
+fn approve_download_root(
+    caller: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+    path: String,
+) -> Result<String, String> {
+    properties_window::ensure_main_window(&caller)?;
     let resolved = resolve_path(path.trim(), &app_handle);
     if !resolved.is_absolute() {
         return Err("Download root must be an absolute path".to_string());
@@ -3039,6 +3053,7 @@ pub mod ipc;
 mod parity;
 mod power;
 mod platform;
+mod properties_window;
 pub mod queue;
 pub mod process;
 pub mod retry;
@@ -3450,9 +3465,11 @@ impl crate::torrent_probe::RpcClient for Aria2RpcClient {
 
 #[tauri::command]
 async fn test_aria2c(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
+    properties_window::ensure_main_window(&caller)?;
     let guard = app_handle.state::<Aria2DaemonGuard>();
     let startup_err = guard
         .startup_error
@@ -3988,9 +4005,11 @@ async fn check_deno(app_handle: &tauri::AppHandle) -> EngineStatusItem {
 
 #[tauri::command]
 async fn get_engine_status(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<EngineStatusResult, String> {
+    properties_window::ensure_main_window(&caller)?;
     let port = state.aria2_port.load(std::sync::atomic::Ordering::Relaxed);
     let secret = state.aria2_secret.clone();
 
@@ -4008,9 +4027,11 @@ async fn get_engine_status(
 
 #[tauri::command]
 async fn get_aria2_engine_status(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<EngineStatusItem, String> {
+    properties_window::ensure_main_window(&caller)?;
     Ok(check_aria2(
         &app_handle,
         state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
@@ -4020,19 +4041,29 @@ async fn get_aria2_engine_status(
 }
 
 #[tauri::command]
-async fn get_ytdlp_engine_status(app_handle: tauri::AppHandle) -> Result<EngineStatusItem, String> {
+async fn get_ytdlp_engine_status(
+    caller: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+) -> Result<EngineStatusItem, String> {
+    properties_window::ensure_main_window(&caller)?;
     Ok(check_ytdlp(&app_handle).await)
 }
 
 #[tauri::command]
 async fn get_ffmpeg_engine_status(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
 ) -> Result<EngineStatusItem, String> {
+    properties_window::ensure_main_window(&caller)?;
     Ok(check_ffmpeg(&app_handle).await)
 }
 
 #[tauri::command]
-async fn get_deno_engine_status(app_handle: tauri::AppHandle) -> Result<EngineStatusItem, String> {
+async fn get_deno_engine_status(
+    caller: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+) -> Result<EngineStatusItem, String> {
+    properties_window::ensure_main_window(&caller)?;
     Ok(check_deno(&app_handle).await)
 }
 
@@ -4491,10 +4522,12 @@ pub(crate) async fn start_media_download_internal(
 
 #[tauri::command]
 async fn pause_download(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     log::info!("pause_download called for id: {}", id);
 
     let _control_guard = state.queue_manager.acquire_aria2_control(&id).await;
@@ -4718,11 +4751,13 @@ async fn pause_download(
 
 #[tauri::command]
 async fn resume_download(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: String,
     queue_id: String,
 ) -> Result<bool, String> {
+    properties_window::ensure_main_window(&caller)?;
     let queue_id = queue_id.trim().to_string();
     if queue_id.is_empty() {
         return Err("Queue id cannot be empty".to_string());
@@ -5077,12 +5112,14 @@ async fn resume_download(
 
 #[tauri::command]
 async fn remove_download(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: String,
     delete_assets: bool,
     preserve_resumable: Option<bool>,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     log::info!("remove_download called for id: {}", id);
     let preserve_resumable = preserve_resumable.unwrap_or(false);
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
@@ -5270,9 +5307,11 @@ async fn remove_download(
 
 #[tauri::command]
 fn get_download_primary_path(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     id: String,
 ) -> Result<Option<String>, String> {
+    properties_window::ensure_main_window(&caller)?;
     crate::download_ownership::primary_path_for_id(&app_handle, &id)
         .map(|path| path.map(|path| path.to_string_lossy().to_string()))
 }
@@ -5346,10 +5385,12 @@ pub(crate) async fn remove_download_assets<R: tauri::Runtime>(
 
 #[tauri::command]
 async fn detach_download_for_reconfigure(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     log::info!("detach_download_for_reconfigure called for id: {}", id);
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     detach_download_for_reconfigure_locked(
@@ -5677,11 +5718,13 @@ fn begin_dock_badge_session() -> u64 {
 #[tauri::command]
 #[allow(unused_variables)]
 fn update_dock_badge(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     count: i32,
     generation: u64,
     session: u64,
-) {
+) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     #[cfg(target_os = "macos")]
     {
         use objc::runtime::Object;
@@ -5719,29 +5762,41 @@ fn update_dock_badge(
             }
         });
     }
+    Ok(())
 }
 
 #[tauri::command]
-fn get_platform_info(state: tauri::State<'_, AppState>) -> crate::ipc::PlatformInfo {
-    crate::ipc::PlatformInfo {
+fn get_platform_info(
+    caller: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::ipc::PlatformInfo, String> {
+    properties_window::ensure_main_window(&caller)?;
+    Ok(crate::ipc::PlatformInfo {
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         target_triple: crate::platform::target_triple(),
         portable: state.storage_layout.is_portable(),
-    }
+    })
 }
 
 #[tauri::command]
-fn set_prevent_sleep(state: tauri::State<'_, AppState>, prevent: bool) -> Result<(), String> {
+fn set_prevent_sleep(
+    caller: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    prevent: bool,
+) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     state.power_manager.set_system_prevention(prevent)
 }
 
 #[tauri::command]
 fn set_power_preferences(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     prevent_system_sleep: bool,
     prevent_display_sleep: bool,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     state
         .power_manager
         .set_preferences(prevent_system_sleep, prevent_display_sleep)
@@ -5761,17 +5816,23 @@ pub(crate) fn execute_system_action(action: crate::ipc::PostQueueAction) -> Resu
 }
 
 #[tauri::command]
-fn perform_system_action(action: crate::ipc::PostQueueAction) -> Result<(), String> {
+fn perform_system_action(
+    caller: tauri::WebviewWindow,
+    action: crate::ipc::PostQueueAction,
+) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     execute_system_action(action)
 }
 
 #[tauri::command]
 fn ack_schedule_trigger(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     action: String,
     key: String,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     crate::settings::update_settings_state(&app_handle, |state| match action.as_str() {
         "start" => {
             state.insert("schedulerLastStartKey".to_string(), serde_json::json!(key));
@@ -5800,9 +5861,11 @@ fn ack_schedule_trigger(
 
 #[tauri::command]
 async fn get_pending_order(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     queue_id: Option<String>,
 ) -> Result<Vec<String>, AppError> {
+    properties_window::ensure_main_window(&caller).map_err(AppError::Internal)?;
     Ok(state.queue_manager.pending_order(queue_id.as_deref()).await)
 }
 
@@ -6272,6 +6335,7 @@ async fn resolve_magnet_metadata(
 
 #[tauri::command]
 async fn inspect_torrent(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     source: String,
@@ -6279,6 +6343,7 @@ async fn inspect_torrent(
     cache: Option<bool>,
     proxy: Option<String>,
 ) -> Result<crate::ipc::TorrentMetadata, AppError> {
+    properties_window::ensure_main_window(&caller).map_err(AppError::Internal)?;
     if source.trim_start().to_ascii_lowercase().starts_with("magnet:") {
         return resolve_magnet_metadata(
             &app_handle,
@@ -6325,10 +6390,12 @@ async fn inspect_torrent(
 
 #[tauri::command]
 async fn rekey_torrent_metadata(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     source_id: String,
     target_id: String,
 ) -> Result<String, AppError> {
+    properties_window::ensure_main_window(&caller).map_err(AppError::Internal)?;
     let source = crate::torrent::managed_torrent_path(&app_handle, &source_id)
         .map_err(AppError::Internal)?;
     let source = crate::torrent::validate_managed_torrent_path(
@@ -6365,19 +6432,23 @@ async fn rekey_torrent_metadata(
 
 #[tauri::command]
 async fn remove_torrent_metadata(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     id: String,
 ) -> Result<(), AppError> {
+    properties_window::ensure_main_window(&caller).map_err(AppError::Internal)?;
     crate::torrent::remove_managed_torrent(&app_handle, &id).await;
     Ok(())
 }
 
 #[tauri::command]
 async fn enqueue_download(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     item: queue::EnqueueItem,
 ) -> Result<crate::ipc::EnqueueAccepted, AppError> {
+    properties_window::ensure_main_window(&caller).map_err(AppError::Internal)?;
     let id = item.id.clone();
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     enqueue_download_locked(&app_handle, state.inner(), item, &control_guard).await
@@ -6457,10 +6528,12 @@ async fn enqueue_download_locked(
 
 #[tauri::command]
 async fn cancel_enqueue_generation(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     id: String,
     generation: String,
 ) -> Result<(), AppError> {
+    properties_window::ensure_main_window(&caller).map_err(AppError::Internal)?;
     let generation = generation
         .parse::<u64>()
         .map_err(|_| AppError::Internal("Invalid enqueue lifecycle generation".to_string()))?;
@@ -6473,10 +6546,12 @@ async fn cancel_enqueue_generation(
 
 #[tauri::command]
 async fn enqueue_many(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     items: Vec<queue::EnqueueItem>,
 ) -> Result<Vec<crate::ipc::EnqueueResult>, AppError> {
+    properties_window::ensure_main_window(&caller).map_err(AppError::Internal)?;
     let mut results = Vec::with_capacity(items.len());
     for mut item in items {
         let id = item.id.clone();
@@ -6601,11 +6676,13 @@ async fn enqueue_many(
 
 #[tauri::command]
 async fn move_in_queue(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     id: String,
     queue_id: String,
     direction: crate::ipc::QueueDirection,
 ) -> Result<Vec<String>, AppError> {
+    properties_window::ensure_main_window(&caller).map_err(AppError::Internal)?;
     Ok(state
         .queue_manager
         .move_in_queue(&id, &queue_id, direction)
@@ -6614,12 +6691,14 @@ async fn move_in_queue(
 
 #[tauri::command]
 async fn move_many_in_queue(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     ids: Vec<String>,
     queue_id: String,
     direction: crate::ipc::QueueDirection,
     target_index: Option<usize>,
 ) -> Result<Vec<String>, AppError> {
+    properties_window::ensure_main_window(&caller).map_err(AppError::Internal)?;
     Ok(match target_index {
         Some(target_index) => state
             .queue_manager
@@ -6634,10 +6713,12 @@ async fn move_many_in_queue(
 
 #[tauri::command]
 async fn remove_from_queue(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<bool, AppError> {
+    properties_window::ensure_main_window(&caller).map_err(AppError::Internal)?;
     let removed = state.queue_manager.remove_from_pending(&id).await;
     if removed {
         let _ = crate::download_ownership::remove(&app_handle, &id);
@@ -6648,18 +6729,22 @@ async fn remove_from_queue(
 
 #[tauri::command]
 async fn set_concurrent_limit(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     limit: usize,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     state.queue_manager.set_capacity(limit.clamp(1, 12));
     Ok(())
 }
 
 #[tauri::command]
 async fn set_queue_concurrency_limits(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     limits: Vec<crate::ipc::QueueConcurrencyConfig>,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     state
         .queue_manager
         .replace_queue_limits(
@@ -6673,10 +6758,12 @@ async fn set_queue_concurrency_limits(
 
 #[tauri::command]
 async fn set_download_speed_limit(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     id: String,
     limit: Option<String>,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     state
         .queue_manager
         .set_aria2_download_speed_limit(&id, limit)
@@ -6685,10 +6772,12 @@ async fn set_download_speed_limit(
 
 #[tauri::command]
 async fn set_torrent_upload_limit(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     id: String,
     limit: Option<String>,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     state
         .queue_manager
         .set_aria2_torrent_upload_limit(&id, limit)
@@ -6697,11 +6786,13 @@ async fn set_torrent_upload_limit(
 
 #[tauri::command]
 async fn set_torrent_peer_options(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     id: String,
     max_peers: Option<i64>,
     peer_speed_limit: Option<String>,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     state
         .queue_manager
         .set_aria2_torrent_peer_options(&id, max_peers, peer_speed_limit)
@@ -6710,25 +6801,34 @@ async fn set_torrent_peer_options(
 
 #[tauri::command]
 async fn get_torrent_peers(
+    caller: tauri::WebviewWindow,
+    properties: tauri::State<'_, properties_window::PropertiesWindowRegistry>,
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<crate::ipc::TorrentPeerDiagnostics, String> {
+    properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
     state.queue_manager.get_aria2_torrent_peers(&id).await
 }
 
 #[tauri::command]
 async fn get_torrent_availability(
+    caller: tauri::WebviewWindow,
+    properties: tauri::State<'_, properties_window::PropertiesWindowRegistry>,
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<crate::ipc::TorrentAvailabilitySnapshot, String> {
+    properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
     state.queue_manager.get_aria2_torrent_availability(&id).await
 }
 
 #[tauri::command]
 async fn get_torrent_file_progress(
+    caller: tauri::WebviewWindow,
+    properties: tauri::State<'_, properties_window::PropertiesWindowRegistry>,
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<crate::ipc::TorrentFileProgressSnapshot, String> {
+    properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
     state
         .queue_manager
         .get_aria2_torrent_file_progress(&id)
@@ -6737,9 +6837,12 @@ async fn get_torrent_file_progress(
 
 #[tauri::command]
 async fn get_torrent_piece_progress(
+    caller: tauri::WebviewWindow,
+    properties: tauri::State<'_, properties_window::PropertiesWindowRegistry>,
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<crate::ipc::TorrentPieceProgressSnapshot, String> {
+    properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
     state
         .queue_manager
         .get_aria2_torrent_piece_progress(&id)
@@ -6979,10 +7082,13 @@ fn persist_torrent_file_selection(
 
 #[tauri::command]
 async fn get_torrent_file_selection(
+    caller: tauri::WebviewWindow,
+    properties: tauri::State<'_, properties_window::PropertiesWindowRegistry>,
     state: tauri::State<'_, crate::db::DbState>,
     app_handle: tauri::AppHandle,
     id: String,
 ) -> Result<crate::ipc::TorrentFileSelectionSnapshot, String> {
+    properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
     let item = load_persisted_torrent_item(state.inner(), &id)?;
     if item.is_torrent != Some(true) {
         return Err("file selection is available only for Torrent downloads".to_string());
@@ -7005,12 +7111,15 @@ async fn get_torrent_file_selection(
 
 #[tauri::command]
 async fn set_torrent_file_selection(
+    caller: tauri::WebviewWindow,
+    properties: tauri::State<'_, properties_window::PropertiesWindowRegistry>,
     state: tauri::State<'_, AppState>,
     database: tauri::State<'_, crate::db::DbState>,
     app_handle: tauri::AppHandle,
     id: String,
     selected_indices: Option<Vec<u32>>,
 ) -> Result<crate::ipc::TorrentFileSelectionSnapshot, String> {
+    properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     let item = load_persisted_torrent_item(database.inner(), &id)?;
     if item.is_torrent != Some(true) {
@@ -7155,10 +7264,13 @@ async fn set_torrent_file_selection(
 
 #[tauri::command]
 async fn get_torrent_details(
+    caller: tauri::WebviewWindow,
+    properties: tauri::State<'_, properties_window::PropertiesWindowRegistry>,
     state: tauri::State<'_, crate::db::DbState>,
     app_handle: tauri::AppHandle,
     id: String,
 ) -> Result<crate::ipc::TorrentDetails, String> {
+    properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
     let item = load_persisted_torrent_item(state.inner(), &id)?;
     if item.is_torrent != Some(true) {
         return Err("details are available only for Torrent downloads".to_string());
@@ -7190,10 +7302,13 @@ fn torrent_identity_magnet(details: &crate::ipc::TorrentDetails) -> Result<Strin
 
 #[tauri::command]
 async fn get_torrent_magnet_link(
+    caller: tauri::WebviewWindow,
+    properties: tauri::State<'_, properties_window::PropertiesWindowRegistry>,
     state: tauri::State<'_, crate::db::DbState>,
     app_handle: tauri::AppHandle,
     id: String,
 ) -> Result<String, String> {
+    properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
     let item = load_persisted_torrent_item(state.inner(), &id)?;
     if item.is_torrent != Some(true) {
         return Err("magnet links are available only for Torrent downloads".to_string());
@@ -7213,11 +7328,14 @@ async fn get_torrent_magnet_link(
 
 #[tauri::command]
 async fn export_torrent_metadata(
+    caller: tauri::WebviewWindow,
+    properties: tauri::State<'_, properties_window::PropertiesWindowRegistry>,
     state: tauri::State<'_, crate::db::DbState>,
     app_handle: tauri::AppHandle,
     id: String,
     destination: String,
 ) -> Result<(), String> {
+    properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
     let destination = std::path::PathBuf::from(destination.trim());
     if !destination.is_absolute()
         || destination.extension().and_then(|value| value.to_str())
@@ -7797,12 +7915,15 @@ fn torrent_move_path_pair(
 
 #[tauri::command]
 async fn move_torrent_data(
+    caller: tauri::WebviewWindow,
+    properties: tauri::State<'_, properties_window::PropertiesWindowRegistry>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     database: tauri::State<'_, crate::db::DbState>,
     id: String,
     destination: String,
 ) -> Result<(), String> {
+    properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     let item = load_persisted_torrent_item(database.inner(), &id)?;
     if item.is_torrent != Some(true) {
@@ -8226,9 +8347,11 @@ async fn move_torrent_data(
 
 #[tauri::command]
 async fn cancel_torrent_move_data(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     if id.trim().is_empty() {
         return Err("invalid Torrent download id".to_string());
     }
@@ -8282,11 +8405,14 @@ fn verification_destination(
 
 #[tauri::command]
 async fn verify_torrent_data(
+    caller: tauri::WebviewWindow,
+    properties: tauri::State<'_, properties_window::PropertiesWindowRegistry>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     database: tauri::State<'_, crate::db::DbState>,
     id: String,
 ) -> Result<(), String> {
+    properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
     // Verification replaces the current Aria2 lifecycle. Serialize that
     // replacement with pause/resume/remove so a paused GID cannot reject the
     // maintenance enqueue as a duplicate task or race it with a late event.
@@ -8632,10 +8758,17 @@ async fn normalize_persisted_torrent_web_seeds(
 
 #[tauri::command]
 async fn get_torrent_web_seeds(
+    caller: tauri::WebviewWindow,
+    properties: tauri::State<'_, properties_window::PropertiesWindowRegistry>,
     database: tauri::State<'_, crate::db::DbState>,
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<Vec<crate::ipc::TorrentWebSeed>, String> {
+    properties_window::ensure_properties_or_main(
+        &caller,
+        &properties,
+        &id,
+    )?;
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     if state.queue_manager.is_registered(&id).await
         && matches!(state.queue_manager.active_kind(&id).await, Some(crate::queue::TaskKind::Aria2))
@@ -8674,11 +8807,13 @@ async fn get_torrent_web_seeds(
 
 #[tauri::command]
 async fn set_torrent_web_seeds(
+    caller: tauri::WebviewWindow,
     database: tauri::State<'_, crate::db::DbState>,
     state: tauri::State<'_, AppState>,
     id: String,
     seeds: Vec<crate::ipc::TorrentWebSeed>,
 ) -> Result<Vec<crate::ipc::TorrentWebSeed>, String> {
+    properties_window::ensure_main_window(&caller)?;
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     let active = state.queue_manager.is_registered(&id).await
         && matches!(state.queue_manager.active_kind(&id).await, Some(crate::queue::TaskKind::Aria2));
@@ -8912,9 +9047,11 @@ fn apply_aria2_torrent_global_options(
 
 #[tauri::command(rename_all = "snake_case")]
 async fn set_torrent_max_open_files(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     max_open_files: u32,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     let max_open_files = queue::normalize_torrent_max_open_files(max_open_files)?;
     rpc_call(
         state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
@@ -8929,9 +9066,11 @@ async fn set_torrent_max_open_files(
 
 #[tauri::command]
 async fn set_torrent_overall_upload_limit(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     limit: Option<String>,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     let normalized_limit = normalize_torrent_overall_upload_limit(limit.as_deref())?;
     let limit_str = normalized_limit.as_deref().unwrap_or("0");
     rpc_call(
@@ -8947,9 +9086,11 @@ async fn set_torrent_overall_upload_limit(
 
 #[tauri::command]
 async fn set_global_speed_limit(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     limit: Option<String>,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     let normalized_limit = limit
         .as_deref()
         .and_then(normalize_speed_limit_for_aria2);
@@ -8973,7 +9114,8 @@ async fn set_global_speed_limit(
 }
 
 #[tauri::command]
-fn check_automation_permission() -> Result<(), String> {
+fn check_automation_permission(caller: tauri::WebviewWindow) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     #[cfg(target_os = "macos")]
     {
         use objc::runtime::Object;
@@ -9011,7 +9153,8 @@ fn check_automation_permission() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn request_automation_permission() -> Result<(), String> {
+fn request_automation_permission(caller: tauri::WebviewWindow) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     #[cfg(target_os = "macos")]
     {
         system_shutdown::request_permission_dialog()
@@ -9024,7 +9167,11 @@ fn request_automation_permission() -> Result<(), String> {
 
 #[tauri::command]
 #[allow(unused_variables)]
-fn open_automation_settings(app_handle: tauri::AppHandle) -> Result<(), String> {
+fn open_automation_settings(
+    caller: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     #[cfg(target_os = "macos")]
     {
         use tauri_plugin_opener::OpenerExt;
@@ -9043,7 +9190,12 @@ fn open_automation_settings(app_handle: tauri::AppHandle) -> Result<(), String> 
 }
 
 #[tauri::command]
-fn get_free_space(app_handle: tauri::AppHandle, path: String) -> Result<String, String> {
+fn get_free_space(
+    caller: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+    path: String,
+) -> Result<String, String> {
+    properties_window::ensure_main_window(&caller)?;
     use sysinfo::Disks;
     let disks = Disks::new_with_refreshed_list();
 
@@ -9081,11 +9233,13 @@ fn get_free_space(app_handle: tauri::AppHandle, path: String) -> Result<String, 
 
 #[tauri::command(async)]
 fn set_keychain_password(
+    caller: tauri::WebviewWindow,
     database: tauri::State<'_, crate::db::DbState>,
     state: tauri::State<'_, AppState>,
     id: String,
     password: String,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     if state.storage_layout.is_portable()
         && id == crate::db::PAIRING_TOKEN_KEYCHAIN_ID
     {
@@ -9099,9 +9253,11 @@ fn set_keychain_password(
 
 #[tauri::command(async)]
 fn get_keychain_password(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<String, String> {
+    properties_window::ensure_main_window(&caller)?;
     if state.storage_layout.is_portable()
         && id == crate::db::PAIRING_TOKEN_KEYCHAIN_ID
     {
@@ -9113,9 +9269,11 @@ fn get_keychain_password(
 
 #[tauri::command(async)]
 fn delete_keychain_password(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     if state.storage_layout.is_portable()
         && id == crate::db::PAIRING_TOKEN_KEYCHAIN_ID
     {
@@ -9127,6 +9285,7 @@ fn delete_keychain_password(
 
 #[tauri::command(async)]
 fn save_site_login(
+    caller: tauri::WebviewWindow,
     database: tauri::State<'_, crate::db::DbState>,
     state: tauri::State<'_, AppState>,
     id: String,
@@ -9134,6 +9293,7 @@ fn save_site_login(
     username: String,
     password: String,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     require_keychain_access(&state)?;
     let connection = database.lock()?;
     crate::db::save_site_login(&connection, &id, &url_pattern, &username, &password)
@@ -9141,10 +9301,12 @@ fn save_site_login(
 
 #[tauri::command(async)]
 fn delete_site_login(
+    caller: tauri::WebviewWindow,
     database: tauri::State<'_, crate::db::DbState>,
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     require_keychain_access(&state)?;
     let connection = database.lock()?;
     crate::db::delete_site_login(&connection, &id)
@@ -9154,7 +9316,11 @@ fn delete_site_login(
 /// decision. The process-local gate prevents any stale or early IPC caller
 /// from producing a native OS prompt before the explanation is visible.
 #[tauri::command]
-fn authorize_keychain_access(state: tauri::State<'_, AppState>) -> Result<(), String> {
+fn authorize_keychain_access(
+    caller: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     if state.storage_layout.is_portable() {
         return Ok(());
     }
@@ -9197,9 +9363,11 @@ struct KeychainGrantStatus {
 /// token with the portable settings folder.
 #[tauri::command(async)]
 fn hydrate_extension_pairing_token(
+    caller: tauri::WebviewWindow,
     database: tauri::State<'_, crate::db::DbState>,
     app_state: tauri::State<'_, AppState>,
 ) -> Result<PairingTokenHydration, String> {
+    properties_window::ensure_main_window(&caller)?;
     let connection = database.lock()?;
 
     if app_state.storage_layout.is_portable() {
@@ -9249,8 +9417,10 @@ fn hydrate_extension_pairing_token(
 /// waits for an explicit user decision.
 #[tauri::command]
 fn get_session_pairing_token(
+    caller: tauri::WebviewWindow,
     app_state: tauri::State<'_, AppState>,
 ) -> Result<PairingTokenHydration, String> {
+    properties_window::ensure_main_window(&caller)?;
     let token = app_state
         .extension_pairing_token
         .read()
@@ -9269,9 +9439,11 @@ fn get_session_pairing_token(
 
 #[tauri::command(async)]
 fn regenerate_pairing_token(
+    caller: tauri::WebviewWindow,
     database: tauri::State<'_, crate::db::DbState>,
     app_state: tauri::State<'_, AppState>,
 ) -> Result<PairingTokenHydration, String> {
+    properties_window::ensure_main_window(&caller)?;
     let connection = database.lock()?;
     let generated = crate::db::generate_pairing_token();
 
@@ -9329,9 +9501,11 @@ fn regenerate_pairing_token(
 // also perform synchronous IPC to their desktop credential service.
 #[tauri::command]
 async fn grant_keychain_access(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     request_id: String,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     validate_keychain_grant_request_id(&request_id)?;
     let app_state = app_handle.state::<AppState>();
     let grant_guard = begin_keychain_grant(app_state.inner(), &request_id)?;
@@ -9361,9 +9535,11 @@ async fn grant_keychain_access(
 
 #[tauri::command]
 fn get_keychain_grant_status(
+    caller: tauri::WebviewWindow,
     app_state: tauri::State<'_, AppState>,
     request_id: String,
 ) -> Result<KeychainGrantStatus, String> {
+    properties_window::ensure_main_window(&caller)?;
     validate_keychain_grant_request_id(&request_id)?;
     let grant = app_state
         .keychain_grant
@@ -9395,9 +9571,11 @@ fn get_keychain_grant_status(
 
 #[tauri::command]
 fn accept_keychain_grant(
+    caller: tauri::WebviewWindow,
     app_state: tauri::State<'_, AppState>,
     request_id: String,
 ) -> Result<PairingTokenHydration, String> {
+    properties_window::ensure_main_window(&caller)?;
     validate_keychain_grant_request_id(&request_id)?;
     let mut grant = app_state
         .keychain_grant
@@ -9428,9 +9606,11 @@ fn accept_keychain_grant(
 
 #[tauri::command]
 fn abandon_keychain_grant(
+    caller: tauri::WebviewWindow,
     app_state: tauri::State<'_, AppState>,
     request_id: String,
 ) -> Result<Option<PairingTokenHydration>, String> {
+    properties_window::ensure_main_window(&caller)?;
     validate_keychain_grant_request_id(&request_id)?;
     let mut grant = app_state
         .keychain_grant
@@ -9537,18 +9717,22 @@ fn grant_keychain_access_blocking(
 
 #[tauri::command]
 fn acknowledge_pairing_token_change(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, crate::db::DbState>,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     let connection = state.lock()?;
     crate::db::acknowledge_pairing_token_notice(&connection)
 }
 
 #[tauri::command]
 fn db_save_settings(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, crate::db::DbState>,
     app_state: tauri::State<'_, AppState>,
     data: String,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     let connection = state.lock()?;
     let existing = crate::db::load_settings(&connection)?;
     let merged = crate::settings::preserve_scheduler_runtime_keys(existing.as_deref(), &data)?;
@@ -9580,7 +9764,11 @@ fn db_save_settings(
 }
 
 #[tauri::command]
-fn db_load_settings(state: tauri::State<'_, crate::db::DbState>) -> Result<Option<String>, String> {
+fn db_load_settings(
+    caller: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::db::DbState>,
+) -> Result<Option<String>, String> {
+    properties_window::ensure_main_window(&caller)?;
     let connection = state.lock()?;
     let settings = crate::db::load_settings(&connection)?;
     if state.is_portable() {
@@ -9597,18 +9785,22 @@ fn db_load_settings(state: tauri::State<'_, crate::db::DbState>) -> Result<Optio
 
 #[tauri::command]
 fn db_get_all_downloads(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, crate::db::DbState>,
 ) -> Result<Vec<String>, String> {
+    properties_window::ensure_main_window(&caller)?;
     let connection = state.lock()?;
     crate::db::load_downloads(&connection)
 }
 
 #[tauri::command]
 async fn clear_torrent_removal_paths(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     // This command is reached from the trusted renderer, but it still owns a
     // destructive reservation boundary. Serialize it with terminal/control
     // transitions and refuse to clear a lifecycle that the backend still
@@ -9627,8 +9819,10 @@ async fn clear_torrent_removal_paths(
 
 #[tauri::command]
 fn reconcile_torrent_removal_reservations(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, crate::db::DbState>,
 ) -> Result<usize, String> {
+    properties_window::ensure_main_window(&caller)?;
     let connection = state.lock()?;
     crate::db::reconcile_torrent_removal_paths_after_restart(&connection)
 }
@@ -9665,9 +9859,11 @@ fn retained_torrent_info_hash_from_persisted_record(record: &str) -> Option<Stri
 
 #[tauri::command]
 fn db_replace_downloads(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, crate::db::DbState>,
     data: String,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     let portable = state.is_portable();
     let mut connection = state.lock()?;
     let existing = crate::db::load_downloads(&connection)?;
@@ -9798,22 +9994,31 @@ fn merge_durable_torrent_telemetry(existing: &[String], data: &str) -> Result<St
 }
 
 #[tauri::command]
-fn db_get_all_queues(state: tauri::State<'_, crate::db::DbState>) -> Result<Vec<String>, String> {
+fn db_get_all_queues(
+    caller: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::db::DbState>,
+) -> Result<Vec<String>, String> {
+    properties_window::ensure_main_window(&caller)?;
     let connection = state.lock()?;
     crate::db::load_queues(&connection)
 }
 
 #[tauri::command]
 fn db_replace_queues(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, crate::db::DbState>,
     data: String,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     let mut connection = state.lock()?;
     crate::db::replace_queues(&mut connection, &data)
 }
 
 #[tauri::command]
-fn check_file_exists(app_handle: tauri::AppHandle, path: String) -> bool {
+fn check_file_exists(caller: tauri::WebviewWindow, app_handle: tauri::AppHandle, path: String) -> bool {
+    if properties_window::ensure_main_window(&caller).is_err() {
+        return false;
+    }
     let resolved_dest = resolve_path(&path, &app_handle);
     if !is_safe_path(&resolved_dest, &app_handle) {
         return false;
@@ -9964,7 +10169,12 @@ fn redact_log_line_for_app(line: &str, app_handle: &tauri::AppHandle) -> String 
 }
 
 #[tauri::command]
-async fn read_logs(app_handle: tauri::AppHandle, limit: usize) -> Result<Vec<String>, String> {
+async fn read_logs(
+    caller: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+    limit: usize,
+) -> Result<Vec<String>, String> {
+    properties_window::ensure_main_window(&caller)?;
     let mut lines = Vec::new();
     for file in log_files(&app_handle).await? {
         let content = tokio::fs::read_to_string(&file)
@@ -9984,7 +10194,8 @@ async fn read_logs(app_handle: tauri::AppHandle, limit: usize) -> Result<Vec<Str
 }
 
 #[tauri::command]
-async fn clear_logs(app_handle: tauri::AppHandle) -> Result<(), String> {
+async fn clear_logs(caller: tauri::WebviewWindow, app_handle: tauri::AppHandle) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     for file in log_files(&app_handle).await? {
         tokio::fs::write(&file, "")
             .await
@@ -9995,10 +10206,12 @@ async fn clear_logs(app_handle: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn export_logs(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     destination: Option<String>,
 ) -> Result<String, String> {
+    properties_window::ensure_main_window(&caller)?;
     let mut output = format!(
         "Firelink support logs\nVersion: {}\nOS: {} {}\nArchitecture: {}\nGenerated: {}\n\n",
         env!("CARGO_PKG_VERSION"),
@@ -10072,7 +10285,12 @@ async fn export_logs(
 }
 
 #[tauri::command]
-fn toggle_tray_icon(app_handle: tauri::AppHandle, show: bool) -> Result<(), String> {
+fn toggle_tray_icon(
+    caller: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+    show: bool,
+) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     if show {
         build_main_tray(&app_handle)
     } else {
@@ -10150,9 +10368,11 @@ fn build_main_tray(app_handle: &tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn set_extension_pairing_token(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     token: String,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     if token.is_empty() || token.len() > 512 {
         return Err("Invalid extension pairing token".to_string());
     }
@@ -10166,7 +10386,13 @@ fn set_extension_pairing_token(
 }
 
 #[tauri::command]
-fn get_extension_server_port(state: tauri::State<'_, AppState>) -> Option<u16> {
+fn get_extension_server_port(
+    caller: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+) -> Option<u16> {
+    if properties_window::ensure_main_window(&caller).is_err() {
+        return None;
+    }
     state
         .extension_server_port
         .read()
@@ -10175,7 +10401,12 @@ fn get_extension_server_port(state: tauri::State<'_, AppState>) -> Option<u16> {
 }
 
 #[tauri::command]
-fn set_extension_frontend_ready(state: tauri::State<'_, AppState>, ready: bool) {
+fn set_extension_frontend_ready(
+    caller: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    ready: bool,
+) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     state
         .extension_frontend_ready
         .store(ready, Ordering::Release);
@@ -10185,13 +10416,16 @@ fn set_extension_frontend_ready(state: tauri::State<'_, AppState>, ready: bool) 
             .send(download::DownloadCmd::FrontendReady(ready))
             .await;
     });
+    Ok(())
 }
 
 #[tauri::command]
 fn ack_extension_download(
+    caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     request_id: String,
 ) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     if request_id.len() != 32 || !request_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("Invalid extension request id".to_string());
     }
@@ -12955,18 +13189,25 @@ static LOG_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 static LOG_STREAM_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[tauri::command]
-fn toggle_log_pause(pause: bool) {
+fn toggle_log_pause(caller: tauri::WebviewWindow, pause: bool) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
     LOG_PAUSED.store(pause, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
 }
 
 #[tauri::command]
-fn is_log_paused() -> bool {
-    LOG_PAUSED.load(std::sync::atomic::Ordering::Relaxed)
+fn is_log_paused(caller: tauri::WebviewWindow) -> bool {
+    properties_window::ensure_main_window(&caller).is_ok()
+        && LOG_PAUSED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[tauri::command]
-fn set_log_stream_active(active: bool) {
+fn set_log_stream_active(caller: tauri::WebviewWindow, active: bool) -> Result<(), String> {
+    if let Err(error) = properties_window::ensure_main_window(&caller) {
+        return Err(error);
+    }
     LOG_STREAM_ACTIVE.store(active, std::sync::atomic::Ordering::Release);
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -13004,6 +13245,7 @@ pub fn run() {
     let aria2_secret = uuid::Uuid::new_v4().to_string();
     tauri::Builder::default()
         .manage(MainWindowRestoreState::default())
+        .manage(properties_window::PropertiesWindowRegistry::default())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             restore_main_window(app);
         }))
@@ -14219,6 +14461,16 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed)
+                && properties_window::is_properties_window_label(window.label())
+            {
+                if let Some(registry) = window.app_handle().try_state::<properties_window::PropertiesWindowRegistry>() {
+                    let _ = registry.remove_window(window.label());
+                }
+                let _ = window
+                    .app_handle()
+                    .emit_to("main", "properties-window-closed", window.label().to_string());
+            }
             if window.label() == "main" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
@@ -14244,6 +14496,13 @@ pub fn run() {
             detach_download_for_reconfigure,
             enqueue_download, enqueue_many, cancel_enqueue_generation, move_in_queue, move_many_in_queue, remove_from_queue, get_pending_order,
             commands::reveal_in_file_manager, commands::open_downloaded_file,
+            properties_window::open_download_properties_window,
+            properties_window::get_properties_window_download_id,
+            properties_window::properties_window_send_ready,
+            properties_window::properties_window_send_action,
+            properties_window::validate_properties_window_request,
+            properties_window::close_download_properties_window,
+            properties_window::properties_window_registry_remove_for_download,
             parity::get_system_proxy, parity::get_file_category, parity::check_for_updates, parity::is_supported_media, parity::get_supported_media_domains,
             parity::create_category_directories,
             db_save_settings, db_load_settings, db_get_all_downloads, db_replace_downloads,

@@ -155,6 +155,13 @@ type CommandMap = {
   move_in_queue: { args: { id: string; queueId: string; direction: 'up' | 'down' }; result: string[] };
   move_many_in_queue: { args: { ids: string[]; queueId: string; direction: 'up' | 'down'; targetIndex?: number }; result: string[] };
   remove_from_queue: { args: { id: string }; result: boolean };
+  open_download_properties_window: { args: { id: string }; result: string };
+  get_properties_window_download_id: { args: undefined; result: string };
+  properties_window_send_ready: { args: undefined; result: void };
+  properties_window_send_action: { args: { requestId: number; action: string; payload?: unknown }; result: void };
+  validate_properties_window_request: { args: { windowLabel: string; downloadId: string }; result: void };
+  close_download_properties_window: { args: { id: string }; result: void };
+  properties_window_registry_remove_for_download: { args: { id: string }; result: void };
 };
 
 type CommandName = keyof CommandMap;

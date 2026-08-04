@@ -231,6 +231,7 @@ const zhCN = {
     liveSpeedLimitClear: '清除',
     liveSpeedLimitFailed: '无法更新实时速度上限：{{detail}}',
     liveSpeedLimitUnavailable: '媒体下载运行时无法使用实时速度控制。',
+    editingUnavailable: '下载进行时无法编辑这些属性。',
     liveTorrentUploadLimit: '实时种子上传限速',
     liveTorrentUploadLimitHint: '适用于活跃的种子下载和做种。清空后可移除该种子的上传限速。',
     liveTorrentUploadLimitPlaceholder: '例如 1024K',

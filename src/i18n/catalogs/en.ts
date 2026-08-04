@@ -231,6 +231,7 @@ const common = {
     liveSpeedLimitClear: 'Clear',
     liveSpeedLimitFailed: 'Could not update live speed cap: {{detail}}',
     liveSpeedLimitUnavailable: 'Live speed control is unavailable for media downloads while running.',
+    editingUnavailable: 'These properties cannot be edited while the download is active.',
     liveTorrentUploadLimit: 'Live Torrent upload limit',
     liveTorrentUploadLimitHint: 'Applies to active Torrent downloads and seeding. Clear it to remove the per-Torrent upload cap.',
     liveTorrentUploadLimitPlaceholder: 'e.g. 1024K',

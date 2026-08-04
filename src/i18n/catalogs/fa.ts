@@ -231,6 +231,7 @@ const fa = {
     liveSpeedLimitClear: 'پاک کردن',
     liveSpeedLimitFailed: 'به‌روزرسانی سقف سرعت زنده ممکن نیست: {{detail}}',
     liveSpeedLimitUnavailable: 'تغییر زنده سرعت دانلودهای رسانه‌ای هنگام اجرا در دسترس نیست.',
+    editingUnavailable: 'هنگام فعال بودن دانلود، ویرایش این ویژگی‌ها ممکن نیست.',
     liveTorrentUploadLimit: 'محدودیت زنده آپلود تورنت',
     liveTorrentUploadLimitHint: 'برای تورنت‌های فعال و در حال سید اعمال می‌شود. برای حذف محدودیت آپلود تورنت، آن را پاک کنید.',
     liveTorrentUploadLimitPlaceholder: 'مثلاً 1024K',

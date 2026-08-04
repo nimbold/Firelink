@@ -6,7 +6,8 @@ use ts_rs::TS;
 use crate::ipc::DownloadCategory;
 
 #[tauri::command]
-pub async fn get_system_proxy() -> Result<Option<String>, String> {
+pub async fn get_system_proxy(caller: tauri::WebviewWindow) -> Result<Option<String>, String> {
+    crate::properties_window::ensure_main_window(&caller)?;
     match native_system_proxy() {
         Ok(Some(proxy)) => Ok(Some(proxy)),
         Ok(None) => Ok(proxy_from_environment()),
@@ -539,8 +540,10 @@ struct GitHubRelease {
 
 #[tauri::command]
 pub async fn check_for_updates(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
 ) -> Result<ReleaseCheckOutcome, String> {
+    crate::properties_window::ensure_main_window(&caller)?;
     let current_version = app_handle.package_info().version.to_string();
 
     crate::ensure_reqwest_crypto_provider();
@@ -606,10 +609,12 @@ fn cmp_versions(a: &str, b: &str) -> std::cmp::Ordering {
 
 #[tauri::command]
 pub async fn create_category_directories(
+    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     base_folder: String,
     subfolders: std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
+    crate::properties_window::ensure_main_window(&caller)?;
     let base = crate::resolve_path(&base_folder, &app_handle);
     let mut errors = Vec::new();
 

@@ -56,6 +56,7 @@ import {
 import { updateDownloadSelection } from '../utils/downloadSelection';
 import { clampFloatingPosition } from '../utils/floatingPosition';
 import { FloatingQueueSubmenu } from './FloatingQueueSubmenu';
+import { openPropertiesWindow } from '../propertiesBridge';
 
 export interface DownloadTableStatusSummary {
   summary: DownloadSummary;
@@ -1383,8 +1384,13 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   }, []);
 
   const openProperties = useCallback((id: string) => {
-    useDownloadStore.getState().setSelectedPropertiesDownloadId(id);
-  }, []);
+    void openPropertiesWindow(id).catch(error => {
+      showInteractionError(t($ => $.downloadTable.interactionError, {
+        message: t($ => $.downloadTable.properties),
+        detail: error instanceof Error ? error.message : String(error)
+      }), error);
+    });
+  }, [showInteractionError, t]);
 
   const revealDownloadFile = useCallback(async (item: DownloadItem) => {
     const pathToReveal = await getDownloadPath(item);
