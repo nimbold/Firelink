@@ -14,6 +14,9 @@ const PROPERTIES_WINDOW_ACTION_REQUEST_EVENT: &str = "properties-window-action-r
 const MAX_PROPERTIES_ACTION_PAYLOAD_BYTES: usize = 64 * 1024;
 const MAX_PROPERTIES_SESSION_ID_BYTES: usize = 128;
 const MAX_PROPERTIES_REQUEST_ID: u64 = 9_007_199_254_740_991;
+const MAX_RETIRED_PROPERTIES_SESSIONS: usize = 256;
+const PROPERTIES_SESSION_HISTORY_EXHAUSTED: &str =
+    "Properties window session history is exhausted; close and reopen the window";
 
 #[derive(Default)]
 pub struct PropertiesWindowRegistry {
@@ -26,6 +29,7 @@ struct RegistryState {
     by_window: HashMap<String, String>,
     ready_windows: HashSet<String>,
     sessions_by_window: HashMap<String, String>,
+    retired_sessions_by_window: HashMap<String, HashSet<String>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -81,6 +85,7 @@ impl PropertiesWindowRegistry {
         let download_id = state.by_window.remove(label);
         state.ready_windows.remove(label);
         state.sessions_by_window.remove(label);
+        state.retired_sessions_by_window.remove(label);
         if let Some(download_id) = &download_id {
             state.by_download.remove(download_id);
         }
@@ -97,6 +102,7 @@ impl PropertiesWindowRegistry {
             state.by_window.remove(label);
             state.ready_windows.remove(label);
             state.sessions_by_window.remove(label);
+            state.retired_sessions_by_window.remove(label);
         }
         Ok(label)
     }
@@ -131,9 +137,38 @@ impl PropertiesWindowRegistry {
         if !state.by_window.contains_key(label) {
             return Err("Properties window is no longer registered".to_string());
         }
-        state
+        if state
             .sessions_by_window
-            .insert(label.to_string(), session_id.to_string());
+            .get(label)
+            .is_some_and(|current| current == session_id)
+        {
+            return Ok(());
+        }
+        if state
+            .retired_sessions_by_window
+            .get(label)
+            .is_some_and(|retired| retired.contains(session_id))
+        {
+            return Err("Properties window session is no longer current".to_string());
+        }
+        if state.sessions_by_window.contains_key(label)
+            && state
+                .retired_sessions_by_window
+                .get(label)
+                .is_some_and(|retired| retired.len() >= MAX_RETIRED_PROPERTIES_SESSIONS)
+        {
+            return Err(PROPERTIES_SESSION_HISTORY_EXHAUSTED.to_string());
+        }
+        if let Some(previous) = state
+            .sessions_by_window
+            .insert(label.to_string(), session_id.to_string())
+        {
+            state
+                .retired_sessions_by_window
+                .entry(label.to_string())
+                .or_default()
+                .insert(previous);
+        }
         Ok(())
     }
 
@@ -340,7 +375,13 @@ pub fn properties_window_send_ready(
 ) -> Result<(), String> {
     validate_properties_session_id(&session_id)?;
     let download_id = registered_download_for_caller(&caller, &registry)?;
-    registry.register_session(caller.label(), &session_id)?;
+    if let Err(error) = registry.register_session(caller.label(), &session_id) {
+        if error == PROPERTIES_SESSION_HISTORY_EXHAUSTED {
+            let _ = registry.remove_window(caller.label());
+            let _ = caller.close();
+        }
+        return Err(error);
+    }
     app.emit_to(
         MAIN_WINDOW_LABEL,
         PROPERTIES_WINDOW_READY_EVENT,
@@ -524,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn registering_a_new_session_invalidates_the_previous_session() {
+    fn a_late_ready_from_a_retired_session_cannot_reclaim_the_window() {
         let registry = PropertiesWindowRegistry::default();
         let label = registry.allocate("download-a").unwrap();
 
@@ -534,6 +575,15 @@ mod tests {
         registry.register_session(&label, "session-new").unwrap();
         assert!(!registry.session_matches(&label, "session-old").unwrap());
         assert!(registry.session_matches(&label, "session-new").unwrap());
+        assert!(registry.register_session(&label, "session-old").is_err());
+        assert!(registry.session_matches(&label, "session-new").unwrap());
+
+        for index in 0..(MAX_RETIRED_PROPERTIES_SESSIONS - 1) {
+            registry
+                .register_session(&label, &format!("session-{index}"))
+                .unwrap();
+        }
+        assert!(registry.register_session(&label, "session-after-limit").is_err());
 
         registry.remove_window(&label).unwrap();
         assert!(!registry.session_matches(&label, "session-new").unwrap());
