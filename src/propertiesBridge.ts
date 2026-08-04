@@ -70,6 +70,23 @@ const PROPERTIES_SNAPSHOT_KEYS = [
   'torrentVerifyRestoreStatus',
 ] as const satisfies readonly (keyof DownloadItem)[];
 
+export const isExpectedPropertiesDiagnosticUnavailable = (error: unknown): boolean => {
+  const message = (error instanceof Error ? error.message : String(error)).trim().toLowerCase();
+  if (message.startsWith('torrent lifecycle changed while reading ')) return true;
+  return [
+    'torrent peer diagnostics are unavailable for this lifecycle',
+    'torrent availability is unavailable for this lifecycle',
+    'live torrent file progress is unavailable',
+    'live torrent piece progress is unavailable',
+    'active torrent transfer has no gid',
+    'active torrent transfer has no current gid mapping',
+    'active torrent transfer has a stale control epoch',
+    'active torrent has no gid',
+    'active torrent has no current gid mapping',
+    'active torrent has a stale control epoch',
+  ].includes(message);
+};
+
 type SafePropertiesFields = Pick<DownloadItem, (typeof PROPERTIES_SNAPSHOT_KEYS)[number]>;
 
 export type PropertiesSnapshot = SafePropertiesFields & {

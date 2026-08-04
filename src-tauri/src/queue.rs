@@ -2511,7 +2511,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
         Ok(())
     }
 
-    /// Return redacted, bounded peer diagnostics for the current Torrent GID.
+    /// Return bounded peer diagnostics for the current Torrent GID. Endpoint
+    /// and peer-id fields live only in this response; they are not persisted.
     /// The control lock and post-RPC mapping check prevent a late response from
     /// being attributed to a replaced or terminal lifecycle.
     pub async fn get_aria2_torrent_peers(
@@ -2519,10 +2520,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
         id: &str,
     ) -> Result<crate::ipc::TorrentPeerDiagnostics, String> {
         let _control_guard = self.acquire_aria2_control(id).await;
-        if !self.is_registered(id).await
-            || !matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
-        {
-            return Err("download is not an active aria2 transfer".to_string());
+        if !self.is_registered(id).await {
+            return Err("Torrent peer diagnostics are unavailable for this lifecycle".to_string());
         }
         let is_torrent = self
             .aria2_payloads
@@ -2564,7 +2563,6 @@ impl<R: tauri::Runtime> QueueManager<R> {
         let diagnostics = parse_torrent_peer_diagnostics(result)?;
 
         let still_current = self.is_registered(id).await
-            && matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
             && self
                 .is_aria2_control_epoch_current(id, expected_mapping.epoch)
                 .await
@@ -2585,9 +2583,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         id: &str,
     ) -> Result<crate::ipc::TorrentAvailabilitySnapshot, String> {
         let _control_guard = self.acquire_aria2_control(id).await;
-        if !self.is_registered(id).await
-            || !matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
-        {
+        if !self.is_registered(id).await {
             return Err("Torrent availability is unavailable for this lifecycle".to_string());
         }
         if !self
@@ -2666,9 +2662,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         id: &str,
     ) -> Result<crate::ipc::TorrentFileProgressSnapshot, String> {
         let _control_guard = self.acquire_aria2_control(id).await;
-        if !self.is_registered(id).await
-            || !matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
-        {
+        if !self.is_registered(id).await {
             return Err("live Torrent file progress is unavailable".to_string());
         }
         let payload = self
@@ -2725,7 +2719,6 @@ impl<R: tauri::Runtime> QueueManager<R> {
         let snapshot = parse_torrent_file_progress(result, &metadata.files)?;
 
         let still_current = self.is_registered(id).await
-            && matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
             && self
                 .is_aria2_control_epoch_current(id, expected_mapping.epoch)
                 .await
@@ -2746,9 +2739,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         id: &str,
     ) -> Result<crate::ipc::TorrentPieceProgressSnapshot, String> {
         let _control_guard = self.acquire_aria2_control(id).await;
-        if !self.is_registered(id).await
-            || !matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
-        {
+        if !self.is_registered(id).await {
             return Err("live Torrent piece progress is unavailable".to_string());
         }
         let is_torrent = self
@@ -2791,7 +2782,6 @@ impl<R: tauri::Runtime> QueueManager<R> {
         let snapshot = parse_torrent_piece_progress(result)?;
 
         let still_current = self.is_registered(id).await
-            && matches!(self.active_kind(id).await, Some(TaskKind::Aria2))
             && self
                 .is_aria2_control_epoch_current(id, expected_mapping.epoch)
                 .await
@@ -5268,6 +5258,30 @@ fn aria2_peer_number(value: Option<&serde_json::Value>) -> u64 {
     }
 }
 
+fn aria2_peer_ip(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?.as_str()?.trim();
+    if value.is_empty() || value.len() > 64 || value.chars().any(char::is_control) {
+        return None;
+    }
+    value.parse::<std::net::IpAddr>().ok().map(|ip| ip.to_string())
+}
+
+fn aria2_peer_port(value: Option<&serde_json::Value>) -> Option<u16> {
+    match value {
+        Some(serde_json::Value::String(value)) => value.parse().ok(),
+        Some(serde_json::Value::Number(value)) => value.as_u64()?.try_into().ok(),
+        _ => None,
+    }
+}
+
+fn aria2_peer_id(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?.as_str()?.trim();
+    if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+        return None;
+    }
+    Some(value.to_string())
+}
+
 fn aria2_peer_bool(value: Option<&serde_json::Value>) -> bool {
     match value {
         Some(serde_json::Value::Bool(value)) => *value,
@@ -5437,6 +5451,9 @@ pub(crate) fn parse_torrent_peer_diagnostics(
             total_seeders = total_seeders.saturating_add(1);
         }
         sanitized.push(crate::ipc::TorrentPeer {
+            ip: aria2_peer_ip(peer.get("ip")),
+            port: aria2_peer_port(peer.get("port")),
+            peer_id: aria2_peer_id(peer.get("peerId")),
             download_speed: aria2_peer_number(peer.get("downloadSpeed")),
             upload_speed: aria2_peer_number(peer.get("uploadSpeed")),
             seeder,
@@ -7618,7 +7635,7 @@ mod tests {
     }
 
     #[test]
-    fn torrent_peer_diagnostics_are_redacted_and_bounded() {
+    fn torrent_peer_diagnostics_are_bounded_and_omit_bitfields() {
         let mut result = vec![serde_json::json!({
             "peerId": "secret-peer-id",
             "ip": "192.0.2.10",
@@ -7647,9 +7664,13 @@ mod tests {
         assert_eq!(diagnostics.total_seeders, 2);
         assert_eq!(diagnostics.peers.len(), MAX_TORRENT_PEER_DIAGNOSTICS);
         assert!(diagnostics.truncated);
+        assert_eq!(diagnostics.peers[0].ip.as_deref(), Some("192.0.2.10"));
+        assert_eq!(diagnostics.peers[0].port, Some(6881));
+        assert_eq!(diagnostics.peers[0].peer_id.as_deref(), Some("secret-peer-id"));
         let serialized = serde_json::to_string(&diagnostics).unwrap();
-        assert!(!serialized.contains("peerId"));
-        assert!(!serialized.contains("192.0.2."));
+        assert!(serialized.contains("peerId"));
+        assert!(serialized.contains("192.0.2."));
+        assert!(!serialized.contains("\"port\":null"));
         assert!(!serialized.contains("bitfield"));
     }
 

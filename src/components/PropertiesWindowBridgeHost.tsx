@@ -217,14 +217,14 @@ export const PropertiesWindowBridgeHost = () => {
               if (!resumed) {
                 throw new Error(i18n.t($ => $.downloadTable.backendRejectedStart));
               }
-              const current = useDownloadStore.getState().downloads.find(download => download.id === request.downloadId);
-              if (!current) throw new Error('Download was removed while starting');
-              // A fast completion is a valid outcome of a successful resume;
-              // only a status that proves the request never left its
-              // pre-action state is a rejected start. Preserve failed as an
-              // error so a real backend failure is not reported as success.
-              if (['paused', 'ready', 'staged', 'failed'].includes(current.status)) {
-                throw new Error(i18n.t($ => $.downloadTable.backendRejectedStart));
+              // resumeDownload returns after the lifecycle request has been
+              // accepted, while the backend may still be admitting a queue
+              // slot, rebinding a retained GID, or emitting the first active
+              // state. Do not inspect the store synchronously here: an event
+              // from the previous lifecycle can still leave the row paused
+              // for one turn even though the request was accepted.
+              if (!useDownloadStore.getState().downloads.some(download => download.id === request.downloadId)) {
+                throw new Error('Download was removed while starting');
               }
             }
             break;

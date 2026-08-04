@@ -15,6 +15,7 @@ import {
   beginExclusivePropertiesAction,
   createFrameCoalescer,
   getPropertiesLifecycleAction,
+  isExpectedPropertiesDiagnosticUnavailable,
   sanitizePropertiesSnapshot,
 } from './propertiesBridge';
 
@@ -133,6 +134,14 @@ describe('Properties window bridge', () => {
     expect(getPropertiesLifecycleAction('staged')).toBe('start');
     expect(getPropertiesLifecycleAction('failed')).toBe('retry');
     expect(getPropertiesLifecycleAction('completed')).toBeNull();
+  });
+
+  it('recognizes expected diagnostics gaps without hiding real RPC failures', () => {
+    expect(isExpectedPropertiesDiagnosticUnavailable(new Error('live Torrent file progress is unavailable'))).toBe(true);
+    expect(isExpectedPropertiesDiagnosticUnavailable(new Error('active Torrent transfer has no current gid mapping'))).toBe(true);
+    expect(isExpectedPropertiesDiagnosticUnavailable(new Error('Torrent lifecycle changed while reading peer diagnostics'))).toBe(true);
+    expect(isExpectedPropertiesDiagnosticUnavailable(new Error('aria2.getPeers failed: unavailable response'))).toBe(false);
+    expect(isExpectedPropertiesDiagnosticUnavailable(new Error('aria2.getFiles failed: connection refused'))).toBe(false);
   });
 
   it('keeps the first action locked when a duplicate request is rejected', () => {
