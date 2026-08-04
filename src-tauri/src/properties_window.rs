@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -21,6 +22,7 @@ pub struct PropertiesWindowRegistry {
 struct RegistryState {
     by_download: HashMap<String, String>,
     by_window: HashMap<String, String>,
+    ready_windows: HashSet<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -72,6 +74,7 @@ impl PropertiesWindowRegistry {
             .lock()
             .map_err(|_| "Properties window registry is unavailable".to_string())?;
         let download_id = state.by_window.remove(label);
+        state.ready_windows.remove(label);
         if let Some(download_id) = &download_id {
             state.by_download.remove(download_id);
         }
@@ -86,6 +89,7 @@ impl PropertiesWindowRegistry {
         let label = state.by_download.remove(download_id);
         if let Some(label) = &label {
             state.by_window.remove(label);
+            state.ready_windows.remove(label);
         }
         Ok(label)
     }
@@ -98,6 +102,36 @@ impl PropertiesWindowRegistry {
             .by_download
             .get(download_id)
             .cloned())
+    }
+
+    pub fn mark_ready(&self, label: &str) -> Result<(), String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "Properties window registry is unavailable".to_string())?;
+        if !state.by_window.contains_key(label) {
+            return Err("Properties window is no longer registered".to_string());
+        }
+        state.ready_windows.insert(label.to_string());
+        Ok(())
+    }
+
+    pub fn is_ready(&self, label: &str) -> Result<bool, String> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| "Properties window registry is unavailable".to_string())?
+            .ready_windows
+            .contains(label))
+    }
+
+    pub fn clear_ready(&self, label: &str) -> Result<(), String> {
+        self.state
+            .lock()
+            .map_err(|_| "Properties window registry is unavailable".to_string())?
+            .ready_windows
+            .remove(label);
+        Ok(())
     }
 }
 
@@ -152,6 +186,7 @@ fn is_properties_action(action: &str) -> bool {
         action,
         "apply-properties"
             | "pause-resume"
+            | "verify-torrent"
             | "set-download-limit"
             | "set-torrent-upload-limit"
             | "set-torrent-peer-options"
@@ -194,18 +229,25 @@ pub fn open_download_properties_window(
 
     let label = registry.allocate(&id)?;
     if let Some(window) = app.get_webview_window(&label) {
+        if !registry.is_ready(&label)? {
+            return Ok(label);
+        }
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
         return Ok(label);
     }
 
+    // If the native window disappeared without delivering Destroyed, discard
+    // the old readiness bit before constructing a fresh hidden webview.
+    registry.clear_ready(&label)?;
     let build_result = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("index.html".into()))
         .title(PROPERTIES_WINDOW_TITLE)
         .inner_size(1000.0, 720.0)
         .min_inner_size(760.0, 560.0)
         .resizable(true)
         .always_on_top(false)
+        .visible(false)
         .build();
     if let Err(error) = build_result {
         // Two rapid main-window requests can race between the native lookup
@@ -213,9 +255,11 @@ pub fn open_download_properties_window(
         // registry entry and focus its window instead of treating the second
         // request as a failed open.
         if let Some(window) = app.get_webview_window(&label) {
-            let _ = window.unminimize();
-            let _ = window.show();
-            let _ = window.set_focus();
+            if registry.is_ready(&label)? {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
             return Ok(label);
         }
         let _ = registry.remove_window(&label);
@@ -249,6 +293,17 @@ pub fn properties_window_send_ready(
         },
     )
     .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn properties_window_reveal(
+    caller: tauri::WebviewWindow,
+    registry: tauri::State<'_, PropertiesWindowRegistry>,
+) -> Result<(), String> {
+    registered_download_for_caller(&caller, &registry)?;
+    registry.mark_ready(caller.label())?;
+    caller.show().map_err(|error| error.to_string())?;
+    caller.set_focus().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -368,10 +423,17 @@ mod tests {
     fn registry_reuses_one_label_per_download_and_cleans_both_indexes() {
         let registry = PropertiesWindowRegistry::default();
         let first = registry.allocate("download-a").unwrap();
+        assert!(!registry.is_ready(&first).unwrap());
+        registry.mark_ready(&first).unwrap();
+        assert!(registry.is_ready(&first).unwrap());
+        registry.clear_ready(&first).unwrap();
+        assert!(!registry.is_ready(&first).unwrap());
+        registry.mark_ready(&first).unwrap();
         assert_eq!(registry.allocate("download-a").unwrap(), first);
         assert_eq!(registry.download_for_window(&first).unwrap(), Some("download-a".to_string()));
         assert_eq!(registry.remove_window(&first).unwrap(), Some("download-a".to_string()));
         assert_eq!(registry.download_for_window(&first).unwrap(), None);
+        assert!(!registry.is_ready(&first).unwrap());
         assert_ne!(registry.allocate("download-a").unwrap(), first);
     }
 
@@ -385,6 +447,7 @@ mod tests {
     #[test]
     fn child_actions_are_allowlisted() {
         assert!(is_properties_action("apply-properties"));
+        assert!(is_properties_action("verify-torrent"));
         assert!(is_properties_action("set-torrent-peer-options"));
         assert!(!is_properties_action("get_keychain_password"));
         assert!(!is_properties_action(""));

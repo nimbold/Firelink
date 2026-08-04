@@ -64,6 +64,7 @@ build/
 # Local secrets and signing material
 .env
 .env.*
+implementation_plan.md
 *.key
 *.pem
 !src-tauri/binaries/_internal/certifi/cacert.pem

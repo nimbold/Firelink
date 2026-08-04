@@ -158,6 +158,7 @@ type CommandMap = {
   open_download_properties_window: { args: { id: string }; result: string };
   get_properties_window_download_id: { args: undefined; result: string };
   properties_window_send_ready: { args: undefined; result: void };
+  properties_window_reveal: { args: undefined; result: void };
   properties_window_send_action: { args: { requestId: number; action: string; payload?: unknown }; result: void };
   validate_properties_window_request: { args: { windowLabel: string; downloadId: string }; result: void };
   close_download_properties_window: { args: { id: string }; result: void };

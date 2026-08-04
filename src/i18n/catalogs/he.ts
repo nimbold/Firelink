@@ -77,6 +77,7 @@ const he = {
       pause: 'השהייה',
       start: 'הפעלה',
       resume: 'חידוש',
+      retry: 'ניסיון חוזר',
       options: 'אפשרויות',
     },
     size: {

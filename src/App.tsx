@@ -35,6 +35,7 @@ import { isTrustedFirelinkReleaseUrl } from './utils/releaseUrls';
 import { changeAppLocale, localeDirection, resolveAppLocale, syncDocumentLocale } from './i18n';
 import { useTranslation } from 'react-i18next';
 import { formatDownloadBytes } from './utils/downloadProgress';
+import { synchronizeDocumentAppearance } from './utils/documentAppearance';
 
 const loadSettingsView = () => import('./components/SettingsView');
 const loadSchedulerView = () => import('./components/SchedulerView');
@@ -669,17 +670,13 @@ function App() {
     });
   }, [addToast, coreReady, showKeychainModal]);
 
-  useEffect(() => {
-    window.document.documentElement.setAttribute('data-font-family', fontFamily);
-  }, [fontFamily]);
-
-  useEffect(() => {
-    window.document.documentElement.setAttribute('data-font-size', appFontSize);
-  }, [appFontSize]);
-
-  useEffect(() => {
-    window.document.documentElement.setAttribute('data-list-density', listRowDensity);
-  }, [listRowDensity]);
+  useEffect(() => synchronizeDocumentAppearance(window, {
+    theme,
+    fontFamily,
+    appFontSize,
+    listRowDensity,
+    locale: resolveAppLocale(i18n.language),
+  }), [appFontSize, fontFamily, i18n.language, listRowDensity, theme]);
 
   useEffect(() => {
     const checkForUpdate = () => {
@@ -1024,39 +1021,6 @@ function App() {
       document.removeEventListener('visibilitychange', handleForegroundChange);
     };
   }, [autoAddClipboardLinks, coreReady, showKeychainModal]);
-
-  useEffect(() => {
-    const root = window.document.documentElement;
-    
-    const applyTheme = () => {
-      // Remove all theme classes first
-      root.classList.remove('theme-dark', 'theme-light', 'theme-dracula', 'theme-nord', 'dark');
-      
-    if (theme === 'system') {
-      const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-      root.classList.add(systemDark ? 'theme-dark' : 'theme-light');
-      root.dataset.resolvedTheme = systemDark ? 'dark' : 'light';
-      root.style.colorScheme = systemDark ? 'dark' : 'light';
-      if (systemDark) root.classList.add('dark');
-    } else {
-      root.classList.add(`theme-${theme}`);
-      if (['dark', 'dracula', 'nord'].includes(theme)) {
-        root.classList.add('dark');
-      }
-      root.dataset.resolvedTheme = ['dark', 'dracula', 'nord'].includes(theme) ? 'dark' : 'light';
-      root.style.colorScheme = ['dark', 'dracula', 'nord'].includes(theme) ? 'dark' : 'light';
-    }
-  };
-
-    applyTheme();
-
-    if (theme === 'system') {
-      const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-      const listener = () => applyTheme();
-      mediaQuery.addEventListener('change', listener);
-      return () => mediaQuery.removeEventListener('change', listener);
-    }
-  }, [theme]);
 
   return (
     <div className={`app-shell flex h-screen w-screen overflow-hidden text-text-primary ${

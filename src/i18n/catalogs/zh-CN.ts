@@ -77,6 +77,7 @@ const zhCN = {
       pause: '暂停',
       start: '开始',
       resume: '恢复',
+      retry: '重试',
       options: '选项',
     },
     size: {

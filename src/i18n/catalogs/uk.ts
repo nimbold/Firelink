@@ -77,6 +77,7 @@ const uk = {
       pause: 'Призупинити',
       start: 'Запустити',
       resume: 'Відновити',
+      retry: 'Повторити',
       options: 'Опції',
     },
     size: {

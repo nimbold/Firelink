@@ -14,6 +14,7 @@ import {
   PROPERTIES_WINDOW_ACTION_RESULT,
   PROPERTIES_WINDOW_REMOVED,
   PROPERTIES_WINDOW_SNAPSHOT,
+  getPropertiesLifecycleAction,
   sendPropertiesActionRequest,
   sendPropertiesReady,
   type PropertiesAction,
@@ -24,6 +25,8 @@ import {
   type PropertiesSnapshotEvent,
 } from '../propertiesBridge';
 import { formatDownloadBytes, formatTorrentRatio } from '../utils/downloadProgress';
+import { changeAppLocale } from '../i18n';
+import { synchronizeDocumentAppearance } from '../utils/documentAppearance';
 
 type PropertiesTab = 'overview' | 'files' | 'trackers' | 'peers' | 'options' | 'transfer' | 'advanced';
 
@@ -73,7 +76,11 @@ export const PropertiesWindowApp = () => {
   const closeAfterSaveRef = useRef(false);
   const switchAfterSaveRef = useRef<PropertiesTab | null>(null);
   const requestIdRef = useRef(0);
+  const pendingActionRef = useRef<PropertiesAction | null>(null);
   const latestSnapshotRevisionRef = useRef(0);
+  const appearanceCleanupRef = useRef<(() => void) | null>(null);
+  const hasRevealedWindowRef = useRef(false);
+  const revealInFlightRef = useRef(false);
   const diagnosticsInFlightRef = useRef(new Set<string>());
   const snapshotRef = useRef(snapshot);
   const activeTabRef = useRef(activeTab);
@@ -140,6 +147,7 @@ export const PropertiesWindowApp = () => {
 
   useEffect(() => {
     let cancelled = false;
+    let readyRetryTimer: number | undefined;
     let unlistenSnapshot: UnlistenFn | undefined;
     let unlistenResult: UnlistenFn | undefined;
     let unlistenRemoved: UnlistenFn | undefined;
@@ -148,18 +156,40 @@ export const PropertiesWindowApp = () => {
         const id = await invoke('get_properties_window_download_id');
         if (cancelled) return;
         setDownloadId(id);
-        unlistenSnapshot = await listen<PropertiesSnapshotEvent>(PROPERTIES_WINDOW_SNAPSHOT, event => {
+        unlistenSnapshot = await listen<PropertiesSnapshotEvent>(PROPERTIES_WINDOW_SNAPSHOT, async event => {
           if (event.payload.windowLabel !== windowLabel || event.payload.downloadId !== id) return;
           if (event.payload.revision <= latestSnapshotRevisionRef.current) return;
           latestSnapshotRevisionRef.current = event.payload.revision;
+          await changeAppLocale(event.payload.snapshot.appearance.locale);
+          if (event.payload.revision !== latestSnapshotRevisionRef.current) return;
+          appearanceCleanupRef.current?.();
+          appearanceCleanupRef.current = synchronizeDocumentAppearance(
+            window,
+            event.payload.snapshot.appearance,
+          );
           setSnapshot(event.payload.snapshot);
           if (draftTabRef.current === null) hydrateDraft(event.payload.snapshot);
           void currentWindow.setTitle(safeTitle(event.payload.snapshot.fileName)).catch(() => undefined);
+          if (!hasRevealedWindowRef.current && !revealInFlightRef.current) {
+            revealInFlightRef.current = true;
+            try {
+              await invoke('properties_window_reveal');
+              hasRevealedWindowRef.current = true;
+              if (readyRetryTimer !== undefined) {
+                window.clearInterval(readyRetryTimer);
+                readyRetryTimer = undefined;
+              }
+            } finally {
+              revealInFlightRef.current = false;
+            }
+          }
         });
         unlistenResult = await listen<PropertiesActionResult>(PROPERTIES_WINDOW_ACTION_RESULT, event => {
           if (event.payload.windowLabel !== windowLabel || event.payload.downloadId !== id) return;
           if (event.payload.requestId !== requestIdRef.current) return;
           setIsSaving(false);
+          const completedAction = pendingActionRef.current;
+          pendingActionRef.current = null;
           if (!event.payload.ok) setErrorMessage(event.payload.error ?? 'The action failed');
           else {
             const nextTab = switchAfterSaveRef.current;
@@ -167,7 +197,7 @@ export const PropertiesWindowApp = () => {
             switchAfterSaveRef.current = null;
             closeAfterSaveRef.current = false;
             setErrorMessage('');
-            setNotice(t($ => $.properties.saved));
+            setNotice(completedAction === 'apply-properties' ? t($ => $.properties.saved) : '');
             draftTabRef.current = null;
             setDraftTab(null);
             if (nextTab) {
@@ -182,11 +212,24 @@ export const PropertiesWindowApp = () => {
         });
         unlistenRemoved = await listen<{ windowLabel: string; downloadId: string }>(PROPERTIES_WINDOW_REMOVED, event => {
           if (event.payload.windowLabel === windowLabel && event.payload.downloadId === id) {
+            if (readyRetryTimer !== undefined) {
+              window.clearInterval(readyRetryTimer);
+              readyRetryTimer = undefined;
+            }
             setSnapshot(null);
             setNotice(t($ => $.downloadTable.noDownloads));
           }
         });
         await sendPropertiesReady();
+        if (cancelled) return;
+        // Tauri event listeners are registered asynchronously. If the main
+        // bridge was still installing its listener, the first ready event can
+        // legitimately be missed; retry until the first snapshot confirms
+        // the handshake rather than leaving a permanently hidden window.
+        readyRetryTimer = window.setInterval(() => {
+          if (cancelled || hasRevealedWindowRef.current) return;
+          void sendPropertiesReady().catch(() => undefined);
+        }, 500);
       } catch (error) {
         if (!cancelled) setErrorMessage(errorText(error));
       }
@@ -194,9 +237,12 @@ export const PropertiesWindowApp = () => {
     void start();
     return () => {
       cancelled = true;
+      if (readyRetryTimer !== undefined) window.clearInterval(readyRetryTimer);
       unlistenSnapshot?.();
       unlistenResult?.();
       unlistenRemoved?.();
+      appearanceCleanupRef.current?.();
+      appearanceCleanupRef.current = null;
     };
   }, [currentWindow, hydrateDraft, t, windowLabel]);
 
@@ -228,8 +274,10 @@ export const PropertiesWindowApp = () => {
     payload?: PropertiesActionRequest['payload'],
   ) => {
     if (!downloadId) return;
+    if (pendingActionRef.current !== null) return;
     const requestId = ++requestIdRef.current;
-    setIsSaving(action === 'apply-properties');
+    pendingActionRef.current = action;
+    setIsSaving(true);
     try {
       await sendPropertiesActionRequest({
         windowLabel,
@@ -240,6 +288,7 @@ export const PropertiesWindowApp = () => {
       });
     } catch (error) {
       setIsSaving(false);
+      pendingActionRef.current = null;
       closeAfterSaveRef.current = false;
       switchAfterSaveRef.current = null;
       setErrorMessage(errorText(error));
@@ -328,8 +377,7 @@ export const PropertiesWindowApp = () => {
           setNotice(t($ => $.properties.torrentMoveCompleted));
         }
       } else {
-        await invoke('verify_torrent_data', { id: downloadId });
-        setNotice(t($ => $.properties.torrentVerifyIntegrity));
+        await requestAction('verify-torrent');
       }
     } catch (error) {
       setErrorMessage(errorText(error));
@@ -344,6 +392,7 @@ export const PropertiesWindowApp = () => {
   }
 
   const progress = Math.max(0, Math.min(1, snapshot.fraction ?? 0));
+  const lifecycleAction = getPropertiesLifecycleAction(snapshot.status);
   const total = snapshot.size || (snapshot.totalBytes === undefined
     ? t($ => $.addDownloads.unknownSize)
     : `${snapshot.totalIsEstimate ? '~' : ''}${formatDownloadBytes(snapshot.totalBytes)}`);
@@ -369,14 +418,32 @@ export const PropertiesWindowApp = () => {
             <p className="mt-1 text-xs text-text-muted" role="status">{statusLabel} · {Math.round(progress * 100)}% · {total}</p>
           </div>
           <div className="flex flex-wrap items-center gap-2" aria-label={t($ => $.actions.continue)}>
-            <button type="button" className="app-button px-3 text-xs" onClick={() => void requestAction('pause-resume')}>
-              {['paused', 'ready', 'staged', 'completed', 'failed'].includes(snapshot.status) ? <Play size={14} /> : <Pause size={14} />}
-              {['paused', 'ready', 'staged', 'completed', 'failed'].includes(snapshot.status) ? t($ => $.downloads.actions.resume) : t($ => $.downloads.actions.pause)}
-            </button>
+            {lifecycleAction && <button
+              type="button"
+              className="app-button px-3 text-xs"
+              disabled={isSaving}
+              onClick={() => {
+                if (lifecycleAction === 'pause'
+                  && snapshot.resumable === false
+                  && !window.confirm(t($ => $.downloadTable.nonResumableOne))) {
+                  return;
+                }
+                void requestAction('pause-resume');
+              }}
+            >
+              {lifecycleAction === 'pause' ? <Pause size={14} /> : <Play size={14} />}
+              {lifecycleAction === 'pause'
+                ? t($ => $.downloads.actions.pause)
+                : lifecycleAction === 'resume'
+                  ? t($ => $.downloads.actions.resume)
+                  : lifecycleAction === 'retry'
+                    ? t($ => $.downloads.actions.retry)
+                    : t($ => $.downloads.actions.start)}
+            </button>}
             {isTorrent && <>
-              <button type="button" className="app-button px-3 text-xs" onClick={() => void performTorrentAction('magnet')}><Copy size={14} />{t($ => $.properties.torrentCopyMagnet)}</button>
-              <button type="button" className="app-button px-3 text-xs" onClick={() => void performTorrentAction('export')}><FileDown size={14} />{t($ => $.properties.torrentExportMetadata)}</button>
-              <button type="button" className="app-button px-3 text-xs" onClick={() => void performTorrentAction('move')}><FolderOpen size={14} />{t($ => $.properties.torrentMove)}</button>
+              <button type="button" className="app-button px-3 text-xs" disabled={isSaving} onClick={() => void performTorrentAction('magnet')}><Copy size={14} />{t($ => $.properties.torrentCopyMagnet)}</button>
+              <button type="button" className="app-button px-3 text-xs" disabled={isSaving} onClick={() => void performTorrentAction('export')}><FileDown size={14} />{t($ => $.properties.torrentExportMetadata)}</button>
+              <button type="button" className="app-button px-3 text-xs" disabled={isSaving} onClick={() => void performTorrentAction('move')}><FolderOpen size={14} />{t($ => $.properties.torrentMove)}</button>
             </>}
           </div>
         </div>
@@ -387,6 +454,7 @@ export const PropertiesWindowApp = () => {
           <span>{formatDownloadBytes(snapshot.downloadedBytes ?? 0)} / {total}</span>
           <span>{snapshot.speed || '—'}</span>
           <span>{snapshot.eta || '—'}</span>
+          <span>{snapshot.activeConnections ?? '—'} / {snapshot.requestedConnections ?? snapshot.connections ?? '—'} {t($ => $.properties.connections)}</span>
           {isTorrent && <span>{formatTorrentRatio(snapshot.torrentUploadedBytes ?? 0, snapshot.downloadedBytes ?? 0, 'en-US')}</span>}
         </div>
       </header>
@@ -432,7 +500,7 @@ export const PropertiesWindowApp = () => {
             <span className="text-text-muted">{t($ => $.properties.torrentDetailsPieces)}</span><span>{details.pieceCount} × {formatDownloadBytes(details.pieceLength)}</span>
             <span className="text-text-muted">{t($ => $.properties.torrentDetailsPrivate)}</span><span>{details.private ? t($ => $.properties.torrentDetailsPrivateYes) : t($ => $.properties.torrentDetailsPrivateNo)}</span>
           </div>}
-          {isTorrent && <div className="flex flex-wrap gap-2"><button type="button" className="app-button px-3 text-xs" onClick={() => void performTorrentAction('verify')}><RefreshCw size={14} />{t($ => $.properties.torrentVerifyNow)}</button></div>}
+          {isTorrent && <div className="flex flex-wrap gap-2"><button type="button" className="app-button px-3 text-xs" disabled={isSaving || !['paused', 'completed', 'failed'].includes(snapshot.status)} onClick={() => void performTorrentAction('verify')}><RefreshCw size={14} />{t($ => $.properties.torrentVerifyNow)}</button></div>}
         </div>}
 
         {activeTab === 'files' && isTorrent && <div className="space-y-3">

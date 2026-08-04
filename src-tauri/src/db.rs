@@ -938,6 +938,91 @@ pub fn replace_downloads(
         .map_err(|error| format!("failed to commit download save: {error}"))
 }
 
+/// Mutate exactly one persisted download inside a database transaction.
+///
+/// Native lifecycle code must not rebuild the renderer-owned download array:
+/// doing so can overwrite a newer renderer snapshot, and encoding the loaded
+/// JSON strings as an array produces double-encoded records. Validate the
+/// complete persisted set before changing the target, then update only that
+/// row while keeping the indexed columns in sync with its JSON document.
+pub fn mutate_download<R, F>(
+    connection: &mut Connection,
+    id: &str,
+    portable: bool,
+    mutate: F,
+) -> Result<R, String>
+where
+    F: FnOnce(&mut serde_json::Map<String, Value>) -> Result<R, String>,
+{
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("failed to begin download mutation: {error}"))?;
+    let records = {
+        let mut statement = transaction
+            .prepare("SELECT id, data FROM downloads ORDER BY rowid")
+            .map_err(|error| format!("failed to prepare download mutation: {error}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| format!("failed to read downloads for mutation: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("failed to read download for mutation: {error}"))?
+    };
+
+    let mut target = None;
+    for (stored_id, data) in records {
+        let value: Value = serde_json::from_str(&data)
+            .map_err(|error| format!("persisted download '{stored_id}' is malformed: {error}"))?;
+        let document_id = required_string(&value, "id")?;
+        required_string(&value, "status")?;
+        if document_id != stored_id {
+            return Err(format!(
+                "persisted download '{stored_id}' has mismatched document id"
+            ));
+        }
+        if stored_id == id {
+            target = Some(value);
+        }
+    }
+
+    let mut value = target.ok_or_else(|| "download is no longer persisted".to_string())?;
+    let original_value = value.clone();
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "persisted download is not an object".to_string())?;
+    let result = mutate(object)?;
+    if object.get("id").and_then(Value::as_str) != Some(id) {
+        return Err("persisted download mutation cannot change its id".to_string());
+    }
+    if portable {
+        remove_persisted_transfer_secrets(&mut value);
+    }
+    if value == original_value {
+        return Ok(result);
+    }
+    let document_id = required_string(&value, "id")?;
+    let status = required_string(&value, "status")?;
+    let queue_id = value.get("queueId").and_then(Value::as_str);
+    let data = serde_json::to_string(&value)
+        .map_err(|error| format!("failed to encode persisted download: {error}"))?;
+    let changed = transaction
+        .execute(
+            "UPDATE downloads
+             SET status = ?1, queue_id = ?2, data = ?3
+             WHERE id = ?4",
+            params![status, queue_id, data, document_id],
+        )
+        .map_err(|error| format!("failed to mutate download '{id}': {error}"))?;
+    if changed != 1 {
+        return Err("download is no longer persisted".to_string());
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("failed to commit download mutation: {error}"))?;
+    Ok(result)
+}
+
 fn remove_persisted_transfer_secrets(value: &mut Value) {
     let Some(object) = value.as_object_mut() else {
         return;
@@ -2258,6 +2343,151 @@ mod tests {
         }
         assert_eq!(saved["torrentTrackers"], "https://tracker.example/announce");
         assert_eq!(saved["torrentExcludeTrackers"], "https://tracker.example/exclude");
+    }
+
+    #[test]
+    fn native_download_mutation_keeps_object_records_and_unrelated_rows_unchanged() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let mut connection = state.lock().unwrap();
+        replace_downloads(
+            &mut connection,
+            &json!([
+                {
+                    "id": "torrent-1",
+                    "status": "paused",
+                    "queueId": "main",
+                    "torrentUploadedBytes": 1
+                },
+                {
+                    "id": "unrelated",
+                    "status": "queued",
+                    "queueId": "secondary",
+                    "customMarker": {"revision": 7}
+                }
+            ])
+            .to_string(),
+            false,
+        )
+        .unwrap();
+        let unrelated_before = load_downloads(&connection).unwrap()[1].clone();
+
+        mutate_download(&mut connection, "torrent-1", false, |object| {
+            object.insert("torrentUploadedBytes".to_string(), json!(99));
+            Ok(())
+        })
+        .unwrap();
+
+        let saved = load_downloads(&connection).unwrap();
+        assert_eq!(saved[1], unrelated_before);
+        for record in &saved {
+            let value: Value = serde_json::from_str(record).unwrap();
+            assert!(value.is_object());
+            assert!(required_string(&value, "id").is_ok());
+            assert!(required_string(&value, "status").is_ok());
+        }
+        let target: Value = serde_json::from_str(&saved[0]).unwrap();
+        assert_eq!(target["torrentUploadedBytes"], 99);
+
+        let changes_before = connection.total_changes();
+        mutate_download(&mut connection, "torrent-1", false, |object| {
+            object.insert("torrentUploadedBytes".to_string(), json!(99));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(connection.total_changes(), changes_before);
+    }
+
+    #[test]
+    fn native_download_mutation_rolls_back_on_malformed_unrelated_row() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let mut connection = state.lock().unwrap();
+        replace_downloads(
+            &mut connection,
+            &json!([{
+                "id": "torrent-1",
+                "status": "paused",
+                "torrentUploadedBytes": 1
+            }])
+            .to_string(),
+            false,
+        )
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO downloads (id, status, data) VALUES (?1, ?2, ?3)",
+                params!["broken", "queued", "\"double-encoded\""],
+            )
+            .unwrap();
+        let target_before = load_downloads(&connection).unwrap()[0].clone();
+
+        let error = mutate_download(&mut connection, "torrent-1", false, |object| {
+            object.insert("torrentUploadedBytes".to_string(), json!(99));
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(error.contains("persisted item is missing 'id'"));
+        assert_eq!(load_downloads(&connection).unwrap()[0], target_before);
+    }
+
+    #[test]
+    fn native_download_mutation_rolls_back_closure_errors_and_rejects_missing_targets() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let mut connection = state.lock().unwrap();
+        replace_downloads(
+            &mut connection,
+            &json!([{"id": "torrent-1", "status": "paused"}]).to_string(),
+            false,
+        )
+        .unwrap();
+        let before = load_downloads(&connection).unwrap()[0].clone();
+
+        let error = mutate_download(&mut connection, "torrent-1", false, |object| {
+            object.insert("status".to_string(), json!("queued"));
+            Err::<(), _>("mutation rejected".to_string())
+        })
+        .unwrap_err();
+        assert_eq!(error, "mutation rejected");
+        assert_eq!(load_downloads(&connection).unwrap()[0], before);
+
+        let missing = mutate_download(&mut connection, "missing", false, |_| Ok(()))
+            .unwrap_err();
+        assert_eq!(missing, "download is no longer persisted");
+    }
+
+    #[test]
+    fn native_download_mutation_applies_portable_redaction_at_commit() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let mut connection = state.lock().unwrap();
+        replace_downloads(
+            &mut connection,
+            &json!([{
+                "id": "torrent-1",
+                "status": "paused",
+                "url": "https://example.test/file",
+                "password": "secret"
+            }])
+            .to_string(),
+            false,
+        )
+        .unwrap();
+
+        mutate_download(&mut connection, "torrent-1", true, |object| {
+            object.insert("torrentUploadedBytes".to_string(), json!(9));
+            Ok(())
+        })
+        .unwrap();
+
+        let saved: Value =
+            serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
+        assert_eq!(saved["torrentUploadedBytes"], 9);
+        assert!(saved.get("password").is_none());
+        assert_eq!(saved["status"], "failed");
+        assert_eq!(saved["resumable"], false);
     }
 
     #[test]

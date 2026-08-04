@@ -6890,45 +6890,30 @@ fn persist_torrent_destination(
     relocation_check_pending: bool,
 ) -> Result<(), String> {
     let mut connection = database.lock()?;
-    let records = crate::db::load_downloads(&connection)?;
-    let mut changed = false;
-    let next_records = records
-        .into_iter()
-        .map(|record| {
-            let mut value: serde_json::Value = serde_json::from_str(&record)
-                .map_err(|error| format!("persisted download is malformed: {error}"))?;
-            if value.get("id").and_then(serde_json::Value::as_str) == Some(id) {
-                let object = value
-                    .as_object_mut()
-                    .ok_or_else(|| "persisted download is not an object".to_string())?;
+    crate::db::mutate_download(
+        &mut connection,
+        id,
+        database.is_portable(),
+        |object| {
+            object.insert(
+                "destination".to_string(),
+                serde_json::Value::String(destination.to_string()),
+            );
+            if relocation_check_pending {
                 object.insert(
-                    "destination".to_string(),
-                    serde_json::Value::String(destination.to_string()),
+                    "torrentRelocationCheckPending".to_string(),
+                    serde_json::Value::Bool(true),
                 );
-                if relocation_check_pending {
-                    object.insert(
-                        "torrentRelocationCheckPending".to_string(),
-                        serde_json::Value::Bool(true),
-                    );
-                } else {
-                    object.remove("torrentRelocationCheckPending");
-                }
-                object.insert(
-                    "torrentMoveDestination".to_string(),
-                    serde_json::Value::String(destination.to_string()),
-                );
-                changed = true;
+            } else {
+                object.remove("torrentRelocationCheckPending");
             }
-            serde_json::to_string(&value)
-                .map_err(|error| format!("failed to encode persisted download: {error}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if !changed {
-        return Err("download is no longer persisted".to_string());
-    }
-    let data = serde_json::to_string(&next_records)
-        .map_err(|error| format!("failed to encode persisted downloads: {error}"))?;
-    crate::db::replace_downloads(&mut connection, &data, database.is_portable())
+            object.insert(
+                "torrentMoveDestination".to_string(),
+                serde_json::Value::String(destination.to_string()),
+            );
+            Ok(())
+        },
+    )
 }
 
 fn persist_torrent_telemetry(
@@ -6937,38 +6922,22 @@ fn persist_torrent_telemetry(
     snapshot: crate::queue::TorrentTelemetrySnapshot,
 ) -> Result<(), String> {
     let mut connection = database.lock()?;
-    let records = crate::db::load_downloads(&connection)?;
-    let mut changed = false;
-    let next_records = records
-        .into_iter()
-        .map(|record| {
-            let mut value: serde_json::Value = serde_json::from_str(&record)
-                .map_err(|error| format!("persisted download is malformed: {error}"))?;
-            if value.get("id").and_then(serde_json::Value::as_str) == Some(id) {
-                let object = value
-                    .as_object_mut()
-                    .ok_or_else(|| "persisted download is not an object".to_string())?;
-                let uploaded = serde_json::Value::from(snapshot.uploaded_bytes);
-                let seeded = serde_json::Value::from(snapshot.seeded_seconds);
-                if object.get("torrentUploadedBytes") != Some(&uploaded) {
-                    object.insert("torrentUploadedBytes".to_string(), uploaded);
-                    changed = true;
-                }
-                if object.get("torrentSeededSeconds") != Some(&seeded) {
-                    object.insert("torrentSeededSeconds".to_string(), seeded);
-                    changed = true;
-                }
-            }
-            serde_json::to_string(&value)
-                .map_err(|error| format!("failed to encode persisted download: {error}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if !changed {
-        return Ok(());
-    }
-    let data = serde_json::to_string(&next_records)
-        .map_err(|error| format!("failed to encode persisted downloads: {error}"))?;
-    crate::db::replace_downloads(&mut connection, &data, database.is_portable())
+    crate::db::mutate_download(
+        &mut connection,
+        id,
+        database.is_portable(),
+        |object| {
+            object.insert(
+                "torrentUploadedBytes".to_string(),
+                serde_json::Value::from(snapshot.uploaded_bytes),
+            );
+            object.insert(
+                "torrentSeededSeconds".to_string(),
+                serde_json::Value::from(snapshot.seeded_seconds),
+            );
+            Ok(())
+        },
+    )
 }
 
 fn persist_torrent_relocation_check(
@@ -6977,41 +6946,22 @@ fn persist_torrent_relocation_check(
     pending: bool,
 ) -> Result<(), String> {
     let mut connection = database.lock()?;
-    let records = crate::db::load_downloads(&connection)?;
-    let mut changed = false;
-    let next_records = records
-        .into_iter()
-        .map(|record| {
-            let mut value: serde_json::Value = serde_json::from_str(&record)
-                .map_err(|error| format!("persisted download is malformed: {error}"))?;
-            if value.get("id").and_then(serde_json::Value::as_str) == Some(id) {
-                let object = value
-                    .as_object_mut()
-                    .ok_or_else(|| "persisted download is not an object".to_string())?;
-                if pending {
-                    if object.get("torrentRelocationCheckPending")
-                        != Some(&serde_json::Value::Bool(true))
-                    {
-                        object.insert(
-                            "torrentRelocationCheckPending".to_string(),
-                            serde_json::Value::Bool(true),
-                        );
-                        changed = true;
-                    }
-                } else if object.remove("torrentRelocationCheckPending").is_some() {
-                    changed = true;
-                }
+    crate::db::mutate_download(
+        &mut connection,
+        id,
+        database.is_portable(),
+        |object| {
+            if pending {
+                object.insert(
+                    "torrentRelocationCheckPending".to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            } else {
+                object.remove("torrentRelocationCheckPending");
             }
-            serde_json::to_string(&value)
-                .map_err(|error| format!("failed to encode persisted download: {error}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if !changed {
-        return Ok(());
-    }
-    let data = serde_json::to_string(&next_records)
-        .map_err(|error| format!("failed to encode persisted downloads: {error}"))?;
-    crate::db::replace_downloads(&mut connection, &data, database.is_portable())
+            Ok(())
+        },
+    )
 }
 
 fn persist_torrent_file_selection(
@@ -7021,63 +6971,44 @@ fn persist_torrent_file_selection(
     selected: Option<&[u32]>,
 ) -> Result<(), String> {
     let mut connection = database.lock()?;
-    let records = crate::db::load_downloads(&connection)?;
-    let mut changed = false;
-    let next = records
-        .into_iter()
-        .map(|record| {
-            let mut value: serde_json::Value = match serde_json::from_str(&record) {
-                Ok(value) => value,
-                Err(_) => return Ok(record),
-            };
-            if value.get("id").and_then(serde_json::Value::as_str) == Some(id) {
-                let current = match value.get("torrentFileIndices") {
-                    None => None,
-                    Some(serde_json::Value::Array(indices)) => Some(
-                        indices
-                            .iter()
-                            .map(serde_json::Value::as_u64)
-                            .collect::<Option<Vec<_>>>()
-                            .ok_or_else(|| {
-                                "persisted Torrent file selection is malformed".to_string()
-                            })?
-                            .into_iter()
-                            .map(|index| {
-                                u32::try_from(index).map_err(|_| {
-                                    "persisted Torrent file selection is out of range".to_string()
-                                })
+    crate::db::mutate_download(
+        &mut connection,
+        id,
+        database.is_portable(),
+        |object| {
+            let current = match object.get("torrentFileIndices") {
+                None => None,
+                Some(serde_json::Value::Array(indices)) => Some(
+                    indices
+                        .iter()
+                        .map(serde_json::Value::as_u64)
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or_else(|| {
+                            "persisted Torrent file selection is malformed".to_string()
+                        })?
+                        .into_iter()
+                        .map(|index| {
+                            u32::try_from(index).map_err(|_| {
+                                "persisted Torrent file selection is out of range".to_string()
                             })
-                            .collect::<Result<Vec<_>, String>>()?,
-                    ),
-                    Some(_) => {
-                        return Err("persisted Torrent file selection is malformed".to_string())
-                    }
-                };
-                if current.as_deref() != expected {
-                    return Err("Torrent file selection changed; reload before applying".to_string());
+                        })
+                        .collect::<Result<Vec<_>, String>>()?,
+                ),
+                Some(_) => {
+                    return Err("persisted Torrent file selection is malformed".to_string())
                 }
-                let object = value
-                    .as_object_mut()
-                    .ok_or_else(|| "persisted download is not an object".to_string())?;
-                if let Some(selected) = selected {
-                    object.insert("torrentFileIndices".to_string(), serde_json::json!(selected));
-                } else {
-                    object.remove("torrentFileIndices");
-                }
-                changed = true;
-                serde_json::to_string(&value)
-                    .map_err(|error| format!("failed to encode persisted download: {error}"))
-            } else {
-                Ok(record)
+            };
+            if current.as_deref() != expected {
+                return Err("Torrent file selection changed; reload before applying".to_string());
             }
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    if !changed {
-        return Err("download is no longer persisted".to_string());
-    }
-    let next_data = serde_json::to_string(&next)
-        .map_err(|error| format!("failed to encode persisted downloads: {error}"))?;
-    crate::db::replace_downloads(&mut connection, &next_data, database.is_portable())
+            if let Some(selected) = selected {
+                object.insert("torrentFileIndices".to_string(), serde_json::json!(selected));
+            } else {
+                object.remove("torrentFileIndices");
+            }
+            Ok(())
+        },
+    )
 }
 
 #[tauri::command]
@@ -8508,46 +8439,27 @@ async fn verify_torrent_data(
         lifecycle_generation: None,
     };
 
-    let original_records = {
-        let connection = database.lock()?;
-        crate::db::load_downloads(&connection)?
-    };
-    let mut next_records = Vec::with_capacity(original_records.len());
-    let mut changed = false;
-    for record in &original_records {
-        let mut value: serde_json::Value = match serde_json::from_str(record) {
-            Ok(value) => value,
-            Err(_) => {
-                next_records.push(record.clone());
-                continue;
-            }
-        };
-        if value.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str()) {
-            let object = value
-                .as_object_mut()
-                .ok_or_else(|| "persisted download is not an object".to_string())?;
-            object.insert("status".to_string(), serde_json::json!("queued"));
-            object.insert("hasBeenDispatched".to_string(), serde_json::json!(false));
-            object.insert("torrentVerifyOnly".to_string(), serde_json::json!(true));
-            object.insert(
-                "torrentVerifyRestoreStatus".to_string(),
-                serde_json::json!(restore_status),
-            );
-            changed = true;
-        }
-        next_records.push(
-            serde_json::to_string(&value)
-                .map_err(|error| format!("failed to encode persisted download: {error}"))?,
-        );
-    }
-    if !changed {
-        return Err("download is no longer persisted".to_string());
-    }
     {
         let mut connection = database.lock()?;
-        let next_data = serde_json::to_string(&next_records)
-            .map_err(|error| format!("failed to encode persisted downloads: {error}"))?;
-        crate::db::replace_downloads(&mut connection, &next_data, database.is_portable())?;
+        crate::db::mutate_download(
+            &mut connection,
+            &id,
+            database.is_portable(),
+            |object| {
+                object.insert("status".to_string(), serde_json::json!("queued"));
+                object.insert("hasBeenDispatched".to_string(), serde_json::json!(false));
+                object.insert("torrentVerifyOnly".to_string(), serde_json::json!(true));
+                object.insert(
+                    "torrentVerifyRestoreStatus".to_string(),
+                    serde_json::json!(restore_status),
+                );
+                object.insert(
+                    "torrentVerifyNative".to_string(),
+                    serde_json::json!(restore_status),
+                );
+                Ok(())
+            },
+        )?;
     }
 
     if let Err(error) =
@@ -8557,56 +8469,47 @@ async fn verify_torrent_data(
         // still the queued verification lifecycle. Never restore the stale
         // full array captured before enqueue: frontend persistence or another
         // command may have changed unrelated rows in the meantime.
-        if let Ok(mut connection) = database.lock() {
-            if let Ok(records) = crate::db::load_downloads(&connection) {
-                let mut changed = false;
-                let next = records
-                    .into_iter()
-                    .map(|record| {
-                        let mut value: serde_json::Value = match serde_json::from_str(&record) {
-                            Ok(value) => value,
-                            Err(_) => return record,
-                        };
-                        let is_target = value
-                            .get("id")
+        let rollback_result = (|| {
+            let mut connection = database.lock()?;
+            crate::db::mutate_download(
+                &mut connection,
+                &id,
+                database.is_portable(),
+                |object| {
+                    let is_verification_marker = object
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("queued")
+                        && object
+                            .get("torrentVerifyOnly")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                        && object
+                            .get("torrentVerifyRestoreStatus")
                             .and_then(serde_json::Value::as_str)
-                            == Some(id.as_str());
-                        let is_verification_marker = value
-                            .get("status")
-                            .and_then(serde_json::Value::as_str)
-                            == Some("queued")
-                            && value
-                                .get("torrentVerifyOnly")
-                                .and_then(serde_json::Value::as_bool)
-                                == Some(true)
-                            && value
-                                .get("torrentVerifyRestoreStatus")
-                                .and_then(serde_json::Value::as_str)
-                                == Some(restore_status.as_str());
-                        if is_target && is_verification_marker {
-                            if let Some(object) = value.as_object_mut() {
-                                object.insert(
-                                    "status".to_string(),
-                                    serde_json::json!(restore_status),
-                                );
-                                object.remove("torrentVerifyOnly");
-                                object.remove("torrentVerifyRestoreStatus");
-                                changed = true;
-                            }
-                        }
-                        serde_json::to_string(&value).unwrap_or(record)
-                    })
-                    .collect::<Vec<_>>();
-                if changed {
-                    if let Ok(data) = serde_json::to_string(&next) {
-                        let _ = crate::db::replace_downloads(
-                            &mut connection,
-                            &data,
-                            database.is_portable(),
+                            == Some(restore_status.as_str());
+                    // The native marker is an additional persistence fence,
+                    // not a prerequisite for rollback. A renderer snapshot
+                    // may have already acknowledged and removed that native
+                    // marker while enqueue is still in flight; the failed
+                    // operation must still clear its own queued lifecycle.
+                    if is_verification_marker {
+                        object.insert(
+                            "status".to_string(),
+                            serde_json::json!(restore_status),
                         );
+                        object.remove("torrentVerifyOnly");
+                        object.remove("torrentVerifyRestoreStatus");
+                        object.remove("torrentVerifyNative");
                     }
-                }
-            }
+                    Ok(())
+                },
+            )
+        })();
+        if let Err(rollback_error) = rollback_result {
+            return Err(format!(
+                "{error}; failed to roll back Torrent verification state: {rollback_error}"
+            ));
         }
         return Err(error.to_string());
     }
@@ -8619,48 +8522,19 @@ fn replace_persisted_torrent_web_seeds(
     seeds: &[crate::ipc::TorrentWebSeed],
 ) -> Result<Option<serde_json::Value>, String> {
     let mut connection = database.lock()?;
-    let records = crate::db::load_downloads(&connection)?;
     let next_seeds = serde_json::to_value(seeds)
         .map_err(|error| format!("failed to encode Torrent web seeds: {error}"))?;
-    let mut previous_seeds = None;
-    let mut changed = false;
-    let mut next = Vec::with_capacity(records.len());
-    for record in records {
-        let mut value: serde_json::Value = match serde_json::from_str(&record) {
-            Ok(value) => value,
-            Err(_) => {
-                // Preserve unrelated legacy/corrupt rows byte-for-byte. A
-                // web-seed update must not fail its own transaction merely
-                // because another download cannot be decoded.
-                next.push(record);
-                continue;
-            }
-        };
-        if value
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            == Some(id)
-        {
-            let object = value
-                .as_object_mut()
-                .ok_or_else(|| "persisted download is not an object".to_string())?;
-            previous_seeds = object.get("torrentWebSeeds").cloned();
+    crate::db::mutate_download(
+        &mut connection,
+        id,
+        database.is_portable(),
+        |object| {
+            let previous_seeds = object.get("torrentWebSeeds").cloned();
             object.insert("torrentWebSeeds".to_string(), next_seeds.clone());
             object.insert("torrentWebSeedsNative".to_string(), next_seeds.clone());
-            changed = true;
-        }
-        next.push(
-            serde_json::to_string(&value)
-                .map_err(|error| format!("failed to encode persisted download: {error}"))?,
-        );
-    }
-    if !changed {
-        return Err("download is not persisted".to_string());
-    }
-    let next_data = serde_json::to_string(&next)
-        .map_err(|error| format!("failed to encode persisted downloads: {error}"))?;
-    crate::db::replace_downloads(&mut connection, &next_data, database.is_portable())?;
-    Ok(previous_seeds)
+            Ok(previous_seeds)
+        },
+    )
 }
 
 fn restore_persisted_torrent_web_seeds(
@@ -8670,29 +8544,13 @@ fn restore_persisted_torrent_web_seeds(
     previous_seeds: Option<serde_json::Value>,
 ) -> Result<(), String> {
     let mut connection = database.lock()?;
-    let records = crate::db::load_downloads(&connection)?;
     let expected_value = serde_json::to_value(expected_seeds)
         .map_err(|error| format!("failed to encode expected Torrent web seeds: {error}"))?;
-    let mut found = false;
-    let mut changed = false;
-    let mut next = Vec::with_capacity(records.len());
-    for record in records {
-        let mut value: serde_json::Value = match serde_json::from_str(&record) {
-            Ok(value) => value,
-            Err(_) => {
-                next.push(record);
-                continue;
-            }
-        };
-        if value
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            == Some(id)
-        {
-            found = true;
-            let object = value
-                .as_object_mut()
-                .ok_or_else(|| "persisted download is not an object".to_string())?;
+    crate::db::mutate_download(
+        &mut connection,
+        id,
+        database.is_portable(),
+        |object| {
             if object.get("torrentWebSeeds") == Some(&expected_value) {
                 match previous_seeds.clone() {
                     Some(previous) => {
@@ -8703,28 +8561,15 @@ fn restore_persisted_torrent_web_seeds(
                     }
                 }
                 object.remove("torrentWebSeedsNative");
-                changed = true;
             } else {
                 log::warn!(
                     "Torrent web-seed rollback [{}] skipped because persisted state changed concurrently",
                     id
                 );
             }
-        }
-        next.push(
-            serde_json::to_string(&value)
-                .map_err(|error| format!("failed to encode persisted download: {error}"))?,
-        );
-    }
-    if !found {
-        return Err("download is no longer persisted".to_string());
-    }
-    if changed {
-        let next_data = serde_json::to_string(&next)
-            .map_err(|error| format!("failed to encode persisted downloads: {error}"))?;
-        crate::db::replace_downloads(&mut connection, &next_data, database.is_portable())?;
-    }
-    Ok(())
+            Ok(())
+        },
+    )
 }
 
 async fn normalize_persisted_torrent_web_seeds(
@@ -9888,7 +9733,14 @@ fn persisted_destinations_equal(left: &str, right: &str) -> bool {
 fn merge_durable_torrent_telemetry(existing: &[String], data: &str) -> Result<String, String> {
     let mut native_state: HashMap<
         String,
-        (u64, u64, Option<String>, Option<serde_json::Value>),
+        (
+            u64,
+            u64,
+            Option<String>,
+            bool,
+            Option<serde_json::Value>,
+            Option<String>,
+        ),
     > = HashMap::new();
     for record in existing {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(record) else {
@@ -9917,7 +9769,15 @@ fn merge_durable_torrent_telemetry(existing: &[String], data: &str) -> Result<St
                     .get("torrentMoveDestination")
                     .and_then(serde_json::Value::as_str)
                     .map(ToString::to_string),
+                object
+                    .get("torrentRelocationCheckPending")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true),
                 object.get("torrentWebSeedsNative").cloned(),
+                object
+                    .get("torrentVerifyNative")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string),
             ),
         );
     }
@@ -9934,8 +9794,14 @@ fn merge_durable_torrent_telemetry(existing: &[String], data: &str) -> Result<St
         let Some(id) = object.get("id").and_then(serde_json::Value::as_str) else {
             continue;
         };
-        let Some((existing_uploaded, existing_seeded, native_destination, native_web_seeds)) =
-            native_state.get(id).cloned()
+        let Some((
+            existing_uploaded,
+            existing_seeded,
+            native_destination,
+            relocation_check_pending,
+            native_web_seeds,
+            native_verify_restore_status,
+        )) = native_state.get(id).cloned()
         else {
             continue;
         };
@@ -9958,12 +9824,44 @@ fn merge_durable_torrent_telemetry(existing: &[String], data: &str) -> Result<St
                 );
             }
         }
+        if relocation_check_pending {
+            object.insert(
+                "torrentRelocationCheckPending".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
         if let Some(native_web_seeds) = native_web_seeds {
             if object.get("torrentWebSeeds") == Some(&native_web_seeds) {
                 object.remove("torrentWebSeedsNative");
             } else {
                 object.insert("torrentWebSeeds".to_string(), native_web_seeds.clone());
                 object.insert("torrentWebSeedsNative".to_string(), native_web_seeds);
+            }
+        }
+        if let Some(restore_status) = native_verify_restore_status {
+            let incoming_acknowledges_marker = object
+                .get("torrentVerifyOnly")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                && object
+                    .get("torrentVerifyRestoreStatus")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(restore_status.as_str());
+            object.insert(
+                "torrentVerifyOnly".to_string(),
+                serde_json::Value::Bool(true),
+            );
+            object.insert(
+                "torrentVerifyRestoreStatus".to_string(),
+                serde_json::Value::String(restore_status.clone()),
+            );
+            if incoming_acknowledges_marker {
+                object.remove("torrentVerifyNative");
+            } else {
+                object.insert(
+                    "torrentVerifyNative".to_string(),
+                    serde_json::Value::String(restore_status),
+                );
             }
         }
         let uploaded = object
@@ -10539,6 +10437,57 @@ mod tests {
         .unwrap();
         let acknowledged: serde_json::Value = serde_json::from_str(&acknowledged).unwrap();
         assert!(acknowledged[0].get("torrentMoveDestination").is_none());
+    }
+
+    #[test]
+    fn renderer_download_snapshots_cannot_clear_native_relocation_or_verification_markers() {
+        let existing = vec![
+            json!({
+                "id": "torrent-1",
+                "status": "queued",
+                "destination": "/downloads/new",
+                "torrentMoveDestination": "/downloads/new",
+                "torrentRelocationCheckPending": true,
+                "torrentVerifyOnly": true,
+                "torrentVerifyRestoreStatus": "paused",
+                "torrentVerifyNative": "paused"
+            })
+            .to_string(),
+        ];
+        let merged = merge_durable_torrent_telemetry(
+            &existing,
+            &json!([{
+                "id": "torrent-1",
+                "status": "paused",
+                "destination": "/downloads/old"
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        let records: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(records[0]["destination"], "/downloads/new");
+        assert_eq!(records[0]["torrentRelocationCheckPending"], true);
+        assert_eq!(records[0]["torrentVerifyOnly"], true);
+        assert_eq!(records[0]["torrentVerifyRestoreStatus"], "paused");
+        assert_eq!(records[0]["torrentVerifyNative"], "paused");
+
+        let acknowledged = merge_durable_torrent_telemetry(
+            &existing,
+            &json!([{
+                "id": "torrent-1",
+                "status": "queued",
+                "destination": "/downloads/new",
+                "torrentVerifyOnly": true,
+                "torrentVerifyRestoreStatus": "paused"
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        let acknowledged: serde_json::Value = serde_json::from_str(&acknowledged).unwrap();
+        assert_eq!(acknowledged[0]["torrentRelocationCheckPending"], true);
+        assert!(acknowledged[0].get("torrentMoveDestination").is_none());
+        assert!(acknowledged[0].get("torrentVerifyNative").is_none());
+        assert_eq!(acknowledged[0]["torrentVerifyOnly"], true);
     }
 
     #[test]
@@ -14499,6 +14448,7 @@ pub fn run() {
             properties_window::open_download_properties_window,
             properties_window::get_properties_window_download_id,
             properties_window::properties_window_send_ready,
+            properties_window::properties_window_reveal,
             properties_window::properties_window_send_action,
             properties_window::validate_properties_window_request,
             properties_window::close_download_properties_window,

@@ -77,6 +77,7 @@ const common = {
       pause: 'Pause',
       start: 'Start',
       resume: 'Resume',
+      retry: 'Retry',
       options: 'Options',
     },
     size: {

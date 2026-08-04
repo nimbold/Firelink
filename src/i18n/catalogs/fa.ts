@@ -77,6 +77,7 @@ const fa = {
       pause: 'توقف',
       start: 'شروع',
       resume: 'ادامه',
+      retry: 'تلاش مجدد',
       options: 'گزینه‌ها',
     },
     size: {
