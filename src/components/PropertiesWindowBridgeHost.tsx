@@ -16,13 +16,16 @@ import {
   applySecretPatch,
   beginExclusivePropertiesAction,
   createFrameCoalescer,
+  enqueuePropertiesAction,
   getPropertiesLifecycleAction,
   sanitizePropertiesSnapshot,
   sendPropertiesActionResult,
   sendPropertiesRemoved,
   sendPropertiesSnapshot,
+  shouldAcceptPropertiesActionRequest,
   type PropertiesActionRequest,
   type PropertiesPatch,
+  type PropertiesWindowRegistration,
   type PropertiesWindowReady,
 } from '../propertiesBridge';
 import { invokeCommand as invoke } from '../ipc';
@@ -108,25 +111,28 @@ const copyEditablePatch = (rawPatch: PropertiesPatch): Partial<DownloadItem> => 
 
 export const PropertiesWindowBridgeHost = () => {
   useEffect(() => {
-    const windows = new Map<string, string>();
+    const windows = new Map<string, PropertiesWindowRegistration>();
     const snapshotRevisions = new Map<string, number>();
     const actionsInFlight = new Set<string>();
+    const actionChains = new Map<string, Promise<void>>();
     let disposed = false;
     let unlistenReady: UnlistenFn | undefined;
     let unlistenAction: UnlistenFn | undefined;
     let unlistenClosed: UnlistenFn | undefined;
     const snapshotCoalescer = createFrameCoalescer(
       windowLabel => {
-        const downloadId = windows.get(windowLabel);
-        if (downloadId) void sendFor(windowLabel, downloadId).catch(() => undefined);
+        const registration = windows.get(windowLabel);
+        if (registration) void sendFor(windowLabel, registration.downloadId).catch(() => undefined);
       },
       callback => window.requestAnimationFrame(callback),
       handle => window.cancelAnimationFrame(handle),
     );
 
     const sendFor = async (windowLabel: string, downloadId: string) => {
+      const registration = windows.get(windowLabel);
+      if (!registration || registration.downloadId !== downloadId || disposed) return false;
       const item = useDownloadStore.getState().downloads.find(download => download.id === downloadId);
-      if (!item || disposed) return false;
+      if (!item) return false;
       const settings = useSettingsStore.getState();
       const progress = useDownloadProgressStore.getState();
       const revision = (snapshotRevisions.get(windowLabel) ?? 0) + 1;
@@ -134,6 +140,7 @@ export const PropertiesWindowBridgeHost = () => {
       await sendPropertiesSnapshot(windowLabel, {
         windowLabel,
         downloadId,
+        sessionId: registration.sessionId,
         revision,
         snapshot: sanitizePropertiesSnapshot(item, {
           theme: settings.theme,
@@ -149,6 +156,25 @@ export const PropertiesWindowBridgeHost = () => {
       return true;
     };
 
+    const synchronizeRegistration = (
+      windowLabel: string,
+      downloadId: string,
+      sessionId: string,
+    ) => {
+      const previous = windows.get(windowLabel);
+      const sessionChanged = previous?.downloadId !== downloadId || previous.sessionId !== sessionId;
+      windows.set(windowLabel, {
+        downloadId,
+        sessionId,
+        latestRequestId: sessionChanged ? 0 : (previous?.latestRequestId ?? 0),
+      });
+      if (sessionChanged) {
+        snapshotRevisions.set(windowLabel, 0);
+      } else if (!snapshotRevisions.has(windowLabel)) {
+        snapshotRevisions.set(windowLabel, 0);
+      }
+    };
+
     const handleReady = async (payload: PropertiesWindowReady) => {
       try {
         await invoke('validate_properties_window_request', payload);
@@ -157,8 +183,7 @@ export const PropertiesWindowBridgeHost = () => {
           await sendPropertiesRemoved(payload.windowLabel, payload.downloadId);
           return;
         }
-        windows.set(payload.windowLabel, payload.downloadId);
-        if (!snapshotRevisions.has(payload.windowLabel)) snapshotRevisions.set(payload.windowLabel, 0);
+        synchronizeRegistration(payload.windowLabel, payload.downloadId, payload.sessionId);
         await sendFor(payload.windowLabel, payload.downloadId);
       } catch {
         // The child will show its own unavailable state. Do not log bridge
@@ -166,14 +191,17 @@ export const PropertiesWindowBridgeHost = () => {
       }
     };
 
-    const handleAction = async (request: PropertiesActionRequest) => {
+    const processAction = async (request: PropertiesActionRequest) => {
       let ok = false;
       let error: string | undefined;
       const actionKey = `${request.windowLabel}:${request.downloadId}`;
       let releaseAction: (() => void) | undefined;
       try {
         await invoke('validate_properties_window_request', request);
-        if (windows.get(request.windowLabel) !== request.downloadId) {
+        const registration = windows.get(request.windowLabel);
+        if (!registration
+          || registration.downloadId !== request.downloadId
+          || registration.sessionId !== request.sessionId) {
           throw new Error('Properties window is no longer registered');
         }
         releaseAction = beginExclusivePropertiesAction(actionsInFlight, actionKey);
@@ -285,6 +313,7 @@ export const PropertiesWindowBridgeHost = () => {
         await sendPropertiesActionResult(request.windowLabel, {
           windowLabel: request.windowLabel,
           downloadId: request.downloadId,
+          sessionId: request.sessionId,
           requestId: request.requestId,
           ok,
           ...(error ? { error } : {}),
@@ -295,18 +324,44 @@ export const PropertiesWindowBridgeHost = () => {
       }
     };
 
+    const handleAction = async (request: PropertiesActionRequest) => {
+      const actionKey = `${request.windowLabel}:${request.downloadId}`;
+      try {
+        // The native command validates the caller, download binding, and
+        // renderer session. If a ready event is delayed or lost, this valid
+        // action can also establish the main-window registration.
+        await invoke('validate_properties_window_request', request);
+        synchronizeRegistration(request.windowLabel, request.downloadId, request.sessionId);
+      } catch {
+        // Stale renderer actions are deliberately ignored. The current child
+        // session cannot safely consume a result for a superseded renderer.
+        return;
+      }
+
+      const registration = windows.get(request.windowLabel);
+      if (!registration) return;
+      if (!shouldAcceptPropertiesActionRequest(registration, request)) return;
+      registration.latestRequestId = request.requestId;
+
+      // Preserve user order for accepted requests. This keeps a pause from an
+      // earlier request from running after a newer resume, while still
+      // allowing the newer request to run after an already-started operation.
+      await enqueuePropertiesAction(actionChains, actionKey, () => processAction(request));
+    };
+
     void listen<PropertiesWindowReady>(PROPERTIES_WINDOW_READY, event => void handleReady(event.payload)).then(value => { unlistenReady = value; });
     void listen<PropertiesActionRequest>(PROPERTIES_WINDOW_ACTION_REQUEST, event => void handleAction(event.payload)).then(value => { unlistenAction = value; });
     void listen<string>(PROPERTIES_WINDOW_CLOSED, event => {
-      const downloadId = windows.get(event.payload);
+      const registration = windows.get(event.payload);
       windows.delete(event.payload);
       snapshotRevisions.delete(event.payload);
       snapshotCoalescer.cancel(event.payload);
-      if (downloadId) actionsInFlight.delete(`${event.payload}:${downloadId}`);
+      if (registration) actionsInFlight.delete(`${event.payload}:${registration.downloadId}`);
     }).then(value => { unlistenClosed = value; });
 
     const unsubscribeStore = useDownloadStore.subscribe((state, previous) => {
-      for (const [windowLabel, downloadId] of windows) {
+      for (const [windowLabel, registration] of windows) {
+        const { downloadId } = registration;
         const next = state.downloads.find(download => download.id === downloadId);
         const before = previous.downloads.find(download => download.id === downloadId);
         if (!next) {
@@ -321,7 +376,8 @@ export const PropertiesWindowBridgeHost = () => {
       }
     });
     const unsubscribeProgress = useDownloadProgressStore.subscribe((state, previous) => {
-      for (const [windowLabel, downloadId] of windows) {
+      for (const [windowLabel, registration] of windows) {
+        const { downloadId } = registration;
         if (state.progressMap[downloadId] !== previous.progressMap[downloadId]
           || state.moveProgressMap[downloadId] !== previous.moveProgressMap[downloadId]) {
           snapshotCoalescer.schedule(windowLabel);

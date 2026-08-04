@@ -12,6 +12,8 @@ const PROPERTIES_WINDOW_TITLE: &str = "Properties - Firelink";
 const PROPERTIES_WINDOW_READY_EVENT: &str = "properties-window-ready";
 const PROPERTIES_WINDOW_ACTION_REQUEST_EVENT: &str = "properties-window-action-request";
 const MAX_PROPERTIES_ACTION_PAYLOAD_BYTES: usize = 64 * 1024;
+const MAX_PROPERTIES_SESSION_ID_BYTES: usize = 128;
+const MAX_PROPERTIES_REQUEST_ID: u64 = 9_007_199_254_740_991;
 
 #[derive(Default)]
 pub struct PropertiesWindowRegistry {
@@ -23,6 +25,7 @@ struct RegistryState {
     by_download: HashMap<String, String>,
     by_window: HashMap<String, String>,
     ready_windows: HashSet<String>,
+    sessions_by_window: HashMap<String, String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -30,6 +33,7 @@ struct RegistryState {
 struct PropertiesWindowReadyEvent {
     window_label: String,
     download_id: String,
+    session_id: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -37,6 +41,7 @@ struct PropertiesWindowReadyEvent {
 struct PropertiesWindowActionEvent {
     window_label: String,
     download_id: String,
+    session_id: String,
     request_id: u64,
     action: String,
     payload: Option<serde_json::Value>,
@@ -75,6 +80,7 @@ impl PropertiesWindowRegistry {
             .map_err(|_| "Properties window registry is unavailable".to_string())?;
         let download_id = state.by_window.remove(label);
         state.ready_windows.remove(label);
+        state.sessions_by_window.remove(label);
         if let Some(download_id) = &download_id {
             state.by_download.remove(download_id);
         }
@@ -90,6 +96,7 @@ impl PropertiesWindowRegistry {
         if let Some(label) = &label {
             state.by_window.remove(label);
             state.ready_windows.remove(label);
+            state.sessions_by_window.remove(label);
         }
         Ok(label)
     }
@@ -114,6 +121,34 @@ impl PropertiesWindowRegistry {
         }
         state.ready_windows.insert(label.to_string());
         Ok(())
+    }
+
+    pub fn register_session(&self, label: &str, session_id: &str) -> Result<(), String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "Properties window registry is unavailable".to_string())?;
+        if !state.by_window.contains_key(label) {
+            return Err("Properties window is no longer registered".to_string());
+        }
+        state
+            .sessions_by_window
+            .insert(label.to_string(), session_id.to_string());
+        Ok(())
+    }
+
+    pub fn session_for_window(&self, label: &str) -> Result<Option<String>, String> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| "Properties window registry is unavailable".to_string())?
+            .sessions_by_window
+            .get(label)
+            .cloned())
+    }
+
+    pub fn session_matches(&self, label: &str, session_id: &str) -> Result<bool, String> {
+        Ok(self.session_for_window(label)?.as_deref() == Some(session_id))
     }
 
     pub fn is_ready(&self, label: &str) -> Result<bool, String> {
@@ -211,6 +246,25 @@ fn validate_download_id(download_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_properties_session_id(session_id: &str) -> Result<(), String> {
+    if session_id.is_empty()
+        || session_id.len() > MAX_PROPERTIES_SESSION_ID_BYTES
+        || !session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("Invalid Properties window session".to_string());
+    }
+    Ok(())
+}
+
+fn validate_properties_request_id(request_id: u64) -> Result<(), String> {
+    if request_id == 0 || request_id > MAX_PROPERTIES_REQUEST_ID {
+        return Err("Invalid Properties action request ID".to_string());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn open_download_properties_window(
     app: tauri::AppHandle,
@@ -282,14 +336,18 @@ pub fn properties_window_send_ready(
     caller: tauri::WebviewWindow,
     app: tauri::AppHandle,
     registry: tauri::State<'_, PropertiesWindowRegistry>,
+    session_id: String,
 ) -> Result<(), String> {
+    validate_properties_session_id(&session_id)?;
     let download_id = registered_download_for_caller(&caller, &registry)?;
+    registry.register_session(caller.label(), &session_id)?;
     app.emit_to(
         MAIN_WINDOW_LABEL,
         PROPERTIES_WINDOW_READY_EVENT,
         PropertiesWindowReadyEvent {
             window_label: caller.label().to_string(),
             download_id,
+            session_id,
         },
     )
     .map_err(|error| error.to_string())
@@ -311,10 +369,13 @@ pub fn properties_window_send_action(
     caller: tauri::WebviewWindow,
     app: tauri::AppHandle,
     registry: tauri::State<'_, PropertiesWindowRegistry>,
+    session_id: String,
     request_id: u64,
     action: String,
     payload: Option<serde_json::Value>,
 ) -> Result<(), String> {
+    validate_properties_session_id(&session_id)?;
+    validate_properties_request_id(request_id)?;
     if !is_properties_action(&action)
         || action.len() > 64
         || action.chars().any(char::is_control)
@@ -330,12 +391,16 @@ pub fn properties_window_send_action(
         }
     }
     let download_id = registered_download_for_caller(&caller, &registry)?;
+    if !registry.session_matches(caller.label(), &session_id)? {
+        return Err("Properties window session is no longer current".to_string());
+    }
     app.emit_to(
         MAIN_WINDOW_LABEL,
         PROPERTIES_WINDOW_ACTION_REQUEST_EVENT,
         PropertiesWindowActionEvent {
             window_label: caller.label().to_string(),
             download_id,
+            session_id,
             request_id,
             action,
             payload,
@@ -350,16 +415,25 @@ pub fn validate_properties_window_request(
     registry: tauri::State<'_, PropertiesWindowRegistry>,
     window_label: String,
     download_id: String,
+    session_id: String,
+    request_id: Option<u64>,
 ) -> Result<(), String> {
     if caller.label() != MAIN_WINDOW_LABEL {
         return Err("Only the main window can validate Properties requests".to_string());
     }
     validate_download_id(&download_id)?;
+    validate_properties_session_id(&session_id)?;
+    if let Some(request_id) = request_id {
+        validate_properties_request_id(request_id)?;
+    }
     if !is_properties_window_label(&window_label) {
         return Err("Invalid Properties window label".to_string());
     }
     if registry.download_for_window(&window_label)?.as_deref() != Some(download_id.as_str()) {
         return Err("Properties window request does not match its registered download".to_string());
+    }
+    if !registry.session_matches(&window_label, &session_id)? {
+        return Err("Properties window session is no longer current".to_string());
     }
     Ok(())
 }
@@ -442,6 +516,27 @@ mod tests {
         assert!(validate_download_id("").is_err());
         assert!(validate_download_id("\n").is_err());
         assert!(validate_download_id("valid-id").is_ok());
+        assert!(validate_properties_session_id("session-1").is_ok());
+        assert!(validate_properties_session_id("").is_err());
+        assert!(validate_properties_session_id("bad session").is_err());
+        assert!(validate_properties_request_id(1).is_ok());
+        assert!(validate_properties_request_id(0).is_err());
+    }
+
+    #[test]
+    fn registering_a_new_session_invalidates_the_previous_session() {
+        let registry = PropertiesWindowRegistry::default();
+        let label = registry.allocate("download-a").unwrap();
+
+        registry.register_session(&label, "session-old").unwrap();
+        assert!(registry.session_matches(&label, "session-old").unwrap());
+
+        registry.register_session(&label, "session-new").unwrap();
+        assert!(!registry.session_matches(&label, "session-old").unwrap());
+        assert!(registry.session_matches(&label, "session-new").unwrap());
+
+        registry.remove_window(&label).unwrap();
+        assert!(!registry.session_matches(&label, "session-new").unwrap());
     }
 
     #[test]

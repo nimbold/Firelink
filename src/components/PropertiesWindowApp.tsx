@@ -50,6 +50,7 @@ export const PropertiesWindowApp = () => {
   const { t } = useTranslation();
   const currentWindow = useMemo(() => getCurrentWindow(), []);
   const windowLabel = currentWindow.label;
+  const sessionId = useMemo(() => crypto.randomUUID(), []);
   const [downloadId, setDownloadId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<PropertiesSnapshot | null>(null);
   const [activeTab, setActiveTab] = useState<PropertiesTab>('overview');
@@ -190,7 +191,9 @@ export const PropertiesWindowApp = () => {
         if (cancelled) return;
         setDownloadId(id);
         unlistenSnapshot = await listen<PropertiesSnapshotEvent>(PROPERTIES_WINDOW_SNAPSHOT, async event => {
-          if (event.payload.windowLabel !== windowLabel || event.payload.downloadId !== id) return;
+          if (event.payload.windowLabel !== windowLabel
+            || event.payload.downloadId !== id
+            || event.payload.sessionId !== sessionId) return;
           if (event.payload.revision <= latestSnapshotRevisionRef.current) return;
           latestSnapshotRevisionRef.current = event.payload.revision;
           await changeAppLocale(event.payload.snapshot.appearance.locale);
@@ -218,7 +221,9 @@ export const PropertiesWindowApp = () => {
           }
         });
         unlistenResult = await listen<PropertiesActionResult>(PROPERTIES_WINDOW_ACTION_RESULT, event => {
-          if (event.payload.windowLabel !== windowLabel || event.payload.downloadId !== id) return;
+          if (event.payload.windowLabel !== windowLabel
+            || event.payload.downloadId !== id
+            || event.payload.sessionId !== sessionId) return;
           if (event.payload.requestId !== requestIdRef.current) return;
           setIsSaving(false);
           const completedAction = pendingActionRef.current;
@@ -253,7 +258,7 @@ export const PropertiesWindowApp = () => {
             setNotice(t($ => $.downloadTable.noDownloads));
           }
         });
-        await sendPropertiesReady();
+        await sendPropertiesReady(sessionId);
         if (cancelled) return;
         // Tauri event listeners are registered asynchronously. If the main
         // bridge was still installing its listener, the first ready event can
@@ -261,7 +266,7 @@ export const PropertiesWindowApp = () => {
         // the handshake rather than leaving a permanently hidden window.
         readyRetryTimer = window.setInterval(() => {
           if (cancelled || hasRevealedWindowRef.current) return;
-          void sendPropertiesReady().catch(() => undefined);
+          void sendPropertiesReady(sessionId).catch(() => undefined);
         }, 500);
       } catch (error) {
         if (!cancelled) setErrorMessage(errorText(error));
@@ -277,7 +282,7 @@ export const PropertiesWindowApp = () => {
       appearanceCleanupRef.current?.();
       appearanceCleanupRef.current = null;
     };
-  }, [currentWindow, hydrateDraft, t, windowLabel]);
+  }, [currentWindow, hydrateDraft, sessionId, t, windowLabel]);
 
   useEffect(() => {
     if (!snapshot || draftTab !== null) return;
@@ -331,6 +336,7 @@ export const PropertiesWindowApp = () => {
       await sendPropertiesActionRequest({
         windowLabel,
         downloadId,
+        sessionId,
         requestId,
         action,
         payload,
@@ -342,7 +348,7 @@ export const PropertiesWindowApp = () => {
       switchAfterSaveRef.current = null;
       setErrorMessage(errorText(error));
     }
-  }, [downloadId, windowLabel]);
+  }, [downloadId, sessionId, windowLabel]);
 
   const applyActiveTab = useCallback(async () => {
     if (!snapshot || !isEditableStatus(snapshot.status)) {

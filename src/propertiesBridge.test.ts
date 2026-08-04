@@ -14,9 +14,11 @@ import {
   applySecretPatch,
   beginExclusivePropertiesAction,
   createFrameCoalescer,
+  enqueuePropertiesAction,
   getPropertiesLifecycleAction,
   isExpectedPropertiesDiagnosticUnavailable,
   sanitizePropertiesSnapshot,
+  shouldAcceptPropertiesActionRequest,
 } from './propertiesBridge';
 
 describe('Properties window bridge', () => {
@@ -155,6 +157,72 @@ describe('Properties window bridge', () => {
     release();
     release();
     expect(inFlight.has('window:download')).toBe(false);
+  });
+
+  it('rejects actions from a superseded renderer session and older request IDs', () => {
+    const registration = {
+      downloadId: 'download-1',
+      sessionId: 'session-new',
+      latestRequestId: 4,
+    };
+
+    expect(shouldAcceptPropertiesActionRequest(registration, {
+      downloadId: 'download-1',
+      sessionId: 'session-old',
+      requestId: 99,
+    })).toBe(false);
+    expect(shouldAcceptPropertiesActionRequest(registration, {
+      downloadId: 'download-1',
+      sessionId: 'session-new',
+      requestId: 4,
+    })).toBe(false);
+    expect(shouldAcceptPropertiesActionRequest(registration, {
+      downloadId: 'download-1',
+      sessionId: 'session-new',
+      requestId: 5,
+    })).toBe(true);
+  });
+
+  it('rejects a request whose download binding does not match the window', () => {
+    expect(shouldAcceptPropertiesActionRequest({
+      downloadId: 'download-1',
+      sessionId: 'session-1',
+      latestRequestId: 0,
+    }, {
+      downloadId: 'download-2',
+      sessionId: 'session-1',
+      requestId: 1,
+    })).toBe(false);
+  });
+
+  it('serializes actions per window and continues after an earlier action fails', async () => {
+    const chains = new Map<string, Promise<void>>();
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let markFirstStarted!: () => void;
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+    const firstStarted = new Promise<void>(resolve => { markFirstStarted = resolve; });
+
+    const first = enqueuePropertiesAction(chains, 'window:download', async () => {
+      events.push('first-start');
+      markFirstStarted();
+      await firstGate;
+      events.push('first-end');
+      throw new Error('first action failed');
+    });
+    const second = enqueuePropertiesAction(chains, 'window:download', async () => {
+      events.push('second');
+    });
+
+    await firstStarted;
+    expect(events).toEqual(['first-start']);
+    releaseFirst();
+    const results = await Promise.allSettled([first, second]);
+
+    expect(results[0].status).toBe('rejected');
+    expect(results[1].status).toBe('fulfilled');
+    expect(events).toEqual(['first-start', 'first-end', 'second']);
+    expect(chains.size).toBe(0);
   });
 
   it('coalesces repeated snapshot requests to one callback per animation frame', () => {

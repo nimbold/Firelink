@@ -157,10 +157,10 @@ type CommandMap = {
   remove_from_queue: { args: { id: string }; result: boolean };
   open_download_properties_window: { args: { id: string }; result: string };
   get_properties_window_download_id: { args: undefined; result: string };
-  properties_window_send_ready: { args: undefined; result: void };
+  properties_window_send_ready: { args: { sessionId: string }; result: void };
   properties_window_reveal: { args: undefined; result: void };
-  properties_window_send_action: { args: { requestId: number; action: string; payload?: unknown }; result: void };
-  validate_properties_window_request: { args: { windowLabel: string; downloadId: string }; result: void };
+  properties_window_send_action: { args: { sessionId: string; requestId: number; action: string; payload?: unknown }; result: void };
+  validate_properties_window_request: { args: { windowLabel: string; downloadId: string; sessionId: string; requestId?: number }; result: void };
   close_download_properties_window: { args: { id: string }; result: void };
   properties_window_registry_remove_for_download: { args: { id: string }; result: void };
 };

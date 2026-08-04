@@ -154,11 +154,13 @@ export const beginExclusivePropertiesAction = (
 export type PropertiesWindowReady = {
   windowLabel: string;
   downloadId: string;
+  sessionId: string;
 };
 
 export type PropertiesActionRequest = {
   windowLabel: string;
   downloadId: string;
+  sessionId: string;
   requestId: number;
   action: PropertiesAction;
   payload?: PropertiesPatch | { limit: string | null } | { maxPeers: string | null; peerSpeedLimit: string | null };
@@ -167,6 +169,7 @@ export type PropertiesActionRequest = {
 export type PropertiesActionResult = {
   windowLabel: string;
   downloadId: string;
+  sessionId: string;
   requestId: number;
   ok: boolean;
   error?: string;
@@ -175,8 +178,39 @@ export type PropertiesActionResult = {
 export type PropertiesSnapshotEvent = {
   windowLabel: string;
   downloadId: string;
+  sessionId: string;
   revision: number;
   snapshot: PropertiesSnapshot;
+};
+
+export type PropertiesWindowRegistration = {
+  downloadId: string;
+  sessionId: string;
+  latestRequestId: number;
+};
+
+export const shouldAcceptPropertiesActionRequest = (
+  registration: PropertiesWindowRegistration | undefined,
+  request: Pick<PropertiesActionRequest, 'downloadId' | 'sessionId' | 'requestId'>,
+): boolean => registration !== undefined
+  && registration.downloadId === request.downloadId
+  && registration.sessionId === request.sessionId
+  && Number.isSafeInteger(request.requestId)
+  && request.requestId > registration.latestRequestId;
+
+export const enqueuePropertiesAction = (
+  chains: Map<string, Promise<void>>,
+  key: string,
+  action: () => Promise<void>,
+): Promise<void> => {
+  const previous = chains.get(key) ?? Promise.resolve();
+  const operation = previous.catch(() => undefined).then(action);
+  let tracked: Promise<void>;
+  tracked = operation.finally(() => {
+    if (chains.get(key) === tracked) chains.delete(key);
+  });
+  chains.set(key, tracked);
+  return tracked;
 };
 
 const copyWithoutSecrets = (
@@ -272,11 +306,12 @@ export const createFrameCoalescer = (
 export const openPropertiesWindow = (downloadId: string): Promise<string> =>
   invoke('open_download_properties_window', { id: downloadId });
 
-export const sendPropertiesReady = (): Promise<void> =>
-  invoke('properties_window_send_ready');
+export const sendPropertiesReady = (sessionId: string): Promise<void> =>
+  invoke('properties_window_send_ready', { sessionId });
 
 export const sendPropertiesActionRequest = (payload: PropertiesActionRequest): Promise<void> =>
   invoke('properties_window_send_action', {
+    sessionId: payload.sessionId,
     requestId: payload.requestId,
     action: payload.action,
     payload: payload.payload,
