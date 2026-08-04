@@ -3421,8 +3421,14 @@ impl<R: tauri::Runtime> QueueManager<R> {
         if let Some(epoch) = aria2_lifecycle_epoch {
             self.begin_aria2_dispatch(&id, epoch).await;
         }
-        self.emit_state(&id, DownloadStatus::Downloading);
         drop(control_guard);
+
+        // Media runners do not receive an Aria2 GID. Their permit is already
+        // active at this point, so publish their live state before spawning
+        // the runner; Aria2 tasks publish only after remember_gid below.
+        if matches!(&task.kind, TaskKind::Media) {
+            self.emit_state(&id, DownloadStatus::Downloading);
+        }
 
         match task.kind {
             TaskKind::Aria2 => {
@@ -3477,7 +3483,13 @@ impl<R: tauri::Runtime> QueueManager<R> {
                             }
                             return;
                         }
+                        // A queued task is not a live transfer until aria2 has
+                        // accepted it and Firelink has installed the GID
+                        // mapping. Emitting Downloading before this point
+                        // lets the UI (and a concurrent Properties pause)
+                        // act on a lifecycle that does not yet exist.
                         let buffered_outcome = self.remember_gid(id.clone(), gid.clone()).await;
+                        self.emit_state(&id, DownloadStatus::Downloading);
                         let install_web_seeds = buffered_outcome.is_none()
                             && task.payload.is_torrent
                             && !task.payload.torrent_verify_only

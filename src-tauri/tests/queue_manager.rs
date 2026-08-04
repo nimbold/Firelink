@@ -1782,6 +1782,7 @@ async fn media_terminal_error_emits_failed_without_completed() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     let statuses = emitted_statuses(&event_rx);
+    assert!(statuses.iter().any(|status| status == "downloading"));
     assert!(statuses.iter().any(|status| status == "failed"));
     assert!(!statuses.iter().any(|status| status == "completed"));
     assert_eq!(manager.available_permits(), 1);
@@ -1839,6 +1840,62 @@ async fn aria2_permit_survives_rpc_return() {
     );
 
     handle.abort();
+}
+
+#[tokio::test]
+async fn aria2_does_not_emit_downloading_before_gid_mapping() {
+    let app = mock_builder()
+        .build(mock_context(noop_assets()))
+        .expect("mock app");
+    let (gid_started_tx, gid_started_rx) = tokio::sync::oneshot::channel();
+    let spawner = Arc::new(DelayedAria2Spawner::new(gid_started_tx));
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    app.handle().listen("download-state", move |event| {
+        let _ = event_tx.send(event.payload().to_string());
+    });
+    let manager = Arc::new(QueueManager::test_new(app.handle().clone(), 1, spawner));
+    manager.push(aria2_task("delayed-start")).await.unwrap();
+
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+
+    gid_started_rx
+        .await
+        .expect("add_uri should begin before the delayed GID is returned");
+    let early_statuses = emitted_statuses(&event_rx);
+    assert!(
+        !early_statuses.iter().any(|status| status == "downloading"),
+        "a queued task must not be reported as downloading before its GID is mapped"
+    );
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if manager.aria2_gid_for_download("delayed-start").is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the delayed GID should eventually be mapped");
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if emitted_statuses(&event_rx)
+                .iter()
+                .any(|status| status == "downloading")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the transfer should become downloading only after its GID is owned");
+
+    manager.release_permit("delayed-start").await;
+    dispatcher.abort();
 }
 
 #[tokio::test]

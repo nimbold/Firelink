@@ -12,6 +12,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 import {
   applySecretPatch,
+  attachAsyncPropertiesListener,
   beginExclusivePropertiesAction,
   createFrameCoalescer,
   enqueuePropertiesAction,
@@ -130,6 +131,7 @@ describe('Properties window bridge', () => {
 
   it('derives truthful lifecycle commands from the current status', () => {
     expect(getPropertiesLifecycleAction('downloading')).toBe('pause');
+    expect(getPropertiesLifecycleAction('queued')).toBe('pause');
     expect(getPropertiesLifecycleAction('retrying')).toBe('pause');
     expect(getPropertiesLifecycleAction('paused')).toBe('resume');
     expect(getPropertiesLifecycleAction('ready')).toBe('start');
@@ -254,5 +256,40 @@ describe('Properties window bridge', () => {
     coalescer.schedule('properties-1');
     coalescer.cancelAll();
     expect(frames.size).toBe(0);
+  });
+
+  it('unlistens a Tauri listener that resolves after bridge cleanup', async () => {
+    let resolveListener!: (unlisten: () => void) => void;
+    const listener = new Promise<() => void>(resolve => { resolveListener = resolve; });
+    let disposed = true;
+    let assigned = false;
+    let unlistened = false;
+
+    attachAsyncPropertiesListener(
+      listener,
+      () => disposed,
+      () => { assigned = true; },
+    );
+    resolveListener(() => { unlistened = true; });
+    await listener;
+    await Promise.resolve();
+
+    expect(assigned).toBe(false);
+    expect(unlistened).toBe(true);
+  });
+
+  it('assigns a live Tauri listener while the bridge is mounted', async () => {
+    let resolveListener!: (unlisten: () => void) => void;
+    const listener = new Promise<() => void>(resolve => { resolveListener = resolve; });
+    const unlisten = vi.fn();
+    let assigned: (() => void) | undefined;
+
+    attachAsyncPropertiesListener(listener, () => false, value => { assigned = value; });
+    resolveListener(unlisten);
+    await listener;
+    await Promise.resolve();
+
+    expect(assigned).toBe(unlisten);
+    expect(unlisten).not.toHaveBeenCalled();
   });
 });

@@ -4873,6 +4873,9 @@ async fn resume_download(
                         )
                         .await;
                     if !parked {
+                        queue_manager
+                            .release_aria2_permit_candidate(&id_clone, lifecycle_generation)
+                            .await;
                         log::warn!(
                             "aria2 resume [{}]: permit ownership was not established before unpause; leaving gid {} paused",
                             id_clone,
@@ -4881,13 +4884,6 @@ async fn resume_download(
                         return;
                     }
                 }
-                let _ = app_handle_clone.emit(
-                    "download-state",
-                    crate::ipc::DownloadStateEvent::new(
-                        &id_clone,
-                        crate::ipc::DownloadStatus::Downloading,
-                    ),
-                );
                 let unpause_error = match rpc_call(
                     aria2_port,
                     &aria2_secret,
@@ -4902,8 +4898,31 @@ async fn resume_download(
                     Err(error) => Some(format!("failed to resume aria2 gid {gid_clone}: {error}")),
                 };
                 if let Some(unpause_error) = unpause_error {
-                    match aria2_download_status(aria2_port, &aria2_secret, &gid_clone).await {
+                    match verify_aria2_resume_status(aria2_port, &aria2_secret, &gid_clone).await {
                         Ok(status) if matches!(status.as_str(), "active" | "waiting") => {
+                            let still_current = queue_manager
+                                .is_aria2_control_epoch_current(&id_clone, control_epoch)
+                                .await
+                                && queue_manager.aria2_gid_for_download(&id_clone).as_deref()
+                                    == Some(gid_clone.as_str());
+                            if !still_current {
+                                let _ = rpc_call(
+                                    aria2_port,
+                                    &aria2_secret,
+                                    "aria2.forcePause",
+                                    serde_json::json!([gid_clone]),
+                                )
+                                .await;
+                                return;
+                            }
+                            use tauri::Emitter;
+                            let _ = app_handle_clone.emit(
+                                "download-state",
+                                crate::ipc::DownloadStateEvent::new(
+                                    &id_clone,
+                                    crate::ipc::DownloadStatus::Downloading,
+                                ),
+                            );
                             log::warn!(
                                 "aria2 resume [{}]: {} but daemon reports gid {} as {}; retaining permit",
                                 id_clone,
@@ -4985,6 +5004,79 @@ async fn resume_download(
                         }
                     }
                 }
+                // A successful unpause RPC is not itself the postcondition:
+                // aria2 may still report the GID as paused, complete, or
+                // otherwise unavailable. Verify the daemon state before
+                // publishing Downloading to the renderer.
+                let status_after_unpause = match verify_aria2_resume_status(
+                    aria2_port,
+                    &aria2_secret,
+                    &gid_clone,
+                )
+                .await
+                {
+                    Ok(status) => status,
+                    Err(error) => {
+                        log::error!(
+                            "aria2 resume [{}]: unpause succeeded but gid {} could not be verified: {}; retaining permit",
+                            id_clone,
+                            gid_clone,
+                            error
+                        );
+                        return;
+                    }
+                };
+                match status_after_unpause.as_str() {
+                    "active" | "waiting" => {}
+                    "complete" => {
+                        queue_manager
+                            .apply_completion_locked(
+                                &id_clone,
+                                crate::queue::PendingOutcome::Complete,
+                            )
+                            .await;
+                        return;
+                    }
+                    "error" | "removed" => {
+                        let terminal_error = format!(
+                            "aria2 resume left gid {gid_clone} in terminal state {status_after_unpause}"
+                        );
+                        queue_manager
+                            .apply_completion_locked(
+                                &id_clone,
+                                crate::queue::PendingOutcome::Error(terminal_error),
+                            )
+                            .await;
+                        return;
+                    }
+                    "paused" => {
+                        queue_manager.next_aria2_control_epoch(&id_clone).await;
+                        queue_manager.cancel_aria2_retries(&id_clone).await;
+                        queue_manager.release_permit(&id_clone).await;
+                        let error = "aria2 kept the download paused after resume".to_string();
+                        log::error!(
+                            "aria2 resume [{}]: {}; gid {} remains paused",
+                            id_clone,
+                            error,
+                            gid_clone
+                        );
+                        let _ = app_handle_clone.emit(
+                            "download-state",
+                            crate::ipc::DownloadStateEvent::paused_with_error(&id_clone, error),
+                        );
+                        return;
+                    }
+                    other => {
+                        log::error!(
+                            "aria2 resume [{}]: unpause left gid {} in unexpected state {}; retaining permit",
+                            id_clone,
+                            gid_clone,
+                            other
+                        );
+                        return;
+                    }
+                }
+
                 let current_epoch = queue_manager
                     .is_aria2_control_epoch_current(&id_clone, control_epoch)
                     .await;
@@ -5002,6 +5094,14 @@ async fn resume_download(
                     .await;
                     return;
                 }
+                use tauri::Emitter;
+                let _ = app_handle_clone.emit(
+                    "download-state",
+                    crate::ipc::DownloadStateEvent::new(
+                        &id_clone,
+                        crate::ipc::DownloadStatus::Downloading,
+                    ),
+                );
                 log::info!("aria2 resume [{}]: unpaused gid {}", id_clone, gid_clone);
             });
             Ok(true)
@@ -5067,6 +5167,9 @@ async fn resume_download(
                         )
                         .await;
                     if !parked && !queue_manager.has_active_permit(&id_clone).await {
+                        queue_manager
+                            .release_aria2_permit_candidate(&id_clone, lifecycle_generation)
+                            .await;
                         return;
                     }
                 }
@@ -5519,6 +5622,26 @@ async fn aria2_download_status(port: u16, secret: &str, gid: &str) -> Result<Str
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| format!("aria2.tellStatus returned no status for gid {gid}"))
+}
+
+/// Verify a retained-GID resume against Aria2's actual state. `unpause` can
+/// return before a paused GID becomes observable as active, and a transient
+/// tellStatus failure must not turn a successful resume into a false failure.
+/// Retry only that ambiguous observation; terminal and active states return
+/// immediately and remain authoritative.
+async fn verify_aria2_resume_status(port: u16, secret: &str, gid: &str) -> Result<String, String> {
+    let mut last_observation = Err(format!("aria2 resume status for gid {gid} was not observed"));
+    for attempt in 0..4u32 {
+        last_observation = match aria2_download_status(port, secret, gid).await {
+            Ok(status) if status != "paused" => return Ok(status),
+            Ok(status) => Ok(status),
+            Err(error) => Err(error),
+        };
+        if attempt < 3 {
+            tokio::time::sleep(Duration::from_millis(25 * (1_u64 << attempt))).await;
+        }
+    }
+    last_observation
 }
 
 async fn reconcile_aria2_downloads(app_handle: &tauri::AppHandle) {

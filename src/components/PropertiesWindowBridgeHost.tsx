@@ -14,6 +14,7 @@ import {
   PROPERTIES_WINDOW_CLOSED,
   PROPERTIES_WINDOW_READY,
   applySecretPatch,
+  attachAsyncPropertiesListener,
   beginExclusivePropertiesAction,
   createFrameCoalescer,
   enqueuePropertiesAction,
@@ -176,8 +177,10 @@ export const PropertiesWindowBridgeHost = () => {
     };
 
     const handleReady = async (payload: PropertiesWindowReady) => {
+      if (disposed) return;
       try {
         await invoke('validate_properties_window_request', payload);
+        if (disposed) return;
         const item = useDownloadStore.getState().downloads.find(download => download.id === payload.downloadId);
         if (!item) {
           await sendPropertiesRemoved(payload.windowLabel, payload.downloadId);
@@ -192,12 +195,14 @@ export const PropertiesWindowBridgeHost = () => {
     };
 
     const processAction = async (request: PropertiesActionRequest) => {
+      if (disposed) return;
       let ok = false;
       let error: string | undefined;
       const actionKey = `${request.windowLabel}:${request.downloadId}`;
       let releaseAction: (() => void) | undefined;
       try {
         await invoke('validate_properties_window_request', request);
+        if (disposed) return;
         const registration = windows.get(request.windowLabel);
         if (!registration
           || registration.downloadId !== request.downloadId
@@ -302,6 +307,7 @@ export const PropertiesWindowBridgeHost = () => {
       } finally {
         releaseAction?.();
       }
+      if (disposed) return;
       if (ok) {
         try {
           await sendFor(request.windowLabel, request.downloadId);
@@ -325,12 +331,14 @@ export const PropertiesWindowBridgeHost = () => {
     };
 
     const handleAction = async (request: PropertiesActionRequest) => {
+      if (disposed) return;
       const actionKey = `${request.windowLabel}:${request.downloadId}`;
       try {
         // The native command validates the caller, download binding, and
         // renderer session. If a ready event is delayed or lost, this valid
         // action can also establish the main-window registration.
         await invoke('validate_properties_window_request', request);
+        if (disposed) return;
         synchronizeRegistration(request.windowLabel, request.downloadId, request.sessionId);
       } catch {
         // Stale renderer actions are deliberately ignored. The current child
@@ -349,15 +357,32 @@ export const PropertiesWindowBridgeHost = () => {
       await enqueuePropertiesAction(actionChains, actionKey, () => processAction(request));
     };
 
-    void listen<PropertiesWindowReady>(PROPERTIES_WINDOW_READY, event => void handleReady(event.payload)).then(value => { unlistenReady = value; });
-    void listen<PropertiesActionRequest>(PROPERTIES_WINDOW_ACTION_REQUEST, event => void handleAction(event.payload)).then(value => { unlistenAction = value; });
-    void listen<string>(PROPERTIES_WINDOW_CLOSED, event => {
-      const registration = windows.get(event.payload);
-      windows.delete(event.payload);
-      snapshotRevisions.delete(event.payload);
-      snapshotCoalescer.cancel(event.payload);
-      if (registration) actionsInFlight.delete(`${event.payload}:${registration.downloadId}`);
-    }).then(value => { unlistenClosed = value; });
+    attachAsyncPropertiesListener(
+      listen<PropertiesWindowReady>(PROPERTIES_WINDOW_READY, event => {
+        if (!disposed) void handleReady(event.payload);
+      }),
+      () => disposed,
+      value => { unlistenReady = value; },
+    );
+    attachAsyncPropertiesListener(
+      listen<PropertiesActionRequest>(PROPERTIES_WINDOW_ACTION_REQUEST, event => {
+        if (!disposed) void handleAction(event.payload);
+      }),
+      () => disposed,
+      value => { unlistenAction = value; },
+    );
+    attachAsyncPropertiesListener(
+      listen<string>(PROPERTIES_WINDOW_CLOSED, event => {
+        if (disposed) return;
+        const registration = windows.get(event.payload);
+        windows.delete(event.payload);
+        snapshotRevisions.delete(event.payload);
+        snapshotCoalescer.cancel(event.payload);
+        if (registration) actionsInFlight.delete(`${event.payload}:${registration.downloadId}`);
+      }),
+      () => disposed,
+      value => { unlistenClosed = value; },
+    );
 
     const unsubscribeStore = useDownloadStore.subscribe((state, previous) => {
       for (const [windowLabel, registration] of windows) {

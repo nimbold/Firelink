@@ -1,4 +1,5 @@
 import { emitTo } from '@tauri-apps/api/event';
+import type { UnlistenFn } from '@tauri-apps/api/event';
 import type { DownloadProgressEvent } from './bindings/DownloadProgressEvent';
 import type { DownloadStatus } from './bindings/DownloadStatus';
 import type { DownloadItem } from './store/useDownloadStore';
@@ -301,6 +302,25 @@ export const createFrameCoalescer = (
       pending.clear();
     },
   };
+};
+
+// Tauri listener registration is asynchronous. React StrictMode can unmount
+// an effect before `listen()` resolves; in that case assigning the late
+// unlisten callback after cleanup leaks a second bridge listener. A leaked
+// Properties host can process one click twice, observe the queued state from
+// the first action, and turn the intended resume into an immediate pause.
+export const attachAsyncPropertiesListener = <T extends UnlistenFn>(
+  listener: Promise<T>,
+  isDisposed: () => boolean,
+  assign: (unlisten: T) => void,
+): void => {
+  void listener.then(unlisten => {
+    if (isDisposed()) {
+      unlisten();
+      return;
+    }
+    assign(unlisten);
+  }).catch(() => undefined);
 };
 
 export const openPropertiesWindow = (downloadId: string): Promise<string> =>

@@ -14,6 +14,7 @@ import {
   PROPERTIES_WINDOW_ACTION_RESULT,
   PROPERTIES_WINDOW_REMOVED,
   PROPERTIES_WINDOW_SNAPSHOT,
+  attachAsyncPropertiesListener,
   getPropertiesLifecycleAction,
   sendPropertiesActionRequest,
   sendPropertiesReady,
@@ -190,7 +191,7 @@ export const PropertiesWindowApp = () => {
         const id = await invoke('get_properties_window_download_id');
         if (cancelled) return;
         setDownloadId(id);
-        unlistenSnapshot = await listen<PropertiesSnapshotEvent>(PROPERTIES_WINDOW_SNAPSHOT, async event => {
+        const snapshotListener = await listen<PropertiesSnapshotEvent>(PROPERTIES_WINDOW_SNAPSHOT, async event => {
           if (event.payload.windowLabel !== windowLabel
             || event.payload.downloadId !== id
             || event.payload.sessionId !== sessionId) return;
@@ -220,7 +221,12 @@ export const PropertiesWindowApp = () => {
             }
           }
         });
-        unlistenResult = await listen<PropertiesActionResult>(PROPERTIES_WINDOW_ACTION_RESULT, event => {
+        if (cancelled) {
+          snapshotListener();
+          return;
+        }
+        unlistenSnapshot = snapshotListener;
+        const resultListener = await listen<PropertiesActionResult>(PROPERTIES_WINDOW_ACTION_RESULT, event => {
           if (event.payload.windowLabel !== windowLabel
             || event.payload.downloadId !== id
             || event.payload.sessionId !== sessionId) return;
@@ -248,7 +254,12 @@ export const PropertiesWindowApp = () => {
             }
           }
         });
-        unlistenRemoved = await listen<{ windowLabel: string; downloadId: string }>(PROPERTIES_WINDOW_REMOVED, event => {
+        if (cancelled) {
+          resultListener();
+          return;
+        }
+        unlistenResult = resultListener;
+        const removedListener = await listen<{ windowLabel: string; downloadId: string }>(PROPERTIES_WINDOW_REMOVED, event => {
           if (event.payload.windowLabel === windowLabel && event.payload.downloadId === id) {
             if (readyRetryTimer !== undefined) {
               window.clearInterval(readyRetryTimer);
@@ -258,6 +269,11 @@ export const PropertiesWindowApp = () => {
             setNotice(t($ => $.downloadTable.noDownloads));
           }
         });
+        if (cancelled) {
+          removedListener();
+          return;
+        }
+        unlistenRemoved = removedListener;
         await sendPropertiesReady(sessionId);
         if (cancelled) return;
         // Tauri event listeners are registered asynchronously. If the main
@@ -315,12 +331,16 @@ export const PropertiesWindowApp = () => {
 
   useEffect(() => {
     if (!isDirty) return;
+    let disposed = false;
     let unlisten: UnlistenFn | undefined;
-    void currentWindow.onCloseRequested(event => {
+    attachAsyncPropertiesListener(currentWindow.onCloseRequested(event => {
       event.preventDefault();
       setClosePrompt(true);
-    }).then(value => { unlisten = value; });
-    return () => unlisten?.();
+    }), () => disposed, value => { unlisten = value; });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [currentWindow, isDirty]);
 
   const requestAction = useCallback(async (
