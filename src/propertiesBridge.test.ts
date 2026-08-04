@@ -18,6 +18,8 @@ import {
   enqueuePropertiesAction,
   getPropertiesLifecycleAction,
   isExpectedPropertiesDiagnosticUnavailable,
+  propertiesLifecycleReachedPostcondition,
+  propertiesTorrentPeerLimit,
   sanitizePropertiesSnapshot,
   shouldAcceptPropertiesActionRequest,
 } from './propertiesBridge';
@@ -68,6 +70,7 @@ describe('Properties window bridge', () => {
       fileName: 'example',
       url: 'https://example.test/file',
       status: 'seeding',
+      isTorrent: true,
       category: 'Other',
       dateAdded: '',
       speed: '-',
@@ -75,6 +78,7 @@ describe('Properties window bridge', () => {
       fraction: 0,
       uploadedBytes: 1,
       password: 'secret',
+      connections: 16,
     } as DownloadItem, {
       theme: 'dark',
       fontFamily: 'system',
@@ -110,14 +114,46 @@ describe('Properties window bridge', () => {
       downloadedBytes: 3,
       totalBytes: 4,
       totalIsEstimate: false,
-      activeConnections: 4,
-      requestedConnections: 8,
+      connectedPeers: 4,
       torrentUploadedBytes: 9,
       uploadSpeed: '1 MiB/s',
       torrentSeeders: 6,
       torrentSeededSeconds: 12,
       moveProgress: 0.5,
     });
+    expect(snapshot).not.toHaveProperty('activeConnections');
+    expect(snapshot).not.toHaveProperty('requestedConnections');
+    expect(snapshot).not.toHaveProperty('connections');
+
+    const normalSnapshot = sanitizePropertiesSnapshot({
+      id: 'http-1',
+      fileName: 'example.bin',
+      url: 'https://example.test/file',
+      status: 'downloading',
+      category: 'Other',
+      dateAdded: '',
+      connections: 8,
+      isTorrent: false,
+    } as DownloadItem, {
+      theme: 'dark',
+      fontFamily: 'system',
+      appFontSize: 'standard',
+      listRowDensity: 'standard',
+      locale: 'en',
+    }, {
+      progress: {
+        id: 'http-1',
+        fraction: 0.5,
+        speed: '1 MiB/s',
+        eta: '5s',
+        size: '4 MiB',
+        size_is_final: true,
+        active_connections: 3,
+        requested_connections: 8,
+      },
+    });
+    expect(normalSnapshot).toMatchObject({ activeConnections: 3, requestedConnections: 8 });
+    expect(normalSnapshot).not.toHaveProperty('connectedPeers');
   });
 
   it('applies explicit secret changes without conflating unchanged fields', () => {
@@ -138,6 +174,22 @@ describe('Properties window bridge', () => {
     expect(getPropertiesLifecycleAction('staged')).toBe('start');
     expect(getPropertiesLifecycleAction('failed')).toBe('retry');
     expect(getPropertiesLifecycleAction('completed')).toBeNull();
+  });
+
+  it('clears a lost lifecycle action from an authoritative postcondition', () => {
+    expect(propertiesLifecycleReachedPostcondition('resume', 'downloading')).toBe(true);
+    expect(propertiesLifecycleReachedPostcondition('resume', 'seeding')).toBe(true);
+    expect(propertiesLifecycleReachedPostcondition('resume', 'paused')).toBe(false);
+    expect(propertiesLifecycleReachedPostcondition('pause', 'paused')).toBe(true);
+    expect(propertiesLifecycleReachedPostcondition('pause', 'completed')).toBe(true);
+    expect(propertiesLifecycleReachedPostcondition('pause', 'downloading')).toBe(false);
+  });
+
+  it('keeps Torrent peer-cap telemetry distinct from generic connections', () => {
+    expect(propertiesTorrentPeerLimit(undefined)).toBe(55);
+    expect(propertiesTorrentPeerLimit(120)).toBe(120);
+    expect(propertiesTorrentPeerLimit(0)).toBe(0);
+    expect(propertiesTorrentPeerLimit(16.5)).toBe(55);
   });
 
   it('recognizes expected diagnostics gaps without hiding real RPC failures', () => {

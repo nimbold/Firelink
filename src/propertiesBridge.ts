@@ -13,6 +13,15 @@ export const PROPERTIES_WINDOW_ACTION_REQUEST = 'properties-window-action-reques
 export const PROPERTIES_WINDOW_ACTION_RESULT = 'properties-window-action-result' as const;
 export const PROPERTIES_WINDOW_REMOVED = 'properties-window-removed' as const;
 export const PROPERTIES_WINDOW_CLOSED = 'properties-window-closed' as const;
+export const DEFAULT_PROPERTIES_TORRENT_MAX_PEERS = 55;
+
+export const propertiesTorrentPeerLimit = (value: unknown): number =>
+  typeof value === 'number'
+    && Number.isInteger(value)
+    && value >= 0
+    && value <= 1000
+    ? value
+    : DEFAULT_PROPERTIES_TORRENT_MAX_PEERS;
 
 const PROPERTIES_SNAPSHOT_KEYS = [
   'id',
@@ -94,6 +103,7 @@ export type PropertiesSnapshot = SafePropertiesFields & {
   appearance: DocumentAppearance;
   activeConnections?: number;
   requestedConnections?: number;
+  connectedPeers?: number;
   uploadSpeed?: string;
   torrentSeeders?: number;
   moveProgress?: number;
@@ -118,6 +128,7 @@ export type PropertiesPatch = Partial<Omit<DownloadItem, 'password' | 'cookies' 
 
 export type PropertiesAction =
   | 'apply-properties'
+  | 'set-torrent-file-selection'
   | 'pause-resume'
   | 'verify-torrent'
   | 'set-download-limit'
@@ -125,6 +136,16 @@ export type PropertiesAction =
   | 'set-torrent-peer-options';
 
 export type PropertiesLifecycleAction = 'pause' | 'resume' | 'start' | 'retry';
+
+export const propertiesLifecycleReachedPostcondition = (
+  action: PropertiesLifecycleAction,
+  status: DownloadStatus,
+): boolean => {
+  if (action === 'pause') {
+    return ['paused', 'completed', 'failed'].includes(status);
+  }
+  return ['queued', 'downloading', 'processing', 'verifying', 'seeding', 'waitingToSeed', 'retrying'].includes(status);
+};
 
 export const getPropertiesLifecycleAction = (
   status: DownloadStatus,
@@ -164,7 +185,10 @@ export type PropertiesActionRequest = {
   sessionId: string;
   requestId: number;
   action: PropertiesAction;
-  payload?: PropertiesPatch | { limit: string | null } | { maxPeers: string | null; peerSpeedLimit: string | null };
+  payload?: PropertiesPatch
+    | { selectedIndices: number[] | null }
+    | { limit: string | null }
+    | { maxPeers: string | null; peerSpeedLimit: string | null };
 };
 
 export type PropertiesActionResult = {
@@ -180,6 +204,7 @@ export type PropertiesSnapshotEvent = {
   windowLabel: string;
   downloadId: string;
   sessionId: string;
+  bridgeGeneration: number;
   revision: number;
   snapshot: PropertiesSnapshot;
 };
@@ -227,6 +252,7 @@ const copyWithoutSecrets = (
       Object.prototype.hasOwnProperty.call(item, key) ? [[key, item[key]]] : []
     )),
   ) as SafePropertiesFields;
+  if (item.isTorrent === true) delete safeItem.connections;
   return {
     ...safeItem,
     appearance,
@@ -247,9 +273,11 @@ const copyWithoutSecrets = (
         ? { totalIsEstimate: live.progress.total_is_estimate }
         : {}),
       ...(live.progress.active_connections !== undefined
-        ? { activeConnections: live.progress.active_connections }
+        ? item.isTorrent === true
+          ? { connectedPeers: live.progress.active_connections }
+          : { activeConnections: live.progress.active_connections }
         : {}),
-      ...(live.progress.requested_connections !== undefined
+      ...(item.isTorrent !== true && live.progress.requested_connections !== undefined
         ? { requestedConnections: live.progress.requested_connections }
         : {}),
       ...(live.progress.uploaded_bytes !== undefined

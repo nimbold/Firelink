@@ -910,6 +910,7 @@ describe('useDownloadStore', () => {
       category: 'Other',
       dateAdded: '',
       isTorrent: true,
+      connections: 16,
       torrentMaxPeers: 'not-a-number' as unknown as number,
       torrentPeerSpeedLimit: 0 as unknown as string,
       torrentCheckIntegrity: 'yes' as unknown as boolean,
@@ -925,6 +926,7 @@ describe('useDownloadStore', () => {
     });
 
     expect(normalized.torrentMaxPeers).toBeUndefined();
+    expect(normalized.connections).toBeUndefined();
     expect(normalized.torrentPeerSpeedLimit).toBeUndefined();
     expect(normalized.torrentCheckIntegrity).toBeUndefined();
     expect(normalized.torrentTrackers).toBeUndefined();

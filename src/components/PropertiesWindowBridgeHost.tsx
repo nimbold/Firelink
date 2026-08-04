@@ -5,9 +5,15 @@ import type { DownloadItem } from '../store/useDownloadStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { useDownloadProgressStore } from '../store/downloadProgressStore';
 import {
+  MAX_TORRENT_STOP_TIMEOUT,
   isValidTorrentExcludeTrackerList,
   isValidTorrentTrackerList,
   normalizeSpeedLimitForBackend,
+  normalizeTorrentEncryptionPolicy,
+  normalizeTorrentFileAllocation,
+  normalizeTorrentPrioritizePiece,
+  normalizeTorrentTrackerInterval,
+  normalizeTorrentTrackerTimeout,
 } from '../utils/downloads';
 import {
   PROPERTIES_WINDOW_ACTION_REQUEST,
@@ -33,6 +39,7 @@ import { invokeCommand as invoke } from '../ipc';
 import i18n, { resolveAppLocale } from '../i18n';
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+let lastPropertiesBridgeGeneration = 0;
 
 const normalizeOptionalSpeed = (value: unknown, label: string): string | undefined => {
   if (typeof value !== 'string') throw new Error(`Invalid ${label}`);
@@ -55,12 +62,22 @@ const copyEditablePatch = (rawPatch: PropertiesPatch): Partial<DownloadItem> => 
     'destination',
     'connections',
     'speedLimit',
-    'torrentFileIndices',
     'torrentTrackers',
     'torrentExcludeTrackers',
+    'torrentSeedTime',
+    'torrentSeedRatio',
+    'torrentCheckIntegrity',
+    'torrentRemoveUnselectedFile',
     'torrentUploadLimit',
     'torrentMaxPeers',
     'torrentPeerSpeedLimit',
+    'torrentTrackerConnectTimeout',
+    'torrentTrackerTimeout',
+    'torrentTrackerInterval',
+    'torrentStopTimeout',
+    'torrentPrioritizePiece',
+    'torrentEncryptionPolicy',
+    'torrentFileAllocation',
   ] as const) copy(key);
 
   if (safePatch.fileName !== undefined && typeof safePatch.fileName !== 'string') {
@@ -86,6 +103,48 @@ const copyEditablePatch = (rawPatch: PropertiesPatch): Partial<DownloadItem> => 
   if (safePatch.torrentMaxPeers !== undefined
     && (!Number.isInteger(safePatch.torrentMaxPeers) || safePatch.torrentMaxPeers < 0 || safePatch.torrentMaxPeers > 1000)) {
     throw new Error('Torrent maximum peers must be a whole number from 0 to 1000');
+  }
+  for (const [key, minimum] of [
+    ['torrentSeedTime', 0],
+    ['torrentSeedRatio', 0],
+  ] as const) {
+    const value = safePatch[key];
+    if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < minimum)) {
+      throw new Error(`Invalid ${key}`);
+    }
+  }
+  for (const key of ['torrentTrackerConnectTimeout', 'torrentTrackerTimeout'] as const) {
+    const value = safePatch[key];
+    if (value !== undefined && normalizeTorrentTrackerTimeout(value) === undefined) {
+      throw new Error(`Invalid ${key}`);
+    }
+  }
+  if (safePatch.torrentTrackerInterval !== undefined
+    && normalizeTorrentTrackerInterval(safePatch.torrentTrackerInterval) === undefined) {
+    throw new Error('Invalid torrentTrackerInterval');
+  }
+  if (safePatch.torrentStopTimeout !== undefined
+    && (!Number.isInteger(safePatch.torrentStopTimeout)
+      || safePatch.torrentStopTimeout < 0
+      || safePatch.torrentStopTimeout > MAX_TORRENT_STOP_TIMEOUT)) {
+    throw new Error('Invalid torrentStopTimeout');
+  }
+  if (safePatch.torrentPrioritizePiece !== undefined
+    && normalizeTorrentPrioritizePiece(safePatch.torrentPrioritizePiece) == null) {
+    throw new Error('Invalid torrentPrioritizePiece');
+  }
+  if (safePatch.torrentEncryptionPolicy !== undefined
+    && normalizeTorrentEncryptionPolicy(safePatch.torrentEncryptionPolicy) === undefined) {
+    throw new Error('Invalid torrentEncryptionPolicy');
+  }
+  if (safePatch.torrentFileAllocation !== undefined
+    && normalizeTorrentFileAllocation(safePatch.torrentFileAllocation) === undefined) {
+    throw new Error('Invalid torrentFileAllocation');
+  }
+  for (const key of ['torrentCheckIntegrity', 'torrentRemoveUnselectedFile'] as const) {
+    if (safePatch[key] !== undefined && typeof safePatch[key] !== 'boolean') {
+      throw new Error(`Invalid ${key}`);
+    }
   }
   if (safePatch.torrentTrackers !== undefined
     && (typeof safePatch.torrentTrackers !== 'string' || !isValidTorrentTrackerList(safePatch.torrentTrackers))) {
@@ -116,6 +175,8 @@ export const PropertiesWindowBridgeHost = () => {
     const snapshotRevisions = new Map<string, number>();
     const actionsInFlight = new Set<string>();
     const actionChains = new Map<string, Promise<void>>();
+    const bridgeGeneration = Math.max(Date.now(), lastPropertiesBridgeGeneration + 1);
+    lastPropertiesBridgeGeneration = bridgeGeneration;
     let disposed = false;
     let unlistenReady: UnlistenFn | undefined;
     let unlistenAction: UnlistenFn | undefined;
@@ -142,6 +203,7 @@ export const PropertiesWindowBridgeHost = () => {
         windowLabel,
         downloadId,
         sessionId: registration.sessionId,
+        bridgeGeneration,
         revision,
         snapshot: sanitizePropertiesSnapshot(item, {
           theme: settings.theme,
@@ -176,6 +238,23 @@ export const PropertiesWindowBridgeHost = () => {
       }
     };
 
+    const assertCurrentAction = async (request: PropertiesActionRequest) => {
+      await invoke('validate_properties_window_request', {
+        windowLabel: request.windowLabel,
+        downloadId: request.downloadId,
+        sessionId: request.sessionId,
+        requestId: request.requestId,
+      });
+      if (disposed) throw new Error('Properties bridge is no longer active');
+      const registration = windows.get(request.windowLabel);
+      if (!registration
+        || registration.downloadId !== request.downloadId
+        || registration.sessionId !== request.sessionId
+        || registration.latestRequestId !== request.requestId) {
+        throw new Error('Properties action is stale');
+      }
+    };
+
     const handleReady = async (payload: PropertiesWindowReady) => {
       if (disposed) return;
       try {
@@ -201,14 +280,10 @@ export const PropertiesWindowBridgeHost = () => {
       const actionKey = `${request.windowLabel}:${request.downloadId}`;
       let releaseAction: (() => void) | undefined;
       try {
-        await invoke('validate_properties_window_request', request);
-        if (disposed) return;
-        const registration = windows.get(request.windowLabel);
-        if (!registration
-          || registration.downloadId !== request.downloadId
-          || registration.sessionId !== request.sessionId) {
-          throw new Error('Properties window is no longer registered');
-        }
+        // The request may have waited behind another action. Revalidate the
+        // native session and request ordering at dequeue time so a closed,
+        // reopened, or reloaded Properties window cannot apply stale work.
+        await assertCurrentAction(request);
         releaseAction = beginExclusivePropertiesAction(actionsInFlight, actionKey);
         const store = useDownloadStore.getState();
         const item = store.downloads.find(download => download.id === request.downloadId);
@@ -216,7 +291,11 @@ export const PropertiesWindowBridgeHost = () => {
 
         switch (request.action) {
           case 'apply-properties': {
+            await assertCurrentAction(request);
             const rawPatch = (request.payload ?? {}) as PropertiesPatch;
+            if (Object.prototype.hasOwnProperty.call(rawPatch, 'torrentFileIndices')) {
+              throw new Error('Torrent file selection requires the dedicated selection action');
+            }
             const safePatch = copyEditablePatch(rawPatch);
             if ('password' in rawPatch) {
               safePatch.password = applySecretPatch(rawPatch.password, item.password);
@@ -230,7 +309,56 @@ export const PropertiesWindowBridgeHost = () => {
             if ('username' in rawPatch) {
               safePatch.username = applySecretPatch(rawPatch.username, item.username);
             }
+            const torrentOptionKeys = [
+              'torrentFileIndices',
+              'torrentTrackers',
+              'torrentExcludeTrackers',
+              'torrentSeedTime',
+              'torrentSeedRatio',
+              'torrentCheckIntegrity',
+              'torrentRemoveUnselectedFile',
+              'torrentUploadLimit',
+              'torrentMaxPeers',
+              'torrentPeerSpeedLimit',
+              'torrentTrackerConnectTimeout',
+              'torrentTrackerTimeout',
+              'torrentTrackerInterval',
+              'torrentStopTimeout',
+              'torrentPrioritizePiece',
+              'torrentEncryptionPolicy',
+              'torrentFileAllocation',
+            ] as const;
+            if (item.isTorrent !== true && torrentOptionKeys.some(key => Object.prototype.hasOwnProperty.call(rawPatch, key))) {
+              throw new Error('Torrent properties are only available for Torrent downloads');
+            }
+            if (item.isTorrent === true && Object.prototype.hasOwnProperty.call(rawPatch, 'connections')) {
+              throw new Error('Generic connection settings are not available for Torrent downloads');
+            }
             await store.applyProperties(request.downloadId, safePatch);
+            break;
+          }
+          case 'set-torrent-file-selection': {
+            if (item.isTorrent !== true
+              || !request.payload
+              || !('selectedIndices' in request.payload)) {
+              throw new Error('Torrent file selection is unavailable for this download');
+            }
+            const selectedIndices = request.payload.selectedIndices;
+            if (selectedIndices !== null
+              && (!Array.isArray(selectedIndices)
+                || selectedIndices.length === 0
+                || selectedIndices.some(index => !Number.isInteger(index) || index < 1))) {
+              throw new Error('Torrent file selection must contain at least one valid file');
+            }
+            const selection = await invoke('set_torrent_file_selection', {
+              id: request.downloadId,
+              selected_indices: selectedIndices,
+            });
+            const selected = selection.files.filter(file => file.selected).map(file => file.index);
+            const allSelected = selection.files.length > 0 && selected.length === selection.files.length;
+            store.updateDownload(request.downloadId, {
+              torrentFileIndices: allSelected ? undefined : selected,
+            });
             break;
           }
           case 'pause-resume': {

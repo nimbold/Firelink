@@ -14253,7 +14253,7 @@ pub fn run() {
                                         total_bytes: (total > 0).then_some(total as f64),
                                         total_is_estimate: Some(false),
                                         active_connections: Some(active_connections),
-                                        requested_connections: Some(requested_connections),
+                                        requested_connections: (!is_torrent).then_some(requested_connections),
                                         uploaded_bytes: torrent_telemetry
                                             .map(|value| value.uploaded_bytes as f64)
                                             .or_else(|| uploaded_bytes.map(|value| value as f64)),

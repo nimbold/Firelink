@@ -1773,7 +1773,13 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .lock()
             .await
             .get(id)
-            .and_then(|payload| payload.connections)
+            .and_then(|payload| {
+                if payload.is_torrent {
+                    None
+                } else {
+                    payload.connections
+                }
+            })
             .map(clamp_download_connections)
     }
 
@@ -5114,6 +5120,10 @@ fn apply_aria2_connection_options(
     );
 }
 
+fn should_apply_aria2_connection_options(payload: &SpawnPayload) -> bool {
+    !payload.is_torrent
+}
+
 fn apply_aria2_follow_options(
     options: &mut serde_json::Map<String, serde_json::Value>,
     payload: &SpawnPayload,
@@ -5284,14 +5294,6 @@ fn aria2_peer_port(value: Option<&serde_json::Value>) -> Option<u16> {
         Some(serde_json::Value::Number(value)) => value.as_u64()?.try_into().ok(),
         _ => None,
     }
-}
-
-fn aria2_peer_id(value: Option<&serde_json::Value>) -> Option<String> {
-    let value = value?.as_str()?.trim();
-    if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
-        return None;
-    }
-    Some(value.to_string())
 }
 
 fn aria2_peer_bool(value: Option<&serde_json::Value>) -> bool {
@@ -5465,7 +5467,6 @@ pub(crate) fn parse_torrent_peer_diagnostics(
         sanitized.push(crate::ipc::TorrentPeer {
             ip: aria2_peer_ip(peer.get("ip")),
             port: aria2_peer_port(peer.get("port")),
-            peer_id: aria2_peer_id(peer.get("peerId")),
             download_speed: aria2_peer_number(peer.get("downloadSpeed")),
             upload_speed: aria2_peer_number(peer.get("uploadSpeed")),
             seeder,
@@ -6118,8 +6119,10 @@ impl SidecarSpawner for ProductionSpawner {
         if !payload.is_torrent {
             options.insert("out".to_string(), serde_json::json!(safe_filename));
         }
-        let conn = effective_aria2_connections(id, payload).await;
-        apply_aria2_connection_options(&mut options, conn);
+        if should_apply_aria2_connection_options(payload) {
+            let conn = effective_aria2_connections(id, payload).await;
+            apply_aria2_connection_options(&mut options, conn);
+        }
         apply_aria2_follow_options(&mut options, payload);
         apply_aria2_torrent_options(&mut options, payload)?;
         let mt = aria2_attempt_limit(payload.max_tries);
@@ -6898,6 +6901,33 @@ mod tests {
     }
 
     #[test]
+    fn torrent_payloads_do_not_use_generic_connection_options() {
+        let torrent = SpawnPayload {
+            is_torrent: true,
+            connections: Some(16),
+            ..Default::default()
+        };
+        let normal = SpawnPayload {
+            is_torrent: false,
+            connections: Some(16),
+            ..Default::default()
+        };
+        let mut torrent_options = serde_json::Map::new();
+        if should_apply_aria2_connection_options(&torrent) {
+            apply_aria2_connection_options(&mut torrent_options, 16);
+        }
+        assert!(!torrent_options.contains_key("split"));
+        assert!(!torrent_options.contains_key("max-connection-per-server"));
+
+        let mut normal_options = serde_json::Map::new();
+        if should_apply_aria2_connection_options(&normal) {
+            apply_aria2_connection_options(&mut normal_options, 16);
+        }
+        assert_eq!(normal_options.get("split"), Some(&serde_json::json!("16")));
+        assert_eq!(normal_options.get("max-connection-per-server"), Some(&serde_json::json!("16")));
+    }
+
+    #[test]
     fn torrent_network_and_storage_settings_are_normalized_at_the_boundary() {
         assert_eq!(
             normalize_torrent_bind_address(Some(" 2001:db8::1 ")).unwrap(),
@@ -7647,7 +7677,7 @@ mod tests {
     }
 
     #[test]
-    fn torrent_peer_diagnostics_are_bounded_and_omit_bitfields() {
+    fn torrent_peer_diagnostics_are_bounded_and_omit_identity_and_bitfields() {
         let mut result = vec![serde_json::json!({
             "peerId": "secret-peer-id",
             "ip": "192.0.2.10",
@@ -7678,11 +7708,11 @@ mod tests {
         assert!(diagnostics.truncated);
         assert_eq!(diagnostics.peers[0].ip.as_deref(), Some("192.0.2.10"));
         assert_eq!(diagnostics.peers[0].port, Some(6881));
-        assert_eq!(diagnostics.peers[0].peer_id.as_deref(), Some("secret-peer-id"));
         let serialized = serde_json::to_string(&diagnostics).unwrap();
-        assert!(serialized.contains("peerId"));
         assert!(serialized.contains("192.0.2."));
         assert!(!serialized.contains("\"port\":null"));
+        assert!(!serialized.contains("peerId"));
+        assert!(!serialized.contains("secret-peer-id"));
         assert!(!serialized.contains("bitfield"));
     }
 

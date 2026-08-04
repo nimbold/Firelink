@@ -327,7 +327,9 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
         url: item.url,
         destination,
         filename: item.fileName,
-        connections: resolveDownloadConnections(item.connections, settings.perServerConnections),
+        connections: item.isTorrent === true
+          ? null
+          : resolveDownloadConnections(item.connections, settings.perServerConnections),
         speed_limit: speedLimitForDispatch(item.speedLimit, settings.globalSpeedLimit, item.isMedia),
         username: item.username || (login ? login.username : null),
         password: item.password || keychainPassword,
@@ -631,6 +633,7 @@ export const hasStaleTemporaryMediaEstimate = (
 
 export const normalizePersistedDownloadProgress = (download: DownloadItem): DownloadItem => {
   const rawSeedRemaining = download.torrentSeedRemaining as unknown;
+  const normalizedConnections = download.isTorrent === true ? undefined : download.connections;
   const normalizedSeedRemaining = typeof rawSeedRemaining === 'number' &&
     Number.isFinite(rawSeedRemaining) &&
     rawSeedRemaining >= 0
@@ -745,6 +748,7 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
     ? rawVerifyRestoreStatus
     : undefined;
   const normalizedOptions = rawSeedRemaining !== normalizedSeedRemaining ||
+    download.connections !== normalizedConnections ||
     rawUploadedBytes !== normalizedUploadedBytes ||
     rawSeededSeconds !== normalizedSeededSeconds ||
     rawWebSeeds !== normalizedWebSeeds ||
@@ -770,6 +774,7 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
     rawVerifyRestoreStatus !== normalizedVerifyRestoreStatus
       ? {
         ...download,
+        connections: normalizedConnections,
         status: recoveredMoveStatus,
         torrentSeedRemaining: normalizedSeedRemaining,
         torrentUploadedBytes: normalizedUploadedBytes,
@@ -1542,7 +1547,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       totalIsEstimate: normalizedItem.totalIsEstimate ?? (
         normalizedItem.isMedia === true && normalizedItem.size?.trim().startsWith('~')
       ),
-      connections: resolveDownloadConnections(normalizedItem.connections, settings.perServerConnections),
+      connections: normalizedItem.isTorrent === true
+        ? undefined
+        : resolveDownloadConnections(normalizedItem.connections, settings.perServerConnections),
       destination: destPath,
       status: action.type === 'add-to-queue' ? 'staged' : 'ready',
       queueId,
@@ -2332,7 +2339,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             url: item.url,
             destination: destPath,
             filename: item.fileName,
-            connections: resolveDownloadConnections(item.connections, settings.perServerConnections),
+            connections: item.isTorrent === true
+              ? null
+              : resolveDownloadConnections(item.connections, settings.perServerConnections),
             speed_limit: speedLimitForDispatch(item.speedLimit, settings.globalSpeedLimit, item.isMedia),
             username: item.username || (login ? login.username : null),
             password: item.password || keychainPassword,

@@ -255,6 +255,7 @@ fn is_properties_action(action: &str) -> bool {
     matches!(
         action,
         "apply-properties"
+            | "set-torrent-file-selection"
             | "pause-resume"
             | "verify-torrent"
             | "set-download-limit"

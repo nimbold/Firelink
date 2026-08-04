@@ -1501,7 +1501,10 @@ export const AddDownloadsModal = () => {
           fileName: finalFile,
           category,
           dateAdded: new Date().toISOString(),
-          connections: Number(connections),
+          // HTTP connections and yt-dlp fragment concurrency are separate
+          // from BitTorrent peer limits. Torrent rows use bt-max-peers below
+          // and must not inherit the generic 1–16 HTTP setting.
+          connections: item.isTorrent ? undefined : Number(connections),
           speedLimit: speedLimitEnabled ? `${speedLimit}K` : undefined,
           username: useAuth ? username.trim() : undefined,
           password: useAuth ? password.trim() : undefined,
@@ -2774,13 +2777,15 @@ export const AddDownloadsModal = () => {
                   <Settings size={16} className="text-blue-500" /> {t($ => $.addDownloads.transferSettings)}
                 </div>
                   <div className="flex flex-col gap-3">
-                    <div className="flex items-center justify-between">
-                      <label className="text-xs text-text-secondary font-medium">{t($ => $.addDownloads.connectionsPerFile)}</label>
-                    <div className="flex items-center gap-2">
-                      <input type="range" min="1" max="16" value={connections} onChange={e=>setConnections(Number(e.target.value))} className="add-download-range w-24 accent-blue-500 cursor-pointer" aria-label={t($ => $.addDownloads.connectionsPerFileAria)} />
-                      <span className="add-download-value text-xs text-text-primary font-mono w-6 text-center">{connections}</span>
-                    </div>
-                  </div>
+                    {!(selectedItemIndex !== null && parsedItems[selectedItemIndex]?.isTorrent) && (
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs text-text-secondary font-medium">{t($ => $.addDownloads.connectionsPerFile)}</label>
+                        <div className="flex items-center gap-2">
+                          <input type="range" min="1" max="16" value={connections} onChange={e=>setConnections(Number(e.target.value))} className="add-download-range w-24 accent-blue-500 cursor-pointer" aria-label={t($ => $.addDownloads.connectionsPerFileAria)} />
+                          <span className="add-download-value text-xs text-text-primary font-mono w-6 text-center">{connections}</span>
+                        </div>
+                      </div>
+                    )}
 
                   <div className="flex items-center justify-between">
                     <label className="flex items-center gap-2 text-xs text-text-secondary font-medium cursor-pointer">
