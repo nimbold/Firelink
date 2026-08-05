@@ -99,6 +99,10 @@ const he = {
       retrying: 'ניסיון חוזר',
       moving: 'מעביר נתונים',
     },
+    errors: {
+      nameResolutionRetrying: 'מנסה שוב באמצעות פותר השמות של המערכת',
+      nameResolutionFailed: 'לא ניתן לפתור את שם השרת. בדקו את ה‑VPN או את ה‑DNS של הרשת.',
+    },
     values: {
       processing: 'מעבד…',
       muxing: 'ממזג…',

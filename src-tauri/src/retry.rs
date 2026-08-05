@@ -50,6 +50,18 @@ pub const BACKOFF_SCHEDULE_429: [Duration; 3] = [
 /// fall through to a hard `Failed`. Three strikes matches the schedule length.
 pub const MAX_RETRIES: usize = BACKOFF_SCHEDULE.len();
 
+/// Detect Aria2's name-resolution failure without treating arbitrary DNS-like
+/// text as a resolver failure. The numeric code is the authoritative signal;
+/// the message forms cover older/alternate Aria2 wrappers that omit it.
+pub fn is_aria2_name_resolution_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("aria2 error code 19")
+        || (lower.contains("name resolution")
+            && lower.contains("failed")
+            && lower.contains("could not contact dns"))
+        || lower.contains("could not contact dns server")
+}
+
 /// Resolve the backoff delay for a 0-based strike. Strikes at or beyond the
 /// schedule length clamp to the longest slot (10s) rather than panicking, so a
 /// mis-sized loop degrades gracefully instead of aborting the worker.
@@ -122,9 +134,13 @@ pub fn is_transient_network_error(message: &str) -> bool {
         return false;
     }
 
+    if is_aria2_name_resolution_error(message) {
+        return true;
+    }
+
     let m = message.to_ascii_lowercase();
 
-    const TRANSIENT: [&str; 34] = [
+    const TRANSIENT: [&str; 36] = [
         // socket-layer / HTTP-client phrasing surfaced by aria2 and yt-dlp
         "timed out",
         "timeout",
@@ -140,6 +156,8 @@ pub fn is_transient_network_error(message: &str) -> bool {
         "connection aborted",
         "error sending request", // reqwest wrapper for connect/send failures
         "dns error",             // transient resolver failures
+        "name resolution",       // aria2 name-resolution failures
+        "could not contact dns", // aria2 c-ares resolver failures
         "protocol error",        // aria2 read/protocol failures after a link drop
         "tls handshake failure",
         "ssl/tls handshake failure",
@@ -323,6 +341,22 @@ mod tests {
         ));
         assert!(is_transient_network_error(
             "SSL/TLS handshake failure: protocol error"
+        ));
+    }
+
+    #[test]
+    fn classifies_aria2_name_resolution_failures_precisely() {
+        assert!(is_aria2_name_resolution_error(
+            "aria2 error code 19: Name resolution for example.test failed: Could not contact DNS servers."
+        ));
+        assert!(is_aria2_name_resolution_error(
+            "Name resolution for example.test failed: Could not contact DNS server"
+        ));
+        assert!(is_aria2_name_resolution_error(
+            "aria2 error code 19: connection refused"
+        ));
+        assert!(!is_aria2_name_resolution_error(
+            "aria2 error code 8: No URI available"
         ));
     }
 

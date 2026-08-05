@@ -1,6 +1,6 @@
 use firelink_lib::queue::{
-    Aria2RecreateOutcome, Aria2RefreshOutcome, QueueManager, QueuedTask, SidecarSpawner,
-    SpawnPayload, TaskKind, MEDIA_RUN_CANCELLED,
+    Aria2RecreateOutcome, Aria2RefreshOutcome, Aria2ResolverMode, QueueManager, QueuedTask,
+    SidecarSpawner, SpawnPayload, TaskKind, MEDIA_RUN_CANCELLED,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -27,6 +27,15 @@ struct CountingSpawner {
     torrent_peer_options_release: tokio::sync::Notify,
     add_speed_limits: std::sync::Mutex<Vec<Option<String>>>,
     add_peer_options: std::sync::Mutex<Vec<(Option<u32>, Option<String>)>>,
+    add_resolver_modes: std::sync::Mutex<Vec<Aria2ResolverMode>>,
+    add_transfer_context: std::sync::Mutex<
+        Vec<(
+            Aria2ResolverMode,
+            Option<String>,
+            Option<String>,
+            Option<i32>,
+        )>,
+    >,
     block_speed_limit: std::sync::atomic::AtomicBool,
     speed_limit_started: tokio::sync::Notify,
     speed_limit_release: tokio::sync::Notify,
@@ -211,6 +220,8 @@ impl CountingSpawner {
             torrent_peer_options_release: tokio::sync::Notify::new(),
             add_speed_limits: std::sync::Mutex::new(Vec::new()),
             add_peer_options: std::sync::Mutex::new(Vec::new()),
+            add_resolver_modes: std::sync::Mutex::new(Vec::new()),
+            add_transfer_context: std::sync::Mutex::new(Vec::new()),
             block_speed_limit: std::sync::atomic::AtomicBool::new(false),
             speed_limit_started: tokio::sync::Notify::new(),
             speed_limit_release: tokio::sync::Notify::new(),
@@ -294,6 +305,16 @@ impl firelink_lib::queue::SidecarSpawner for CountingSpawner {
                 payload.torrent_max_peers,
                 payload.torrent_peer_speed_limit.clone(),
             ));
+        self.add_resolver_modes
+            .lock()
+            .unwrap()
+            .push(payload.aria2_resolver_mode);
+        self.add_transfer_context.lock().unwrap().push((
+            payload.aria2_resolver_mode,
+            payload.headers.clone(),
+            payload.proxy.clone(),
+            payload.connections,
+        ));
         Ok(format!("gid-{call}"))
     }
     async fn remove_uri(&self, _gid: &str) -> Result<(), String> {
@@ -2166,6 +2187,93 @@ async fn transient_aria2_error_reissues_after_backoff() {
     assert_eq!(manager.available_permits(), 1);
 
     manager.release_permit("retry").await;
+    dispatcher.abort();
+}
+
+#[tokio::test]
+async fn resolver_failure_uses_one_system_fallback_without_retry_budget() {
+    use firelink_lib::queue::PendingOutcome;
+
+    let (mgr, spawner) = make_manager(1);
+    let manager = Arc::new(mgr);
+    manager.set_aria2_async_dns_supported(true);
+    let mut task = aria2_task("resolver-fallback");
+    task.payload.max_tries = Some(0);
+    task.payload.headers = Some("X-Test: retained".to_string());
+    task.payload.proxy = Some("http://127.0.0.1:8123".to_string());
+    manager.push(task).await.unwrap();
+
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if spawner.add_uri_calls.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial transfer should be admitted");
+
+    let resolver_error = PendingOutcome::Error(
+        "aria2 error code 19: Name resolution failed: Could not contact DNS servers".to_string(),
+    );
+    manager
+        .handle_aria2_event("gid-1", resolver_error.clone())
+        .await;
+    manager.handle_aria2_event("gid-1", resolver_error).await;
+
+    timeout(Duration::from_secs(4), async {
+        loop {
+            if spawner.add_uri_calls.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("resolver failure should re-add once with the system resolver");
+    assert_eq!(
+        *spawner.add_resolver_modes.lock().unwrap(),
+        vec![Aria2ResolverMode::Automatic, Aria2ResolverMode::System]
+    );
+    assert_eq!(
+        *spawner.add_transfer_context.lock().unwrap(),
+        vec![
+            (
+                Aria2ResolverMode::Automatic,
+                Some("X-Test: retained".to_string()),
+                Some("http://127.0.0.1:8123".to_string()),
+                None,
+            ),
+            (
+                Aria2ResolverMode::System,
+                Some("X-Test: retained".to_string()),
+                Some("http://127.0.0.1:8123".to_string()),
+                None,
+            ),
+        ]
+    );
+    assert_eq!(spawner.add_uri_calls.load(Ordering::SeqCst), 2);
+
+    // A second resolver failure is now on the system mode. With max_tries=0
+    // it must terminate instead of switching back or consuming another add.
+    manager
+        .handle_aria2_event(
+            "gid-2",
+            PendingOutcome::Error(
+                "aria2 error code 19: Name resolution failed: Could not contact DNS servers"
+                    .to_string(),
+            ),
+        )
+        .await;
+    assert_eq!(spawner.add_uri_calls.load(Ordering::SeqCst), 2);
+    assert!(manager.aria2_gid_for_download("resolver-fallback").is_none());
+    assert_eq!(manager.available_permits(), 1);
+
     dispatcher.abort();
 }
 

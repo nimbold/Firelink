@@ -577,5 +577,9 @@ export const redactDownloadForPersistence = (item: DownloadItem): DownloadItem =
   for (const field of DOWNLOAD_SECRET_FIELDS) {
     delete copy[field];
   }
+  // Error classification is derived from the live native state and must not
+  // become a persistence field or influence a new lifecycle after restart.
+  delete copy.lastErrorKind;
+  delete copy.lastResolverFallback;
   return copy;
 };

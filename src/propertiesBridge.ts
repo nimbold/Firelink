@@ -1,11 +1,13 @@
 import { emitTo } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import type { DownloadProgressEvent } from './bindings/DownloadProgressEvent';
+import type { DownloadErrorKind } from './bindings/DownloadErrorKind';
 import type { DownloadStatus } from './bindings/DownloadStatus';
 import type { DownloadItem } from './store/useDownloadStore';
 import { canPauseDownload } from './utils/downloadActions';
 import type { DocumentAppearance } from './utils/documentAppearance';
 import { invokeCommand as invoke } from './ipc';
+import { classifyDownloadError } from './utils/downloadErrors';
 
 export const PROPERTIES_WINDOW_READY = 'properties-window-ready' as const;
 export const PROPERTIES_WINDOW_SNAPSHOT = 'properties-window-snapshot' as const;
@@ -49,6 +51,8 @@ const PROPERTIES_SNAPSHOT_KEYS = [
   'queuePosition',
   'hasBeenDispatched',
   'lastError',
+  'lastErrorKind',
+  'lastResolverFallback',
   'lastTry',
   'isTorrent',
   'torrentFileIndices',
@@ -145,6 +149,8 @@ export type PropertiesSnapshotContext = {
 export type PropertiesSnapshot = SafePropertiesFields & {
   appearance: DocumentAppearance;
   queueName?: string;
+  lastErrorKind?: DownloadErrorKind;
+  lastResolverFallback?: boolean;
   activeConnections?: number;
   requestedConnections?: number;
   connectedPeers?: number;
@@ -298,9 +304,11 @@ const copyWithoutSecrets = (
     )),
   ) as SafePropertiesFields;
   if (item.isTorrent === true) delete safeItem.connections;
+  const lastErrorKind = item.lastErrorKind ?? classifyDownloadError(item.lastError);
   return {
     ...safeItem,
     appearance,
+    ...(lastErrorKind ? { lastErrorKind } : {}),
     ...(context?.queueName ? { queueName: context.queueName } : {}),
     ...(live?.progress ? {
       fraction: live.progress.fraction,

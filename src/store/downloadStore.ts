@@ -200,7 +200,11 @@ const startDownloadListeners = async () => {
             ? { totalIsEstimate: progress.total_is_estimate }
             : {})
         } : {}),
-        ...(payload.error ? { lastError: payload.error } : {}),
+        ...(payload.error ? {
+          lastError: payload.error,
+          lastErrorKind: payload.errorKind,
+          lastResolverFallback: payload.resolverFallback,
+        } : {}),
         ...((status === 'downloading' || status === 'verifying' || status === 'retrying')
           ? { lastTry: new Date().toISOString() }
           : {})
@@ -212,6 +216,8 @@ const startDownloadListeners = async () => {
       }
       if (!payload.error && status !== 'failed' && status !== 'retrying') {
         updates.lastError = undefined;
+        updates.lastErrorKind = undefined;
+        updates.lastResolverFallback = undefined;
       }
       if (payload.fileName && payload.fileName !== current.fileName) {
         updates.fileName = payload.fileName;

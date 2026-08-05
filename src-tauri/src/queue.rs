@@ -1,14 +1,17 @@
 use base64::Engine as _;
 use crate::ipc::{DownloadStateEvent, DownloadStatus, QueueDirection};
 use crate::power::PowerManager;
-use crate::retry::{backoff_and_emit, is_transient_network_error, BackoffOutcome, MAX_RETRIES};
+use crate::retry::{
+    backoff_and_emit, is_aria2_name_resolution_error, is_transient_network_error,
+    BackoffOutcome, MAX_RETRIES,
+};
 use log;
 use serde::Deserialize;
 use serde_json;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
@@ -705,6 +708,21 @@ enum SeedAdmissionOutcome {
 
 /// Args mirroring start_download / start_media_download. Kept untyped-loose
 /// (String/Option) to match the existing command signatures exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Aria2ResolverMode {
+    /// Use Aria2's normal resolver configuration. This is the initial mode
+    /// and deliberately leaves daemon-wide behavior unchanged.
+    Automatic,
+    /// Use the host operating system resolver for this transfer.
+    System,
+}
+
+impl Default for Aria2ResolverMode {
+    fn default() -> Self {
+        Self::Automatic
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SpawnPayload {
     pub url: String,
@@ -721,6 +739,9 @@ pub struct SpawnPayload {
     pub user_agent: Option<String>,
     pub max_tries: Option<i32>,
     pub proxy: Option<String>,
+    /// Runtime-only resolver selection. This is never part of an enqueue or
+    /// persisted download payload.
+    pub aria2_resolver_mode: Aria2ResolverMode,
     pub format_selector: Option<String>,
     pub cookie_source: Option<String>,
     pub is_media: bool,
@@ -907,6 +928,11 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
     /// cap as a degraded connection pool.
     aria2_global_speed_limit: Arc<StdMutex<Option<String>>>,
 
+    /// Capability reported by aria2.getVersion. Keep the fallback disabled
+    /// until the daemon explicitly advertises Async DNS; an unknown
+    /// capability must not be treated as permission to change resolver mode.
+    aria2_async_dns_supported: AtomicBool,
+
     /// 0-based transient-error strike counter per aria2 download id.
     aria2_retry_strikes: Mutex<HashMap<String, usize>>,
 
@@ -990,6 +1016,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             aria2_dispatch_inflight: Mutex::new(HashMap::new()),
             aria2_dispatch_notify: Notify::new(),
             aria2_global_speed_limit: Arc::new(StdMutex::new(None)),
+            aria2_async_dns_supported: AtomicBool::new(false),
             aria2_retry_strikes: Mutex::new(HashMap::new()),
             aria2_retry_cancelled: Mutex::new(HashSet::new()),
             aria2_retry_inflight: Mutex::new(HashMap::new()),
@@ -1007,6 +1034,15 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
     pub fn power_manager(&self) -> Arc<PowerManager> {
         Arc::clone(&self.power_manager)
+    }
+
+    pub fn set_aria2_async_dns_supported(&self, supported: bool) {
+        self.aria2_async_dns_supported
+            .store(supported, Ordering::Relaxed);
+    }
+
+    fn aria2_system_resolver_fallback_available(&self) -> bool {
+        self.aria2_async_dns_supported.load(Ordering::Relaxed)
     }
 
     /// Accept one lifecycle-fenced Aria2 status sample and return Firelink's
@@ -3897,7 +3933,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 if verification_only {
                     self.emit_paused_with_error(id, error);
                 } else {
-                    log::error!("aria2 download {} failed: {}", id, error);
+                    let safe_error = crate::redact_sensitive_text(&error);
+                    log::error!("aria2 download {} failed: {}", id, safe_error);
                     self.emit_failed(id, error);
                 }
             }
@@ -4468,9 +4505,18 @@ impl<R: tauri::Runtime> QueueManager<R> {
             *entry
         };
 
-        let transient = is_retryable_aria2_error(&error);
-        let strikes_left = strike < automatic_retry_limit(payload.max_tries);
-        if !(transient && strikes_left) {
+        let retry_action = aria2_retry_action(
+            &payload,
+            &error,
+            strike,
+            self.aria2_system_resolver_fallback_available(),
+        );
+        let resolver_fallback = retry_action == Aria2RetryAction::SystemResolverFallback;
+        // Switching resolver strategy is a bounded transfer repair, not an
+        // ordinary retry. It must still run when the user configured zero
+        // automatic retries, while every later failure follows the normal
+        // retry budget and never switches back to the first strategy.
+        if retry_action == Aria2RetryAction::Terminal {
             self.apply_completion_locked(&id, PendingOutcome::Error(error))
                 .await;
             return;
@@ -4510,6 +4556,14 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 .insert(id.clone(), payload.clone());
         }
 
+        if resolver_fallback {
+            payload.aria2_resolver_mode = Aria2ResolverMode::System;
+            self.aria2_payloads
+                .lock()
+                .await
+                .insert(id.clone(), payload.clone());
+        }
+
         let this = Arc::clone(self);
         let id_for_task = id.clone();
         let error_for_emit = error.clone();
@@ -4530,10 +4584,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
             };
             let outcome = backoff_and_emit(strike, error_for_emit, retry_cancel, |reason| {
                 use tauri::Emitter;
-                let _ = this.app_handle.emit(
-                    "download-state",
-                    DownloadStateEvent::retrying(&id_for_task, reason),
-                );
+                let event = if resolver_fallback {
+                    DownloadStateEvent::retrying_with_resolver_fallback(&id_for_task, reason)
+                } else {
+                    DownloadStateEvent::retrying(&id_for_task, reason)
+                };
+                let _ = this.app_handle.emit("download-state", event);
             })
             .await;
 
@@ -4602,10 +4658,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
                             .await;
                         return;
                     }
-                    this.aria2_retry_strikes
-                        .lock()
-                        .await
-                        .insert(id_for_task.clone(), strike + 1);
+                    if !resolver_fallback {
+                        this.aria2_retry_strikes
+                            .lock()
+                            .await
+                            .insert(id_for_task.clone(), strike + 1);
+                    }
                     this.emit_state(&id_for_task, DownloadStatus::Downloading);
                     // Stop suppressing events for the id before exposing the
                     // new gid. The old gid remains marked as retrying until
@@ -4834,6 +4892,39 @@ fn aria2_attempt_limit(max_tries: Option<i32>) -> u32 {
 
 fn is_retryable_aria2_error(error: &str) -> bool {
     is_transient_network_error(error) || is_aria2_range_mode_error(error)
+}
+
+fn should_use_aria2_system_resolver_fallback(
+    payload: &SpawnPayload,
+    error: &str,
+    async_dns_supported: bool,
+) -> bool {
+    async_dns_supported
+        && payload.aria2_resolver_mode == Aria2ResolverMode::Automatic
+        && is_aria2_name_resolution_error(error)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Aria2RetryAction {
+    SystemResolverFallback,
+    OrdinaryRetry,
+    Terminal,
+}
+
+fn aria2_retry_action(
+    payload: &SpawnPayload,
+    error: &str,
+    strike: usize,
+    async_dns_supported: bool,
+) -> Aria2RetryAction {
+    if should_use_aria2_system_resolver_fallback(payload, error, async_dns_supported) {
+        return Aria2RetryAction::SystemResolverFallback;
+    }
+    if is_retryable_aria2_error(error) && strike < automatic_retry_limit(payload.max_tries) {
+        Aria2RetryAction::OrdinaryRetry
+    } else {
+        Aria2RetryAction::Terminal
+    }
 }
 
 fn is_aria2_rpc_unavailable(error: &str) -> bool {
@@ -5118,6 +5209,15 @@ fn apply_aria2_connection_options(
         "stream-piece-selector".to_string(),
         serde_json::json!(ARIA2_STREAM_PIECE_SELECTOR),
     );
+}
+
+fn apply_aria2_resolver_options(
+    options: &mut serde_json::Map<String, serde_json::Value>,
+    mode: Aria2ResolverMode,
+) {
+    if mode == Aria2ResolverMode::System {
+        options.insert("async-dns".to_string(), serde_json::json!("false"));
+    }
 }
 
 fn should_apply_aria2_connection_options(payload: &SpawnPayload) -> bool {
@@ -6174,6 +6274,7 @@ impl SidecarSpawner for ProductionSpawner {
         if let Some(prox) = proxy_value {
             options.insert("all-proxy".to_string(), serde_json::json!(prox));
         }
+        apply_aria2_resolver_options(&mut options, payload.aria2_resolver_mode);
 
         let (method, params) = if payload.is_torrent {
             if let Some(path) = payload.torrent_path.as_deref() {
@@ -6789,6 +6890,7 @@ impl EnqueueItem {
                 user_agent: self.user_agent,
                 max_tries: self.max_tries,
                 proxy: self.proxy,
+                aria2_resolver_mode: Aria2ResolverMode::Automatic,
                 format_selector: self.format_selector,
                 cookie_source: self.cookie_source,
                 is_media: media,
@@ -6898,6 +7000,36 @@ mod tests {
             options.get("stream-piece-selector"),
             Some(&serde_json::json!("inorder"))
         );
+    }
+
+    #[test]
+    fn aria2_system_resolver_mode_is_per_transfer_and_preserves_automatic_default() {
+        let mut automatic = serde_json::Map::new();
+        apply_aria2_resolver_options(&mut automatic, Aria2ResolverMode::Automatic);
+        assert!(!automatic.contains_key("async-dns"));
+
+        let mut system = serde_json::Map::new();
+        apply_aria2_resolver_options(&mut system, Aria2ResolverMode::System);
+        assert_eq!(system.get("async-dns"), Some(&serde_json::json!("false")));
+    }
+
+    #[test]
+    fn resolver_state_events_are_typed_and_redacted() {
+        let event = DownloadStateEvent::failed(
+            "dns-event",
+            "aria2 error code 19: Name resolution failed for https://example.test/file?token=secret",
+        );
+        assert_eq!(event.error_kind, Some(crate::ipc::DownloadErrorKind::NameResolution));
+        assert!(event.error.as_deref().is_some_and(|error| {
+            error.contains("[redacted]") && !error.contains("token=secret")
+        }));
+
+        let retry = DownloadStateEvent::retrying_with_resolver_fallback(
+            "dns-event",
+            "aria2 error code 19: Name resolution failed",
+        );
+        assert_eq!(retry.error_kind, Some(crate::ipc::DownloadErrorKind::NameResolution));
+        assert_eq!(retry.resolver_fallback, Some(true));
     }
 
     #[test]
@@ -8388,6 +8520,60 @@ mod tests {
     #[test]
     fn aria2_stall_timeout_outcome_is_not_automatically_retried() {
         assert!(!is_retryable_aria2_error("aria2 error code 7: unfinished download"));
+    }
+
+    #[test]
+    fn aria2_name_resolution_error_is_retryable_for_resolver_recovery() {
+        let error = "aria2 error code 19: Name resolution for example.test failed: Could not contact DNS servers.";
+        assert!(is_retryable_aria2_error(error));
+        assert!(should_use_aria2_system_resolver_fallback(
+            &SpawnPayload::default(),
+            error,
+            true,
+        ));
+        assert_eq!(
+            aria2_retry_action(&SpawnPayload::default(), error, 0, true),
+            Aria2RetryAction::SystemResolverFallback
+        );
+        assert!(!should_use_aria2_system_resolver_fallback(
+            &SpawnPayload {
+                aria2_resolver_mode: Aria2ResolverMode::System,
+                ..Default::default()
+            },
+            error,
+            true,
+        ));
+        assert!(!should_use_aria2_system_resolver_fallback(
+            &SpawnPayload::default(),
+            error,
+            false,
+        ));
+        assert_eq!(
+            aria2_retry_action(
+                &SpawnPayload {
+                    aria2_resolver_mode: Aria2ResolverMode::System,
+                    max_tries: Some(0),
+                    ..Default::default()
+                },
+                error,
+                0,
+                true,
+            ),
+            Aria2RetryAction::Terminal
+        );
+        assert_eq!(
+            aria2_retry_action(
+                &SpawnPayload {
+                    aria2_resolver_mode: Aria2ResolverMode::System,
+                    max_tries: Some(1),
+                    ..Default::default()
+                },
+                error,
+                0,
+                true,
+            ),
+            Aria2RetryAction::OrdinaryRetry
+        );
     }
 
     #[test]

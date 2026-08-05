@@ -125,6 +125,44 @@ describe('useDownloadProgressStore', () => {
     release();
   });
 
+  it('projects resolver error metadata and clears it when the lifecycle resumes', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'resolver-error',
+        url: 'https://example.test/file',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: '',
+      }],
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-state']({ payload: {
+      id: 'resolver-error',
+      status: 'retrying',
+      error: 'aria2 error code 19: Name resolution failed',
+      errorKind: 'nameResolution',
+      resolverFallback: true,
+    } });
+    expect(useDownloadStore.getState().downloads[0].lastErrorKind).toBe('nameResolution');
+    expect(useDownloadStore.getState().downloads[0].lastResolverFallback).toBe(true);
+
+    handlers['download-state']({ payload: {
+      id: 'resolver-error',
+      status: 'downloading',
+      error: null,
+    } });
+    expect(useDownloadStore.getState().downloads[0].lastErrorKind).toBeUndefined();
+    expect(useDownloadStore.getState().downloads[0].lastResolverFallback).toBeUndefined();
+    release();
+  });
+
   it('projects torrent seeding state and upload telemetry', async () => {
     const handlers: Record<string, (event: any) => void> = {};
     vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {

@@ -922,6 +922,7 @@ pub fn replace_downloads(
     let strings = values
         .into_iter()
         .map(|mut value| {
+            remove_live_download_metadata(&mut value);
             if portable {
                 remove_persisted_transfer_secrets(&mut value);
             }
@@ -995,6 +996,7 @@ where
     if object.get("id").and_then(Value::as_str) != Some(id) {
         return Err("persisted download mutation cannot change its id".to_string());
     }
+    remove_live_download_metadata(&mut value);
     if portable {
         remove_persisted_transfer_secrets(&mut value);
     }
@@ -1023,7 +1025,17 @@ where
     Ok(result)
 }
 
+fn remove_live_download_metadata(value: &mut Value) {
+    if let Some(object) = value.as_object_mut() {
+        // Error classifications and resolver phase are process-local
+        // presentation metadata; never retain them in the persisted contract.
+        object.remove("lastErrorKind");
+        object.remove("lastResolverFallback");
+    }
+}
+
 fn remove_persisted_transfer_secrets(value: &mut Value) {
+    remove_live_download_metadata(value);
     let Some(object) = value.as_object_mut() else {
         return;
     };
@@ -2469,7 +2481,8 @@ mod tests {
                 "id": "torrent-1",
                 "status": "paused",
                 "url": "https://example.test/file",
-                "password": "secret"
+                "password": "secret",
+                "lastErrorKind": "nameResolution"
             }])
             .to_string(),
             false,
@@ -2488,6 +2501,36 @@ mod tests {
         assert!(saved.get("password").is_none());
         assert_eq!(saved["status"], "failed");
         assert_eq!(saved["resumable"], false);
+        assert!(saved.get("lastErrorKind").is_none());
+    }
+
+    #[test]
+    fn native_download_mutation_drops_live_error_metadata_in_standard_mode() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let mut connection = state.lock().unwrap();
+        replace_downloads(
+            &mut connection,
+            &json!([{
+                "id": "download-live-metadata",
+                "status": "paused"
+            }])
+            .to_string(),
+            false,
+        )
+        .unwrap();
+
+        mutate_download(&mut connection, "download-live-metadata", false, |object| {
+            object.insert("status".to_string(), json!("queued"));
+            object.insert("lastErrorKind".to_string(), json!("nameResolution"));
+            object.insert("lastResolverFallback".to_string(), json!(true));
+            Ok(())
+        })
+        .unwrap();
+
+        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
+        assert!(saved.get("lastErrorKind").is_none());
+        assert!(saved.get("lastResolverFallback").is_none());
     }
 
     #[test]

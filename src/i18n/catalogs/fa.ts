@@ -99,6 +99,10 @@ const fa = {
       retrying: 'در حال تلاش مجدد',
       moving: 'در حال جابه‌جایی داده',
     },
+    errors: {
+      nameResolutionRetrying: 'تلاش مجدد با DNS سیستم',
+      nameResolutionFailed: 'نام سرور پیدا نشد. VPN یا DNS شبکه را بررسی کنید.',
+    },
     values: {
       processing: 'در حال پردازش…',
       muxing: 'در حال ترکیب…',

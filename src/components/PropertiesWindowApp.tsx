@@ -896,7 +896,21 @@ export const PropertiesWindowApp = () => {
             <span className="text-text-muted">{t($ => $.properties.lastTry)}</span><span dir="ltr">{snapshot.lastTry || '—'}</span>
             <span className="text-text-muted">{t($ => $.properties.queueId)}</span><span title={queuePlacement}>{queuePlacement}</span>
             <span className="text-text-muted">{t($ => $.properties.resumable)}</span><span>{snapshot.resumable === false ? '—' : '✓'}</span>
-            {snapshot.lastError && <><span className="text-text-muted">{t($ => $.properties.lastError)}</span><span className="break-words text-red-300">{snapshot.lastError}</span></>}
+            {snapshot.lastError && <>
+              <span className="text-text-muted">{t($ => $.properties.lastError)}</span>
+              <div className="space-y-1 break-words text-red-300">
+                {snapshot.lastErrorKind === 'nameResolution' && (
+                  <p className="font-medium text-text-primary">
+                    {snapshot.status === 'retrying'
+                      ? snapshot.lastResolverFallback === true
+                        ? t($ => $.downloads.errors.nameResolutionRetrying)
+                        : t($ => $.downloads.status.retrying)
+                      : t($ => $.downloads.errors.nameResolutionFailed)}
+                  </p>
+                )}
+                <span>{snapshot.lastError}</span>
+              </div>
+            </>}
           </div>
           {snapshot.isMedia === true && <div className="grid gap-2 rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs sm:grid-cols-2">
             <span className="text-text-muted">{t($ => $.addDownloads.format)}</span><span className="break-all font-mono">{snapshot.mediaFormatSelector || '—'}</span>

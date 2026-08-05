@@ -215,6 +215,13 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     return value === 'Unknown' ? t($ => $.addDownloads.unknown) : value;
   })();
   const downloadStatusLabel = t($ => $.downloads.status[download.status]);
+  const visibleErrorStatusLabel = download.lastErrorKind === 'nameResolution'
+    ? download.status === 'retrying' && download.lastResolverFallback === true
+      ? t($ => $.downloads.errors.nameResolutionRetrying)
+      : download.status === 'failed'
+        ? t($ => $.downloads.errors.nameResolutionFailed)
+        : downloadStatusLabel
+    : downloadStatusLabel;
   const downloadedSizeLabel = sizeDisplay.totalIsEstimate
     ? t($ => $.downloads.size.downloadedOfApproximate, {
       downloaded: sizeDisplay.downloaded ?? '',
@@ -349,7 +356,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
               ) : download.status === 'processing' ? (
                 downloadStatusLabel
               ) : (
-                downloadStatusLabel
+                visibleErrorStatusLabel
               )}
             </span>
           </div>

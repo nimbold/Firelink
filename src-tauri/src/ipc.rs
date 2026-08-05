@@ -140,6 +140,13 @@ pub struct QueueConcurrencyConfig {
     pub max_concurrent: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum DownloadErrorKind {
+    NameResolution,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
@@ -198,6 +205,12 @@ pub struct DownloadItem {
     pub has_been_dispatched: Option<bool>,
     #[ts(optional)]
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_error_kind: Option<DownloadErrorKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_resolver_fallback: Option<bool>,
     #[ts(optional)]
     pub last_try: Option<String>,
     #[serde(default)]
@@ -757,6 +770,12 @@ pub struct DownloadStateEvent {
     pub id: String,
     pub status: String,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error_kind: Option<DownloadErrorKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub resolver_fallback: Option<bool>,
     #[ts(optional)]
     pub file_name: Option<String>,
     #[ts(optional)]
@@ -769,26 +788,34 @@ impl DownloadStateEvent {
             id: id.into(),
             status: status.as_str().to_string(),
             error: None,
+            error_kind: None,
+            resolver_fallback: None,
             file_name: None,
             torrent_seed_remaining: None,
         }
     }
 
     pub fn failed(id: impl Into<String>, error: impl Into<String>) -> Self {
+        let (error, error_kind) = Self::safe_error(error);
         Self {
             id: id.into(),
             status: DownloadStatus::Failed.as_str().to_string(),
-            error: Some(error.into()),
+            error: Some(error),
+            error_kind,
+            resolver_fallback: None,
             file_name: None,
             torrent_seed_remaining: None,
         }
     }
 
     pub fn paused_with_error(id: impl Into<String>, error: impl Into<String>) -> Self {
+        let (error, error_kind) = Self::safe_error(error);
         Self {
             id: id.into(),
             status: DownloadStatus::Paused.as_str().to_string(),
-            error: Some(error.into()),
+            error: Some(error),
+            error_kind,
+            resolver_fallback: None,
             file_name: None,
             torrent_seed_remaining: None,
         }
@@ -799,6 +826,8 @@ impl DownloadStateEvent {
             id: id.into(),
             status: DownloadStatus::Paused.as_str().to_string(),
             error: None,
+            error_kind: None,
+            resolver_fallback: None,
             file_name: None,
             torrent_seed_remaining: remaining,
         }
@@ -809,6 +838,8 @@ impl DownloadStateEvent {
             id: id.into(),
             status: DownloadStatus::Completed.as_str().to_string(),
             error: None,
+            error_kind: None,
+            resolver_fallback: None,
             file_name: Some(file_name.into()),
             torrent_seed_remaining: None,
         }
@@ -817,10 +848,13 @@ impl DownloadStateEvent {
     /// Transient retry state. Carries the human-readable reason so the UI can
     /// surface "network dropped, retrying in 5s…". The slot is still held.
     pub fn retrying(id: impl Into<String>, reason: impl Into<String>) -> Self {
+        let (reason, error_kind) = Self::safe_error(reason);
         Self {
             id: id.into(),
             status: DownloadStatus::Retrying.as_str().to_string(),
-            error: Some(reason.into()),
+            error: Some(reason),
+            error_kind,
+            resolver_fallback: None,
             file_name: None,
             torrent_seed_remaining: None,
         }
@@ -831,8 +865,26 @@ impl DownloadStateEvent {
             id: id.into(),
             status: DownloadStatus::WaitingToSeed.as_str().to_string(),
             error: None,
+            error_kind: None,
+            resolver_fallback: None,
             file_name: None,
             torrent_seed_remaining: remaining,
         }
+    }
+
+    pub fn retrying_with_resolver_fallback(
+        id: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        let mut event = Self::retrying(id, reason);
+        event.resolver_fallback = Some(true);
+        event
+    }
+
+    fn safe_error(error: impl Into<String>) -> (String, Option<DownloadErrorKind>) {
+        let error = crate::redact_sensitive_text(&error.into());
+        let error_kind = crate::retry::is_aria2_name_resolution_error(&error)
+            .then_some(DownloadErrorKind::NameResolution);
+        (error, error_kind)
     }
 }

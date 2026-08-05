@@ -50,6 +50,16 @@ describe('download persistence progress snapshots', () => {
     expect(persisted.totalIsEstimate).toBe(false);
   });
 
+  it('does not persist live resolver error classification', () => {
+    const sanitized = redactDownloadForPersistence({
+      ...item('failed'),
+      lastErrorKind: 'nameResolution',
+      lastResolverFallback: true,
+    });
+    expect(sanitized.lastErrorKind).toBeUndefined();
+    expect(sanitized.lastResolverFallback).toBeUndefined();
+  });
+
   it.each(['queued', 'staged', 'retrying', 'processing'] as const)(
     'keeps byte counters for %s snapshots',
     (status) => {

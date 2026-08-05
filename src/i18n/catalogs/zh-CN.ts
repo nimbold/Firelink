@@ -99,6 +99,10 @@ const zhCN = {
       retrying: '重试中',
       moving: '正在移动数据',
     },
+    errors: {
+      nameResolutionRetrying: '正在使用系统 DNS 重试',
+      nameResolutionFailed: '无法解析服务器名称。请检查 VPN 或网络 DNS。',
+    },
     values: {
       processing: '处理中…',
       muxing: '混流中…',

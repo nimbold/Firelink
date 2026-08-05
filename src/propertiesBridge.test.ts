@@ -67,6 +67,29 @@ describe('Properties window bridge', () => {
     });
   });
 
+  it('adds resolver error metadata without exposing the queue-internal mode', () => {
+    const snapshot = sanitizePropertiesSnapshot({
+      id: 'dns-1',
+      fileName: 'example.bin',
+      url: 'https://example.test/file',
+      status: 'failed',
+      category: 'Other',
+      dateAdded: '',
+      lastResolverFallback: true,
+      lastError: 'aria2 error code 19: Name resolution for example.test failed: Could not contact DNS servers.',
+    } as DownloadItem, {
+      theme: 'dark',
+      fontFamily: 'system',
+      appFontSize: 'standard',
+      listRowDensity: 'standard',
+      locale: 'en',
+    });
+
+    expect(snapshot.lastErrorKind).toBe('nameResolution');
+    expect(snapshot.lastResolverFallback).toBe(true);
+    expect(snapshot).not.toHaveProperty('aria2ResolverMode');
+  });
+
   it('projects the latest live telemetry without exposing secrets', () => {
     const snapshot = sanitizePropertiesSnapshot({
       id: 'torrent-1',

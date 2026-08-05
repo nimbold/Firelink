@@ -13539,6 +13539,7 @@ pub fn run() {
             });
 
             let queue_manager_poll = Arc::clone(&queue_manager);
+            let queue_manager_capability = Arc::clone(&queue_manager);
 
             app.manage(AppState {
                 download_coordinator: download::DownloadCoordinator::spawn(app.handle().clone()),
@@ -13798,7 +13799,23 @@ pub fn run() {
                                         match rpc_call(attempt_port, &aria2_secret_clone, "aria2.getVersion", serde_json::json!([])).await {
                                             Ok(ver) => {
                                                 let v = ver.get("version").and_then(|v| v.as_str()).unwrap_or("unknown");
-                                                log::info!("aria2 daemon ready (version {}) on port {}", v, attempt_port);
+                                                let async_dns_supported = ver
+                                                    .get("enabledFeatures")
+                                                    .and_then(|features| features.as_array())
+                                                    .map(|features| {
+                                                        features.iter().any(|feature| {
+                                                            feature.as_str() == Some("Async DNS")
+                                                        })
+                                                    })
+                                                    .unwrap_or(false);
+                                                queue_manager_capability
+                                                    .set_aria2_async_dns_supported(async_dns_supported);
+                                                log::info!(
+                                                    "aria2 daemon ready (version {}) on port {} (async DNS: {})",
+                                                    v,
+                                                    attempt_port,
+                                                    async_dns_supported
+                                                );
                                                 ready = true;
                                                 break;
                                             }

@@ -99,6 +99,10 @@ const uk = {
       retrying: 'Повторна спроба',
       moving: 'Переміщення даних',
     },
+    errors: {
+      nameResolutionRetrying: 'Повторна спроба через системний DNS',
+      nameResolutionFailed: 'Не вдалося визначити ім’я сервера. Перевірте VPN або DNS мережі.',
+    },
     values: {
       processing: 'Обробка…',
       muxing: 'Об\'єднання потоків…',

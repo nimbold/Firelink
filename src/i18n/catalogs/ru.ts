@@ -99,6 +99,10 @@ const ru = {
       retrying: 'Повторная попытка',
       moving: 'Перемещение данных',
     },
+    errors: {
+      nameResolutionRetrying: 'Повторная попытка через системный DNS',
+      nameResolutionFailed: 'Не удалось разрешить имя сервера. Проверьте VPN или DNS сети.',
+    },
     values: {
       processing: 'Обработка…',
       muxing: 'Мультиплексирование…',

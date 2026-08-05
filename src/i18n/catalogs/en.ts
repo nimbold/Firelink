@@ -99,6 +99,10 @@ const common = {
       retrying: 'Retrying',
       moving: 'Moving data',
     },
+    errors: {
+      nameResolutionRetrying: 'Retrying with system network resolver',
+      nameResolutionFailed: 'Could not resolve the server name. Check your VPN or network DNS settings.',
+    },
     values: {
       processing: 'Processing...',
       muxing: 'Muxing...',
