@@ -225,6 +225,7 @@ const fa = {
     connectedPeers: 'همتای متصل',
     details: 'جزئیات',
     queueId: 'صف',
+    queuePosition: 'موقعیت {{position}}',
     resumable: 'قابل ادامه',
     connectionCount: '{{active}}/{{total}} فعال',
     connectionCountUnknown: '—/{{total}} فعال',

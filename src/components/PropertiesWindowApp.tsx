@@ -3,7 +3,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import { open, save } from '@tauri-apps/plugin-dialog';
-import { Copy, FileDown, FolderOpen, Pause, Play, RefreshCw, Save, X } from 'lucide-react';
+import { Activity, Copy, Download, FileDown, FolderOpen, Gauge, MapPin, MoreHorizontal, Pause, Play, RefreshCw, Save, Timer, Upload, Users, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { TorrentAvailabilitySnapshot } from '../bindings/TorrentAvailabilitySnapshot';
 import type { TorrentDetails } from '../bindings/TorrentDetails';
@@ -15,16 +15,20 @@ import {
   PROPERTIES_WINDOW_REMOVED,
   PROPERTIES_WINDOW_SNAPSHOT,
   attachAsyncPropertiesListener,
+  formatPropertiesQueuePlacement,
   getPropertiesLifecycleAction,
   propertiesLifecycleReachedPostcondition,
   propertiesTorrentPeerLimit,
+  propertiesDiagnosticRequestState,
   sendPropertiesActionRequest,
   sendPropertiesReady,
   isExpectedPropertiesDiagnosticUnavailable,
+  propertiesDiagnosticPhase,
   type PropertiesAction,
   type PropertiesActionRequest,
   type PropertiesActionResult,
   type PropertiesPatch,
+  type PropertiesDiagnosticPhase,
   type PropertiesSnapshot,
   type PropertiesSnapshotEvent,
 } from '../propertiesBridge';
@@ -64,6 +68,31 @@ const safeTitle = (name: string) => {
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
+const propertiesStatusTone = (status: string) => {
+  if (status === 'paused') return 'paused';
+  if (status === 'seeding') return 'seeding';
+  if (status === 'failed') return 'failed';
+  if (status === 'processing' || status === 'verifying' || status === 'moving') return 'processing';
+  if (status === 'queued' || status === 'staged') return 'queued';
+  if (status === 'retrying') return 'retrying';
+  if (status === 'completed') return 'completed';
+  return 'downloading';
+};
+
+const propertiesDiagnosticLifecycleKey = (snapshot: PropertiesSnapshot): string => [
+  snapshot.id,
+  snapshot.status,
+  snapshot.lastTry ?? '',
+  snapshot.hasBeenDispatched === true,
+  snapshot.destination ?? '',
+  snapshot.torrentInfoHash ?? '',
+  snapshot.torrentFileIndices?.join(',') ?? '',
+  snapshot.torrentMoveDestination ?? '',
+  snapshot.torrentMoveRestoreStatus ?? '',
+  snapshot.torrentVerifyOnly === true,
+  snapshot.torrentRelocationCheckPending === true,
+].join('\u0000');
+
 export const PropertiesWindowApp = () => {
   const { t } = useTranslation();
   const currentWindow = useMemo(() => getCurrentWindow(), []);
@@ -84,6 +113,8 @@ export const PropertiesWindowApp = () => {
   const [details, setDetails] = useState<TorrentDetails | null>(null);
   const [diagnosticError, setDiagnosticError] = useState('');
   const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
+  const [diagnosticsRefreshing, setDiagnosticsRefreshing] = useState(false);
+  const [diagnosticPhase, setDiagnosticPhase] = useState<PropertiesDiagnosticPhase>('idle');
   // null means the Files tab has no local selection draft yet; [] is an
   // explicit user choice to clear every file and must remain visually empty.
   const [selectedFiles, setSelectedFiles] = useState<number[] | null>(null);
@@ -129,9 +160,20 @@ export const PropertiesWindowApp = () => {
   const snapshotRef = useRef(snapshot);
   const activeTabRef = useRef(activeTab);
   const downloadIdRef = useRef(downloadId);
+  const fileProgressRef = useRef(fileProgress);
+  const peersRef = useRef(peers);
+  const availabilityRef = useRef(availability);
+  const detailsRef = useRef(details);
+  const diagnosticAttemptsRef = useRef(new Set<string>());
+  const diagnosticLifecycleKeyRef = useRef('');
+  const diagnosticLifecycleEpochRef = useRef(0);
   snapshotRef.current = snapshot;
   activeTabRef.current = activeTab;
   downloadIdRef.current = downloadId;
+  fileProgressRef.current = fileProgress;
+  peersRef.current = peers;
+  availabilityRef.current = availability;
+  detailsRef.current = details;
 
   const isTorrent = snapshot?.isTorrent === true;
   const tabs = useMemo<PropertiesTab[]>(() => isTorrent
@@ -173,25 +215,50 @@ export const PropertiesWindowApp = () => {
     });
   }, []);
 
-  const refreshDiagnostics = useCallback(async (tab: PropertiesTab, id: string) => {
+  const refreshDiagnostics = useCallback(async (tab: PropertiesTab, id: string, manual = false) => {
     if (!isTorrentDiagnosticsStatus(snapshotRef.current?.status ?? '')) return;
-    const requestKey = `${id}:${tab}`;
+    const diagnosticTabKey = `${id}:${tab}`;
+    const requestLifecycleEpoch = diagnosticLifecycleEpochRef.current;
+    const requestKey = `${diagnosticTabKey}:${requestLifecycleEpoch}`;
     if (diagnosticsInFlightRef.current.has(requestKey)) return;
     diagnosticsInFlightRef.current.add(requestKey);
     const isCurrent = () => downloadIdRef.current === id
       && activeTabRef.current === tab
-      && isTorrentDiagnosticsStatus(snapshotRef.current?.status ?? '');
+      && isTorrentDiagnosticsStatus(snapshotRef.current?.status ?? '')
+      && diagnosticLifecycleEpochRef.current === requestLifecycleEpoch;
+    const hasCachedResult = () => tab === 'files'
+      ? fileProgressRef.current !== null
+      : tab === 'peers'
+        ? peersRef.current !== null || availabilityRef.current !== null
+        : detailsRef.current !== null;
+    const hasPreviousAttempt = diagnosticAttemptsRef.current.has(diagnosticTabKey);
+    diagnosticAttemptsRef.current.add(diagnosticTabKey);
     if (isCurrent()) {
-      setDiagnosticError('');
-      setDiagnosticsLoading(true);
+      const cached = hasCachedResult();
+      const requestState = propertiesDiagnosticRequestState(cached, hasPreviousAttempt, manual);
+      setDiagnosticsLoading(requestState.loading);
+      setDiagnosticsRefreshing(requestState.refreshing);
+      // A silent refresh with no cached result must not replace a stable
+      // unavailable/error message between polling requests. Cached results
+      // remain visible while their request is refreshed in the background.
+      if (requestState.resetMessage) {
+        setDiagnosticError('');
+        setDiagnosticPhase(requestState.phase);
+      }
     }
     try {
       if (tab === 'overview') {
         const nextDetails = await invoke('get_torrent_details', { id });
-        if (isCurrent()) setDetails(nextDetails);
+        if (isCurrent()) {
+          setDetails(nextDetails);
+          setDiagnosticPhase(propertiesDiagnosticPhase(false, 'success'));
+        }
       } else if (tab === 'files') {
         const nextProgress = await invoke('get_torrent_file_progress', { id });
-        if (isCurrent()) setFileProgress(nextProgress);
+        if (isCurrent()) {
+          setFileProgress(nextProgress);
+          setDiagnosticPhase(propertiesDiagnosticPhase(false, 'success'));
+        }
       } else if (tab === 'peers') {
         const [peerResult, availabilityResult] = await Promise.allSettled([
           invoke('get_torrent_peers', { id }),
@@ -199,14 +266,22 @@ export const PropertiesWindowApp = () => {
         ]);
         if (isCurrent()) {
           if (peerResult.status === 'fulfilled') setPeers(peerResult.value);
-          else setPeers(null);
           if (availabilityResult.status === 'fulfilled') setAvailability(availabilityResult.value);
-          else setAvailability(null);
-          const unexpectedErrors = [peerResult, availabilityResult]
+          const rejectedResults = [peerResult, availabilityResult]
             .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
-            .map(result => result.reason)
+            .map(result => result.reason);
+          const unexpectedErrors = rejectedResults
             .filter(error => !isExpectedPropertiesDiagnosticUnavailable(error));
           setDiagnosticError(unexpectedErrors.length > 0 ? errorText(unexpectedErrors[0]) : '');
+          if (rejectedResults.length > 0) {
+            const hasPeerResult = hasCachedResult()
+              || peerResult.status === 'fulfilled'
+              || availabilityResult.status === 'fulfilled';
+            setDiagnosticPhase(propertiesDiagnosticPhase(
+              hasPeerResult,
+              unexpectedErrors.length > 0 ? 'unexpected-error' : 'expected-unavailable',
+            ));
+          } else setDiagnosticPhase(propertiesDiagnosticPhase(false, 'success'));
         }
       }
     } catch (error) {
@@ -217,19 +292,19 @@ export const PropertiesWindowApp = () => {
         // not a diagnostic failure, and must not flash a raw backend error.
         if (isExpectedPropertiesDiagnosticUnavailable(error)) {
           setDiagnosticError('');
-          if (tab === 'files') setFileProgress(null);
-          if (tab === 'peers') {
-            setPeers(null);
-            setAvailability(null);
-          }
+          setDiagnosticPhase(propertiesDiagnosticPhase(hasCachedResult(), 'expected-unavailable'));
         } else {
           setDiagnosticError(message);
+          setDiagnosticPhase(propertiesDiagnosticPhase(hasCachedResult(), 'unexpected-error'));
         }
       }
     } finally {
       diagnosticsInFlightRef.current.delete(requestKey);
-      if (downloadIdRef.current === id && activeTabRef.current === tab) {
+      if (downloadIdRef.current === id
+        && activeTabRef.current === tab
+        && diagnosticLifecycleEpochRef.current === requestLifecycleEpoch) {
         setDiagnosticsLoading(false);
+        setDiagnosticsRefreshing(false);
       }
     }
   }, []);
@@ -255,6 +330,9 @@ export const PropertiesWindowApp = () => {
           if (latestBridgeGenerationRef.current !== event.payload.bridgeGeneration) {
             latestBridgeGenerationRef.current = event.payload.bridgeGeneration;
             latestSnapshotRevisionRef.current = 0;
+            diagnosticLifecycleEpochRef.current += 1;
+            diagnosticLifecycleKeyRef.current = '';
+            diagnosticAttemptsRef.current.clear();
             const lostAction = pendingActionRef.current;
             const lostApply = lostAction === 'apply-properties';
             // A main-webview restart can lose both the action-result event and
@@ -283,6 +361,12 @@ export const PropertiesWindowApp = () => {
           }
           if (event.payload.revision <= latestSnapshotRevisionRef.current) return;
           latestSnapshotRevisionRef.current = event.payload.revision;
+          const nextDiagnosticLifecycleKey = propertiesDiagnosticLifecycleKey(event.payload.snapshot);
+          if (diagnosticLifecycleKeyRef.current !== nextDiagnosticLifecycleKey) {
+            diagnosticLifecycleKeyRef.current = nextDiagnosticLifecycleKey;
+            diagnosticLifecycleEpochRef.current += 1;
+            diagnosticAttemptsRef.current.clear();
+          }
           await changeAppLocale(event.payload.snapshot.appearance.locale);
           if (event.payload.revision !== latestSnapshotRevisionRef.current) return;
           appearanceCleanupRef.current?.();
@@ -366,6 +450,9 @@ export const PropertiesWindowApp = () => {
               window.clearInterval(readyHeartbeatTimer);
               readyHeartbeatTimer = undefined;
             }
+            diagnosticLifecycleEpochRef.current += 1;
+            diagnosticLifecycleKeyRef.current = '';
+            diagnosticAttemptsRef.current.clear();
             setSnapshot(null);
             setNotice(t($ => $.downloadTable.noDownloads));
           }
@@ -422,12 +509,19 @@ export const PropertiesWindowApp = () => {
       setAvailability(null);
       setDiagnosticError('');
       setDiagnosticsLoading(false);
+      setDiagnosticsRefreshing(false);
+      diagnosticLifecycleEpochRef.current += 1;
+      diagnosticLifecycleKeyRef.current = '';
+      diagnosticAttemptsRef.current.clear();
+      setDiagnosticPhase('idle');
       return;
     }
     if (!isTorrentPollingStatus(snapshot.status)) {
       setFileProgress(null);
       setPeers(null);
       setAvailability(null);
+      diagnosticAttemptsRef.current.clear();
+      setDiagnosticPhase('idle');
     }
     void refreshDiagnostics(activeTab, downloadId);
     if (!isTorrentPollingStatus(snapshot.status) || !['files', 'peers'].includes(activeTab)) return;
@@ -664,16 +758,25 @@ export const PropertiesWindowApp = () => {
     ? t($ => $.addDownloads.unknownSize)
     : `${snapshot.totalIsEstimate ? '~' : ''}${formatDownloadBytes(snapshot.totalBytes)}`);
   const statusLabel = t($ => $.downloads.status[snapshot.status]);
-  const torrentMaxPeersLabel = snapshot.torrentMaxPeers === undefined
-    ? `${propertiesTorrentPeerLimit(snapshot.torrentMaxPeers)}${t($ => $.properties.defaultValue)}`
-    : snapshot.torrentMaxPeers === 0
-      ? t($ => $.speedLimiter.unlimited)
-      : String(snapshot.torrentMaxPeers);
   const connectionMetric = isTorrent
-    ? `${snapshot.connectedPeers ?? '—'} ${t($ => $.properties.torrentConnectedPeers)} · ${torrentMaxPeersLabel} ${t($ => $.properties.torrentMaxPeers)}`
+    ? String(snapshot.connectedPeers ?? '—')
     : snapshot.isMedia === true
       ? `${snapshot.connections ?? '—'} ${t($ => $.properties.configuredConcurrency)}`
       : `${snapshot.activeConnections ?? '—'} / ${snapshot.requestedConnections ?? snapshot.connections ?? '—'} ${t($ => $.properties.connections)}`;
+  const queuePlacement = formatPropertiesQueuePlacement(
+    snapshot.queueName,
+    snapshot.queuePosition,
+    position => t($ => $.properties.queuePosition, { position }),
+  );
+  const progressPercent = `${Math.round(progress * 100)}%`;
+  const statusTone = propertiesStatusTone(snapshot.status);
+  const lifecycleLabel = lifecycleAction === 'pause'
+    ? t($ => $.downloads.actions.pause)
+    : lifecycleAction === 'resume'
+      ? t($ => $.downloads.actions.resume)
+      : lifecycleAction === 'retry'
+        ? t($ => $.downloads.actions.retry)
+        : t($ => $.downloads.actions.start);
   const tabLabel = (tab: PropertiesTab) => {
     switch (tab) {
       case 'overview': return t($ => $.properties.details);
@@ -688,17 +791,22 @@ export const PropertiesWindowApp = () => {
 
   return (
     <main className="properties-window-shell flex h-screen min-h-0 flex-col bg-main-bg text-text-primary" aria-labelledby="properties-window-title">
-      <header className="shrink-0 border-b border-border-modal bg-sidebar-bg px-5 py-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h1 id="properties-window-title" className="truncate text-base font-semibold" title={snapshot.fileName}>{snapshot.fileName}</h1>
-            <p className="mt-1 text-xs text-text-muted" role="status">{statusLabel} · {Math.round(progress * 100)}% · {total}</p>
+      <header className="properties-window-header shrink-0 border-b border-border-modal bg-sidebar-bg px-5 py-4">
+        <div className="properties-window-hero-top">
+          <div className="properties-window-title-block min-w-0">
+            <div className="properties-window-title-line">
+              <h1 id="properties-window-title" className="truncate text-base font-semibold" title={snapshot.fileName}>{snapshot.fileName}</h1>
+              <span className={`properties-status-pill properties-status-${statusTone}`}>{statusLabel}</span>
+            </div>
+            <p className="properties-window-queue text-xs text-text-muted" title={queuePlacement}>{queuePlacement}</p>
           </div>
-          <div className="flex flex-wrap items-center gap-2" aria-label={t($ => $.actions.continue)}>
+          <div className="properties-window-command-bar" aria-label={t($ => $.actions.continue)}>
             {lifecycleAction && <button
               type="button"
-              className="app-button px-3 text-xs"
+              className="app-button app-button-primary properties-primary-action px-3 text-xs"
               disabled={pendingAction !== null}
+              title={lifecycleLabel}
+              aria-label={lifecycleLabel}
               onClick={() => {
                 if (lifecycleAction === 'pause'
                   && snapshot.resumable === false
@@ -709,31 +817,42 @@ export const PropertiesWindowApp = () => {
               }}
             >
               {lifecycleAction === 'pause' ? <Pause size={14} /> : <Play size={14} />}
-              {lifecycleAction === 'pause'
-                ? t($ => $.downloads.actions.pause)
-                : lifecycleAction === 'resume'
-                  ? t($ => $.downloads.actions.resume)
-                  : lifecycleAction === 'retry'
-                    ? t($ => $.downloads.actions.retry)
-                    : t($ => $.downloads.actions.start)}
+              <span className="properties-command-label">{lifecycleLabel}</span>
             </button>}
             {isTorrent && <>
-              <button type="button" className="app-button px-3 text-xs" disabled={pendingTorrentCommand === 'magnet'} onClick={() => void performTorrentAction('magnet')}><Copy size={14} />{t($ => $.properties.torrentCopyMagnet)}</button>
-              <button type="button" className="app-button px-3 text-xs" disabled={pendingTorrentCommand === 'export'} onClick={() => void performTorrentAction('export')}><FileDown size={14} />{t($ => $.properties.torrentExportMetadata)}</button>
-              <button type="button" className="app-button px-3 text-xs" disabled={pendingTorrentCommand === 'move'} onClick={() => void performTorrentAction('move')}><FolderOpen size={14} />{t($ => $.properties.torrentMove)}</button>
+              <div className="properties-secondary-actions">
+                <button type="button" className="app-button properties-command-button px-3 text-xs" disabled={pendingTorrentCommand === 'magnet'} onClick={() => void performTorrentAction('magnet')} title={t($ => $.properties.torrentCopyMagnet)}><Copy size={14} /><span className="properties-command-label">{t($ => $.properties.torrentCopyMagnet)}</span></button>
+                <button type="button" className="app-button properties-command-button px-3 text-xs" disabled={pendingTorrentCommand === 'export'} onClick={() => void performTorrentAction('export')} title={t($ => $.properties.torrentExportMetadata)}><FileDown size={14} /><span className="properties-command-label">{t($ => $.properties.torrentExportMetadata)}</span></button>
+                <button type="button" className="app-button properties-command-button px-3 text-xs" disabled={pendingTorrentCommand === 'move'} onClick={() => void performTorrentAction('move')} title={t($ => $.properties.torrentMove)}><FolderOpen size={14} /><span className="properties-command-label">{t($ => $.properties.torrentMove)}</span></button>
+              </div>
+              <details className="properties-command-overflow">
+                <summary className="app-icon-button" title={t($ => $.downloads.actions.options)} aria-label={t($ => $.downloads.actions.options)}><MoreHorizontal size={16} /></summary>
+                <div className="properties-command-menu">
+                  <button type="button" disabled={pendingTorrentCommand === 'magnet'} onClick={() => void performTorrentAction('magnet')}><Copy size={14} />{t($ => $.properties.torrentCopyMagnet)}</button>
+                  <button type="button" disabled={pendingTorrentCommand === 'export'} onClick={() => void performTorrentAction('export')}><FileDown size={14} />{t($ => $.properties.torrentExportMetadata)}</button>
+                  <button type="button" disabled={pendingTorrentCommand === 'move'} onClick={() => void performTorrentAction('move')}><FolderOpen size={14} />{t($ => $.properties.torrentMove)}</button>
+                </div>
+              </details>
             </>}
           </div>
         </div>
-        <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-item-hover" aria-label={t($ => $.properties.progress)}>
-          <div className="h-full rounded-full bg-accent transition-[width] motion-reduce:transition-none" style={{ width: `${progress * 100}%` }} />
+        <div className="properties-window-progress-row" dir="ltr">
+          <div className="properties-window-progress-track" aria-label={t($ => $.properties.progress)} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress * 100)}>
+            <div className={`properties-window-progress-fill properties-progress-${statusTone}`} style={{ width: `${progress * 100}%` }} />
+          </div>
+          <span className="properties-window-progress-percent">{progressPercent}</span>
         </div>
-        <div className="mt-3 grid min-w-0 grid-cols-2 gap-2 text-[11px] text-text-muted sm:grid-cols-4" dir="ltr">
-          <span>{formatDownloadBytes(snapshot.downloadedBytes ?? 0)} / {total}</span>
-          <span>{snapshot.speed || '—'}</span>
-          <span>{snapshot.eta || '—'}</span>
-          <span>{connectionMetric}</span>
-          {isTorrent && <span>{formatTorrentRatio(snapshot.torrentUploadedBytes ?? 0, snapshot.downloadedBytes ?? 0, 'en-US')}</span>}
+        <div className="properties-window-metrics" dir="ltr">
+          <div className="properties-metric-card"><Download size={14} /><div><span>{t($ => $.properties.size)}</span><strong>{formatDownloadBytes(snapshot.downloadedBytes ?? 0)} / {total}</strong></div></div>
+          <div className="properties-metric-card"><Gauge size={14} /><div><span>{t($ => $.properties.speed)}</span><strong>{snapshot.speed || '—'}</strong></div></div>
+          <div className="properties-metric-card"><Timer size={14} /><div><span>{t($ => $.properties.eta)}</span><strong>{snapshot.eta || '—'}</strong></div></div>
+          <div className="properties-metric-card"><Users size={14} /><div><span>{isTorrent ? t($ => $.properties.torrentConnectedPeers) : t($ => $.properties.connections)}</span><strong>{connectionMetric}</strong></div></div>
+          {isTorrent && <>
+            <div className="properties-metric-card"><Upload size={14} /><div><span>{t($ => $.properties.torrentUploaded)}</span><strong>{formatDownloadBytes(snapshot.torrentUploadedBytes ?? 0)}</strong></div></div>
+            <div className="properties-metric-card"><Activity size={14} /><div><span>{t($ => $.properties.torrentRatio)}</span><strong>{formatTorrentRatio(snapshot.torrentUploadedBytes ?? 0, snapshot.downloadedBytes ?? 0, 'en-US')}</strong></div></div>
+          </>}
         </div>
+        <div className="properties-window-destination" title={snapshot.destination || undefined}><MapPin size={13} /><span>{snapshot.destination || '—'}</span></div>
       </header>
 
       <nav className="properties-window-tabs flex shrink-0 gap-1 overflow-x-auto border-b border-border-modal px-4" role="tablist" aria-label={t($ => $.downloadTable.properties)}>
@@ -762,7 +881,7 @@ export const PropertiesWindowApp = () => {
         ))}
       </nav>
 
-      <section id={`properties-panel-${activeTab}`} role="tabpanel" aria-labelledby={`properties-tab-${activeTab}`} className="min-h-0 flex-1 overflow-auto p-5" tabIndex={0}>
+      <section id={`properties-panel-${activeTab}`} role="tabpanel" aria-labelledby={`properties-tab-${activeTab}`} className="properties-window-panel min-h-0 flex-1 overflow-auto p-5" data-diagnostic-phase={diagnosticPhase} tabIndex={0}>
         {activeTab === 'overview' && <div className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="text-xs text-text-muted">{t($ => $.properties.fileName)}<input className="app-control mt-1 w-full" value={fileName} onChange={event => { setFileName(event.target.value); setDraftTab('overview'); }} disabled={!editingEnabled} /></label>
@@ -775,7 +894,7 @@ export const PropertiesWindowApp = () => {
           <div className="grid gap-2 rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs sm:grid-cols-2">
             <span className="text-text-muted">{t($ => $.properties.dateAdded)}</span><span dir="ltr">{snapshot.dateAdded || '—'}</span>
             <span className="text-text-muted">{t($ => $.properties.lastTry)}</span><span dir="ltr">{snapshot.lastTry || '—'}</span>
-            <span className="text-text-muted">{t($ => $.properties.queueId)}</span><span>{snapshot.queueId || '—'}{snapshot.queuePosition === undefined ? '' : ` · ${snapshot.queuePosition + 1}`}</span>
+            <span className="text-text-muted">{t($ => $.properties.queueId)}</span><span title={queuePlacement}>{queuePlacement}</span>
             <span className="text-text-muted">{t($ => $.properties.resumable)}</span><span>{snapshot.resumable === false ? '—' : '✓'}</span>
             {snapshot.lastError && <><span className="text-text-muted">{t($ => $.properties.lastError)}</span><span className="break-words text-red-300">{snapshot.lastError}</span></>}
           </div>
@@ -799,10 +918,10 @@ export const PropertiesWindowApp = () => {
         </div>}
 
         {activeTab === 'files' && isTorrent && <div className="space-y-3">
-          <div className="flex flex-wrap gap-2"><button type="button" className="app-button px-3 text-xs" disabled={!fileSelectionEditingEnabled} onClick={() => { const all = fileProgress?.files.map(file => file.index) ?? []; setSelectedFiles(all); setDraftTab('files'); }}>{t($ => $.properties.torrentFileSelectionAll)}</button><button type="button" className="app-button px-3 text-xs" disabled={!fileSelectionEditingEnabled} onClick={() => { setSelectedFiles([]); setDraftTab('files'); }}>{t($ => $.properties.torrentFileSelectionClear)}</button><button type="button" className="app-button px-3 text-xs" onClick={() => downloadId && void refreshDiagnostics('files', downloadId)}><RefreshCw size={14} />{t($ => $.properties.torrentFileProgressRefresh)}</button></div>
+          <div className="flex flex-wrap gap-2"><button type="button" className="app-button px-3 text-xs" disabled={!fileSelectionEditingEnabled} onClick={() => { const all = fileProgress?.files.map(file => file.index) ?? []; setSelectedFiles(all); setDraftTab('files'); }}>{t($ => $.properties.torrentFileSelectionAll)}</button><button type="button" className="app-button px-3 text-xs" disabled={!fileSelectionEditingEnabled} onClick={() => { setSelectedFiles([]); setDraftTab('files'); }}>{t($ => $.properties.torrentFileSelectionClear)}</button><button type="button" className="app-button px-3 text-xs" aria-busy={diagnosticsLoading || diagnosticsRefreshing} onClick={() => downloadId && void refreshDiagnostics('files', downloadId, true)}><RefreshCw size={14} className={diagnosticsLoading || diagnosticsRefreshing ? 'animate-spin motion-reduce:animate-none' : undefined} />{t($ => $.properties.torrentFileProgressRefresh)}</button></div>
           <div className="overflow-auto rounded-lg border border-border-modal"><table className="w-full min-w-[640px] text-xs" dir="ltr"><thead className="sticky top-0 bg-sidebar-bg text-left text-text-muted"><tr><th className="p-2">{t($ => $.properties.torrentFileProgressSelected)}</th><th className="p-2">#</th><th className="p-2">{t($ => $.properties.torrentFileProgressPath)}</th><th className="p-2">{t($ => $.properties.size)}</th><th className="p-2">{t($ => $.properties.torrentFileProgressCompleted)}</th></tr></thead><tbody>{fileProgress?.files.map(file => { const checked = selectedFiles === null ? file.selected : selectedFiles.includes(file.index); return <tr key={file.index} className="border-t border-border-modal/60"><td className="p-2"><input type="checkbox" checked={checked} disabled={!fileSelectionEditingEnabled} onChange={() => { const current = selectedFiles ?? fileProgress.files.filter(candidate => candidate.selected).map(candidate => candidate.index); const next = checked ? current.filter(index => index !== file.index) : [...current, file.index]; setSelectedFiles(next); setDraftTab('files'); }} aria-label={`${file.index + 1} ${file.relativePath}`} /></td><td className="p-2">{file.index + 1}</td><td className="max-w-[420px] truncate p-2" dir="auto">{file.relativePath}</td><td className="p-2">{formatDownloadBytes(file.length)}</td><td className="p-2">{formatDownloadBytes(file.completedLength)} ({file.length ? Math.round(file.completedLength / file.length * 100) : 0}%)</td></tr>; })}</tbody></table></div>
-          {diagnosticsLoading && <p className="text-xs text-text-muted">{t($ => $.properties.torrentPeerDiagnosticsLoading)}</p>}
-          {!diagnosticsLoading && !fileProgress && !diagnosticError && <p className="text-xs text-text-muted">{t($ => $.properties.torrentFileProgressUnavailable)}</p>}
+          {diagnosticPhase === 'initial' && diagnosticsLoading && !fileProgress && <p className="text-xs text-text-muted">{t($ => $.properties.torrentFileProgressLoading)}</p>}
+          {diagnosticPhase === 'unavailable' && !fileProgress && !diagnosticError && <p className="text-xs text-text-muted">{t($ => $.properties.torrentFileProgressUnavailable)}</p>}
           {diagnosticError && <p className="text-xs text-red-400" role="alert">{diagnosticError}</p>}
         </div>}
 
@@ -819,7 +938,7 @@ export const PropertiesWindowApp = () => {
         </div>}
 
         {activeTab === 'peers' && isTorrent && <div className="space-y-4">
-          <div className="flex items-center justify-between"><p className="text-sm">{peers ? t($ => $.properties.torrentPeerCount, { total: peers.totalPeers, seeders: peers.totalSeeders }) : diagnosticsLoading ? t($ => $.properties.torrentPeerDiagnosticsLoading) : t($ => $.properties.torrentPeerDiagnosticsUnavailable)}</p><button type="button" className="app-button px-3 text-xs" onClick={() => downloadId && void refreshDiagnostics('peers', downloadId)}><RefreshCw size={14} />{t($ => $.properties.torrentPeerDiagnosticsRefresh)}</button></div>
+          <div className="flex items-center justify-between"><p className="text-sm">{peers ? t($ => $.properties.torrentPeerCount, { total: peers.totalPeers, seeders: peers.totalSeeders }) : diagnosticsLoading ? t($ => $.properties.torrentPeerDiagnosticsLoading) : t($ => $.properties.torrentPeerDiagnosticsUnavailable)}</p><button type="button" className="app-button px-3 text-xs" aria-busy={diagnosticsLoading || diagnosticsRefreshing} onClick={() => downloadId && void refreshDiagnostics('peers', downloadId, true)}><RefreshCw size={14} className={diagnosticsLoading || diagnosticsRefreshing ? 'animate-spin motion-reduce:animate-none' : undefined} />{t($ => $.properties.torrentPeerDiagnosticsRefresh)}</button></div>
           <div className="grid gap-3 sm:grid-cols-2"><div className="rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs"><span className="text-text-muted">{t($ => $.properties.torrentAvailability)}</span><p className="mt-1">{availability ? `${availability.availability} · ${availability.pieceCount} ${t($ => $.properties.torrentDetailsPieces)}` : '—'}</p></div><div className="rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs"><span className="text-text-muted">{t($ => $.properties.torrentPeerDiagnosticsHint)}</span><p className="mt-1">{peers?.truncated ? t($ => $.properties.torrentPeerShowing, { shown: peers.peers.length, total: peers.totalPeers }) : peers?.peers.length ?? 0}</p></div></div>
           <div className="overflow-auto rounded-lg border border-border-modal"><table className="w-full min-w-[640px] text-xs" dir="ltr"><thead className="bg-sidebar-bg text-left text-text-muted"><tr><th className="p-2">{t($ => $.properties.torrentPeerAddress)}</th><th className="p-2">{t($ => $.properties.torrentPeerDownload)}</th><th className="p-2">{t($ => $.properties.torrentPeerUpload)}</th><th className="p-2">{t($ => $.properties.torrentPeerSeeder)}</th><th className="p-2">{t($ => $.properties.torrentPeerChoking)}</th></tr></thead><tbody>{peers?.peers.map((peer, index) => <tr key={`${peer.ip ?? 'peer'}-${peer.port ?? 'unknown'}-${index}`} className="border-t border-border-modal/60"><td className="p-2 font-mono">{peer.ip ? `${peer.ip.includes(':') ? `[${peer.ip}]` : peer.ip}${peer.port == null ? '' : `:${peer.port}`}` : '—'}</td><td className="p-2">{formatDownloadBytes(peer.downloadSpeed)}/s</td><td className="p-2">{formatDownloadBytes(peer.uploadSpeed)}/s</td><td className="p-2">{peer.seeder ? '✓' : '—'}</td><td className="p-2">{peer.peerChoking ? '✓' : '—'}</td></tr>)}</tbody></table></div>
           {diagnosticError && <p className="text-xs text-red-400" role="alert">{diagnosticError}</p>}

@@ -16,8 +16,11 @@ import {
   beginExclusivePropertiesAction,
   createFrameCoalescer,
   enqueuePropertiesAction,
+  formatPropertiesQueuePlacement,
   getPropertiesLifecycleAction,
   isExpectedPropertiesDiagnosticUnavailable,
+  propertiesDiagnosticPhase,
+  propertiesDiagnosticRequestState,
   propertiesLifecycleReachedPostcondition,
   propertiesTorrentPeerLimit,
   sanitizePropertiesSnapshot,
@@ -154,6 +157,68 @@ describe('Properties window bridge', () => {
     });
     expect(normalSnapshot).toMatchObject({ activeConnections: 3, requestedConnections: 8 });
     expect(normalSnapshot).not.toHaveProperty('connectedPeers');
+  });
+
+  it('adds a user-facing queue name to the sanitized snapshot', () => {
+    const snapshot = sanitizePropertiesSnapshot({
+      id: 'queued-1',
+      fileName: 'example.bin',
+      url: 'https://example.test/file',
+      status: 'queued',
+      queueId: 'internal-queue-id',
+      queuePosition: 2,
+    } as DownloadItem, {
+      theme: 'dark',
+      fontFamily: 'system',
+      appFontSize: 'standard',
+      listRowDensity: 'standard',
+      locale: 'en',
+    }, undefined, { queueName: 'Main Queue' });
+
+    expect(snapshot.queueName).toBe('Main Queue');
+    expect(snapshot.queueId).toBe('internal-queue-id');
+  });
+
+  it('keeps diagnostic refreshes quiet when cached data exists', () => {
+    expect(propertiesDiagnosticPhase(false, 'request-start')).toBe('initial');
+    expect(propertiesDiagnosticPhase(false, 'request-start', true)).toBe('refreshing');
+    expect(propertiesDiagnosticPhase(true, 'request-start')).toBe('refreshing');
+    expect(propertiesDiagnosticPhase(true, 'success')).toBe('idle');
+    expect(propertiesDiagnosticPhase(true, 'expected-unavailable')).toBe('stale');
+    expect(propertiesDiagnosticPhase(false, 'expected-unavailable')).toBe('unavailable');
+    expect(propertiesDiagnosticPhase(true, 'unexpected-error')).toBe('error');
+    expect(propertiesDiagnosticRequestState(false, false, false)).toMatchObject({
+      loading: true,
+      refreshing: false,
+      resetMessage: true,
+      phase: 'initial',
+    });
+    expect(propertiesDiagnosticRequestState(false, true, false)).toMatchObject({
+      loading: false,
+      refreshing: false,
+      resetMessage: false,
+      phase: 'refreshing',
+    });
+    expect(propertiesDiagnosticRequestState(true, true, true)).toMatchObject({
+      loading: false,
+      refreshing: true,
+      resetMessage: true,
+      phase: 'refreshing',
+    });
+  });
+
+  it('formats queue placement without ever using a raw queue id', () => {
+    const formatPosition = (position: number) => `Position ${position}`;
+    expect(formatPropertiesQueuePlacement('Main Queue', 2, formatPosition))
+      .toBe('Main Queue · Position 3');
+    expect(formatPropertiesQueuePlacement(undefined, 2, formatPosition))
+      .toBe('Position 3');
+    expect(formatPropertiesQueuePlacement('Main Queue', undefined, formatPosition))
+      .toBe('Main Queue');
+    expect(formatPropertiesQueuePlacement('  Main Queue  ', 1.5, formatPosition))
+      .toBe('Main Queue');
+    expect(formatPropertiesQueuePlacement(undefined, Number.NaN, formatPosition))
+      .toBe('—');
   });
 
   it('applies explicit secret changes without conflating unchanged fields', () => {

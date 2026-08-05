@@ -225,6 +225,7 @@ const he = {
     connectedPeers: 'עמיתים מחוברים',
     details: 'פרטים',
     queueId: 'תור',
+    queuePosition: 'מיקום {{position}}',
     resumable: 'ניתן להמשך',
     connectionCount: '{{active}}/{{total}} פעילות',
     connectionCountUnknown: '—/{{total}} פעילות',

@@ -225,6 +225,7 @@ const uk = {
     connectedPeers: 'підключених пірів',
     details: 'Деталі',
     queueId: 'Черга',
+    queuePosition: 'Позиція {{position}}',
     resumable: 'Можна продовжити',
     connectionCount: '{{active}}/{{total}} активних',
     connectionCountUnknown: '—/{{total}} активних',

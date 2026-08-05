@@ -225,6 +225,7 @@ const ru = {
     connectedPeers: 'подключённых пиров',
     details: 'Подробности',
     queueId: 'Очередь',
+    queuePosition: 'Позиция {{position}}',
     resumable: 'Возобновляемая',
     connectionCount: '{{active}}/{{total}} активных',
     connectionCountUnknown: '—/{{total}} активных',

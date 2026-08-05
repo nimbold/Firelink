@@ -193,8 +193,11 @@ export const PropertiesWindowBridgeHost = () => {
     const sendFor = async (windowLabel: string, downloadId: string) => {
       const registration = windows.get(windowLabel);
       if (!registration || registration.downloadId !== downloadId || disposed) return false;
-      const item = useDownloadStore.getState().downloads.find(download => download.id === downloadId);
+      const store = useDownloadStore.getState();
+      const item = store.downloads.find(download => download.id === downloadId);
       if (!item) return false;
+      const queue = store.queues.find(candidate => candidate.id === item.queueId)
+        ?? store.queues.find(candidate => candidate.isMain);
       const settings = useSettingsStore.getState();
       const progress = useDownloadProgressStore.getState();
       const revision = (snapshotRevisions.get(windowLabel) ?? 0) + 1;
@@ -214,6 +217,8 @@ export const PropertiesWindowBridgeHost = () => {
         }, {
           progress: progress.progressMap[downloadId],
           moveProgress: progress.moveProgressMap[downloadId],
+        }, {
+          queueName: queue?.name,
         }),
       });
       return true;

@@ -97,10 +97,54 @@ export const isExpectedPropertiesDiagnosticUnavailable = (error: unknown): boole
   ].includes(message);
 };
 
+export type PropertiesDiagnosticPhase = 'idle' | 'initial' | 'refreshing' | 'stale' | 'unavailable' | 'error';
+export type PropertiesDiagnosticOutcome = 'request-start' | 'success' | 'expected-unavailable' | 'unexpected-error';
+
+export const propertiesDiagnosticPhase = (
+  hasCachedResult: boolean,
+  outcome: PropertiesDiagnosticOutcome,
+  hasPreviousAttempt = false,
+): PropertiesDiagnosticPhase => {
+  if (outcome === 'request-start') return hasCachedResult || hasPreviousAttempt ? 'refreshing' : 'initial';
+  if (outcome === 'success') return 'idle';
+  if (outcome === 'expected-unavailable') return hasCachedResult ? 'stale' : 'unavailable';
+  return 'error';
+};
+
+export const propertiesDiagnosticRequestState = (
+  hasCachedResult: boolean,
+  hasPreviousAttempt: boolean,
+  manual: boolean,
+) => ({
+  loading: !hasPreviousAttempt && !hasCachedResult,
+  refreshing: manual && (hasPreviousAttempt || hasCachedResult),
+  resetMessage: !hasPreviousAttempt || hasCachedResult,
+  phase: propertiesDiagnosticPhase(hasCachedResult, 'request-start', hasPreviousAttempt),
+});
+
+export const formatPropertiesQueuePlacement = (
+  queueName: unknown,
+  queuePosition: unknown,
+  formatPosition: (position: number) => string,
+): string => {
+  const name = typeof queueName === 'string' ? queueName.trim() : '';
+  const hasPosition = typeof queuePosition === 'number'
+    && Number.isInteger(queuePosition)
+    && queuePosition >= 0;
+  const position = hasPosition ? formatPosition(queuePosition + 1) : '';
+  if (name && position) return `${name} · ${position}`;
+  return name || position || '—';
+};
+
 type SafePropertiesFields = Pick<DownloadItem, (typeof PROPERTIES_SNAPSHOT_KEYS)[number]>;
+
+export type PropertiesSnapshotContext = {
+  queueName?: string;
+};
 
 export type PropertiesSnapshot = SafePropertiesFields & {
   appearance: DocumentAppearance;
+  queueName?: string;
   activeConnections?: number;
   requestedConnections?: number;
   connectedPeers?: number;
@@ -246,6 +290,7 @@ const copyWithoutSecrets = (
     progress?: DownloadProgressEvent;
     moveProgress?: number;
   },
+  context?: PropertiesSnapshotContext,
 ): PropertiesSnapshot => {
   const safeItem = Object.fromEntries(
     PROPERTIES_SNAPSHOT_KEYS.flatMap(key => (
@@ -256,6 +301,7 @@ const copyWithoutSecrets = (
   return {
     ...safeItem,
     appearance,
+    ...(context?.queueName ? { queueName: context.queueName } : {}),
     ...(live?.progress ? {
       fraction: live.progress.fraction,
       speed: item.status === 'seeding'

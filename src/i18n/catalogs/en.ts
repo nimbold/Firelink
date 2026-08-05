@@ -225,6 +225,7 @@ const common = {
     connectedPeers: 'connected peers',
     details: 'Details',
     queueId: 'Queue',
+    queuePosition: 'Position {{position}}',
     resumable: 'Resumable',
     connectionCount: '{{active}}/{{total}}',
     connectionCountUnknown: '—/{{total}}',

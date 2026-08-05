@@ -225,6 +225,7 @@ const zhCN = {
     connectedPeers: '已连接对等端',
     details: '详细信息',
     queueId: '队列',
+    queuePosition: '位置 {{position}}',
     resumable: '可续传',
     connectionCount: '{{active}}/{{total}} 个连接',
     connectionCountUnknown: '—/{{total}} 个连接',
