@@ -220,6 +220,8 @@ const common = {
     },
   },
   properties: {
+    discardChanges: 'Discard changes',
+    keepEditing: 'Keep editing',
     progress: 'Progress',
     size: 'Size',
     speed: 'Speed',

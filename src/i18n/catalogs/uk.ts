@@ -220,6 +220,8 @@ const uk = {
     },
   },
   properties: {
+    discardChanges: 'Відкинути зміни',
+    keepEditing: 'Продовжити редагування',
     progress: 'Прогрес',
     size: 'Розмір',
     speed: 'Швидкість',

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
@@ -15,15 +15,18 @@ import {
   PROPERTIES_WINDOW_REMOVED,
   PROPERTIES_WINDOW_SNAPSHOT,
   attachAsyncPropertiesListener,
+  DEFAULT_PROPERTIES_WINDOW_CHROME,
   formatPropertiesQueuePlacement,
   getPropertiesLifecycleAction,
-  propertiesLifecycleReachedPostcondition,
   propertiesTorrentPeerLimit,
   propertiesDiagnosticRequestState,
   sendPropertiesActionRequest,
   sendPropertiesReady,
   isExpectedPropertiesDiagnosticUnavailable,
+  nextPropertiesRequestId,
   propertiesDiagnosticPhase,
+  propertiesActionRequestKey,
+  resetPropertiesActionState,
   type PropertiesAction,
   type PropertiesActionRequest,
   type PropertiesActionResult,
@@ -35,6 +38,9 @@ import {
 import { formatDownloadBytes, formatTorrentRatio } from '../utils/downloadProgress';
 import { changeAppLocale } from '../i18n';
 import { synchronizeDocumentAppearance } from '../utils/documentAppearance';
+import { getWindowControlRevealOffset } from '../utils/windowControlStyle';
+import { getPropertiesFooterActions } from '../utils/propertiesFooter';
+import { WindowControls } from './WindowControls';
 import {
   TORRENT_ENCRYPTION_POLICY_DISABLED,
   TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION,
@@ -47,9 +53,6 @@ type PropertiesTab = 'overview' | 'files' | 'trackers' | 'peers' | 'options' | '
 type SecretName = 'username' | 'password' | 'cookies' | 'headers';
 type SecretDraft = { value: string; touched: boolean; clear: boolean };
 const SECRET_NAMES: SecretName[] = ['username', 'password', 'cookies', 'headers'];
-const nextPropertiesRequestId = (current: number): number =>
-  current >= Number.MAX_SAFE_INTEGER ? 1 : current + 1;
-
 const isTorrentDiagnosticsStatus = (status: string) =>
   ['downloading', 'verifying', 'seeding', 'waitingToSeed', 'retrying', 'paused', 'completed'].includes(status);
 
@@ -149,8 +152,9 @@ export const PropertiesWindowApp = () => {
   const closeAfterSaveRef = useRef(false);
   const switchAfterSaveRef = useRef<PropertiesTab | null>(null);
   const requestIdRef = useRef(0);
+  const pendingActionRequestRef = useRef<PropertiesActionRequest | null>(null);
   const pendingActionRef = useRef<PropertiesAction | null>(null);
-  const pendingLifecycleIntentRef = useRef<ReturnType<typeof getPropertiesLifecycleAction>>(null);
+  const pendingActionSendKeyRef = useRef<string | null>(null);
   const latestSnapshotRevisionRef = useRef(0);
   const latestBridgeGenerationRef = useRef<number | null>(null);
   const appearanceCleanupRef = useRef<(() => void) | null>(null);
@@ -167,6 +171,9 @@ export const PropertiesWindowApp = () => {
   const diagnosticAttemptsRef = useRef(new Set<string>());
   const diagnosticLifecycleKeyRef = useRef('');
   const diagnosticLifecycleEpochRef = useRef(0);
+  const allowWindowCloseRef = useRef(false);
+  const isDirtyRef = useRef(false);
+  const windowChromeRef = useRef(DEFAULT_PROPERTIES_WINDOW_CHROME);
   snapshotRef.current = snapshot;
   activeTabRef.current = activeTab;
   downloadIdRef.current = downloadId;
@@ -180,6 +187,23 @@ export const PropertiesWindowApp = () => {
     ? ['overview', 'files', 'trackers', 'peers', 'options']
     : ['overview', 'transfer', 'advanced'], [isTorrent]);
   const isDirty = draftTab !== null;
+  isDirtyRef.current = isDirty;
+  if (isDirty && allowWindowCloseRef.current) {
+    // A programmatic close is only authorized for the close request it
+    // immediately follows. If the native close was vetoed by another owner
+    // and the user starts editing again, restore the dirty-state guard.
+    allowWindowCloseRef.current = false;
+  }
+
+  const closeCurrentWindow = useCallback(async (allowDirtyClose = false) => {
+    allowWindowCloseRef.current = allowDirtyClose;
+    try {
+      await currentWindow.close();
+    } catch (error) {
+      setErrorMessage(errorText(error));
+      allowWindowCloseRef.current = false;
+    }
+  }, [currentWindow]);
 
   useEffect(() => {
     draftTabRef.current = draftTab;
@@ -322,6 +346,7 @@ export const PropertiesWindowApp = () => {
         if (cancelled) return;
         setDownloadId(id);
         const snapshotListener = await listen<PropertiesSnapshotEvent>(PROPERTIES_WINDOW_SNAPSHOT, async event => {
+          if (cancelled) return;
           if (event.payload.windowLabel !== windowLabel
             || event.payload.downloadId !== id
             || event.payload.sessionId !== sessionId) return;
@@ -334,7 +359,8 @@ export const PropertiesWindowApp = () => {
             diagnosticLifecycleKeyRef.current = '';
             diagnosticAttemptsRef.current.clear();
             const lostAction = pendingActionRef.current;
-            const lostApply = lostAction === 'apply-properties';
+            const lostDraftAction = lostAction === 'apply-properties'
+              || lostAction === 'set-torrent-file-selection';
             // A main-webview restart can lose both the action-result event and
             // the store transition event while the child Properties window
             // remains alive. No result from the dead bridge can be correlated
@@ -343,13 +369,14 @@ export const PropertiesWindowApp = () => {
             // action. This never replays a possibly completed lifecycle
             // request, and also recovers when the native request failed while
             // its failure event was lost.
-            requestIdRef.current = nextPropertiesRequestId(requestIdRef.current);
-            pendingActionRef.current = null;
-            pendingLifecycleIntentRef.current = null;
+            const resetActionState = resetPropertiesActionState(requestIdRef.current);
+            requestIdRef.current = resetActionState.requestId;
+            pendingActionRequestRef.current = resetActionState.request;
+            pendingActionRef.current = resetActionState.pendingAction;
             setPendingAction(null);
             closeAfterSaveRef.current = false;
             switchAfterSaveRef.current = null;
-            if (lostApply) {
+            if (lostDraftAction) {
               // A completed property action is represented by the fresh
               // snapshot, not by the stale draft that produced the request.
               draftTabRef.current = null;
@@ -368,23 +395,16 @@ export const PropertiesWindowApp = () => {
             diagnosticAttemptsRef.current.clear();
           }
           await changeAppLocale(event.payload.snapshot.appearance.locale);
-          if (event.payload.revision !== latestSnapshotRevisionRef.current) return;
+          if (cancelled
+            || event.payload.bridgeGeneration !== latestBridgeGenerationRef.current
+            || event.payload.revision !== latestSnapshotRevisionRef.current) return;
           appearanceCleanupRef.current?.();
           appearanceCleanupRef.current = synchronizeDocumentAppearance(
             window,
             event.payload.snapshot.appearance,
           );
+          windowChromeRef.current = event.payload.snapshot.windowChrome ?? DEFAULT_PROPERTIES_WINDOW_CHROME;
           setSnapshot(event.payload.snapshot);
-          if (pendingActionRef.current === 'pause-resume'
-            && pendingLifecycleIntentRef.current
-            && propertiesLifecycleReachedPostcondition(
-              pendingLifecycleIntentRef.current,
-              event.payload.snapshot.status,
-            )) {
-            pendingActionRef.current = null;
-            pendingLifecycleIntentRef.current = null;
-            setPendingAction(null);
-          }
           if (draftTabRef.current === null) hydrateDraft(event.payload.snapshot);
           void currentWindow.setTitle(safeTitle(event.payload.snapshot.fileName)).catch(() => undefined);
           if (!hasRevealedWindowRef.current && !revealInFlightRef.current) {
@@ -407,31 +427,40 @@ export const PropertiesWindowApp = () => {
         }
         unlistenSnapshot = snapshotListener;
         const resultListener = await listen<PropertiesActionResult>(PROPERTIES_WINDOW_ACTION_RESULT, event => {
+          if (cancelled) return;
           if (event.payload.windowLabel !== windowLabel
             || event.payload.downloadId !== id
             || event.payload.sessionId !== sessionId) return;
           if (event.payload.requestId !== requestIdRef.current) return;
+          if (pendingActionRef.current === null) return;
           const completedAction = pendingActionRef.current;
           pendingActionRef.current = null;
-          pendingLifecycleIntentRef.current = null;
+          pendingActionRequestRef.current = null;
           setPendingAction(null);
-          if (!event.payload.ok) setErrorMessage(event.payload.error ?? 'The action failed');
-          else {
+          if (!event.payload.ok) {
+            setErrorMessage(event.payload.error ?? 'The action failed');
+            closeAfterSaveRef.current = false;
+            switchAfterSaveRef.current = null;
+          } else {
+            const commitsDraft = completedAction === 'apply-properties'
+              || completedAction === 'set-torrent-file-selection';
             const nextTab = switchAfterSaveRef.current;
             const shouldClose = closeAfterSaveRef.current;
             switchAfterSaveRef.current = null;
             closeAfterSaveRef.current = false;
             setErrorMessage('');
             setNotice(completedAction === 'apply-properties' ? t($ => $.properties.saved) : '');
-            draftTabRef.current = null;
-            setDraftTab(null);
-            if (nextTab) {
-              setActiveTab(nextTab);
-              setPendingTab(null);
-            }
-            if (shouldClose) {
+            if (commitsDraft) {
+              draftTabRef.current = null;
+              setDraftTab(null);
               setClosePrompt(false);
-              void currentWindow.close().catch(error => setErrorMessage(errorText(error)));
+              if (nextTab) {
+                setActiveTab(nextTab);
+                setPendingTab(null);
+              }
+              if (shouldClose) {
+                void closeCurrentWindow(true);
+              }
             }
           }
         });
@@ -441,6 +470,7 @@ export const PropertiesWindowApp = () => {
         }
         unlistenResult = resultListener;
         const removedListener = await listen<{ windowLabel: string; downloadId: string }>(PROPERTIES_WINDOW_REMOVED, event => {
+          if (cancelled) return;
           if (event.payload.windowLabel === windowLabel && event.payload.downloadId === id) {
             if (readyRetryTimer !== undefined) {
               window.clearInterval(readyRetryTimer);
@@ -454,6 +484,18 @@ export const PropertiesWindowApp = () => {
             diagnosticLifecycleKeyRef.current = '';
             diagnosticAttemptsRef.current.clear();
             setSnapshot(null);
+            draftTabRef.current = null;
+            isDirtyRef.current = false;
+            setDraftTab(null);
+            setPendingTab(null);
+            setClosePrompt(false);
+            closeAfterSaveRef.current = false;
+            switchAfterSaveRef.current = null;
+            pendingActionRequestRef.current = null;
+            pendingActionRef.current = null;
+            pendingActionSendKeyRef.current = null;
+            allowWindowCloseRef.current = false;
+            setPendingAction(null);
             setNotice(t($ => $.downloadTable.noDownloads));
           }
         });
@@ -491,10 +533,13 @@ export const PropertiesWindowApp = () => {
       unlistenSnapshot?.();
       unlistenResult?.();
       unlistenRemoved?.();
+      pendingActionRequestRef.current = null;
+      pendingActionSendKeyRef.current = null;
+      allowWindowCloseRef.current = false;
       appearanceCleanupRef.current?.();
       appearanceCleanupRef.current = null;
     };
-  }, [currentWindow, hydrateDraft, sessionId, t, windowLabel]);
+  }, [closeCurrentWindow, currentWindow, hydrateDraft, sessionId, t, windowLabel]);
 
   useEffect(() => {
     if (!snapshot || draftTab !== null) return;
@@ -533,10 +578,14 @@ export const PropertiesWindowApp = () => {
   }, [activeTab, downloadId, isTorrent, refreshDiagnostics, snapshot?.status]);
 
   useEffect(() => {
-    if (!isDirty) return;
     let disposed = false;
     let unlisten: UnlistenFn | undefined;
     attachAsyncPropertiesListener(currentWindow.onCloseRequested(event => {
+      if (allowWindowCloseRef.current) {
+        allowWindowCloseRef.current = false;
+        return;
+      }
+      if (!isDirtyRef.current) return;
       event.preventDefault();
       setClosePrompt(true);
     }), () => disposed, value => { unlisten = value; });
@@ -544,7 +593,27 @@ export const PropertiesWindowApp = () => {
       disposed = true;
       unlisten?.();
     };
-  }, [currentWindow, isDirty]);
+  }, [currentWindow]);
+
+  const sendPendingAction = useCallback(async (reportError: boolean) => {
+    const request = pendingActionRequestRef.current;
+    if (!request || pendingActionRef.current === null) return;
+    const requestKey = propertiesActionRequestKey(request);
+    if (pendingActionSendKeyRef.current === requestKey) return;
+    pendingActionSendKeyRef.current = requestKey;
+    try {
+      await sendPropertiesActionRequest(request);
+    } catch (error) {
+      // A rejected IPC promise does not prove that the host did not receive
+      // the request. Keep the exact request pending so the idempotent host can
+      // replay its result on the next attempt.
+      if (reportError) setErrorMessage(errorText(error));
+    } finally {
+      if (pendingActionSendKeyRef.current === requestKey) {
+        pendingActionSendKeyRef.current = null;
+      }
+    }
+  }, []);
 
   const requestAction = useCallback(async (
     action: PropertiesAction,
@@ -554,30 +623,26 @@ export const PropertiesWindowApp = () => {
     const requestId = nextPropertiesRequestId(requestIdRef.current);
     requestIdRef.current = requestId;
     pendingActionRef.current = action;
-    if (action === 'pause-resume') {
-      pendingLifecycleIntentRef.current = getPropertiesLifecycleAction(snapshot?.status ?? 'completed');
-    } else {
-      pendingLifecycleIntentRef.current = null;
-    }
     setPendingAction(action);
-    try {
-      await sendPropertiesActionRequest({
-        windowLabel,
-        downloadId,
-        sessionId,
-        requestId,
-        action,
-        payload,
-      });
-    } catch (error) {
-      setPendingAction(null);
-      pendingActionRef.current = null;
-      pendingLifecycleIntentRef.current = null;
-      closeAfterSaveRef.current = false;
-      switchAfterSaveRef.current = null;
-      setErrorMessage(errorText(error));
-    }
-  }, [downloadId, sessionId, snapshot?.status, windowLabel]);
+    const request: PropertiesActionRequest = {
+      windowLabel,
+      downloadId,
+      sessionId,
+      requestId,
+      action,
+      payload,
+    };
+    pendingActionRequestRef.current = request;
+    await sendPendingAction(true);
+  }, [downloadId, sendPendingAction, sessionId, windowLabel]);
+
+  useEffect(() => {
+    if (pendingAction === null) return;
+    const retryTimer = window.setInterval(() => {
+      void sendPendingAction(false);
+    }, 2500);
+    return () => window.clearInterval(retryTimer);
+  }, [pendingAction, sendPendingAction]);
 
   const updateSecretDraft = (name: SecretName, value: string) => {
     setSecretDrafts(current => ({
@@ -692,6 +757,7 @@ export const PropertiesWindowApp = () => {
   };
 
   const discardDraft = () => {
+    if (pendingActionRef.current !== null) return;
     const shouldClose = closePrompt;
     if (snapshot) hydrateDraft(snapshot);
     draftTabRef.current = null;
@@ -699,16 +765,15 @@ export const PropertiesWindowApp = () => {
     if (pendingTab) setActiveTab(pendingTab);
     setPendingTab(null);
     setClosePrompt(false);
-    if (shouldClose) void currentWindow.close().catch(error => setErrorMessage(errorText(error)));
+    if (shouldClose) void closeCurrentWindow(true);
   };
 
   const closeWindow = async () => {
-    if (!downloadId) return;
-    try {
-      await invoke('close_download_properties_window', { id: downloadId });
-    } catch (error) {
-      setErrorMessage(errorText(error));
+    if (isDirtyRef.current) {
+      setClosePrompt(true);
+      return;
     }
+    await closeCurrentWindow();
   };
 
   const performTorrentAction = async (action: 'magnet' | 'export' | 'move' | 'verify') => {
@@ -743,16 +808,34 @@ export const PropertiesWindowApp = () => {
     }
   };
 
-  if (!downloadId) {
-    return <main className="properties-window-shell p-6" role="status">{errorMessage || t($ => $.app.loading)}</main>;
-  }
-  if (!snapshot) {
-    return <main className="properties-window-shell p-6" role="status">{errorMessage || t($ => $.app.loading)}</main>;
+  const windowChrome = snapshot?.windowChrome ?? windowChromeRef.current;
+  const windowControlRevealOffset = getWindowControlRevealOffset(windowChrome.controlStyle);
+  if (!downloadId || !snapshot) {
+    return (
+      <main
+        className={`properties-window-shell properties-window-shell--controls-${windowChrome.side} flex h-screen min-h-0 flex-col bg-main-bg text-text-primary`}
+        style={{ '--window-control-reveal-offset': `${windowControlRevealOffset}px` } as CSSProperties}
+        aria-labelledby="properties-window-title"
+      >
+        <WindowControls side={windowChrome.side} controlStyle={windowChrome.controlStyle} />
+        <div className="properties-window-titlebar" data-tauri-drag-region>
+          <span id="properties-window-title" data-tauri-drag-region>{t($ => $.downloadTable.properties)} - Firelink</span>
+        </div>
+        <div className="flex min-h-0 flex-1 items-center justify-center p-6" role="status">
+          {errorMessage || t($ => $.app.loading)}
+        </div>
+      </main>
+    );
   }
 
   const progress = Math.max(0, Math.min(1, snapshot.fraction ?? 0));
   const lifecycleAction = getPropertiesLifecycleAction(snapshot.status);
   const editingEnabled = pendingAction === null && isEditableStatus(snapshot.status);
+  const footerActions = getPropertiesFooterActions({
+    isDirty,
+    hasUnsavedNavigation: pendingTab !== null || closePrompt,
+  });
+  const isPromptFooter = footerActions.includes('keepEditing');
   const fileSelectionEditingEnabled = editingEnabled && isTorrentFileSelectionEditable(snapshot.status);
   const total = snapshot.size || (snapshot.totalBytes === undefined
     ? t($ => $.addDownloads.unknownSize)
@@ -790,7 +873,15 @@ export const PropertiesWindowApp = () => {
   };
 
   return (
-    <main className="properties-window-shell flex h-screen min-h-0 flex-col bg-main-bg text-text-primary" aria-labelledby="properties-window-title">
+    <main
+      className={`properties-window-shell properties-window-shell--controls-${windowChrome.side} flex h-screen min-h-0 flex-col bg-main-bg text-text-primary`}
+      style={{ '--window-control-reveal-offset': `${windowControlRevealOffset}px` } as CSSProperties}
+      aria-labelledby="properties-window-title"
+    >
+      <WindowControls side={windowChrome.side} controlStyle={windowChrome.controlStyle} />
+      <div className="properties-window-titlebar" data-tauri-drag-region>
+        <span data-tauri-drag-region>{snapshot.fileName} - {t($ => $.downloadTable.properties)} - Firelink</span>
+      </div>
       <header className="properties-window-header shrink-0 border-b border-border-modal bg-sidebar-bg px-5 py-4">
         <div className="properties-window-hero-top">
           <div className="properties-window-title-block min-w-0">
@@ -1006,7 +1097,7 @@ export const PropertiesWindowApp = () => {
       </section>
 
       {(isDirty || errorMessage || notice || pendingTab || closePrompt) && <div className="shrink-0 border-t border-border-modal bg-sidebar-bg px-4 py-2" aria-live="polite">
-        {pendingTab || closePrompt ? <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span>{t($ => $.scheduler.unsavedChanges)}</span><div className="flex gap-2"><button type="button" className="app-button px-3 text-xs" onClick={discardDraft}>{t($ => $.actions.cancel)}</button><button type="button" className="app-button app-button-primary px-3 text-xs" disabled={pendingAction !== null} onClick={() => { closeAfterSaveRef.current = closePrompt; switchAfterSaveRef.current = pendingTab; void applyActiveTab(); }}>{t($ => $.properties.save)}</button><button type="button" className="app-button px-3 text-xs" onClick={() => { switchAfterSaveRef.current = null; closeAfterSaveRef.current = false; setPendingTab(null); setClosePrompt(false); }}>{t($ => $.properties.cancel)}</button></div></div> : <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className={errorMessage ? 'text-red-400' : 'text-text-muted'}>{errorMessage || notice}</span><div className="flex gap-2">{isDirty && <><button type="button" className="app-button px-3 text-xs" onClick={discardDraft}>{t($ => $.actions.cancel)}</button><button type="button" className="app-button app-button-primary px-3 text-xs" disabled={pendingAction !== null} onClick={() => void applyActiveTab()}><Save size={14} />{t($ => $.properties.save)}</button></>}<button type="button" className="app-button px-3 text-xs" onClick={() => void closeWindow()}><X size={14} />{t($ => $.properties.cancel)}</button></div></div>}
+        {isPromptFooter ? <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span>{t($ => $.scheduler.unsavedChanges)}</span><div className="flex gap-2"><button type="button" className="app-button px-3 text-xs" disabled={pendingAction !== null} onClick={discardDraft}>{t($ => $.properties.discardChanges)}</button><button type="button" className="app-button app-button-primary px-3 text-xs" disabled={pendingAction !== null} onClick={() => { closeAfterSaveRef.current = closePrompt; switchAfterSaveRef.current = pendingTab; void applyActiveTab(); }}>{t($ => $.properties.save)}</button><button type="button" className="app-button px-3 text-xs" onClick={() => { switchAfterSaveRef.current = null; closeAfterSaveRef.current = false; setPendingTab(null); setClosePrompt(false); }}>{t($ => $.properties.keepEditing)}</button></div></div> : <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className={errorMessage ? 'text-red-400' : 'text-text-muted'}>{errorMessage || notice}</span><div className="flex gap-2">{footerActions.includes('discardChanges') && <><button type="button" className="app-button px-3 text-xs" disabled={pendingAction !== null} onClick={discardDraft}>{t($ => $.properties.discardChanges)}</button><button type="button" className="app-button app-button-primary px-3 text-xs" disabled={pendingAction !== null} onClick={() => void applyActiveTab()}><Save size={14} />{t($ => $.properties.save)}</button></>}<button type="button" className="app-button px-3 text-xs" onClick={() => void closeWindow()}><X size={14} />{t($ => $.window.close)}</button></div></div>}
       </div>}
     </main>
   );

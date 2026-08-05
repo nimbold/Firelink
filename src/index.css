@@ -572,14 +572,44 @@ html[data-list-density="relaxed"] {
   }
 
   .properties-window-shell {
-    --properties-header-surface: hsl(var(--surface-raised) / 0.88);
+    --properties-header-surface: hsl(var(--surface-raised));
     --properties-card-surface: hsl(var(--bg-input) / 0.42);
   }
 
+  .properties-window-titlebar {
+    display: flex;
+    height: 52px;
+    flex: 0 0 auto;
+    align-items: center;
+    padding: 0 18px;
+    direction: ltr;
+    border-bottom: 1px solid hsl(var(--border-color));
+    background: hsl(var(--statusbar-bg));
+    color: hsl(var(--text-primary));
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    -webkit-app-region: drag;
+  }
+
+  .properties-window-titlebar span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .properties-window-shell--controls-left .properties-window-titlebar {
+    padding-left: calc(var(--window-control-reveal-offset, 88px) + 18px);
+  }
+
+  .properties-window-shell--controls-right .properties-window-titlebar {
+    justify-content: flex-end;
+    padding-right: calc(var(--window-control-reveal-offset, 88px) + 18px);
+  }
+
   .properties-window-header {
-    background:
-      radial-gradient(circle at 100% 0%, hsl(var(--accent-color) / 0.1), transparent 38%),
-      var(--properties-header-surface);
+    background: var(--properties-header-surface);
     box-shadow: inset 0 -1px 0 hsl(0 0% 100% / 0.025);
   }
 

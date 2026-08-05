@@ -220,6 +220,8 @@ const fa = {
     },
   },
   properties: {
+    discardChanges: 'صرف‌نظر از تغییرات',
+    keepEditing: 'ادامه ویرایش',
     progress: 'پیشرفت',
     size: 'اندازه',
     speed: 'سرعت',

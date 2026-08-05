@@ -14,15 +14,17 @@ import {
   applySecretPatch,
   attachAsyncPropertiesListener,
   beginExclusivePropertiesAction,
+  classifyPropertiesActionRequest,
   createFrameCoalescer,
   enqueuePropertiesAction,
   formatPropertiesQueuePlacement,
   getPropertiesLifecycleAction,
   isExpectedPropertiesDiagnosticUnavailable,
   propertiesDiagnosticPhase,
+  propertiesActionRequestKey,
   propertiesDiagnosticRequestState,
-  propertiesLifecycleReachedPostcondition,
   propertiesTorrentPeerLimit,
+  resetPropertiesActionState,
   sanitizePropertiesSnapshot,
   shouldAcceptPropertiesActionRequest,
 } from './propertiesBridge';
@@ -65,6 +67,7 @@ describe('Properties window bridge', () => {
       listRowDensity: 'compact',
       locale: 'fa',
     });
+    expect(snapshot.windowChrome).toEqual({ controlStyle: 'macos', side: 'left' });
   });
 
   it('adds resolver error metadata without exposing the queue-internal mode', () => {
@@ -202,6 +205,27 @@ describe('Properties window bridge', () => {
     expect(snapshot.queueId).toBe('internal-queue-id');
   });
 
+  it('preserves resolved Properties window chrome in the sanitized snapshot', () => {
+    const snapshot = sanitizePropertiesSnapshot({
+      id: 'chrome-1',
+      fileName: 'example.bin',
+      url: 'https://example.test/file',
+      status: 'paused',
+      category: 'Other',
+      dateAdded: '',
+    } as DownloadItem, {
+      theme: 'dark',
+      fontFamily: 'system',
+      appFontSize: 'standard',
+      listRowDensity: 'standard',
+      locale: 'en',
+    }, undefined, {
+      windowChrome: { controlStyle: 'windows', side: 'right' },
+    });
+
+    expect(snapshot.windowChrome).toEqual({ controlStyle: 'windows', side: 'right' });
+  });
+
   it('keeps diagnostic refreshes quiet when cached data exists', () => {
     expect(propertiesDiagnosticPhase(false, 'request-start')).toBe('initial');
     expect(propertiesDiagnosticPhase(false, 'request-start', true)).toBe('refreshing');
@@ -262,15 +286,6 @@ describe('Properties window bridge', () => {
     expect(getPropertiesLifecycleAction('staged')).toBe('start');
     expect(getPropertiesLifecycleAction('failed')).toBe('retry');
     expect(getPropertiesLifecycleAction('completed')).toBeNull();
-  });
-
-  it('clears a lost lifecycle action from an authoritative postcondition', () => {
-    expect(propertiesLifecycleReachedPostcondition('resume', 'downloading')).toBe(true);
-    expect(propertiesLifecycleReachedPostcondition('resume', 'seeding')).toBe(true);
-    expect(propertiesLifecycleReachedPostcondition('resume', 'paused')).toBe(false);
-    expect(propertiesLifecycleReachedPostcondition('pause', 'paused')).toBe(true);
-    expect(propertiesLifecycleReachedPostcondition('pause', 'completed')).toBe(true);
-    expect(propertiesLifecycleReachedPostcondition('pause', 'downloading')).toBe(false);
   });
 
   it('keeps Torrent peer-cap telemetry distinct from generic connections', () => {
@@ -335,6 +350,35 @@ describe('Properties window bridge', () => {
       sessionId: 'session-1',
       requestId: 1,
     })).toBe(false);
+  });
+
+  it('replays completed duplicate requests after a lost result and deduplicates retries', () => {
+    const registration = {
+      downloadId: 'download-1',
+      sessionId: 'session-1',
+      latestRequestId: 4,
+    };
+    const request = { downloadId: 'download-1', sessionId: 'session-1', requestId: 4 };
+
+    expect(classifyPropertiesActionRequest(registration, { ...request, requestId: 5 }, false, false)).toBe('accept');
+    expect(classifyPropertiesActionRequest(registration, request, true, false)).toBe('replay');
+    expect(classifyPropertiesActionRequest(registration, request, false, true)).toBe('pending');
+    expect(classifyPropertiesActionRequest(registration, { ...request, requestId: 3 }, false, false)).toBe('ignore');
+    expect(classifyPropertiesActionRequest(registration, { ...request, sessionId: 'session-old' }, false, false)).toBe('ignore');
+
+    const base = { windowLabel: 'properties-1', sessionId: 'session-1', requestId: 4 };
+    expect(propertiesActionRequestKey(base)).not.toBe(propertiesActionRequestKey({ ...base, requestId: 5 }));
+    expect(propertiesActionRequestKey(base)).not.toBe(propertiesActionRequestKey({ ...base, sessionId: 'session-2' }));
+    expect(propertiesActionRequestKey(base)).not.toBe(propertiesActionRequestKey({ ...base, windowLabel: 'properties-2' }));
+  });
+
+  it('resets pending action state while advancing the bridge-generation request cursor', () => {
+    expect(resetPropertiesActionState(9)).toEqual({
+      requestId: 10,
+      pendingAction: null,
+      request: null,
+    });
+    expect(resetPropertiesActionState(Number.MAX_SAFE_INTEGER).requestId).toBe(1);
   });
 
   it('serializes actions per window and continues after an earlier action fails', async () => {

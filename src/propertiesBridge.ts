@@ -6,6 +6,7 @@ import type { DownloadStatus } from './bindings/DownloadStatus';
 import type { DownloadItem } from './store/useDownloadStore';
 import { canPauseDownload } from './utils/downloadActions';
 import type { DocumentAppearance } from './utils/documentAppearance';
+import type { ResolvedWindowControlStyle } from './utils/windowControlStyle';
 import { invokeCommand as invoke } from './ipc';
 import { classifyDownloadError } from './utils/downloadErrors';
 
@@ -16,6 +17,16 @@ export const PROPERTIES_WINDOW_ACTION_RESULT = 'properties-window-action-result'
 export const PROPERTIES_WINDOW_REMOVED = 'properties-window-removed' as const;
 export const PROPERTIES_WINDOW_CLOSED = 'properties-window-closed' as const;
 export const DEFAULT_PROPERTIES_TORRENT_MAX_PEERS = 55;
+
+export type PropertiesWindowChrome = {
+  controlStyle: ResolvedWindowControlStyle;
+  side: 'left' | 'right';
+};
+
+export const DEFAULT_PROPERTIES_WINDOW_CHROME: PropertiesWindowChrome = {
+  controlStyle: 'macos',
+  side: 'left',
+};
 
 export const propertiesTorrentPeerLimit = (value: unknown): number =>
   typeof value === 'number'
@@ -144,10 +155,12 @@ type SafePropertiesFields = Pick<DownloadItem, (typeof PROPERTIES_SNAPSHOT_KEYS)
 
 export type PropertiesSnapshotContext = {
   queueName?: string;
+  windowChrome?: PropertiesWindowChrome;
 };
 
 export type PropertiesSnapshot = SafePropertiesFields & {
   appearance: DocumentAppearance;
+  windowChrome: PropertiesWindowChrome;
   queueName?: string;
   lastErrorKind?: DownloadErrorKind;
   lastResolverFallback?: boolean;
@@ -186,16 +199,6 @@ export type PropertiesAction =
   | 'set-torrent-peer-options';
 
 export type PropertiesLifecycleAction = 'pause' | 'resume' | 'start' | 'retry';
-
-export const propertiesLifecycleReachedPostcondition = (
-  action: PropertiesLifecycleAction,
-  status: DownloadStatus,
-): boolean => {
-  if (action === 'pause') {
-    return ['paused', 'completed', 'failed'].includes(status);
-  }
-  return ['queued', 'downloading', 'processing', 'verifying', 'seeding', 'waitingToSeed', 'retrying'].includes(status);
-};
 
 export const getPropertiesLifecycleAction = (
   status: DownloadStatus,
@@ -250,6 +253,15 @@ export type PropertiesActionResult = {
   error?: string;
 };
 
+export const nextPropertiesRequestId = (requestId: number): number =>
+  requestId >= Number.MAX_SAFE_INTEGER ? 1 : requestId + 1;
+
+export const resetPropertiesActionState = (requestId: number) => ({
+  requestId: nextPropertiesRequestId(requestId),
+  pendingAction: null as PropertiesAction | null,
+  request: null as PropertiesActionRequest | null,
+});
+
 export type PropertiesSnapshotEvent = {
   windowLabel: string;
   downloadId: string;
@@ -263,6 +275,30 @@ export type PropertiesWindowRegistration = {
   downloadId: string;
   sessionId: string;
   latestRequestId: number;
+};
+
+export type PropertiesActionRequestDisposition = 'accept' | 'replay' | 'pending' | 'ignore';
+
+export const propertiesActionRequestKey = (
+  request: Pick<PropertiesActionRequest, 'windowLabel' | 'sessionId' | 'requestId'>,
+): string => `${request.windowLabel}\u0000${request.sessionId}\u0000${request.requestId}`;
+
+export const classifyPropertiesActionRequest = (
+  registration: PropertiesWindowRegistration | undefined,
+  request: Pick<PropertiesActionRequest, 'downloadId' | 'sessionId' | 'requestId'>,
+  hasCachedResult: boolean,
+  isInFlight: boolean,
+): PropertiesActionRequestDisposition => {
+  if (registration === undefined
+    || registration.downloadId !== request.downloadId
+    || registration.sessionId !== request.sessionId
+    || !Number.isSafeInteger(request.requestId)
+    || request.requestId <= 0) {
+    return 'ignore';
+  }
+  if (hasCachedResult) return 'replay';
+  if (isInFlight) return 'pending';
+  return request.requestId > registration.latestRequestId ? 'accept' : 'ignore';
 };
 
 export const shouldAcceptPropertiesActionRequest = (
@@ -308,6 +344,7 @@ const copyWithoutSecrets = (
   return {
     ...safeItem,
     appearance,
+    windowChrome: context?.windowChrome ?? DEFAULT_PROPERTIES_WINDOW_CHROME,
     ...(lastErrorKind ? { lastErrorKind } : {}),
     ...(context?.queueName ? { queueName: context.queueName } : {}),
     ...(live?.progress ? {

@@ -331,14 +331,16 @@ pub fn open_download_properties_window(
     // If the native window disappeared without delivering Destroyed, discard
     // the old readiness bit before constructing a fresh hidden webview.
     registry.clear_ready(&label)?;
-    let build_result = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("index.html".into()))
+    let builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("index.html".into()))
         .title(PROPERTIES_WINDOW_TITLE)
         .inner_size(1000.0, 720.0)
         .min_inner_size(760.0, 560.0)
         .resizable(true)
         .always_on_top(false)
-        .visible(false)
-        .build();
+        .visible(false);
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    let builder = builder.decorations(false);
+    let build_result = builder.build();
     if let Err(error) = build_result {
         // Two rapid main-window requests can race between the native lookup
         // above and builder creation. If the first request won, retain the
@@ -496,12 +498,18 @@ pub fn close_download_properties_window(
     if registered_id.as_deref() != Some(id.as_str()) {
         return Err("Properties window close request is not registered".to_string());
     }
-    if let Some(label) = registry.window_for_download(&id)? {
-        if let Some(window) = app.get_webview_window(&label) {
+    if let Some(window_label) = registry.window_for_download(&id)? {
+        if let Some(window) = app.get_webview_window(&window_label) {
             window.close().map_err(|error| error.to_string())?;
+        } else {
+            // A native window can disappear without delivering its Destroyed
+            // event. Only clear this stale registry entry when there is no
+            // window left to receive a close-request veto from the child.
+            let _ = registry.remove_download(&id);
         }
+    } else {
+        let _ = registry.remove_download(&id);
     }
-    let _ = registry.remove_download(&id);
     Ok(())
 }
 
@@ -517,7 +525,11 @@ pub fn properties_window_registry_remove_for_download(
     }
     if let Some(label) = registry.remove_download(&id)? {
         if let Some(window) = app.get_webview_window(&label) {
-            let _ = window.close();
+            // This command is used after the download has already been
+            // removed. It is a forced lifecycle teardown, so a dirty-draft
+            // close-request handler must not be able to leave an orphaned
+            // Properties window behind.
+            let _ = window.destroy();
         }
     }
     Ok(())

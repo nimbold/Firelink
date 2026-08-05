@@ -220,6 +220,8 @@ const ru = {
     },
   },
   properties: {
+    discardChanges: 'Отменить изменения',
+    keepEditing: 'Продолжить редактирование',
     progress: 'Прогресс',
     size: 'Размер',
     speed: 'Скорость',

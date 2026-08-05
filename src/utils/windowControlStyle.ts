@@ -1,6 +1,8 @@
 import type { WindowControlStyle } from '../bindings/WindowControlStyle';
 
 export type ResolvedWindowControlStyle = Exclude<WindowControlStyle, 'auto'>;
+export type WindowControlSide = 'left' | 'right';
+export type SidebarPosition = 'auto' | WindowControlSide;
 
 // The reveal button sits after the complete custom-control hit area. Keep this
 // derived from the resolved style so a sidebar toggle can never overlap a
@@ -14,6 +16,14 @@ const WINDOW_CONTROL_REVEAL_OFFSETS: Record<ResolvedWindowControlStyle, number> 
 
 export const getWindowControlRevealOffset = (style: ResolvedWindowControlStyle): number =>
   WINDOW_CONTROL_REVEAL_OFFSETS[style];
+
+export const resolveWindowControlSide = (
+  sidebarPosition: SidebarPosition,
+  direction: 'ltr' | 'rtl',
+): WindowControlSide => sidebarPosition === 'right'
+  || (sidebarPosition === 'auto' && direction === 'rtl')
+  ? 'right'
+  : 'left';
 
 export const resolveWindowControlStyle = (
   style: WindowControlStyle,

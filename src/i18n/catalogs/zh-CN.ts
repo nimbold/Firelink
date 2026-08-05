@@ -220,6 +220,8 @@ const zhCN = {
     },
   },
   properties: {
+    discardChanges: '放弃更改',
+    keepEditing: '继续编辑',
     progress: '进度',
     size: '大小',
     speed: '速度',

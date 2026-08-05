@@ -22,21 +22,25 @@ import {
   applySecretPatch,
   attachAsyncPropertiesListener,
   beginExclusivePropertiesAction,
+  classifyPropertiesActionRequest,
   createFrameCoalescer,
   enqueuePropertiesAction,
   getPropertiesLifecycleAction,
+  propertiesActionRequestKey,
   sanitizePropertiesSnapshot,
   sendPropertiesActionResult,
   sendPropertiesRemoved,
   sendPropertiesSnapshot,
-  shouldAcceptPropertiesActionRequest,
   type PropertiesActionRequest,
+  type PropertiesActionResult,
   type PropertiesPatch,
   type PropertiesWindowRegistration,
   type PropertiesWindowReady,
 } from '../propertiesBridge';
 import { invokeCommand as invoke } from '../ipc';
-import i18n, { resolveAppLocale } from '../i18n';
+import { getPlatformInfo } from '../utils/platform';
+import { resolveWindowControlSide, resolveWindowControlStyle } from '../utils/windowControlStyle';
+import i18n, { localeDirection, resolveAppLocale } from '../i18n';
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 let lastPropertiesBridgeGeneration = 0;
@@ -175,6 +179,9 @@ export const PropertiesWindowBridgeHost = () => {
     const snapshotRevisions = new Map<string, number>();
     const actionsInFlight = new Set<string>();
     const actionChains = new Map<string, Promise<void>>();
+    const actionOperations = new Map<string, Promise<void>>();
+    const actionResults = new Map<string, PropertiesActionResult>();
+    let platformOs = 'unknown';
     const bridgeGeneration = Math.max(Date.now(), lastPropertiesBridgeGeneration + 1);
     lastPropertiesBridgeGeneration = bridgeGeneration;
     let disposed = false;
@@ -190,6 +197,43 @@ export const PropertiesWindowBridgeHost = () => {
       handle => window.cancelAnimationFrame(handle),
     );
 
+    const clearWindowActionState = (windowLabel: string) => {
+      const resultPrefix = `${windowLabel}\u0000`;
+      for (const key of actionResults.keys()) {
+        if (key.startsWith(resultPrefix)) actionResults.delete(key);
+      }
+      for (const key of actionOperations.keys()) {
+        if (key.startsWith(resultPrefix)) actionOperations.delete(key);
+      }
+      // A renderer session can be replaced while an accepted mutation is
+      // still running. Keep the download-scoped chain so the next session
+      // cannot start a second mutation concurrently with that operation.
+      // Completed chains remove themselves; host teardown clears the map.
+    };
+
+    const clearSessionActionResults = (windowLabel: string, sessionId: string) => {
+      const resultPrefix = `${windowLabel}\u0000${sessionId}\u0000`;
+      for (const key of actionResults.keys()) {
+        if (key.startsWith(resultPrefix)) actionResults.delete(key);
+      }
+    };
+
+    const cacheActionResult = (key: string, result: PropertiesActionResult) => {
+      // A child can have only one pending action per session. Retain the most
+      // recent completed result for that session until a newer request is
+      // accepted, so a lost result can always be replayed without allowing an
+      // unbounded per-action cache.
+      const separator = key.lastIndexOf('\u0000');
+      const sessionPrefixEnd = separator >= 0 ? key.lastIndexOf('\u0000', separator - 1) : -1;
+      if (sessionPrefixEnd >= 0) {
+        const sessionPrefix = key.slice(0, sessionPrefixEnd + 1);
+        for (const existingKey of actionResults.keys()) {
+          if (existingKey.startsWith(sessionPrefix)) actionResults.delete(existingKey);
+        }
+      }
+      actionResults.set(key, result);
+    };
+
     const sendFor = async (windowLabel: string, downloadId: string) => {
       const registration = windows.get(windowLabel);
       if (!registration || registration.downloadId !== downloadId || disposed) return false;
@@ -200,6 +244,17 @@ export const PropertiesWindowBridgeHost = () => {
         ?? store.queues.find(candidate => candidate.isMain);
       const settings = useSettingsStore.getState();
       const progress = useDownloadProgressStore.getState();
+      const windowChrome = {
+        controlStyle: resolveWindowControlStyle(
+          settings.windowControlStyle,
+          platformOs,
+          navigator.userAgent,
+        ),
+        side: resolveWindowControlSide(
+          settings.sidebarPosition,
+          localeDirection(resolveAppLocale(i18n.language)),
+        ),
+      };
       const revision = (snapshotRevisions.get(windowLabel) ?? 0) + 1;
       snapshotRevisions.set(windowLabel, revision);
       await sendPropertiesSnapshot(windowLabel, {
@@ -219,6 +274,7 @@ export const PropertiesWindowBridgeHost = () => {
           moveProgress: progress.moveProgressMap[downloadId],
         }, {
           queueName: queue?.name,
+          windowChrome,
         }),
       });
       return true;
@@ -231,6 +287,7 @@ export const PropertiesWindowBridgeHost = () => {
     ) => {
       const previous = windows.get(windowLabel);
       const sessionChanged = previous?.downloadId !== downloadId || previous.sessionId !== sessionId;
+      if (sessionChanged) clearWindowActionState(windowLabel);
       windows.set(windowLabel, {
         downloadId,
         sessionId,
@@ -279,7 +336,6 @@ export const PropertiesWindowBridgeHost = () => {
     };
 
     const processAction = async (request: PropertiesActionRequest) => {
-      if (disposed) return;
       let ok = false;
       let error: string | undefined;
       const actionKey = `${request.windowLabel}:${request.downloadId}`;
@@ -440,32 +496,44 @@ export const PropertiesWindowBridgeHost = () => {
       } finally {
         releaseAction?.();
       }
-      if (disposed) return;
-      if (ok) {
-        try {
-          await sendFor(request.windowLabel, request.downloadId);
-        } catch {
-          // Snapshot delivery is best effort across a close/reopen race.
-        }
-      }
+      if (ok) void sendFor(request.windowLabel, request.downloadId).catch(() => undefined);
+      const result: PropertiesActionResult = {
+        windowLabel: request.windowLabel,
+        downloadId: request.downloadId,
+        sessionId: request.sessionId,
+        requestId: request.requestId,
+        ok,
+        ...(error ? { error } : {}),
+      };
+      cacheActionResult(propertiesActionRequestKey(request), result);
       try {
-        await sendPropertiesActionResult(request.windowLabel, {
-          windowLabel: request.windowLabel,
-          downloadId: request.downloadId,
-          sessionId: request.sessionId,
-          requestId: request.requestId,
-          ok,
-          ...(error ? { error } : {}),
-        });
+        await sendPropertiesActionResult(request.windowLabel, result);
       } catch {
-        // The window may have closed between the request and its result.
-        return;
+        // The result remains cached so a same-request retry can replay it.
+      }
+    };
+
+    const sendRejectedActionResult = async (request: PropertiesActionRequest, reason: unknown) => {
+      const result: PropertiesActionResult = {
+        windowLabel: request.windowLabel,
+        downloadId: request.downloadId,
+        sessionId: request.sessionId,
+        requestId: request.requestId,
+        ok: false,
+        error: errorText(reason),
+      };
+      // Validation failures did not enter the mutation queue, so do not cache
+      // them as a completed request. A same-ID retry must be able to recover
+      // from a transient registry/session race.
+      try {
+        await sendPropertiesActionResult(request.windowLabel, result);
+      } catch {
+        // The child may have closed while the validation error was delivered.
       }
     };
 
     const handleAction = async (request: PropertiesActionRequest) => {
       if (disposed) return;
-      const actionKey = `${request.windowLabel}:${request.downloadId}`;
       try {
         // The native command validates the caller, download binding, and
         // renderer session. If a ready event is delayed or lost, this valid
@@ -473,21 +541,52 @@ export const PropertiesWindowBridgeHost = () => {
         await invoke('validate_properties_window_request', request);
         if (disposed) return;
         synchronizeRegistration(request.windowLabel, request.downloadId, request.sessionId);
-      } catch {
+      } catch (error) {
         // Stale renderer actions are deliberately ignored. The current child
-        // session cannot safely consume a result for a superseded renderer.
+        // session cannot safely consume a result for a superseded renderer,
+        // but an active child still needs a terminal result to unlock its
+        // request state and decide whether to retry.
+        sendRejectedActionResult(request, error);
         return;
       }
 
       const registration = windows.get(request.windowLabel);
-      if (!registration) return;
-      if (!shouldAcceptPropertiesActionRequest(registration, request)) return;
+      if (!registration) {
+        sendRejectedActionResult(request, new Error('Properties window is no longer registered'));
+        return;
+      }
+      const requestKey = propertiesActionRequestKey(request);
+      const disposition = classifyPropertiesActionRequest(
+        registration,
+        request,
+        actionResults.has(requestKey),
+        actionOperations.has(requestKey),
+      );
+      if (disposition === 'replay') {
+        const result = actionResults.get(requestKey);
+        if (result) void sendPropertiesActionResult(request.windowLabel, result).catch(() => undefined);
+        return;
+      }
+      if (disposition === 'pending') return;
+      if (disposition === 'ignore') {
+        sendRejectedActionResult(request, new Error('Properties action is stale'));
+        return;
+      }
+      clearSessionActionResults(request.windowLabel, request.sessionId);
       registration.latestRequestId = request.requestId;
+      const actionKey = `${request.windowLabel}:${request.downloadId}`;
 
       // Preserve user order for accepted requests. This keeps a pause from an
       // earlier request from running after a newer resume, while still
       // allowing the newer request to run after an already-started operation.
-      await enqueuePropertiesAction(actionChains, actionKey, () => processAction(request));
+      const operation = enqueuePropertiesAction(actionChains, actionKey, () => processAction(request));
+      actionOperations.set(requestKey, operation);
+      const clearOperation = () => {
+        if (actionOperations.get(requestKey) === operation) actionOperations.delete(requestKey);
+      };
+      // Consume either outcome while removing the in-flight marker. An
+      // unexpected host exception must not become an unhandled rejection.
+      void operation.then(clearOperation, clearOperation);
     };
 
     attachAsyncPropertiesListener(
@@ -510,6 +609,7 @@ export const PropertiesWindowBridgeHost = () => {
         const registration = windows.get(event.payload);
         windows.delete(event.payload);
         snapshotRevisions.delete(event.payload);
+        clearWindowActionState(event.payload);
         snapshotCoalescer.cancel(event.payload);
         if (registration) actionsInFlight.delete(`${event.payload}:${registration.downloadId}`);
       }),
@@ -527,6 +627,7 @@ export const PropertiesWindowBridgeHost = () => {
           void sendPropertiesRemoved(windowLabel, downloadId).catch(() => undefined);
           windows.delete(windowLabel);
           snapshotRevisions.delete(windowLabel);
+          clearWindowActionState(windowLabel);
           void invoke('properties_window_registry_remove_for_download', { id: downloadId }).catch(() => undefined);
         } else if (next !== before) {
           snapshotCoalescer.schedule(windowLabel);
@@ -547,7 +648,9 @@ export const PropertiesWindowBridgeHost = () => {
         && state.fontFamily === previous.fontFamily
         && state.appFontSize === previous.appFontSize
         && state.listRowDensity === previous.listRowDensity
-        && state.language === previous.language) {
+        && state.language === previous.language
+        && state.windowControlStyle === previous.windowControlStyle
+        && state.sidebarPosition === previous.sidebarPosition) {
         return;
       }
       for (const windowLabel of windows.keys()) {
@@ -561,6 +664,12 @@ export const PropertiesWindowBridgeHost = () => {
     };
     i18n.on('languageChanged', handleLanguageChanged);
 
+    void getPlatformInfo().then(info => {
+      if (disposed) return;
+      platformOs = info.os;
+      for (const windowLabel of windows.keys()) snapshotCoalescer.schedule(windowLabel);
+    }).catch(() => undefined);
+
     return () => {
       disposed = true;
       snapshotCoalescer.cancelAll();
@@ -571,6 +680,9 @@ export const PropertiesWindowBridgeHost = () => {
       unlistenReady?.();
       unlistenAction?.();
       unlistenClosed?.();
+      actionOperations.clear();
+      actionResults.clear();
+      actionChains.clear();
     };
   }, []);
 

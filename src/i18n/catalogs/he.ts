@@ -220,6 +220,8 @@ const he = {
     },
   },
   properties: {
+    discardChanges: 'השלכת השינויים',
+    keepEditing: 'להמשיך לערוך',
     progress: 'התקדמות',
     size: 'גודל',
     speed: 'מהירות',

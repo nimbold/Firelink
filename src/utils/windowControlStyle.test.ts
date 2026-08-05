@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { getWindowControlRevealOffset, resolveWindowControlStyle } from './windowControlStyle';
+import {
+  getWindowControlRevealOffset,
+  resolveWindowControlSide,
+  resolveWindowControlStyle,
+} from './windowControlStyle';
 
 describe('resolveWindowControlStyle', () => {
   it('uses the platform convention for automatic style', () => {
@@ -31,5 +35,12 @@ describe('resolveWindowControlStyle', () => {
     expect(getWindowControlRevealOffset('windows')).toBe(168);
     expect(getWindowControlRevealOffset('gnome')).toBe(134);
     expect(getWindowControlRevealOffset('minimal')).toBe(104);
+  });
+
+  it('resolves automatic control placement from the effective document direction', () => {
+    expect(resolveWindowControlSide('auto', 'ltr')).toBe('left');
+    expect(resolveWindowControlSide('auto', 'rtl')).toBe('right');
+    expect(resolveWindowControlSide('left', 'rtl')).toBe('left');
+    expect(resolveWindowControlSide('right', 'ltr')).toBe('right');
   });
 });
