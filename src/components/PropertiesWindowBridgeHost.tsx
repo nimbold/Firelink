@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useDownloadStore } from '../store/useDownloadStore';
 import type { DownloadItem } from '../store/useDownloadStore';
 import { useSettingsStore } from '../store/useSettingsStore';
@@ -31,6 +32,7 @@ import {
   sendPropertiesActionResult,
   sendPropertiesRemoved,
   sendPropertiesSnapshot,
+  propertiesWindowEventTarget,
   type PropertiesActionRequest,
   type PropertiesActionResult,
   type PropertiesPatch,
@@ -175,6 +177,7 @@ const copyEditablePatch = (rawPatch: PropertiesPatch): Partial<DownloadItem> => 
 
 export const PropertiesWindowBridgeHost = () => {
   useEffect(() => {
+    const mainWindowTarget = propertiesWindowEventTarget(getCurrentWindow().label);
     const windows = new Map<string, PropertiesWindowRegistration>();
     const snapshotRevisions = new Map<string, number>();
     const actionsInFlight = new Set<string>();
@@ -324,7 +327,12 @@ export const PropertiesWindowBridgeHost = () => {
         if (disposed) return;
         const item = useDownloadStore.getState().downloads.find(download => download.id === payload.downloadId);
         if (!item) {
-          await sendPropertiesRemoved(payload.windowLabel, payload.downloadId);
+          // The store subscription cannot see a window that never completed
+          // registration. Tear down the native registry entry here as well,
+          // otherwise a late ready event can leave an empty child window and
+          // a permanently reserved label for a deleted download.
+          void sendPropertiesRemoved(payload.windowLabel, payload.downloadId).catch(() => undefined);
+          await invoke('properties_window_registry_remove_for_download', { id: payload.downloadId });
           return;
         }
         synchronizeRegistration(payload.windowLabel, payload.downloadId, payload.sessionId);
@@ -592,14 +600,14 @@ export const PropertiesWindowBridgeHost = () => {
     attachAsyncPropertiesListener(
       listen<PropertiesWindowReady>(PROPERTIES_WINDOW_READY, event => {
         if (!disposed) void handleReady(event.payload);
-      }),
+      }, { target: mainWindowTarget }),
       () => disposed,
       value => { unlistenReady = value; },
     );
     attachAsyncPropertiesListener(
       listen<PropertiesActionRequest>(PROPERTIES_WINDOW_ACTION_REQUEST, event => {
         if (!disposed) void handleAction(event.payload);
-      }),
+      }, { target: mainWindowTarget }),
       () => disposed,
       value => { unlistenAction = value; },
     );
@@ -612,7 +620,7 @@ export const PropertiesWindowBridgeHost = () => {
         clearWindowActionState(event.payload);
         snapshotCoalescer.cancel(event.payload);
         if (registration) actionsInFlight.delete(`${event.payload}:${registration.downloadId}`);
-      }),
+      }, { target: mainWindowTarget }),
       () => disposed,
       value => { unlistenClosed = value; },
     );

@@ -28,6 +28,17 @@ export const DEFAULT_PROPERTIES_WINDOW_CHROME: PropertiesWindowChrome = {
   side: 'left',
 };
 
+// Tauri's listen() default target is `Any`, which only receives events emitted
+// globally. Properties snapshots and child actions are emitted to a specific
+// WebviewWindow, so the child must register against that exact target. Keeping
+// the target construction here prevents a future listener from silently
+// falling back to the global target and waiting forever for its first
+// snapshot.
+export const propertiesWindowEventTarget = (windowLabel: string) => ({
+  kind: 'WebviewWindow' as const,
+  label: windowLabel,
+});
+
 export const propertiesTorrentPeerLimit = (value: unknown): number =>
   typeof value === 'number'
     && Number.isInteger(value)
@@ -457,13 +468,13 @@ export const sendPropertiesActionRequest = (payload: PropertiesActionRequest): P
   });
 
 export const sendPropertiesSnapshot = (windowLabel: string, payload: PropertiesSnapshotEvent): Promise<void> =>
-  emitTo(windowLabel, PROPERTIES_WINDOW_SNAPSHOT, payload);
+  emitTo(propertiesWindowEventTarget(windowLabel), PROPERTIES_WINDOW_SNAPSHOT, payload);
 
 export const sendPropertiesActionResult = (windowLabel: string, payload: PropertiesActionResult): Promise<void> =>
-  emitTo(windowLabel, PROPERTIES_WINDOW_ACTION_RESULT, payload);
+  emitTo(propertiesWindowEventTarget(windowLabel), PROPERTIES_WINDOW_ACTION_RESULT, payload);
 
 export const sendPropertiesRemoved = (windowLabel: string, downloadId: string): Promise<void> =>
-  emitTo(windowLabel, PROPERTIES_WINDOW_REMOVED, { windowLabel, downloadId });
+  emitTo(propertiesWindowEventTarget(windowLabel), PROPERTIES_WINDOW_REMOVED, { windowLabel, downloadId });
 
 export const applySecretPatch = (
   patch: unknown,

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 
 use serde::Serialize;
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use uuid::Uuid;
 
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -244,10 +244,18 @@ fn emit_to_main<T: Serialize + Clone>(
     event: &str,
     payload: T,
 ) -> Result<(), String> {
-    let main_window = app
-        .get_webview_window(MAIN_WINDOW_LABEL)
-        .ok_or_else(|| "Firelink main window is unavailable".to_string())?;
-    main_window.emit(event, payload).map_err(|error| error.to_string())
+    use tauri::Emitter;
+
+    if app.get_webview_window(MAIN_WINDOW_LABEL).is_none() {
+        return Err("Firelink main window is unavailable".to_string());
+    }
+
+    app.emit_to(
+        tauri::EventTarget::webview_window(MAIN_WINDOW_LABEL),
+        event,
+        payload,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn registered_download_for_caller(
@@ -350,16 +358,14 @@ pub fn open_download_properties_window(
         .min_inner_size(760.0, 560.0)
         .resizable(true)
         .always_on_top(false)
-        .visible(true);
+        // Let the child renderer paint its rounded loading shell before the
+        // native window becomes visible. Showing an opaque native surface
+        // here exposes the webview's unpainted white background.
+        .visible(false)
+        .transparent(true);
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     let builder = builder.decorations(false);
     let build_result = builder.build();
-    if let Ok(window) = &build_result {
-        // Keep the initial loading/error shell visible even if the child
-        // renderer has not completed its bridge handshake yet.
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
     if let Err(error) = build_result {
         // Two rapid main-window requests can race between the native lookup
         // above and builder creation. If the first request won, retain the

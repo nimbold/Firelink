@@ -31,7 +31,9 @@ export function WindowControls({ side, controlStyle }: WindowControlsProps) {
         onPointerDown={stopTitlebarDrag}
         onClick={(event) => {
           event.stopPropagation();
-          void appWindow.close();
+          void appWindow.close().catch(error => {
+            console.error('[WindowControls] close failed', error);
+          });
         }}
       >
         <X size={10} strokeWidth={3} />

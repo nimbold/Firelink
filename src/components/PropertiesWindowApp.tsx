@@ -26,6 +26,7 @@ import {
   nextPropertiesRequestId,
   propertiesDiagnosticPhase,
   propertiesActionRequestKey,
+  propertiesWindowEventTarget,
   resetPropertiesActionState,
   type PropertiesAction,
   type PropertiesActionRequest,
@@ -98,6 +99,8 @@ const propertiesDiagnosticLifecycleKey = (snapshot: PropertiesSnapshot): string 
 
 export const PropertiesWindowApp = () => {
   const { t } = useTranslation();
+  const translationRef = useRef(t);
+  translationRef.current = t;
   const currentWindow = useMemo(() => getCurrentWindow(), []);
   const windowLabel = currentWindow.label;
   const sessionId = useMemo(() => crypto.randomUUID(), []);
@@ -160,6 +163,7 @@ export const PropertiesWindowApp = () => {
   const appearanceCleanupRef = useRef<(() => void) | null>(null);
   const hasRevealedWindowRef = useRef(false);
   const revealInFlightRef = useRef(false);
+  const readyRetryTimerRef = useRef<number | undefined>(undefined);
   const diagnosticsInFlightRef = useRef(new Set<string>());
   const snapshotRef = useRef(snapshot);
   const activeTabRef = useRef(activeTab);
@@ -204,6 +208,37 @@ export const PropertiesWindowApp = () => {
       allowWindowCloseRef.current = false;
     }
   }, [currentWindow]);
+
+  const revealWindow = useCallback(async () => {
+    if (hasRevealedWindowRef.current) {
+      if (latestSnapshotRevisionRef.current > 0 && readyRetryTimerRef.current !== undefined) {
+        window.clearInterval(readyRetryTimerRef.current);
+        readyRetryTimerRef.current = undefined;
+      }
+      return;
+    }
+    if (revealInFlightRef.current) return;
+    revealInFlightRef.current = true;
+    try {
+      await invoke('properties_window_reveal');
+      hasRevealedWindowRef.current = true;
+      if (latestSnapshotRevisionRef.current > 0 && readyRetryTimerRef.current !== undefined) {
+        window.clearInterval(readyRetryTimerRef.current);
+        readyRetryTimerRef.current = undefined;
+      }
+    } catch (error) {
+      setErrorMessage(errorText(error));
+    } finally {
+      revealInFlightRef.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    // Native creation is hidden. Reveal after React has committed the loading
+    // shell so the first visible frame is styled and clipped by its radius,
+    // independent of the bridge snapshot timing.
+    void revealWindow();
+  }, [revealWindow]);
 
   useEffect(() => {
     draftTabRef.current = draftTab;
@@ -335,7 +370,6 @@ export const PropertiesWindowApp = () => {
 
   useEffect(() => {
     let cancelled = false;
-    let readyRetryTimer: number | undefined;
     let readyHeartbeatTimer: number | undefined;
     let unlistenSnapshot: UnlistenFn | undefined;
     let unlistenResult: UnlistenFn | undefined;
@@ -407,25 +441,8 @@ export const PropertiesWindowApp = () => {
           setSnapshot(event.payload.snapshot);
           if (draftTabRef.current === null) hydrateDraft(event.payload.snapshot);
           void currentWindow.setTitle(safeTitle(event.payload.snapshot.fileName)).catch(() => undefined);
-          if (!hasRevealedWindowRef.current && !revealInFlightRef.current) {
-            revealInFlightRef.current = true;
-            try {
-              await invoke('properties_window_reveal');
-              hasRevealedWindowRef.current = true;
-              if (readyRetryTimer !== undefined) {
-                window.clearInterval(readyRetryTimer);
-                readyRetryTimer = undefined;
-              }
-            } catch (error) {
-              // Native visibility is established by the opener. Keep the
-              // loading shell usable when the optional ready-state update is
-              // delayed or rejected, and let the next snapshot retry it.
-              setErrorMessage(errorText(error));
-            } finally {
-              revealInFlightRef.current = false;
-            }
-          }
-        });
+          await revealWindow();
+        }, { target: propertiesWindowEventTarget(windowLabel) });
         if (cancelled) {
           snapshotListener();
           return;
@@ -454,7 +471,9 @@ export const PropertiesWindowApp = () => {
             switchAfterSaveRef.current = null;
             closeAfterSaveRef.current = false;
             setErrorMessage('');
-            setNotice(completedAction === 'apply-properties' ? t($ => $.properties.saved) : '');
+            setNotice(completedAction === 'apply-properties'
+              ? translationRef.current($ => $.properties.saved)
+              : '');
             if (commitsDraft) {
               draftTabRef.current = null;
               setDraftTab(null);
@@ -468,7 +487,7 @@ export const PropertiesWindowApp = () => {
               }
             }
           }
-        });
+        }, { target: propertiesWindowEventTarget(windowLabel) });
         if (cancelled) {
           resultListener();
           return;
@@ -477,9 +496,9 @@ export const PropertiesWindowApp = () => {
         const removedListener = await listen<{ windowLabel: string; downloadId: string }>(PROPERTIES_WINDOW_REMOVED, event => {
           if (cancelled) return;
           if (event.payload.windowLabel === windowLabel && event.payload.downloadId === id) {
-            if (readyRetryTimer !== undefined) {
-              window.clearInterval(readyRetryTimer);
-              readyRetryTimer = undefined;
+            if (readyRetryTimerRef.current !== undefined) {
+              window.clearInterval(readyRetryTimerRef.current);
+              readyRetryTimerRef.current = undefined;
             }
             if (readyHeartbeatTimer !== undefined) {
               window.clearInterval(readyHeartbeatTimer);
@@ -501,22 +520,23 @@ export const PropertiesWindowApp = () => {
             pendingActionSendKeyRef.current = null;
             allowWindowCloseRef.current = false;
             setPendingAction(null);
-            setNotice(t($ => $.downloadTable.noDownloads));
+            setNotice(translationRef.current($ => $.downloadTable.noDownloads));
           }
-        });
+        }, { target: propertiesWindowEventTarget(windowLabel) });
         if (cancelled) {
           removedListener();
           return;
         }
         unlistenRemoved = removedListener;
-        await sendPropertiesReady(sessionId);
         if (cancelled) return;
         // Tauri event listeners are registered asynchronously. If the main
         // bridge was still installing its listener, the first ready event can
         // legitimately be missed; retry until the first snapshot confirms
-        // the handshake rather than leaving a permanently hidden window.
-        readyRetryTimer = window.setInterval(() => {
-          if (cancelled || hasRevealedWindowRef.current) return;
+        // the handshake. Install this before the first attempt so an IPC
+        // rejection is recoverable as well as a missed event.
+        readyRetryTimerRef.current = window.setInterval(() => {
+          if (cancelled || latestSnapshotRevisionRef.current > 0) return;
+          void revealWindow();
           void sendPropertiesReady(sessionId).catch(() => undefined);
         }, 500);
         // The main webview can restart independently of this child window.
@@ -526,6 +546,7 @@ export const PropertiesWindowApp = () => {
           if (cancelled) return;
           void sendPropertiesReady(sessionId).catch(() => undefined);
         }, 2000);
+        void sendPropertiesReady(sessionId).catch(() => undefined);
       } catch (error) {
         if (!cancelled) setErrorMessage(errorText(error));
       }
@@ -533,7 +554,10 @@ export const PropertiesWindowApp = () => {
     void start();
     return () => {
       cancelled = true;
-      if (readyRetryTimer !== undefined) window.clearInterval(readyRetryTimer);
+      if (readyRetryTimerRef.current !== undefined) {
+        window.clearInterval(readyRetryTimerRef.current);
+        readyRetryTimerRef.current = undefined;
+      }
       if (readyHeartbeatTimer !== undefined) window.clearInterval(readyHeartbeatTimer);
       unlistenSnapshot?.();
       unlistenResult?.();
@@ -544,7 +568,7 @@ export const PropertiesWindowApp = () => {
       appearanceCleanupRef.current?.();
       appearanceCleanupRef.current = null;
     };
-  }, [closeCurrentWindow, currentWindow, hydrateDraft, sessionId, t, windowLabel]);
+  }, [closeCurrentWindow, currentWindow, hydrateDraft, revealWindow, sessionId, windowLabel]);
 
   useEffect(() => {
     if (!snapshot || draftTab !== null) return;

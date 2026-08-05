@@ -574,6 +574,11 @@ html[data-list-density="relaxed"] {
   .properties-window-shell {
     --properties-header-surface: hsl(var(--surface-raised));
     --properties-card-surface: hsl(var(--bg-input) / 0.42);
+    min-height: 100%;
+    overflow: hidden;
+    border: 1px solid hsl(var(--border-color));
+    border-radius: 18px;
+    background: hsl(var(--main-bg));
   }
 
   .properties-window-titlebar {

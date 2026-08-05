@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { emitTo } from '@tauri-apps/api/event';
 import type { DownloadItem } from './store/useDownloadStore';
 
 vi.mock('./ipc', () => ({
@@ -24,12 +25,34 @@ import {
   propertiesActionRequestKey,
   propertiesDiagnosticRequestState,
   propertiesTorrentPeerLimit,
+  propertiesWindowEventTarget,
   resetPropertiesActionState,
   sanitizePropertiesSnapshot,
+  sendPropertiesSnapshot,
   shouldAcceptPropertiesActionRequest,
 } from './propertiesBridge';
 
 describe('Properties window bridge', () => {
+  it('uses a WebviewWindow target for directed child events', () => {
+    expect(propertiesWindowEventTarget('properties-1')).toEqual({
+      kind: 'WebviewWindow',
+      label: 'properties-1',
+    });
+  });
+
+  it('targets the initial snapshot at the child WebviewWindow', async () => {
+    vi.mocked(emitTo).mockClear();
+    const payload = {} as Parameters<typeof sendPropertiesSnapshot>[1];
+
+    await sendPropertiesSnapshot('properties-1', payload);
+
+    expect(emitTo).toHaveBeenCalledWith(
+      { kind: 'WebviewWindow', label: 'properties-1' },
+      'properties-window-snapshot',
+      payload,
+    );
+  });
+
   it('sanitizes transfer secrets while preserving presence flags', () => {
     const item = {
       id: 'download-1',
