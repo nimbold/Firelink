@@ -186,6 +186,7 @@ impl PropertiesWindowRegistry {
         Ok(self.session_for_window(label)?.as_deref() == Some(session_id))
     }
 
+    #[cfg(test)]
     pub fn is_ready(&self, label: &str) -> Result<bool, String> {
         Ok(self
             .state
@@ -236,6 +237,17 @@ pub fn ensure_main_window(caller: &tauri::WebviewWindow) -> Result<(), String> {
     (caller.label() == MAIN_WINDOW_LABEL)
         .then_some(())
         .ok_or_else(|| "This command is available only to the main window".to_string())
+}
+
+fn emit_to_main<T: Serialize + Clone>(
+    app: &tauri::AppHandle,
+    event: &str,
+    payload: T,
+) -> Result<(), String> {
+    let main_window = app
+        .get_webview_window(MAIN_WINDOW_LABEL)
+        .ok_or_else(|| "Firelink main window is unavailable".to_string())?;
+    main_window.emit(event, payload).map_err(|error| error.to_string())
 }
 
 fn registered_download_for_caller(
@@ -319,9 +331,10 @@ pub fn open_download_properties_window(
 
     let label = registry.allocate(&id)?;
     if let Some(window) = app.get_webview_window(&label) {
-        if !registry.is_ready(&label)? {
-            return Ok(label);
-        }
+        // Visibility belongs to the native window owner, not to the renderer
+        // handshake. A delayed or lost snapshot must leave a usable loading
+        // window on screen instead of making the open request appear to do
+        // nothing.
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
@@ -337,21 +350,25 @@ pub fn open_download_properties_window(
         .min_inner_size(760.0, 560.0)
         .resizable(true)
         .always_on_top(false)
-        .visible(false);
+        .visible(true);
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     let builder = builder.decorations(false);
     let build_result = builder.build();
+    if let Ok(window) = &build_result {
+        // Keep the initial loading/error shell visible even if the child
+        // renderer has not completed its bridge handshake yet.
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
     if let Err(error) = build_result {
         // Two rapid main-window requests can race between the native lookup
         // above and builder creation. If the first request won, retain the
         // registry entry and focus its window instead of treating the second
         // request as a failed open.
         if let Some(window) = app.get_webview_window(&label) {
-            if registry.is_ready(&label)? {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
             return Ok(label);
         }
         let _ = registry.remove_window(&label);
@@ -385,8 +402,8 @@ pub fn properties_window_send_ready(
         }
         return Err(error);
     }
-    app.emit_to(
-        MAIN_WINDOW_LABEL,
+    emit_to_main(
+        &app,
         PROPERTIES_WINDOW_READY_EVENT,
         PropertiesWindowReadyEvent {
             window_label: caller.label().to_string(),
@@ -394,7 +411,6 @@ pub fn properties_window_send_ready(
             session_id,
         },
     )
-    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -438,8 +454,8 @@ pub fn properties_window_send_action(
     if !registry.session_matches(caller.label(), &session_id)? {
         return Err("Properties window session is no longer current".to_string());
     }
-    app.emit_to(
-        MAIN_WINDOW_LABEL,
+    emit_to_main(
+        &app,
         PROPERTIES_WINDOW_ACTION_REQUEST_EVENT,
         PropertiesWindowActionEvent {
             window_label: caller.label().to_string(),
@@ -450,7 +466,6 @@ pub fn properties_window_send_action(
             payload,
         },
     )
-    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

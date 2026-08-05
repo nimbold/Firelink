@@ -416,6 +416,11 @@ export const PropertiesWindowApp = () => {
                 window.clearInterval(readyRetryTimer);
                 readyRetryTimer = undefined;
               }
+            } catch (error) {
+              // Native visibility is established by the opener. Keep the
+              // loading shell usable when the optional ready-state update is
+              // delayed or rejected, and let the next snapshot retry it.
+              setErrorMessage(errorText(error));
             } finally {
               revealInFlightRef.current = false;
             }

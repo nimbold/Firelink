@@ -5,7 +5,10 @@
   "windows": ["properties-*"],
   "permissions": [
     "core:window:allow-close",
+    "core:window:allow-minimize",
     "core:window:allow-set-title",
+    "core:window:allow-start-dragging",
+    "core:window:allow-toggle-maximize",
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "dialog:default",

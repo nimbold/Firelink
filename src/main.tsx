@@ -7,13 +7,11 @@ import "@fontsource-variable/outfit/wght.css";
 import "@fontsource-variable/roboto/wght.css";
 import "@fontsource-variable/vazirmatn/wght.css";
 import "./index.css";
-import App from "./App";
 import { i18nReady } from "./i18n";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ToastProvider } from "./contexts/ToastContext";
 import { error as logError, warn as logWarn, initLogger } from "./utils/logger";
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { PropertiesWindowApp } from './components/PropertiesWindowApp';
 
 const isPropertiesWindow = getCurrentWindow().label.startsWith('properties-');
 
@@ -45,14 +43,22 @@ console.warn = (...values: unknown[]) => {
 };
 
 const rootElement = document.getElementById("root");
-const renderApp = () => {
+const renderApp = async () => {
   if (!rootElement) return;
+
+  // Keep the child entrypoint isolated from the main application module. App
+  // imports the persistent Zustand stores, whose module initialization issues
+  // main-window-only IPC commands. Loading it in a Properties child creates a
+  // second persistence owner and can race the bridge handshake.
+  const RootComponent = isPropertiesWindow
+    ? (await import('./components/PropertiesWindowApp')).PropertiesWindowApp
+    : (await import('./App')).default;
 
   createRoot(rootElement).render(
     <StrictMode>
       <ErrorBoundary>
         <ToastProvider>
-          {isPropertiesWindow ? <PropertiesWindowApp /> : <App />}
+          <RootComponent />
         </ToastProvider>
       </ErrorBoundary>
     </StrictMode>,
@@ -61,7 +67,7 @@ const renderApp = () => {
 
 void i18nReady.then(renderApp).catch(error => {
   console.error('Failed to initialize localization:', error);
-  renderApp();
+  void renderApp();
 });
 
 // Prevent the webview's default context menu ("Reload", etc.) on right-click.
