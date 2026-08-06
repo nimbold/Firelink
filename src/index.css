@@ -2609,9 +2609,15 @@ html[data-list-density="relaxed"] {
 }
 
 .window-controls {
+  /* The main window's controls are positioned against the app shell. The
+     Properties shell below has its own titlebar-relative centering rule. */
+  --window-control-titlebar-height: 52px;
+  --window-control-height: 14px;
+  --window-control-inset: 22px;
+  --window-control-top: 20px;
   position: absolute;
-  top: 20px;
-  left: 22px;
+  top: var(--window-control-top);
+  left: var(--window-control-inset);
   right: auto;
   z-index: 60;
   display: inline-flex;
@@ -2628,12 +2634,12 @@ html[data-list-density="relaxed"] {
 
 .app-shell--sidebar-right .window-controls {
   left: auto;
-  right: 22px;
+  right: var(--window-control-inset);
 }
 
 .window-controls--right {
   left: auto;
-  right: 22px;
+  right: var(--window-control-inset);
   flex-direction: row-reverse;
 }
 
@@ -2685,7 +2691,8 @@ html[data-list-density="relaxed"] {
 /* Windows 11 caption-button treatment: full-width hit targets, neutral
    glyphs, side-aware close placement, and rounded outer corners. */
 .window-controls--style-windows {
-  top: 18px;
+  --window-control-height: 32px;
+  --window-control-top: 18px;
   gap: 0;
   flex-direction: row;
   border-radius: 10px;
@@ -2759,15 +2766,10 @@ html[data-list-density="relaxed"] {
   filter: brightness(0.9);
 }
 
-/* Keep the smaller macOS traffic lights centered on the same lower titlebar
-   line as the larger caption-button presets. */
-.window-controls--style-macos {
-  top: 27px;
-}
-
 /* GNOME/Adwaita header-bar treatment: compact, borderless icon buttons. */
 .window-controls--style-gnome {
-  top: 18px;
+  --window-control-height: 32px;
+  --window-control-top: 18px;
   gap: 4px;
 }
 
@@ -2814,7 +2816,8 @@ html[data-list-density="relaxed"] {
 
 /* Minimal keeps the compact footprint while removing colored circles. */
 .window-controls--style-minimal {
-  top: 23px;
+  --window-control-height: 22px;
+  --window-control-top: 23px;
   gap: 4px;
 }
 
@@ -2827,6 +2830,18 @@ html[data-list-density="relaxed"] {
 .window-controls--style-minimal .window-control:active,
 .window-controls--style-gnome .window-control:active {
   filter: none;
+}
+
+/* Properties has a direct 52px titlebar, so center each complete control
+   hit target in that titlebar while retaining the main-window placement. */
+.properties-window-shell .window-controls {
+  --window-control-inset: 12px;
+  --window-control-top: calc((var(--window-control-titlebar-height) - var(--window-control-height)) / 2);
+}
+
+/* macOS keeps its platform-specific compact rail offset in the main shell. */
+.window-controls--style-macos {
+  --window-control-top: 27px;
 }
 
 .main-titlebar {
