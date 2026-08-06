@@ -14,8 +14,18 @@ const WINDOW_CONTROL_REVEAL_OFFSETS: Record<ResolvedWindowControlStyle, number> 
   minimal: 104,
 };
 
+const WINDOW_CONTROL_RAIL_WIDTHS: Record<ResolvedWindowControlStyle, number> = {
+  macos: 60,
+  windows: 138,
+  gnome: 104,
+  minimal: 74,
+};
+
 export const getWindowControlRevealOffset = (style: ResolvedWindowControlStyle): number =>
   WINDOW_CONTROL_REVEAL_OFFSETS[style];
+
+export const getWindowControlRailWidth = (style: ResolvedWindowControlStyle): number =>
+  WINDOW_CONTROL_RAIL_WIDTHS[style];
 
 export const resolveWindowControlSide = (
   sidebarPosition: SidebarPosition,

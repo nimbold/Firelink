@@ -22,6 +22,7 @@ export function WindowControls({ side, controlStyle }: WindowControlsProps) {
     <div
       className={`window-controls window-controls--${side} window-controls--style-${controlStyle}`}
       aria-label={t($ => $.window.controls)}
+      role="group"
     >
       <button
         type="button"

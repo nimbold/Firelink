@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import { open, save } from '@tauri-apps/plugin-dialog';
-import { Activity, Copy, Download, FileDown, FolderOpen, Gauge, MapPin, MoreHorizontal, Pause, Play, RefreshCw, Save, Timer, Upload, Users, X } from 'lucide-react';
+import { Activity, Copy, Download, FileDown, FileText, FolderOpen, Gauge, Info, List, MapPin, MoreHorizontal, Pause, Play, RefreshCw, Save, SlidersHorizontal, Timer, Upload, Users, Wrench, X, ChevronDown, ChevronUp } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { TorrentAvailabilitySnapshot } from '../bindings/TorrentAvailabilitySnapshot';
 import type { TorrentDetails } from '../bindings/TorrentDetails';
@@ -39,8 +39,10 @@ import {
 import { formatDownloadBytes, formatTorrentRatio } from '../utils/downloadProgress';
 import { changeAppLocale } from '../i18n';
 import { synchronizeDocumentAppearance } from '../utils/documentAppearance';
-import { getWindowControlRevealOffset } from '../utils/windowControlStyle';
+import { getWindowControlRailWidth } from '../utils/windowControlStyle';
 import { getPropertiesFooterActions } from '../utils/propertiesFooter';
+import { shouldOfferPropertiesUrlExpansion, shouldResetPropertiesUrlExpansion } from '../utils/propertiesUrl';
+import { getPropertiesTabIndex, getPropertiesTabs, PROPERTIES_TABS_OVERFLOW_BREAKPOINT, shouldUsePropertiesTabOverflow, type PropertiesTab } from '../utils/propertiesTabs';
 import { WindowControls } from './WindowControls';
 import {
   TORRENT_ENCRYPTION_POLICY_DISABLED,
@@ -50,7 +52,6 @@ import {
   type TorrentFileAllocation,
 } from '../utils/downloads';
 
-type PropertiesTab = 'overview' | 'files' | 'trackers' | 'peers' | 'options' | 'transfer' | 'advanced';
 type SecretName = 'username' | 'password' | 'cookies' | 'headers';
 type SecretDraft = { value: string; touched: boolean; clear: boolean };
 const SECRET_NAMES: SecretName[] = ['username', 'password', 'cookies', 'headers'];
@@ -83,6 +84,19 @@ const propertiesStatusTone = (status: string) => {
   return 'downloading';
 };
 
+const propertiesTabIcon = (tab: PropertiesTab) => {
+  const props = { className: 'properties-window-tab-icon', size: 15, strokeWidth: 2, 'aria-hidden': true } as const;
+  switch (tab) {
+    case 'overview': return <Info {...props} />;
+    case 'files': return <FileText {...props} />;
+    case 'trackers': return <List {...props} />;
+    case 'peers': return <Users {...props} />;
+    case 'options': return <SlidersHorizontal {...props} />;
+    case 'transfer': return <Gauge {...props} />;
+    case 'advanced': return <Wrench {...props} />;
+  }
+};
+
 const propertiesDiagnosticLifecycleKey = (snapshot: PropertiesSnapshot): string => [
   snapshot.id,
   snapshot.status,
@@ -106,6 +120,9 @@ export const PropertiesWindowApp = () => {
   const sessionId = useMemo(() => crypto.randomUUID(), []);
   const [downloadId, setDownloadId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<PropertiesSnapshot | null>(null);
+  const [isUrlExpanded, setIsUrlExpanded] = useState(false);
+  const [urlHasOverflow, setUrlHasOverflow] = useState(false);
+  const [useTabOverflow, setUseTabOverflow] = useState(false);
   const [activeTab, setActiveTab] = useState<PropertiesTab>('overview');
   const [pendingTab, setPendingTab] = useState<PropertiesTab | null>(null);
   const [closePrompt, setClosePrompt] = useState(false);
@@ -178,6 +195,10 @@ export const PropertiesWindowApp = () => {
   const allowWindowCloseRef = useRef(false);
   const isDirtyRef = useRef(false);
   const windowChromeRef = useRef(DEFAULT_PROPERTIES_WINDOW_CHROME);
+  const previousUrlDownloadIdRef = useRef<string | null>(downloadId);
+  const previousUrlRef = useRef<string | null>(null);
+  const urlCardRef = useRef<HTMLDivElement | null>(null);
+  const urlValueRef = useRef<HTMLParagraphElement | null>(null);
   snapshotRef.current = snapshot;
   activeTabRef.current = activeTab;
   downloadIdRef.current = downloadId;
@@ -187,9 +208,8 @@ export const PropertiesWindowApp = () => {
   detailsRef.current = details;
 
   const isTorrent = snapshot?.isTorrent === true;
-  const tabs = useMemo<PropertiesTab[]>(() => isTorrent
-    ? ['overview', 'files', 'trackers', 'peers', 'options']
-    : ['overview', 'transfer', 'advanced'], [isTorrent]);
+  const tabs = useMemo(() => getPropertiesTabs(isTorrent), [isTorrent]);
+  const urlCanExpand = Boolean(snapshot && (shouldOfferPropertiesUrlExpansion(snapshot.url) || urlHasOverflow));
   const isDirty = draftTab !== null;
   isDirtyRef.current = isDirty;
   if (isDirty && allowWindowCloseRef.current) {
@@ -198,6 +218,60 @@ export const PropertiesWindowApp = () => {
     // and the user starts editing again, restore the dirty-state guard.
     allowWindowCloseRef.current = false;
   }
+
+  useEffect(() => {
+    const nextUrl = snapshot?.url ?? null;
+    if (shouldResetPropertiesUrlExpansion(
+      previousUrlDownloadIdRef.current,
+      downloadId,
+      previousUrlRef.current,
+      nextUrl,
+    )) {
+      setIsUrlExpanded(false);
+      setUrlHasOverflow(false);
+    }
+    previousUrlDownloadIdRef.current = downloadId;
+    previousUrlRef.current = nextUrl;
+  }, [downloadId, snapshot?.url]);
+
+  useEffect(() => {
+    const updateOverflowState = () => setUseTabOverflow(shouldUsePropertiesTabOverflow(window.innerWidth));
+    updateOverflowState();
+    const media = typeof window.matchMedia === 'function'
+      ? window.matchMedia(`(max-width: ${PROPERTIES_TABS_OVERFLOW_BREAKPOINT}px)`)
+      : null;
+    if (media && typeof media.addEventListener === 'function') {
+      media.addEventListener('change', updateOverflowState);
+      return () => media.removeEventListener('change', updateOverflowState);
+    }
+    if (media && typeof media.addListener === 'function') {
+      media.addListener(updateOverflowState);
+      return () => media.removeListener(updateOverflowState);
+    }
+    window.addEventListener('resize', updateOverflowState);
+    return () => window.removeEventListener('resize', updateOverflowState);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (isUrlExpanded) return;
+    const card = urlCardRef.current;
+    const value = urlValueRef.current;
+    if (!card || !value) {
+      setUrlHasOverflow(false);
+      return;
+    }
+    const measureOverflow = () => {
+      setUrlHasOverflow(value.scrollHeight > value.clientHeight + 1);
+    };
+    measureOverflow();
+    if (typeof ResizeObserver === 'function') {
+      const observer = new ResizeObserver(measureOverflow);
+      observer.observe(card);
+      return () => observer.disconnect();
+    }
+    window.addEventListener('resize', measureOverflow);
+    return () => window.removeEventListener('resize', measureOverflow);
+  }, [activeTab, isUrlExpanded, snapshot?.url, useTabOverflow]);
 
   const closeCurrentWindow = useCallback(async (allowDirtyClose = false) => {
     allowWindowCloseRef.current = allowDirtyClose;
@@ -780,9 +854,16 @@ export const PropertiesWindowApp = () => {
   }, [activeTab, checkIntegrity, connections, destination, downloadLimit, encryptionPolicy, excludedTrackers, fileAllocation, fileName, fileProgress, isTorrent, maxPeers, peerSpeedLimit, prioritizePiece, removeUnselectedFile, requestAction, secretDrafts, seedRatio, seedTime, selectedFiles, snapshot, stopTimeout, trackerConnectTimeout, trackerInterval, trackerTimeout, trackers, t, uploadLimit]);
 
   const chooseTab = (tab: PropertiesTab) => {
-    if (tab === activeTab) return;
-    if (isDirty) setPendingTab(tab);
-    else setActiveTab(tab);
+    if (tab === activeTab) {
+      if (pendingTab !== null) setPendingTab(null);
+      return false;
+    }
+    if (isDirty) {
+      setPendingTab(tab);
+      return false;
+    }
+    setActiveTab(tab);
+    return true;
   };
 
   const discardDraft = () => {
@@ -838,12 +919,14 @@ export const PropertiesWindowApp = () => {
   };
 
   const windowChrome = snapshot?.windowChrome ?? windowChromeRef.current;
-  const windowControlRevealOffset = getWindowControlRevealOffset(windowChrome.controlStyle);
+  const windowControlRailWidth = getWindowControlRailWidth(windowChrome.controlStyle);
+  const windowShellClassName = `properties-window-shell properties-window-shell--controls-${windowChrome.side} properties-window-shell--style-${windowChrome.controlStyle} flex h-screen min-h-0 flex-col bg-main-bg text-text-primary`;
+  const windowShellStyle = { '--properties-window-control-rail-width': `${windowControlRailWidth}px` } as CSSProperties;
   if (!downloadId || !snapshot) {
     return (
       <main
-        className={`properties-window-shell properties-window-shell--controls-${windowChrome.side} flex h-screen min-h-0 flex-col bg-main-bg text-text-primary`}
-        style={{ '--window-control-reveal-offset': `${windowControlRevealOffset}px` } as CSSProperties}
+        className={windowShellClassName}
+        style={windowShellStyle}
         aria-labelledby="properties-window-title"
       >
         <WindowControls side={windowChrome.side} controlStyle={windowChrome.controlStyle} />
@@ -891,20 +974,20 @@ export const PropertiesWindowApp = () => {
         : t($ => $.downloads.actions.start);
   const tabLabel = (tab: PropertiesTab) => {
     switch (tab) {
-      case 'overview': return t($ => $.properties.details);
-      case 'files': return t($ => $.properties.torrentFileProgress);
-      case 'trackers': return t($ => $.properties.torrentTrackers);
-      case 'peers': return t($ => $.properties.torrentPeerDiagnostics);
-      case 'options': return t($ => $.downloads.actions.options);
-      case 'transfer': return t($ => $.properties.connections);
-      case 'advanced': return t($ => $.properties.advancedTransfer);
+      case 'overview': return t($ => $.properties.tabs.overview);
+      case 'files': return t($ => $.properties.tabs.files);
+      case 'trackers': return t($ => $.properties.tabs.trackers);
+      case 'peers': return t($ => $.properties.tabs.peers);
+      case 'options': return t($ => $.properties.tabs.options);
+      case 'transfer': return t($ => $.properties.tabs.transfer);
+      case 'advanced': return t($ => $.properties.tabs.advanced);
     }
   };
 
   return (
     <main
-      className={`properties-window-shell properties-window-shell--controls-${windowChrome.side} flex h-screen min-h-0 flex-col bg-main-bg text-text-primary`}
-      style={{ '--window-control-reveal-offset': `${windowControlRevealOffset}px` } as CSSProperties}
+      className={windowShellClassName}
+      style={windowShellStyle}
       aria-labelledby="properties-window-title"
     >
       <WindowControls side={windowChrome.side} controlStyle={windowChrome.controlStyle} />
@@ -975,40 +1058,78 @@ export const PropertiesWindowApp = () => {
         <div className="properties-window-destination" title={snapshot.destination || undefined}><MapPin size={13} /><span>{snapshot.destination || '—'}</span></div>
       </header>
 
-      <nav className="properties-window-tabs flex shrink-0 gap-1 overflow-x-auto border-b border-border-modal px-4" role="tablist" aria-label={t($ => $.downloadTable.properties)}>
-        {tabs.map(tab => (
-          <button
-            key={tab}
-            type="button"
-            role="tab"
-            aria-selected={activeTab === tab}
-            aria-controls={`properties-panel-${tab}`}
-            tabIndex={activeTab === tab ? 0 : -1}
-            className={`whitespace-nowrap border-b-2 px-3 py-2 text-xs font-medium ${activeTab === tab ? 'border-accent text-text-primary' : 'border-transparent text-text-muted hover:text-text-primary'}`}
-            onClick={() => chooseTab(tab)}
-            onKeyDown={event => {
-              const index = tabs.indexOf(tab);
-              const nextIndex = event.key === 'ArrowRight' ? (index + 1) % tabs.length : event.key === 'ArrowLeft' ? (index - 1 + tabs.length) % tabs.length : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : -1;
-              if (nextIndex >= 0) {
-                event.preventDefault();
-                const next = tabs[nextIndex];
-                chooseTab(next);
-                window.setTimeout(() => document.getElementById(`properties-tab-${next}`)?.focus(), 0);
-              }
-            }}
-            id={`properties-tab-${tab}`}
-          >{tabLabel(tab)}</button>
-        ))}
-      </nav>
+      <div className={`properties-window-tab-navigation ${useTabOverflow ? 'properties-window-tab-navigation--overflow' : ''}`}>
+        <span id="properties-active-section-label" className="sr-only">{tabLabel(activeTab)}</span>
+        <nav className="properties-window-tabs" role="tablist" aria-label={t($ => $.properties.tabs.label)}>
+          {tabs.map(tab => (
+            <button
+              key={tab}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab}
+              aria-controls={`properties-panel-${tab}`}
+              tabIndex={(pendingTab ?? activeTab) === tab ? 0 : -1}
+              className="properties-window-tab"
+              onClick={() => chooseTab(tab)}
+              onKeyDown={event => {
+                const index = tabs.indexOf(tab);
+                const nextIndex = getPropertiesTabIndex(
+                  tabs,
+                  index,
+                  event.key,
+                  document.documentElement.dir === 'rtl' ? 'rtl' : 'ltr',
+                );
+                if (nextIndex >= 0) {
+                  event.preventDefault();
+                  const next = tabs[nextIndex];
+                  if (chooseTab(next) || isDirty) {
+                    window.setTimeout(() => document.getElementById(`properties-tab-${next}`)?.focus(), 0);
+                  }
+                }
+              }}
+              id={`properties-tab-${tab}`}
+            >
+              {propertiesTabIcon(tab)}
+              <span>{tabLabel(tab)}</span>
+            </button>
+          ))}
+        </nav>
+        <label className="properties-window-tab-overflow">
+          <span className="sr-only">{t($ => $.properties.tabs.label)}</span>
+          <select
+            aria-label={t($ => $.properties.tabs.label)}
+            value={pendingTab ?? activeTab}
+            aria-controls={`properties-panel-${activeTab}`}
+            onChange={event => chooseTab(event.target.value as PropertiesTab)}
+          >
+            {tabs.map(tab => <option key={tab} value={tab}>{tabLabel(tab)}</option>)}
+          </select>
+        </label>
+      </div>
 
-      <section id={`properties-panel-${activeTab}`} role="tabpanel" aria-labelledby={`properties-tab-${activeTab}`} className="properties-window-panel min-h-0 flex-1 overflow-auto p-5" data-diagnostic-phase={diagnosticPhase} tabIndex={0}>
+      <section id={`properties-panel-${activeTab}`} role="tabpanel" aria-labelledby={useTabOverflow ? 'properties-active-section-label' : `properties-tab-${activeTab}`} className="properties-window-panel min-h-0 flex-1 overflow-auto p-5" data-diagnostic-phase={diagnosticPhase} tabIndex={0}>
         {activeTab === 'overview' && <div className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="text-xs text-text-muted">{t($ => $.properties.fileName)}<input className="app-control mt-1 w-full" value={fileName} onChange={event => { setFileName(event.target.value); setDraftTab('overview'); }} disabled={!editingEnabled} /></label>
             <label className="text-xs text-text-muted">{t($ => $.properties.destination)}<input className="app-control mt-1 w-full" value={destination} onChange={event => { setDestination(event.target.value); setDraftTab('overview'); }} disabled={!editingEnabled} /></label>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            <div className="rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs"><span className="text-text-muted">{t($ => $.properties.url)}</span><p className="mt-1 break-all" dir="ltr">{snapshot.url}</p></div>
+            <div ref={urlCardRef} className="properties-url-card rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs">
+              <div className="properties-url-card-header">
+                <span className="text-text-muted">{t($ => $.properties.url)}</span>
+                {urlCanExpand && <button
+                  type="button"
+                  className="properties-url-toggle"
+                  aria-expanded={isUrlExpanded}
+                  aria-controls="properties-url-value"
+                  onClick={() => setIsUrlExpanded(expanded => !expanded)}
+                >
+                  {isUrlExpanded ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+                  {isUrlExpanded ? t($ => $.properties.urlShowLess) : t($ => $.properties.urlShowMore)}
+                </button>}
+              </div>
+              <p ref={urlValueRef} id="properties-url-value" className={`properties-url-value mt-1 ${!isUrlExpanded ? 'properties-url-value--collapsed' : ''}`} dir="ltr">{snapshot.url}</p>
+            </div>
             <div className="rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs"><span className="text-text-muted">{t($ => $.properties.category)}</span><p className="mt-1">{snapshot.category}</p></div>
           </div>
           <div className="grid gap-2 rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs sm:grid-cols-2">

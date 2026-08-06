@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  getWindowControlRailWidth,
   getWindowControlRevealOffset,
   resolveWindowControlSide,
   resolveWindowControlStyle,
@@ -35,6 +36,13 @@ describe('resolveWindowControlStyle', () => {
     expect(getWindowControlRevealOffset('windows')).toBe(168);
     expect(getWindowControlRevealOffset('gnome')).toBe(134);
     expect(getWindowControlRevealOffset('minimal')).toBe(104);
+  });
+
+  it('reports the shared titlebar rail width for each control style', () => {
+    expect(getWindowControlRailWidth('macos')).toBe(60);
+    expect(getWindowControlRailWidth('windows')).toBe(138);
+    expect(getWindowControlRailWidth('gnome')).toBe(104);
+    expect(getWindowControlRailWidth('minimal')).toBe(74);
   });
 
   it('resolves automatic control placement from the effective document direction', () => {
