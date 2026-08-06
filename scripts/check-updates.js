@@ -7,6 +7,14 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
 const userAgent = 'firelink-update-check';
+const fetchRetryDelaysMs = [250, 1_000];
+const fetchTimeoutMs = 30_000;
+const retryableHttpStatuses = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+function httpResponseError(response, url) {
+  const status = [response.status, response.statusText].filter(Boolean).join(' ');
+  return new Error(`${status}: ${url}`);
+}
 
 function parseJsonFile(file) {
   return JSON.parse(fs.readFileSync(path.join(repoRoot, file), 'utf8'));
@@ -50,25 +58,67 @@ function npmOutdated(cwd) {
 }
 
 async function fetchJson(url) {
-  const response = await fetch(url, { headers: { 'User-Agent': userAgent } });
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}: ${url}`);
-  return response.json();
+  return fetchWithContext(url, response => response.json());
 }
 
 async function fetchText(url) {
-  const response = await fetch(url, { headers: { 'User-Agent': userAgent } });
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}: ${url}`);
-  return response.text();
+  return fetchWithContext(url, response => response.text());
+}
+
+async function fetchWithContext(url, readResponse) {
+  let lastError;
+  for (let attempt = 0; attempt <= fetchRetryDelaysMs.length; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(url, {
+        headers: { 'User-Agent': userAgent },
+        signal: AbortSignal.timeout(fetchTimeoutMs),
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt === fetchRetryDelaysMs.length) break;
+      await new Promise(resolve => setTimeout(resolve, fetchRetryDelaysMs[attempt]));
+      continue;
+    }
+
+    if (!response.ok) {
+      const error = httpResponseError(response, url);
+      if (!retryableHttpStatuses.has(response.status) || attempt === fetchRetryDelaysMs.length) {
+        await response.body?.cancel();
+        throw error;
+      }
+      await response.body?.cancel();
+      lastError = error;
+      await new Promise(resolve => setTimeout(resolve, fetchRetryDelaysMs[attempt]));
+      continue;
+    }
+
+    try {
+      return await readResponse(response);
+    } catch (error) {
+      lastError = error;
+      if (attempt === fetchRetryDelaysMs.length) break;
+      await new Promise(resolve => setTimeout(resolve, fetchRetryDelaysMs[attempt]));
+    }
+  }
+  const detail = lastError instanceof Error ? lastError.message : String(lastError);
+  throw new Error(`fetch failed for ${url}: ${detail}`, { cause: lastError });
 }
 
 async function githubLatest(repo) {
-  return fetchJson(`https://api.github.com/repos/${repo}/releases/latest`);
+  const release = await fetchJson(`https://api.github.com/repos/${repo}/releases/latest`);
+  if (!release || Array.isArray(release) || typeof release.tag_name !== 'string' || !release.tag_name.trim()) {
+    throw new Error(`GitHub latest release response for ${repo} has no usable tag_name`);
+  }
+  return release;
 }
 
 async function latestFfmpegStable() {
   const html = await fetchText('https://ffmpeg.org/releases/');
   const versions = [...html.matchAll(/ffmpeg-(\d+\.\d+(?:\.\d+)?)\.tar\.xz/g)].map(match => match[1]);
-  return [...new Set(versions)].sort(compareVersions).at(-1);
+  const latest = [...new Set(versions)].sort(compareVersions).at(-1);
+  if (!latest) throw new Error('FFmpeg release page contained no usable stable release version');
+  return latest;
 }
 
 async function latestMartinRiedlMacArm64Release() {
@@ -157,7 +207,9 @@ function checkRows(rows, latestByEngine, latestByTargetEngine = {}, latestUrlsBy
   let outdated = 0;
   for (const row of rows) {
     const latest = latestByTargetEngine[`${row.target}:${row.engine}`] || latestByEngine[row.engine];
-    if (!latest) continue;
+    if (typeof latest !== 'string' || !latest.trim()) {
+      throw new Error(`Latest version is unavailable for ${row.target} ${row.engine}`);
+    }
     const current = normalizeVersion(row.version);
     const wanted = normalizeVersion(latest);
     const latestUrl = latestUrlsByTargetEngine[`${row.target}:${row.engine}`];
@@ -203,15 +255,25 @@ async function main() {
     aria2c: aria2.tag_name,
     ffmpeg,
   };
+  if (
+    !btbnFfmpegN81Build?.version ||
+    !btbnFfmpegN81Build.urls?.windows ||
+    !btbnFfmpegN81Build.urls?.linux
+  ) {
+    throw new Error('BtbN FFmpeg provider response has no complete Windows/Linux build');
+  }
+  if (!martinRiedlMacArm64Snapshot?.version || !martinRiedlMacArm64Snapshot.url) {
+    throw new Error('Martin Riedl FFmpeg provider response has no complete macOS arm64 snapshot');
+  }
   const latestByTargetEngine = {
-    'x86_64-pc-windows-msvc:ffmpeg': btbnFfmpegN81Build?.version || ffmpeg,
-    'x86_64-unknown-linux-gnu:ffmpeg': btbnFfmpegN81Build?.version || ffmpeg,
-    'aarch64-apple-darwin:ffmpeg': martinRiedlMacArm64Snapshot?.version || martinRiedlMacArm64Ffmpeg,
+    'x86_64-pc-windows-msvc:ffmpeg': btbnFfmpegN81Build.version,
+    'x86_64-unknown-linux-gnu:ffmpeg': btbnFfmpegN81Build.version,
+    'aarch64-apple-darwin:ffmpeg': martinRiedlMacArm64Snapshot.version,
   };
   const latestUrlsByTargetEngine = {
-    'x86_64-pc-windows-msvc:ffmpeg': btbnFfmpegN81Build?.urls.windows,
-    'x86_64-unknown-linux-gnu:ffmpeg': btbnFfmpegN81Build?.urls.linux,
-    'aarch64-apple-darwin:ffmpeg': martinRiedlMacArm64Snapshot?.url,
+    'x86_64-pc-windows-msvc:ffmpeg': btbnFfmpegN81Build.urls.windows,
+    'x86_64-unknown-linux-gnu:ffmpeg': btbnFfmpegN81Build.urls.linux,
+    'aarch64-apple-darwin:ffmpeg': martinRiedlMacArm64Snapshot.url,
   };
 
   console.log('\nlatest engines:');
@@ -245,7 +307,11 @@ async function main() {
   console.log('\nAll checked packages and engines are current.');
 }
 
-main().catch(error => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(error => {
+    console.error(error instanceof Error ? error.message : error);
+    process.exit(1);
+  });
+}
+
+export { checkRows, fetchJson, fetchText, fetchWithContext };
