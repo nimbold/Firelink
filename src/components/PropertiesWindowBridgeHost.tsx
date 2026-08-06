@@ -25,9 +25,11 @@ import {
   beginExclusivePropertiesAction,
   classifyPropertiesActionRequest,
   createFrameCoalescer,
+  decodePropertiesPatchValue,
   enqueuePropertiesAction,
   getPropertiesLifecycleAction,
   propertiesActionRequestKey,
+  PROPERTIES_PATCH_CLEARABLE_KEYS,
   sanitizePropertiesSnapshot,
   sendPropertiesActionResult,
   sendPropertiesRemoved,
@@ -85,6 +87,13 @@ const copyEditablePatch = (rawPatch: PropertiesPatch): Partial<DownloadItem> => 
     'torrentEncryptionPolicy',
     'torrentFileAllocation',
   ] as const) copy(key);
+
+  for (const key of PROPERTIES_PATCH_CLEARABLE_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(rawPatch, key)) {
+      const value = (rawPatch as Record<string, unknown>)[key];
+      (safePatch as Record<string, unknown>)[key] = decodePropertiesPatchValue(value);
+    }
+  }
 
   if (safePatch.fileName !== undefined && typeof safePatch.fileName !== 'string') {
     throw new Error('Invalid file name');

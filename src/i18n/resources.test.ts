@@ -112,6 +112,7 @@ describe('translation catalogs', () => {
       'settings.network.firefoxMacos',
       'settings.network.safariMacos',
       'settings.network.torrentExternalIpPlaceholder',
+      'properties.inputFormatPiecePriority',
     ]);
 
     const unexpectedDuplicates = duplicates

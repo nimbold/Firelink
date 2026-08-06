@@ -193,12 +193,47 @@ export type SecretPatch =
   | { kind: 'replace'; value: string }
   | { kind: 'clear' };
 
-export type PropertiesPatch = Partial<Omit<DownloadItem, 'password' | 'cookies' | 'headers' | 'username'>> & {
+export const PROPERTIES_PATCH_CLEARABLE_KEYS = [
+  'destination',
+  'speedLimit',
+  'torrentTrackers',
+  'torrentExcludeTrackers',
+  'torrentSeedTime',
+  'torrentSeedRatio',
+  'torrentUploadLimit',
+  'torrentMaxPeers',
+  'torrentPeerSpeedLimit',
+  'torrentTrackerConnectTimeout',
+  'torrentTrackerTimeout',
+  'torrentTrackerInterval',
+  'torrentStopTimeout',
+  'torrentPrioritizePiece',
+  'torrentEncryptionPolicy',
+  'torrentFileAllocation',
+] as const;
+
+type PropertiesPatchClearableKey = typeof PROPERTIES_PATCH_CLEARABLE_KEYS[number];
+
+type PropertiesPatchClearableValues = {
+  [Key in PropertiesPatchClearableKey]?: DownloadItem[Key] | null;
+};
+
+export type PropertiesPatch = Partial<Omit<DownloadItem,
+  'password' | 'cookies' | 'headers' | 'username' | PropertiesPatchClearableKey
+>> & PropertiesPatchClearableValues & {
   username?: SecretPatch;
   password?: SecretPatch;
   cookies?: SecretPatch;
   headers?: SecretPatch;
 };
+
+// Tauri command arguments cross a JSON boundary. `undefined` object members
+// may be omitted before they reach Rust, so nullable fields are the explicit
+// wire-level sentinel for clearing an optional per-download override.
+export const encodePropertiesPatchValue = <T>(value: T | undefined): T | null => value ?? null;
+
+export const decodePropertiesPatchValue = <T>(value: T | null | undefined): T | undefined =>
+  value === null ? undefined : value;
 
 export type PropertiesAction =
   | 'apply-properties'

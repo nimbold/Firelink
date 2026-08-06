@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
@@ -16,9 +16,9 @@ import {
   PROPERTIES_WINDOW_SNAPSHOT,
   attachAsyncPropertiesListener,
   DEFAULT_PROPERTIES_WINDOW_CHROME,
+  encodePropertiesPatchValue,
   formatPropertiesQueuePlacement,
   getPropertiesLifecycleAction,
-  propertiesTorrentPeerLimit,
   propertiesDiagnosticRequestState,
   sendPropertiesActionRequest,
   sendPropertiesReady,
@@ -72,6 +72,68 @@ const safeTitle = (name: string) => {
 };
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+
+const PropertiesHelp = ({ text }: { text: string }) => (
+  <button type="button" className="properties-help" aria-label={text}>
+    <Info size={13} strokeWidth={2} aria-hidden="true" />
+    <span className="properties-help-tooltip" aria-hidden="true">{text}</span>
+  </button>
+);
+
+const PropertiesField = ({
+  label,
+  controlId,
+  hint,
+  meta,
+  format,
+  children,
+  className = '',
+}: {
+  label: ReactNode;
+  controlId: string;
+  hint?: string;
+  meta?: ReactNode;
+  format?: ReactNode;
+  children: ReactNode;
+  className?: string;
+}) => (
+  <div className={`properties-field ${className}`}>
+    <div className="properties-field-label">
+      <label className="properties-field-label-text" htmlFor={controlId}>
+        <span className="min-w-0">{label}</span>
+      </label>
+      {hint && <PropertiesHelp text={hint} />}
+      {meta && <span className="properties-field-meta">{meta}</span>}
+    </div>
+    {children}
+    {format && <span className="properties-field-format">{format}</span>}
+  </div>
+);
+
+const PropertiesOptionToggle = ({
+  label,
+  hint,
+  checked,
+  disabled,
+  onChange,
+}: {
+  label: ReactNode;
+  hint: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (checked: boolean) => void;
+}) => {
+  const controlId = useId();
+  return (
+    <div className="properties-option-toggle">
+      <input id={controlId} type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} disabled={disabled} />
+      <span className="properties-option-toggle-copy">
+        <label className="properties-option-toggle-label" htmlFor={controlId}>{label}</label>
+      </span>
+      <PropertiesHelp text={hint} />
+    </div>
+  );
+};
 
 const propertiesStatusTone = (status: string) => {
   if (status === 'paused') return 'paused';
@@ -156,8 +218,8 @@ export const PropertiesWindowApp = () => {
   const [removeUnselectedFile, setRemoveUnselectedFile] = useState(false);
   const [stopTimeout, setStopTimeout] = useState('');
   const [prioritizePiece, setPrioritizePiece] = useState('');
-  const [encryptionPolicy, setEncryptionPolicy] = useState<TorrentEncryptionPolicy>(TORRENT_ENCRYPTION_POLICY_DISABLED);
-  const [fileAllocation, setFileAllocation] = useState<TorrentFileAllocation>('prealloc');
+  const [encryptionPolicy, setEncryptionPolicy] = useState<TorrentEncryptionPolicy | ''>('');
+  const [fileAllocation, setFileAllocation] = useState<TorrentFileAllocation | ''>('');
   const [trackerConnectTimeout, setTrackerConnectTimeout] = useState('');
   const [trackerTimeout, setTrackerTimeout] = useState('');
   const [trackerInterval, setTrackerInterval] = useState('');
@@ -335,8 +397,8 @@ export const PropertiesWindowApp = () => {
     setRemoveUnselectedFile(next.torrentRemoveUnselectedFile === true);
     setStopTimeout(next.torrentStopTimeout === undefined ? '' : String(next.torrentStopTimeout));
     setPrioritizePiece(next.torrentPrioritizePiece ?? '');
-    setEncryptionPolicy((next.torrentEncryptionPolicy as TorrentEncryptionPolicy | undefined) ?? TORRENT_ENCRYPTION_POLICY_DISABLED);
-    setFileAllocation((next.torrentFileAllocation as TorrentFileAllocation | undefined) ?? 'prealloc');
+    setEncryptionPolicy((next.torrentEncryptionPolicy as TorrentEncryptionPolicy | undefined) ?? '');
+    setFileAllocation((next.torrentFileAllocation as TorrentFileAllocation | undefined) ?? '');
     setTrackerConnectTimeout(next.torrentTrackerConnectTimeout === undefined ? '' : String(next.torrentTrackerConnectTimeout));
     setTrackerTimeout(next.torrentTrackerTimeout === undefined ? '' : String(next.torrentTrackerTimeout));
     setTrackerInterval(next.torrentTrackerInterval === undefined ? '' : String(next.torrentTrackerInterval));
@@ -773,7 +835,9 @@ export const PropertiesWindowApp = () => {
     const patch: PropertiesPatch = {};
     if (activeTab === 'overview') {
       if (fileName !== snapshot.fileName) patch.fileName = fileName;
-      if (destination !== (snapshot.destination ?? '')) patch.destination = destination || undefined;
+      const nextDestination = destination.trim() ? destination : undefined;
+      const currentDestination = snapshot.destination?.trim() ? snapshot.destination : undefined;
+      if (nextDestination !== currentDestination) patch.destination = encodePropertiesPatchValue(nextDestination);
       if (!isTorrent && connections.trim() && Number(connections) !== snapshot.connections) {
         patch.connections = Number(connections);
       }
@@ -796,19 +860,23 @@ export const PropertiesWindowApp = () => {
       await requestAction('set-torrent-file-selection', { selectedIndices: nextSelectedFiles });
       return;
     } else if (activeTab === 'trackers') {
-      if (trackers !== (snapshot.torrentTrackers ?? '')) patch.torrentTrackers = trackers;
-      if (excludedTrackers !== (snapshot.torrentExcludeTrackers ?? '')) patch.torrentExcludeTrackers = excludedTrackers;
+      const nextTrackers = trackers.trim();
+      const currentTrackers = (snapshot.torrentTrackers ?? '').trim();
+      if (nextTrackers !== currentTrackers) patch.torrentTrackers = encodePropertiesPatchValue(nextTrackers || undefined);
+      const nextExcludedTrackers = excludedTrackers.trim();
+      const currentExcludedTrackers = (snapshot.torrentExcludeTrackers ?? '').trim();
+      if (nextExcludedTrackers !== currentExcludedTrackers) patch.torrentExcludeTrackers = encodePropertiesPatchValue(nextExcludedTrackers || undefined);
       if (trackerConnectTimeout !== String(snapshot.torrentTrackerConnectTimeout ?? '')) {
-        patch.torrentTrackerConnectTimeout = trackerConnectTimeout.trim() ? Number(trackerConnectTimeout) : undefined;
+        patch.torrentTrackerConnectTimeout = encodePropertiesPatchValue(trackerConnectTimeout.trim() ? Number(trackerConnectTimeout) : undefined);
       }
       if (trackerTimeout !== String(snapshot.torrentTrackerTimeout ?? '')) {
-        patch.torrentTrackerTimeout = trackerTimeout.trim() ? Number(trackerTimeout) : undefined;
+        patch.torrentTrackerTimeout = encodePropertiesPatchValue(trackerTimeout.trim() ? Number(trackerTimeout) : undefined);
       }
       if (trackerInterval !== String(snapshot.torrentTrackerInterval ?? '')) {
-        patch.torrentTrackerInterval = trackerInterval.trim() ? Number(trackerInterval) : undefined;
+        patch.torrentTrackerInterval = encodePropertiesPatchValue(trackerInterval.trim() ? Number(trackerInterval) : undefined);
       }
     } else if (activeTab === 'options' || activeTab === 'transfer') {
-      if (downloadLimit !== (snapshot.speedLimit ?? '')) patch.speedLimit = downloadLimit;
+      if (downloadLimit !== (snapshot.speedLimit ?? '')) patch.speedLimit = encodePropertiesPatchValue(downloadLimit.trim() ? downloadLimit : undefined);
       if (activeTab === 'transfer' && !isTorrent && connections.trim()) {
         const nextConnections = Number(connections);
         if (nextConnections !== snapshot.connections) patch.connections = nextConnections;
@@ -820,28 +888,27 @@ export const PropertiesWindowApp = () => {
           switchAfterSaveRef.current = null;
           return;
         }
-        if (uploadLimit !== (snapshot.torrentUploadLimit ?? '')) patch.torrentUploadLimit = uploadLimit;
+        if (uploadLimit !== (snapshot.torrentUploadLimit ?? '')) patch.torrentUploadLimit = encodePropertiesPatchValue(uploadLimit.trim() ? uploadLimit : undefined);
         if (maxPeers !== String(snapshot.torrentMaxPeers ?? '')) {
-          patch.torrentMaxPeers = maxPeers.trim() ? Number(maxPeers) : undefined;
+          patch.torrentMaxPeers = encodePropertiesPatchValue(maxPeers.trim() ? Number(maxPeers) : undefined);
         }
-        if (peerSpeedLimit !== (snapshot.torrentPeerSpeedLimit ?? '')) patch.torrentPeerSpeedLimit = peerSpeedLimit;
+        if (peerSpeedLimit !== (snapshot.torrentPeerSpeedLimit ?? '')) patch.torrentPeerSpeedLimit = encodePropertiesPatchValue(peerSpeedLimit.trim() ? peerSpeedLimit : undefined);
         if (seedTime !== String(snapshot.torrentSeedTime ?? '')) {
-          patch.torrentSeedTime = seedTime.trim() ? Number(seedTime) : undefined;
+          patch.torrentSeedTime = encodePropertiesPatchValue(seedTime.trim() ? Number(seedTime) : undefined);
         }
         if (seedRatio !== String(snapshot.torrentSeedRatio ?? '')) {
-          patch.torrentSeedRatio = seedRatio.trim() ? Number(seedRatio) : undefined;
+          patch.torrentSeedRatio = encodePropertiesPatchValue(seedRatio.trim() ? Number(seedRatio) : undefined);
         }
         if (checkIntegrity !== (snapshot.torrentCheckIntegrity === true)) patch.torrentCheckIntegrity = checkIntegrity;
         if (removeUnselectedFile !== (snapshot.torrentRemoveUnselectedFile === true)) patch.torrentRemoveUnselectedFile = removeUnselectedFile;
         if (stopTimeout !== String(snapshot.torrentStopTimeout ?? '')) {
-          patch.torrentStopTimeout = stopTimeout.trim() ? Number(stopTimeout) : undefined;
+          patch.torrentStopTimeout = encodePropertiesPatchValue(stopTimeout.trim() ? Number(stopTimeout) : undefined);
         }
-        if (prioritizePiece !== (snapshot.torrentPrioritizePiece ?? '')) patch.torrentPrioritizePiece = prioritizePiece.trim() || undefined;
-        const snapshotEncryptionPolicy = (snapshot.torrentEncryptionPolicy as TorrentEncryptionPolicy | undefined) ?? TORRENT_ENCRYPTION_POLICY_DISABLED;
-        if (encryptionPolicy !== snapshotEncryptionPolicy) {
-          patch.torrentEncryptionPolicy = encryptionPolicy === TORRENT_ENCRYPTION_POLICY_DISABLED ? undefined : encryptionPolicy;
-        }
-        if (fileAllocation !== ((snapshot.torrentFileAllocation as TorrentFileAllocation | undefined) ?? 'prealloc')) patch.torrentFileAllocation = fileAllocation;
+        if (prioritizePiece !== (snapshot.torrentPrioritizePiece ?? '')) patch.torrentPrioritizePiece = encodePropertiesPatchValue(prioritizePiece.trim() || undefined);
+        const nextEncryptionPolicy = encryptionPolicy || undefined;
+        if (nextEncryptionPolicy !== snapshot.torrentEncryptionPolicy) patch.torrentEncryptionPolicy = encodePropertiesPatchValue(nextEncryptionPolicy);
+        const nextFileAllocation = fileAllocation || undefined;
+        if (nextFileAllocation !== snapshot.torrentFileAllocation) patch.torrentFileAllocation = encodePropertiesPatchValue(nextFileAllocation);
       }
     } else if (activeTab === 'advanced') {
       for (const name of SECRET_NAMES) {
@@ -994,7 +1061,7 @@ export const PropertiesWindowApp = () => {
       <div className="properties-window-titlebar" data-tauri-drag-region>
         <span data-tauri-drag-region>{snapshot.fileName} - {t($ => $.downloadTable.properties)} - Firelink</span>
       </div>
-      <header className="properties-window-header shrink-0 border-b border-border-modal bg-sidebar-bg px-5 py-4">
+      <header className="properties-window-header shrink-0 border-b border-border-modal px-5 py-4">
         <div className="properties-window-hero-top">
           <div className="properties-window-title-block min-w-0">
             <div className="properties-window-title-line">
@@ -1201,31 +1268,173 @@ export const PropertiesWindowApp = () => {
 
         {activeTab === 'transfer' && <div className="space-y-4">
           <div className="grid max-w-2xl gap-4 sm:grid-cols-2">
-            <label className="text-xs text-text-muted">{t($ => $.properties.speedCap)}<input className="app-control mt-1 w-full" value={downloadLimit} onChange={event => { setDownloadLimit(event.target.value); setDraftTab('transfer'); }} placeholder="1024K" disabled={!editingEnabled} /></label>
+            <PropertiesField
+              label={t($ => $.properties.speedCap)}
+              controlId="properties-transfer-speed-cap"
+              hint={t($ => $.properties.speedLimitHint)}
+              meta={downloadLimit.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
+                format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatSpeedLimit) })}
+              >
+                <input id="properties-transfer-speed-cap" className="app-control w-full" value={downloadLimit} onChange={event => { setDownloadLimit(event.target.value); setDraftTab('transfer'); }} placeholder={t($ => $.properties.inputExampleSpeedLimit)} disabled={!editingEnabled} />
+            </PropertiesField>
             <div className="rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs"><span className="text-text-muted">{snapshot.isMedia === true ? t($ => $.properties.configuredConcurrency) : t($ => $.properties.connections)}</span><p className="mt-1">{snapshot.isMedia === true ? snapshot.connections ?? '—' : `${snapshot.activeConnections ?? '—'} / ${snapshot.requestedConnections ?? snapshot.connections ?? '—'}`}</p></div>
           </div>
           <label className="block max-w-2xl text-xs text-text-muted">{snapshot.isMedia === true ? t($ => $.properties.configuredConcurrency) : t($ => $.properties.connections)}<div className="mt-2 flex items-center gap-3"><input type="range" min="1" max="16" value={connections || '1'} onChange={event => { setConnections(event.target.value); setDraftTab('transfer'); }} disabled={!editingEnabled} className="min-w-0 flex-1 accent-blue-500" aria-label={t($ => $.properties.connections)} /><span className="w-8 text-center font-mono text-text-primary">{connections || '1'}</span></div></label>
           <p className="text-xs text-text-muted">{t($ => $.properties.transferSettings)}</p>
         </div>}
 
-        {activeTab === 'options' && isTorrent && <div className="space-y-5 text-xs">
-          <div className="grid max-w-3xl gap-4 sm:grid-cols-2">
-            <label className="text-text-muted">{t($ => $.properties.speedCap)}<input className="app-control mt-1 w-full" value={downloadLimit} onChange={event => { setDownloadLimit(event.target.value); setDraftTab('options'); }} placeholder="1024K" disabled={!editingEnabled} /></label>
-            <label className="text-text-muted">{t($ => $.properties.liveTorrentUploadLimit)}<input className="app-control mt-1 w-full" value={uploadLimit} onChange={event => { setUploadLimit(event.target.value); setDraftTab('options'); }} placeholder="1024K" disabled={!editingEnabled} /></label>
-            <label className="text-text-muted">{t($ => $.properties.torrentMaxPeers)}<input className="app-control mt-1 w-full" value={maxPeers} onChange={event => { setMaxPeers(event.target.value); setDraftTab('options'); }} inputMode="numeric" placeholder={String(propertiesTorrentPeerLimit(undefined))} disabled={!editingEnabled} /></label>
-            <label className="text-text-muted">{t($ => $.properties.torrentPeerSpeedLimit)}<input className="app-control mt-1 w-full" value={peerSpeedLimit} onChange={event => { setPeerSpeedLimit(event.target.value); setDraftTab('options'); }} placeholder="50K" disabled={!editingEnabled} /></label>
-            <label className="text-text-muted">{t($ => $.addDownloads.seedTime)}<input className="app-control mt-1 w-full" value={seedTime} onChange={event => { setSeedTime(event.target.value); setDraftTab('options'); }} inputMode="decimal" placeholder={t($ => $.properties.defaultValue)} disabled={!editingEnabled} /></label>
-            <label className="text-text-muted">{t($ => $.addDownloads.seedRatio)}<input className="app-control mt-1 w-full" value={seedRatio} onChange={event => { setSeedRatio(event.target.value); setDraftTab('options'); }} inputMode="decimal" placeholder="0" disabled={!editingEnabled} /></label>
-            <label className="text-text-muted">{t($ => $.properties.torrentStopTimeout)}<input className="app-control mt-1 w-full" value={stopTimeout} onChange={event => { setStopTimeout(event.target.value); setDraftTab('options'); }} inputMode="numeric" placeholder="0" disabled={!editingEnabled} /></label>
-            <label className="text-text-muted">{t($ => $.properties.torrentPrioritizePiece)}<input className="app-control mt-1 w-full" value={prioritizePiece} onChange={event => { setPrioritizePiece(event.target.value); setDraftTab('options'); }} placeholder="head=1M,tail=1M" disabled={!editingEnabled} /></label>
+        {activeTab === 'options' && isTorrent && <div className="properties-options space-y-5 text-xs">
+          <div className="properties-options-intro">
+            <div className="min-w-0">
+              <p className="properties-section-eyebrow">{t($ => $.properties.tabs.options)}</p>
+              <p className="mt-1 text-text-muted">{t($ => $.properties.torrentPeerOptionsSavedHint)}</p>
+            </div>
+            <span className="properties-default-legend"><span className="properties-default-legend-dot" />{t($ => $.properties.blankUsesDefault)}</span>
           </div>
-          <div className="grid max-w-3xl gap-3 sm:grid-cols-2">
-            <label className="flex items-center gap-2"><input type="checkbox" checked={checkIntegrity} onChange={event => { setCheckIntegrity(event.target.checked); setDraftTab('options'); }} disabled={!editingEnabled} />{t($ => $.properties.torrentVerifyIntegrity)}</label>
-            <label className="flex items-center gap-2"><input type="checkbox" checked={removeUnselectedFile} onChange={event => { setRemoveUnselectedFile(event.target.checked); setDraftTab('options'); }} disabled={!editingEnabled || (!removeUnselectedFile && (!snapshot.torrentFileIndices || snapshot.torrentFileIndices.length === 0))} />{t($ => $.properties.torrentRemoveUnselectedFile)}</label>
-            <label className="flex items-center gap-2 text-text-muted">{t($ => $.properties.torrentFileAllocation)}<select className="app-control" value={fileAllocation} onChange={event => { setFileAllocation(event.target.value as TorrentFileAllocation); setDraftTab('options'); }} disabled={!editingEnabled}><option value="prealloc">{t($ => $.properties.torrentFileAllocationPrealloc)}</option><option value="none">{t($ => $.properties.torrentFileAllocationNone)}</option></select></label>
-            <label className="flex items-center gap-2 text-text-muted">{t($ => $.properties.torrentEncryptionPolicy)}<select className="app-control" value={encryptionPolicy} onChange={event => { setEncryptionPolicy(event.target.value as TorrentEncryptionPolicy); setDraftTab('options'); }} disabled={!editingEnabled}><option value={TORRENT_ENCRYPTION_POLICY_DISABLED}>{t($ => $.properties.torrentEncryptionDisabled)}</option><option value={TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO}>{t($ => $.properties.torrentEncryptionRequireCrypto)}</option><option value={TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION}>{t($ => $.properties.torrentEncryptionForceEncryption)}</option></select></label>
-          </div>
-          <p className="max-w-3xl text-text-muted">{t($ => $.properties.torrentPeerOptionsSavedHint)}</p>
+
+          <section className="properties-option-group" aria-labelledby="properties-options-limits-heading">
+            <div className="properties-option-group-heading">
+              <div>
+                <h2 id="properties-options-limits-heading">{t($ => $.properties.liveTorrentPeerOptions)}</h2>
+                <p>{t($ => $.properties.speedLimitHint)}</p>
+              </div>
+            </div>
+            <div className="grid max-w-4xl gap-4 sm:grid-cols-2">
+              <PropertiesField
+                label={t($ => $.properties.speedCap)}
+                controlId="properties-options-speed-cap"
+                hint={t($ => $.properties.speedLimitHint)}
+                meta={downloadLimit.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
+                format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatSpeedLimit) })}
+              >
+                <input id="properties-options-speed-cap" className="app-control w-full" value={downloadLimit} onChange={event => { setDownloadLimit(event.target.value); setDraftTab('options'); }} placeholder={t($ => $.properties.inputExampleSpeedLimit)} disabled={!editingEnabled} />
+              </PropertiesField>
+              <PropertiesField
+                label={t($ => $.properties.liveTorrentUploadLimit)}
+                controlId="properties-options-upload-limit"
+                hint={t($ => $.properties.liveTorrentUploadLimitHint)}
+                meta={uploadLimit.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
+                format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatSpeedLimit) })}
+              >
+                <input id="properties-options-upload-limit" className="app-control w-full" value={uploadLimit} onChange={event => { setUploadLimit(event.target.value); setDraftTab('options'); }} placeholder={t($ => $.properties.inputExampleSpeedLimit)} disabled={!editingEnabled} />
+              </PropertiesField>
+              <PropertiesField
+                label={t($ => $.properties.torrentMaxPeers)}
+                controlId="properties-options-max-peers"
+                hint={t($ => $.properties.torrentPeerOptionsSavedHint)}
+                meta={maxPeers.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
+                format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatMaxPeers) })}
+              >
+                <input id="properties-options-max-peers" className="app-control w-full" value={maxPeers} onChange={event => { setMaxPeers(event.target.value); setDraftTab('options'); }} inputMode="numeric" placeholder={t($ => $.properties.inputExampleMaxPeers)} disabled={!editingEnabled} />
+              </PropertiesField>
+              <PropertiesField
+                label={t($ => $.properties.torrentPeerSpeedLimit)}
+                controlId="properties-options-peer-speed-limit"
+                hint={t($ => $.properties.torrentPeerOptionsSavedHint)}
+                meta={peerSpeedLimit.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
+                format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatSpeedLimit) })}
+              >
+                <input id="properties-options-peer-speed-limit" className="app-control w-full" value={peerSpeedLimit} onChange={event => { setPeerSpeedLimit(event.target.value); setDraftTab('options'); }} placeholder={t($ => $.properties.inputExampleSpeedLimit)} disabled={!editingEnabled} />
+              </PropertiesField>
+            </div>
+          </section>
+
+          <section className="properties-option-group" aria-labelledby="properties-options-seeding-heading">
+            <div className="properties-option-group-heading">
+              <div>
+                <h2 id="properties-options-seeding-heading">{t($ => $.addDownloads.torrentSeeding)}</h2>
+                <p>{t($ => $.addDownloads.seedRatioHint)}</p>
+              </div>
+            </div>
+            <div className="grid max-w-4xl gap-4 sm:grid-cols-2">
+              <PropertiesField
+                label={t($ => $.addDownloads.seedTime)}
+                controlId="properties-options-seed-time"
+                hint={t($ => $.properties.torrentSeedTimeHint)}
+                meta={seedTime.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
+                format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatSeedTime) })}
+              >
+                <input id="properties-options-seed-time" className="app-control w-full" value={seedTime} onChange={event => { setSeedTime(event.target.value); setDraftTab('options'); }} inputMode="decimal" placeholder={t($ => $.properties.inputExampleSeedTime)} disabled={!editingEnabled} />
+              </PropertiesField>
+              <PropertiesField
+                label={t($ => $.addDownloads.seedRatio)}
+                controlId="properties-options-seed-ratio"
+                hint={t($ => $.addDownloads.seedRatioHint)}
+                meta={seedRatio.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
+                format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatSeedRatio) })}
+              >
+                <input id="properties-options-seed-ratio" className="app-control w-full" value={seedRatio} onChange={event => { setSeedRatio(event.target.value); setDraftTab('options'); }} inputMode="decimal" placeholder={t($ => $.properties.inputExampleSeedRatio)} disabled={!editingEnabled} />
+              </PropertiesField>
+              <PropertiesField
+                label={t($ => $.properties.torrentStopTimeout)}
+                controlId="properties-options-stop-timeout"
+                hint={t($ => $.properties.torrentStopTimeoutHint)}
+                meta={stopTimeout.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
+                format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatStopTimeout) })}
+              >
+                <input id="properties-options-stop-timeout" className="app-control w-full" value={stopTimeout} onChange={event => { setStopTimeout(event.target.value); setDraftTab('options'); }} inputMode="numeric" placeholder={t($ => $.properties.inputExampleStopTimeout)} disabled={!editingEnabled} />
+              </PropertiesField>
+              <PropertiesField
+                label={t($ => $.properties.torrentPrioritizePiece)}
+                controlId="properties-options-prioritize-piece"
+                hint={t($ => $.properties.torrentPrioritizePieceHint)}
+                meta={prioritizePiece.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
+                format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatPiecePriority) })}
+              >
+                <input id="properties-options-prioritize-piece" className="app-control w-full" value={prioritizePiece} onChange={event => { setPrioritizePiece(event.target.value); setDraftTab('options'); }} placeholder={t($ => $.properties.inputExamplePiecePriority)} disabled={!editingEnabled} />
+              </PropertiesField>
+            </div>
+          </section>
+
+          <section className="properties-option-group" aria-labelledby="properties-options-behavior-heading">
+            <div className="properties-option-group-heading">
+              <div>
+                <h2 id="properties-options-behavior-heading">{t($ => $.properties.torrentOptionsBehavior)}</h2>
+                <p>{t($ => $.properties.torrentOptionsBehaviorHint)}</p>
+              </div>
+            </div>
+            <div className="grid max-w-4xl gap-3 sm:grid-cols-2">
+              <PropertiesOptionToggle
+                label={t($ => $.properties.torrentVerifyIntegrity)}
+                hint={t($ => $.properties.torrentVerifyIntegrityHint)}
+                checked={checkIntegrity}
+                onChange={checked => { setCheckIntegrity(checked); setDraftTab('options'); }}
+                disabled={!editingEnabled}
+              />
+              <PropertiesOptionToggle
+                label={t($ => $.properties.torrentRemoveUnselectedFile)}
+                hint={t($ => $.properties.torrentRemoveUnselectedFileHint)}
+                checked={removeUnselectedFile}
+                onChange={checked => { setRemoveUnselectedFile(checked); setDraftTab('options'); }}
+                disabled={!editingEnabled || (!removeUnselectedFile && (!snapshot.torrentFileIndices || snapshot.torrentFileIndices.length === 0))}
+              />
+              <PropertiesField
+                label={t($ => $.properties.torrentFileAllocation)}
+                controlId="properties-options-file-allocation"
+                hint={t($ => $.properties.torrentFileAllocationHint)}
+                meta={fileAllocation === '' ? t($ => $.properties.usingDefault) : t($ => $.properties.customPerDownload)}
+              >
+                <select id="properties-options-file-allocation" className="app-control w-full" value={fileAllocation} onChange={event => { setFileAllocation(event.target.value as TorrentFileAllocation | ''); setDraftTab('options'); }} disabled={!editingEnabled}>
+                  <option value="">{t($ => $.properties.usingDefault)}</option>
+                  <option value="prealloc">{t($ => $.properties.torrentFileAllocationPrealloc)}</option>
+                  <option value="none">{t($ => $.properties.torrentFileAllocationNone)}</option>
+                </select>
+              </PropertiesField>
+              <PropertiesField
+                label={t($ => $.properties.torrentEncryptionPolicy)}
+                controlId="properties-options-encryption-policy"
+                hint={t($ => $.properties.torrentEncryptionPolicyHint)}
+                meta={encryptionPolicy === '' ? t($ => $.properties.usingDefault) : t($ => $.properties.customPerDownload)}
+              >
+                <select id="properties-options-encryption-policy" className="app-control w-full" value={encryptionPolicy} onChange={event => { setEncryptionPolicy(event.target.value as TorrentEncryptionPolicy | ''); setDraftTab('options'); }} disabled={!editingEnabled}>
+                  <option value="">{t($ => $.properties.usingDefault)}</option>
+                  <option value={TORRENT_ENCRYPTION_POLICY_DISABLED}>{t($ => $.properties.torrentEncryptionDisabled)}</option>
+                  <option value={TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO}>{t($ => $.properties.torrentEncryptionRequireCrypto)}</option>
+                  <option value={TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION}>{t($ => $.properties.torrentEncryptionForceEncryption)}</option>
+                </select>
+              </PropertiesField>
+            </div>
+          </section>
         </div>}
 
         {activeTab === 'advanced' && <div className="space-y-4">

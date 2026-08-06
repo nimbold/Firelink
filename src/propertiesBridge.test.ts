@@ -17,6 +17,8 @@ import {
   beginExclusivePropertiesAction,
   classifyPropertiesActionRequest,
   createFrameCoalescer,
+  decodePropertiesPatchValue,
+  encodePropertiesPatchValue,
   enqueuePropertiesAction,
   formatPropertiesQueuePlacement,
   getPropertiesLifecycleAction,
@@ -33,6 +35,17 @@ import {
 } from './propertiesBridge';
 
 describe('Properties window bridge', () => {
+  it('keeps optional override resets explicit across the JSON IPC boundary', () => {
+    const encoded = encodePropertiesPatchValue<string>(undefined);
+
+    expect(encoded).toBeNull();
+    expect(JSON.parse(JSON.stringify({ torrentEncryptionPolicy: encoded }))).toEqual({
+      torrentEncryptionPolicy: null,
+    });
+    expect(decodePropertiesPatchValue(encoded)).toBeUndefined();
+    expect(decodePropertiesPatchValue('prealloc')).toBe('prealloc');
+  });
+
   it('uses a WebviewWindow target for directed child events', () => {
     expect(propertiesWindowEventTarget('properties-1')).toEqual({
       kind: 'WebviewWindow',
