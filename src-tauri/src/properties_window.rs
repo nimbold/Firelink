@@ -9,6 +9,10 @@ use uuid::Uuid;
 const MAIN_WINDOW_LABEL: &str = "main";
 const PROPERTIES_LABEL_PREFIX: &str = "properties-";
 const PROPERTIES_WINDOW_TITLE: &str = "Properties - Firelink";
+const PROPERTIES_DEFAULT_WIDTH: f64 = 960.0;
+const PROPERTIES_DEFAULT_HEIGHT: f64 = 640.0;
+const PROPERTIES_MIN_WIDTH: f64 = 680.0;
+const PROPERTIES_MIN_HEIGHT: f64 = 500.0;
 const PROPERTIES_WINDOW_READY_EVENT: &str = "properties-window-ready";
 const PROPERTIES_WINDOW_ACTION_REQUEST_EVENT: &str = "properties-window-action-request";
 const MAX_PROPERTIES_ACTION_PAYLOAD_BYTES: usize = 64 * 1024;
@@ -30,6 +34,13 @@ struct RegistryState {
     ready_windows: HashSet<String>,
     sessions_by_window: HashMap<String, String>,
     retired_sessions_by_window: HashMap<String, HashSet<String>>,
+    remembered_size: Option<PropertiesWindowSize>,
+}
+
+#[derive(Clone, Copy)]
+struct PropertiesWindowSize {
+    width: f64,
+    height: f64,
 }
 
 #[derive(Clone, Serialize)]
@@ -52,6 +63,47 @@ struct PropertiesWindowActionEvent {
 }
 
 impl PropertiesWindowRegistry {
+    pub(crate) fn remember_size(
+        &self,
+        window_label: &str,
+        physical_width: u32,
+        physical_height: u32,
+        scale_factor: f64,
+    ) -> Result<(), String> {
+        if !scale_factor.is_finite() || scale_factor <= 0.0 {
+            return Ok(());
+        }
+
+        let width = (f64::from(physical_width) / scale_factor).round();
+        let height = (f64::from(physical_height) / scale_factor).round();
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return Ok(());
+        }
+
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "Properties window registry is unavailable".to_string())?;
+        if !state.by_window.contains_key(window_label) {
+            return Ok(());
+        }
+
+        state.remembered_size = Some(PropertiesWindowSize {
+            width: width.max(PROPERTIES_MIN_WIDTH),
+            height: height.max(PROPERTIES_MIN_HEIGHT),
+        });
+        Ok(())
+    }
+
+    fn remembered_size(&self) -> Result<Option<(f64, f64)>, String> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| "Properties window registry is unavailable".to_string())?
+            .remembered_size
+            .map(|size| (size.width, size.height)))
+    }
+
     pub fn allocate(&self, download_id: &str) -> Result<String, String> {
         let mut state = self
             .state
@@ -352,10 +404,13 @@ pub fn open_download_properties_window(
     // If the native window disappeared without delivering Destroyed, discard
     // the old readiness bit before constructing a fresh hidden webview.
     registry.clear_ready(&label)?;
+    let (initial_width, initial_height) = registry
+        .remembered_size()?
+        .unwrap_or((PROPERTIES_DEFAULT_WIDTH, PROPERTIES_DEFAULT_HEIGHT));
     let builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("index.html".into()))
         .title(PROPERTIES_WINDOW_TITLE)
-        .inner_size(960.0, 540.0)
-        .min_inner_size(680.0, 500.0)
+        .inner_size(initial_width, initial_height)
+        .min_inner_size(PROPERTIES_MIN_WIDTH, PROPERTIES_MIN_HEIGHT)
         .resizable(true)
         .always_on_top(false)
         // Let the child renderer paint its rounded loading shell before the
@@ -584,6 +639,50 @@ mod tests {
         assert_eq!(registry.download_for_window(&first).unwrap(), None);
         assert!(!registry.is_ready(&first).unwrap());
         assert_ne!(registry.allocate("download-a").unwrap(), first);
+    }
+
+    #[test]
+    fn remembered_size_uses_logical_units_and_survives_window_cleanup() {
+        let registry = PropertiesWindowRegistry::default();
+        let label = registry.allocate("download-a").unwrap();
+
+        registry.remember_size(&label, 1920, 1280, 2.0).unwrap();
+        assert_eq!(registry.remembered_size().unwrap(), Some((960.0, 640.0)));
+
+        registry.remove_window(&label).unwrap();
+        assert_eq!(registry.remembered_size().unwrap(), Some((960.0, 640.0)));
+    }
+
+    #[test]
+    fn remembered_size_clamps_below_minimum_and_ignores_invalid_scale() {
+        let registry = PropertiesWindowRegistry::default();
+
+        let label = registry.allocate("download-a").unwrap();
+        registry.remember_size(&label, 1, 1, 1.0).unwrap();
+        assert_eq!(
+            registry.remembered_size().unwrap(),
+            Some((PROPERTIES_MIN_WIDTH, PROPERTIES_MIN_HEIGHT))
+        );
+
+        registry.remember_size(&label, 2000, 1600, 0.0).unwrap();
+        assert_eq!(
+            registry.remembered_size().unwrap(),
+            Some((PROPERTIES_MIN_WIDTH, PROPERTIES_MIN_HEIGHT))
+        );
+    }
+
+    #[test]
+    fn late_resize_from_unregistered_window_cannot_overwrite_session_size() {
+        let registry = PropertiesWindowRegistry::default();
+        let label = registry.allocate("download-a").unwrap();
+
+        registry.remember_size(&label, 1920, 1280, 2.0).unwrap();
+        registry.remove_window(&label).unwrap();
+        registry
+            .remember_size(&label, 2560, 1600, 2.0)
+            .unwrap();
+
+        assert_eq!(registry.remembered_size().unwrap(), Some((960.0, 640.0)));
     }
 
     #[test]

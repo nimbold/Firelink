@@ -14581,15 +14581,50 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .on_window_event(|window, event| {
-            if matches!(event, tauri::WindowEvent::Destroyed)
-                && properties_window::is_properties_window_label(window.label())
-            {
-                if let Some(registry) = window.app_handle().try_state::<properties_window::PropertiesWindowRegistry>() {
-                    let _ = registry.remove_window(window.label());
+            if properties_window::is_properties_window_label(window.label()) {
+                let resize = match event {
+                    tauri::WindowEvent::Resized(size) => {
+                        window.scale_factor().ok().map(|scale_factor| {
+                            (size.width, size.height, scale_factor)
+                        })
+                    }
+                    tauri::WindowEvent::ScaleFactorChanged {
+                        scale_factor,
+                        new_inner_size,
+                        ..
+                    } => Some((new_inner_size.width, new_inner_size.height, *scale_factor)),
+                    tauri::WindowEvent::CloseRequested { .. } => window
+                        .inner_size()
+                        .ok()
+                        .and_then(|size| {
+                            window
+                                .scale_factor()
+                                .ok()
+                                .map(|scale_factor| (size.width, size.height, scale_factor))
+                        }),
+                    _ => None,
+                };
+                if let Some((width, height, scale_factor)) = resize {
+                    if let Some(registry) = window
+                        .app_handle()
+                        .try_state::<properties_window::PropertiesWindowRegistry>()
+                    {
+                        let _ = registry.remember_size(
+                            window.label(),
+                            width,
+                            height,
+                            scale_factor,
+                        );
+                    }
                 }
-                let _ = window
-                    .app_handle()
-                    .emit_to("main", "properties-window-closed", window.label().to_string());
+                if matches!(event, tauri::WindowEvent::Destroyed) {
+                    if let Some(registry) = window.app_handle().try_state::<properties_window::PropertiesWindowRegistry>() {
+                        let _ = registry.remove_window(window.label());
+                    }
+                    let _ = window
+                        .app_handle()
+                        .emit_to("main", "properties-window-closed", window.label().to_string());
+                }
             }
             if window.label() == "main" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
