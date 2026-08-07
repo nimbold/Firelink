@@ -1368,18 +1368,15 @@ export const PropertiesWindowApp = () => {
         </div>}
 
         {activeTab === 'transfer' && <div className="space-y-4">
-          <div className="grid max-w-2xl gap-4 sm:grid-cols-2">
-            <PropertiesField
-              label={t($ => $.properties.speedCap)}
-              controlId="properties-transfer-speed-cap"
-              hint={t($ => $.properties.speedLimitHint)}
-              meta={downloadLimit.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
-                format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatSpeedLimit) })}
-              >
-                <input id="properties-transfer-speed-cap" className="app-control w-full" value={downloadLimit} onChange={event => { setDownloadLimit(event.target.value); setDraftTab('transfer'); }} placeholder={t($ => $.properties.inputExampleSpeedLimit)} disabled={!editingEnabled} />
-            </PropertiesField>
-            <div className="rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs"><span className="text-text-muted">{snapshot.isMedia === true ? t($ => $.properties.configuredConcurrency) : t($ => $.properties.connections)}</span><p className="mt-1">{snapshot.isMedia === true ? snapshot.connections ?? '—' : `${snapshot.activeConnections ?? '—'} / ${snapshot.requestedConnections ?? snapshot.connections ?? '—'}`}</p></div>
-          </div>
+          <PropertiesField
+            label={t($ => $.properties.speedCap)}
+            controlId="properties-transfer-speed-cap"
+            hint={t($ => $.properties.speedLimitHint)}
+            meta={downloadLimit.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
+              format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatSpeedLimit) })}
+            >
+              <input id="properties-transfer-speed-cap" className="app-control w-full" value={downloadLimit} onChange={event => { setDownloadLimit(event.target.value); setDraftTab('transfer'); }} placeholder={t($ => $.properties.inputExampleSpeedLimit)} disabled={!editingEnabled} />
+          </PropertiesField>
           <label className="block max-w-2xl text-xs text-text-muted">{snapshot.isMedia === true ? t($ => $.properties.configuredConcurrency) : t($ => $.properties.connections)}<div className="mt-2 flex items-center gap-3"><input type="range" min="1" max="16" value={connections || '1'} onChange={event => { setConnections(event.target.value); setDraftTab('transfer'); }} disabled={!editingEnabled} className="min-w-0 flex-1 accent-blue-500" aria-label={t($ => $.properties.connections)} /><span className="w-8 text-center font-mono text-text-primary">{connections || '1'}</span></div></label>
           <p className="text-xs text-text-muted">{t($ => $.properties.transferSettings)}</p>
         </div>}
