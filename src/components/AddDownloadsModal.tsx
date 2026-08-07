@@ -62,10 +62,12 @@ const formatBytes = (bytes: number) => {
 };
 
 const normalizeComparableUrl = (rawUrl: string) => {
+  const trimmed = rawUrl.trim();
+  if (trimmed.startsWith('/') || /^[a-z]:[\\/]/i.test(trimmed)) return trimmed;
   try {
-    return new URL(rawUrl).href;
+    return new URL(trimmed).href;
   } catch {
-    return rawUrl.trim();
+    return trimmed;
   }
 };
 
@@ -141,6 +143,7 @@ export const AddDownloadsModal = () => {
     pendingAddHeaders,
     pendingAddCookies,
     pendingAddMediaUrls,
+    pendingAddTorrentUrls,
     pendingAddBatchName,
     pendingAddRequestContexts,
     pendingAddRequestVersion,
@@ -530,13 +533,8 @@ export const AddDownloadsModal = () => {
       return Object.keys(retained).length === Object.keys(current).length ? current : retained;
     });
 
-    const forcedMediaUrls = new Set(pendingAddMediaUrls.map(url => {
-      try {
-        return new URL(url).href;
-      } catch {
-        return url;
-      }
-    }));
+    const forcedMediaUrls = new Set(pendingAddMediaUrls.map(normalizeComparableUrl));
+    const forcedTorrentUrls = new Set(pendingAddTorrentUrls.map(normalizeComparableUrl));
     const requestFilenames = Object.fromEntries(
       Object.entries(pendingAddRequestContexts)
         .filter(([, context]) => Boolean(context.filename))
@@ -564,13 +562,15 @@ export const AddDownloadsModal = () => {
         requestFilenames,
         requestContextVersions,
         playlistExpansions,
-        selectedBySourceUrl
+        selectedBySourceUrl,
+        forcedTorrentUrls
       );
     });
   }, [
     urls,
     pendingAddFilename,
     pendingAddMediaUrls,
+    pendingAddTorrentUrls,
     pendingAddRequestContexts,
     hasExtensionRequestContext,
     playlistExpansions
@@ -608,7 +608,11 @@ export const AddDownloadsModal = () => {
               source: row.sourceUrl,
               id: torrentCacheId,
               cache: true,
-              proxy: proxy ?? undefined
+              proxy: proxy ?? undefined,
+              headers: headersForRow(contextUrl) || undefined,
+              cookies: cookiesForRow(contextUrl, row.sourceUrl) || undefined,
+              cookieScopes: requestContext?.cookieScopes || undefined,
+              torrent: true
             });
             const isCurrentTorrentDraft = addModalOpenRef.current
               && parsedItemsRef.current.some(currentRow =>
@@ -1465,6 +1469,7 @@ export const AddDownloadsModal = () => {
         try {
           const id = crypto.randomUUID();
           allocatedId = id;
+          const contextUrl = requestContextUrlForRow(item);
           let torrentPath = item.torrentPath;
           if (item.isTorrent) {
             if (item.torrentPath) {
@@ -1483,7 +1488,11 @@ export const AddDownloadsModal = () => {
                 source: item.sourceUrl,
                 id,
                 cache: true,
-                proxy: proxy ?? undefined
+                proxy: proxy ?? undefined,
+                headers: headersForRow(contextUrl) || undefined,
+                cookies: cookiesForRow(contextUrl, item.sourceUrl) || undefined,
+                cookieScopes: requestContextForUrl(contextUrl)?.cookieScopes || undefined,
+                torrent: true
               });
               torrentPath = torrentData.torrentPath;
             }
@@ -1492,8 +1501,6 @@ export const AddDownloadsModal = () => {
             ? mediaFileNameForSelectedFormat(item.file, item)
             : canonicalizeDownloadFileName(item.file);
           let formatSelector = mediaFormatSelectorForRow(item);
-        const contextUrl = requestContextUrlForRow(item);
-
         const category = categoryForFileName(finalFile);
         const added = await addDownload({
           id,

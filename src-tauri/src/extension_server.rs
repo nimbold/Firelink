@@ -36,7 +36,7 @@ const SERVER_PROOF_HEADER: &str = "x-firelink-server-proof";
 const SERVER_PORT_HEADER: &str = "x-firelink-server-port";
 const SMOKE_PROCESS_ID_HEADER: &str = "x-firelink-smoke-process-id";
 const SERVER_PROOF_PREFIX: &[u8] = b"firelink-server-proof\n";
-const PROTOCOL_VERSION: &str = "4";
+const PROTOCOL_VERSION: &str = "5";
 const MAX_PENDING_EXTENSION_ACKS: usize = 64;
 const EXTENSION_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -75,6 +75,8 @@ struct ExtensionRequest {
     #[serde(default)]
     media: bool,
     #[serde(default)]
+    torrent: bool,
+    #[serde(default)]
     batch: bool,
     #[serde(default)]
     batch_name: Option<String>,
@@ -100,6 +102,7 @@ pub struct ExtensionDownload {
     cookies: Option<String>,
     cookie_scopes: Option<Vec<ExtensionCookieScope>>,
     media: bool,
+    torrent: bool,
     batch: bool,
     batch_name: Option<String>,
 }
@@ -428,6 +431,20 @@ fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload
     {
         return None;
     }
+    let torrent = !payload.media
+        && urls.len() == 1
+        && Url::parse(&urls[0]).ok().is_some_and(|url| {
+            if url.scheme() == "magnet" {
+                return true;
+            }
+            matches!(url.scheme(), "http" | "https")
+                && (payload.torrent
+                    || filename_is_torrent(payload.filename.as_deref())
+                    || url.path().to_ascii_lowercase().ends_with(".torrent"))
+        });
+    if payload.torrent && !torrent {
+        return None;
+    }
 
     let referer = payload.referer.and_then(|value| {
         let url = Url::parse(value.trim()).ok()?;
@@ -482,6 +499,7 @@ fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload
         cookies,
         cookie_scopes,
         media: payload.media,
+        torrent,
         batch,
         batch_name,
     })
@@ -568,7 +586,15 @@ fn normalize_headers(headers: Option<String>, media: bool) -> Option<String> {
 
 fn normalize_url(raw_url: &str) -> Option<String> {
     let url = Url::parse(raw_url.trim()).ok()?;
-    matches!(url.scheme(), "http" | "https" | "ftp" | "sftp").then(|| url.to_string())
+    matches!(url.scheme(), "http" | "https" | "ftp" | "sftp" | "magnet")
+        .then(|| url.to_string())
+}
+
+fn filename_is_torrent(filename: Option<&str>) -> bool {
+    filename
+        .and_then(|value| Path::new(value.trim()).file_name())
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.to_ascii_lowercase().ends_with(".torrent"))
 }
 
 fn sanitize_filename(filename: &str) -> Option<String> {
@@ -752,7 +778,7 @@ mod tests {
         assert_eq!(response.headers().get(SERVER_HEADER).unwrap(), "1");
         assert_eq!(
             response.headers().get(PROTOCOL_VERSION_HEADER).unwrap(),
-            "4"
+            "5"
         );
 
         server.abort();
@@ -816,6 +842,7 @@ mod tests {
             cookies: None,
             cookie_scopes: None,
             media: true,
+            torrent: false,
             batch: false,
             batch_name: None,
         });
@@ -836,6 +863,7 @@ mod tests {
             cookies: None,
             cookie_scopes: None,
             media: false,
+            torrent: false,
             batch: false,
             batch_name: None,
         });
@@ -897,6 +925,7 @@ mod tests {
             cookies: Some(format!("large={}", "x".repeat(64 * 1024))),
             cookie_scopes: None,
             media: true,
+            torrent: false,
             batch: false,
             batch_name: None,
         })
@@ -918,6 +947,7 @@ mod tests {
             cookies: Some("session=browser-cookie-header".to_string()),
             cookie_scopes: None,
             media: false,
+            torrent: false,
             batch: false,
             batch_name: None,
         })
@@ -928,6 +958,63 @@ mod tests {
             download.cookies.as_deref(),
             Some("session=browser-cookie-header")
         );
+    }
+
+    #[test]
+    fn torrent_handoff_accepts_magnets_and_preserves_the_intent() {
+        let download = normalize_download(ExtensionRequest {
+            urls: vec![
+                "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".to_string(),
+            ],
+            referer: None,
+            silent: false,
+            filename: None,
+            headers: None,
+            cookies: None,
+            cookie_scopes: None,
+            media: false,
+            torrent: true,
+            batch: false,
+            batch_name: None,
+        })
+        .expect("valid magnet torrent handoff");
+
+        assert!(download.torrent);
+        assert_eq!(download.urls[0], "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567");
+
+        let opaque = normalize_download(ExtensionRequest {
+            urls: vec!["https://example.com/download?id=opaque".to_string()],
+            referer: None,
+            silent: true,
+            filename: None,
+            headers: None,
+            cookies: None,
+            cookie_scopes: None,
+            media: false,
+            torrent: true,
+            batch: false,
+            batch_name: None,
+        })
+        .expect("explicit opaque torrent handoff");
+        assert!(opaque.torrent);
+
+        let legacy_magnet = normalize_download(ExtensionRequest {
+            urls: vec![
+                "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".to_string(),
+            ],
+            referer: None,
+            silent: false,
+            filename: None,
+            headers: None,
+            cookies: None,
+            cookie_scopes: None,
+            media: false,
+            torrent: false,
+            batch: false,
+            batch_name: None,
+        })
+        .expect("legacy magnet handoff");
+        assert!(legacy_magnet.torrent);
     }
 
     #[test]
@@ -954,6 +1041,7 @@ mod tests {
                 },
             ]),
             media: false,
+            torrent: false,
             batch: false,
             batch_name: None,
         })
@@ -984,6 +1072,7 @@ mod tests {
             cookies: Some("session=secret".to_string()),
             cookie_scopes: None,
             media: false,
+            torrent: false,
             batch: false,
             batch_name: None,
         })
@@ -1007,6 +1096,7 @@ mod tests {
             cookies: None,
             cookie_scopes: None,
             media: false,
+            torrent: false,
             batch: true,
             batch_name: Some("Example Gallery / Chapter: 1".to_string()),
         })
@@ -1030,6 +1120,7 @@ mod tests {
             cookies: None,
             cookie_scopes: None,
             media: false,
+            torrent: false,
             batch: true,
             batch_name: Some("Example Gallery".to_string()),
         })

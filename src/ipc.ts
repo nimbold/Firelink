@@ -41,7 +41,16 @@ type CommandMap = {
     result: MediaPlaylistMetadata;
   };
   inspect_torrent: {
-    args: { source: string; id: string; cache?: boolean; proxy?: string };
+    args: {
+      source: string;
+      id: string;
+      cache?: boolean;
+      proxy?: string;
+      headers?: string;
+      cookies?: string;
+      cookieScopes?: Array<ExtensionCookieScope>;
+      torrent?: boolean;
+    };
     result: TorrentMetadata;
   };
   rekey_torrent_metadata: {

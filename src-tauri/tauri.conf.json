@@ -38,12 +38,26 @@
     "resources": {
       "engine-dist/": "engine-dist/",
       "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
-    }
+    },
+    "fileAssociations": [
+      {
+        "ext": ["torrent"],
+        "mimeType": "application/x-bittorrent",
+        "name": "BitTorrent file",
+        "description": "BitTorrent metadata file",
+        "role": "Viewer",
+        "rank": "Alternate",
+        "exportedType": {
+          "identifier": "com.nimbold.firelink.torrent",
+          "conformsTo": ["public.data"]
+        }
+      }
+    ]
   },
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["firelink"]
+        "schemes": ["firelink", "magnet"]
       }
     }
   }

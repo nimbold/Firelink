@@ -2683,6 +2683,7 @@ describe('useDownloadStore', () => {
         { url: 'https://accounts.google.com/', cookies: 'SID=account-session' }
       ],
       media: false,
+      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -2721,6 +2722,7 @@ describe('useDownloadStore', () => {
 	   cookies: null,
       cookie_scopes: null,
       media: false,
+      torrent: false,
       batch: false,
       batch_name: null
 	  });
@@ -2744,6 +2746,7 @@ describe('useDownloadStore', () => {
 	   cookies: 'session=secret',
       cookie_scopes: null,
       media: false,
+      torrent: false,
       batch: false,
       batch_name: null
 	  });
@@ -2768,6 +2771,7 @@ describe('useDownloadStore', () => {
       cookies: null,
       cookie_scopes: null,
       media: false,
+      torrent: false,
       batch: true,
       batch_name: 'Example Gallery'
     });
@@ -2792,6 +2796,7 @@ describe('useDownloadStore', () => {
       cookies: 'first=session',
       cookie_scopes: null,
       media: false,
+      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -2804,6 +2809,7 @@ describe('useDownloadStore', () => {
       cookies: 'second=session',
       cookie_scopes: null,
       media: false,
+      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -2843,6 +2849,7 @@ describe('useDownloadStore', () => {
       cookies: `oversized=${'x'.repeat(64 * 1024)}`,
       cookie_scopes: null,
       media: true,
+      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -2865,6 +2872,7 @@ describe('useDownloadStore', () => {
       cookies: 'session=secret',
       cookie_scopes: null,
       media: false,
+      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -2884,6 +2892,7 @@ describe('useDownloadStore', () => {
         { url: 'https://media.example/', cookies: 'session=secret' }
       ],
       media: true,
+      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -2903,6 +2912,7 @@ describe('useDownloadStore', () => {
       cookies: 'session=secret',
       cookie_scopes: null,
       media: false,
+      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -2915,6 +2925,7 @@ describe('useDownloadStore', () => {
       cookies: null,
       cookie_scopes: null,
       media: false,
+      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -2945,6 +2956,7 @@ describe('useDownloadStore', () => {
       cookies: 'session=secret',
       cookie_scopes: null,
       media: true,
+      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -2967,6 +2979,7 @@ describe('useDownloadStore', () => {
       cookies: null,
       cookie_scopes: null,
       media: false,
+      torrent: false,
       batch: false,
       batch_name: null
     });

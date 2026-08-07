@@ -235,7 +235,8 @@ export const reconcileDownloadRows = (
   requestFilenames: Readonly<Record<string, string>> = {},
   requestContextVersions: Readonly<Record<string, number>> = {},
   playlistExpansions: PlaylistExpansions = {},
-  selectedBySourceUrl: Readonly<Record<string, boolean>> = {}
+  selectedBySourceUrl: Readonly<Record<string, boolean>> = {},
+  forceTorrentUrls: ReadonlySet<string> = new Set()
 ): AddDownloadDraftRow[] => {
   const inputs = parseInputLines(
     rawText,
@@ -249,6 +250,7 @@ export const reconcileDownloadRows = (
     const preserved = existing.get(input.sourceUrl);
     if (preserved) {
       const forcedMedia = input.valid && forceMediaUrls.has(input.sourceUrl);
+      const forcedTorrent = input.valid && forceTorrentUrls.has(input.sourceUrl);
       const requestContextVersion = input.requestContextVersion;
       const contextChanged = requestContextVersion !== undefined
         && requestContextVersion !== preserved.requestContextVersion;
@@ -257,7 +259,10 @@ export const reconcileDownloadRows = (
         || preserved.playlistIndex !== input.playlistIndex
         || preserved.playlistCount !== input.playlistCount
         || preserved.playlistEntryTitle !== input.playlistEntryTitle;
-      if ((forcedMedia && !preserved.isMedia) || contextChanged || playlistContextChanged) {
+      if ((forcedMedia && !preserved.isMedia)
+        || (forcedTorrent && !preserved.isTorrent)
+        || contextChanged
+        || playlistContextChanged) {
         const nextGeneration = preserved.generation + 1;
         const requestedFilename = input.playlistSourceUrl
           ? `${playlistFilePrefix(input.playlistIndex, input.playlistCount)}${input.playlistEntryTitle || 'video'}`
@@ -271,7 +276,7 @@ export const reconcileDownloadRows = (
           generation: nextGeneration,
           requestContextVersion,
           isMedia: preserved.isMedia || forcedMedia || Boolean(input.playlistSourceUrl),
-          isTorrent: input.isTorrent,
+          isTorrent: input.isTorrent || forcedTorrent,
           size: undefined,
           sizeBytes: undefined,
           resumable: undefined,
@@ -290,7 +295,7 @@ export const reconcileDownloadRows = (
           playlistError: undefined,
           metadataBlockedReason: undefined,
           torrentPath: undefined,
-          torrentCacheId: input.isTorrent ? `${preserved.id}-${nextGeneration}` : undefined,
+          torrentCacheId: input.isTorrent || forcedTorrent ? `${preserved.id}-${nextGeneration}` : undefined,
           torrentInfoHash: undefined,
           torrentFiles: undefined,
           selectedTorrentFileIndices: undefined
@@ -323,7 +328,7 @@ export const reconcileDownloadRows = (
         || forceMediaUrls.has(input.sourceUrl)
         || isMediaUrl(input.sourceUrl)
       ),
-      isTorrent: input.valid && Boolean(input.isTorrent),
+      isTorrent: input.valid && (Boolean(input.isTorrent) || forceTorrentUrls.has(input.sourceUrl)),
       isPlaylist: input.isPlaylist,
       playlistSourceUrl: input.playlistSourceUrl,
       playlistTitle: input.playlistTitle,
@@ -331,7 +336,9 @@ export const reconcileDownloadRows = (
       playlistCount: input.playlistCount,
       playlistEntryTitle: input.playlistEntryTitle,
       metadataBlockedReason: undefined,
-      torrentCacheId: input.valid && input.isTorrent ? `${id}-${generation}` : undefined,
+      torrentCacheId: input.valid && (input.isTorrent || forceTorrentUrls.has(input.sourceUrl))
+        ? `${id}-${generation}`
+        : undefined,
       selected: input.selected !== false
     };
   });

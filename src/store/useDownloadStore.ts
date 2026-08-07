@@ -924,6 +924,7 @@ export type PendingAddRequestContext = {
   cookies: string;
   cookieScopes?: ExtensionCookieScope[];
   media: boolean;
+  torrent?: boolean;
 };
 
 export type DeleteModalState = {
@@ -956,6 +957,7 @@ interface DownloadState {
   pendingAddHeaders: string;
   pendingAddCookies: string;
   pendingAddMediaUrls: string[];
+  pendingAddTorrentUrls: string[];
   pendingAddBatch: boolean;
   pendingAddBatchName: string;
   pendingAddRequestContexts: Record<string, PendingAddRequestContext>;
@@ -971,7 +973,8 @@ interface DownloadState {
     media?: boolean,
     cookieScopes?: ExtensionCookieScope[] | null,
     batch?: boolean,
-    batchName?: string | null
+    batchName?: string | null,
+    torrent?: boolean
   ) => void;
   handleExtensionDownload: (request: ExtensionDownloadRequest) => Promise<void>;
   deleteModalState: DeleteModalState;
@@ -1399,6 +1402,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
   pendingAddHeaders: '',
   pendingAddCookies: '',
   pendingAddMediaUrls: [],
+  pendingAddTorrentUrls: [],
   pendingAddBatch: false,
   pendingAddBatchName: '',
   pendingAddRequestContexts: {},
@@ -1420,6 +1424,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     pendingAddHeaders: '',
     pendingAddCookies: '',
     pendingAddMediaUrls: [],
+    pendingAddTorrentUrls: [],
     pendingAddBatch: false,
     pendingAddBatchName: '',
     pendingAddRequestContexts: {},
@@ -1436,7 +1441,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     media = false,
     cookieScopes,
     batch = false,
-    batchName
+    batchName,
+    torrent = false
   ) => set((state) => {
     const isAppending = state.isAddModalOpen && Boolean(state.pendingAddUrls);
     const existingUrls = isAppending ? state.pendingAddUrls : '';
@@ -1482,11 +1488,15 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         headers: cleanHeaders,
         cookies: cleanCookies,
         ...(cleanCookieScopes?.length ? { cookieScopes: cleanCookieScopes } : {}),
-        media
+        media,
+        ...(torrent ? { torrent: true } : {})
       };
     }
     const pendingAddMediaUrls = Object.entries(pendingAddRequestContexts)
       .filter(([, context]) => context.media)
+      .map(([url]) => url);
+    const pendingAddTorrentUrls = Object.entries(pendingAddRequestContexts)
+      .filter(([, context]) => context.torrent)
       .map(([url]) => url);
     return {
       isAddModalOpen: true,
@@ -1496,6 +1506,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       pendingAddHeaders: cleanHeaders,
       pendingAddCookies: cleanCookies,
       pendingAddMediaUrls,
+      pendingAddTorrentUrls,
       pendingAddBatch: nextBatch,
       pendingAddBatchName: nextBatchName,
       pendingAddRequestContexts,
@@ -1523,7 +1534,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       request.media === true,
       request.media === true ? undefined : request.cookie_scopes,
       request.batch === true && urls.length >= 2,
-      request.batch_name
+      request.batch_name,
+      request.torrent === true
     );
   },
   setSelectedPropertiesDownloadId: (id) => set({ selectedPropertiesDownloadId: id }),

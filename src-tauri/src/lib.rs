@@ -6,6 +6,7 @@ use regex::Regex;
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -1747,12 +1748,27 @@ async fn validate_url_ssrf(url: &str) -> Result<Option<(String, std::net::Socket
 
 const MAX_REMOTE_TORRENT_REDIRECTS: usize = 5;
 
+fn is_remote_torrent_source(source: &str, explicitly_torrent: bool) -> bool {
+    if crate::torrent::is_remote_torrent_url(source) {
+        return true;
+    }
+    if !explicitly_torrent {
+        return false;
+    }
+    reqwest::Url::parse(source.trim())
+        .ok()
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
 /// Fetch remote `.torrent` metadata through the same SSRF, redirect, proxy,
 /// timeout, and bounded-body rules used by Firelink's metadata path. The
 /// bytes are parsed and cached before they can enter the Aria2 lifecycle.
 async fn fetch_remote_torrent_bytes(
     source: &str,
     proxy: Option<&str>,
+    headers: Option<&str>,
+    cookies: Option<&str>,
+    cookie_scopes: Option<&[extension_server::ExtensionCookieScope]>,
 ) -> Result<Vec<u8>, String> {
     ensure_reqwest_crypto_provider();
     let proxy = proxy
@@ -1761,8 +1777,16 @@ async fn fetch_remote_torrent_bytes(
         .flatten();
     let mut current = reqwest::Url::parse(source)
         .map_err(|_| "SSRF blocked: Invalid URL".to_string())?;
+    let original_origin = Some(current.clone());
+    let cookies_available = metadata_cookie_header_present(headers, cookies, cookie_scopes);
+    let mut send_cookies = !cookies_available;
+    let mut cookie_retry_attempted = false;
 
-    for redirect_count in 0..=MAX_REMOTE_TORRENT_REDIRECTS {
+    let mut redirect_count = 0;
+    loop {
+        if redirect_count > MAX_REMOTE_TORRENT_REDIRECTS {
+            return Err("Too many redirects while fetching torrent metadata".to_string());
+        }
         if !matches!(current.scheme(), "http" | "https") {
             return Err("Remote torrent metadata must use HTTP or HTTPS".to_string());
         }
@@ -1785,6 +1809,27 @@ async fn fetch_remote_torrent_bytes(
             None => {}
         }
         builder = builder.resolve(&host, address);
+        let same_origin_credentials = should_send_metadata_credentials(
+            original_origin.as_ref(),
+            Some(&current),
+            redirect_count,
+        );
+        let scoped_cookie = if send_cookies {
+            cookie_scope_for_url(current.as_str(), cookie_scopes)
+        } else {
+            None
+        };
+        let cookie_header = if same_origin_credentials {
+            scoped_cookie.or(cookies)
+        } else {
+            scoped_cookie
+        };
+        let header_map = if same_origin_credentials {
+            metadata_headers(headers, cookie_header, send_cookies)
+        } else {
+            metadata_headers(None, cookie_header, send_cookies)
+        };
+        builder = builder.default_headers(header_map);
         let client = builder
             .build()
             .map_err(|error| format!("could not create torrent metadata client: {error}"))?;
@@ -1803,6 +1848,19 @@ async fn fetch_remote_torrent_bytes(
                 )
             })?;
 
+        if should_retry_metadata_with_cookies(
+            response.status(),
+            cookies_available && !send_cookies,
+            cookie_retry_attempted,
+        ) {
+            send_cookies = true;
+            cookie_retry_attempted = true;
+            current = reqwest::Url::parse(source)
+                .map_err(|_| "SSRF blocked: Invalid URL".to_string())?;
+            redirect_count = 0;
+            continue;
+        }
+
         if response.status().is_redirection() {
             if redirect_count == MAX_REMOTE_TORRENT_REDIRECTS {
                 return Err("Too many redirects while fetching torrent metadata".to_string());
@@ -1815,6 +1873,7 @@ async fn fetch_remote_torrent_bytes(
             current = current
                 .join(location)
                 .map_err(|_| "Torrent metadata redirect URL is invalid".to_string())?;
+            redirect_count += 1;
             continue;
         }
 
@@ -1861,7 +1920,6 @@ async fn fetch_remote_torrent_bytes(
         return Ok(bytes);
     }
 
-    Err("Too many redirects while fetching torrent metadata".to_string())
 }
 
 fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
@@ -3263,6 +3321,20 @@ enum FirelinkDeepLink {
 }
 
 fn parse_firelink_deep_link(deep_link: &url::Url) -> FirelinkDeepLink {
+    if deep_link.scheme() == "magnet" {
+        return if deep_link.query().is_some()
+            && deep_link.fragment().is_none()
+            && deep_link.username().is_empty()
+            && deep_link.password().is_none()
+            && deep_link.port().is_none()
+            && deep_link.to_string().chars().count() < MAX_DEEP_LINK_PAYLOAD_LEN
+        {
+            FirelinkDeepLink::Add(vec![deep_link.to_string()])
+        } else {
+            FirelinkDeepLink::Invalid
+        };
+    }
+
     if deep_link.scheme() != "firelink"
         || !deep_link.username().is_empty()
         || deep_link.password().is_some()
@@ -3324,6 +3396,57 @@ fn parse_firelink_deep_link(deep_link: &url::Url) -> FirelinkDeepLink {
     }
 }
 
+fn normalize_opened_torrent_argument(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty()
+        || raw.starts_with('-')
+        || raw.contains('\r')
+        || raw.contains('\n')
+        || raw.chars().count() >= MAX_DEEP_LINK_PAYLOAD_LEN
+    {
+        return None;
+    }
+
+    let is_windows_absolute = cfg!(target_os = "windows")
+        && raw.len() >= 3
+        && raw.as_bytes()[1] == b':'
+        && matches!(raw.as_bytes()[2], b'/' | b'\\');
+    let path = if is_windows_absolute {
+        PathBuf::from(raw)
+    } else if let Ok(url) = url::Url::parse(raw) {
+        if url.scheme() != "file" {
+            return None;
+        }
+        url.to_file_path().ok()?
+    } else {
+        PathBuf::from(raw)
+    };
+    if !path.is_absolute() && !is_windows_absolute {
+        return None;
+    }
+    if !path.extension().is_some_and(|extension| {
+        extension.to_string_lossy().eq_ignore_ascii_case("torrent")
+    }) {
+        return None;
+    }
+    let path = path.to_string_lossy().into_owned();
+    (!path.contains('\r') && !path.contains('\n')).then_some(path)
+}
+
+fn collect_opened_torrent_paths<I, S>(arguments: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut seen = HashSet::new();
+    arguments
+        .into_iter()
+        .filter_map(|argument| argument.as_ref().to_str().and_then(normalize_opened_torrent_argument))
+        .filter(|path| seen.insert(path.clone()))
+        .take(MAX_DEEP_LINK_URLS)
+        .collect()
+}
+
 fn restore_main_window(app_handle: &tauri::AppHandle) {
     let Some(window) = app_handle.get_webview_window("main") else {
         if let Some(state) = app_handle.try_state::<MainWindowRestoreState>() {
@@ -3378,6 +3501,22 @@ fn dispatch_deep_links(app_handle: tauri::AppHandle, deep_links: Vec<url::Url>) 
             .await
         {
             eprintln!("Failed to dispatch deep link to download coordinator: {error}");
+        }
+    });
+}
+
+fn dispatch_opened_torrent_paths(app_handle: tauri::AppHandle, paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+    restore_main_window(&app_handle);
+    let coordinator = app_handle.state::<AppState>().download_coordinator.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = coordinator
+            .send(download::DownloadCmd::CaptureUrls(paths))
+            .await
+        {
+            eprintln!("Failed to dispatch opened torrent files: {error}");
         }
     });
 }
@@ -6465,6 +6604,10 @@ async fn inspect_torrent(
     id: String,
     cache: Option<bool>,
     proxy: Option<String>,
+    headers: Option<String>,
+    cookies: Option<String>,
+    cookie_scopes: Option<Vec<extension_server::ExtensionCookieScope>>,
+    torrent: Option<bool>,
 ) -> Result<crate::ipc::TorrentMetadata, AppError> {
     properties_window::ensure_main_window(&caller).map_err(AppError::Internal)?;
     if source.trim_start().to_ascii_lowercase().starts_with("magnet:") {
@@ -6479,9 +6622,15 @@ async fn inspect_torrent(
         .await
         .map_err(AppError::Internal);
     }
-    if crate::torrent::is_remote_torrent_url(&source) {
+    if is_remote_torrent_source(&source, torrent == Some(true)) {
         let remote_source = source.trim();
-        let bytes = fetch_remote_torrent_bytes(remote_source, proxy.as_deref())
+        let bytes = fetch_remote_torrent_bytes(
+            remote_source,
+            proxy.as_deref(),
+            headers.as_deref(),
+            cookies.as_deref(),
+            cookie_scopes.as_deref(),
+        )
             .await
             .map_err(AppError::Internal)?;
         let parsed = crate::torrent::parse_torrent_bytes(&bytes).map_err(AppError::Internal)?;
@@ -10499,6 +10648,7 @@ mod tests {
         media_progress_speed,
         cookie_scope_for_url, metadata_authentication_error, metadata_cookie_header_present,
         metadata_headers, metadata_response_error,
+        is_remote_torrent_source,
         normalize_speed_limit_for_aria2,
         normalize_torrent_overall_upload_limit,
         apply_aria2_torrent_global_options,
@@ -10509,6 +10659,8 @@ mod tests {
         apply_aria2_torrent_dht_options,
         aria2_rpc_port_is_occupied,
         parse_firelink_deep_link, parse_ffmpeg_version, parse_media_progress_line,
+        collect_opened_torrent_paths,
+        normalize_opened_torrent_argument,
         redact_log_line, redact_log_line_for_output, sanitize_ytdlp_config_value,
         has_resumable_download_assets, is_media_artifact_name,
         should_cleanup_media_artifacts_after_failure,
@@ -11029,17 +11181,33 @@ mod tests {
     #[tokio::test]
     async fn remote_torrent_fetch_rejects_non_http_and_embedded_credentials() {
         assert_eq!(
-            super::fetch_remote_torrent_bytes("ftp://example.com/sample.torrent", None).await,
+            super::fetch_remote_torrent_bytes(
+                "ftp://example.com/sample.torrent",
+                None,
+                None,
+                None,
+                None,
+            )
+            .await,
             Err("Remote torrent metadata must use HTTP or HTTPS".to_string())
         );
         assert_eq!(
-            super::fetch_remote_torrent_bytes("https://user:pass@example.com/sample.torrent", None)
-                .await,
+            super::fetch_remote_torrent_bytes(
+                "https://user:pass@example.com/sample.torrent",
+                None,
+                None,
+                None,
+                None,
+            )
+            .await,
             Err("Torrent metadata URLs must not contain credentials".to_string())
         );
         let proxy_error = super::fetch_remote_torrent_bytes(
             "https://example.com/sample.torrent",
             Some("socks5://127.0.0.1:1080"),
+            None,
+            None,
+            None,
         )
         .await
         .expect_err("remote Torrent metadata must use the shared proxy policy");
@@ -11996,6 +12164,26 @@ mod tests {
     }
 
     #[test]
+    fn explicit_torrent_intent_allows_opaque_http_sources() {
+        assert!(is_remote_torrent_source(
+            "https://example.com/download?id=opaque",
+            true
+        ));
+        assert!(!is_remote_torrent_source(
+            "https://example.com/download?id=opaque",
+            false
+        ));
+        assert!(!is_remote_torrent_source(
+            "ftp://example.com/download?id=opaque",
+            true
+        ));
+        assert!(is_remote_torrent_source(
+            "https://example.com/files/sample.torrent?download=1",
+            false
+        ));
+    }
+
+    #[test]
     fn recognizes_resume_sidecars_without_treating_the_primary_file_as_partial() {
         let directory = tempfile::tempdir().unwrap();
         let primary = directory.path().join("download.bin");
@@ -12370,6 +12558,48 @@ mod tests {
             parse_firelink_deep_link(&deep_link),
             FirelinkDeepLink::Launch
         );
+    }
+
+    #[test]
+    fn accepts_direct_magnet_deep_links() {
+        let deep_link = url::Url::parse(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Example",
+        )
+        .unwrap();
+        assert_eq!(
+            parse_firelink_deep_link(&deep_link),
+            FirelinkDeepLink::Add(vec![deep_link.to_string()])
+        );
+    }
+
+    #[test]
+    fn filters_opened_torrent_arguments_to_absolute_files() {
+        assert_eq!(
+            normalize_opened_torrent_argument("file:///tmp/example%20one.torrent"),
+            Some("/tmp/example one.torrent".to_string())
+        );
+        assert!(normalize_opened_torrent_argument("relative/example.torrent").is_none());
+        assert!(normalize_opened_torrent_argument("--flag.torrent").is_none());
+        assert!(normalize_opened_torrent_argument("/tmp/line\nbreak.torrent").is_none());
+        assert!(normalize_opened_torrent_argument("file:///tmp/line%0Abreak.torrent").is_none());
+        assert!(normalize_opened_torrent_argument("/tmp/example.zip").is_none());
+        if cfg!(target_os = "windows") {
+            assert!(normalize_opened_torrent_argument("C:/example.torrent").is_some());
+        } else {
+            assert!(normalize_opened_torrent_argument("C:/example.torrent").is_none());
+        }
+
+        let paths = collect_opened_torrent_paths([
+            "--new-instance",
+            "/tmp/one.torrent",
+            "/tmp/one.torrent",
+            "/tmp/two.TORRENT",
+            "/tmp/readme.txt",
+        ]);
+        assert_eq!(paths, vec![
+            "/tmp/one.torrent".to_string(),
+            "/tmp/two.TORRENT".to_string(),
+        ]);
     }
 
     #[test]
@@ -13349,8 +13579,10 @@ pub fn run() {
     tauri::Builder::default()
         .manage(MainWindowRestoreState::default())
         .manage(properties_window::PropertiesWindowRegistry::default())
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             restore_main_window(app);
+            let paths = collect_opened_torrent_paths(args);
+            dispatch_opened_torrent_paths(app.clone(), paths);
         }))
         .plugin(tauri_plugin_deep_link::init())
         .manage(Aria2DaemonGuard::new())
@@ -13602,6 +13834,12 @@ pub fn run() {
                 .build()
                 .map_err(|error| format!("failed to create main window: {error}"))?;
             restore_pending_main_window(app.handle());
+
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            dispatch_opened_torrent_paths(
+                app.handle().clone(),
+                collect_opened_torrent_paths(std::env::args_os().skip(1)),
+            );
 
             #[cfg(target_os = "windows")]
             if let Some(window) = app.get_webview_window("main") {
@@ -14670,6 +14908,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| match event {
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Opened { urls } => {
+                let paths = collect_opened_torrent_paths(
+                    urls.into_iter().map(|url| url.to_string()),
+                );
+                dispatch_opened_torrent_paths(app_handle.clone(), paths);
+            }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen {
                 has_visible_windows,

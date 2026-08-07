@@ -120,6 +120,29 @@ describe('add download metadata workflow', () => {
     });
   });
 
+  it('preserves an explicit torrent handoff for an opaque remote URL', () => {
+    const sourceUrl = 'https://example.com/download?id=opaque';
+    const rows = reconcileDownloadRows(
+      sourceUrl,
+      [],
+      'example.torrent',
+      new Set(),
+      undefined,
+      {},
+      {},
+      {},
+      {},
+      new Set([sourceUrl])
+    );
+
+    expect(rows[0]).toMatchObject({
+      sourceUrl,
+      isTorrent: true,
+      torrentCacheId: `${rows[0].id}-1`,
+      file: 'example.torrent'
+    });
+  });
+
   it('gives refreshed torrent metadata a new cache identity', () => {
     const existing = row({
       id: 'torrent-row',
