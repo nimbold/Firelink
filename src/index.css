@@ -11,6 +11,7 @@
   --item-hover: 0 0% 0% / 0.05;
   --item-selected: 211 100% 50%;
   --accent-color: 211 100% 50%;
+  --properties-live-value-color: 211 100% 37%;
   --accent-foreground: 220 20% 8%;
   --stripe-bg: 0 0% 0% / 0.035;
 
@@ -57,6 +58,7 @@
   --item-hover: 0 0% 0% / 0.05;
   --item-selected: 211 100% 50%;
   --accent-color: 211 100% 50%;
+  --properties-live-value-color: 211 100% 37%;
   --accent-foreground: 220 20% 8%;
   --stripe-bg: 0 0% 0% / 0.035;
   --text-primary: 0 0% 10%;
@@ -89,6 +91,7 @@
   --item-hover: 0 0% 100% / 0.07;
   --item-selected: 211 100% 56%;
   --accent-color: 211 100% 56%;
+  --properties-live-value-color: 211 100% 66%;
   --accent-foreground: 220 20% 12%;
   --stripe-bg: 0 0% 100% / 0.025;
   --text-primary: 0 0% 91%;
@@ -134,6 +137,7 @@
   --item-hover: 326 100% 74% / 0.10;
   --item-selected: 326 100% 74%;
   --accent-color: 326 100% 74%;
+  --properties-live-value-color: 326 100% 74%;
   --accent-foreground: 220 20% 12%;
   --stripe-bg: 0 0% 100% / 0.025;
   --text-primary: 60 30% 96%;
@@ -179,6 +183,7 @@
   --item-hover: 193 43% 67% / 0.12;
   --item-selected: 193 43% 67%;
   --accent-color: 193 43% 67%;
+  --properties-live-value-color: 193 43% 67%;
   --accent-foreground: 220 20% 12%;
   --stripe-bg: 0 0% 100% / 0.025;
   --text-primary: 218 27% 92%;
@@ -572,14 +577,17 @@ html[data-list-density="relaxed"] {
   }
 
   .properties-window-shell {
-    --properties-header-surface: hsl(var(--main-bg));
-    --properties-card-surface: hsl(var(--surface-raised) / 0.38);
+    --properties-body-surface: hsl(var(--main-bg));
+    --properties-header-surface: hsl(var(--bg-modal));
+    --properties-card-surface: hsl(var(--bg-input));
+    --properties-card-border: hsl(var(--border-modal));
+    --properties-live-value: hsl(var(--properties-live-value-color));
     position: relative;
     min-height: 100%;
     overflow: hidden;
     border: 1px solid hsl(var(--border-color));
     border-radius: 18px;
-    background: hsl(var(--main-bg));
+    background: var(--properties-body-surface);
   }
 
   .properties-window-titlebar {
@@ -612,10 +620,10 @@ html[data-list-density="relaxed"] {
   }
 
   .properties-window-header {
-    background:
-      radial-gradient(circle at 100% 0%, hsl(var(--accent-color) / 0.055), transparent 38%),
-      var(--properties-header-surface);
-    box-shadow: inset 0 -1px 0 hsl(var(--text-primary) / 0.025);
+    background: var(--properties-header-surface);
+    box-shadow:
+      inset 0 -1px 0 var(--properties-card-border),
+      0 8px 24px hsl(var(--shadow-color));
   }
 
   .properties-window-hero-top {
@@ -793,10 +801,12 @@ html[data-list-density="relaxed"] {
     align-items: flex-start;
     gap: 8px;
     padding: 8px 10px;
-    border: 1px solid hsl(var(--border-modal) / 0.72);
+    border: 1px solid var(--properties-card-border);
     border-radius: 8px;
     background: var(--properties-card-surface);
-    box-shadow: inset 0 1px 0 hsl(var(--text-primary) / 0.025);
+    box-shadow:
+      inset 0 1px 0 hsl(var(--text-primary) / 0.05),
+      0 1px 2px hsl(var(--shadow-color));
   }
 
   .properties-metric-card > svg {
@@ -825,7 +835,7 @@ html[data-list-density="relaxed"] {
   .properties-metric-card strong {
     overflow: hidden;
     color: hsl(var(--text-primary));
-    font-size: 12px;
+    font-size: 13px;
     font-variant-numeric: tabular-nums;
     font-weight: 650;
     text-overflow: ellipsis;
@@ -858,8 +868,8 @@ html[data-list-density="relaxed"] {
     align-items: center;
     gap: 10px;
     padding: 7px 16px;
-    border-bottom: 1px solid hsl(var(--border-modal));
-    background: hsl(var(--surface-raised) / 0.42);
+    border-bottom: 1px solid var(--properties-card-border);
+    background: hsl(var(--surface-raised));
   }
 
   .properties-window-tab-navigation--overflow .properties-window-tabs {
@@ -965,6 +975,80 @@ html[data-list-density="relaxed"] {
     scrollbar-gutter: stable;
   }
 
+  .properties-data-value {
+    color: var(--properties-live-value);
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+  }
+
+  .properties-diagnostic-card {
+    min-width: 0;
+    padding: 12px;
+    border: 1px solid var(--properties-card-border);
+    border-radius: 10px;
+    background: var(--properties-card-surface);
+    box-shadow:
+      inset 0 1px 0 hsl(var(--text-primary) / 0.04),
+      0 1px 2px hsl(var(--shadow-color));
+  }
+
+  .properties-diagnostic-card[data-diagnostic-phase="stale"] {
+    border-style: dashed;
+  }
+
+  .properties-diagnostic-card[data-diagnostic-phase="error"] {
+    border-color: hsl(var(--status-failed));
+  }
+
+  .properties-diagnostic-card[data-diagnostic-phase="unavailable"] .properties-diagnostic-value,
+  .properties-diagnostic-card[data-diagnostic-phase="initial"] .properties-diagnostic-value,
+  .properties-diagnostic-value[data-value-state="loading"],
+  .properties-diagnostic-value[data-value-state="unavailable"],
+  .properties-diagnostic-value[data-value-state="stale"],
+  .properties-diagnostic-value[data-value-state="error"] {
+    color: hsl(var(--text-secondary));
+  }
+
+  .properties-diagnostic-heading {
+    display: flex;
+    min-width: 0;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .properties-diagnostic-label {
+    color: hsl(var(--text-muted));
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.025em;
+    text-transform: uppercase;
+  }
+
+  .properties-diagnostic-value {
+    margin-top: 6px;
+    color: var(--properties-live-value);
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 750;
+    line-height: 1.25;
+  }
+
+  .properties-diagnostic-hint {
+    max-width: 60ch;
+    margin-top: 8px;
+    color: hsl(var(--text-secondary));
+    font-size: 11px;
+    line-height: 1.45;
+  }
+
+  .properties-diagnostic-detail {
+    margin-top: 8px;
+    color: hsl(var(--text-muted));
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+
   .properties-window-panel .app-control {
     min-height: 34px;
     padding: 7px 11px;
@@ -977,7 +1061,7 @@ html[data-list-density="relaxed"] {
 
   .properties-options-intro,
   .properties-option-group {
-    border: 1px solid hsl(var(--border-modal) / 0.82);
+    border: 1px solid var(--properties-card-border);
     border-radius: 12px;
     background: hsl(var(--surface-raised) / 0.22);
   }
@@ -1028,7 +1112,7 @@ html[data-list-density="relaxed"] {
     gap: 12px;
     margin-bottom: 14px;
     padding-bottom: 11px;
-    border-bottom: 1px solid hsl(var(--border-modal) / 0.64);
+    border-bottom: 1px solid var(--properties-card-border);
   }
 
   .properties-option-group-heading p {
@@ -1141,7 +1225,7 @@ html[data-list-density="relaxed"] {
     flex-direction: row !important;
     gap: 10px !important;
     padding: 10px 11px;
-    border: 1px solid hsl(var(--border-modal) / 0.82);
+    border: 1px solid var(--properties-card-border);
     border-radius: 9px;
     background: hsl(var(--bg-input) / 0.2);
   }

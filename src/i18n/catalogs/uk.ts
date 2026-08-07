@@ -300,6 +300,7 @@ const uk = {
     torrentPeerDiagnostics: 'Діагностика пірів торрента',
     torrentPeerDiagnosticsRefresh: 'Оновити',
     torrentPeerDiagnosticsLoading: 'Завантаження діагностики пірів…',
+    torrentPeerDiagnosticsStale: 'Показано останній перевірений результат; оновіть, щоб перевірити ще раз.',
     torrentPeerDiagnosticsUnavailable: 'Діагностика пірів доступна, поки торрент активний або призупинений.',
     torrentPeerDiagnosticsFailed: 'Не вдалося отримати діагностику пірів торрента.',
     torrentPeerDiagnosticsHint: 'Перевірені адреси й порти пірів показуються лише тимчасово; ідентифікатори пірів і сирі бітові поля ніколи не зберігаються.',

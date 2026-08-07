@@ -300,6 +300,7 @@ const ru = {
     torrentPeerDiagnostics: 'Диагностика пиров торрента',
     torrentPeerDiagnosticsRefresh: 'Обновить',
     torrentPeerDiagnosticsLoading: 'Загрузка диагностики пиров…',
+    torrentPeerDiagnosticsStale: 'Показан последний проверенный результат; обновите, чтобы проверить снова.',
     torrentPeerDiagnosticsUnavailable: 'Диагностика пиров доступна, пока торрент активен или приостановлен.',
     torrentPeerDiagnosticsFailed: 'Не удалось получить диагностику пиров торрента.',
     torrentPeerDiagnosticsHint: 'Проверенные адреса и порты пиров показываются только временно; идентификаторы пиров и исходные битовые поля никогда не сохраняются.',

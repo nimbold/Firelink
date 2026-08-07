@@ -300,6 +300,7 @@ const common = {
     torrentPeerDiagnostics: 'Torrent peer diagnostics',
     torrentPeerDiagnosticsRefresh: 'Refresh',
     torrentPeerDiagnosticsLoading: 'Loading peer diagnostics…',
+    torrentPeerDiagnosticsStale: 'Showing the last validated result; refresh to check again.',
     torrentPeerDiagnosticsUnavailable: 'Peer diagnostics are available while this Torrent is active or paused.',
     torrentPeerDiagnosticsFailed: 'Could not read Torrent peer diagnostics.',
     torrentPeerDiagnosticsHint: 'Validated peer addresses and ports are shown ephemerally; peer IDs and raw bitfields are never retained.',

@@ -300,6 +300,7 @@ const he = {
     torrentPeerDiagnostics: 'אבחון עמיתי טורנט',
     torrentPeerDiagnosticsRefresh: 'רענון',
     torrentPeerDiagnosticsLoading: 'טוען אבחון עמיתים…',
+    torrentPeerDiagnosticsStale: 'מוצגת התוצאה המאומתת האחרונה; רענן כדי לבדוק שוב.',
     torrentPeerDiagnosticsUnavailable: 'אבחון עמיתים זמין כשהטורנט פעיל או מושהה.',
     torrentPeerDiagnosticsFailed: 'לא ניתן לקרוא את אבחון עמיתי הטורנט.',
     torrentPeerDiagnosticsHint: 'כתובות ויציאות מאומתות של עמיתים מוצגות באופן זמני בלבד; מזהי עמיתים ושדות סיביות גולמיים לעולם אינם נשמרים.',

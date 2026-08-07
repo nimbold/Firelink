@@ -41,6 +41,10 @@ import { changeAppLocale } from '../i18n';
 import { synchronizeDocumentAppearance } from '../utils/documentAppearance';
 import { getWindowControlRailWidth } from '../utils/windowControlStyle';
 import { getPropertiesFooterActions } from '../utils/propertiesFooter';
+import {
+  getPropertiesAvailabilityDiagnosticState,
+  getPropertiesPeerDiagnosticState,
+} from '../utils/propertiesDiagnostics';
 import { shouldOfferPropertiesUrlExpansion, shouldResetPropertiesUrlExpansion } from '../utils/propertiesUrl';
 import { getPropertiesTabIndex, getPropertiesTabs, PROPERTIES_TABS_OVERFLOW_BREAKPOINT, shouldUsePropertiesTabOverflow, type PropertiesTab } from '../utils/propertiesTabs';
 import { WindowControls } from './WindowControls';
@@ -200,6 +204,8 @@ export const PropertiesWindowApp = () => {
   const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
   const [diagnosticsRefreshing, setDiagnosticsRefreshing] = useState(false);
   const [diagnosticPhase, setDiagnosticPhase] = useState<PropertiesDiagnosticPhase>('idle');
+  const [peerDiagnosticPhase, setPeerDiagnosticPhase] = useState<PropertiesDiagnosticPhase>('idle');
+  const [availabilityDiagnosticPhase, setAvailabilityDiagnosticPhase] = useState<PropertiesDiagnosticPhase>('idle');
   // null means the Files tab has no local selection draft yet; [] is an
   // explicit user choice to clear every file and must remain visually empty.
   const [selectedFiles, setSelectedFiles] = useState<number[] | null>(null);
@@ -271,6 +277,8 @@ export const PropertiesWindowApp = () => {
 
   const isTorrent = snapshot?.isTorrent === true;
   const tabs = useMemo(() => getPropertiesTabs(isTorrent), [isTorrent]);
+  const peerDiagnosticState = getPropertiesPeerDiagnosticState(peers, diagnosticsLoading, peerDiagnosticPhase);
+  const availabilityDiagnosticState = getPropertiesAvailabilityDiagnosticState(availability, diagnosticsLoading, availabilityDiagnosticPhase);
   const urlCanExpand = Boolean(snapshot && (shouldOfferPropertiesUrlExpansion(snapshot.url) || urlHasOverflow));
   const isDirty = draftTab !== null;
   isDirtyRef.current = isDirty;
@@ -433,6 +441,18 @@ export const PropertiesWindowApp = () => {
       const requestState = propertiesDiagnosticRequestState(cached, hasPreviousAttempt, manual);
       setDiagnosticsLoading(requestState.loading);
       setDiagnosticsRefreshing(requestState.refreshing);
+      if (tab === 'peers') {
+        setPeerDiagnosticPhase(propertiesDiagnosticPhase(
+          peersRef.current !== null,
+          'request-start',
+          hasPreviousAttempt,
+        ));
+        setAvailabilityDiagnosticPhase(propertiesDiagnosticPhase(
+          availabilityRef.current !== null,
+          'request-start',
+          hasPreviousAttempt,
+        ));
+      }
       // A silent refresh with no cached result must not replace a stable
       // unavailable/error message between polling requests. Cached results
       // remain visible while their request is refreshed in the background.
@@ -455,6 +475,8 @@ export const PropertiesWindowApp = () => {
           setDiagnosticPhase(propertiesDiagnosticPhase(false, 'success'));
         }
       } else if (tab === 'peers') {
+        const hadCachedPeers = peersRef.current !== null;
+        const hadCachedAvailability = availabilityRef.current !== null;
         const [peerResult, availabilityResult] = await Promise.allSettled([
           invoke('get_torrent_peers', { id }),
           invoke('get_torrent_availability', { id }),
@@ -462,6 +484,18 @@ export const PropertiesWindowApp = () => {
         if (isCurrent()) {
           if (peerResult.status === 'fulfilled') setPeers(peerResult.value);
           if (availabilityResult.status === 'fulfilled') setAvailability(availabilityResult.value);
+          const peerOutcome = peerResult.status === 'fulfilled'
+            ? 'success'
+            : isExpectedPropertiesDiagnosticUnavailable(peerResult.reason)
+              ? 'expected-unavailable'
+              : 'unexpected-error';
+          const availabilityOutcome = availabilityResult.status === 'fulfilled'
+            ? 'success'
+            : isExpectedPropertiesDiagnosticUnavailable(availabilityResult.reason)
+              ? 'expected-unavailable'
+              : 'unexpected-error';
+          setPeerDiagnosticPhase(propertiesDiagnosticPhase(hadCachedPeers, peerOutcome));
+          setAvailabilityDiagnosticPhase(propertiesDiagnosticPhase(hadCachedAvailability, availabilityOutcome));
           const rejectedResults = [peerResult, availabilityResult]
             .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
             .map(result => result.reason);
@@ -491,6 +525,15 @@ export const PropertiesWindowApp = () => {
         } else {
           setDiagnosticError(message);
           setDiagnosticPhase(propertiesDiagnosticPhase(hasCachedResult(), 'unexpected-error'));
+        }
+        if (tab === 'peers') {
+          const hasCachedPeers = peersRef.current !== null;
+          const hasCachedAvailability = availabilityRef.current !== null;
+          const outcome = isExpectedPropertiesDiagnosticUnavailable(error)
+            ? 'expected-unavailable'
+            : 'unexpected-error';
+          setPeerDiagnosticPhase(propertiesDiagnosticPhase(hasCachedPeers, outcome));
+          setAvailabilityDiagnosticPhase(propertiesDiagnosticPhase(hasCachedAvailability, outcome));
         }
       }
     } finally {
@@ -563,6 +606,19 @@ export const PropertiesWindowApp = () => {
             diagnosticLifecycleKeyRef.current = nextDiagnosticLifecycleKey;
             diagnosticLifecycleEpochRef.current += 1;
             diagnosticAttemptsRef.current.clear();
+            // A changed Torrent lifecycle invalidates every diagnostic snapshot
+            // from the previous lifecycle. Keep the old response out of the
+            // loading and stale states while the new lifecycle is queried.
+            setDetails(null);
+            setFileProgress(null);
+            setPeers(null);
+            setAvailability(null);
+            setDiagnosticError('');
+            setDiagnosticsLoading(false);
+            setDiagnosticsRefreshing(false);
+            setDiagnosticPhase('idle');
+            setPeerDiagnosticPhase('idle');
+            setAvailabilityDiagnosticPhase('idle');
           }
           await changeAppLocale(event.payload.snapshot.appearance.locale);
           if (cancelled
@@ -724,6 +780,8 @@ export const PropertiesWindowApp = () => {
       diagnosticLifecycleKeyRef.current = '';
       diagnosticAttemptsRef.current.clear();
       setDiagnosticPhase('idle');
+      setPeerDiagnosticPhase('idle');
+      setAvailabilityDiagnosticPhase('idle');
       return;
     }
     if (!isTorrentPollingStatus(snapshot.status)) {
@@ -732,6 +790,8 @@ export const PropertiesWindowApp = () => {
       setAvailability(null);
       diagnosticAttemptsRef.current.clear();
       setDiagnosticPhase('idle');
+      setPeerDiagnosticPhase('idle');
+      setAvailabilityDiagnosticPhase('idle');
     }
     void refreshDiagnostics(activeTab, downloadId);
     if (!isTorrentPollingStatus(snapshot.status) || !['files', 'peers'].includes(activeTab)) return;
@@ -1241,7 +1301,7 @@ export const PropertiesWindowApp = () => {
 
         {activeTab === 'files' && isTorrent && <div className="space-y-3">
           <div className="flex flex-wrap gap-2"><button type="button" className="app-button px-3 text-xs" disabled={!fileSelectionEditingEnabled} onClick={() => { const all = fileProgress?.files.map(file => file.index) ?? []; setSelectedFiles(all); setDraftTab('files'); }}>{t($ => $.properties.torrentFileSelectionAll)}</button><button type="button" className="app-button px-3 text-xs" disabled={!fileSelectionEditingEnabled} onClick={() => { setSelectedFiles([]); setDraftTab('files'); }}>{t($ => $.properties.torrentFileSelectionClear)}</button><button type="button" className="app-button px-3 text-xs" aria-busy={diagnosticsLoading || diagnosticsRefreshing} onClick={() => downloadId && void refreshDiagnostics('files', downloadId, true)}><RefreshCw size={14} className={diagnosticsLoading || diagnosticsRefreshing ? 'animate-spin motion-reduce:animate-none' : undefined} />{t($ => $.properties.torrentFileProgressRefresh)}</button></div>
-          <div className="overflow-auto rounded-lg border border-border-modal"><table className="w-full min-w-[640px] text-xs" dir="ltr"><thead className="sticky top-0 bg-sidebar-bg text-left text-text-muted"><tr><th className="p-2">{t($ => $.properties.torrentFileProgressSelected)}</th><th className="p-2">#</th><th className="p-2">{t($ => $.properties.torrentFileProgressPath)}</th><th className="p-2">{t($ => $.properties.size)}</th><th className="p-2">{t($ => $.properties.torrentFileProgressCompleted)}</th></tr></thead><tbody>{fileProgress?.files.map(file => { const checked = selectedFiles === null ? file.selected : selectedFiles.includes(file.index); return <tr key={file.index} className="border-t border-border-modal/60"><td className="p-2"><input type="checkbox" checked={checked} disabled={!fileSelectionEditingEnabled} onChange={() => { const current = selectedFiles ?? fileProgress.files.filter(candidate => candidate.selected).map(candidate => candidate.index); const next = checked ? current.filter(index => index !== file.index) : [...current, file.index]; setSelectedFiles(next); setDraftTab('files'); }} aria-label={`${file.index + 1} ${file.relativePath}`} /></td><td className="p-2">{file.index + 1}</td><td className="max-w-[420px] truncate p-2" dir="auto">{file.relativePath}</td><td className="p-2">{formatDownloadBytes(file.length)}</td><td className="p-2">{formatDownloadBytes(file.completedLength)} ({file.length ? Math.round(file.completedLength / file.length * 100) : 0}%)</td></tr>; })}</tbody></table></div>
+          <div className="overflow-auto rounded-lg border border-border-modal"><table className="w-full min-w-[640px] text-xs" dir="ltr"><thead className="sticky top-0 bg-sidebar-bg text-left text-text-muted"><tr><th className="p-2">{t($ => $.properties.torrentFileProgressSelected)}</th><th className="p-2">#</th><th className="p-2">{t($ => $.properties.torrentFileProgressPath)}</th><th className="p-2">{t($ => $.properties.size)}</th><th className="p-2">{t($ => $.properties.torrentFileProgressCompleted)}</th></tr></thead><tbody>{fileProgress?.files.map(file => { const checked = selectedFiles === null ? file.selected : selectedFiles.includes(file.index); return <tr key={file.index} className="border-t border-border-modal/60"><td className="p-2"><input type="checkbox" checked={checked} disabled={!fileSelectionEditingEnabled} onChange={() => { const current = selectedFiles ?? fileProgress.files.filter(candidate => candidate.selected).map(candidate => candidate.index); const next = checked ? current.filter(index => index !== file.index) : [...current, file.index]; setSelectedFiles(next); setDraftTab('files'); }} aria-label={`${file.index + 1} ${file.relativePath}`} /></td><td className="p-2">{file.index + 1}</td><td className="max-w-[420px] truncate p-2" dir="auto">{file.relativePath}</td><td className="p-2">{formatDownloadBytes(file.length)}</td><td className="properties-data-value p-2">{formatDownloadBytes(file.completedLength)} ({file.length ? Math.round(file.completedLength / file.length * 100) : 0}%)</td></tr>; })}</tbody></table></div>
           {diagnosticPhase === 'initial' && diagnosticsLoading && !fileProgress && <p className="text-xs text-text-muted">{t($ => $.properties.torrentFileProgressLoading)}</p>}
           {diagnosticPhase === 'unavailable' && !fileProgress && !diagnosticError && <p className="text-xs text-text-muted">{t($ => $.properties.torrentFileProgressUnavailable)}</p>}
           {diagnosticError && <p className="text-xs text-red-400" role="alert">{diagnosticError}</p>}
@@ -1260,9 +1320,29 @@ export const PropertiesWindowApp = () => {
         </div>}
 
         {activeTab === 'peers' && isTorrent && <div className="space-y-4">
-          <div className="flex items-center justify-between"><p className="text-sm">{peers ? t($ => $.properties.torrentPeerCount, { total: peers.totalPeers, seeders: peers.totalSeeders }) : diagnosticsLoading ? t($ => $.properties.torrentPeerDiagnosticsLoading) : t($ => $.properties.torrentPeerDiagnosticsUnavailable)}</p><button type="button" className="app-button px-3 text-xs" aria-busy={diagnosticsLoading || diagnosticsRefreshing} onClick={() => downloadId && void refreshDiagnostics('peers', downloadId, true)}><RefreshCw size={14} className={diagnosticsLoading || diagnosticsRefreshing ? 'animate-spin motion-reduce:animate-none' : undefined} />{t($ => $.properties.torrentPeerDiagnosticsRefresh)}</button></div>
-          <div className="grid gap-3 sm:grid-cols-2"><div className="rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs"><span className="text-text-muted">{t($ => $.properties.torrentAvailability)}</span><p className="mt-1">{availability ? `${availability.availability} · ${availability.pieceCount} ${t($ => $.properties.torrentDetailsPieces)}` : '—'}</p></div><div className="rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs"><span className="text-text-muted">{t($ => $.properties.torrentPeerDiagnosticsHint)}</span><p className="mt-1">{peers?.truncated ? t($ => $.properties.torrentPeerShowing, { shown: peers.peers.length, total: peers.totalPeers }) : peers?.peers.length ?? 0}</p></div></div>
-          <div className="overflow-auto rounded-lg border border-border-modal"><table className="w-full min-w-[640px] text-xs" dir="ltr"><thead className="bg-sidebar-bg text-left text-text-muted"><tr><th className="p-2">{t($ => $.properties.torrentPeerAddress)}</th><th className="p-2">{t($ => $.properties.torrentPeerDownload)}</th><th className="p-2">{t($ => $.properties.torrentPeerUpload)}</th><th className="p-2">{t($ => $.properties.torrentPeerSeeder)}</th><th className="p-2">{t($ => $.properties.torrentPeerChoking)}</th></tr></thead><tbody>{peers?.peers.map((peer, index) => <tr key={`${peer.ip ?? 'peer'}-${peer.port ?? 'unknown'}-${index}`} className="border-t border-border-modal/60"><td className="p-2 font-mono">{peer.ip ? `${peer.ip.includes(':') ? `[${peer.ip}]` : peer.ip}${peer.port == null ? '' : `:${peer.port}`}` : '—'}</td><td className="p-2">{formatDownloadBytes(peer.downloadSpeed)}/s</td><td className="p-2">{formatDownloadBytes(peer.uploadSpeed)}/s</td><td className="p-2">{peer.seeder ? '✓' : '—'}</td><td className="p-2">{peer.peerChoking ? '✓' : '—'}</td></tr>)}</tbody></table></div>
+          <div
+            className="properties-diagnostic-card"
+            data-diagnostic-phase={peerDiagnosticPhase}
+          >
+            <div className="properties-diagnostic-heading">
+              <div className="min-w-0">
+                <span className="properties-diagnostic-label">{t($ => $.properties.torrentPeerDiagnostics)}</span>
+                <p className="properties-diagnostic-value" data-value-state={peerDiagnosticState} role="status">
+                  {peers
+                    ? t($ => $.properties.torrentPeerCount, { total: peers.totalPeers, seeders: peers.totalSeeders })
+                    : diagnosticsLoading
+                      ? t($ => $.properties.torrentPeerDiagnosticsLoading)
+                      : t($ => $.properties.torrentPeerDiagnosticsUnavailable)}
+                </p>
+              </div>
+              <button type="button" className="app-button px-3 text-xs" aria-busy={diagnosticsLoading || diagnosticsRefreshing} onClick={() => downloadId && void refreshDiagnostics('peers', downloadId, true)}><RefreshCw size={14} className={diagnosticsLoading || diagnosticsRefreshing ? 'animate-spin motion-reduce:animate-none' : undefined} />{t($ => $.properties.torrentPeerDiagnosticsRefresh)}</button>
+            </div>
+            <p className="properties-diagnostic-hint">{t($ => $.properties.torrentPeerDiagnosticsHint)}</p>
+            {peerDiagnosticPhase === 'stale' && <p className="properties-diagnostic-detail">{t($ => $.properties.torrentPeerDiagnosticsStale)}</p>}
+            {peers?.truncated && <p className="properties-diagnostic-detail">{t($ => $.properties.torrentPeerShowing, { shown: peers.peers.length, total: peers.totalPeers })}</p>}
+          </div>
+          <div className="properties-diagnostic-card" data-diagnostic-phase={availabilityDiagnosticPhase}><span className="properties-diagnostic-label">{t($ => $.properties.torrentAvailability)}</span><p className="properties-diagnostic-value" data-value-state={availabilityDiagnosticState}>{availability ? `${availability.availability} · ${availability.pieceCount} ${t($ => $.properties.torrentDetailsPieces)}` : '—'}</p>{availabilityDiagnosticPhase === 'stale' && <p className="properties-diagnostic-detail">{t($ => $.properties.torrentPeerDiagnosticsStale)}</p>}</div>
+          <div className="overflow-auto rounded-lg border border-border-modal"><table className="w-full min-w-[640px] text-xs" dir="ltr"><thead className="bg-sidebar-bg text-left text-text-muted"><tr><th className="p-2">{t($ => $.properties.torrentPeerAddress)}</th><th className="p-2">{t($ => $.properties.torrentPeerDownload)}</th><th className="p-2">{t($ => $.properties.torrentPeerUpload)}</th><th className="p-2">{t($ => $.properties.torrentPeerSeeder)}</th><th className="p-2">{t($ => $.properties.torrentPeerChoking)}</th></tr></thead><tbody>{peers?.peers.map((peer, index) => <tr key={`${peer.ip ?? 'peer'}-${peer.port ?? 'unknown'}-${index}`} className="border-t border-border-modal/60"><td className="p-2 font-mono">{peer.ip ? `${peer.ip.includes(':') ? `[${peer.ip}]` : peer.ip}${peer.port == null ? '' : `:${peer.port}`}` : '—'}</td><td className="properties-data-value p-2">{formatDownloadBytes(peer.downloadSpeed)}/s</td><td className="properties-data-value p-2">{formatDownloadBytes(peer.uploadSpeed)}/s</td><td className="p-2">{peer.seeder ? '✓' : '—'}</td><td className="p-2">{peer.peerChoking ? '✓' : '—'}</td></tr>)}</tbody></table></div>
           {diagnosticError && <p className="text-xs text-red-400" role="alert">{diagnosticError}</p>}
         </div>}
 

@@ -300,6 +300,7 @@ const zhCN = {
     torrentPeerDiagnostics: 'Torrent 对等节点诊断',
     torrentPeerDiagnosticsRefresh: '刷新',
     torrentPeerDiagnosticsLoading: '正在加载对等节点诊断…',
+    torrentPeerDiagnosticsStale: '当前显示最近一次验证的结果；刷新以再次检查。',
     torrentPeerDiagnosticsUnavailable: 'Torrent 活跃或暂停时可查看对等节点诊断。',
     torrentPeerDiagnosticsFailed: '无法读取 Torrent 对等节点诊断。',
     torrentPeerDiagnosticsHint: '仅临时显示经过验证的对等端地址和端口；永不保留对等端 ID 或原始位域。',

@@ -300,6 +300,7 @@ const fa = {
     torrentPeerDiagnostics: 'اطلاعات همتاهای تورنت',
     torrentPeerDiagnosticsRefresh: 'تازه‌سازی',
     torrentPeerDiagnosticsLoading: 'در حال دریافت اطلاعات همتاها…',
+    torrentPeerDiagnosticsStale: 'آخرین نتیجهٔ معتبر نمایش داده می‌شود؛ برای بررسی دوباره تازه‌سازی کنید.',
     torrentPeerDiagnosticsUnavailable: 'اطلاعات همتاها هنگام فعال یا متوقف بودن تورنت در دسترس است.',
     torrentPeerDiagnosticsFailed: 'خواندن اطلاعات همتاهای تورنت ممکن نیست.',
     torrentPeerDiagnosticsHint: 'آدرس و پورت معتبر همتاها فقط به‌صورت موقت نمایش داده می‌شوند؛ شناسه همتا و بیت‌فیلد خام هرگز نگه‌داری نمی‌شود.',
