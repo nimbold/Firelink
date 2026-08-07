@@ -354,8 +354,8 @@ pub fn open_download_properties_window(
     registry.clear_ready(&label)?;
     let builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("index.html".into()))
         .title(PROPERTIES_WINDOW_TITLE)
-        .inner_size(1000.0, 720.0)
-        .min_inner_size(760.0, 560.0)
+        .inner_size(750.0, 540.0)
+        .min_inner_size(680.0, 500.0)
         .resizable(true)
         .always_on_top(false)
         // Let the child renderer paint its rounded loading shell before the
