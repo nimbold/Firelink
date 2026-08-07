@@ -334,6 +334,8 @@ describe('Properties window bridge', () => {
   it('recognizes expected diagnostics gaps without hiding real RPC failures', () => {
     expect(isExpectedPropertiesDiagnosticUnavailable(new Error('live Torrent file progress is unavailable'))).toBe(true);
     expect(isExpectedPropertiesDiagnosticUnavailable(new Error('active Torrent transfer has no current gid mapping'))).toBe(true);
+    expect(isExpectedPropertiesDiagnosticUnavailable(new Error('active Torrent transfer has a stale control epoch'))).toBe(true);
+    expect(isExpectedPropertiesDiagnosticUnavailable(new Error('active Torrent has a stale control epoch'))).toBe(true);
     expect(isExpectedPropertiesDiagnosticUnavailable(new Error('Torrent lifecycle changed while reading peer diagnostics'))).toBe(true);
     expect(isExpectedPropertiesDiagnosticUnavailable(new Error('aria2.getPeers failed: unavailable response'))).toBe(false);
     expect(isExpectedPropertiesDiagnosticUnavailable(new Error('aria2.getFiles failed: connection refused'))).toBe(false);

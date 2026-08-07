@@ -1615,6 +1615,21 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .or_insert(generation);
     }
 
+    /// Return a generation newer than every observed or cancelled enqueue for
+    /// an internally-created lifecycle. The caller still passes this value to
+    /// `reserve_enqueue_generation`, which performs the atomic ownership and
+    /// cancellation checks before the enqueue is committed.
+    pub async fn next_enqueue_generation(&self, id: &str) -> Result<u64, String> {
+        let cancellations = self.enqueue_cancellations.lock().await;
+        let generations = self.enqueue_generations.lock().await;
+        let previous_generation = generations.get(id).copied().unwrap_or_default();
+        let cancelled_generation = cancellations.get(id).copied().unwrap_or_default();
+        previous_generation
+            .max(cancelled_generation)
+            .checked_add(1)
+            .ok_or_else(|| "Download lifecycle generation exhausted".to_string())
+    }
+
     /// Atomically reserve an ID after rejecting cancelled or replayed generations.
     /// The returned watermark must be passed to `rollback_enqueue_reservation`
     /// if ownership registration fails before the task is committed.
@@ -8182,6 +8197,27 @@ mod tests {
         .expect("frontend enqueue payload should deserialize");
 
         assert!(item.into_task().payload.torrent_remove_unselected_file);
+    }
+
+    #[tokio::test]
+    async fn internally_created_enqueue_advances_past_cancelled_generation() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
+
+        manager.cancel_enqueue_generation("torrent", 4).await;
+        let generation = manager
+            .next_enqueue_generation("torrent")
+            .await
+            .expect("a fresh generation should be available");
+
+        assert_eq!(generation, 5);
+        manager
+            .reserve_enqueue_generation("torrent", generation)
+            .await
+            .expect("the fresh generation should not be rejected as stale");
+        assert_eq!(manager.registered_lifecycle_generation("torrent").await, Some(5));
     }
 
     #[test]

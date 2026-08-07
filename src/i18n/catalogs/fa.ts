@@ -340,7 +340,7 @@ const fa = {
     torrentWebSeedsAdd: 'افزودن وب‌سید',
     torrentWebSeedsRemove: 'حذف وب‌سید',
     torrentWebSeedsInvalid: 'هر ردیف وب‌سید باید فایل معتبر تورنت و نشانی پایهٔ HTTP(S) بدون اطلاعات ورود یا fragment داشته باشد.',
-    torrentPeerCount: '{{total}} همتا · {{seeders}} سید',
+    torrentPeerCount: '{{total}} همتا — {{seeders}} سید',
     torrentPeerDownload: 'دریافت',
     torrentPeerUpload: 'آپلود',
     torrentPeerSeeder: 'سید',

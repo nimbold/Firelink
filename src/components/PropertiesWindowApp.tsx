@@ -36,12 +36,14 @@ import {
   type PropertiesSnapshot,
   type PropertiesSnapshotEvent,
 } from '../propertiesBridge';
-import { formatDownloadBytes, formatTorrentRatio } from '../utils/downloadProgress';
+import { formatDownloadBytes, formatTorrentRatio, resolveDownloadFraction } from '../utils/downloadProgress';
 import { changeAppLocale } from '../i18n';
 import { synchronizeDocumentAppearance } from '../utils/documentAppearance';
 import { getWindowControlRailWidth } from '../utils/windowControlStyle';
 import { getPropertiesFooterActions } from '../utils/propertiesFooter';
 import {
+  formatPropertiesAvailability,
+  formatPropertiesDiagnosticCount,
   getPropertiesAvailabilityDiagnosticState,
   getPropertiesPeerDiagnosticState,
 } from '../utils/propertiesDiagnostics';
@@ -1067,7 +1069,15 @@ export const PropertiesWindowApp = () => {
     );
   }
 
-  const progress = Math.max(0, Math.min(1, snapshot.fraction ?? 0));
+  const progress = resolveDownloadFraction({
+    fraction: snapshot.fraction,
+    downloadedBytes: snapshot.downloadedBytes,
+    totalBytes: snapshot.totalBytes,
+    totalIsEstimate: snapshot.totalIsEstimate,
+    isMedia: snapshot.isMedia,
+    size: snapshot.size,
+    status: snapshot.status,
+  });
   const lifecycleAction = getPropertiesLifecycleAction(snapshot.status);
   const editingEnabled = pendingAction === null && isEditableStatus(snapshot.status);
   const footerActions = getPropertiesFooterActions({
@@ -1329,7 +1339,10 @@ export const PropertiesWindowApp = () => {
                 <span className="properties-diagnostic-label">{t($ => $.properties.torrentPeerDiagnostics)}</span>
                 <p className="properties-diagnostic-value" data-value-state={peerDiagnosticState} role="status">
                   {peers
-                    ? t($ => $.properties.torrentPeerCount, { total: peers.totalPeers, seeders: peers.totalSeeders })
+                    ? t($ => $.properties.torrentPeerCount, {
+                      total: formatPropertiesDiagnosticCount(peers.totalPeers, snapshot.appearance.locale),
+                      seeders: formatPropertiesDiagnosticCount(peers.totalSeeders, snapshot.appearance.locale),
+                    })
                     : diagnosticsLoading
                       ? t($ => $.properties.torrentPeerDiagnosticsLoading)
                       : t($ => $.properties.torrentPeerDiagnosticsUnavailable)}
@@ -1341,7 +1354,15 @@ export const PropertiesWindowApp = () => {
             {peerDiagnosticPhase === 'stale' && <p className="properties-diagnostic-detail">{t($ => $.properties.torrentPeerDiagnosticsStale)}</p>}
             {peers?.truncated && <p className="properties-diagnostic-detail">{t($ => $.properties.torrentPeerShowing, { shown: peers.peers.length, total: peers.totalPeers })}</p>}
           </div>
-          <div className="properties-diagnostic-card" data-diagnostic-phase={availabilityDiagnosticPhase}><span className="properties-diagnostic-label">{t($ => $.properties.torrentAvailability)}</span><p className="properties-diagnostic-value" data-value-state={availabilityDiagnosticState}>{availability ? `${availability.availability} · ${availability.pieceCount} ${t($ => $.properties.torrentDetailsPieces)}` : '—'}</p>{availabilityDiagnosticPhase === 'stale' && <p className="properties-diagnostic-detail">{t($ => $.properties.torrentPeerDiagnosticsStale)}</p>}</div>
+          <div className="properties-diagnostic-card" data-diagnostic-phase={availabilityDiagnosticPhase}>
+            <div className="min-w-0">
+              <span className="properties-diagnostic-label">{t($ => $.properties.torrentAvailability)}</span>
+              <p className="properties-diagnostic-value" data-value-state={availabilityDiagnosticState}>
+                {availability ? `${formatPropertiesAvailability(availability.availability, snapshot.appearance.locale)} — ${formatPropertiesDiagnosticCount(availability.pieceCount, snapshot.appearance.locale)} ${t($ => $.properties.torrentDetailsPieces)}` : '—'}
+              </p>
+            </div>
+            {availabilityDiagnosticPhase === 'stale' && <p className="properties-diagnostic-detail">{t($ => $.properties.torrentPeerDiagnosticsStale)}</p>}
+          </div>
           <div className="overflow-auto rounded-lg border border-border-modal"><table className="w-full min-w-[640px] text-xs" dir="ltr"><thead className="bg-sidebar-bg text-left text-text-muted"><tr><th className="p-2">{t($ => $.properties.torrentPeerAddress)}</th><th className="p-2">{t($ => $.properties.torrentPeerDownload)}</th><th className="p-2">{t($ => $.properties.torrentPeerUpload)}</th><th className="p-2">{t($ => $.properties.torrentPeerSeeder)}</th><th className="p-2">{t($ => $.properties.torrentPeerChoking)}</th></tr></thead><tbody>{peers?.peers.map((peer, index) => <tr key={`${peer.ip ?? 'peer'}-${peer.port ?? 'unknown'}-${index}`} className="border-t border-border-modal/60"><td className="p-2 font-mono">{peer.ip ? `${peer.ip.includes(':') ? `[${peer.ip}]` : peer.ip}${peer.port == null ? '' : `:${peer.port}`}` : '—'}</td><td className="properties-data-value p-2">{formatDownloadBytes(peer.downloadSpeed)}/s</td><td className="properties-data-value p-2">{formatDownloadBytes(peer.uploadSpeed)}/s</td><td className="p-2">{peer.seeder ? '✓' : '—'}</td><td className="p-2">{peer.peerChoking ? '✓' : '—'}</td></tr>)}</tbody></table></div>
           {diagnosticError && <p className="text-xs text-red-400" role="alert">{diagnosticError}</p>}
         </div>}

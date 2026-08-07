@@ -340,7 +340,7 @@ const ru = {
     torrentWebSeedsAdd: 'Добавить веб-сид',
     torrentWebSeedsRemove: 'Удалить веб-сид',
     torrentWebSeedsInvalid: 'В каждой строке веб-сида нужны допустимый файл торрента и базовый HTTP(S)-адрес без учётных данных или фрагмента.',
-    torrentPeerCount: '{{total}} пиров · {{seeders}} сидеров',
+    torrentPeerCount: '{{total}} пиров — {{seeders}} сидеров',
     torrentPeerDownload: 'Загрузка',
     torrentPeerUpload: 'Отдача',
     torrentPeerSeeder: 'Сидер',

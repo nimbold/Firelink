@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  formatPropertiesAvailability,
+  formatPropertiesDiagnosticCount,
   getPropertiesAvailabilityDiagnosticState,
   getPropertiesPeerDiagnosticState,
 } from './propertiesDiagnostics';
@@ -12,6 +14,20 @@ const emptyPeerDiagnostics = {
 };
 
 describe('Properties peer diagnostics presentation state', () => {
+  it('formats swarm availability without exposing floating-point noise', () => {
+    expect(formatPropertiesAvailability(6.05186170212766, 'en-US')).toBe('6.05');
+    expect(formatPropertiesAvailability(1.5, 'en-US')).toBe('1.5');
+    expect(formatPropertiesAvailability(1.5, '')).toBe('1.5');
+    expect(formatPropertiesAvailability(Number.NaN, 'en-US')).toBe('—');
+  });
+
+  it('formats diagnostic counts with the same locale as availability', () => {
+    expect(formatPropertiesDiagnosticCount(1234, 'en-US')).toBe('1,234');
+    expect(formatPropertiesDiagnosticCount(1234, 'fa')).toBe(new Intl.NumberFormat('fa').format(1234));
+    expect(formatPropertiesDiagnosticCount(-1, 'en-US')).toBe('—');
+    expect(formatPropertiesDiagnosticCount(Number.MAX_SAFE_INTEGER + 1, 'en-US')).toBe('—');
+  });
+
   it('keeps a genuine empty response live instead of treating it as unavailable', () => {
     expect(getPropertiesPeerDiagnosticState(emptyPeerDiagnostics, false, 'idle')).toBe('live');
   });

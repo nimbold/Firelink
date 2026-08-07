@@ -340,7 +340,7 @@ const common = {
     torrentWebSeedsAdd: 'Add web seed',
     torrentWebSeedsRemove: 'Remove web seed',
     torrentWebSeedsInvalid: 'Each web-seed row needs a valid Torrent file and an HTTP(S) base URI without credentials or fragments.',
-    torrentPeerCount: '{{total}} peers · {{seeders}} seeders',
+    torrentPeerCount: '{{total}} peers — {{seeders}} seeders',
     torrentPeerDownload: 'Download',
     torrentPeerUpload: 'Upload',
     torrentPeerSeeder: 'Seeder',

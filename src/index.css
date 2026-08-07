@@ -983,7 +983,7 @@ html[data-list-density="relaxed"] {
 
   .properties-diagnostic-card {
     min-width: 0;
-    padding: 12px;
+    padding: 10px 12px;
     border: 1px solid var(--properties-card-border);
     border-radius: 10px;
     background: var(--properties-card-surface);
@@ -1014,38 +1014,38 @@ html[data-list-density="relaxed"] {
     min-width: 0;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 12px;
+    gap: 8px;
   }
 
   .properties-diagnostic-label {
     color: hsl(var(--text-muted));
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.025em;
+    font-size: 10px;
+    font-weight: 650;
+    letter-spacing: 0.04em;
     text-transform: uppercase;
   }
 
   .properties-diagnostic-value {
     margin-top: 6px;
     color: var(--properties-live-value);
-    font-size: 15px;
+    font-size: 13px;
     font-variant-numeric: tabular-nums;
-    font-weight: 750;
+    font-weight: 650;
     line-height: 1.25;
   }
 
   .properties-diagnostic-hint {
     max-width: 60ch;
-    margin-top: 8px;
+    margin-top: 6px;
     color: hsl(var(--text-secondary));
-    font-size: 11px;
-    line-height: 1.45;
+    font-size: 10px;
+    line-height: 1.35;
   }
 
   .properties-diagnostic-detail {
-    margin-top: 8px;
+    margin-top: 6px;
     color: hsl(var(--text-muted));
-    font-size: 11px;
+    font-size: 10px;
     font-variant-numeric: tabular-nums;
   }
 

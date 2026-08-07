@@ -6,10 +6,61 @@ export interface DownloadSizeDisplay {
   fallback: string;
 }
 
+export type DownloadFractionInput = {
+  fraction?: number | null;
+  downloadedBytes?: number | null;
+  totalBytes?: number | null;
+  totalIsEstimate?: boolean | null;
+  isMedia?: boolean | null;
+  size?: string | null;
+  status?: string | null;
+};
+
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const;
 
 const isUsableByteCount = (value: number | null | undefined): value is number =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0;
+
+const isUsableFraction = (value: number | null | undefined): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
+
+const clampFraction = (value: number): number => Math.max(0, Math.min(1, value));
+
+/**
+ * Resolves the fraction shown by progress bars when a live fraction is not
+ * available. Volatile fractions are intentionally omitted from persisted
+ * downloads, but paused rows retain exact byte counters so their progress can
+ * still be reconstructed after restart. Estimated media totals are excluded:
+ * they describe a provisional denominator and must not become a false visual
+ * claim about completion.
+ */
+export const resolveDownloadFraction = ({
+  fraction,
+  downloadedBytes,
+  totalBytes,
+  totalIsEstimate = false,
+  isMedia = false,
+  size,
+  status
+}: DownloadFractionInput): number => {
+  if (status === 'completed') return 1;
+
+  const storedFraction = isUsableFraction(fraction) ? fraction : undefined;
+  if (storedFraction !== undefined && storedFraction > 0) return storedFraction;
+
+  const hasEstimatedTotal = totalIsEstimate === true ||
+    (isMedia === true && size?.trim().startsWith('~') === true);
+  if (
+    !hasEstimatedTotal &&
+    isUsableByteCount(downloadedBytes) &&
+    isUsableByteCount(totalBytes) &&
+    totalBytes > 0
+  ) {
+    return clampFraction(downloadedBytes / totalBytes);
+  }
+
+  return storedFraction ?? 0;
+};
 
 const byteUnitIndex = (bytes: number): number => {
   let value = bytes;

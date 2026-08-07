@@ -8494,6 +8494,8 @@ async fn verify_torrent_data(
     let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
     crate::torrent::validate_info_hash(item.torrent_info_hash.as_deref(), &metadata.info_hash)?;
     let restore_status = item.status.as_str().to_string();
+    let restore_status_value = item.status;
+    let restore_has_been_dispatched = item.has_been_dispatched;
     let destination = verification_destination(&app_handle, &item)?;
     if matches!(item.status, crate::ipc::DownloadStatus::Paused) {
         detach_download_for_reconfigure_locked(
@@ -8508,6 +8510,11 @@ async fn verify_torrent_data(
     {
         return Err("Torrent lifecycle changed; pause it before verifying its data".to_string());
     }
+    // Allocate the internally-created generation after detaching any retained
+    // paused lifecycle, so the value includes every cancellation watermark
+    // observed during that transition. Reservation still remains the atomic
+    // acceptance point immediately before ownership registration.
+    let verification_generation = state.queue_manager.next_enqueue_generation(&id).await?;
     let enqueue_item = queue::EnqueueItem {
         id: item.id.clone(),
         queue_id: item
@@ -8559,7 +8566,7 @@ async fn verify_torrent_data(
         torrent_file_allocation: item.torrent_file_allocation.clone(),
         torrent_verify_only: Some(true),
         torrent_verify_restore_status: Some(restore_status.clone()),
-        lifecycle_generation: None,
+        lifecycle_generation: Some(verification_generation.to_string()),
     };
 
     {
@@ -8589,9 +8596,10 @@ async fn verify_torrent_data(
         enqueue_download_locked(&app_handle, state.inner(), enqueue_item, &control_guard).await
     {
         // Roll back only this verification marker, and only while the row is
-        // still the queued verification lifecycle. Never restore the stale
-        // full array captured before enqueue: frontend persistence or another
-        // command may have changed unrelated rows in the meantime.
+        // still this verification lifecycle (queued or already restored by a
+        // renderer snapshot). Never restore the stale full array captured
+        // before enqueue: frontend persistence or another command may have
+        // changed unrelated rows in the meantime.
         let rollback_result = (|| {
             let mut connection = database.lock()?;
             crate::db::mutate_download(
@@ -8599,18 +8607,20 @@ async fn verify_torrent_data(
                 &id,
                 database.is_portable(),
                 |object| {
-                    let is_verification_marker = object
-                        .get("status")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("queued")
-                        && object
-                            .get("torrentVerifyOnly")
-                            .and_then(serde_json::Value::as_bool)
-                            == Some(true)
+                    let has_verification_marker = object
+                        .get("torrentVerifyOnly")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
                         && object
                             .get("torrentVerifyRestoreStatus")
                             .and_then(serde_json::Value::as_str)
                             == Some(restore_status.as_str());
+                    let current_status = object
+                        .get("status")
+                        .and_then(serde_json::Value::as_str);
+                    let is_verification_marker = has_verification_marker
+                        && (current_status == Some("queued")
+                            || current_status == Some(restore_status.as_str()));
                     // The native marker is an additional persistence fence,
                     // not a prerequisite for rollback. A renderer snapshot
                     // may have already acknowledged and removed that native
@@ -8621,18 +8631,39 @@ async fn verify_torrent_data(
                             "status".to_string(),
                             serde_json::json!(restore_status),
                         );
+                        match restore_has_been_dispatched {
+                            Some(value) => {
+                                object.insert(
+                                    "hasBeenDispatched".to_string(),
+                                    serde_json::json!(value),
+                                );
+                            }
+                            None => {
+                                object.remove("hasBeenDispatched");
+                            }
+                        }
                         object.remove("torrentVerifyOnly");
                         object.remove("torrentVerifyRestoreStatus");
                         object.remove("torrentVerifyNative");
                     }
-                    Ok(())
+                    Ok(is_verification_marker)
                 },
             )
         })();
-        if let Err(rollback_error) = rollback_result {
-            return Err(format!(
-                "{error}; failed to roll back Torrent verification state: {rollback_error}"
-            ));
+        let rollback_applied = match rollback_result {
+            Ok(applied) => applied,
+            Err(rollback_error) => {
+                return Err(format!(
+                    "{error}; failed to roll back Torrent verification state: {rollback_error}"
+                ));
+            }
+        };
+        if rollback_applied {
+            use tauri::Emitter;
+            let _ = app_handle.emit(
+                "download-state",
+                crate::ipc::DownloadStateEvent::new(&id, restore_status_value),
+            );
         }
         return Err(error.to_string());
     }

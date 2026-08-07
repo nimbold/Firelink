@@ -15,7 +15,8 @@ import {
   downloadProgressColorClass,
   formatTorrentDuration,
   formatDownloadTotal,
-  resolveDownloadSizeDisplay
+  resolveDownloadSizeDisplay,
+  resolveDownloadFraction
 } from '../utils/downloadProgress';
 import {
   COLUMN_ALIGNMENT_JUSTIFY,
@@ -180,11 +181,24 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     };
   }, [isActionVisible, updateActionPosition]);
 
-  const displayFraction = download.status === 'moving'
-    ? moveProgress ?? download.fraction ?? 0
+  const progressFraction = download.status === 'moving'
+    ? moveProgress ?? download.fraction
     : download.status === 'downloading' || download.status === 'verifying' || download.status === 'seeding'
-    ? liveProgress?.fraction ?? download.fraction ?? 0
-    : download.fraction ?? 0;
+    ? liveProgress?.fraction ?? download.fraction
+    : download.fraction;
+  const displayFraction = download.status === 'moving' && moveProgress !== undefined
+    ? Math.max(0, Math.min(1, moveProgress))
+    : download.status === 'moving'
+    ? resolveDownloadFraction({ fraction: progressFraction, status: download.status })
+    : resolveDownloadFraction({
+      fraction: progressFraction,
+      downloadedBytes: liveProgress?.downloaded_bytes ?? download.downloadedBytes,
+      totalBytes: liveProgress?.total_bytes ?? download.totalBytes,
+      totalIsEstimate: liveProgress?.total_is_estimate ?? download.totalIsEstimate,
+      isMedia: download.isMedia,
+      size: download.size,
+      status: download.status,
+    });
   const displayPercent = `${(displayFraction * 100).toFixed(0)}%`;
   const displaySpeed = download.status === 'seeding'
     ? liveProgress?.upload_speed ?? '-'
