@@ -1726,10 +1726,14 @@ async fn resolve_and_validate_url_host(
     let addrs: Vec<_> = if let Ok(ip) = lookup_host.parse::<std::net::IpAddr>() {
         vec![std::net::SocketAddr::new(ip, port)]
     } else {
-        tokio::net::lookup_host((lookup_host, port))
-            .await
-            .map_err(|_| "SSRF blocked: DNS resolution failed")?
-            .collect()
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::net::lookup_host((lookup_host, port)),
+        )
+        .await
+        .map_err(|_| "SSRF blocked: DNS resolution timed out")?
+        .map_err(|_| "SSRF blocked: DNS resolution failed")?
+        .collect()
     };
     let addr = addrs.first().copied().ok_or("SSRF blocked: No DNS records")?;
     if addrs.iter().any(|candidate| is_blocked_network_address(candidate.ip())) {
@@ -6160,6 +6164,60 @@ async fn validate_enqueue_uris(url: &str, mirrors: Option<&str>) -> Result<(), S
     Ok(())
 }
 
+async fn validate_torrent_web_seed_destinations(seeds: &[String]) -> Result<(), String> {
+    for uri in seeds {
+        let parsed = reqwest::Url::parse(uri)
+            .map_err(|_| "Torrent web-seed URI is invalid".to_string())?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().is_none_or(str::is_empty)
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err("Torrent web-seed URI must use HTTP or HTTPS without credentials or fragments".to_string());
+        }
+        resolve_and_validate_url_host(&parsed).await?;
+    }
+    Ok(())
+}
+
+/// Embedded web seeds are optional Torrent accelerators, not the transfer's
+/// source of truth. Keep the peer-only path usable when a stale seed domain is
+/// temporarily unavailable, while still rejecting destinations that resolve
+/// to local or private addresses before they are offered to Aria2.
+pub(crate) async fn filter_torrent_web_seed_destinations(
+    seeds: &[String],
+) -> Result<Vec<String>, String> {
+    let mut allowed = Vec::with_capacity(seeds.len());
+    for seed in seeds {
+        let parsed = reqwest::Url::parse(seed)
+            .map_err(|_| "Torrent web-seed URI is invalid".to_string())?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().is_none_or(str::is_empty)
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err("Torrent web-seed URI must use HTTP or HTTPS without credentials or fragments".to_string());
+        }
+        match resolve_and_validate_url_host(&parsed).await {
+            Ok(_) => allowed.push(seed.clone()),
+            Err(error)
+                if error == "SSRF blocked: DNS resolution failed"
+                    || error == "SSRF blocked: DNS resolution timed out"
+                    || error == "SSRF blocked: No DNS records" =>
+            {
+                log::warn!(
+                    "Skipping unavailable embedded Torrent web seed {}",
+                    parsed.host_str().unwrap_or("<unknown host>")
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(allowed)
+}
+
 async fn validate_torrent_enqueue(
     app_handle: &tauri::AppHandle,
     item: &mut queue::EnqueueItem,
@@ -6191,6 +6249,17 @@ async fn validate_torrent_enqueue(
         let bytes = std::fs::read(path)
             .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
         let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
+        let normalized_user_web_seeds = queue::normalize_torrent_web_seeds(
+            item.torrent_web_seeds.as_deref(),
+            &metadata.files,
+        )?;
+        let user_web_seed_uris = normalized_user_web_seeds
+            .iter()
+            .map(|seed| seed.uri.clone())
+            .collect::<Vec<_>>();
+        validate_torrent_web_seed_destinations(&user_web_seed_uris).await?;
+        item.torrent_web_seeds = (!normalized_user_web_seeds.is_empty())
+            .then_some(normalized_user_web_seeds);
         crate::torrent::validate_info_hash(
             item.torrent_info_hash.as_deref(),
             &metadata.info_hash,
@@ -6545,9 +6614,10 @@ async fn resolve_magnet_metadata(
     }
 
     let client = std::sync::Arc::new(Aria2RpcClient { port, secret });
+    let sanitized_source = crate::torrent::sanitize_magnet_uri_for_aria2(source)?;
     let metadata_result = crate::torrent_probe::run_metadata_probe(
         client,
-        source,
+        &sanitized_source,
         options,
         &metadata_path,
         Duration::from_secs(60),
@@ -6737,6 +6807,8 @@ async fn enqueue_download_locked(
             .await
             .map_err(AppError::Internal)?;
     } else {
+        item.sftp_host_key_md = queue::normalize_sftp_host_key_md(item.sftp_host_key_md.as_deref())
+            .map_err(AppError::Internal)?;
         validate_enqueue_uris(&item.url, item.mirrors.as_deref())
             .await
             .map_err(AppError::Internal)?;
@@ -6834,7 +6906,13 @@ async fn enqueue_many(
         let validation = if item.is_torrent.unwrap_or(false) {
             validate_torrent_enqueue(&app_handle, &mut item).await
         } else {
-            validate_enqueue_uris(&item.url, item.mirrors.as_deref()).await
+            match queue::normalize_sftp_host_key_md(item.sftp_host_key_md.as_deref()) {
+                Ok(normalized) => {
+                    item.sftp_host_key_md = normalized;
+                    validate_enqueue_uris(&item.url, item.mirrors.as_deref()).await
+                }
+                Err(error) => Err(error),
+            }
         };
         if let Err(error) = validation {
             results.push(crate::ipc::EnqueueResult {
@@ -8677,6 +8755,7 @@ async fn verify_torrent_data(
         speed_limit: item.speed_limit.clone(),
         username: item.username.clone(),
         password: item.password.clone(),
+        sftp_host_key_md: item.sftp_host_key_md.clone(),
         headers: item.headers.clone(),
         checksum: item.checksum.clone(),
         cookies: item.cookies.clone(),
@@ -8901,7 +8980,10 @@ async fn normalize_persisted_torrent_web_seeds(
         .await
         .map_err(|error| format!("could not read cached Torrent metadata: {error}"))?;
     let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
-    crate::queue::normalize_torrent_web_seeds(Some(seeds), &metadata.files)
+    let normalized = crate::queue::normalize_torrent_web_seeds(Some(seeds), &metadata.files)?;
+    let web_seed_uris = normalized.iter().map(|seed| seed.uri.clone()).collect::<Vec<_>>();
+    validate_torrent_web_seed_destinations(&web_seed_uris).await?;
+    Ok(normalized)
 }
 
 #[tauri::command]
@@ -8979,6 +9061,8 @@ async fn set_torrent_web_seeds(
         )
         .await?
     };
+    let web_seed_uris = normalized.iter().map(|seed| seed.uri.clone()).collect::<Vec<_>>();
+    validate_torrent_web_seed_destinations(&web_seed_uris).await?;
     let previous_seeds =
         replace_persisted_torrent_web_seeds(database.inner(), &id, &normalized)?;
     // The download can cross the queued/active boundary while metadata is

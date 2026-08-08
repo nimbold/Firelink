@@ -60,6 +60,20 @@ describe('download persistence progress snapshots', () => {
     expect(sanitized.lastResolverFallback).toBeUndefined();
   });
 
+  it('marks redacted downloads that need credentials after restart', () => {
+    const persisted = redactDownloadForPersistence({
+      ...item('paused'),
+      username: 'alice',
+      password: 'secret',
+      cookies: 'session=redacted',
+      headers: 'Authorization: redacted',
+    });
+    expect(persisted.credentialsRequired).toBe(true);
+    expect(persisted.password).toBeUndefined();
+    expect(persisted.cookies).toBeUndefined();
+    expect(persisted.headers).toBeUndefined();
+  });
+
   it.each(['queued', 'staged', 'retrying', 'processing'] as const)(
     'keeps byte counters for %s snapshots',
     (status) => {

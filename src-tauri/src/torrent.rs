@@ -15,6 +15,9 @@ pub struct ParsedTorrent {
     pub total_bytes: u64,
     pub files: Vec<TorrentFile>,
     pub info_hash: String,
+    /// URL-list entries from the torrent metainfo. These are validated again
+    /// at enqueue time because Aria2 consumes the original torrent bytes.
+    pub web_seeds: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -290,7 +293,7 @@ fn parse_info(info: &BencodeValue) -> Result<ParsedTorrent, String> {
     let digest = Sha1::digest(encoded);
     let info_hash = digest.iter().map(|byte| format!("{byte:02x}")).collect();
 
-    Ok(ParsedTorrent { name, total_bytes, files, info_hash })
+    Ok(ParsedTorrent { name, total_bytes, files, info_hash, web_seeds: Vec::new() })
 }
 
 fn canonical_btih(value: &str) -> Option<String> {
@@ -358,7 +361,32 @@ pub fn parse_torrent_bytes(bytes: &[u8]) -> Result<ParsedTorrent, String> {
     let info = root
         .get(b"info".as_slice())
         .ok_or_else(|| "torrent metadata is missing info".to_string())?;
-    parse_info(info)
+    let web_seeds = parse_torrent_web_seeds(root.get(b"url-list".as_slice()))?;
+    let mut parsed = parse_info(info)?;
+    parsed.web_seeds = web_seeds;
+    Ok(parsed)
+}
+
+/// Remove the untrusted metainfo URL-list before handing a torrent to Aria2.
+/// The info dictionary, and therefore the info hash, remains unchanged. The
+/// caller can pass the parsed seeds back through the explicit web-seed policy
+/// and add only the destinations that were accepted there.
+pub fn sanitize_torrent_bytes_for_aria2(bytes: &[u8]) -> Result<(Vec<u8>, Vec<String>), String> {
+    if bytes.is_empty() || bytes.len() > MAX_TORRENT_BYTES {
+        return Err(format!(
+            "torrent metadata must be between 1 byte and {MAX_TORRENT_BYTES} bytes"
+        ));
+    }
+    let root = match Parser::new(bytes).parse()? {
+        BencodeValue::Dict(value) => value,
+        _ => return Err("torrent root is not a dictionary".to_string()),
+    };
+    let web_seeds = parse_torrent_web_seeds(root.get(b"url-list".as_slice()))?;
+    let mut sanitized = root;
+    sanitized.remove(b"url-list".as_slice());
+    let mut encoded = Vec::with_capacity(bytes.len());
+    encode(&BencodeValue::Dict(sanitized), &mut encoded);
+    Ok((encoded, web_seeds))
 }
 
 fn bounded_optional_text(value: Option<&BencodeValue>, limit: usize) -> Option<String> {
@@ -415,6 +443,35 @@ fn collect_torrent_uris(value: Option<&BencodeValue>, schemes: &[&str]) -> Vec<S
     values
 }
 
+fn parse_torrent_web_seeds(value: Option<&BencodeValue>) -> Result<Vec<String>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let entries = match value {
+        BencodeValue::Bytes(_) => std::slice::from_ref(value),
+        BencodeValue::List(entries) => entries.as_slice(),
+        _ => return Err("torrent url-list field is invalid".to_string()),
+    };
+    if entries.len() > 256 {
+        return Err("torrent url-list contains too many web seeds".to_string());
+    }
+    let mut normalized = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let BencodeValue::Bytes(bytes) = entry else {
+            return Err("torrent url-list contains a non-text web seed".to_string());
+        };
+        let value = String::from_utf8(bytes.clone())
+            .map_err(|_| "torrent url-list contains invalid UTF-8".to_string())?;
+        let value = value.trim();
+        let uri = bounded_uri(value, &["http", "https"])
+            .ok_or_else(|| "torrent url-list contains an invalid HTTP(S) web seed".to_string())?;
+        if !normalized.contains(&uri) {
+            normalized.push(uri);
+        }
+    }
+    Ok(normalized)
+}
+
 pub fn torrent_details_from_bytes(bytes: &[u8]) -> Result<crate::ipc::TorrentDetails, String> {
     if bytes.is_empty() || bytes.len() > MAX_TORRENT_BYTES {
         return Err(format!(
@@ -429,6 +486,7 @@ pub fn torrent_details_from_bytes(bytes: &[u8]) -> Result<crate::ipc::TorrentDet
         .get(b"info".as_slice())
         .ok_or_else(|| "torrent metadata is missing info".to_string())?;
     let parsed = parse_info(info)?;
+    let web_seeds = parse_torrent_web_seeds(root.get(b"url-list".as_slice()))?;
     let info_dict = match info {
         BencodeValue::Dict(value) => value,
         _ => return Err("torrent info dictionary is invalid".to_string()),
@@ -484,7 +542,7 @@ pub fn torrent_details_from_bytes(bytes: &[u8]) -> Result<crate::ipc::TorrentDet
             4_096,
         ),
         trackers,
-        web_seeds: collect_torrent_uris(root.get(b"url-list".as_slice()), &["http", "https"]),
+        web_seeds,
     })
 }
 
@@ -542,7 +600,49 @@ fn magnet_metadata(source: &str) -> Result<ParsedTorrent, String> {
         .filter(|value| !value.trim().is_empty())
         .map(|value| crate::download_ownership::canonical_download_filename(&value))
         .unwrap_or_else(|| format!("torrent-{info_hash}"));
-    Ok(ParsedTorrent { name, total_bytes: 0, files: Vec::new(), info_hash })
+    Ok(ParsedTorrent { name, total_bytes: 0, files: Vec::new(), info_hash, web_seeds: Vec::new() })
+}
+
+/// Return the Magnet URI form that Firelink may hand to Aria2. Direct source
+/// parameters can make Aria2 fetch arbitrary HTTP/FTP/SFTP resources during
+/// metadata resolution, so keep the peer/tracker identity parameters but
+/// remove `ws`, `as`, and `xs` sources. Users can add validated web seeds after
+/// metadata is available through the transactional per-file path.
+pub fn sanitize_magnet_uri_for_aria2(source: &str) -> Result<String, String> {
+    let mut parsed = url::Url::parse(source.trim()).map_err(|_| "invalid magnet URI".to_string())?;
+    if parsed.scheme() != "magnet"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+        || parsed.host_str().is_some()
+        || parsed.port().is_some()
+    {
+        return Err("magnet URI contains an invalid authority or fragment".to_string());
+    }
+
+    let mut has_info_hash = false;
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in parsed.query_pairs() {
+        if matches!(key.as_ref(), "ws" | "as" | "xs") {
+            continue;
+        }
+        if key == "xt" {
+            let hash = value
+                .strip_prefix("urn:btih:")
+                .and_then(canonical_btih)
+                .ok_or_else(|| "magnet URI has no valid BitTorrent info hash".to_string())?;
+            query.append_pair("xt", &format!("urn:btih:{hash}"));
+            has_info_hash = true;
+        } else {
+            query.append_pair(&key, &value);
+        }
+    }
+    if !has_info_hash {
+        return Err("magnet URI has no valid BitTorrent info hash".to_string());
+    }
+    let query = query.finish();
+    parsed.set_query(Some(&query));
+    Ok(parsed.to_string())
 }
 
 pub fn magnet_allows_cached_metadata(source: &str) -> bool {
@@ -1105,6 +1205,46 @@ mod tests {
         assert_eq!(parsed.files[0].index, 1);
         assert_eq!(parsed.files[0].path, "test");
         assert_eq!(parsed.info_hash.len(), 40);
+    }
+
+    #[test]
+    fn retains_only_strict_http_web_seeds_for_enqueue_policy_validation() {
+        let parsed = parse_torrent_bytes(
+            b"d4:infod6:lengthi5e4:name4:teste8:url-list22:https://example.test/ae",
+        )
+        .expect("torrent with an HTTP web seed should parse");
+        assert_eq!(parsed.web_seeds, vec!["https://example.test/a"]);
+
+        let credentials = parse_torrent_bytes(
+            b"d4:infod6:lengthi5e4:name4:teste8:url-list32:https://user:pass@example.test/aee",
+        );
+        assert!(credentials.is_err());
+    }
+
+    #[test]
+    fn sanitizing_torrent_web_seeds_preserves_the_info_hash() {
+        let bytes = b"d4:infod6:lengthi5e4:name4:teste8:url-list22:https://example.test/ae";
+        let original = parse_torrent_bytes(bytes).expect("torrent should parse");
+        let (sanitized, web_seeds) = sanitize_torrent_bytes_for_aria2(bytes)
+            .expect("torrent should be sanitized");
+        let parsed = parse_torrent_bytes(&sanitized).expect("sanitized torrent should parse");
+
+        assert_eq!(web_seeds, vec!["https://example.test/a"]);
+        assert!(parsed.web_seeds.is_empty());
+        assert_eq!(parsed.info_hash, original.info_hash);
+    }
+
+    #[test]
+    fn magnet_sanitization_removes_direct_sources_but_preserves_identity() {
+        let sanitized = sanitize_magnet_uri_for_aria2(
+            "magnet:?xt=urn:btih:0123456789012345678901234567890123456789&dn=demo&tr=udp%3A%2F%2Ftracker.example%3A80&ws=https%3A%2F%2Flocal.example%2Ffile&as=https%3A%2F%2Fother.example%2Ffile",
+        )
+        .expect("magnet should sanitize");
+        assert!(sanitized.contains("xt=urn%3Abtih%3A0123456789012345678901234567890123456789"));
+        assert!(sanitized.contains("dn=demo"));
+        assert!(sanitized.contains("tr=udp%3A%2F%2Ftracker.example%3A80"));
+        assert!(!sanitized.contains("ws="));
+        assert!(!sanitized.contains("as="));
     }
 
     #[test]

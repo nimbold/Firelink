@@ -135,6 +135,30 @@ describe('useDownloadStore', () => {
     expect(fileName.endsWith('.mp4')).toBe(true);
   });
 
+  it('keeps the credential-required marker when the last secret is cleared', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'credential-marker',
+        url: 'https://secure.example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'failed',
+        category: 'Other',
+        dateAdded: '',
+        credentialsRequired: true
+      }] as any[]
+    });
+
+    await useDownloadStore.getState().applyProperties('credential-marker', {
+      password: ''
+    });
+    expect(useDownloadStore.getState().downloads[0].credentialsRequired).toBe(true);
+
+    await useDownloadStore.getState().applyProperties('credential-marker', {
+      password: 'secret'
+    });
+    expect(useDownloadStore.getState().downloads[0].credentialsRequired).toBe(false);
+  });
+
   it('clears a persisted Torrent removal reservation when a paused item disables cleanup', async () => {
     useDownloadStore.setState({
       downloads: [{
@@ -1815,6 +1839,30 @@ describe('useDownloadStore', () => {
     expect(setShowKeychainModal).toHaveBeenCalledWith(true);
     expect(ipc.invokeCommand).not.toHaveBeenCalledWith('get_keychain_password', expect.anything());
     expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
+  });
+
+  it('does not resume a paused backend lifecycle without restored credentials', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'credential-resume-gated',
+        url: 'https://secure.example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'paused',
+        category: 'Other',
+        dateAdded: '',
+        credentialsRequired: true
+      }] as any[],
+      backendRegisteredIds: new Set(['credential-resume-gated'])
+    });
+
+    await expect(useDownloadStore.getState().resumeDownload('credential-resume-gated'))
+      .resolves.toBe(false);
+
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith(
+      'resume_download',
+      expect.anything()
+    );
+    expect(useDownloadStore.getState().downloads[0].status).toBe('paused');
   });
 
   it('preserves backend rejection reasons while auto-resuming saved queued items', async () => {

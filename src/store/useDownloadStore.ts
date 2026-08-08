@@ -114,6 +114,26 @@ const waitForPendingStartupResume = async (): Promise<void> => {
   if (pending) await pending.catch(() => undefined);
 };
 
+const credentialsRequiredMessage = (): string =>
+  i18n.t($ => $.properties.credentialsRequired);
+
+const hasCredentialMaterial = (value: string | null | undefined): boolean =>
+  typeof value === 'string' && value.trim().length > 0;
+
+const markCredentialsRequired = (id: string): void => {
+  useDownloadStore.getState().updateDownload(id, {
+    status: 'paused',
+    lastError: credentialsRequiredMessage(),
+  });
+  useDownloadStore.setState(state => ({
+    pendingOrder: state.pendingOrder.filter(value => value !== id),
+  }));
+};
+
+const clearCredentialsRequired = (id: string): void => {
+  useDownloadStore.getState().updateDownload(id, { credentialsRequired: false });
+};
+
 const currentQueueControlGeneration = (queueId: string): number =>
   queueControlGenerations.get(queueId) ?? 0;
 
@@ -316,6 +336,16 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
       }
       if (!isCurrentDownloadLifecycle(id, lifecycleGeneration)) return false;
 
+      if (item.credentialsRequired === true
+        && !hasCredentialMaterial(item.password)
+        && !hasCredentialMaterial(item.cookies)
+        && !hasCredentialMaterial(item.headers)
+        && !hasCredentialMaterial(keychainPassword)) {
+        markCredentialsRequired(id);
+        return false;
+      }
+      if (item.credentialsRequired === true) clearCredentialsRequired(id);
+
       const proxy = proxyOverride === undefined
         ? await getProxyArgs(settings)
         : proxyOverride;
@@ -333,6 +363,7 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
         speed_limit: speedLimitForDispatch(item.speedLimit, settings.globalSpeedLimit, item.isMedia),
         username: item.username || (login ? login.username : null),
         password: item.password || keychainPassword,
+        sftp_host_key_md: item.sftpHostKeyMd || undefined,
         headers: item.headers || null,
         checksum: item.checksum || null,
         cookies: item.cookies || null,
@@ -1017,9 +1048,22 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     const state = get();
     const item = state.downloads.find(d => d.id === id);
     if (!item) return;
-    const normalizedUpdates = updates.fileName === undefined
-      ? updates
-      : { ...updates, fileName: canonicalizeDownloadFileName(updates.fileName) };
+    const credentialsUpdated = (['password', 'cookies', 'headers'] as const)
+      .some(field => Object.prototype.hasOwnProperty.call(updates, field));
+    const nextCredentialMaterial = (['password', 'cookies', 'headers'] as const)
+      .some(field => hasCredentialMaterial(
+        Object.prototype.hasOwnProperty.call(updates, field) ? updates[field] : item[field]
+      ));
+    const normalizedUpdates = {
+      ...(updates.fileName === undefined
+        ? updates
+        : { ...updates, fileName: canonicalizeDownloadFileName(updates.fileName) }),
+      ...(credentialsUpdated && nextCredentialMaterial
+        ? { credentialsRequired: false }
+        : credentialsUpdated && item.credentialsRequired === true
+          ? { credentialsRequired: true }
+          : {}),
+    };
     const disablingTorrentRemoval = item.isTorrent === true
       && normalizedUpdates.torrentRemoveUnselectedFile === false
       && item.torrentRemoveUnselectedFile !== false;
@@ -1084,6 +1128,30 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     await waitForPendingStartupResume();
     let targetItem = get().downloads.find(d => d.id === id);
     if (!targetItem) return false;
+
+    if (targetItem.credentialsRequired === true
+      && !hasCredentialMaterial(targetItem.password)
+      && !hasCredentialMaterial(targetItem.cookies)
+      && !hasCredentialMaterial(targetItem.headers)) {
+      const settings = useSettingsStore.getState();
+      const login = getSiteLogin(targetItem.url, settings);
+      let keychainPassword: string | null = null;
+      if (login && settings.keychainAccessReady) {
+        try {
+          keychainPassword = await invoke('get_keychain_password', { id: login.id });
+        } catch (error) {
+          console.warn('Could not fetch keychain password for resume:', error);
+        }
+      }
+      if (!hasCredentialMaterial(keychainPassword)) {
+        if (login && !settings.keychainAccessReady && !settings.keychainPromptDismissed) {
+          settings.setShowKeychainModal(true);
+        }
+        markCredentialsRequired(id);
+        return false;
+      }
+      clearCredentialsRequired(id);
+    }
 
     setDownloadControlIntent(id, 'resume');
     let previousStatus = targetItem.status;
@@ -2343,6 +2411,15 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
               console.warn("Could not fetch keychain password for login:", e);
             }
           }
+          if (item.credentialsRequired === true
+            && !hasCredentialMaterial(item.password)
+            && !hasCredentialMaterial(item.cookies)
+            && !hasCredentialMaterial(item.headers)
+            && !hasCredentialMaterial(keychainPassword)) {
+            markCredentialsRequired(item.id);
+            continue;
+          }
+          if (item.credentialsRequired === true) clearCredentialsRequired(item.id);
           const destPath = item.destination ||
             await resolveCategoryDestination(settings, item.category);
           itemsToEnqueue.push({
@@ -2357,6 +2434,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             speed_limit: speedLimitForDispatch(item.speedLimit, settings.globalSpeedLimit, item.isMedia),
             username: item.username || (login ? login.username : null),
             password: item.password || keychainPassword,
+            sftp_host_key_md: item.sftpHostKeyMd || undefined,
             headers: item.headers || null,
             checksum: item.checksum || null,
             cookies: item.cookies || null,

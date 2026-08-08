@@ -214,6 +214,7 @@ export const PropertiesWindowApp = () => {
   const [fileName, setFileName] = useState('');
   const [destination, setDestination] = useState('');
   const [connections, setConnections] = useState('');
+  const [sftpHostKeyMd, setSftpHostKeyMd] = useState('');
   const [trackers, setTrackers] = useState('');
   const [excludedTrackers, setExcludedTrackers] = useState('');
   const [downloadLimit, setDownloadLimit] = useState('');
@@ -278,6 +279,7 @@ export const PropertiesWindowApp = () => {
   detailsRef.current = details;
 
   const isTorrent = snapshot?.isTorrent === true;
+  const isSftp = Boolean(snapshot?.url.trim().toLowerCase().startsWith('sftp:'));
   const tabs = useMemo(() => getPropertiesTabs(isTorrent), [isTorrent]);
   const peerDiagnosticState = getPropertiesPeerDiagnosticState(peers, diagnosticsLoading, peerDiagnosticPhase);
   const availabilityDiagnosticState = getPropertiesAvailabilityDiagnosticState(availability, diagnosticsLoading, availabilityDiagnosticPhase);
@@ -394,6 +396,7 @@ export const PropertiesWindowApp = () => {
     setFileName(next.fileName);
     setDestination(next.destination ?? '');
     setConnections(next.connections === undefined ? '' : String(next.connections));
+    setSftpHostKeyMd(next.sftpHostKeyMd ?? '');
     setTrackers(next.torrentTrackers ?? '');
     setExcludedTrackers(next.torrentExcludeTrackers ?? '');
     setSelectedFiles(next.torrentFileIndices ? [...next.torrentFileIndices] : null);
@@ -973,6 +976,9 @@ export const PropertiesWindowApp = () => {
         if (nextFileAllocation !== snapshot.torrentFileAllocation) patch.torrentFileAllocation = encodePropertiesPatchValue(nextFileAllocation);
       }
     } else if (activeTab === 'advanced') {
+      if (isSftp && sftpHostKeyMd !== (snapshot.sftpHostKeyMd ?? '')) {
+        patch.sftpHostKeyMd = encodePropertiesPatchValue(sftpHostKeyMd.trim() || undefined);
+      }
       for (const name of SECRET_NAMES) {
         const draft = secretDrafts[name];
         if (!draft.touched) continue;
@@ -980,7 +986,7 @@ export const PropertiesWindowApp = () => {
       }
     }
     await requestAction('apply-properties', patch);
-  }, [activeTab, checkIntegrity, connections, destination, downloadLimit, encryptionPolicy, excludedTrackers, fileAllocation, fileName, fileProgress, isTorrent, maxPeers, peerSpeedLimit, prioritizePiece, removeUnselectedFile, requestAction, secretDrafts, seedRatio, seedTime, selectedFiles, snapshot, stopTimeout, trackerConnectTimeout, trackerInterval, trackerTimeout, trackers, t, uploadLimit]);
+  }, [activeTab, checkIntegrity, connections, destination, downloadLimit, encryptionPolicy, excludedTrackers, fileAllocation, fileName, fileProgress, isSftp, isTorrent, maxPeers, peerSpeedLimit, prioritizePiece, removeUnselectedFile, requestAction, sftpHostKeyMd, secretDrafts, seedRatio, seedTime, selectedFiles, snapshot, stopTimeout, trackerConnectTimeout, trackerInterval, trackerTimeout, trackers, t, uploadLimit]);
 
   const chooseTab = (tab: PropertiesTab) => {
     if (tab === activeTab) {
@@ -1538,6 +1544,8 @@ export const PropertiesWindowApp = () => {
 
         {activeTab === 'advanced' && <div className="space-y-4">
           <p className="text-xs text-text-muted">{t($ => $.properties.advancedTransfer)}</p>
+          {snapshot.credentialsRequired === true && <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200" role="alert">{t($ => $.properties.credentialsRequired)}</p>}
+          {isSftp && <label className="block max-w-2xl text-xs text-text-muted">{t($ => $.properties.sftpHostKeyMd)}<input className="app-control mt-1 w-full font-mono" value={sftpHostKeyMd} onChange={event => { setSftpHostKeyMd(event.target.value); setDraftTab('advanced'); }} placeholder={t($ => $.properties.sftpHostKeyMdHint)} disabled={!editingEnabled} autoComplete="off" /><span className="mt-1 block text-[11px]">{t($ => $.properties.sftpHostKeyMdDescription)}</span></label>}
           <div className="grid max-w-2xl gap-3 rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs sm:grid-cols-2">
             <div><span className="text-text-muted">{t($ => $.properties.connections)}</span><p className="mt-1">{snapshot.isMedia === true ? `${snapshot.connections ?? '—'} ${t($ => $.properties.configuredConcurrency)}` : `${snapshot.activeConnections ?? '—'} / ${snapshot.requestedConnections ?? snapshot.connections ?? '—'}`}</p></div>
             <div><span className="text-text-muted">{t($ => $.properties.speedCap)}</span><p className="mt-1">{snapshot.speedLimit || '—'}</p></div>

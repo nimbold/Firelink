@@ -64,6 +64,7 @@ const PROPERTIES_SNAPSHOT_KEYS = [
   'resumable',
   'connections',
   'speedLimit',
+  'sftpHostKeyMd',
   'checksum',
   'destination',
   'isMedia',
@@ -73,6 +74,7 @@ const PROPERTIES_SNAPSHOT_KEYS = [
   'queuePosition',
   'hasBeenDispatched',
   'lastError',
+  'credentialsRequired',
   'lastErrorKind',
   'lastResolverFallback',
   'lastTry',
@@ -195,6 +197,7 @@ export type SecretPatch =
 
 export const PROPERTIES_PATCH_CLEARABLE_KEYS = [
   'destination',
+  'sftpHostKeyMd',
   'speedLimit',
   'torrentTrackers',
   'torrentExcludeTrackers',

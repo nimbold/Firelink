@@ -101,6 +101,15 @@ const copyEditablePatch = (rawPatch: PropertiesPatch): Partial<DownloadItem> => 
   if (safePatch.destination !== undefined && typeof safePatch.destination !== 'string') {
     throw new Error('Invalid destination');
   }
+  if (safePatch.sftpHostKeyMd !== undefined) {
+    if (typeof safePatch.sftpHostKeyMd !== 'string') throw new Error('Invalid SFTP host-key fingerprint');
+    const fingerprint = safePatch.sftpHostKeyMd.trim().toLowerCase();
+    const valid = /^(md5|sha-1)=[0-9a-f]+$/.test(fingerprint)
+      && ((fingerprint.startsWith('md5=') && fingerprint.length === 36)
+        || (fingerprint.startsWith('sha-1=') && fingerprint.length === 45));
+    if (!valid) throw new Error('Invalid SFTP host-key fingerprint');
+    safePatch.sftpHostKeyMd = fingerprint;
+  }
 
   if (safePatch.connections !== undefined
     && (!Number.isInteger(safePatch.connections) || safePatch.connections < 1 || safePatch.connections > 16)) {

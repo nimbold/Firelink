@@ -182,6 +182,8 @@ pub struct DownloadItem {
     #[ts(optional)]
     pub password: Option<String>,
     #[ts(optional)]
+    pub sftp_host_key_md: Option<String>,
+    #[ts(optional)]
     pub headers: Option<String>,
     #[ts(optional)]
     pub checksum: Option<String>,
@@ -205,6 +207,9 @@ pub struct DownloadItem {
     pub has_been_dispatched: Option<bool>,
     #[ts(optional)]
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub credentials_required: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub last_error_kind: Option<DownloadErrorKind>,

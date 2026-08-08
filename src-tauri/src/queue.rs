@@ -51,6 +51,28 @@ pub const DEFAULT_TORRENT_LISTEN_PORT_SPEC: &str = "6881-6999";
 pub const DEFAULT_ARIA2_DISK_CACHE: &str = "16M";
 pub const MAX_ARIA2_DISK_CACHE_MIB: u64 = 1024;
 
+pub fn normalize_sftp_host_key_md(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let (kind, digest) = value
+        .split_once('=')
+        .ok_or_else(|| "SFTP host-key fingerprint must use TYPE=DIGEST form".to_string())?;
+    let kind = kind.trim().to_ascii_lowercase();
+    let digest = digest.trim().to_ascii_lowercase();
+    let expected_length = match kind.as_str() {
+        "md5" => 32,
+        "sha-1" => 40,
+        _ => return Err("SFTP host-key fingerprint type must be md5 or sha-1".to_string()),
+    };
+    if digest.len() != expected_length || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!(
+            "SFTP {kind} host-key fingerprint must contain exactly {expected_length} hexadecimal characters"
+        ));
+    }
+    Ok(Some(format!("{kind}={digest}")))
+}
+
 pub fn normalize_torrent_bind_address(value: Option<&str>) -> Result<Option<String>, String> {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
@@ -732,6 +754,7 @@ pub struct SpawnPayload {
     pub speed_limit: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
+    pub sftp_host_key_md: Option<String>,
     pub headers: Option<String>,
     pub checksum: Option<String>,
     pub cookies: Option<String>,
@@ -4980,14 +5003,14 @@ enum BoundedRangeSupport {
     Unknown,
 }
 
-async fn effective_aria2_connections(id: &str, payload: &SpawnPayload) -> i32 {
+async fn effective_aria2_connections(id: &str, payload: &SpawnPayload) -> Result<i32, String> {
     let requested = clamp_download_connections(
         payload
             .connections
             .unwrap_or(DOWNLOAD_CONNECTIONS_MIN),
     );
     if requested <= 1 {
-        return requested;
+        return Ok(requested);
     }
 
     for uri in crate::collect_download_uris(&payload.url, payload.mirrors.as_deref()) {
@@ -5002,7 +5025,7 @@ async fn effective_aria2_connections(id: &str, payload: &SpawnPayload) -> i32 {
                     id,
                     uri_host_for_log(&uri)
                 );
-                return 1;
+                return Ok(1);
             }
             Ok(BoundedRangeSupport::Supported) => {}
             Ok(BoundedRangeSupport::Unknown) => {
@@ -5013,6 +5036,7 @@ async fn effective_aria2_connections(id: &str, payload: &SpawnPayload) -> i32 {
                     requested
                 );
             }
+            Err(error) if error.starts_with("SSRF blocked:") => return Err(error),
             Err(error) => {
                 log::debug!(
                     "aria2 range probe [{}]: {} probe failed: {}; keeping {} connections",
@@ -5025,7 +5049,7 @@ async fn effective_aria2_connections(id: &str, payload: &SpawnPayload) -> i32 {
         }
     }
 
-    requested
+    Ok(requested)
 }
 
 fn is_http_uri(uri: &str) -> bool {
@@ -5069,44 +5093,93 @@ async fn probe_bounded_range_support(
 ) -> Result<BoundedRangeSupport, String> {
     crate::ensure_reqwest_crypto_provider();
 
-    let mut builder = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .timeout(std::time::Duration::from_secs(10));
+    let original = reqwest::Url::parse(uri).map_err(|error| error.to_string())?;
+    let mut current = original.clone();
+    let mut credentials_allowed = true;
+    for redirect_count in 0..=5 {
+        let (host, address) = crate::resolve_and_validate_url_host(&current).await?;
+        let mut builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(10))
+            .resolve(&host, address);
 
-    if let Some(proxy) = payload
-        .proxy
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        if proxy.eq_ignore_ascii_case("none") {
-            builder = builder.no_proxy();
-        } else {
-            builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|error| error.to_string())?);
+        if let Some(proxy) = payload
+            .proxy
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if proxy.eq_ignore_ascii_case("none") {
+                builder = builder.no_proxy();
+            } else {
+                builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|error| error.to_string())?);
+            }
         }
+
+        let client = builder.build().map_err(|error| error.to_string())?;
+        let request = client
+            .get(current.clone())
+            .header(reqwest::header::RANGE, "bytes=0-0")
+            .header(reqwest::header::ACCEPT_ENCODING, "identity");
+        let include_credentials = credentials_allowed
+            && can_forward_payload_credentials(&original, &current);
+        let response = apply_payload_headers(request, payload, include_credentials)
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+
+        if response.status().is_redirection() {
+            if redirect_count == 5 {
+                return Err("range probe redirect limit exceeded".to_string());
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| "range probe redirect has no valid Location".to_string())?;
+            let next = current
+                .join(location)
+                .map_err(|error| format!("invalid range probe redirect: {error}"))?;
+            if !matches!(next.scheme(), "http" | "https") {
+                return Err("range probe redirect uses an unsupported scheme".to_string());
+            }
+            credentials_allowed = credentials_allowed
+                && can_forward_payload_credentials(&original, &next);
+            current = next;
+            continue;
+        }
+
+        let content_range = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok());
+        return Ok(classify_bounded_range_response(
+            response.status(),
+            content_range,
+        ));
     }
 
-    let client = builder.build().map_err(|error| error.to_string())?;
-    let request = client
-        .get(uri)
-        .header(reqwest::header::RANGE, "bytes=0-0")
-        .header(reqwest::header::ACCEPT_ENCODING, "identity");
-    let request = apply_payload_headers(request, payload);
-    let response = request.send().await.map_err(|error| error.to_string())?;
-    let content_range = response
-        .headers()
-        .get(reqwest::header::CONTENT_RANGE)
-        .and_then(|value| value.to_str().ok());
+    Err("range probe redirect loop exhausted".to_string())
+}
 
-    Ok(classify_bounded_range_response(
-        response.status(),
-        content_range,
-    ))
+fn can_forward_payload_credentials(
+    original: &reqwest::Url,
+    current: &reqwest::Url,
+) -> bool {
+    original.host() == current.host()
+        && (original.port_or_known_default() == current.port_or_known_default()
+            || (original.scheme() == "http"
+                && current.scheme() == "https"
+                && original.port_or_known_default() == Some(80)
+                && current.port_or_known_default() == Some(443)))
+        && (original.scheme() == current.scheme()
+            || (original.scheme() == "http" && current.scheme() == "https"))
 }
 
 fn apply_payload_headers(
     mut request: reqwest::RequestBuilder,
     payload: &SpawnPayload,
+    include_credentials: bool,
 ) -> reqwest::RequestBuilder {
     if let Some(user_agent) = payload
         .user_agent
@@ -5115,38 +5188,109 @@ fn apply_payload_headers(
     {
         request = request.header(reqwest::header::USER_AGENT, user_agent);
     }
-    if let Some(cookies) = payload.cookies.as_deref().filter(|value| !value.is_empty()) {
-        request = request.header(reqwest::header::COOKIE, cookies);
-    }
-    if let Some(headers) = payload.headers.as_deref() {
-        for line in headers
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-        {
-            let Some((name, value)) = line.split_once(':') else {
-                continue;
-            };
-            if name.trim().eq_ignore_ascii_case("range") {
-                continue;
+    if include_credentials {
+        if let Some(cookies) = payload.cookies.as_deref().filter(|value| !value.is_empty()) {
+            request = request.header(reqwest::header::COOKIE, cookies);
+        }
+        if let Some(headers) = payload.headers.as_deref() {
+            for line in headers
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+            {
+                let Some((name, value)) = line.split_once(':') else {
+                    continue;
+                };
+                if name.trim().eq_ignore_ascii_case("range") {
+                    continue;
+                }
+                let Ok(name) = reqwest::header::HeaderName::from_bytes(name.trim().as_bytes()) else {
+                    continue;
+                };
+                let Ok(value) = reqwest::header::HeaderValue::from_str(value.trim()) else {
+                    continue;
+                };
+                request = request.header(name, value);
             }
-            let Ok(name) = reqwest::header::HeaderName::from_bytes(name.trim().as_bytes()) else {
-                continue;
-            };
-            let Ok(value) = reqwest::header::HeaderValue::from_str(value.trim()) else {
-                continue;
-            };
-            request = request.header(name, value);
+        }
+        if let Some(username) = payload
+            .username
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            request = request.basic_auth(username, payload.password.as_deref());
         }
     }
-    if let Some(username) = payload
-        .username
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        request = request.basic_auth(username, payload.password.as_deref());
-    }
     request
+}
+
+fn apply_protocol_auth_options(
+    options: &mut serde_json::Map<String, serde_json::Value>,
+    payload: &SpawnPayload,
+    uris: &[String],
+) {
+    let has_http = uris.iter().any(|uri| is_http_uri(uri));
+    let has_ftp = uris.iter().any(|uri| {
+        url::Url::parse(uri)
+            .ok()
+            .is_some_and(|parsed| matches!(parsed.scheme(), "ftp" | "sftp"))
+    });
+    let has_sftp = uris.iter().any(|uri| {
+        url::Url::parse(uri)
+            .ok()
+            .is_some_and(|parsed| parsed.scheme() == "sftp")
+    });
+    if has_http {
+        if let Some(user) = &payload.username {
+            options.insert("http-user".to_string(), serde_json::json!(user));
+        }
+        if let Some(pass) = &payload.password {
+            options.insert("http-passwd".to_string(), serde_json::json!(pass));
+        }
+    }
+    if has_ftp {
+        if let Some(user) = &payload.username {
+            options.insert("ftp-user".to_string(), serde_json::json!(user));
+        }
+        if let Some(pass) = &payload.password {
+            options.insert("ftp-passwd".to_string(), serde_json::json!(pass));
+        }
+    }
+    if has_sftp {
+        if let Some(fingerprint) = &payload.sftp_host_key_md {
+            options.insert("ssh-host-key-md".to_string(), serde_json::json!(fingerprint));
+        }
+    }
+}
+
+fn apply_checksum_options(
+    options: &mut serde_json::Map<String, serde_json::Value>,
+    checksum: Option<&str>,
+) {
+    if let Some(chk) = checksum {
+        let formatted_chk = if let Some((algo, digest)) = chk.split_once('=') {
+            format!("{}={}", algo.to_ascii_lowercase(), digest)
+        } else {
+            chk.to_string()
+        };
+        options.insert("checksum".to_string(), serde_json::json!(formatted_chk));
+        options.insert("check-integrity".to_string(), serde_json::json!("true"));
+    }
+}
+
+async fn validate_aria2_transfer_network_policy(uris: &[String]) -> Result<(), String> {
+    for uri in uris {
+        let parsed = reqwest::Url::parse(uri).map_err(|_| "SSRF blocked: Invalid URL".to_string())?;
+        if !matches!(parsed.scheme(), "http" | "https" | "ftp" | "sftp") {
+            return Err("Unsupported URL scheme".to_string());
+        }
+        // This is deliberately repeated immediately before addUri/addTorrent
+        // so admission-time DNS is not the only policy check. Aria2 still
+        // resolves independently later; Firelink therefore does not claim
+        // that this is an IP pinning boundary.
+        crate::resolve_and_validate_url_host(&parsed).await?;
+    }
+    Ok(())
 }
 
 fn classify_bounded_range_response(
@@ -6234,8 +6378,16 @@ impl SidecarSpawner for ProductionSpawner {
         if !payload.is_torrent {
             options.insert("out".to_string(), serde_json::json!(safe_filename));
         }
+        let transfer_uris = if payload.is_torrent {
+            Vec::new()
+        } else {
+            crate::collect_download_uris(&payload.url, payload.mirrors.as_deref())
+        };
+        if !payload.is_torrent {
+            validate_aria2_transfer_network_policy(&transfer_uris).await?;
+        }
         if should_apply_aria2_connection_options(payload) {
-            let conn = effective_aria2_connections(id, payload).await;
+            let conn = effective_aria2_connections(id, payload).await?;
             apply_aria2_connection_options(&mut options, conn);
         }
         apply_aria2_follow_options(&mut options, payload);
@@ -6255,19 +6407,9 @@ impl SidecarSpawner for ProductionSpawner {
         {
             options.insert("max-download-limit".to_string(), serde_json::json!(speed));
         }
-        if let Some(user) = &payload.username {
-            options.insert("http-user".to_string(), serde_json::json!(user));
-        }
-        if let Some(pass) = &payload.password {
-            options.insert("http-passwd".to_string(), serde_json::json!(pass));
-        }
-        if let Some(chk) = &payload.checksum {
-            let formatted_chk = if let Some((algo, digest)) = chk.split_once('=') {
-                format!("{}={}", algo.to_ascii_lowercase(), digest)
-            } else {
-                chk.clone()
-            };
-            options.insert("checksum".to_string(), serde_json::json!(formatted_chk));
+        if !payload.is_torrent {
+            apply_protocol_auth_options(&mut options, payload, &transfer_uris);
+            apply_checksum_options(&mut options, payload.checksum.as_deref());
         }
         if let Some(ua) = &payload.user_agent {
             options.insert("user-agent".to_string(), serde_json::json!(ua));
@@ -6301,7 +6443,11 @@ impl SidecarSpawner for ProductionSpawner {
                 let bytes = tokio::fs::read(&path)
                     .await
                     .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
-                let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
+                let (sanitized_bytes, embedded_web_seeds) =
+                    crate::torrent::sanitize_torrent_bytes_for_aria2(&bytes)?;
+                let embedded_web_seeds =
+                    crate::filter_torrent_web_seed_destinations(&embedded_web_seeds).await?;
+                let metadata = crate::torrent::parse_torrent_bytes(&sanitized_bytes)?;
                 options.insert(
                     "index-out".to_string(),
                     serde_json::json!(crate::torrent::aria2_index_outputs(&metadata, &payload.filename)),
@@ -6316,19 +6462,19 @@ impl SidecarSpawner for ProductionSpawner {
                         serde_json::json!(indices.iter().map(u32::to_string).collect::<Vec<_>>().join(",")),
                     );
                 }
-                let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-                let uris = if payload.torrent_web_seeds.is_some() {
-                    // Typed per-file web seeds are attached after the GID is
-                    // known through changeUri. addTorrent accepts only one
-                    // unscoped URI list, which cannot represent fileIndex.
-                    Vec::new()
-                } else {
-                    payload
-                        .mirrors
-                        .as_deref()
-                        .map(|mirrors| crate::collect_download_uris("", Some(mirrors)))
-                        .unwrap_or_default()
-                };
+                let encoded = base64::engine::general_purpose::STANDARD.encode(sanitized_bytes);
+                let mut uris = embedded_web_seeds;
+                if payload.torrent_web_seeds.is_none() {
+                    uris.extend(
+                        payload
+                            .mirrors
+                            .as_deref()
+                            .map(|mirrors| crate::collect_download_uris("", Some(mirrors)))
+                            .unwrap_or_default(),
+                    );
+                    uris.sort();
+                    uris.dedup();
+                }
                 ("aria2.addTorrent", serde_json::json!([encoded, uris, options]))
             } else {
                 let parsed = url::Url::parse(&payload.url)
@@ -6343,7 +6489,8 @@ impl SidecarSpawner for ProductionSpawner {
                 if selected.is_some() {
                     return Err("magnet file selection requires resolved torrent metadata".to_string());
                 }
-                ("aria2.addUri", serde_json::json!([[payload.url.clone()], options]))
+                let magnet = crate::torrent::sanitize_magnet_uri_for_aria2(&payload.url)?;
+                ("aria2.addUri", serde_json::json!([[magnet], options]))
             }
         } else {
             let uris = crate::collect_download_uris(&payload.url, payload.mirrors.as_deref());
@@ -6785,6 +6932,9 @@ pub struct EnqueueItem {
     pub speed_limit: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub sftp_host_key_md: Option<String>,
     pub headers: Option<String>,
     pub checksum: Option<String>,
     pub cookies: Option<String>,
@@ -6898,6 +7048,7 @@ impl EnqueueItem {
                 speed_limit: self.speed_limit,
                 username: self.username,
                 password: self.password,
+                sftp_host_key_md: self.sftp_host_key_md,
                 headers: self.headers,
                 checksum: self.checksum,
                 cookies: self.cookies,
@@ -8116,6 +8267,118 @@ mod tests {
             &files,
         )
         .is_err());
+    }
+
+    #[test]
+    fn normal_protocol_options_use_the_protocol_specific_aria2_keys() {
+        let payload = SpawnPayload {
+            username: Some("alice".to_string()),
+            password: Some("secret".to_string()),
+            sftp_host_key_md: Some(
+                "sha-1=0123456789abcdef0123456789abcdef01234567".to_string(),
+            ),
+            ..SpawnPayload::default()
+        };
+        let mut options = serde_json::Map::new();
+        apply_protocol_auth_options(
+            &mut options,
+            &payload,
+            &["ftp://example.test/file.bin".to_string()],
+        );
+        assert_eq!(options.get("ftp-user"), Some(&serde_json::json!("alice")));
+        assert_eq!(options.get("ftp-passwd"), Some(&serde_json::json!("secret")));
+        assert!(!options.contains_key("http-user"));
+        assert!(!options.contains_key("ssh-host-key-md"));
+
+        options.clear();
+        apply_protocol_auth_options(
+            &mut options,
+            &payload,
+            &["sftp://example.test/file.bin".to_string()],
+        );
+        assert_eq!(options.get("ftp-user"), Some(&serde_json::json!("alice")));
+        assert_eq!(
+            options.get("ssh-host-key-md"),
+            Some(&serde_json::json!("sha-1=0123456789abcdef0123456789abcdef01234567"))
+        );
+        assert!(!options.contains_key("http-user"));
+    }
+
+    #[test]
+    fn normal_checksum_options_enable_aria2_integrity_checks() {
+        let mut options = serde_json::Map::new();
+        apply_checksum_options(&mut options, Some("SHA-256=ABCDEF"));
+        assert_eq!(options.get("checksum"), Some(&serde_json::json!("sha-256=ABCDEF")));
+        assert_eq!(options.get("check-integrity"), Some(&serde_json::json!("true")));
+
+        options.clear();
+        apply_checksum_options(&mut options, None);
+        assert!(options.is_empty());
+    }
+
+    #[test]
+    fn sftp_host_key_fingerprints_are_normalized_and_bounded() {
+        assert_eq!(
+            normalize_sftp_host_key_md(Some(
+                " SHA-1=0123456789ABCDEF0123456789ABCDEF01234567 ",
+            ))
+            .unwrap()
+            .as_deref(),
+            Some("sha-1=0123456789abcdef0123456789abcdef01234567")
+        );
+        assert!(normalize_sftp_host_key_md(Some("sha-256=abcd")).is_err());
+        assert!(normalize_sftp_host_key_md(Some("md5=abcd")).is_err());
+        assert!(normalize_sftp_host_key_md(Some("sha-1=xyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzx")).is_err());
+        assert_eq!(normalize_sftp_host_key_md(Some(" ")).unwrap(), None);
+    }
+
+    #[test]
+    fn range_probe_does_not_forward_credentials_across_origins() {
+        crate::ensure_reqwest_crypto_provider();
+        let payload = SpawnPayload {
+            username: Some("alice".to_string()),
+            password: Some("secret".to_string()),
+            cookies: Some("session=secret".to_string()),
+            headers: Some("Authorization: Bearer secret\nX-Test: yes".to_string()),
+            ..SpawnPayload::default()
+        };
+        let client = reqwest::Client::builder().build().unwrap();
+        let same_origin = apply_payload_headers(
+            client.get("https://example.test/file"),
+            &payload,
+            true,
+        )
+        .build()
+        .unwrap();
+        assert!(same_origin.headers().contains_key(reqwest::header::COOKIE));
+        assert!(same_origin.headers().contains_key(reqwest::header::AUTHORIZATION));
+        assert_eq!(same_origin.headers().get("x-test").unwrap(), "yes");
+
+        let cross_origin = apply_payload_headers(
+            client.get("https://cdn.example.test/file"),
+            &payload,
+            false,
+        )
+        .build()
+        .unwrap();
+        assert!(!cross_origin.headers().contains_key(reqwest::header::COOKIE));
+        assert!(!cross_origin.headers().contains_key(reqwest::header::AUTHORIZATION));
+        assert!(!cross_origin.headers().contains_key("x-test"));
+    }
+
+    #[test]
+    fn range_probe_allows_http_to_https_upgrade_but_not_cross_origin_return() {
+        let original = reqwest::Url::parse("http://example.test/file").unwrap();
+        let upgrade = reqwest::Url::parse("https://example.test/file").unwrap();
+        let unrelated = reqwest::Url::parse("https://cdn.example.test/file").unwrap();
+
+        assert!(can_forward_payload_credentials(&original, &original));
+        assert!(can_forward_payload_credentials(&original, &upgrade));
+        assert!(!can_forward_payload_credentials(&original, &unrelated));
+        assert!(!can_forward_payload_credentials(
+            &reqwest::Url::parse("https://example.test/file").unwrap(),
+            &reqwest::Url::parse("http://example.test/file").unwrap()
+        ));
     }
 
     #[test]

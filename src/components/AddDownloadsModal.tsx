@@ -284,6 +284,7 @@ export const AddDownloadsModal = () => {
   const [useAuth, setUseAuth] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [sftpHostKeyMd, setSftpHostKeyMd] = useState('');
 
   const [advancedExpanded, setAdvancedExpanded] = useState(false);
   const [playlistQualityExpanded, setPlaylistQualityExpanded] = useState(true);
@@ -411,6 +412,7 @@ export const AddDownloadsModal = () => {
     setUseAuth(false);
     setUsername('');
     setPassword('');
+    setSftpHostKeyMd('');
     setAdvancedExpanded(false);
     setChecksumEnabled(false);
     setChecksumAlgo('SHA-256');
@@ -1515,6 +1517,9 @@ export const AddDownloadsModal = () => {
           speedLimit: speedLimitEnabled ? `${speedLimit}K` : undefined,
           username: useAuth ? username.trim() : undefined,
           password: useAuth ? password.trim() : undefined,
+          sftpHostKeyMd: !item.isTorrent && item.sourceUrl.trim().toLowerCase().startsWith('sftp:')
+            ? sftpHostKeyMd.trim() || undefined
+            : undefined,
           headers: headersForRow(contextUrl) || undefined,
           checksum: checksumEnabled && checksumValue.trim()
             ? `${checksumAlgo}=${checksumValue.trim()}`
@@ -1706,6 +1711,9 @@ export const AddDownloadsModal = () => {
     return Boolean(selected && selected.length > 0 && selected.length < item.torrentFiles.length);
   };
   const selectedItem = selectedItemIndex === null ? undefined : parsedItems[selectedItemIndex];
+  const hasSftpRows = parsedItems.some(item => item.selected !== false
+    && !item.isTorrent
+    && item.sourceUrl.trim().toLowerCase().startsWith('sftp:'));
   const selectedPlaylistSourceUrl = selectedItem?.playlistSourceUrl;
   const selectedPlaylistRows = selectedPlaylistSourceUrl
     ? parsedItems.filter(item => item.playlistSourceUrl === selectedPlaylistSourceUrl && item.selected !== false)
@@ -2851,6 +2859,23 @@ export const AddDownloadsModal = () => {
                           <option>MD5</option><option>SHA-1</option><option>SHA-256</option>
                         </select>
                         <input type="text" value={checksumValue} onChange={e=>setChecksumValue(e.target.value)} placeholder={t($ => $.addDownloads.expectedDigest)} className="add-download-control flex-1 px-3 py-1.5 text-xs font-mono" />
+                      </div>
+                    )}
+
+                    {hasSftpRows && (
+                      <div>
+                        <label className="block text-[10px] uppercase font-bold tracking-wider text-text-muted mb-1">
+                          {t($ => $.addDownloads.sftpHostKeyMd)}
+                        </label>
+                        <input
+                          type="text"
+                          value={sftpHostKeyMd}
+                          onChange={event => setSftpHostKeyMd(event.target.value)}
+                          placeholder={t($ => $.addDownloads.sftpHostKeyMdHint)}
+                          className="add-download-control w-full px-3 py-1.5 text-xs font-mono"
+                          autoComplete="off"
+                        />
+                        <p className="mt-1 text-[11px] text-text-muted">{t($ => $.addDownloads.sftpHostKeyMdDescription)}</p>
                       </div>
                     )}
 

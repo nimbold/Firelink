@@ -566,6 +566,10 @@ const VOLATILE_PROGRESS_STATUSES = new Set([
  */
 export const redactDownloadForPersistence = (item: DownloadItem): DownloadItem => {
   const copy: DownloadItem = { ...item };
+  if (item.credentialsRequired === true
+    || DOWNLOAD_SECRET_FIELDS.some(field => Boolean(item[field]))) {
+    copy.credentialsRequired = true;
+  }
   delete copy.fraction;
   delete copy.speed;
   delete copy.eta;
