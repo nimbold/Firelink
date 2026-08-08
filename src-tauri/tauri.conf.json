@@ -48,8 +48,8 @@
         "role": "Viewer",
         "rank": "Alternate",
         "exportedType": {
-          "identifier": "com.nimbold.firelink.torrent",
-          "conformsTo": ["public.data"]
+          "identifier": "org.bittorrent.torrent",
+          "conformsTo": ["public.data", "public.item"]
         }
       }
     ]
