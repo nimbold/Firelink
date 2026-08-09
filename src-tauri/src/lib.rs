@@ -2251,6 +2251,17 @@ const MEDIA_METADATA_TIMEOUT: Duration = Duration::from_secs(55);
 const MEDIA_METADATA_CACHE_MAX_ENTRIES: usize = 128;
 const FILE_METADATA_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_SHELL_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+// Since early 2026, YouTube's default client set can expose only a
+// progressive 360p stream without separate audio formats. Keep the default
+// client for normal authenticated/public behavior, then let yt-dlp try the
+// embedded player client for the richer format set recommended by yt-dlp's
+// maintainers.
+const YTDLP_YOUTUBE_PLAYER_CLIENTS: &str = "youtube:player_client=default,web_embedded";
+
+fn ytdlp_youtube_extractor_args() -> [&'static str; 2] {
+    ["--extractor-args", YTDLP_YOUTUBE_PLAYER_CLIENTS]
+}
+
 fn normalize_media_connections(connections: Option<i32>) -> i32 {
     crate::queue::clamp_download_connections(
         connections.unwrap_or(crate::queue::DOWNLOAD_CONNECTIONS_MAX),
@@ -2771,6 +2782,7 @@ async fn fetch_media_metadata_uncached(
         .arg("3")
         .arg("--compat-options")
         .arg("no-youtube-unavailable-videos")
+        .args(ytdlp_youtube_extractor_args())
         .arg("--print")
         .arg("%(.{title,duration,thumbnail,formats})j");
 
@@ -4412,6 +4424,7 @@ pub(crate) async fn start_media_download_internal(
             .arg("--continue")
             .arg("--compat-options")
             .arg("no-youtube-unavailable-videos")
+            .args(ytdlp_youtube_extractor_args())
             .arg("--print")
             .arg("after_move:%(filepath)s")
             .arg("-o")
@@ -10827,6 +10840,7 @@ mod tests {
         should_retry_without_browser_cookies,
         retry_metadata_with_cookies, should_retry_metadata_with_cookies,
         should_send_metadata_credentials, collect_log_files, FirelinkDeepLink,
+        ytdlp_youtube_extractor_args, YTDLP_YOUTUBE_PLAYER_CLIENTS,
         percent_decode_metadata_value, MediaProgress,
         MediaProgressEmitterState, MediaSpeedSampler, MEDIA_PROGRESS_PREFIX,
         observe_aria2_connections, observe_aria2_connections_with_epoch,
@@ -12115,6 +12129,14 @@ mod tests {
     }
 
     #[test]
+    fn uses_youtube_clients_that_preserve_adaptive_video_and_audio_formats() {
+        assert_eq!(
+            ytdlp_youtube_extractor_args(),
+            ["--extractor-args", "youtube:player_client=default,web_embedded"]
+        );
+    }
+
+    #[test]
     fn parses_playlist_entries_and_skips_duplicates_or_unusable_entries() {
         let metadata = parse_media_playlist_metadata(
             &json!({
@@ -13033,6 +13055,8 @@ mod tests {
                 "3",
                 "--compat-options",
                 "no-youtube-unavailable-videos",
+                "--extractor-args",
+                YTDLP_YOUTUBE_PLAYER_CLIENTS,
                 "--",
                 &url,
             ])
