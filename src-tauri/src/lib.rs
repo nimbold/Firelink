@@ -3073,7 +3073,7 @@ fn push_unique_path(paths: &mut Vec<std::path::PathBuf>, path: std::path::PathBu
     }
 }
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 struct Aria2DaemonGuard {
@@ -3081,6 +3081,7 @@ struct Aria2DaemonGuard {
     startup_error: Mutex<Option<String>>,
     last_stderr: Mutex<String>,
     config_path: Mutex<Option<tempfile::TempPath>>,
+    shutdown_state: AtomicU8,
 }
 
 impl Aria2DaemonGuard {
@@ -3090,7 +3091,62 @@ impl Aria2DaemonGuard {
             startup_error: Mutex::new(None),
             last_stderr: Mutex::new(String::new()),
             config_path: Mutex::new(None),
+            shutdown_state: AtomicU8::new(0),
         }
+    }
+
+    fn exit_allowed(&self) -> bool {
+        self.shutdown_state.load(Ordering::SeqCst) == 2
+    }
+
+    fn begin_shutdown(&self) -> bool {
+        self.shutdown_state
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    fn allow_exit(&self) {
+        self.shutdown_state.store(2, Ordering::SeqCst);
+    }
+}
+
+async fn shutdown_aria2_daemon(app_handle: tauri::AppHandle) {
+    let guard = app_handle.state::<Aria2DaemonGuard>();
+    if let Some(state) = app_handle.try_state::<AppState>() {
+        let port = state.aria2_port.load(Ordering::Relaxed);
+        if port != 0 {
+            let shutdown = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                rpc_call(port, &state.aria2_secret, "aria2.shutdown", serde_json::json!([])),
+            )
+            .await;
+            match shutdown {
+                Ok(Ok(_)) => log::info!("aria2 graceful shutdown requested"),
+                Ok(Err(error)) => log::warn!("aria2 graceful shutdown failed: {error}"),
+                Err(_) => log::warn!("aria2 graceful shutdown timed out"),
+            }
+        }
+    }
+
+    let child = guard.child.lock().ok().and_then(|mut child| child.take());
+    if let Some(mut child) = child {
+        let _ = tokio::task::spawn_blocking(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return;
+                    }
+                }
+            }
+        })
+        .await;
     }
 }
 
@@ -8762,6 +8818,9 @@ async fn verify_torrent_data(
         mirrors: None,
         user_agent: None,
         max_tries: Some(0),
+        minimum_normal_download_speed_kib: None,
+        retry_not_found_errors: None,
+        adaptive_mirror_selection: None,
         proxy: None,
         format_selector: None,
         cookie_source: None,
@@ -9238,6 +9297,19 @@ fn apply_aria2_torrent_dht_options(
     let timeout = queue::normalize_torrent_dht_message_timeout(message_timeout)
         .unwrap_or(queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT);
     command.arg(format!("--dht-message-timeout={timeout}"));
+}
+
+fn apply_aria2_server_stat_options(
+    command: &mut std::process::Command,
+    path: Option<&std::path::Path>,
+) {
+    let Some(path) = path else {
+        return;
+    };
+    command
+        .arg(format!("--server-stat-if={}", path.display()))
+        .arg(format!("--server-stat-of={}", path.display()))
+        .arg("--server-stat-timeout=86400");
 }
 
 fn apply_aria2_torrent_peer_identity_options(
@@ -10741,6 +10813,7 @@ mod tests {
         apply_aria2_torrent_peer_discovery_options,
         apply_aria2_torrent_dht_paths,
         apply_aria2_torrent_dht_options,
+        apply_aria2_server_stat_options,
         aria2_rpc_port_is_occupied,
         parse_firelink_deep_link, parse_ffmpeg_version, parse_media_progress_line,
         collect_opened_torrent_paths,
@@ -10762,6 +10835,7 @@ mod tests {
         retained_torrent_id_from_persisted_record,
         retained_torrent_info_hash_from_persisted_record,
         merge_durable_torrent_telemetry, torrent_identity_magnet, torrent_move_path_pair,
+        Aria2DaemonGuard,
     };
     #[cfg(target_os = "macos")]
     use super::should_apply_dock_badge_update;
@@ -11011,6 +11085,42 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["--dht-message-timeout=10"]
         );
+    }
+
+    #[test]
+    fn aria2_adaptive_mirror_history_is_private_and_launch_scoped() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("server-stat.txt");
+        let mut command = std::process::Command::new("aria2c");
+        apply_aria2_server_stat_options(&mut command, Some(&path));
+        assert_eq!(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec![
+                format!("--server-stat-if={}", path.display()),
+                format!("--server-stat-of={}", path.display()),
+                "--server-stat-timeout=86400".to_string(),
+            ]
+        );
+
+        let mut disabled = std::process::Command::new("aria2c");
+        apply_aria2_server_stat_options(&mut disabled, None);
+        assert_eq!(disabled.get_args().count(), 0);
+    }
+
+    #[test]
+    fn aria2_shutdown_blocks_repeated_exit_requests_until_cleanup_finishes() {
+        let guard = Aria2DaemonGuard::new();
+        assert!(!guard.exit_allowed());
+        assert!(guard.begin_shutdown());
+        assert!(!guard.begin_shutdown());
+        assert!(!guard.exit_allowed());
+
+        guard.allow_exit();
+        assert!(guard.exit_allowed());
+        assert!(!guard.begin_shutdown());
     }
 
     #[test]
@@ -13765,6 +13875,15 @@ pub fn run() {
             // conflict must fail startup; silently allowing Aria2 to fall back
             // to a user-global dht.dat would escape the storage boundary.
             let aria2_dht_paths = storage_layout.prepare_aria2_dht_paths()?;
+            let aria2_server_stat_path = match storage_layout.prepare_aria2_server_stat_path() {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    log::warn!(
+                        "adaptive mirror history is disabled for this session: {error}"
+                    );
+                    None
+                }
+            };
             if let Err(error) = crate::torrent::remove_orphaned_probe_dirs(app.handle()) {
                 log::warn!("could not remove orphaned torrent probes: {error}");
             }
@@ -14044,6 +14163,10 @@ pub fn run() {
                             apply_aria2_torrent_dht_options(
                                 &mut cmd,
                                 torrent_startup_settings.dht_message_timeout,
+                            );
+                            apply_aria2_server_stat_options(
+                                &mut cmd,
+                                aria2_server_stat_path.as_deref(),
                             );
 
                             apply_aria2_torrent_peer_discovery_options(
@@ -15008,9 +15131,21 @@ pub fn run() {
                     restore_main_window(app_handle);
                 }
             }
-            tauri::RunEvent::ExitRequested { .. } => {
+            tauri::RunEvent::ExitRequested { code, api, .. } => {
                 let state = app_handle.state::<AppState>();
                 let _ = state.extension_server_shutdown.send(true);
+                let guard = app_handle.state::<Aria2DaemonGuard>();
+                if !guard.exit_allowed() {
+                    api.prevent_exit();
+                    if guard.begin_shutdown() {
+                        let app = app_handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            shutdown_aria2_daemon(app.clone()).await;
+                            app.state::<Aria2DaemonGuard>().allow_exit();
+                            app.exit(code.unwrap_or(0));
+                        });
+                    }
+                }
             }
             _ => {}
         });

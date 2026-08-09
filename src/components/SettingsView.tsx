@@ -963,6 +963,43 @@ runEngineChecks(false);
                     className="app-control w-24 text-center"
                   />
                 </div>
+                <div className="mac-settings-row">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.downloads.minimumNormalDownloadSpeed)}</span>
+                    <small>{t($ => $.settings.downloads.minimumNormalDownloadSpeedDescription)}</small>
+                  </div>
+                  <input
+                    type="number" min="0" max="1048576"
+                    value={settings.minimumNormalDownloadSpeedKiB}
+                    onChange={(event) => settings.setMinimumNormalDownloadSpeedKiB(Number(event.target.value))}
+                    className="app-control w-24 text-center"
+                    aria-label={t($ => $.settings.downloads.minimumNormalDownloadSpeed)}
+                  />
+                </div>
+                <label className="mac-settings-row cursor-default">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.downloads.retryNotFoundErrors)}</span>
+                    <small>{t($ => $.settings.downloads.retryNotFoundErrorsDescription)}</small>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.retryNotFoundErrors}
+                    onChange={(event) => settings.setRetryNotFoundErrors(event.target.checked)}
+                    className="mac-switch"
+                  />
+                </label>
+                <label className="mac-settings-row cursor-default">
+                  <div className="settings-row-label">
+                    <span>{t($ => $.settings.downloads.adaptiveMirrorSelection)}</span>
+                    <small>{t($ => $.settings.downloads.adaptiveMirrorSelectionDescription)}</small>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.adaptiveMirrorSelection}
+                    onChange={(event) => settings.setAdaptiveMirrorSelection(event.target.checked)}
+                    className="mac-switch"
+                  />
+                </label>
               </div>
 
               <div className="mac-settings-group">

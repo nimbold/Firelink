@@ -50,6 +50,16 @@ pub const MIN_TORRENT_LISTEN_PORT: u16 = 1024;
 pub const DEFAULT_TORRENT_LISTEN_PORT_SPEC: &str = "6881-6999";
 pub const DEFAULT_ARIA2_DISK_CACHE: &str = "16M";
 pub const MAX_ARIA2_DISK_CACHE_MIB: u64 = 1024;
+pub const MAX_MINIMUM_NORMAL_DOWNLOAD_SPEED_KIB: u32 = 1_048_576;
+
+pub fn normalize_minimum_normal_download_speed_kib(value: u32) -> Result<u32, String> {
+    if value > MAX_MINIMUM_NORMAL_DOWNLOAD_SPEED_KIB {
+        return Err(format!(
+            "minimum normal download speed must be between 0 and {MAX_MINIMUM_NORMAL_DOWNLOAD_SPEED_KIB} KiB/s"
+        ));
+    }
+    Ok(value)
+}
 
 pub fn normalize_sftp_host_key_md(value: Option<&str>) -> Result<Option<String>, String> {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -761,6 +771,9 @@ pub struct SpawnPayload {
     pub mirrors: Option<String>,
     pub user_agent: Option<String>,
     pub max_tries: Option<i32>,
+    pub minimum_normal_download_speed_kib: u32,
+    pub retry_not_found_errors: bool,
+    pub adaptive_mirror_selection: bool,
     pub proxy: Option<String>,
     /// Runtime-only resolver selection. This is never part of an enqueue or
     /// persisted download payload.
@@ -4932,6 +4945,27 @@ fn is_retryable_aria2_error(error: &str) -> bool {
     is_transient_network_error(error) || is_aria2_range_mode_error(error)
 }
 
+fn is_aria2_not_found_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("aria2 error code 3") || lower.contains("aria2 error code 4")
+}
+
+fn is_aria2_low_speed_error(error: &str) -> bool {
+    error
+        .to_ascii_lowercase()
+        .contains("aria2 error code 5")
+}
+
+fn is_retryable_aria2_error_for_payload(payload: &SpawnPayload, error: &str) -> bool {
+    is_retryable_aria2_error(error)
+        || (!payload.is_torrent
+            && payload.retry_not_found_errors
+            && is_aria2_not_found_error(error))
+        || (!payload.is_torrent
+            && payload.minimum_normal_download_speed_kib > 0
+            && is_aria2_low_speed_error(error))
+}
+
 fn should_use_aria2_system_resolver_fallback(
     payload: &SpawnPayload,
     error: &str,
@@ -4958,7 +4992,9 @@ fn aria2_retry_action(
     if should_use_aria2_system_resolver_fallback(payload, error, async_dns_supported) {
         return Aria2RetryAction::SystemResolverFallback;
     }
-    if is_retryable_aria2_error(error) && strike < automatic_retry_limit(payload.max_tries) {
+    if is_retryable_aria2_error_for_payload(payload, error)
+        && strike < automatic_retry_limit(payload.max_tries)
+    {
         Aria2RetryAction::OrdinaryRetry
     } else {
         Aria2RetryAction::Terminal
@@ -5003,53 +5039,111 @@ enum BoundedRangeSupport {
     Unknown,
 }
 
-async fn effective_aria2_connections(id: &str, payload: &SpawnPayload) -> Result<i32, String> {
-    let requested = clamp_download_connections(
-        payload
-            .connections
-            .unwrap_or(DOWNLOAD_CONNECTIONS_MIN),
-    );
-    if requested <= 1 {
-        return Ok(requested);
-    }
+struct HttpTransferProbe {
+    final_uri: String,
+    range_support: BoundedRangeSupport,
+    credentials_allowed: bool,
+}
 
-    for uri in crate::collect_download_uris(&payload.url, payload.mirrors.as_deref()) {
+struct PreparedNormalTransfer {
+    uris: Vec<String>,
+    connections: i32,
+    credentials_allowed: bool,
+}
+
+fn payload_has_credential_material(payload: &SpawnPayload) -> bool {
+    [
+        payload.username.as_deref(),
+        payload.password.as_deref(),
+        payload.cookies.as_deref(),
+        payload.headers.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| !value.trim().is_empty())
+}
+
+async fn prepare_normal_transfer(
+    id: &str,
+    payload: &SpawnPayload,
+) -> Result<PreparedNormalTransfer, String> {
+    let credential_origin = reqwest::Url::parse(&payload.url)
+        .map_err(|_| "normal download has an invalid primary URL".to_string())?;
+    let requested =
+        clamp_download_connections(payload.connections.unwrap_or(DOWNLOAD_CONNECTIONS_MIN));
+    let mut connections = requested;
+    let mut uris = Vec::new();
+    let mut credentials_allowed = true;
+    for (index, uri) in crate::collect_download_uris(&payload.url, payload.mirrors.as_deref())
+        .into_iter()
+        .enumerate()
+    {
         if !is_http_uri(&uri) {
+            crate::resolve_and_validate_url_host(
+                &reqwest::Url::parse(&uri).map_err(|_| "SSRF blocked: Invalid URL".to_string())?,
+            )
+            .await?;
+            uris.push(uri);
             continue;
         }
 
-        match probe_bounded_range_support(&uri, payload).await {
-            Ok(BoundedRangeSupport::Unsupported) => {
-                log::warn!(
-                    "aria2 range probe [{}]: {} does not honor bounded byte ranges; using one connection",
-                    id,
-                    uri_host_for_log(&uri)
-                );
-                return Ok(1);
+        match probe_bounded_range_support(&uri, payload, &credential_origin).await {
+            Ok(probe) => {
+                if index > 0
+                    && payload_has_credential_material(payload)
+                    && !probe.credentials_allowed
+                {
+                    return Err(
+                        "credentialed mirrors must use the same origin as the primary URL"
+                            .to_string(),
+                    );
+                }
+                credentials_allowed &= probe.credentials_allowed;
+                uris.push(probe.final_uri);
+                match probe.range_support {
+                    BoundedRangeSupport::Unsupported if requested > 1 => {
+                        log::warn!(
+                            "aria2 range probe [{}]: {} does not honor bounded byte ranges; using one connection",
+                            id,
+                            uri_host_for_log(&uri)
+                        );
+                        connections = 1;
+                    }
+                    BoundedRangeSupport::Unknown if requested > 1 => {
+                        log::debug!(
+                            "aria2 range probe [{}]: {} range support unknown; keeping {} connections",
+                            id,
+                            uri_host_for_log(&uri),
+                            requested
+                        );
+                    }
+                    _ => {}
+                }
             }
-            Ok(BoundedRangeSupport::Supported) => {}
-            Ok(BoundedRangeSupport::Unknown) => {
-                log::debug!(
-                    "aria2 range probe [{}]: {} range support unknown; keeping {} connections",
-                    id,
-                    uri_host_for_log(&uri),
-                    requested
-                );
-            }
-            Err(error) if error.starts_with("SSRF blocked:") => return Err(error),
             Err(error) => {
-                log::debug!(
-                    "aria2 range probe [{}]: {} probe failed: {}; keeping {} connections",
-                    id,
+                return Err(format!(
+                    "normal transfer preflight failed for {}: {}",
                     uri_host_for_log(&uri),
-                    error,
-                    requested
-                );
+                    crate::redact_sensitive_text(&error)
+                ));
             }
         }
     }
-
-    Ok(requested)
+    uris.dedup();
+    if uris.is_empty() {
+        return Err("normal download has no usable URI".to_string());
+    }
+    if payload_has_credential_material(payload) && !credentials_allowed {
+        log::warn!(
+            "aria2 redirect policy [{}]: stripping credentials after a cross-origin redirect",
+            id
+        );
+    }
+    Ok(PreparedNormalTransfer {
+        uris,
+        connections,
+        credentials_allowed,
+    })
 }
 
 fn is_http_uri(uri: &str) -> bool {
@@ -5090,12 +5184,12 @@ pub(crate) fn aria2_all_proxy_value(proxy: &str) -> Result<Option<String>, Strin
 async fn probe_bounded_range_support(
     uri: &str,
     payload: &SpawnPayload,
-) -> Result<BoundedRangeSupport, String> {
+    credential_origin: &reqwest::Url,
+) -> Result<HttpTransferProbe, String> {
     crate::ensure_reqwest_crypto_provider();
 
-    let original = reqwest::Url::parse(uri).map_err(|error| error.to_string())?;
-    let mut current = original.clone();
-    let mut credentials_allowed = true;
+    let mut current = reqwest::Url::parse(uri).map_err(|error| error.to_string())?;
+    let mut credentials_allowed = can_forward_payload_credentials(credential_origin, &current);
     for redirect_count in 0..=5 {
         let (host, address) = crate::resolve_and_validate_url_host(&current).await?;
         let mut builder = reqwest::Client::builder()
@@ -5112,7 +5206,8 @@ async fn probe_bounded_range_support(
             if proxy.eq_ignore_ascii_case("none") {
                 builder = builder.no_proxy();
             } else {
-                builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|error| error.to_string())?);
+                builder =
+                    builder.proxy(reqwest::Proxy::all(proxy).map_err(|error| error.to_string())?);
             }
         }
 
@@ -5121,9 +5216,7 @@ async fn probe_bounded_range_support(
             .get(current.clone())
             .header(reqwest::header::RANGE, "bytes=0-0")
             .header(reqwest::header::ACCEPT_ENCODING, "identity");
-        let include_credentials = credentials_allowed
-            && can_forward_payload_credentials(&original, &current);
-        let response = apply_payload_headers(request, payload, include_credentials)
+        let response = apply_payload_headers(request, payload, credentials_allowed)
             .send()
             .await
             .map_err(|error| error.to_string())?;
@@ -5143,8 +5236,8 @@ async fn probe_bounded_range_support(
             if !matches!(next.scheme(), "http" | "https") {
                 return Err("range probe redirect uses an unsupported scheme".to_string());
             }
-            credentials_allowed = credentials_allowed
-                && can_forward_payload_credentials(&original, &next);
+            credentials_allowed =
+                credentials_allowed && can_forward_payload_credentials(credential_origin, &next);
             current = next;
             continue;
         }
@@ -5153,19 +5246,17 @@ async fn probe_bounded_range_support(
             .headers()
             .get(reqwest::header::CONTENT_RANGE)
             .and_then(|value| value.to_str().ok());
-        return Ok(classify_bounded_range_response(
-            response.status(),
-            content_range,
-        ));
+        return Ok(HttpTransferProbe {
+            final_uri: current.to_string(),
+            range_support: classify_bounded_range_response(response.status(), content_range),
+            credentials_allowed,
+        });
     }
 
     Err("range probe redirect loop exhausted".to_string())
 }
 
-fn can_forward_payload_credentials(
-    original: &reqwest::Url,
-    current: &reqwest::Url,
-) -> bool {
+fn can_forward_payload_credentials(original: &reqwest::Url, current: &reqwest::Url) -> bool {
     original.host() == current.host()
         && (original.port_or_known_default() == current.port_or_known_default()
             || (original.scheme() == "http"
@@ -5368,6 +5459,31 @@ fn apply_aria2_connection_options(
         "stream-piece-selector".to_string(),
         serde_json::json!(ARIA2_STREAM_PIECE_SELECTOR),
     );
+}
+
+fn apply_aria2_normal_reliability_options(
+    options: &mut serde_json::Map<String, serde_json::Value>,
+    payload: &SpawnPayload,
+    uri_count: usize,
+) -> Result<(), String> {
+    if payload.is_torrent {
+        return Ok(());
+    }
+    let minimum_speed =
+        normalize_minimum_normal_download_speed_kib(payload.minimum_normal_download_speed_kib)?;
+    if minimum_speed > 0 {
+        options.insert(
+            "lowest-speed-limit".to_string(),
+            serde_json::json!(format!("{minimum_speed}K")),
+        );
+    }
+    if payload.adaptive_mirror_selection && uri_count > 1 {
+        options.insert(
+            "uri-selector".to_string(),
+            serde_json::json!("adaptive"),
+        );
+    }
+    Ok(())
 }
 
 fn apply_aria2_resolver_options(
@@ -6378,18 +6494,22 @@ impl SidecarSpawner for ProductionSpawner {
         if !payload.is_torrent {
             options.insert("out".to_string(), serde_json::json!(safe_filename));
         }
-        let transfer_uris = if payload.is_torrent {
-            Vec::new()
+        let (transfer_uris, transfer_connections, credentials_allowed) = if payload.is_torrent {
+            (Vec::new(), DOWNLOAD_CONNECTIONS_MIN, true)
         } else {
-            crate::collect_download_uris(&payload.url, payload.mirrors.as_deref())
+            let requested = crate::collect_download_uris(&payload.url, payload.mirrors.as_deref());
+            validate_aria2_transfer_network_policy(&requested).await?;
+            let prepared = prepare_normal_transfer(id, payload).await?;
+            (
+                prepared.uris,
+                prepared.connections,
+                prepared.credentials_allowed,
+            )
         };
-        if !payload.is_torrent {
-            validate_aria2_transfer_network_policy(&transfer_uris).await?;
-        }
         if should_apply_aria2_connection_options(payload) {
-            let conn = effective_aria2_connections(id, payload).await?;
-            apply_aria2_connection_options(&mut options, conn);
+            apply_aria2_connection_options(&mut options, transfer_connections);
         }
+        apply_aria2_normal_reliability_options(&mut options, payload, transfer_uris.len())?;
         apply_aria2_follow_options(&mut options, payload);
         apply_aria2_torrent_options(&mut options, payload)?;
         let mt = aria2_attempt_limit(payload.max_tries);
@@ -6408,20 +6528,24 @@ impl SidecarSpawner for ProductionSpawner {
             options.insert("max-download-limit".to_string(), serde_json::json!(speed));
         }
         if !payload.is_torrent {
-            apply_protocol_auth_options(&mut options, payload, &transfer_uris);
+            if credentials_allowed {
+                apply_protocol_auth_options(&mut options, payload, &transfer_uris);
+            }
             apply_checksum_options(&mut options, payload.checksum.as_deref());
         }
         if let Some(ua) = &payload.user_agent {
             options.insert("user-agent".to_string(), serde_json::json!(ua));
         }
         let mut header_list = Vec::new();
-        if let Some(cook) = &payload.cookies {
-            header_list.push(format!("Cookie: {}", cook));
-        }
-        if let Some(hdrs) = &payload.headers {
-            for line in hdrs.lines() {
-                if !line.trim().is_empty() {
-                    header_list.push(line.trim().to_string());
+        if payload.is_torrent || credentials_allowed {
+            if let Some(cook) = &payload.cookies {
+                header_list.push(format!("Cookie: {}", cook));
+            }
+            if let Some(hdrs) = &payload.headers {
+                for line in hdrs.lines() {
+                    if !line.trim().is_empty() {
+                        header_list.push(line.trim().to_string());
+                    }
                 }
             }
         }
@@ -6941,6 +7065,15 @@ pub struct EnqueueItem {
     pub mirrors: Option<String>,
     pub user_agent: Option<String>,
     pub max_tries: Option<i32>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub minimum_normal_download_speed_kib: Option<u32>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub retry_not_found_errors: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub adaptive_mirror_selection: Option<bool>,
     pub proxy: Option<String>,
     pub format_selector: Option<String>,
     pub cookie_source: Option<String>,
@@ -7055,6 +7188,11 @@ impl EnqueueItem {
                 mirrors: self.mirrors,
                 user_agent: self.user_agent,
                 max_tries: self.max_tries,
+                minimum_normal_download_speed_kib: self
+                    .minimum_normal_download_speed_kib
+                    .unwrap_or_default(),
+                retry_not_found_errors: self.retry_not_found_errors.unwrap_or(false),
+                adaptive_mirror_selection: self.adaptive_mirror_selection.unwrap_or(true),
                 proxy: self.proxy,
                 aria2_resolver_mode: Aria2ResolverMode::Automatic,
                 format_selector: self.format_selector,
@@ -7166,6 +7304,47 @@ mod tests {
             options.get("stream-piece-selector"),
             Some(&serde_json::json!("inorder"))
         );
+    }
+
+    #[test]
+    fn normal_reliability_options_are_bounded_and_do_not_apply_to_torrents() {
+        let mut options = serde_json::Map::new();
+        let payload = SpawnPayload {
+            minimum_normal_download_speed_kib: 64,
+            adaptive_mirror_selection: true,
+            ..SpawnPayload::default()
+        };
+        apply_aria2_normal_reliability_options(&mut options, &payload, 2).unwrap();
+        assert_eq!(
+            options.get("lowest-speed-limit"),
+            Some(&serde_json::json!("64K"))
+        );
+        assert_eq!(
+            options.get("uri-selector"),
+            Some(&serde_json::json!("adaptive"))
+        );
+
+        options.clear();
+        apply_aria2_normal_reliability_options(&mut options, &payload, 1).unwrap();
+        assert!(!options.contains_key("uri-selector"));
+
+        options.clear();
+        apply_aria2_normal_reliability_options(
+            &mut options,
+            &SpawnPayload {
+                is_torrent: true,
+                minimum_normal_download_speed_kib: 64,
+                adaptive_mirror_selection: true,
+                ..SpawnPayload::default()
+            },
+            2,
+        )
+        .unwrap();
+        assert!(options.is_empty());
+        assert!(normalize_minimum_normal_download_speed_kib(
+            MAX_MINIMUM_NORMAL_DOWNLOAD_SPEED_KIB + 1
+        )
+        .is_err());
     }
 
     #[test]
@@ -8405,6 +8584,26 @@ mod tests {
     }
 
     #[test]
+    fn enqueue_item_carries_normal_reliability_policy_into_the_spawn_payload() {
+        let item: EnqueueItem = serde_json::from_value(serde_json::json!({
+            "id": "normal-reliability",
+            "queue_id": "main",
+            "url": "https://example.test/file.bin",
+            "destination": "/tmp/downloads",
+            "filename": "file.bin",
+            "minimum_normal_download_speed_kib": 64,
+            "retry_not_found_errors": true,
+            "adaptive_mirror_selection": false
+        }))
+        .expect("frontend enqueue payload should deserialize");
+
+        let payload = item.into_task().payload;
+        assert_eq!(payload.minimum_normal_download_speed_kib, 64);
+        assert!(payload.retry_not_found_errors);
+        assert!(!payload.adaptive_mirror_selection);
+    }
+
+    #[test]
     fn enqueue_item_carries_torrent_stop_timeout_into_the_spawn_payload() {
         let item: EnqueueItem = serde_json::from_value(serde_json::json!({
             "id": "torrent-stop-timeout",
@@ -8819,6 +9018,75 @@ mod tests {
     #[test]
     fn aria2_stall_timeout_outcome_is_not_automatically_retried() {
         assert!(!is_retryable_aria2_error("aria2 error code 7: unfinished download"));
+    }
+
+    #[test]
+    fn optional_not_found_and_low_speed_retries_use_the_firelink_budget() {
+        let not_found = "aria2 error code 3: Resource not found";
+        let low_speed = "aria2 error code 5: Download speed is too slow";
+
+        assert_eq!(
+            aria2_retry_action(&SpawnPayload::default(), not_found, 0, false),
+            Aria2RetryAction::Terminal
+        );
+        assert_eq!(
+            aria2_retry_action(
+                &SpawnPayload {
+                    retry_not_found_errors: true,
+                    max_tries: Some(1),
+                    ..SpawnPayload::default()
+                },
+                not_found,
+                0,
+                false,
+            ),
+            Aria2RetryAction::OrdinaryRetry
+        );
+        assert_eq!(
+            aria2_retry_action(
+                &SpawnPayload {
+                    retry_not_found_errors: true,
+                    max_tries: Some(1),
+                    ..SpawnPayload::default()
+                },
+                not_found,
+                1,
+                false,
+            ),
+            Aria2RetryAction::Terminal
+        );
+        assert_eq!(
+            aria2_retry_action(&SpawnPayload::default(), low_speed, 0, false),
+            Aria2RetryAction::Terminal
+        );
+        assert_eq!(
+            aria2_retry_action(
+                &SpawnPayload {
+                    minimum_normal_download_speed_kib: 1,
+                    max_tries: Some(1),
+                    ..SpawnPayload::default()
+                },
+                low_speed,
+                0,
+                false,
+            ),
+            Aria2RetryAction::OrdinaryRetry
+        );
+        assert_eq!(
+            aria2_retry_action(
+                &SpawnPayload {
+                    is_torrent: true,
+                    minimum_normal_download_speed_kib: 1,
+                    retry_not_found_errors: true,
+                    max_tries: Some(1),
+                    ..SpawnPayload::default()
+                },
+                low_speed,
+                0,
+                false,
+            ),
+            Aria2RetryAction::Terminal
+        );
     }
 
     #[test]

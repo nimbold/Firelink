@@ -82,3 +82,5 @@ jobs:
         run: node scripts/smoke-torrent.js --binary src-tauri/engine-dist/${{ matrix.target }}/aria2c-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }} --failure-paths
       - name: Run Aria2 resolver smoke
         run: node scripts/smoke-aria2-resolver.js --binary src-tauri/engine-dist/${{ matrix.target }}/aria2c-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }}
+      - name: Run Aria2 normal-transfer smoke
+        run: node scripts/smoke-aria2-transfers.js --binary src-tauri/engine-dist/${{ matrix.target }}/aria2c-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }}

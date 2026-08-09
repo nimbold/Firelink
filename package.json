@@ -36,6 +36,7 @@
     "smoke:torrent": "node scripts/smoke-torrent.js",
     "smoke:torrent:failure-paths": "node scripts/smoke-torrent.js --failure-paths",
     "smoke:aria2:resolver": "node scripts/smoke-aria2-resolver.js",
+    "smoke:aria2:transfers": "node scripts/smoke-aria2-transfers.js",
     "test:torrent:rpc": "cd src-tauri && cargo test --test torrent_rpc -- --nocapture",
     "verify:macos-signing": "node scripts/verify-macos-signing.js",
     "preview": "vite preview",

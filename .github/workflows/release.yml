@@ -118,6 +118,9 @@ jobs:
           test -n "$DMG"
           npm run verify:macos-signing -- --app "$APP" --dmg "$DMG"
           node scripts/verify-binaries.js --search-root "$APP" --target ${{ matrix.target }}
+          ARIA2="$(find "$APP" -type f -name 'aria2c-${{ matrix.target }}' -print -quit)"
+          test -n "$ARIA2"
+          node scripts/smoke-aria2-transfers.js --binary "$ARIA2"
           node scripts/smoke-packaged-app.js --executable "$APP/Contents/MacOS/firelink"
       - name: Verify Windows installer payload and launch
         if: runner.os == 'Windows'
@@ -130,6 +133,12 @@ jobs:
           & 7z x $installer.FullName "-o$extractRoot" -y
           if ($LASTEXITCODE -ne 0) { throw "7z failed to extract the Windows installer payload (exit code $LASTEXITCODE)." }
           node scripts/verify-binaries.js --search-root "$extractRoot" --target ${{ matrix.target }}
+          $aria2 = Get-ChildItem $extractRoot -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ieq "aria2c-${{ matrix.target }}.exe" } |
+            Sort-Object FullName |
+            Select-Object -First 1
+          if (-not $aria2) { throw "Packaged Aria2 executable was not found in the installer payload." }
+          node scripts/smoke-aria2-transfers.js --binary $aria2.FullName
 
           $portableRoot = "$env:RUNNER_TEMP/firelink-portable-payload"
           $portableArtifactDir = "$env:RUNNER_TEMP/firelink-portable"
@@ -195,6 +204,9 @@ jobs:
           chmod +x "$APPIMAGE"
           (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/$APPIMAGE" --appimage-extract >/dev/null)
           node scripts/verify-binaries.js --search-root "$RUNNER_TEMP/squashfs-root" --target ${{ matrix.target }}
+          ARIA2="$(find "$RUNNER_TEMP/squashfs-root" -type f -name 'aria2c-${{ matrix.target }}' -print -quit)"
+          test -n "$ARIA2"
+          node scripts/smoke-aria2-transfers.js --binary "$ARIA2"
           xvfb-run -a node scripts/smoke-packaged-app.js --executable "$RUNNER_TEMP/squashfs-root/AppRun"
       - uses: actions/upload-artifact@v7
         with:

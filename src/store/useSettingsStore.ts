@@ -234,6 +234,9 @@ export interface SettingsState {
   // Replicated SwiftUI App Settings
   perServerConnections: number;
   maxAutomaticRetries: number;
+  minimumNormalDownloadSpeedKiB: number;
+  retryNotFoundErrors: boolean;
+  adaptiveMirrorSelection: boolean;
   showNotifications: boolean;
   playCompletionSound: boolean;
   autoAddClipboardLinks: boolean;
@@ -307,6 +310,9 @@ export interface SettingsState {
 
   setPerServerConnections: (count: number) => void;
   setMaxAutomaticRetries: (count: number) => void;
+  setMinimumNormalDownloadSpeedKiB: (speed: number) => void;
+  setRetryNotFoundErrors: (enabled: boolean) => void;
+  setAdaptiveMirrorSelection: (enabled: boolean) => void;
   setShowNotifications: (show: boolean) => void;
   setPlayCompletionSound: (play: boolean) => void;
   setAutoAddClipboardLinks: (enabled: boolean) => void;
@@ -403,6 +409,9 @@ export const useSettingsStore = create<SettingsState>()(
       // Replicated SwiftUI defaults
       perServerConnections: 16,
       maxAutomaticRetries: 3,
+      minimumNormalDownloadSpeedKiB: 0,
+      retryNotFoundErrors: false,
+      adaptiveMirrorSelection: true,
       showNotifications: true,
       playCompletionSound: false,
       autoAddClipboardLinks: false,
@@ -526,6 +535,16 @@ export const useSettingsStore = create<SettingsState>()(
       setMaxAutomaticRetries: (maxAutomaticRetries) => set({
         maxAutomaticRetries: clampSettingInteger(maxAutomaticRetries, 0, 10, 3)
       }),
+      setMinimumNormalDownloadSpeedKiB: (minimumNormalDownloadSpeedKiB) => set({
+        minimumNormalDownloadSpeedKiB: clampSettingInteger(
+          minimumNormalDownloadSpeedKiB,
+          0,
+          1_048_576,
+          0
+        )
+      }),
+      setRetryNotFoundErrors: (retryNotFoundErrors) => set({ retryNotFoundErrors }),
+      setAdaptiveMirrorSelection: (adaptiveMirrorSelection) => set({ adaptiveMirrorSelection }),
       setShowNotifications: (showNotifications) => set({ showNotifications }),
       setPlayCompletionSound: (playCompletionSound) => set({ playCompletionSound }),
       setAutoAddClipboardLinks: (autoAddClipboardLinks) => set({ autoAddClipboardLinks }),
@@ -762,6 +781,9 @@ export const useSettingsStore = create<SettingsState>()(
         
         perServerConnections: state.perServerConnections,
         maxAutomaticRetries: state.maxAutomaticRetries,
+        minimumNormalDownloadSpeedKiB: state.minimumNormalDownloadSpeedKiB,
+        retryNotFoundErrors: state.retryNotFoundErrors,
+        adaptiveMirrorSelection: state.adaptiveMirrorSelection,
         showNotifications: state.showNotifications,
         playCompletionSound: state.playCompletionSound,
         autoAddClipboardLinks: state.autoAddClipboardLinks,
@@ -960,6 +982,20 @@ export const useSettingsStore = create<SettingsState>()(
             0,
             10,
             currentState.maxAutomaticRetries
+          ),
+          minimumNormalDownloadSpeedKiB: clampSettingInteger(
+            persisted.minimumNormalDownloadSpeedKiB,
+            0,
+            1_048_576,
+            currentState.minimumNormalDownloadSpeedKiB
+          ),
+          retryNotFoundErrors: persistedBoolean(
+            persisted.retryNotFoundErrors,
+            currentState.retryNotFoundErrors
+          ),
+          adaptiveMirrorSelection: persistedBoolean(
+            persisted.adaptiveMirrorSelection,
+            currentState.adaptiveMirrorSelection
           ),
           speedLimitPresetValues: Array.isArray(persisted.speedLimitPresetValues)
             ? persisted.speedLimitPresetValues

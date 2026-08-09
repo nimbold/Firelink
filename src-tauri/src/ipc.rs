@@ -54,6 +54,10 @@ fn default_aria2_disk_cache() -> String {
     crate::queue::DEFAULT_ARIA2_DISK_CACHE.to_string()
 }
 
+fn default_adaptive_mirror_selection() -> bool {
+    true
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../src/bindings/")]
@@ -686,6 +690,12 @@ pub struct PersistedSettings {
     pub last_custom_speed_limit_unit: String,
     pub per_server_connections: i32,
     pub max_automatic_retries: i32,
+    #[serde(default)]
+    pub minimum_normal_download_speed_ki_b: u32,
+    #[serde(default)]
+    pub retry_not_found_errors: bool,
+    #[serde(default = "default_adaptive_mirror_selection")]
+    pub adaptive_mirror_selection: bool,
     pub show_notifications: bool,
     pub play_completion_sound: bool,
     #[serde(default)]

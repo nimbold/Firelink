@@ -581,6 +581,11 @@ fn validate_settings(settings: &mut PersistedSettings) {
     settings.max_concurrent_downloads = settings.max_concurrent_downloads.min(12);
     settings.per_server_connections = settings.per_server_connections.clamp(1, 16);
     settings.max_automatic_retries = settings.max_automatic_retries.clamp(0, 10);
+    settings.minimum_normal_download_speed_ki_b =
+        crate::queue::normalize_minimum_normal_download_speed_kib(
+            settings.minimum_normal_download_speed_ki_b,
+        )
+        .unwrap_or_default();
     settings.torrent_overall_upload_limit = crate::normalize_speed_limit_for_aria2(
         &settings.torrent_overall_upload_limit,
     )
@@ -851,6 +856,9 @@ fn default_settings() -> PersistedSettings {
         last_custom_speed_limit_unit: "MB/s".to_string(),
         per_server_connections: 16,
         max_automatic_retries: 3,
+        minimum_normal_download_speed_ki_b: 0,
+        retry_not_found_errors: false,
+        adaptive_mirror_selection: true,
         show_notifications: true,
         play_completion_sound: false,
         auto_add_clipboard_links: false,
@@ -1167,7 +1175,8 @@ mod tests {
             "state": {
                 "maxConcurrentDownloads": 99,
                 "perServerConnections": -4,
-                "maxAutomaticRetries": 99
+                "maxAutomaticRetries": 99,
+                "minimumNormalDownloadSpeedKiB": 2000000
             },
             "version": 3
         });
@@ -1177,6 +1186,17 @@ mod tests {
         assert_eq!(settings.max_concurrent_downloads, 12);
         assert_eq!(settings.per_server_connections, 1);
         assert_eq!(settings.max_automatic_retries, 10);
+        assert_eq!(settings.minimum_normal_download_speed_ki_b, 0);
+    }
+
+    #[test]
+    fn normal_reliability_defaults_are_migration_safe() {
+        let stored = json!({ "state": {}, "version": 5 });
+        let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
+
+        assert_eq!(settings.minimum_normal_download_speed_ki_b, 0);
+        assert!(!settings.retry_not_found_errors);
+        assert!(settings.adaptive_mirror_selection);
     }
 
     #[test]

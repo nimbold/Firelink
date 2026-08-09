@@ -36,6 +36,9 @@ vi.mock('./useSettingsStore', () => ({
       perServerConnections: 16,
       customUserAgent: '',
       maxAutomaticRetries: 3,
+      minimumNormalDownloadSpeedKiB: 0,
+      retryNotFoundErrors: false,
+      adaptiveMirrorSelection: true,
       mediaCookieSource: 'none',
       baseDownloadFolder: '~/Downloads',
       categorySubfoldersEnabled: true,
@@ -68,6 +71,9 @@ describe('useDownloadStore', () => {
       perServerConnections: 16,
       customUserAgent: '',
       maxAutomaticRetries: 3,
+      minimumNormalDownloadSpeedKiB: 0,
+      retryNotFoundErrors: false,
+      adaptiveMirrorSelection: true,
       mediaCookieSource: 'none',
       baseDownloadFolder: '~/Downloads',
       categorySubfoldersEnabled: true,
@@ -1145,6 +1151,38 @@ describe('useDownloadStore', () => {
       eta: '10s',
       hasBeenDispatched: true
     });
+  });
+
+  it('dispatches normal reliability and adaptive mirror settings to the native queue', async () => {
+    vi.mocked(useSettingsStore.getState).mockReturnValue({
+      ...useSettingsStore.getState(),
+      minimumNormalDownloadSpeedKiB: 64,
+      retryNotFoundErrors: true,
+      adaptiveMirrorSelection: false,
+    } as ReturnType<typeof useSettingsStore.getState>);
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'reliable', url: 'https://example.test/file', fileName: 'file.bin', destination: '/tmp', status: 'queued', category: 'Other', dateAdded: '', queueId: 'MAIN', hasBeenDispatched: false },
+      ] as any[],
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'enqueue_download') return { id: 'reliable', filename: 'file.bin' } as never;
+      if (command === 'get_pending_order') return ['reliable'] as never;
+      return undefined;
+    });
+
+    await useDownloadStore.getState().startQueue('MAIN');
+
+    expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'enqueue_download',
+      expect.objectContaining({
+        item: expect.objectContaining({
+          minimum_normal_download_speed_kib: 64,
+          retry_not_found_errors: true,
+          adaptive_mirror_selection: false,
+        })
+      })
+    );
   });
 
   it('does not resurrect a row removed while its backend enqueue is in flight', async () => {

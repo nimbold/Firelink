@@ -25,6 +25,43 @@ describe('last used download directory preference', () => {
   });
 });
 
+describe('normal download reliability preferences', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useSettingsStore.setState({
+      minimumNormalDownloadSpeedKiB: 0,
+      retryNotFoundErrors: false,
+      adaptiveMirrorSelection: true,
+    });
+  });
+
+  it('uses migration-safe defaults and persists bounded changes', async () => {
+    expect(useSettingsStore.getState()).toMatchObject({
+      minimumNormalDownloadSpeedKiB: 0,
+      retryNotFoundErrors: false,
+      adaptiveMirrorSelection: true,
+    });
+
+    useSettingsStore.getState().setMinimumNormalDownloadSpeedKiB(64);
+    useSettingsStore.getState().setRetryNotFoundErrors(true);
+    useSettingsStore.getState().setAdaptiveMirrorSelection(false);
+    await vi.waitFor(() => {
+      const save = vi.mocked(ipc.invokeCommand).mock.calls
+        .filter(([command]) => command === 'db_save_settings')
+        .slice(-1)[0];
+      expect(save).toBeDefined();
+      expect(JSON.parse((save?.[1] as { data: string }).data).state).toMatchObject({
+        minimumNormalDownloadSpeedKiB: 64,
+        retryNotFoundErrors: true,
+        adaptiveMirrorSelection: false,
+      });
+    });
+
+    useSettingsStore.getState().setMinimumNormalDownloadSpeedKiB(2_000_000);
+    expect(useSettingsStore.getState().minimumNormalDownloadSpeedKiB).toBe(1_048_576);
+  });
+});
+
 describe('Torrent peer discovery preferences', () => {
   beforeEach(() => {
     vi.clearAllMocks();

@@ -8,6 +8,8 @@ const PORTABLE_WEBVIEW_DIR: &str = "webview";
 const ARIA2_DATA_DIR: &str = "aria2";
 const ARIA2_DHT_FILE: &str = "dht.dat";
 const ARIA2_DHT6_FILE: &str = "dht6.dat";
+const ARIA2_SERVER_STAT_FILE: &str = "server-stat.txt";
+const MAX_ARIA2_SERVER_STAT_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageMode {
@@ -116,6 +118,12 @@ impl StorageLayout {
         )
     }
 
+    pub fn aria2_server_stat_path(&self) -> PathBuf {
+        self.data_dir
+            .join(ARIA2_DATA_DIR)
+            .join(ARIA2_SERVER_STAT_FILE)
+    }
+
     /// Create and validate only Firelink's Aria2 state directory. Aria2 owns
     /// the table contents; Firelink owns this exact location and must never
     /// fall back to a user-global default when it cannot establish it.
@@ -160,6 +168,86 @@ impl StorageLayout {
 
         Ok(self.aria2_dht_paths())
     }
+
+    /// Prepare the exact cache file used by Aria2's adaptive URI selector.
+    /// The cache is non-authoritative: malformed or oversized contents are
+    /// reset to empty, while symlinks and non-files disable the cache instead
+    /// of allowing Aria2 to write outside Firelink's storage boundary.
+    pub fn prepare_aria2_server_stat_path(&self) -> Result<PathBuf, String> {
+        let directory = self.data_dir.join(ARIA2_DATA_DIR);
+        if crate::path_has_symlink_component(&directory) {
+            return Err("Aria2 server-stat directory contains a symlink".to_string());
+        }
+        std::fs::create_dir_all(&directory)
+            .map_err(|error| format!("failed to create Aria2 server-stat directory: {error}"))?;
+
+        let path = self.aria2_server_stat_path();
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err("Aria2 server-stat cache is a symlink".to_string());
+            }
+            Ok(metadata) if !metadata.is_file() => {
+                return Err("Aria2 server-stat cache is not a regular file".to_string());
+            }
+            Ok(metadata) => {
+                let valid = metadata.len() <= MAX_ARIA2_SERVER_STAT_BYTES
+                    && std::fs::read_to_string(&path)
+                        .ok()
+                        .is_some_and(|contents| aria2_server_stat_is_valid(&contents));
+                if !valid {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .truncate(true)
+                        .open(&path)
+                        .map_err(|error| {
+                            format!("failed to reset Aria2 server-stat cache: {error}")
+                        })?;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&path)
+                    .map_err(|error| {
+                        format!("failed to create Aria2 server-stat cache: {error}")
+                    })?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect Aria2 server-stat cache: {error}"
+                ));
+            }
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| format!("failed to protect Aria2 server-stat cache: {error}"))?;
+        }
+        Ok(path)
+    }
+}
+
+fn aria2_server_stat_is_valid(contents: &str) -> bool {
+    contents.lines().all(|line| {
+        let line = line.trim();
+        if line.is_empty() {
+            return true;
+        }
+        if line.chars().any(char::is_control) {
+            return false;
+        }
+        let fields = line
+            .split(',')
+            .filter_map(|field| field.trim().split_once('='))
+            .map(|(name, value)| (name.trim(), value.trim()))
+            .collect::<std::collections::HashMap<_, _>>();
+        ["host", "protocol", "dl_speed", "last_updated", "status"]
+            .iter()
+            .all(|name| fields.get(name).is_some_and(|value| !value.is_empty()))
+    })
 }
 
 fn canonicalize_storage_path(path: &Path) -> Result<PathBuf, String> {
@@ -276,6 +364,53 @@ mod tests {
             .prepare_aria2_dht_paths()
             .unwrap_err();
         assert!(error.contains("not a directory"));
+    }
+
+    #[test]
+    fn aria2_server_stat_cache_is_private_and_recovers_from_malformed_data() {
+        let root = TempDir::new().unwrap();
+        let layout = test_layout(root.path());
+        layout.prepare_aria2_dht_paths().unwrap();
+        let path = layout.prepare_aria2_server_stat_path().unwrap();
+        assert_eq!(path, layout.aria2_server_stat_path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "");
+
+        fs::write(&path, "not an aria2 server profile\n").unwrap();
+        layout.prepare_aria2_server_stat_path().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "");
+
+        let valid =
+            "host=mirror.example, protocol=https, dl_speed=1024, last_updated=1, status=OK\n";
+        fs::write(&path, valid).unwrap();
+        layout.prepare_aria2_server_stat_path().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), valid);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aria2_server_stat_cache_rejects_symlink_output() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let layout = test_layout(root.path());
+        layout.prepare_aria2_dht_paths().unwrap();
+        symlink(
+            target.path().join("outside"),
+            layout.aria2_server_stat_path(),
+        )
+        .unwrap();
+
+        assert!(layout.prepare_aria2_server_stat_path().is_err());
     }
 
     #[cfg(unix)]
