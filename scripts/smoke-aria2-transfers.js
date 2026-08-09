@@ -216,6 +216,7 @@ const payload = Buffer.alloc(4 * 1024 * 1024, 0x5a);
 const checksum = crypto.createHash('sha256').update(payload).digest('hex');
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'firelink-aria2-transfers-'));
 const serverStatPath = path.join(tempRoot, 'server-stat.txt');
+const serverStatOutputPath = path.join(tempRoot, 'server-stat.next');
 fs.writeFileSync(serverStatPath, '', { mode: 0o600 });
 let finalRequests = 0;
 let finalCredentials = [];
@@ -321,7 +322,7 @@ const child = spawn(binaryPath, [
   '--console-log-level=error',
   '--quiet=true',
   `--server-stat-if=${serverStatPath}`,
-  `--server-stat-of=${serverStatPath}`,
+  `--server-stat-of=${serverStatOutputPath}`,
 ], { env: environment, stdio: ['ignore', 'ignore', 'pipe'] });
 let stderr = '';
 child.stderr.on('data', chunk => { stderr += chunk.toString(); });
@@ -460,10 +461,9 @@ try {
   smokeFailure = new Error(`${error.message}${detail ? `\n${detail}` : ''}`);
 } finally {
   try {
-    if (process.platform === 'win32') fs.rmSync(serverStatPath, { force: true });
     await stop(child, rpcPort, secret);
     if (smokePassed) {
-      const stat = fs.readFileSync(serverStatPath, 'utf8');
+      const stat = fs.readFileSync(serverStatOutputPath, 'utf8');
       if (!stat.includes('host=127.0.0.1')) {
         throw new Error(`Aria2 did not persist adaptive mirror statistics: ${JSON.stringify(stat)}`);
       }

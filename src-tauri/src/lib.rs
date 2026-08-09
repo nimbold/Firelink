@@ -3115,10 +3115,6 @@ async fn shutdown_aria2_daemon(app_handle: tauri::AppHandle) {
     if let Some(state) = app_handle.try_state::<AppState>() {
         let port = state.aria2_port.load(Ordering::Relaxed);
         if port != 0 {
-            #[cfg(target_os = "windows")]
-            if let Err(error) = state.storage_layout.prepare_aria2_server_stat_for_replace() {
-                log::warn!("adaptive mirror history cannot be replaced on shutdown: {error}");
-            }
             let shutdown = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 rpc_call(port, &state.aria2_secret, "aria2.shutdown", serde_json::json!([])),
@@ -3151,6 +3147,11 @@ async fn shutdown_aria2_daemon(app_handle: tauri::AppHandle) {
             }
         })
         .await;
+    }
+    if let Some(state) = app_handle.try_state::<AppState>() {
+        if let Err(error) = state.storage_layout.promote_aria2_server_stat_output() {
+            log::warn!("adaptive mirror history could not be promoted: {error}");
+        }
     }
 }
 
@@ -9305,14 +9306,15 @@ fn apply_aria2_torrent_dht_options(
 
 fn apply_aria2_server_stat_options(
     command: &mut std::process::Command,
-    path: Option<&std::path::Path>,
+    input_path: Option<&std::path::Path>,
+    output_path: Option<&std::path::Path>,
 ) {
-    let Some(path) = path else {
+    let (Some(input_path), Some(output_path)) = (input_path, output_path) else {
         return;
     };
     command
-        .arg(format!("--server-stat-if={}", path.display()))
-        .arg(format!("--server-stat-of={}", path.display()))
+        .arg(format!("--server-stat-if={}", input_path.display()))
+        .arg(format!("--server-stat-of={}", output_path.display()))
         .arg("--server-stat-timeout=86400");
 }
 
@@ -11095,8 +11097,9 @@ mod tests {
     fn aria2_adaptive_mirror_history_is_private_and_launch_scoped() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("server-stat.txt");
+        let output_path = root.path().join("server-stat.next");
         let mut command = std::process::Command::new("aria2c");
-        apply_aria2_server_stat_options(&mut command, Some(&path));
+        apply_aria2_server_stat_options(&mut command, Some(&path), Some(&output_path));
         assert_eq!(
             command
                 .get_args()
@@ -11104,13 +11107,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 format!("--server-stat-if={}", path.display()),
-                format!("--server-stat-of={}", path.display()),
+                format!("--server-stat-of={}", output_path.display()),
                 "--server-stat-timeout=86400".to_string(),
             ]
         );
 
         let mut disabled = std::process::Command::new("aria2c");
-        apply_aria2_server_stat_options(&mut disabled, None);
+        apply_aria2_server_stat_options(&mut disabled, None, None);
         assert_eq!(disabled.get_args().count(), 0);
     }
 
@@ -13888,6 +13891,9 @@ pub fn run() {
                     None
                 }
             };
+            let aria2_server_stat_output_path = aria2_server_stat_path
+                .as_ref()
+                .map(|_| storage_layout.aria2_server_stat_output_path());
             if let Err(error) = crate::torrent::remove_orphaned_probe_dirs(app.handle()) {
                 log::warn!("could not remove orphaned torrent probes: {error}");
             }
@@ -14171,6 +14177,7 @@ pub fn run() {
                             apply_aria2_server_stat_options(
                                 &mut cmd,
                                 aria2_server_stat_path.as_deref(),
+                                aria2_server_stat_output_path.as_deref(),
                             );
 
                             apply_aria2_torrent_peer_discovery_options(

@@ -9,6 +9,7 @@ const ARIA2_DATA_DIR: &str = "aria2";
 const ARIA2_DHT_FILE: &str = "dht.dat";
 const ARIA2_DHT6_FILE: &str = "dht6.dat";
 const ARIA2_SERVER_STAT_FILE: &str = "server-stat.txt";
+const ARIA2_SERVER_STAT_OUTPUT_FILE: &str = "server-stat.next";
 const MAX_ARIA2_SERVER_STAT_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +125,12 @@ impl StorageLayout {
             .join(ARIA2_SERVER_STAT_FILE)
     }
 
+    pub fn aria2_server_stat_output_path(&self) -> PathBuf {
+        self.data_dir
+            .join(ARIA2_DATA_DIR)
+            .join(ARIA2_SERVER_STAT_OUTPUT_FILE)
+    }
+
     /// Create and validate only Firelink's Aria2 state directory. Aria2 owns
     /// the table contents; Firelink owns this exact location and must never
     /// fall back to a user-global default when it cannot establish it.
@@ -226,27 +233,99 @@ impl StorageLayout {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
                 .map_err(|error| format!("failed to protect Aria2 server-stat cache: {error}"))?;
         }
+        let output_path = self.aria2_server_stat_output_path();
+        match std::fs::symlink_metadata(&output_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err("Aria2 server-stat session output is not a regular file".to_string());
+            }
+            Ok(_) => std::fs::remove_file(&output_path).map_err(|error| {
+                format!("failed to reset Aria2 server-stat session output: {error}")
+            })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect Aria2 server-stat session output: {error}"
+                ));
+            }
+        }
+
         Ok(path)
     }
 
-    /// The MSVC build of Aria2 uses C `rename`, which cannot replace an
-    /// existing destination on Windows. Remove only the already-validated,
-    /// app-owned regular cache immediately before graceful shutdown so
-    /// Aria2's `__temp` file can be renamed into place.
-    pub fn prepare_aria2_server_stat_for_replace(&self) -> Result<(), String> {
+    /// Promote Aria2's session-only output after the daemon has exited. Keeping
+    /// the input and output paths distinct avoids the locked MSVC engine's
+    /// inability to replace an existing destination with C `rename`.
+    pub fn promote_aria2_server_stat_output(&self) -> Result<(), String> {
         let path = self.aria2_server_stat_path();
+        let output_path = self.aria2_server_stat_output_path();
+        let directory = self.data_dir.join(ARIA2_DATA_DIR);
+        if crate::path_has_symlink_component(&directory) {
+            return Err("Aria2 server-stat directory contains a symlink".to_string());
+        }
+
+        let output_metadata = match std::fs::symlink_metadata(&output_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err("Aria2 server-stat session output is not a regular file".to_string());
+            }
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect Aria2 server-stat session output: {error}"
+                ));
+            }
+        };
+        let output = if output_metadata.len() <= MAX_ARIA2_SERVER_STAT_BYTES {
+            std::fs::read_to_string(&output_path).ok()
+        } else {
+            None
+        };
+        if !output
+            .as_deref()
+            .is_some_and(aria2_server_stat_is_valid)
+        {
+            std::fs::remove_file(&output_path).map_err(|error| {
+                format!("failed to discard invalid Aria2 server-stat session output: {error}")
+            })?;
+            return Ok(());
+        }
+
         match std::fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                Err("Aria2 server-stat cache replacement target is not a regular file".to_string())
+                return Err(
+                    "Aria2 server-stat cache replacement target is not a regular file".to_string(),
+                );
             }
-            Ok(_) => std::fs::remove_file(&path).map_err(|error| {
-                format!("failed to prepare Aria2 server-stat replacement: {error}")
-            }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!(
-                "failed to inspect Aria2 server-stat replacement target: {error}"
-            )),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect Aria2 server-stat replacement target: {error}"
+                ));
+            }
         }
+
+        std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .and_then(|mut file| {
+                use std::io::Write;
+                file.write_all(output.as_deref().unwrap_or_default().as_bytes())?;
+                file.sync_all()
+            })
+            .map_err(|error| {
+                format!("failed to promote Aria2 server-stat session output: {error}")
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| format!("failed to protect Aria2 server-stat cache: {error}"))?;
+        }
+        std::fs::remove_file(&output_path)
+            .map_err(|error| format!("failed to remove Aria2 server-stat session output: {error}"))
     }
 }
 
@@ -416,20 +495,31 @@ mod tests {
     }
 
     #[test]
-    fn aria2_server_stat_replacement_removes_only_the_managed_regular_cache() {
+    fn aria2_server_stat_output_is_promoted_only_after_validation() {
         let root = TempDir::new().unwrap();
         let layout = test_layout(root.path());
         layout.prepare_aria2_dht_paths().unwrap();
         let path = layout.prepare_aria2_server_stat_path().unwrap();
+        let output_path = layout.aria2_server_stat_output_path();
+        fs::write(&path, "").unwrap();
         fs::write(
-            &path,
+            &output_path,
             "host=mirror.example, protocol=https, dl_speed=1, last_updated=1, status=OK\n",
         )
         .unwrap();
 
-        layout.prepare_aria2_server_stat_for_replace().unwrap();
-        assert!(!path.exists());
-        layout.prepare_aria2_server_stat_for_replace().unwrap();
+        layout.promote_aria2_server_stat_output().unwrap();
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("host=mirror.example"));
+        assert!(!output_path.exists());
+
+        fs::write(&output_path, "invalid\n").unwrap();
+        layout.promote_aria2_server_stat_output().unwrap();
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("host=mirror.example"));
+        assert!(!output_path.exists());
     }
 
     #[cfg(unix)]
@@ -448,7 +538,12 @@ mod tests {
         .unwrap();
 
         assert!(layout.prepare_aria2_server_stat_path().is_err());
-        assert!(layout.prepare_aria2_server_stat_for_replace().is_err());
+        fs::write(
+            layout.aria2_server_stat_output_path(),
+            "host=mirror.example, protocol=https, dl_speed=1, last_updated=1, status=OK\n",
+        )
+        .unwrap();
+        assert!(layout.promote_aria2_server_stat_output().is_err());
     }
 
     #[cfg(unix)]
