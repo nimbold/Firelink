@@ -51,8 +51,12 @@ jobs:
       - name: Verify non-publishing package version
         if: github.event_name == 'workflow_dispatch' && !inputs.publish_release
         run: node scripts/verify-release-version.js --allow-untagged
-      - name: Verify Companion release identity
+      - name: Verify tagged Companion release identity
+        if: github.event_name == 'push' || inputs.publish_release
         run: node scripts/verify-companion-release.js
+      - name: Verify non-publishing Companion package metadata
+        if: github.event_name == 'workflow_dispatch' && !inputs.publish_release
+        run: node scripts/verify-companion-release.js --allow-untagged
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

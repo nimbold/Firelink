@@ -31,6 +31,7 @@ function exactVersionTag(extensionRoot, expectedTag) {
 export function verifyCompanionRelease({
   repositoryRoot = defaultRepositoryRoot,
   resolveExactTag = exactVersionTag,
+  requireExactTag = true,
 } = {}) {
   const extensionRoot = path.join(repositoryRoot, 'Extensions', 'Browser');
   const packagePath = path.join(extensionRoot, 'package.json');
@@ -53,6 +54,9 @@ export function verifyCompanionRelease({
   }
 
   const expectedTag = `v${packageVersion}`;
+  if (!requireExactTag) {
+    return { tag: null, version: packageVersion };
+  }
   const tag = resolveExactTag(extensionRoot, expectedTag);
   if (!tag) {
     throw new Error(
@@ -68,8 +72,13 @@ export function verifyCompanionRelease({
 
 function main() {
   try {
-    const { tag, version } = verifyCompanionRelease();
-    console.log(`Companion release ${version} matches exact tag ${tag}.`);
+    const requireExactTag = !process.argv.includes('--allow-untagged');
+    const { tag, version } = verifyCompanionRelease({ requireExactTag });
+    console.log(
+      requireExactTag
+        ? `Companion release ${version} matches exact tag ${tag}.`
+        : `Non-publishing Companion package metadata agrees at version ${version}.`
+    );
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

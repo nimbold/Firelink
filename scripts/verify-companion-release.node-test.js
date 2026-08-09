@@ -84,6 +84,27 @@ test('rejects an untagged Companion commit', () => {
   }
 });
 
+test('accepts aligned untagged Companion metadata for a non-publishing audit', () => {
+  const root = createFixture('2.0.7', '2.0.7');
+  let tagLookupCalled = false;
+  try {
+    assert.deepEqual(
+      verifyCompanionRelease({
+        repositoryRoot: root,
+        requireExactTag: false,
+        resolveExactTag: () => {
+          tagLookupCalled = true;
+          return null;
+        },
+      }),
+      { tag: null, version: '2.0.7' }
+    );
+    assert.equal(tagLookupCalled, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('rejects a Companion tag for another version', () => {
   const root = createFixture('2.0.7', '2.0.7');
   try {
