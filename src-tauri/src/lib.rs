@@ -3115,6 +3115,10 @@ async fn shutdown_aria2_daemon(app_handle: tauri::AppHandle) {
     if let Some(state) = app_handle.try_state::<AppState>() {
         let port = state.aria2_port.load(Ordering::Relaxed);
         if port != 0 {
+            #[cfg(target_os = "windows")]
+            if let Err(error) = state.storage_layout.prepare_aria2_server_stat_for_replace() {
+                log::warn!("adaptive mirror history cannot be replaced on shutdown: {error}");
+            }
             let shutdown = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 rpc_call(port, &state.aria2_secret, "aria2.shutdown", serde_json::json!([])),

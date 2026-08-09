@@ -228,6 +228,26 @@ impl StorageLayout {
         }
         Ok(path)
     }
+
+    /// The MSVC build of Aria2 uses C `rename`, which cannot replace an
+    /// existing destination on Windows. Remove only the already-validated,
+    /// app-owned regular cache immediately before graceful shutdown so
+    /// Aria2's `__temp` file can be renamed into place.
+    pub fn prepare_aria2_server_stat_for_replace(&self) -> Result<(), String> {
+        let path = self.aria2_server_stat_path();
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                Err("Aria2 server-stat cache replacement target is not a regular file".to_string())
+            }
+            Ok(_) => std::fs::remove_file(&path).map_err(|error| {
+                format!("failed to prepare Aria2 server-stat replacement: {error}")
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "failed to inspect Aria2 server-stat replacement target: {error}"
+            )),
+        }
+    }
 }
 
 fn aria2_server_stat_is_valid(contents: &str) -> bool {
@@ -395,6 +415,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn aria2_server_stat_replacement_removes_only_the_managed_regular_cache() {
+        let root = TempDir::new().unwrap();
+        let layout = test_layout(root.path());
+        layout.prepare_aria2_dht_paths().unwrap();
+        let path = layout.prepare_aria2_server_stat_path().unwrap();
+        fs::write(
+            &path,
+            "host=mirror.example, protocol=https, dl_speed=1, last_updated=1, status=OK\n",
+        )
+        .unwrap();
+
+        layout.prepare_aria2_server_stat_for_replace().unwrap();
+        assert!(!path.exists());
+        layout.prepare_aria2_server_stat_for_replace().unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn aria2_server_stat_cache_rejects_symlink_output() {
@@ -411,6 +448,7 @@ mod tests {
         .unwrap();
 
         assert!(layout.prepare_aria2_server_stat_path().is_err());
+        assert!(layout.prepare_aria2_server_stat_for_replace().is_err());
     }
 
     #[cfg(unix)]

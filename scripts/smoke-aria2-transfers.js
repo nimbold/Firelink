@@ -460,6 +460,7 @@ try {
   smokeFailure = new Error(`${error.message}${detail ? `\n${detail}` : ''}`);
 } finally {
   try {
+    if (process.platform === 'win32') fs.rmSync(serverStatPath, { force: true });
     await stop(child, rpcPort, secret);
     if (smokePassed) {
       const stat = fs.readFileSync(serverStatPath, 'utf8');
