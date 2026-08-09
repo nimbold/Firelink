@@ -42,23 +42,11 @@ function versionFromRef(ref) {
   return version;
 }
 
-const tag = argValue('--tag') || process.env.GITHUB_REF_NAME;
-const expected = versionFromRef(tag);
 const versions = {
   'package.json': readPackageVersion(repositoryRoot),
   'src-tauri/Cargo.toml': readCargoVersion(repositoryRoot),
   'src-tauri/tauri.conf.json': readTauriVersion(repositoryRoot),
 };
-const mismatches = Object.entries(versions)
-  .filter(([, version]) => version !== expected)
-  .map(([file, version]) => `${file}=${version}`);
-
-if (mismatches.length > 0) {
-  console.error(`Release tag ${tag} does not match the application manifests (expected ${expected}).`);
-  for (const mismatch of mismatches) console.error(`  ${mismatch}`);
-  process.exit(1);
-}
-
 const uniqueVersions = new Set(Object.values(versions));
 if (uniqueVersions.size !== 1) {
   console.error('Application version manifests do not agree:');
@@ -66,4 +54,21 @@ if (uniqueVersions.size !== 1) {
   process.exit(1);
 }
 
-console.log(`Release version ${expected} matches ${Object.keys(versions).length} manifests.`);
+const allowUntagged = process.argv.includes('--allow-untagged');
+const tag = argValue('--tag') || process.env.GITHUB_REF_NAME;
+const expected = allowUntagged ? Object.values(versions)[0] : versionFromRef(tag);
+const mismatches = Object.entries(versions)
+  .filter(([, version]) => version !== expected)
+  .map(([file, version]) => `${file}=${version}`);
+
+if (!allowUntagged && mismatches.length > 0) {
+  console.error(`Release tag ${tag} does not match the application manifests (expected ${expected}).`);
+  for (const mismatch of mismatches) console.error(`  ${mismatch}`);
+  process.exit(1);
+}
+
+console.log(
+  allowUntagged
+    ? `Non-publishing package version ${expected} matches ${Object.keys(versions).length} manifests.`
+    : `Release version ${expected} matches ${Object.keys(versions).length} manifests.`
+);

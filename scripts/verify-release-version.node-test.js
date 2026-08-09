@@ -11,8 +11,8 @@ const currentVersion = JSON.parse(
   fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8')
 ).version;
 
-function runVerifier(tag) {
-  return spawnSync(process.execPath, [verifier, '--tag', tag], {
+function runVerifier(tag, ...extraArguments) {
+  return spawnSync(process.execPath, [verifier, '--tag', tag, ...extraArguments], {
     cwd: repositoryRoot,
     encoding: 'utf8',
   });
@@ -34,4 +34,10 @@ test('release version verifier rejects non-semver tag names', () => {
   const result = runVerifier('release-candidate');
   assert.equal(result.status, 1);
   assert.match(result.stderr, /semantic version tag/);
+});
+
+test('release version verifier accepts an untagged non-publishing package audit', () => {
+  const result = runVerifier('main', '--allow-untagged');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, new RegExp(`Non-publishing package version ${currentVersion} matches`));
 });
