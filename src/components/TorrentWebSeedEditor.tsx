@@ -19,13 +19,18 @@ const filePath = (file: TorrentWebSeedFile): string => 'path' in file ? file.pat
 export const TorrentWebSeedEditor = ({ files, rows, onChange, disabled = false, idPrefix }: Props) => {
   const { t } = useTranslation();
   const uriRefs = useRef<Array<HTMLInputElement | null>>([]);
+  const addButtonRef = useRef<HTMLButtonElement | null>(null);
   const focusAfterRemoveRef = useRef<number | null>(null);
   const filesForValidation = files.map(file => ({ index: file.index }));
   const rowsAreValid = normalizeTorrentWebSeedDrafts(rows, filesForValidation) !== null;
   useEffect(() => {
     const rowIndex = focusAfterRemoveRef.current;
     focusAfterRemoveRef.current = null;
-    if (rowIndex !== null) uriRefs.current[rowIndex]?.focus();
+    if (rowIndex === -1) {
+      addButtonRef.current?.focus();
+    } else if (rowIndex !== null) {
+      uriRefs.current[rowIndex]?.focus();
+    }
   }, [rows]);
   const addRow = () => onChange([...rows, { fileIndex: files[0]?.index ?? null, uri: '' }]);
   const updateRow = (rowIndex: number, update: Partial<TorrentWebSeedDraft>) => onChange(
@@ -33,7 +38,7 @@ export const TorrentWebSeedEditor = ({ files, rows, onChange, disabled = false, 
   );
   const removeRow = (rowIndex: number) => {
     const nextRows = rows.filter((_, index) => index !== rowIndex);
-    focusAfterRemoveRef.current = nextRows.length > 0 ? Math.min(rowIndex, nextRows.length - 1) : null;
+    focusAfterRemoveRef.current = nextRows.length > 0 ? Math.min(rowIndex, nextRows.length - 1) : -1;
     onChange(nextRows);
   };
 
@@ -57,6 +62,7 @@ export const TorrentWebSeedEditor = ({ files, rows, onChange, disabled = false, 
                   value={files[0].index}
                   onChange={() => undefined}
                   disabled
+                  dir="ltr"
                   aria-invalid={!rowIsValid}
                   className="app-control w-full min-h-[30px] px-2 py-1.5 text-xs disabled:opacity-70"
                 >
@@ -68,6 +74,7 @@ export const TorrentWebSeedEditor = ({ files, rows, onChange, disabled = false, 
                   value={row.fileIndex ?? ''}
                   onChange={event => updateRow(rowIndex, { fileIndex: Number(event.currentTarget.value) })}
                   disabled={disabled || files.length === 0}
+                  dir="ltr"
                   aria-invalid={!rowIsValid}
                   className="app-control w-full min-h-[30px] px-2 py-1.5 text-xs disabled:opacity-50"
                 >
@@ -91,6 +98,7 @@ export const TorrentWebSeedEditor = ({ files, rows, onChange, disabled = false, 
                 value={row.uri}
                 onChange={event => updateRow(rowIndex, { uri: event.currentTarget.value })}
                 disabled={disabled}
+                dir="ltr"
                 aria-invalid={!rowIsValid}
                 placeholder="https://mirror.example/torrent/"
                 className="app-control w-full min-h-[30px] px-2 py-1.5 text-xs font-mono disabled:opacity-50"
@@ -115,6 +123,7 @@ export const TorrentWebSeedEditor = ({ files, rows, onChange, disabled = false, 
       )}
       <button
         type="button"
+        ref={addButtonRef}
         onClick={addRow}
         disabled={disabled || files.length === 0}
         className="app-button px-3 text-xs disabled:opacity-50"

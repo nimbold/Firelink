@@ -1389,14 +1389,6 @@ export const PropertiesWindowApp = () => {
         </div>}
 
         {activeTab === 'options' && isTorrent && <div className="properties-options space-y-5 text-xs">
-          <div className="properties-options-intro">
-            <div className="min-w-0">
-              <p className="properties-section-eyebrow">{t($ => $.properties.tabs.options)}</p>
-              <p className="mt-1 text-text-muted">{t($ => $.properties.torrentPeerOptionsSavedHint)}</p>
-            </div>
-            <span className="properties-default-legend"><span className="properties-default-legend-dot" />{t($ => $.properties.blankUsesDefault)}</span>
-          </div>
-
           <section className="properties-option-group" aria-labelledby="properties-options-limits-heading">
             <div className="properties-option-group-heading">
               <div>

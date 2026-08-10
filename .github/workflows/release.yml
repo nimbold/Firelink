@@ -124,6 +124,7 @@ jobs:
           APP="src-tauri/target/${{ matrix.target }}/release/bundle/macos/Firelink.app"
           DMG="$(find src-tauri/target/${{ matrix.target }}/release/bundle/dmg -name '*.dmg' -print -quit)"
           test -n "$DMG"
+          FIRELINK_MACOS_APP="$APP" node scripts/app-associations.node-test.js
           npm run verify:macos-signing -- --app "$APP" --dmg "$DMG"
           node scripts/verify-binaries.js --search-root "$APP" --target ${{ matrix.target }}
           ARIA2="$(find "$APP" -type f -name 'aria2c-${{ matrix.target }}' -print -quit)"
