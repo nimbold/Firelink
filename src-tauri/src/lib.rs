@@ -5597,6 +5597,7 @@ async fn remove_download(
     }
 
     let owned_paths = crate::download_ownership::owned_paths_for_id(&app_handle, &id)?;
+    let primary_path = crate::download_ownership::primary_path_for_id(&app_handle, &id)?;
 
     use tauri::Emitter;
     let _ = app_handle.emit(
@@ -5605,12 +5606,21 @@ async fn remove_download(
     );
 
     let preserve_assets = preserve_resumable
-        && owned_paths.iter().any(|path| has_resumable_download_assets(path));
+        && (owned_paths.iter().any(|path| has_resumable_download_assets(path))
+            || primary_path
+                .as_ref()
+                .is_some_and(|path| has_resumable_download_assets(path)));
 
     let cleanup_result = async {
         if delete_assets && !preserve_assets {
             for path in &owned_paths {
                 remove_download_assets(path, &app_handle).await?;
+            }
+            if let Some(primary) = primary_path
+                .as_ref()
+                .filter(|primary| primary_path_needs_container_cleanup(primary, &owned_paths))
+            {
+                remove_download_container_assets(primary, &app_handle).await?;
             }
         }
         crate::torrent::remove_managed_torrent(&app_handle, &id).await;
@@ -5642,6 +5652,15 @@ fn has_resumable_download_assets(primary: &std::path::Path) -> bool {
     })
 }
 
+fn primary_path_needs_container_cleanup(
+    primary: &std::path::Path,
+    owned_paths: &[std::path::PathBuf],
+) -> bool {
+    !owned_paths
+        .iter()
+        .any(|owned| crate::platform::paths_equal(owned, primary))
+}
+
 pub(crate) async fn remove_download_assets<R: tauri::Runtime>(
     primary: &std::path::Path,
     app_handle: &tauri::AppHandle<R>,
@@ -5654,7 +5673,15 @@ pub(crate) async fn remove_download_assets<R: tauri::Runtime>(
         let mut retries = 5;
         loop {
             let res = if primary.is_dir() {
-                tokio::fs::remove_dir_all(primary).await.map_err(|e| e.to_string())
+                if directory_has_non_metadata_entries(primary).await? {
+                    return Err(format!(
+                        "refusing to move non-empty download directory '{}' to Trash without explicit ownership",
+                        primary.display()
+                    ));
+                }
+                // Download directories must follow the same Trash contract as
+                // files. Do not fall back to recursive permanent deletion.
+                trash::delete(primary).map_err(|e| e.to_string())
             } else {
                 if let Err(e) = trash::delete(primary) {
                     log::warn!("failed to move downloaded file to Trash, attempting hard delete: {}", e);
@@ -5676,6 +5703,16 @@ pub(crate) async fn remove_download_assets<R: tauri::Runtime>(
         }
     }
 
+    remove_download_sidecars(primary, app_handle).await?;
+
+    cleanup_media_processing_artifacts(primary).await;
+    Ok(())
+}
+
+async fn remove_download_sidecars<R: tauri::Runtime>(
+    primary: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<(), String> {
     for suffix in [".aria2", ".part", ".ytdl"] {
         let mut candidate_os = primary.as_os_str().to_os_string();
         candidate_os.push(suffix);
@@ -5696,8 +5733,96 @@ pub(crate) async fn remove_download_assets<R: tauri::Runtime>(
             }
         }
     }
+    Ok(())
+}
 
-    cleanup_media_processing_artifacts(primary).await;
+fn is_os_directory_metadata(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some(".DS_Store" | ".localized" | "Icon\r" | "Thumbs.db" | "desktop.ini" | ".directory")
+    )
+}
+
+async fn directory_has_non_metadata_entries(path: &std::path::Path) -> Result<bool, String> {
+    match tokio::fs::read_dir(path).await {
+        Ok(mut entries) => loop {
+            match entries.next_entry().await {
+                Ok(Some(entry)) if is_os_directory_metadata(&entry.file_name()) => continue,
+                Ok(Some(_)) => break Ok(true),
+                Ok(None) => break Ok(false),
+                Err(error) => {
+                    break Err(format!(
+                        "could not inspect directory '{}': {}",
+                        path.display(),
+                        error
+                    ));
+                }
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "could not inspect directory '{}': {}",
+            path.display(),
+            error
+        )),
+    }
+}
+
+async fn remove_download_container_assets<R: tauri::Runtime>(
+    primary: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<(), String> {
+    if !is_safe_path(primary, app_handle) {
+        return Err("Download asset path is outside an allowed download location".to_string());
+    }
+
+    // The primary path of a multi-file Torrent is its output directory, while
+    // owned_paths contains only the selected files. Remove the directory's
+    // Aria2 sidecars, then move the directory itself to Trash only when no
+    // unowned files remain inside it.
+    remove_download_sidecars(primary, app_handle).await?;
+    let is_directory = std::fs::symlink_metadata(primary)
+        .map(|metadata| metadata.file_type().is_dir())
+        .unwrap_or(false);
+    if !is_directory {
+        return Ok(());
+    }
+    if directory_has_non_metadata_entries(primary).await? {
+        log::debug!(
+            "keeping non-empty Torrent output directory '{}': it contains files outside the selected ownership set",
+            primary.display()
+        );
+        return Ok(());
+    }
+
+    let mut retries = 5;
+    loop {
+        match trash::delete(primary) {
+            Ok(()) => break,
+            Err(error) => {
+                if directory_has_non_metadata_entries(primary).await? {
+                    log::debug!(
+                        "keeping non-empty Torrent output directory '{}': {}",
+                        primary.display(),
+                        error
+                    );
+                    break;
+                }
+                if !primary.exists() {
+                    return Ok(());
+                }
+                if retries == 0 {
+                    return Err(format!(
+                        "failed to move Torrent output directory '{}' to Trash: {}",
+                        primary.display(),
+                        error
+                    ));
+                }
+                retries -= 1;
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -10836,6 +10961,7 @@ mod tests {
         normalize_opened_torrent_argument,
         redact_log_line, redact_log_line_for_output, sanitize_ytdlp_config_value,
         has_resumable_download_assets, is_media_artifact_name,
+        directory_has_non_metadata_entries, primary_path_needs_container_cleanup,
         should_cleanup_media_artifacts_after_failure,
         should_retry_without_browser_cookies,
         retry_metadata_with_cookies, should_retry_metadata_with_cookies,
@@ -12412,6 +12538,35 @@ mod tests {
 
         std::fs::write(directory.path().join("download.bin.aria2"), b"control").unwrap();
         assert!(has_resumable_download_assets(&primary));
+    }
+
+    #[test]
+    fn multi_file_torrent_primary_directory_is_cleaned_separately_from_owned_files() {
+        let primary = std::path::PathBuf::from("/Downloads/Torrents/Example");
+        let selected_file = primary.join("disc/file.bin");
+
+        assert!(primary_path_needs_container_cleanup(&primary, &[selected_file]));
+        assert!(!primary_path_needs_container_cleanup(
+            &primary,
+            std::slice::from_ref(&primary)
+        ));
+    }
+
+    #[tokio::test]
+    async fn non_empty_torrent_container_is_not_eligible_for_trash_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+
+        assert!(!directory_has_non_metadata_entries(directory.path())
+            .await
+            .unwrap());
+        std::fs::write(directory.path().join(".DS_Store"), b"finder metadata").unwrap();
+        assert!(!directory_has_non_metadata_entries(directory.path())
+            .await
+            .unwrap());
+        std::fs::write(directory.path().join("MD5"), b"unselected").unwrap();
+        assert!(directory_has_non_metadata_entries(directory.path())
+            .await
+            .unwrap());
     }
 
     #[test]
