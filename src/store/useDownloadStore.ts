@@ -9,7 +9,7 @@ import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
 import type { Queue } from '../bindings/Queue';
 import { useSettingsStore } from './useSettingsStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
-import { canonicalizeDownloadFileName, categoryForFileName, isActiveDownloadStatus, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForDownload, categoryForFileName, isActiveDownloadStatus, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
 import {
   resolveCategoryDestination
 } from '../utils/downloadLocations';
@@ -418,7 +418,11 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
       if (acceptedFilename !== item.fileName) {
         useDownloadStore.getState().updateDownload(id, {
           fileName: acceptedFilename,
-          category: categoryForFileName(acceptedFilename)
+          category: categoryForDownload(
+            acceptedFilename,
+            item.isTorrent === true,
+            item.category
+          )
         });
       }
       const order = await invoke('get_pending_order', { queueId: item.queueId || MAIN_QUEUE_ID });
@@ -1614,7 +1618,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     const settings = useSettingsStore.getState();
     const normalizedItem = {
       ...item,
-      fileName: canonicalizeDownloadFileName(item.fileName)
+      fileName: canonicalizeDownloadFileName(item.fileName),
+      category: categoryForFileName(item.fileName, item.isTorrent === true)
     };
     const destPath = await effectiveDestinationForItem(normalizedItem, settings);
     const queueId = action.type === 'add-to-queue' ? action.queueId : MAIN_QUEUE_ID;
@@ -2541,7 +2546,11 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
                       ...(acceptedFilenames.has(download.id)
                         ? {
                             fileName: acceptedFilenames.get(download.id),
-                            category: categoryForFileName(acceptedFilenames.get(download.id)!)
+                            category: categoryForDownload(
+                              acceptedFilenames.get(download.id)!,
+                              download.isTorrent === true,
+                              download.category
+                            )
                           }
                         : {}),
                       hasBeenDispatched: true,

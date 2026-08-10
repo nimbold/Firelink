@@ -813,6 +813,7 @@ runEngineChecks(false);
       case 'Documents': return t($ => $.navigation.categories.documents);
       case 'Pictures': return t($ => $.navigation.categories.pictures);
       case 'Applications': return t($ => $.navigation.categories.applications);
+      case 'Torrents': return t($ => $.navigation.categories.torrents);
       default: return t($ => $.navigation.categories.other);
     }
   };

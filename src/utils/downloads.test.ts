@@ -6,6 +6,8 @@ import {
   downloadMediaKindsMatch,
   MAX_DOWNLOAD_FILENAME_BYTES,
   canonicalizeDownloadFileName,
+  categoryForDownload,
+  categoryForFileName,
   isValidTorrentExcludeTrackerList,
   isValidTorrentTrackerList,
   normalizeTorrentEncryptionPolicy,
@@ -31,6 +33,17 @@ const item = (status: DownloadItem['status']): DownloadItem => ({
   downloadedBytes: 1024,
   totalBytes: 4096,
   totalIsEstimate: false
+});
+
+describe('download category detection', () => {
+  it('classifies torrent files and explicit Torrent rows separately from filename types', () => {
+    expect(categoryForFileName('Example.torrent')).toBe('Torrents');
+    expect(categoryForFileName('Example', true)).toBe('Torrents');
+    expect(categoryForFileName('Example.mkv', true)).toBe('Torrents');
+    expect(categoryForFileName('Example.mkv')).toBe('Movies');
+    expect(categoryForDownload('Renamed', true, 'Other')).toBe('Other');
+    expect(categoryForDownload('Renamed', true, 'Torrents')).toBe('Torrents');
+  });
 });
 
 describe('download persistence progress snapshots', () => {

@@ -2,7 +2,7 @@ import type { UnlistenFn } from '@tauri-apps/api/event';
 import type { DownloadStatus } from '../bindings/DownloadStatus';
 import { listenEvent as listen } from '../ipc';
 import type { DownloadItem } from '../bindings/DownloadItem';
-import { categoryForFileName } from '../utils/downloads';
+import { categoryForDownload } from '../utils/downloads';
 import { useDownloadProgressStore } from './downloadProgressStore';
 
 import {
@@ -221,7 +221,11 @@ const startDownloadListeners = async () => {
       }
       if (payload.fileName && payload.fileName !== current.fileName) {
         updates.fileName = payload.fileName;
-        updates.category = categoryForFileName(payload.fileName);
+        updates.category = categoryForDownload(
+          payload.fileName,
+          current.isTorrent === true,
+          current.category
+        );
       }
       if (status !== 'downloading' && status !== 'verifying') {
         updates.speed = '-';

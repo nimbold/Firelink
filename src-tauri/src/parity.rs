@@ -486,7 +486,9 @@ pub fn get_file_category(filename: String) -> DownloadCategory {
         "run", "sh", "bin", "jar",
     ];
 
-    if music_exts.contains(&ext.as_str()) {
+    if ext == "torrent" {
+        DownloadCategory::Torrents
+    } else if music_exts.contains(&ext.as_str()) {
         DownloadCategory::Musics
     } else if movie_exts.contains(&ext.as_str()) {
         DownloadCategory::Movies
@@ -688,4 +690,22 @@ pub fn is_supported_media(url: String) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_file_category;
+    use crate::ipc::DownloadCategory;
+
+    #[test]
+    fn classifies_torrent_files_as_torrents() {
+        assert!(matches!(
+            get_file_category("Example.TORRENT".to_string()),
+            DownloadCategory::Torrents
+        ));
+        assert!(matches!(
+            get_file_category("Example.mkv".to_string()),
+            DownloadCategory::Movies
+        ));
+    }
 }

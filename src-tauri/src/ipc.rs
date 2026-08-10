@@ -120,6 +120,7 @@ pub enum DownloadCategory {
     Documents,
     Pictures,
     Applications,
+    Torrents,
     Other,
 }
 

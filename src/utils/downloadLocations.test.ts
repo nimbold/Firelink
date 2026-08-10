@@ -130,6 +130,24 @@ describe('download locations', () => {
     expect(await resolveCategoryDestination(automatic, 'Movies')).toBe('/Volumes/Media');
   });
 
+  it('defaults Torrent downloads to the Torrents folder and respects overrides', async () => {
+    const settings = normalizeDownloadLocationSettings({
+      baseDownloadFolder: '/Users/test/Downloads'
+    });
+
+    expect(settings.categorySubfolders.Torrents).toBe('Torrents');
+    expect(await resolveCategoryDestination(settings, 'Torrents'))
+      .toBe('/Users/test/Downloads/Torrents');
+
+    settings.categoryDirectoryOverrides.Torrents = '/Volumes/Archive/Torrents';
+    expect(await resolveCategoryDestination(settings, 'Torrents'))
+      .toBe('/Volumes/Archive/Torrents');
+
+    settings.categorySubfoldersEnabled = false;
+    expect(await resolveCategoryDestination(settings, 'Torrents'))
+      .toBe('/Users/test/Downloads');
+  });
+
   it('defaults category subfolders on and sends every category to the base folder when disabled', async () => {
     const automatic = normalizeDownloadLocationSettings({
       baseDownloadFolder: '/Users/test/Downloads'

@@ -19,6 +19,7 @@ export const DOWNLOAD_CATEGORIES: DownloadCategory[] = [
   'Documents',
   'Pictures',
   'Applications',
+  'Torrents',
   'Other'
 ];
 
@@ -29,6 +30,7 @@ export const DEFAULT_CATEGORY_SUBFOLDERS: Record<DownloadCategory, string> = {
   Documents: 'Documents',
   Pictures: 'Pictures',
   Applications: 'Applications',
+  Torrents: 'Torrents',
   Other: 'Other'
 };
 
@@ -245,6 +247,7 @@ export const normalizeDownloadLocationSettings = (
     Documents: 'Documents',
     Pictures: 'Images',
     Applications: 'Apps',
+    Torrents: 'Torrents',
     Other: 'Other'
   };
 

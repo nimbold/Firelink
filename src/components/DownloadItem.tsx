@@ -273,8 +273,8 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
             </span>
           ) : null}
           {download.isTorrent ? (
-            <span className="download-quality-chip shrink-0" title={t($ => $.addDownloads.torrentFiles)}>
-              {t($ => $.addDownloads.torrentFiles)}
+            <span className="download-quality-chip shrink-0" title={t($ => $.addDownloads.torrent)}>
+              {t($ => $.addDownloads.torrent)}
             </span>
           ) : null}
         </div>

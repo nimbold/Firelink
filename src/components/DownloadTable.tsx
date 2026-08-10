@@ -6,7 +6,7 @@ import { useToast } from '../contexts/ToastContext';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { SidebarFilter } from './Sidebar';
 import {
-  Play, Pause, Plus, FileText, Image as ImageIcon, Music, Film, Box, Archive, FileQuestion,
+  Play, Pause, Plus, FileText, Image as ImageIcon, Music, Film, Box, Archive, FileQuestion, Magnet,
   ArrowDownCircle, ArrowUp, ArrowDown, Command, ChevronUp, ChevronDown, MoreHorizontal,
   AlignLeft, AlignCenter, AlignRight, GripVertical
 } from 'lucide-react';
@@ -1850,6 +1850,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       case 'Documents': return t($ => $.navigation.categories.documents);
       case 'Pictures': return t($ => $.navigation.categories.pictures);
       case 'Applications': return t($ => $.navigation.categories.applications);
+      case 'Torrents': return t($ => $.navigation.categories.torrents);
       case 'Other': return t($ => $.navigation.categories.other);
       default: return filter;
     }
@@ -2008,6 +2009,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       case 'Applications': return <Box size={16} className="text-indigo-400" />;
       case 'Pictures': return <ImageIcon size={16} className="text-purple-400" />;
       case 'Compressed': return <Archive size={16} className="text-amber-600" />;
+      case 'Torrents': return <Magnet size={16} className="text-violet-400" />;
       case 'Other': return <FileQuestion size={16} className="text-gray-400" />;
       default: return <FileQuestion size={16} className="text-gray-400" />;
     }

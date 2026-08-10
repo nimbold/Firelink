@@ -888,7 +888,7 @@ export const AddDownloadsModal = () => {
     if (first.status !== 'ready' && first.status !== 'metadata-error') return;
     void resolveCategoryDestination(
       useSettingsStore.getState(),
-      categoryForFileName(first.file)
+      categoryForFileName(first.file, first.isTorrent === true)
     ).then(location => {
       if (requestId === locationResolutionRequestRef.current) {
         setSaveLocation(location);
@@ -940,8 +940,8 @@ export const AddDownloadsModal = () => {
     }
   };
 
-  const categoryLocationForFile = (fileName: string) => {
-    const category = categoryForFileName(fileName);
+  const categoryLocationForFile = (fileName: string, isTorrent = false) => {
+    const category = categoryForFileName(fileName, isTorrent);
     return resolveCategoryDestination(useSettingsStore.getState(), category);
   };
 
@@ -963,12 +963,13 @@ export const AddDownloadsModal = () => {
     fileName: string,
     finalLocation: string,
     useSharedDestination: boolean,
-    destinationOverride?: string
+    destinationOverride?: string,
+    isTorrent = false
   ): Promise<string> => {
     if (destinationOverride) return destinationOverride;
     const root = useSharedDestination
       ? finalLocation
-      : await categoryLocationForFile(fileName);
+      : await categoryLocationForFile(fileName, isTorrent);
     return saveInDedicatedFolder
       ? resolveSubfolderDestination(root, dedicatedFolderName)
       : root;
@@ -1113,7 +1114,9 @@ export const AddDownloadsModal = () => {
           const suggestedLocation = await destinationForFile(
             item.file,
             finalLocation,
-            isSaveLocationManual
+            isSaveLocationManual,
+            undefined,
+            item.isTorrent === true
           );
           const selected = await open({
             directory: true,
@@ -1160,7 +1163,8 @@ export const AddDownloadsModal = () => {
         finalFile,
         finalLocation,
         useSharedDestination,
-        destinationOverrides[i]
+        destinationOverrides[i],
+        item.isTorrent === true
       );
 
       const urlMatch = store.downloads.find(d =>
@@ -1342,7 +1346,8 @@ export const AddDownloadsModal = () => {
           finalFile,
           finalLocation,
           useSharedDestination,
-          destinationOverrides[idx]
+          destinationOverrides[idx],
+          item.isTorrent === true
         );
                  
                  let count = 1;
@@ -1358,7 +1363,8 @@ export const AddDownloadsModal = () => {
                      candidateFile,
                      finalLocation,
                      useSharedDestination,
-                     destinationOverrides[candidateIndex]
+                     destinationOverrides[candidateIndex],
+                     candidate.isTorrent === true
                    );
                    batchTargets.push({ location: candidateLocation, fileName: candidateFile });
                  }
@@ -1419,7 +1425,8 @@ export const AddDownloadsModal = () => {
           finalFile,
           finalLocation,
           useSharedDestination,
-          destinationOverrides[idx]
+          destinationOverrides[idx],
+          item.isTorrent === true
         );
         const store = useDownloadStore.getState();
         let existingItem = conflict?.existingDownloadId
@@ -1531,7 +1538,7 @@ export const AddDownloadsModal = () => {
             ? mediaFileNameForSelectedFormat(item.file, item)
             : canonicalizeDownloadFileName(item.file);
           let formatSelector = mediaFormatSelectorForRow(item);
-        const category = categoryForFileName(finalFile);
+        const category = categoryForFileName(finalFile, item.isTorrent === true);
         const added = await addDownload({
           id,
           url: item.downloadUrl,
@@ -1559,7 +1566,8 @@ export const AddDownloadsModal = () => {
                 finalFile,
                 finalLocation,
                 useSharedDestination,
-                destinationOverrides[itemIndex]
+                destinationOverrides[itemIndex],
+                item.isTorrent === true
               )
             : undefined,
           isMedia: item.isMedia,

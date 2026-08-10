@@ -693,6 +693,7 @@ fn default_category_subfolders() -> HashMap<String, String> {
         ("Documents", "Documents"),
         ("Pictures", "Pictures"),
         ("Applications", "Applications"),
+        ("Torrents", "Torrents"),
         ("Other", "Other"),
     ]
     .into_iter()
@@ -762,6 +763,7 @@ fn migrate_location_settings(state: &mut Value) -> Result<(), String> {
             ("Documents", "Documents"),
             ("Pictures", "Images"),
             ("Applications", "Apps"),
+            ("Torrents", "Torrents"),
             ("Other", "Other"),
         ];
         for (category, alias) in aliases {
@@ -1044,6 +1046,7 @@ mod tests {
 
         assert_eq!(settings.base_download_folder, "/Users/test/Downloads");
         assert_eq!(settings.category_subfolders["Movies"], "Movies");
+        assert_eq!(settings.category_subfolders["Torrents"], "Torrents");
         assert!(!settings.category_directory_overrides.contains_key("Movies"));
         assert_eq!(
             settings.category_directory_overrides["Documents"],

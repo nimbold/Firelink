@@ -1607,6 +1607,23 @@ describe('useDownloadStore', () => {
     expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
   });
 
+  it('normalizes new Torrent rows before resolving their default destination', async () => {
+    await useDownloadStore.getState().addDownload({
+      id: 'torrent-default',
+      url: 'magnet:?xt=urn:btih:default',
+      fileName: 'metadata',
+      category: 'Other',
+      dateAdded: '',
+      isTorrent: true
+    }, { type: 'add-to-queue', queueId: 'queue-torrents' });
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      category: 'Torrents',
+      destination: '/Users/test/Downloads/Torrents',
+      status: 'staged'
+    });
+  });
+
   it('inserts a newly staged queue item before paused rows', async () => {
     useDownloadStore.setState({
       downloads: [{

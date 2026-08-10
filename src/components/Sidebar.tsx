@@ -2,7 +2,7 @@ import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Inbox, Zap, CheckCircle2, CircleDashed,
-  Film, Music, FileText, Box, Image as ImageIcon, Archive, FileQuestion,
+  Film, Music, FileText, Box, Image as ImageIcon, Archive, FileQuestion, Magnet,
   List, CalendarClock, Gauge, Bug, Settings, Plus, Play, Pause, Edit2, Trash2, PanelLeft,
   ChevronDown,
   type LucideIcon
@@ -403,6 +403,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
               <NavItem icon={FileText} label={t($ => $.navigation.categories.documents)} filter="Documents" />
               <NavItem icon={ImageIcon} label={t($ => $.navigation.categories.pictures)} filter="Pictures" />
               <NavItem icon={Box} label={t($ => $.navigation.categories.applications)} filter="Applications" />
+              <NavItem icon={Magnet} label={t($ => $.navigation.categories.torrents)} filter="Torrents" />
               <NavItem icon={FileQuestion} label={t($ => $.navigation.categories.other)} filter="Other" />
             </div>
           </div>

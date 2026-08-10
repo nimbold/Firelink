@@ -417,7 +417,11 @@ export const initMediaDomains = async () => {
   }
 };
 
-export const categoryForFileName = (fileName: string): DownloadCategory => {
+export const categoryForFileName = (
+  fileName: string,
+  isTorrent = false
+): DownloadCategory => {
+  if (isTorrent || fileName.trim().toLowerCase().endsWith('.torrent')) return 'Torrents';
   const ext = fileName.split('.').pop()?.toLowerCase() || '';
   if (['mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm', 'm4v', 'mpeg', 'mpg', '3gp', 'ts', 'vob'].includes(ext)) return 'Movies';
   if (['mp3', 'wav', 'aac', 'flac', 'ogg', 'm4a', 'wma', 'alac', 'ape', 'mid', 'midi'].includes(ext)) return 'Musics';
@@ -426,6 +430,15 @@ export const categoryForFileName = (fileName: string): DownloadCategory => {
   if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'svg', 'ico', 'heic', 'raw', 'psd', 'ai'].includes(ext)) return 'Pictures';
   if (['zip', 'rar', '7z', 'tar', 'gz', 'xz', 'bz2', 'lz', 'lzma', 'zst', 'iso', 'cab', 'tgz', 'tbz', 'z', 'sit', 'sitx'].includes(ext)) return 'Compressed';
   return 'Other';
+};
+
+export const categoryForDownload = (
+  fileName: string,
+  isTorrent: boolean,
+  existingCategory?: DownloadCategory
+): DownloadCategory => {
+  if (isTorrent && existingCategory === 'Other') return existingCategory;
+  return categoryForFileName(fileName, isTorrent);
 };
 
 export const fileNameFromUrl = (rawUrl: string): string => {
