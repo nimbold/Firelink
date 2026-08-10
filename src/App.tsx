@@ -10,7 +10,7 @@ import { KeychainPermissionModal } from './components/KeychainPermissionModal';
 import { extractValidDownloadUrls } from './utils/url';
 import { readClipboardDownloadUrls } from './utils/clipboard';
 import { listenEvent as listen, invokeCommand as invoke } from "./ipc";
-import { initializeDownloadPersistence, useDownloadStore, MAIN_QUEUE_ID, type ExtensionDownloadRequest } from './store/useDownloadStore';
+import { flushDownloadPersistence, initializeDownloadPersistence, useDownloadStore, MAIN_QUEUE_ID, type ExtensionDownloadRequest } from './store/useDownloadStore';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { initDownloadListener } from './store/downloadStore';
 import { subscribeToSettingsPersistenceErrors, useSettingsStore } from "./store/useSettingsStore";
@@ -411,6 +411,24 @@ function App() {
     const disposePersistence = initializeDownloadPersistence(getCurrentWindow().label);
     let active = true;
     let cleanupListeners: (() => void) | null = null;
+    let unlistenExit: (() => void) | null = null;
+    const exitListener = listen('app-exit-requested', async () => {
+      try {
+        await flushDownloadPersistence();
+      } catch (error) {
+        console.error('Failed to flush download state before exit:', error);
+      } finally {
+        await invoke('ack_frontend_exit').catch(error => {
+          console.error('Failed to acknowledge frontend exit flush:', error);
+        });
+      }
+    });
+    void exitListener.then(unlisten => {
+      if (active) unlistenExit = unlisten;
+      else unlisten();
+    }).catch(error => {
+      console.error('Failed to listen for frontend exit flush:', error);
+    });
     const initialize = async () => {
       let unlistenDownload: (() => void) | null = null;
       let unlistenTerminalState: (() => void) | null = null;
@@ -418,6 +436,8 @@ function App() {
       let unlistenDeepLink: (() => void) | null = null;
       const disposeListeners = () => {
         void queueFrontendReadyUpdate(false).catch(() => {});
+        unlistenExit?.();
+        unlistenExit = null;
         unlistenTerminalState?.();
         unlistenTerminalState = null;
         unlistenExtension?.();
@@ -624,6 +644,8 @@ function App() {
       pendingStartupInputs.current = [];
       cleanupListeners?.();
       cleanupListeners = null;
+      unlistenExit?.();
+      unlistenExit = null;
       disposePersistence();
     };
   }, [addToast, queueFrontendReadyUpdate]);

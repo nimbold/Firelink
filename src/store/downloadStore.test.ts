@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { initDownloadListener, useDownloadProgressStore } from './downloadStore';
 import {
   clearDownloadControlIntents,
+  initializeDownloadPersistence,
   downloadControlIntentFor,
   setDownloadControlIntent,
   useDownloadStore
@@ -239,6 +240,77 @@ describe('useDownloadProgressStore', () => {
 
     expect(useDownloadStore.getState().downloads[0].status).toBe('seeding');
     release();
+  });
+
+  it('accepts Torrent verification while a row is seeding', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'torrent-seeding-verification',
+        url: 'magnet:?xt=urn:btih:test',
+        fileName: 'ubuntu.iso',
+        status: 'seeding',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-state']({ payload: {
+      id: 'torrent-seeding-verification',
+      status: 'verifying'
+    } });
+
+    expect(useDownloadStore.getState().downloads[0].status).toBe('verifying');
+    release();
+  });
+
+  it('durably acknowledges a completed Torrent verification before clearing its marker', async () => {
+    const handlers: Record<string, (event: any) => unknown> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => unknown;
+      return Promise.resolve(vi.fn());
+    });
+    const persistedMarkers: Array<boolean | undefined> = [];
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: any) => {
+      if (command === 'db_commit_download_state') {
+        const records = JSON.parse(args.downloadsData) as Array<{ torrentVerifyOnly?: boolean }>;
+        persistedMarkers.push(records[0]?.torrentVerifyOnly);
+      }
+      return undefined;
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'torrent-verification-ack',
+        url: 'magnet:?xt=urn:btih:test',
+        fileName: 'ubuntu.iso',
+        status: 'paused',
+        category: 'Other',
+        dateAdded: '',
+        isTorrent: true,
+        torrentVerifyOnly: true,
+        torrentVerifyRestoreStatus: 'paused'
+      }] as any[]
+    });
+    const disposePersistence = initializeDownloadPersistence('main');
+
+    try {
+      const release = await initDownloadListener();
+      await handlers['download-state']({ payload: {
+        id: 'torrent-verification-ack',
+        status: 'paused'
+      } });
+
+      expect(persistedMarkers).toEqual([true, undefined]);
+      expect(useDownloadStore.getState().downloads[0].torrentVerifyOnly).toBeUndefined();
+      release();
+    } finally {
+      disposePersistence();
+    }
   });
 
   it('clears progress when events arrive after a download row was removed', async () => {

@@ -7,6 +7,7 @@ import { useDownloadProgressStore } from './downloadProgressStore';
 
 import {
   clearDownloadControlIntent,
+  commitDownloadState,
   downloadControlIntentFor,
   hasStaleTemporaryMediaEstimate,
   useDownloadStore
@@ -111,7 +112,7 @@ const startDownloadListeners = async () => {
         mainStore.updateDownload(payload.id, updates);
       }
     }),
-    listen('download-state', (event) => {
+    listen('download-state', async (event) => {
       const payload = event.payload;
       const mainStore = useDownloadStore.getState();
       const current = mainStore.downloads.find(d => d.id === payload.id);
@@ -169,6 +170,7 @@ const startDownloadListeners = async () => {
       if (current.status === 'seeding' &&
           status !== 'seeding' &&
           status !== 'waitingToSeed' &&
+          status !== 'verifying' &&
           status !== 'paused' &&
           status !== 'completed' &&
           status !== 'failed' &&
@@ -231,16 +233,10 @@ const startDownloadListeners = async () => {
         updates.speed = '-';
         updates.eta = '-';
       }
-      if (
-        current.torrentVerifyOnly === true &&
-        ['ready', 'staged', 'paused', 'completed', 'failed'].includes(status)
-      ) {
-        // Verification is a maintenance lifecycle layered over the existing
-        // row. Clear its markers once Aria2 has reached the restored terminal
-        // state so restart cannot replay verification indefinitely.
-        updates.torrentVerifyOnly = undefined;
-        updates.torrentVerifyRestoreStatus = undefined;
-      }
+      const verificationRestoreStatus = current.torrentVerifyRestoreStatus;
+      const verificationNeedsAcknowledgement = current.torrentVerifyOnly === true &&
+        typeof verificationRestoreStatus === 'string' &&
+        ['ready', 'staged', 'paused', 'completed', 'failed'].includes(status);
       mainStore.updateDownload(payload.id, updates);
 
       if (status === 'completed' || status === 'failed' || status === 'paused' || status === 'seeding' || status === 'waitingToSeed') {
@@ -257,6 +253,37 @@ const startDownloadListeners = async () => {
         mainStore.registerBackendIds([payload.id]);
       } else if (status === 'completed' || status === 'failed') {
         mainStore.unregisterBackendIds([payload.id]);
+      }
+
+      if (verificationNeedsAcknowledgement) {
+        try {
+          // The native persistence marker is intentionally acknowledged in a
+          // separate durable snapshot before the renderer clears its copy.
+          // Coalescing both updates into one snapshot would let the native
+          // marker protect an already-finished verification forever.
+          await commitDownloadState();
+          const acknowledged = useDownloadStore.getState().downloads.find(
+            download => download.id === payload.id
+          );
+          if (
+            !acknowledged ||
+            acknowledged.status !== status ||
+            acknowledged.torrentVerifyOnly !== true ||
+            acknowledged.torrentVerifyRestoreStatus !== verificationRestoreStatus
+          ) {
+            return;
+          }
+          mainStore.updateDownload(payload.id, {
+            torrentVerifyOnly: undefined,
+            torrentVerifyRestoreStatus: undefined
+          });
+          await commitDownloadState();
+        } catch (error) {
+          // Keep the marker in the durable/native path when the acknowledgement
+          // cannot be committed. Restarting verification is safer than losing
+          // the integrity-maintenance lifecycle.
+          console.error('Failed to acknowledge Torrent verification:', error);
+        }
       }
     }),
     listen('torrent-move-progress', (event) => {

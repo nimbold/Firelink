@@ -407,6 +407,15 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
       useDownloadStore.getState().updateDownload(id, {
         lastTry: new Date().toISOString()
       });
+      await commitDownloadState();
+      const admittedItem = useDownloadStore.getState().downloads.find(download => download.id === id);
+      if (
+        !admittedItem ||
+        !isCurrentDownloadLifecycle(id, lifecycleGeneration) ||
+        !['ready', 'staged', 'failed', 'queued'].includes(admittedItem.status)
+      ) {
+        return false;
+      }
       const accepted = await invoke('enqueue_download', { item: enqueueItem });
       backendAccepted = true;
       if (!isCurrentDownloadLifecycle(id, lifecycleGeneration)) {
@@ -1055,6 +1064,22 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     const state = get();
     const item = state.downloads.find(d => d.id === id);
     if (!item) return;
+    const previousItem = item;
+    const commitProperties = async (): Promise<void> => {
+      try {
+        await commitDownloadState();
+      } catch (error) {
+        // Do not leave a renderer-only Properties edit that will disappear on
+        // restart. Restore the prior row while retaining the native lifecycle
+        // fencing already performed for this operation.
+        set(current => ({
+          downloads: current.downloads.map(download =>
+            download.id === id ? previousItem : download
+          )
+        }));
+        throw error;
+      }
+    };
     const credentialsUpdated = (['password', 'cookies', 'headers'] as const)
       .some(field => Object.prototype.hasOwnProperty.call(updates, field));
     const nextCredentialMaterial = (['password', 'cookies', 'headers'] as const)
@@ -1084,6 +1109,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         await invoke('clear_torrent_removal_paths', { id });
       }
       state.updateDownload(id, normalizedUpdates);
+      await commitProperties();
       return;
     }
 
@@ -1100,6 +1126,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         await invoke('clear_torrent_removal_paths', { id });
       }
       state.updateDownload(id, normalizedUpdates);
+      await commitProperties();
       if (isRegistered || wasDispatching) {
         const dispatched = await dispatchItemInternal(id);
         if (dispatched) {
@@ -1125,6 +1152,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         await invoke('clear_torrent_removal_paths', { id });
       }
       state.updateDownload(id, normalizedUpdates);
+      await commitProperties();
     }
   };
 
@@ -1196,6 +1224,21 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
 
       if (currentTargetItem.status === 'ready' || currentTargetItem.status === 'staged') {
         get().updateDownload(id, { status: 'queued', hasBeenDispatched: true });
+        try {
+          await commitDownloadState();
+        } catch (error) {
+          get().updateDownload(id, {
+            status: currentTargetItem.status,
+            lastError: errorMessage(error)
+          });
+          clearDownloadControlIntent(id, 'resume');
+          return false;
+        }
+        const queuedItem = get().downloads.find(download => download.id === id);
+        if (!queuedItem || queuedItem.status !== 'queued') {
+          clearDownloadControlIntent(id, 'resume');
+          return false;
+        }
         if (await dispatchItemInternal(id)) {
           return true;
         }
@@ -1220,6 +1263,23 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         ...(queuePosition === undefined ? {} : { queuePosition }),
         lastTry: new Date().toISOString()
       });
+
+      try {
+        await commitDownloadState();
+      } catch (error) {
+        get().updateDownload(id, {
+          status: prevStatus,
+          lastError: errorMessage(error)
+        });
+        clearDownloadControlIntent(id, 'resume');
+        return false;
+      }
+
+      const queuedItem = get().downloads.find(download => download.id === id);
+      if (!queuedItem || queuedItem.status !== 'queued') {
+        clearDownloadControlIntent(id, 'resume');
+        return false;
+      }
 
       const resumedExisting = options.forceRequeue
         ? false
@@ -1649,6 +1709,18 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       downloads: reorderQueueWithPausedAtEnd([...state.downloads, ownedItem], queueId)
     }));
 
+    try {
+      // Admission must not reach Aria2 or yt-dlp before the row and its queue
+      // position are committed. If the process dies after this point, startup
+      // recovery still has an authoritative row to resume.
+      await commitDownloadState();
+    } catch (error) {
+      const message = errorMessage(error);
+      console.error(`Failed to persist download ${item.id} before admission:`, error);
+      get().updateDownload(item.id, { status: 'failed', lastError: message });
+      return false;
+    }
+
     if (action.type === 'add-to-queue') {
       info(`Download ${item.id} added to queue ${action.queueId}`);
       return true;
@@ -1749,6 +1821,25 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         Array.from(state.backendRegisteredIds).filter(registeredId => registeredId !== id)
       )
     }));
+    try {
+      await commitDownloadState();
+    } catch (error) {
+      const message = errorMessage(error);
+      console.error(`Failed to persist removal of ${id}:`, error);
+      if (item) {
+        set(state => state.downloads.some(download => download.id === id)
+          ? {}
+          : {
+              downloads: [...state.downloads, {
+                ...item,
+                status: 'failed' as const,
+                lastError: message,
+                hasBeenDispatched: false
+              }]
+            });
+      }
+      throw error;
+    }
     useDownloadProgressStore.getState().clearDownloadProgress(id);
     info(`Download ${id} removed`);
     syncSystemIntegrations();
@@ -1772,6 +1863,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       const current = get().downloads.find(download => download.id === id);
       if (current && current.status !== 'completed' && current.status !== 'failed') {
         get().updateDownload(id, { status: 'paused', speed: '-', eta: '-' });
+        await commitDownloadState();
       }
     } finally {
       clearDownloadControlIntent(id, 'pause');
@@ -1817,6 +1909,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       hasBeenDispatched: false,
       dateAdded: new Date().toISOString()
     });
+
+    await commitDownloadState();
 
     if (!await dispatchItemInternal(id)) {
       console.error("Failed to enqueue redownload");
@@ -2154,6 +2248,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         );
         return { downloads: reorderQueueWithPausedAtEnd(downloads, queueId) };
       });
+      await commitDownloadState();
     });
   },
   setDownloadSpeedLimit: (id, limit) => runDownloadLifecycleOperation(
@@ -2363,6 +2458,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         selectedQueueIds
       });
     }
+    await commitDownloadState();
   },
   resumePendingDownloads: () => {
     if (pendingStartupResume) return pendingStartupResume;
@@ -2382,6 +2478,10 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             : download)
         }));
       }
+      // Startup converts interrupted active lifecycles into queued rows before
+      // rebuilding backend ownership. Commit that recovery state first so a
+      // crash during enqueue_many cannot lose the restartable row.
+      await commitDownloadState();
       const active = get().downloads
         .filter(d => d.status === 'queued')
         .sort((a, b) => (a.queuePosition ?? 0) - (b.queuePosition ?? 0));
@@ -2485,7 +2585,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         }
 
         const currentItems = new Map(get().downloads.map(item => [item.id, item]));
-        const dispatchableItems = itemsToEnqueue.filter(item => {
+        let dispatchableItems = itemsToEnqueue.filter(item => {
           const current = currentItems.get(item.id);
           return current &&
             current.status === 'queued' &&
@@ -2495,6 +2595,17 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         });
         if (dispatchableItems.length === 0) return;
 
+        await commitDownloadState();
+        const latestItems = new Map(get().downloads.map(item => [item.id, item]));
+        dispatchableItems = dispatchableItems.filter(item => {
+          const current = latestItems.get(item.id);
+          return current &&
+            current.status === 'queued' &&
+            !get().backendRegisteredIds.has(item.id) &&
+            !backendDispatchPromises.has(item.id) &&
+            currentDownloadLifecycle(item.id).toString() === item.lifecycle_generation;
+        });
+        if (dispatchableItems.length === 0) return;
         const results = await invoke('enqueue_many', { items: dispatchableItems });
         const registeredIds = results.filter(result => result.success).map(result => result.id);
         const failedErrors = new Map(
@@ -2665,43 +2776,137 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
   };
 });
 
-let lastSavedDownloads = '';
-let isSavingDownloads = false;
-let nextDownloadsData: string | null = null;
+type PersistenceSnapshot = {
+  key: string;
+  downloadsData: string;
+  queuesData: string;
+  revision: number;
+};
 
-async function processDownloadsSave() {
-  if (isSavingDownloads || !nextDownloadsData) return;
-  isSavingDownloads = true;
-  while (nextDownloadsData) {
-    const data = nextDownloadsData;
-    nextDownloadsData = null;
-    try {
-      await invoke('db_replace_downloads', { data });
-    } catch (error) {
-      console.error('Failed to persist downloads:', error);
+type PersistenceWaiter = {
+  revision: number;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+};
+
+let persistenceRevision = 0;
+let committedPersistenceRevision = 0;
+let lastRequestedPersistenceKey: string | null = null;
+let lastCommittedPersistenceKey: string | null = null;
+let nextPersistenceSnapshot: PersistenceSnapshot | null = null;
+let persistenceSaveInFlight = false;
+let persistenceWaiters: PersistenceWaiter[] = [];
+let downloadPersistenceReady = false;
+
+const persistenceSnapshotForState = (state: Pick<DownloadState, 'downloads' | 'queues'>): Omit<PersistenceSnapshot, 'revision'> => {
+  // Strip secret fields (password/cookies/headers) and volatile progress
+  // before writing to disk. Secrets remain on the in-memory item for the
+  // active session only.
+  const downloadsData = JSON.stringify(state.downloads.map(redactDownloadForPersistence));
+  const queuesData = JSON.stringify(state.queues);
+  return {
+    key: JSON.stringify([downloadsData, queuesData]),
+    downloadsData,
+    queuesData
+  };
+};
+
+const waitForPersistenceRevision = (revision: number): Promise<void> => {
+  if (revision <= committedPersistenceRevision) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    persistenceWaiters.push({ revision, resolve, reject });
+  });
+};
+
+const settlePersistenceWaiters = (revision: number, error?: unknown): void => {
+  const remaining: PersistenceWaiter[] = [];
+  for (const waiter of persistenceWaiters) {
+    if (waiter.revision > revision) {
+      remaining.push(waiter);
+      continue;
     }
+    if (error === undefined) waiter.resolve();
+    else waiter.reject(error);
   }
-  isSavingDownloads = false;
+  persistenceWaiters = remaining;
+};
+
+const queuePersistenceSnapshot = (snapshot: Omit<PersistenceSnapshot, 'revision'>): Promise<void> => {
+  const hasUncommittedPersistence = persistenceSaveInFlight || nextPersistenceSnapshot !== null;
+  if (snapshot.key === lastCommittedPersistenceKey && !hasUncommittedPersistence) {
+    return Promise.resolve();
+  }
+
+  const existingRevision = snapshot.key === lastRequestedPersistenceKey
+    ? persistenceRevision
+    : null;
+  if (existingRevision !== null) return waitForPersistenceRevision(existingRevision);
+
+  const revision = ++persistenceRevision;
+  lastRequestedPersistenceKey = snapshot.key;
+  nextPersistenceSnapshot = { ...snapshot, revision };
+  const completion = waitForPersistenceRevision(revision);
+  void processPersistenceSave();
+  return completion;
+};
+
+async function processPersistenceSave(): Promise<void> {
+  if (persistenceSaveInFlight) return;
+  persistenceSaveInFlight = true;
+  try {
+    while (nextPersistenceSnapshot) {
+      const snapshot = nextPersistenceSnapshot;
+      nextPersistenceSnapshot = null;
+      try {
+        await invoke('db_commit_download_state', {
+          downloadsData: snapshot.downloadsData,
+          queuesData: snapshot.queuesData
+        });
+        lastCommittedPersistenceKey = snapshot.key;
+        committedPersistenceRevision = snapshot.revision;
+        settlePersistenceWaiters(snapshot.revision);
+      } catch (error) {
+        if (lastRequestedPersistenceKey === snapshot.key) {
+          lastRequestedPersistenceKey = null;
+        }
+        settlePersistenceWaiters(snapshot.revision, error);
+        console.error('Failed to persist download state:', error);
+      }
+    }
+  } finally {
+    persistenceSaveInFlight = false;
+    if (nextPersistenceSnapshot) void processPersistenceSave();
+  }
 }
 
-let lastSavedQueues = '';
-let isSavingQueues = false;
-let nextQueuesData: string | null = null;
-
-async function processQueuesSave() {
-  if (isSavingQueues || !nextQueuesData) return;
-  isSavingQueues = true;
-  while (nextQueuesData) {
-    const data = nextQueuesData;
-    nextQueuesData = null;
-    try {
-      await invoke('db_replace_queues', { data });
-    } catch (error) {
-      console.error('Failed to persist queues:', error);
+export const commitDownloadState = async (): Promise<void> => {
+  if (!downloadPersistenceReady) return;
+  while (true) {
+    const snapshot = persistenceSnapshotForState(useDownloadStore.getState());
+    await queuePersistenceSnapshot(snapshot);
+    const current = persistenceSnapshotForState(useDownloadStore.getState());
+    if (
+      current.key === snapshot.key &&
+      current.key === lastCommittedPersistenceKey &&
+      !persistenceSaveInFlight &&
+      nextPersistenceSnapshot === null
+    ) {
+      return;
     }
   }
-  isSavingQueues = false;
-}
+};
+
+export const flushDownloadPersistence = async (): Promise<void> => {
+  if (!downloadPersistenceReady) return;
+  while (true) {
+    const snapshot = persistenceSnapshotForState(useDownloadStore.getState());
+    if (snapshot.key === lastCommittedPersistenceKey) return;
+    await queuePersistenceSnapshot(snapshot);
+    if (persistenceSnapshotForState(useDownloadStore.getState()).key === lastCommittedPersistenceKey) {
+      return;
+    }
+  }
+};
 
 let downloadPersistenceUnsubscribe: (() => void) | null = null;
 
@@ -2714,31 +2919,17 @@ export const initializeDownloadPersistence = (windowLabel: string): (() => void)
   if (windowLabel !== 'main' || downloadPersistenceUnsubscribe) return () => undefined;
 
   downloadPersistenceUnsubscribe = useDownloadStore.subscribe((state, prevState) => {
-    if (state.queues !== prevState.queues) {
-      const data = JSON.stringify(state.queues);
-      if (data !== lastSavedQueues) {
-        lastSavedQueues = data;
-        nextQueuesData = data;
-        void processQueuesSave();
-      }
-    }
-
-    if (state.downloads !== prevState.downloads) {
-      // Strip secret fields (password/cookies/headers) and volatile progress
-      // before writing to disk. Secrets remain on the in-memory item for the
-      // active session only.
-      const staticDownloads = state.downloads.map(redactDownloadForPersistence);
-      const currentSerialized = JSON.stringify(staticDownloads);
-      if (currentSerialized !== lastSavedDownloads) {
-        lastSavedDownloads = currentSerialized;
-        nextDownloadsData = currentSerialized;
-        void processDownloadsSave();
-      }
+    if (state.queues !== prevState.queues || state.downloads !== prevState.downloads) {
+      void queuePersistenceSnapshot(persistenceSnapshotForState(state)).catch(error => {
+        console.error('Failed to persist download state:', error);
+      });
     }
   });
+  downloadPersistenceReady = true;
 
   return () => {
     downloadPersistenceUnsubscribe?.();
     downloadPersistenceUnsubscribe = null;
+    downloadPersistenceReady = false;
   };
 };

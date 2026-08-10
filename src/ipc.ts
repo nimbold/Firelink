@@ -136,6 +136,7 @@ type CommandMap = {
   abandon_keychain_grant: { args: { requestId: string }; result: PairingTokenHydration | null };
   acknowledge_pairing_token_change: { args: undefined; result: void };
   set_extension_frontend_ready: { args: { ready: boolean }; result: void };
+  ack_frontend_exit: { args: undefined; result: void };
   ack_extension_download: { args: { requestId: string }; result: void };
   get_system_proxy: { args: undefined; result: string | null };
   get_file_category: { args: { filename: string }; result: DownloadCategory };
@@ -145,6 +146,10 @@ type CommandMap = {
   db_load_settings: { args: undefined; result: string | null };
   db_get_all_downloads: { args: undefined; result: string[] };
   db_replace_downloads: { args: { data: string }; result: void };
+  db_commit_download_state: {
+    args: { downloadsData: string; queuesData: string };
+    result: void;
+  };
   db_get_all_queues: { args: undefined; result: string[] };
   db_replace_queues: { args: { data: string }; result: void };
   create_category_directories: {
@@ -198,6 +203,7 @@ type EventMap = {
   'extension-add-download': ExtensionDownload;
   'deep-link-add-download': string;
   'tray-action': 'pause-all' | 'resume-all';
+  'app-exit-requested': null;
 };
 
 export function listenEvent<K extends keyof EventMap>(

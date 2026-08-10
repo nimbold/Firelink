@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { dispatchItem, getProxyArgs, getSiteLogin, hasStaleTemporaryMediaEstimate, normalizeCustomProxy, normalizePersistedDownloadProgress, normalizePersistedQueueState, normalizePersistedQueues, useDownloadStore } from './useDownloadStore';
+import { commitDownloadState, dispatchItem, flushDownloadPersistence, getProxyArgs, getSiteLogin, hasStaleTemporaryMediaEstimate, initializeDownloadPersistence, normalizeCustomProxy, normalizePersistedDownloadProgress, normalizePersistedQueueState, normalizePersistedQueues, useDownloadStore } from './useDownloadStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
 import { useSettingsStore } from './useSettingsStore';
 import * as ipc from '../ipc';
@@ -1605,6 +1605,281 @@ describe('useDownloadStore', () => {
     expect(item.queueId).toBe('queue-b');
     expect(item.queuePosition).toBe(0);
     expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
+  });
+
+  it('waits for durable admission before dispatching a start-now download', async () => {
+    const disposePersistence = initializeDownloadPersistence('main');
+    const events: string[] = [];
+    let releaseCommit!: () => void;
+    let signalCommitStarted!: () => void;
+    const commitStarted = new Promise<void>(resolve => {
+      signalCommitStarted = resolve;
+    });
+    const commitGate = new Promise<void>(resolve => {
+      releaseCommit = resolve;
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'db_commit_download_state') {
+        events.push('commit-start');
+        signalCommitStarted();
+        await commitGate;
+        events.push('commit-complete');
+        return undefined;
+      }
+      if (command === 'enqueue_download') {
+        events.push('enqueue');
+        return { id: 'durable-admission', filename: 'file.bin' };
+      }
+      if (command === 'get_pending_order') return [];
+      return undefined;
+    });
+
+    try {
+      const adding = useDownloadStore.getState().addDownload({
+        id: 'durable-admission',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        category: 'Other',
+        dateAdded: ''
+      }, { type: 'start-now' });
+
+      await commitStarted;
+      expect(events).toEqual(['commit-start']);
+      expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
+
+      releaseCommit();
+      await expect(adding).resolves.toBe(true);
+      const enqueueIndex = events.indexOf('enqueue');
+      expect(enqueueIndex).toBeGreaterThan(0);
+      expect(events.slice(0, enqueueIndex).filter(event => event === 'commit-start').length)
+        .toBe(events.slice(0, enqueueIndex).filter(event => event === 'commit-complete').length);
+    } finally {
+      disposePersistence();
+    }
+  });
+
+  it('does not dispatch when durable admission fails', async () => {
+    const disposePersistence = initializeDownloadPersistence('main');
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'db_commit_download_state') {
+        throw new Error('database unavailable');
+      }
+      if (command === 'enqueue_download') {
+        throw new Error('enqueue must not run');
+      }
+      return undefined;
+    });
+
+    try {
+      await expect(useDownloadStore.getState().addDownload({
+        id: 'durable-admission-failure',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        category: 'Other',
+        dateAdded: ''
+      }, { type: 'start-now' })).resolves.toBe(false);
+      expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+        id: 'durable-admission-failure',
+        status: 'failed',
+        lastError: 'database unavailable'
+      });
+      expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
+    } finally {
+      disposePersistence();
+    }
+  });
+
+  it('does not enqueue after a lifecycle is invalidated during durable admission', async () => {
+    const disposePersistence = initializeDownloadPersistence('main');
+    let releaseCommit!: () => void;
+    let signalCommitStarted!: () => void;
+    const commitStarted = new Promise<void>(resolve => {
+      signalCommitStarted = resolve;
+    });
+    const commitGate = new Promise<void>(resolve => {
+      releaseCommit = resolve;
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'db_commit_download_state') {
+        signalCommitStarted();
+        await commitGate;
+        return undefined;
+      }
+      if (command === 'enqueue_download') {
+        throw new Error('stale dispatch must not enqueue');
+      }
+      return undefined;
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'admission-lifecycle-race',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        destination: '/tmp',
+        status: 'queued',
+        category: 'Other',
+        dateAdded: ''
+      }] as any[]
+    });
+
+    try {
+      const dispatching = dispatchItem('admission-lifecycle-race');
+      await commitStarted;
+      const pausing = useDownloadStore.getState().pauseDownload('admission-lifecycle-race');
+      releaseCommit();
+
+      await expect(dispatching).resolves.toBe(false);
+      await expect(pausing).resolves.toBeUndefined();
+      expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
+      expect(useDownloadStore.getState().downloads[0].status).toBe('paused');
+    } finally {
+      disposePersistence();
+    }
+  });
+
+  it('waits for the latest full snapshot when state changes during a durable commit', async () => {
+    const disposePersistence = initializeDownloadPersistence('main');
+    const persistedIds: string[] = [];
+    let releaseFirstCommit!: () => void;
+    let signalFirstCommit!: () => void;
+    const firstCommitStarted = new Promise<void>(resolve => {
+      signalFirstCommit = resolve;
+    });
+    const firstCommitGate = new Promise<void>(resolve => {
+      releaseFirstCommit = resolve;
+    });
+    let commitCount = 0;
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: any) => {
+      if (command === 'db_commit_download_state') {
+        persistedIds.push((JSON.parse(args.downloadsData) as Array<{ id: string }>)[0]?.id || 'empty');
+        commitCount += 1;
+        if (commitCount === 1) {
+          signalFirstCommit();
+          await firstCommitGate;
+        }
+        return undefined;
+      }
+      return undefined;
+    });
+    const first = {
+      id: 'commit-first',
+      url: 'https://example.com/first',
+      fileName: 'first.bin',
+      status: 'ready' as const,
+      category: 'Other' as const,
+      dateAdded: ''
+    };
+    const second = { ...first, id: 'commit-second', fileName: 'second.bin' };
+
+    try {
+      useDownloadStore.setState({ downloads: [first] as any[] });
+      await firstCommitStarted;
+      const committing = commitDownloadState();
+      useDownloadStore.setState({ downloads: [second] as any[] });
+      releaseFirstCommit();
+
+      await committing;
+      expect(persistedIds).toEqual(['commit-first', 'commit-second']);
+    } finally {
+      disposePersistence();
+    }
+  });
+
+  it('does not leave an older in-flight snapshot after state returns to the committed value', async () => {
+    const disposePersistence = initializeDownloadPersistence('main');
+    const persistedIds: string[] = [];
+    let releaseFirstCommit!: () => void;
+    let signalFirstCommit!: () => void;
+    const firstCommitStarted = new Promise<void>(resolve => {
+      signalFirstCommit = resolve;
+    });
+    const firstCommitGate = new Promise<void>(resolve => {
+      releaseFirstCommit = resolve;
+    });
+    let commitCount = 0;
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: any) => {
+      if (command === 'db_commit_download_state') {
+        const records = JSON.parse(args.downloadsData) as Array<{ id: string }>;
+        persistedIds.push(records[0]?.id || 'empty');
+        commitCount += 1;
+        if (commitCount === 1) {
+          signalFirstCommit();
+          await firstCommitGate;
+        }
+        return undefined;
+      }
+      return undefined;
+    });
+
+    try {
+      const first = {
+        id: 'snapshot-a',
+        url: 'https://example.com/a',
+        fileName: 'a.bin',
+        status: 'ready' as const,
+        category: 'Other' as const,
+        dateAdded: ''
+      };
+      const second = { ...first, id: 'snapshot-b', fileName: 'b.bin' };
+      useDownloadStore.setState({ downloads: [first] as any[] });
+      await firstCommitStarted;
+      useDownloadStore.setState({ downloads: [second] as any[] });
+      useDownloadStore.setState({ downloads: [first] as any[] });
+
+      releaseFirstCommit();
+      await flushDownloadPersistence();
+
+      expect(persistedIds).toEqual(['snapshot-a', 'snapshot-a']);
+    } finally {
+      disposePersistence();
+    }
+  });
+
+  it('waits for durable queued state before resuming an existing lifecycle', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'durable-resume',
+        url: 'https://example.com/resume.bin',
+        fileName: 'resume.bin',
+        status: 'paused',
+        category: 'Other',
+        dateAdded: '',
+        queueId: 'main'
+      }] as any[]
+    });
+    const disposePersistence = initializeDownloadPersistence('main');
+    let releaseCommit!: () => void;
+    let signalCommitStarted!: () => void;
+    const commitStarted = new Promise<void>(resolve => {
+      signalCommitStarted = resolve;
+    });
+    const commitGate = new Promise<void>(resolve => {
+      releaseCommit = resolve;
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'db_commit_download_state') {
+        signalCommitStarted();
+        await commitGate;
+        return undefined;
+      }
+      if (command === 'resume_download') return true;
+      return undefined;
+    });
+
+    try {
+      const resuming = useDownloadStore.getState().resumeDownload('durable-resume');
+      await commitStarted;
+      expect(ipc.invokeCommand).not.toHaveBeenCalledWith('resume_download', expect.anything());
+
+      releaseCommit();
+      await expect(resuming).resolves.toBe(true);
+      expect(ipc.invokeCommand).toHaveBeenCalledWith('resume_download', {
+        id: 'durable-resume',
+        queueId: 'main'
+      });
+    } finally {
+      disposePersistence();
+    }
   });
 
   it('normalizes new Torrent rows before resolving their default destination', async () => {

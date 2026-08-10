@@ -3085,8 +3085,32 @@ fn push_unique_path(paths: &mut Vec<std::path::PathBuf>, path: std::path::PathBu
     }
 }
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+
+struct FrontendExitFlush {
+    next_request: AtomicU64,
+    completed: tokio::sync::watch::Sender<u64>,
+}
+
+impl FrontendExitFlush {
+    fn new() -> Self {
+        let (completed, _) = tokio::sync::watch::channel(0);
+        Self {
+            next_request: AtomicU64::new(0),
+            completed,
+        }
+    }
+
+    fn request(&self) -> u64 {
+        self.next_request.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn acknowledge(&self) {
+        let request = self.next_request.load(Ordering::Acquire);
+        let _ = self.completed.send(request);
+    }
+}
 
 struct Aria2DaemonGuard {
     child: Mutex<Option<std::process::Child>>,
@@ -3218,6 +3242,7 @@ pub struct AppState {
     pub extension_acks: extension_server::SharedExtensionAcks,
     pub extension_server_port: extension_server::SharedServerPort,
     pub extension_server_shutdown: tokio::sync::watch::Sender<bool>,
+    frontend_exit_flush: Arc<FrontendExitFlush>,
     pub aria2_port: std::sync::Arc<std::sync::atomic::AtomicU16>,
     pub aria2_secret: String,
     pub media_semaphore: Arc<tokio::sync::Semaphore>,
@@ -10316,6 +10341,26 @@ fn db_replace_downloads(
     crate::db::replace_downloads(&mut connection, &data, portable)
 }
 
+#[tauri::command]
+fn db_commit_download_state(
+    caller: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::db::DbState>,
+    downloads_data: String,
+    queues_data: String,
+) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
+    let portable = state.is_portable();
+    let mut connection = state.lock()?;
+    let existing = crate::db::load_downloads(&connection)?;
+    let downloads_data = merge_durable_torrent_telemetry(&existing, &downloads_data)?;
+    crate::db::replace_downloads_and_queues(
+        &mut connection,
+        &downloads_data,
+        &queues_data,
+        portable,
+    )
+}
+
 fn persisted_destinations_equal(left: &str, right: &str) -> bool {
     let left = std::path::Path::new(left.trim());
     let right = std::path::Path::new(right.trim());
@@ -10918,6 +10963,16 @@ fn set_extension_frontend_ready(
 }
 
 #[tauri::command]
+fn ack_frontend_exit(
+    caller: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
+    state.frontend_exit_flush.acknowledge();
+    Ok(())
+}
+
+#[tauri::command]
 fn ack_extension_download(
     caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
@@ -10971,6 +11026,7 @@ mod tests {
         MediaProgressEmitterState, MediaSpeedSampler, MEDIA_PROGRESS_PREFIX,
         observe_aria2_connections, observe_aria2_connections_with_epoch,
         Aria2ConnectionObservation, Aria2ConnectionSample, Aria2RecoveryReason,
+        FrontendExitFlush,
         aria2_active_connection_count,
         parse_media_playlist_metadata,
         normalize_media_connections,
@@ -11264,6 +11320,18 @@ mod tests {
         guard.allow_exit();
         assert!(guard.exit_allowed());
         assert!(!guard.begin_shutdown());
+    }
+
+    #[test]
+    fn frontend_exit_flush_acknowledges_the_current_request_generation() {
+        let flush = FrontendExitFlush::new();
+        let completed = flush.completed.subscribe();
+        let request = flush.request();
+        assert_eq!(*completed.borrow(), 0);
+
+        flush.acknowledge();
+
+        assert_eq!(*completed.borrow(), request);
     }
 
     #[test]
@@ -13947,6 +14015,7 @@ pub fn run() {
     let server_extension_port = extension_server_port.clone();
     let (extension_server_shutdown_tx, extension_server_shutdown_rx) =
         tokio::sync::watch::channel(false);
+    let frontend_exit_flush = Arc::new(FrontendExitFlush::new());
 
     let initial_aria2_port = 6800; // Will be determined dynamically in background
     let aria2_port = Arc::new(std::sync::atomic::AtomicU16::new(initial_aria2_port));
@@ -14200,6 +14269,7 @@ pub fn run() {
                 extension_acks,
                 extension_server_port,
                 extension_server_shutdown: extension_server_shutdown_tx.clone(),
+                frontend_exit_flush,
                 aria2_port: aria2_port.clone(),
                 aria2_secret: aria2_secret.clone(),
                 media_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
@@ -15274,7 +15344,7 @@ pub fn run() {
             authorize_keychain_access,
             acknowledge_pairing_token_change,
             check_file_exists, toggle_tray_icon, set_extension_pairing_token,
-            get_extension_server_port, set_extension_frontend_ready, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, get_torrent_availability, get_torrent_file_progress, get_torrent_piece_progress, get_torrent_file_selection, set_torrent_file_selection, get_torrent_details, get_torrent_magnet_link, export_torrent_metadata, move_torrent_data, cancel_torrent_move_data, verify_torrent_data, get_torrent_web_seeds, set_torrent_web_seeds, set_torrent_max_open_files, set_torrent_overall_upload_limit, set_global_speed_limit, remove_download, get_download_primary_path,
+            get_extension_server_port, set_extension_frontend_ready, ack_frontend_exit, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, get_torrent_availability, get_torrent_file_progress, get_torrent_piece_progress, get_torrent_file_selection, set_torrent_file_selection, get_torrent_details, get_torrent_magnet_link, export_torrent_metadata, move_torrent_data, cancel_torrent_move_data, verify_torrent_data, get_torrent_web_seeds, set_torrent_web_seeds, set_torrent_max_open_files, set_torrent_overall_upload_limit, set_global_speed_limit, remove_download, get_download_primary_path,
             detach_download_for_reconfigure,
             enqueue_download, enqueue_many, cancel_enqueue_generation, move_in_queue, move_many_in_queue, remove_from_queue, get_pending_order,
             commands::reveal_in_file_manager, commands::open_downloaded_file,
@@ -15289,6 +15359,7 @@ pub fn run() {
             parity::get_system_proxy, parity::get_file_category, parity::check_for_updates, parity::is_supported_media, parity::get_supported_media_domains,
             parity::create_category_directories,
             db_save_settings, db_load_settings, db_get_all_downloads, db_replace_downloads,
+            db_commit_download_state,
             clear_torrent_removal_paths, reconcile_torrent_removal_reservations,
             db_get_all_queues, db_replace_queues,
             read_logs, export_logs, toggle_log_pause, is_log_paused, clear_logs,
@@ -15314,14 +15385,37 @@ pub fn run() {
                 }
             }
             tauri::RunEvent::ExitRequested { code, api, .. } => {
-                let state = app_handle.state::<AppState>();
-                let _ = state.extension_server_shutdown.send(true);
                 let guard = app_handle.state::<Aria2DaemonGuard>();
                 if !guard.exit_allowed() {
                     api.prevent_exit();
                     if guard.begin_shutdown() {
                         let app = app_handle.clone();
                         tauri::async_runtime::spawn(async move {
+                            let frontend_exit_flush = app.state::<AppState>().frontend_exit_flush.clone();
+                            let extension_server_shutdown = app
+                                .state::<AppState>()
+                                .extension_server_shutdown
+                                .clone();
+                            let request = frontend_exit_flush.request();
+                            let mut completed = frontend_exit_flush.completed.subscribe();
+                            let _ = app.emit_to("main", "app-exit-requested", ());
+                            let flush_wait = async move {
+                                loop {
+                                    if *completed.borrow() >= request {
+                                        break;
+                                    }
+                                    if completed.changed().await.is_err() {
+                                        break;
+                                    }
+                                }
+                            };
+                            if tokio::time::timeout(Duration::from_secs(2), flush_wait)
+                                .await
+                                .is_err()
+                            {
+                                log::warn!("frontend persistence flush timed out during exit");
+                            }
+                            let _ = extension_server_shutdown.send(true);
                             shutdown_aria2_daemon(app.clone()).await;
                             app.state::<Aria2DaemonGuard>().allow_exit();
                             app.exit(code.unwrap_or(0));

@@ -917,19 +917,7 @@ pub fn replace_downloads(
     data: &str,
     portable: bool,
 ) -> Result<(), String> {
-    let values: Vec<Value> = serde_json::from_str(data)
-        .map_err(|error| format!("failed to decode downloads: {error}"))?;
-    let strings = values
-        .into_iter()
-        .map(|mut value| {
-            remove_live_download_metadata(&mut value);
-            if portable {
-                remove_persisted_transfer_secrets(&mut value);
-            }
-            serde_json::to_string(&value)
-                .map_err(|error| format!("failed to encode download: {error}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let strings = prepare_download_strings(data, portable)?;
     let transaction = connection
         .transaction()
         .map_err(|error| format!("failed to begin download save: {error}"))?;
@@ -937,6 +925,24 @@ pub fn replace_downloads(
     transaction
         .commit()
         .map_err(|error| format!("failed to commit download save: {error}"))
+}
+
+pub fn replace_downloads_and_queues(
+    connection: &mut Connection,
+    downloads_data: &str,
+    queues_data: &str,
+    portable: bool,
+) -> Result<(), String> {
+    let downloads = prepare_download_strings(downloads_data, portable)?;
+    let queues = prepare_queue_strings(queues_data)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("failed to begin download state save: {error}"))?;
+    replace_downloads_tx(&transaction, &downloads)?;
+    replace_queues_tx(&transaction, &queues)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("failed to commit download state save: {error}"))
 }
 
 /// Mutate exactly one persisted download inside a database transaction.
@@ -1304,14 +1310,7 @@ pub fn load_queues(connection: &Connection) -> Result<Vec<String>, String> {
 }
 
 pub fn replace_queues(connection: &mut Connection, data: &str) -> Result<(), String> {
-    let values: Vec<Value> =
-        serde_json::from_str(data).map_err(|error| format!("failed to decode queues: {error}"))?;
-    let strings = values
-        .iter()
-        .map(|value| {
-            serde_json::to_string(value).map_err(|error| format!("failed to encode queue: {error}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let strings = prepare_queue_strings(data)?;
     let transaction = connection
         .transaction()
         .map_err(|error| format!("failed to begin queue save: {error}"))?;
@@ -1319,6 +1318,33 @@ pub fn replace_queues(connection: &mut Connection, data: &str) -> Result<(), Str
     transaction
         .commit()
         .map_err(|error| format!("failed to commit queue save: {error}"))
+}
+
+fn prepare_download_strings(data: &str, portable: bool) -> Result<Vec<String>, String> {
+    let values: Vec<Value> = serde_json::from_str(data)
+        .map_err(|error| format!("failed to decode downloads: {error}"))?;
+    values
+        .into_iter()
+        .map(|mut value| {
+            remove_live_download_metadata(&mut value);
+            if portable {
+                remove_persisted_transfer_secrets(&mut value);
+            }
+            serde_json::to_string(&value)
+                .map_err(|error| format!("failed to encode download: {error}"))
+        })
+        .collect()
+}
+
+fn prepare_queue_strings(data: &str) -> Result<Vec<String>, String> {
+    let values: Vec<Value> =
+        serde_json::from_str(data).map_err(|error| format!("failed to decode queues: {error}"))?;
+    values
+        .iter()
+        .map(|value| {
+            serde_json::to_string(value).map_err(|error| format!("failed to encode queue: {error}"))
+        })
+        .collect()
 }
 
 fn replace_queues_tx(transaction: &Transaction<'_>, queues: &[String]) -> Result<(), String> {
@@ -2355,6 +2381,72 @@ mod tests {
         }
         assert_eq!(saved["torrentTrackers"], "https://tracker.example/announce");
         assert_eq!(saved["torrentExcludeTrackers"], "https://tracker.example/exclude");
+    }
+
+    #[test]
+    fn download_state_commit_is_atomic_across_downloads_and_queues() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let mut connection = state.lock().unwrap();
+        replace_downloads(
+            &mut connection,
+            &json!([{
+                "id": "old-download",
+                "status": "paused",
+                "queueId": "old-queue"
+            }])
+            .to_string(),
+            false,
+        )
+        .unwrap();
+        replace_queues(
+            &mut connection,
+            &json!([{
+                "id": "old-queue",
+                "name": "Old Queue",
+                "isMain": true
+            }])
+            .to_string(),
+        )
+        .unwrap();
+
+        let result = replace_downloads_and_queues(
+            &mut connection,
+            &json!([{
+                "id": "new-download",
+                "status": "queued",
+                "queueId": "new-queue"
+            }])
+            .to_string(),
+            &json!([{
+                "name": "missing-id"
+            }])
+            .to_string(),
+            false,
+        );
+        assert!(result.is_err());
+        assert!(load_downloads(&connection).unwrap()[0].contains("old-download"));
+        assert!(load_queues(&connection).unwrap()[0].contains("old-queue"));
+
+        replace_downloads_and_queues(
+            &mut connection,
+            &json!([{
+                "id": "new-download",
+                "status": "queued",
+                "queueId": "new-queue"
+            }])
+            .to_string(),
+            &json!([{
+                "id": "new-queue",
+                "name": "New Queue",
+                "isMain": true
+            }])
+            .to_string(),
+            false,
+        )
+        .unwrap();
+        assert!(load_downloads(&connection).unwrap()[0].contains("new-download"));
+        assert!(load_queues(&connection).unwrap()[0].contains("new-queue"));
     }
 
     #[test]
