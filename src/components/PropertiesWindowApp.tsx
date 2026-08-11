@@ -49,6 +49,7 @@ import {
 } from '../utils/propertiesDiagnostics';
 import { shouldOfferPropertiesUrlExpansion, shouldResetPropertiesUrlExpansion } from '../utils/propertiesUrl';
 import { getPropertiesTabIndex, getPropertiesTabs, PROPERTIES_TABS_OVERFLOW_BREAKPOINT, shouldUsePropertiesTabOverflow, type PropertiesTab } from '../utils/propertiesTabs';
+import { getPropertiesConnectionPresentation } from '../utils/propertiesPresentation';
 import { WindowControls } from './WindowControls';
 import {
   TORRENT_ENCRYPTION_POLICY_DISABLED,
@@ -1096,11 +1097,12 @@ export const PropertiesWindowApp = () => {
     ? t($ => $.addDownloads.unknownSize)
     : `${snapshot.totalIsEstimate ? '~' : ''}${formatDownloadBytes(snapshot.totalBytes)}`);
   const statusLabel = t($ => $.downloads.status[snapshot.status]);
-  const connectionMetric = isTorrent
-    ? String(snapshot.connectedPeers ?? '—')
-    : snapshot.isMedia === true
-      ? `${snapshot.connections ?? '—'} ${t($ => $.properties.configuredConcurrency)}`
-      : `${snapshot.activeConnections ?? '—'} / ${snapshot.requestedConnections ?? snapshot.connections ?? '—'} ${t($ => $.properties.connections)}`;
+  const connectionPresentation = getPropertiesConnectionPresentation(snapshot);
+  const connectionLabel = connectionPresentation.labelKey === 'fragmentConcurrency'
+    ? t($ => $.properties.fragmentConcurrency)
+    : connectionPresentation.labelKey === 'torrentConnectedPeers'
+      ? t($ => $.properties.torrentConnectedPeers)
+      : t($ => $.properties.connections);
   const queuePlacement = formatPropertiesQueuePlacement(
     snapshot.queueName,
     snapshot.queuePosition,
@@ -1192,7 +1194,7 @@ export const PropertiesWindowApp = () => {
           <div className="properties-metric-card"><Download size={14} /><div><span>{t($ => $.properties.size)}</span><strong>{formatDownloadBytes(snapshot.downloadedBytes ?? 0)} / {total}</strong></div></div>
           <div className="properties-metric-card"><Gauge size={14} /><div><span>{t($ => $.properties.speed)}</span><strong>{snapshot.speed || '—'}</strong></div></div>
           <div className="properties-metric-card"><Timer size={14} /><div><span>{t($ => $.properties.eta)}</span><strong>{snapshot.eta || '—'}</strong></div></div>
-          <div className="properties-metric-card"><Users size={14} /><div><span>{isTorrent ? t($ => $.properties.torrentConnectedPeers) : t($ => $.properties.connections)}</span><strong>{connectionMetric}</strong></div></div>
+          {connectionPresentation.showHeaderMetric && <div className="properties-metric-card"><Users size={14} /><div><span>{connectionLabel}</span><strong>{connectionPresentation.value}</strong></div></div>}
           {isTorrent && <>
             <div className="properties-metric-card"><Upload size={14} /><div><span>{t($ => $.properties.torrentUploaded)}</span><strong>{formatDownloadBytes(snapshot.torrentUploadedBytes ?? 0)}</strong></div></div>
             <div className="properties-metric-card"><Activity size={14} /><div><span>{t($ => $.properties.torrentRatio)}</span><strong>{formatTorrentRatio(snapshot.torrentUploadedBytes ?? 0, snapshot.downloadedBytes ?? 0, 'en-US')}</strong></div></div>
@@ -1299,7 +1301,7 @@ export const PropertiesWindowApp = () => {
           {snapshot.isMedia === true && <div className="grid gap-2 rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs sm:grid-cols-2">
             <span className="text-text-muted">{t($ => $.addDownloads.format)}</span><span className="break-all font-mono">{snapshot.mediaFormatSelector || '—'}</span>
             <span className="text-text-muted">{t($ => $.addDownloads.quality)}</span><span>{snapshot.mediaQuality || '—'}</span>
-            <span className="text-text-muted">{t($ => $.properties.configuredConcurrency)}</span><span>{snapshot.connections ?? '—'}</span>
+            <span className="text-text-muted">{t($ => $.properties.fragmentConcurrency)}</span><span>{snapshot.connections ?? '—'}</span>
           </div>}
           {isTorrent && details && <div className="grid gap-2 rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs sm:grid-cols-2">
             <span className="text-text-muted">{t($ => $.properties.torrentDetailsDisplayName)}</span><span>{details.displayName || '—'}</span>
@@ -1379,12 +1381,22 @@ export const PropertiesWindowApp = () => {
             controlId="properties-transfer-speed-cap"
             hint={t($ => $.properties.speedLimitHint)}
             meta={downloadLimit.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
-            className="max-w-md"
+            className="max-w-sm"
             format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatSpeedLimit) })}
           >
             <input id="properties-transfer-speed-cap" className="app-control w-full" value={downloadLimit} onChange={event => { setDownloadLimit(event.target.value); setDraftTab('transfer'); }} placeholder={t($ => $.properties.inputExampleSpeedLimit)} disabled={!editingEnabled} />
           </PropertiesField>
-          <label className="block max-w-2xl text-xs text-text-muted">{snapshot.isMedia === true ? t($ => $.properties.configuredConcurrency) : t($ => $.properties.connections)}<div className="mt-2 flex items-center gap-3"><input type="range" min="1" max="16" value={connections || '1'} onChange={event => { setConnections(event.target.value); setDraftTab('transfer'); }} disabled={!editingEnabled} className="min-w-0 flex-1 accent-blue-500" aria-label={t($ => $.properties.connections)} /><span className="w-8 text-center font-mono text-text-primary">{connections || '1'}</span></div></label>
+          <PropertiesField
+            label={connectionLabel}
+            controlId="properties-transfer-concurrency"
+            hint={snapshot.isMedia === true ? t($ => $.properties.fragmentConcurrencyHint) : undefined}
+            className="max-w-md"
+          >
+            <div className="mt-2 flex items-center gap-3" dir="ltr">
+              <input id="properties-transfer-concurrency" type="range" min="1" max="16" value={connections || '1'} onChange={event => { setConnections(event.target.value); setDraftTab('transfer'); }} disabled={!editingEnabled} className="min-w-0 flex-1 accent-blue-500" aria-label={connectionLabel} />
+              <span className="w-8 text-center font-mono text-text-primary">{connections || '1'}</span>
+            </div>
+          </PropertiesField>
           <p className="text-xs text-text-muted">{t($ => $.properties.transferSettings)}</p>
         </div>}
 
@@ -1539,7 +1551,7 @@ export const PropertiesWindowApp = () => {
           {snapshot.credentialsRequired === true && <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200" role="alert">{t($ => $.properties.credentialsRequired)}</p>}
           {isSftp && <label className="block max-w-2xl text-xs text-text-muted">{t($ => $.properties.sftpHostKeyMd)}<input className="app-control mt-1 w-full font-mono" value={sftpHostKeyMd} onChange={event => { setSftpHostKeyMd(event.target.value); setDraftTab('advanced'); }} placeholder={t($ => $.properties.sftpHostKeyMdHint)} disabled={!editingEnabled} autoComplete="off" /><span className="mt-1 block text-[11px]">{t($ => $.properties.sftpHostKeyMdDescription)}</span></label>}
           <div className="grid max-w-2xl gap-3 rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs sm:grid-cols-2">
-            <div><span className="text-text-muted">{t($ => $.properties.connections)}</span><p className="mt-1">{snapshot.isMedia === true ? `${snapshot.connections ?? '—'} ${t($ => $.properties.configuredConcurrency)}` : `${snapshot.activeConnections ?? '—'} / ${snapshot.requestedConnections ?? snapshot.connections ?? '—'}`}</p></div>
+            <div><span className="text-text-muted">{connectionLabel}</span><p className="mt-1">{connectionPresentation.value}</p></div>
             <div><span className="text-text-muted">{t($ => $.properties.speedCap)}</span><p className="mt-1">{snapshot.speedLimit || '—'}</p></div>
             <div><span className="text-text-muted">{t($ => $.properties.username)}</span><p className="mt-1">{snapshot.hasUsername ? '✓' : '—'}</p></div>
             <div><span className="text-text-muted">{t($ => $.properties.password)}</span><p className="mt-1">{snapshot.hasPassword ? '✓' : '—'}</p></div>

@@ -3218,6 +3218,7 @@ mod torrent_probe;
 pub mod torrent;
 mod settings;
 mod storage;
+mod window_geometry;
 pub use error::AppError;
 
 // Retained only for compatibility with the optional aria2 diagnostic monitor.
@@ -14285,6 +14286,33 @@ pub fn run() {
             // Build the window only after all command state is registered. This
             // prevents the frontend from racing startup and invoking IPC before
             // the database and portable storage layout are available.
+            let startup_size = persisted_settings
+                .as_ref()
+                .and_then(|settings| settings.main_window_size.as_ref())
+                .and_then(|size| crate::window_geometry::normalize_main_window_size(Some(size)))
+                .unwrap_or_else(crate::window_geometry::default_main_window_size);
+            let startup_size = app
+                .primary_monitor()
+                .ok()
+                .flatten()
+                .and_then(|monitor| {
+                    let scale_factor = monitor.scale_factor();
+                    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+                        return None;
+                    }
+                    let work_area = monitor.work_area().size;
+                    let logical_width = (work_area.width as f64 / scale_factor).round() as u32;
+                    let logical_height = (work_area.height as f64 / scale_factor).round() as u32;
+                    Some(crate::window_geometry::clamp_main_window_size(
+                        startup_size.clone(),
+                        logical_width,
+                        logical_height,
+                    ))
+                })
+                .unwrap_or(startup_size);
+            main_window_builder = main_window_builder
+                .inner_size(startup_size.width as f64, startup_size.height as f64)
+                .prevent_overflow();
             main_window_builder
                 .build()
                 .map_err(|error| format!("failed to create main window: {error}"))?;

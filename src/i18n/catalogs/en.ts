@@ -228,7 +228,8 @@ const common = {
     speed: 'Speed',
     eta: 'ETA',
     connections: 'Connections',
-    configuredConcurrency: 'Configured concurrency',
+    fragmentConcurrency: 'Fragment concurrency',
+    fragmentConcurrencyHint: 'Maximum number of media fragments yt-dlp may process concurrently. Firelink does not report a live fragment count; this is the configured value used when the transfer starts or resumes.',
     connectedPeers: 'connected peers',
     details: 'Details',
     tabs: {

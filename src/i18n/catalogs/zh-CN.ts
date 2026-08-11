@@ -228,7 +228,8 @@ const zhCN = {
     speed: '速度',
     eta: '剩余时间',
     connections: '连接数',
-    configuredConcurrency: '已配置并发数',
+    fragmentConcurrency: '分片并发数',
+    fragmentConcurrencyHint: 'yt-dlp 可同时处理的媒体分片最大数量。Firelink 不会报告实时活动分片数量；此配置值会在传输开始或恢复时使用。',
     connectedPeers: '已连接对等端',
     details: '详细信息',
     tabs: {

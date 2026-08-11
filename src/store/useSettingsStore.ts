@@ -37,15 +37,31 @@ import {
   isCalendarPreference,
   type CalendarPreference
 } from '../utils/dateTime';
+import type { MainWindowSize } from '../bindings/MainWindowSize';
+import { normalizeMainWindowSize } from '../utils/mainWindowState';
 
 let settingsQueue: Promise<void> = Promise.resolve();
 let torrentMaxOpenFilesQueue: Promise<void> = Promise.resolve();
 let torrentOverallUploadLimitQueue: Promise<void> = Promise.resolve();
 let pairingTokenHydrationRequest: Promise<PairingTokenHydration> | null = null;
+let shouldPersistLegacyFoldersFallback = false;
 const settingsPersistenceErrorListeners = new Set<() => void>();
 let settingsPersistenceFailed = false;
 const DEFAULT_SCHEDULER_QUEUE_ID = '00000000-0000-0000-0000-000000000001';
+const LEGACY_FOLDERS_COLLAPSED_KEY = 'firelink-folders-collapsed';
 export const DEFAULT_SPEED_LIMIT_PRESET_VALUES = [1, 5, 10];
+
+const readLegacyFoldersCollapsed = (): boolean | undefined => {
+  if (typeof window === 'undefined') return undefined;
+  try {
+    const value = window.localStorage.getItem(LEGACY_FOLDERS_COLLAPSED_KEY);
+    return value === null ? undefined : value === 'true';
+  } catch {
+    return undefined;
+  }
+};
+
+const initialFoldersCollapsed = readLegacyFoldersCollapsed() ?? false;
 
 export const subscribeToSettingsPersistenceErrors = (listener: () => void): (() => void) => {
   settingsPersistenceErrorListeners.add(listener);
@@ -72,6 +88,8 @@ const requestPairingTokenHydration = (): Promise<PairingTokenHydration> => {
 export const runSettingsPersistenceTransaction = <T>(
   operation: () => Promise<T>
 ): Promise<T> => enqueueSettingsTask(operation);
+
+export const waitForSettingsPersistence = (): Promise<void> => settingsQueue;
 
 const notifySettingsPersistenceError = () => {
   if (settingsPersistenceFailed) return;
@@ -220,7 +238,9 @@ export interface SettingsState {
   speedLimitPresetValues: number[];
   logsEnabled: boolean;
   isSidebarVisible: boolean;
+  isFoldersCollapsed: boolean;
   sidebarPosition: SidebarPosition;
+  mainWindowSize: MainWindowSize | null;
   activeView: ActiveView;
   activeSettingsTab: SettingsTab;
   scheduler: SchedulerSettings;
@@ -297,6 +317,9 @@ export interface SettingsState {
   setSpeedLimitPresetValues: (values: number[]) => void;
   setLogsEnabled: (enabled: boolean) => void;
   setSidebarPosition: (position: SidebarPosition) => void;
+  setFoldersCollapsed: (collapsed: boolean) => void;
+  toggleFoldersCollapsed: () => void;
+  setMainWindowSize: (size: MainWindowSize) => void;
   setActiveView: (view: ActiveView) => void;
   setActiveSettingsTab: (tab: SettingsTab) => void;
   setScheduler: (settings: SchedulerSettings) => void;
@@ -388,6 +411,8 @@ export const useSettingsStore = create<SettingsState>()(
       activeView: 'downloads',
       activeSettingsTab: 'downloads',
       isSidebarVisible: true,
+      isFoldersCollapsed: initialFoldersCollapsed,
+      mainWindowSize: null,
       sidebarPosition: 'auto',
       scheduler: {
         enabled: false,
@@ -518,6 +543,12 @@ export const useSettingsStore = create<SettingsState>()(
       setSpeedLimitPresetValues: (speedLimitPresetValues) => set({ speedLimitPresetValues }),
       setLogsEnabled: (logsEnabled) => set({ logsEnabled }),
       setSidebarPosition: (sidebarPosition) => set({ sidebarPosition }),
+      setFoldersCollapsed: (isFoldersCollapsed) => set({ isFoldersCollapsed }),
+      toggleFoldersCollapsed: () => set(state => ({ isFoldersCollapsed: !state.isFoldersCollapsed })),
+      setMainWindowSize: (size) => {
+        const normalized = normalizeMainWindowSize(size);
+        if (normalized) set({ mainWindowSize: normalized });
+      },
       setActiveView: (view) => set({ activeView: view }),
       setActiveSettingsTab: (activeSettingsTab) => set({ activeSettingsTab }),
       setScheduler: (scheduler) => set({ scheduler }),
@@ -751,6 +782,15 @@ export const useSettingsStore = create<SettingsState>()(
           logsEnabled: persisted.logsEnabled === true
         } as SettingsState;
       },
+      onRehydrateStorage: () => (state, error) => {
+        if (error || !state) {
+          shouldPersistLegacyFoldersFallback = false;
+          return;
+        }
+        if (!shouldPersistLegacyFoldersFallback) return;
+        shouldPersistLegacyFoldersFallback = false;
+        state.setFoldersCollapsed(state.isFoldersCollapsed);
+      },
       partialize: (state): PersistedSettingsSnapshot => ({
         theme: state.theme,
         fontFamily: state.fontFamily,
@@ -769,6 +809,8 @@ export const useSettingsStore = create<SettingsState>()(
         speedLimitPresetValues: state.speedLimitPresetValues,
         logsEnabled: state.logsEnabled,
         isSidebarVisible: state.isSidebarVisible,
+        isFoldersCollapsed: state.isFoldersCollapsed,
+        mainWindowSize: state.mainWindowSize ?? undefined,
         sidebarPosition: state.sidebarPosition,
         activeSettingsTab: state.activeSettingsTab,
         scheduler: state.scheduler,
@@ -829,6 +871,13 @@ export const useSettingsStore = create<SettingsState>()(
         const persisted = persistedState && typeof persistedState === 'object'
           ? persistedState as Partial<SettingsState>
           : {};
+        shouldPersistLegacyFoldersFallback = false;
+        const legacyFoldersCollapsed = readLegacyFoldersCollapsed();
+        if (typeof persisted.isFoldersCollapsed !== 'boolean' && legacyFoldersCollapsed !== undefined) {
+          shouldPersistLegacyFoldersFallback = true;
+        }
+        const foldersCollapsedFallback = legacyFoldersCollapsed
+          ?? currentState.isFoldersCollapsed;
         const locations = normalizeDownloadLocationSettings(persisted);
         return ({
           ...currentState,
@@ -853,6 +902,12 @@ export const useSettingsStore = create<SettingsState>()(
           language: isAppLocalePreference(persisted.language)
             ? persisted.language
             : currentState.language,
+          isFoldersCollapsed: persistedBoolean(
+            persisted.isFoldersCollapsed,
+            foldersCollapsedFallback
+          ),
+          mainWindowSize: normalizeMainWindowSize(persisted.mainWindowSize)
+            ?? currentState.mainWindowSize,
           appFontSize: isAllowedSetting(APP_FONT_SIZE_VALUES, persisted.appFontSize)
             ? persisted.appFontSize
             : currentState.appFontSize,

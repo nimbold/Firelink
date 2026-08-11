@@ -13,7 +13,11 @@ import { listenEvent as listen, invokeCommand as invoke } from "./ipc";
 import { flushDownloadPersistence, initializeDownloadPersistence, useDownloadStore, MAIN_QUEUE_ID, type ExtensionDownloadRequest } from './store/useDownloadStore';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { initDownloadListener } from './store/downloadStore';
-import { subscribeToSettingsPersistenceErrors, useSettingsStore } from "./store/useSettingsStore";
+import {
+  subscribeToSettingsPersistenceErrors,
+  useSettingsStore,
+  waitForSettingsPersistence
+} from "./store/useSettingsStore";
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { WindowControls } from "./components/WindowControls";
 import { PropertiesWindowBridgeHost } from "./components/PropertiesWindowBridgeHost";
@@ -36,6 +40,8 @@ import { changeAppLocale, localeDirection, resolveAppLocale, syncDocumentLocale 
 import { useTranslation } from 'react-i18next';
 import { formatDownloadBytes } from './utils/downloadProgress';
 import { synchronizeDocumentAppearance } from './utils/documentAppearance';
+import { createMainWindowSizePersistence } from './utils/mainWindowState';
+import type { MainWindowSize } from './bindings/MainWindowSize';
 
 const loadSettingsView = () => import('./components/SettingsView');
 const loadSchedulerView = () => import('./components/SchedulerView');
@@ -410,14 +416,44 @@ function App() {
   useEffect(() => {
     const disposePersistence = initializeDownloadPersistence(getCurrentWindow().label);
     let active = true;
+    let exitRequested = false;
+    let exiting = false;
+    let settingsHydrated = useSettingsStore.persist.hasHydrated();
+    let latestSizeBeforeHydration: MainWindowSize | null = null;
+    const unlistenSettingsHydration = settingsHydrated
+      ? null
+      : useSettingsStore.persist.onFinishHydration(() => {
+        settingsHydrated = true;
+        const size = latestSizeBeforeHydration;
+        latestSizeBeforeHydration = null;
+        if (size && active && !exitRequested && !exiting) {
+          useSettingsStore.getState().setMainWindowSize(size);
+        }
+      });
+    const mainWindowSizePersistence = createMainWindowSizePersistence({
+      appWindow: getCurrentWindow(),
+      onSize: size => {
+        if (!active || exiting) return;
+        if (!settingsHydrated) {
+          latestSizeBeforeHydration = size;
+          return;
+        }
+        useSettingsStore.getState().setMainWindowSize(size);
+      }
+    });
     let cleanupListeners: (() => void) | null = null;
     let unlistenExit: (() => void) | null = null;
     const exitListener = listen('app-exit-requested', async () => {
+      exitRequested = true;
       try {
+        await mainWindowSizePersistence.flush();
+        await waitForSettingsPersistence();
         await flushDownloadPersistence();
       } catch (error) {
         console.error('Failed to flush download state before exit:', error);
       } finally {
+        exiting = true;
+        latestSizeBeforeHydration = null;
         await invoke('ack_frontend_exit').catch(error => {
           console.error('Failed to acknowledge frontend exit flush:', error);
         });
@@ -436,6 +472,7 @@ function App() {
       let unlistenDeepLink: (() => void) | null = null;
       const disposeListeners = () => {
         void queueFrontendReadyUpdate(false).catch(() => {});
+        mainWindowSizePersistence.dispose();
         unlistenExit?.();
         unlistenExit = null;
         unlistenTerminalState?.();
@@ -646,6 +683,8 @@ function App() {
       cleanupListeners = null;
       unlistenExit?.();
       unlistenExit = null;
+      unlistenSettingsHydration?.();
+      mainWindowSizePersistence.dispose();
       disposePersistence();
     };
   }, [addToast, queueFrontendReadyUpdate]);

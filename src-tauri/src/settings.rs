@@ -386,6 +386,23 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
         return;
     };
 
+    let main_window_size = state
+        .get("mainWindowSize")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<crate::ipc::MainWindowSize>(value).ok())
+        .and_then(|size| crate::window_geometry::normalize_main_window_size(Some(&size)));
+    match main_window_size {
+        Some(size) => {
+            state.insert(
+                "mainWindowSize".to_string(),
+                serde_json::to_value(size).expect("main window size is serializable"),
+            );
+        }
+        None => {
+            state.remove("mainWindowSize");
+        }
+    }
+
     sanitize_integer_setting(state, "maxConcurrentDownloads", |value| value.as_u64().is_some());
     sanitize_integer_setting(state, "perServerConnections", |value| value.as_i64().is_some());
     sanitize_integer_setting(state, "maxAutomaticRetries", |value| value.as_i64().is_some());
@@ -575,6 +592,9 @@ fn sanitize_allowed_string(
 }
 
 fn validate_settings(settings: &mut PersistedSettings) {
+    settings.main_window_size = crate::window_geometry::normalize_main_window_size(
+        settings.main_window_size.as_ref(),
+    );
     if settings.max_concurrent_downloads == 0 {
         settings.max_concurrent_downloads = default_settings().max_concurrent_downloads;
     }
@@ -838,6 +858,8 @@ fn default_settings() -> PersistedSettings {
         speed_limit_preset_values: vec![1.0, 5.0, 10.0],
         logs_enabled: false,
         is_sidebar_visible: true,
+        is_folders_collapsed: false,
+        main_window_size: None,
         sidebar_position: "auto".to_string(),
         active_settings_tab: SettingsTab::Downloads,
         scheduler: SchedulerSettings {
@@ -1376,6 +1398,51 @@ mod tests {
     #[test]
     fn does_not_remember_last_used_download_directory_by_default() {
         assert!(!default_settings().remember_last_used_download_directory);
+    }
+
+    #[test]
+    fn legacy_settings_without_geometry_use_no_persisted_size() {
+        let settings = decode_stored_settings(&Value::String(
+            json!({ "state": { "theme": "system" }, "version": 0 }).to_string(),
+        ))
+        .unwrap();
+
+        assert!(settings.main_window_size.is_none());
+    }
+
+    #[test]
+    fn valid_main_window_geometry_round_trips() {
+        let settings = decode_stored_settings(&Value::String(
+            json!({
+                "state": { "mainWindowSize": { "width": 1440, "height": 900 } },
+                "version": 6
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            settings
+                .main_window_size
+                .as_ref()
+                .map(|size| (size.width, size.height)),
+            Some((1440, 900))
+        );
+    }
+
+    #[test]
+    fn malformed_and_out_of_range_geometry_is_dropped() {
+        for geometry in [
+            json!({ "width": "1440", "height": 900 }),
+            json!({ "width": 959, "height": 900 }),
+            json!({ "width": 1440, "height": 16_385 }),
+        ] {
+            let settings = decode_stored_settings(&Value::String(
+                json!({ "state": { "mainWindowSize": geometry }, "version": 6 }).to_string(),
+            ))
+            .unwrap();
+            assert!(settings.main_window_size.is_none());
+        }
     }
 
     #[test]

@@ -25,6 +25,66 @@ describe('last used download directory preference', () => {
   });
 });
 
+describe('durable main-window and sidebar preferences', () => {
+  it('uses safe defaults and persists the current values', async () => {
+    vi.clearAllMocks();
+    useSettingsStore.setState({ isFoldersCollapsed: false, mainWindowSize: null });
+
+    expect(useSettingsStore.getState()).toMatchObject({
+      isFoldersCollapsed: false,
+      mainWindowSize: null
+    });
+
+    useSettingsStore.getState().setFoldersCollapsed(true);
+    useSettingsStore.getState().setMainWindowSize({ width: 1280, height: 800 });
+
+    await vi.waitFor(() => {
+      const save = vi.mocked(ipc.invokeCommand).mock.calls
+        .filter(([command]) => command === 'db_save_settings')
+        .slice(-1)[0];
+      expect(save).toBeDefined();
+      expect(JSON.parse((save?.[1] as { data: string }).data).state).toMatchObject({
+        isFoldersCollapsed: true,
+        mainWindowSize: { width: 1280, height: 800 }
+      });
+    });
+  });
+
+  it('rejects malformed, undersized, and oversized geometry during hydration', () => {
+    const merge = useSettingsStore.persist.getOptions().merge;
+    expect(merge).toBeTypeOf('function');
+    const current = useSettingsStore.getState();
+
+    expect(merge?.({ mainWindowSize: { width: 959, height: 800 } }, current).mainWindowSize)
+      .toBe(current.mainWindowSize);
+    expect(merge?.({ mainWindowSize: { width: 1280, height: 16_385 } }, current).mainWindowSize)
+      .toBe(current.mainWindowSize);
+    expect(merge?.({ mainWindowSize: { width: '1280', height: 800 } }, current).mainWindowSize)
+      .toBe(current.mainWindowSize);
+    expect(merge?.({ mainWindowSize: { width: 1440, height: 900 } }, current).mainWindowSize)
+      .toEqual({ width: 1440, height: 900 });
+  });
+
+  it('uses the legacy localStorage value only when durable state is absent', () => {
+    const originalWindow = globalThis.window;
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: { localStorage: { getItem: () => 'true' } }
+    });
+    try {
+      const merge = useSettingsStore.persist.getOptions().merge;
+      const current = { ...useSettingsStore.getState(), isFoldersCollapsed: false };
+      expect(merge?.({}, current).isFoldersCollapsed).toBe(true);
+      expect(merge?.({ isFoldersCollapsed: false }, current).isFoldersCollapsed).toBe(false);
+    } finally {
+      Object.defineProperty(globalThis, 'window', {
+        configurable: true,
+        value: originalWindow
+      });
+    }
+  });
+});
+
 describe('normal download reliability preferences', () => {
   beforeEach(() => {
     vi.clearAllMocks();

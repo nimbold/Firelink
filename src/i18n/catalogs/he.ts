@@ -228,7 +228,8 @@ const he = {
     speed: 'מהירות',
     eta: 'זמן נותר',
     connections: 'חיבורים',
-    configuredConcurrency: 'מקביליות מוגדרת',
+    fragmentConcurrency: 'מקביליות מקטעים',
+    fragmentConcurrencyHint: 'מספר מקטעי המדיה המרבי ש-yt-dlp יכול לעבד במקביל. Firelink אינו מדווח על מספר המקטעים הפעילים בזמן אמת; זהו הערך המוגדר שבו נעשה שימוש כשההעברה מתחילה או מתחדשת.',
     connectedPeers: 'עמיתים מחוברים',
     details: 'פרטים',
     tabs: {

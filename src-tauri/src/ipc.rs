@@ -656,6 +656,14 @@ pub struct SchedulerSettings {
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
+pub struct MainWindowSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub struct PersistedSettings {
     pub theme: Theme,
     #[serde(default)]
@@ -678,6 +686,11 @@ pub struct PersistedSettings {
     pub speed_limit_preset_values: Vec<f64>,
     pub logs_enabled: bool,
     pub is_sidebar_visible: bool,
+    #[serde(default)]
+    pub is_folders_collapsed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub main_window_size: Option<MainWindowSize>,
     #[serde(default = "default_sidebar_position")]
     pub sidebar_position: String,
     pub active_settings_tab: SettingsTab,

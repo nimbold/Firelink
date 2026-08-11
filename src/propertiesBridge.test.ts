@@ -241,6 +241,40 @@ describe('Properties window bridge', () => {
     expect(snapshot.queueId).toBe('internal-queue-id');
   });
 
+  it('does not project Aria2 connection telemetry onto media snapshots', () => {
+    const snapshot = sanitizePropertiesSnapshot({
+      id: 'media-1',
+      fileName: 'video.mp4',
+      url: 'https://example.test/video',
+      status: 'downloading',
+      category: 'Other',
+      dateAdded: '',
+      isMedia: true,
+      connections: 16,
+    } as DownloadItem, {
+      theme: 'dark',
+      fontFamily: 'system',
+      appFontSize: 'standard',
+      listRowDensity: 'standard',
+      locale: 'en',
+    }, {
+      progress: {
+        id: 'media-1',
+        fraction: 0.5,
+        speed: '1 MiB/s',
+        eta: '5s',
+        size: '4 MiB',
+        size_is_final: false,
+        active_connections: 8,
+        requested_connections: 16,
+      },
+    });
+
+    expect(snapshot.connections).toBe(16);
+    expect(snapshot).not.toHaveProperty('activeConnections');
+    expect(snapshot).not.toHaveProperty('requestedConnections');
+  });
+
   it('preserves resolved Properties window chrome in the sanitized snapshot', () => {
     const snapshot = sanitizePropertiesSnapshot({
       id: 'chrome-1',

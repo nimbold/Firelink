@@ -412,12 +412,17 @@ const copyWithoutSecrets = (
       ...(live.progress.total_is_estimate !== undefined
         ? { totalIsEstimate: live.progress.total_is_estimate }
         : {}),
-      ...(live.progress.active_connections !== undefined
-        ? item.isTorrent === true
-          ? { connectedPeers: live.progress.active_connections }
-          : { activeConnections: live.progress.active_connections }
+      ...(live.progress.active_connections !== undefined && item.isTorrent === true
+        ? { connectedPeers: live.progress.active_connections }
         : {}),
-      ...(item.isTorrent !== true && live.progress.requested_connections !== undefined
+      ...(live.progress.active_connections !== undefined
+        && item.isTorrent !== true
+        && item.isMedia !== true
+        ? { activeConnections: live.progress.active_connections }
+        : {}),
+      ...(item.isTorrent !== true
+        && item.isMedia !== true
+        && live.progress.requested_connections !== undefined
         ? { requestedConnections: live.progress.requested_connections }
         : {}),
       ...(live.progress.uploaded_bytes !== undefined

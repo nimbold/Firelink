@@ -25,7 +25,13 @@ interface SidebarProps {
 export const Sidebar: React.FC<SidebarProps> = (props) => {
   const { selectedFilter, onSelectFilter } = props;
   const { downloads, queues, addQueue, renameQueue, removeQueue, startQueue, pauseQueue, setQueueConcurrency } = useDownloadStore();
-  const { activeView, setActiveView, toggleSidebar } = useSettingsStore();
+  const {
+    activeView,
+    setActiveView,
+    toggleSidebar,
+    isFoldersCollapsed: foldersCollapsed,
+    toggleFoldersCollapsed
+  } = useSettingsStore();
   const { addToast } = useToast();
   const { t, i18n } = useTranslation();
 
@@ -36,9 +42,6 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
   const [contextMenuPosition, setContextMenuPosition] = useState<{ x: number; y: number } | null>(null);
-  const [foldersCollapsed, setFoldersCollapsed] = useState(() =>
-    window.localStorage.getItem('firelink-folders-collapsed') === 'true'
-  );
   const foldersToggleRef = useRef<HTMLButtonElement>(null);
   const foldersListRef = useRef<HTMLDivElement>(null);
 
@@ -115,10 +118,6 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
   }, [renamingQueueId]);
 
   useEffect(() => {
-    window.localStorage.setItem('firelink-folders-collapsed', String(foldersCollapsed));
-  }, [foldersCollapsed]);
-
-  useEffect(() => {
     if (foldersCollapsed && foldersListRef.current?.contains(document.activeElement)) {
       foldersToggleRef.current?.focus();
     }
@@ -128,7 +127,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
     if (foldersListRef.current?.contains(document.activeElement)) {
       foldersToggleRef.current?.focus();
     }
-    setFoldersCollapsed(collapsed => !collapsed);
+    toggleFoldersCollapsed();
   };
 
   useEffect(() => {

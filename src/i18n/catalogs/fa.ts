@@ -228,7 +228,8 @@ const fa = {
     speed: 'سرعت',
     eta: 'زمان باقیمانده',
     connections: 'اتصالات',
-    configuredConcurrency: 'هم‌زمانی پیکربندی‌شده',
+    fragmentConcurrency: 'هم‌زمانی قطعه‌ها',
+    fragmentConcurrencyHint: 'حداکثر تعداد قطعه‌های رسانه‌ای که yt-dlp می‌تواند هم‌زمان پردازش کند. Firelink تعداد قطعه‌های فعال را به‌صورت زنده گزارش نمی‌کند؛ این مقدار هنگام شروع یا ازسرگیری انتقال استفاده می‌شود.',
     connectedPeers: 'همتای متصل',
     details: 'جزئیات',
     tabs: {
