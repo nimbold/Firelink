@@ -2032,14 +2032,19 @@ export const AddDownloadsModal = () => {
                   </div>
                 </div>
                 <textarea
-                  className={`add-download-control add-download-links-input w-full h-32 p-3 text-[13px] resize-none ${
+                  id="add-download-links-input"
+                  aria-describedby="add-download-links-hint"
+                  className={`add-download-control add-download-links-input w-full h-24 p-3 text-[13px] resize-none ${
                     isRtl ? 'add-download-links-input--rtl' : ''
                   }`}
                   placeholder={t($ => $.addDownloads.pastePlaceholder)}
                   value={urls}
                   onChange={(e) => setUrls(e.target.value)}
                 />
-                <div className="flex justify-end">
+                <div className="add-download-url-meta px-1">
+                  <p id="add-download-links-hint" className="add-download-input-hint min-w-0 flex-1 text-[10px] leading-4 text-text-muted">
+                    {t($ => $.addDownloads.pasteHint)}
+                  </p>
                   <button
                     type="button"
                     onClick={() => void addTorrentFiles()}
@@ -2062,15 +2067,14 @@ export const AddDownloadsModal = () => {
                     </p>
                   );
                 })}
-                <div className="add-download-selection-toolbar px-1">
-                  <div
-                    className="add-download-selection-status"
-                    role="status"
-                    aria-live="polite"
-                    aria-atomic="true"
-                    aria-label={localizedSelectedSummary}
-                  >
-                    <span className="sr-only">{localizedSelectedSummary}</span>
+                <div
+                  className="add-download-selection-summary px-1"
+                  role="status"
+                  aria-live="polite"
+                  aria-atomic="true"
+                >
+                  <span className="sr-only">{localizedSelectedSummary}</span>
+                  <div className="add-download-selection-status" aria-hidden="true">
                     <span className="add-download-status-chip" data-tone="ready">
                       <strong>{readyMetadataCount}</strong>
                       <span>{t($ => $.addDownloads.selectedSummaryReady)}</span>
@@ -2088,7 +2092,23 @@ export const AddDownloadsModal = () => {
                       <span>{t($ => $.addDownloads.selectedSummaryBlocked)}</span>
                     </span>
                   </div>
-                  <div className="add-download-selection-actions">
+                </div>
+              </div>
+
+              <div className="grid grid-cols-4 gap-3">
+                <SummaryBox title={t($ => $.addDownloads.files)} value={selectedItems.length === parsedItems.length ? parsedItems.length : `${selectedItems.length}/${parsedItems.length}`} icon={FileText} color="text-blue-500" />
+                <SummaryBox title={t($ => $.addDownloads.required)} value={requiredStr === 'Unknown' ? t($ => $.addDownloads.unknown) : requiredStr} icon={Database} color="text-orange-500" />
+                <SummaryBox title={t($ => $.addDownloads.free)} value={freeSpace === 'Unknown' ? t($ => $.addDownloads.unknown) : freeSpace} icon={HardDrive} color="text-green-500" />
+                <SummaryBox title={t($ => $.addDownloads.unknown)} value={selectedItems.filter(i => !i.sizeBytes).length} icon={FileText} color="text-purple-500" />
+              </div>
+
+              <div className="flex flex-col gap-2 flex-1 min-h-0 min-w-0 overflow-hidden">
+                <div className="add-download-preview-heading flex flex-wrap items-center justify-between gap-2">
+                  <div className="add-download-section-title flex items-center gap-2">
+                    <ArrowRight size={16} className="text-blue-500" />
+                    {t($ => $.addDownloads.preview)}
+                  </div>
+                  <div className="add-download-preview-actions flex items-center gap-1">
                     <button
                       type="button"
                       onClick={() => setParsedItems(refreshFailedMetadataRows)}
@@ -2101,25 +2121,11 @@ export const AddDownloadsModal = () => {
                       type="button"
                       onClick={toggleAllRows}
                       disabled={parsedItems.length === 0}
-                      className="add-download-link-button ms-3 text-[11px] font-medium"
+                      className="add-download-link-button text-[11px] font-medium"
                     >
                       {allRowsSelected ? t($ => $.addDownloads.clearSelection) : t($ => $.addDownloads.selectAll)}
                     </button>
                   </div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-4 gap-3">
-                <SummaryBox title={t($ => $.addDownloads.files)} value={selectedItems.length === parsedItems.length ? parsedItems.length : `${selectedItems.length}/${parsedItems.length}`} icon={FileText} color="text-blue-500" />
-                <SummaryBox title={t($ => $.addDownloads.required)} value={requiredStr === 'Unknown' ? t($ => $.addDownloads.unknown) : requiredStr} icon={Database} color="text-orange-500" />
-                <SummaryBox title={t($ => $.addDownloads.free)} value={freeSpace === 'Unknown' ? t($ => $.addDownloads.unknown) : freeSpace} icon={HardDrive} color="text-green-500" />
-                <SummaryBox title={t($ => $.addDownloads.unknown)} value={selectedItems.filter(i => !i.sizeBytes).length} icon={FileText} color="text-purple-500" />
-              </div>
-
-              <div className="flex flex-col gap-2 flex-1 min-h-0 min-w-0 overflow-hidden">
-                <div className="add-download-section-title flex items-center gap-2">
-                  <ArrowRight size={16} className="text-blue-500" />
-                  {t($ => $.addDownloads.preview)}
                 </div>
                 <div className="add-download-preview flex-1 min-h-0 min-w-0 overflow-hidden flex flex-col">
                   <div className="add-download-preview-header px-3 py-2 flex text-[11px] font-semibold text-text-muted uppercase tracking-wider">
