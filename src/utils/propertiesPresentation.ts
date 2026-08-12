@@ -1,4 +1,5 @@
 import type { PropertiesSnapshot } from '../propertiesBridge';
+import { resolveDownloadFraction } from './downloadProgress';
 
 export type PropertiesConnectionKind = 'media' | 'torrent' | 'aria2';
 export type PropertiesConnectionLabelKey = 'fragmentConcurrency' | 'torrentConnectedPeers' | 'connections';
@@ -11,6 +12,12 @@ export type PropertiesConnectionPresentation = {
 };
 
 const displayCount = (value: number | undefined): string => value == null ? '—' : String(value);
+
+export const getPropertiesProgress = (
+  snapshot: Pick<PropertiesSnapshot, 'status' | 'moveProgress' | 'fraction' | 'downloadedBytes' | 'totalBytes' | 'totalIsEstimate' | 'isMedia' | 'size'>,
+): number => snapshot.status === 'moving'
+  ? Math.max(0, Math.min(1, snapshot.moveProgress ?? 0))
+  : resolveDownloadFraction(snapshot);
 
 export const getPropertiesConnectionPresentation = (
   snapshot: Pick<PropertiesSnapshot, 'isMedia' | 'isTorrent' | 'connections' | 'activeConnections' | 'requestedConnections' | 'connectedPeers'>,

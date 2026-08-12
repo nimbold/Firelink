@@ -238,6 +238,26 @@ impl PropertiesWindowRegistry {
         Ok(self.session_for_window(label)?.as_deref() == Some(session_id))
     }
 
+    /// Validate a session and perform a short synchronous mutation while the
+    /// registry lock is held. Callers use this for cancellation flags so a
+    /// stale session cannot pass validation and then race a replacement
+    /// session before its mutation is recorded.
+    pub fn with_current_session<T>(
+        &self,
+        label: &str,
+        session_id: &str,
+        mutation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "Properties window registry is unavailable".to_string())?;
+        if state.sessions_by_window.get(label).map(String::as_str) != Some(session_id) {
+            return Err("Properties window session is no longer current".to_string());
+        }
+        mutation()
+    }
+
     #[cfg(test)]
     pub fn is_ready(&self, label: &str) -> Result<bool, String> {
         Ok(self
@@ -478,8 +498,16 @@ pub fn properties_window_send_ready(
 pub fn properties_window_reveal(
     caller: tauri::WebviewWindow,
     registry: tauri::State<'_, PropertiesWindowRegistry>,
+    session_id: Option<String>,
 ) -> Result<(), String> {
     registered_download_for_caller(&caller, &registry)?;
+    if caller.label() != MAIN_WINDOW_LABEL {
+        let session_id = session_id.ok_or_else(|| "Properties window session is required".to_string())?;
+        validate_properties_session_id(&session_id)?;
+        if !registry.session_matches(caller.label(), &session_id)? {
+            return Err("Properties window session is no longer current".to_string());
+        }
+    }
     registry.mark_ready(caller.label())?;
     caller.show().map_err(|error| error.to_string())?;
     caller.set_focus().map_err(|error| error.to_string())
@@ -720,6 +748,28 @@ mod tests {
 
         registry.remove_window(&label).unwrap();
         assert!(!registry.session_matches(&label, "session-new").unwrap());
+    }
+
+    #[test]
+    fn current_session_mutation_is_fenced_from_retired_sessions() {
+        let registry = PropertiesWindowRegistry::default();
+        let label = registry.allocate("download-a").unwrap();
+        registry.register_session(&label, "session-old").unwrap();
+
+        let mut mutations = 0;
+        let stale = registry.with_current_session(&label, "session-old", || {
+            mutations += 1;
+            Ok(())
+        });
+        assert!(stale.is_ok());
+
+        registry.register_session(&label, "session-new").unwrap();
+        let rejected = registry.with_current_session(&label, "session-old", || {
+            mutations += 1;
+            Ok(())
+        });
+        assert!(rejected.is_err());
+        assert_eq!(mutations, 1);
     }
 
     #[test]

@@ -807,6 +807,9 @@ pub struct DownloadStateEvent {
     pub resolver_fallback: Option<bool>,
     #[ts(optional)]
     pub file_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub destination: Option<String>,
     #[ts(optional)]
     pub torrent_seed_remaining: Option<f64>,
 }
@@ -820,6 +823,7 @@ impl DownloadStateEvent {
             error_kind: None,
             resolver_fallback: None,
             file_name: None,
+            destination: None,
             torrent_seed_remaining: None,
         }
     }
@@ -833,6 +837,7 @@ impl DownloadStateEvent {
             error_kind,
             resolver_fallback: None,
             file_name: None,
+            destination: None,
             torrent_seed_remaining: None,
         }
     }
@@ -846,6 +851,7 @@ impl DownloadStateEvent {
             error_kind,
             resolver_fallback: None,
             file_name: None,
+            destination: None,
             torrent_seed_remaining: None,
         }
     }
@@ -858,6 +864,7 @@ impl DownloadStateEvent {
             error_kind: None,
             resolver_fallback: None,
             file_name: None,
+            destination: None,
             torrent_seed_remaining: remaining,
         }
     }
@@ -870,6 +877,7 @@ impl DownloadStateEvent {
             error_kind: None,
             resolver_fallback: None,
             file_name: Some(file_name.into()),
+            destination: None,
             torrent_seed_remaining: None,
         }
     }
@@ -885,6 +893,7 @@ impl DownloadStateEvent {
             error_kind,
             resolver_fallback: None,
             file_name: None,
+            destination: None,
             torrent_seed_remaining: None,
         }
     }
@@ -897,6 +906,7 @@ impl DownloadStateEvent {
             error_kind: None,
             resolver_fallback: None,
             file_name: None,
+            destination: None,
             torrent_seed_remaining: remaining,
         }
     }
@@ -908,6 +918,11 @@ impl DownloadStateEvent {
         let mut event = Self::retrying(id, reason);
         event.resolver_fallback = Some(true);
         event
+    }
+
+    pub fn with_destination(mut self, destination: impl Into<String>) -> Self {
+        self.destination = Some(destination.into());
+        self
     }
 
     fn safe_error(error: impl Into<String>) -> (String, Option<DownloadErrorKind>) {

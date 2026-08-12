@@ -29,10 +29,12 @@ import {
   propertiesTorrentPeerLimit,
   propertiesWindowEventTarget,
   resetPropertiesActionState,
+  redactPropertiesError,
   sanitizePropertiesSnapshot,
   sendPropertiesSnapshot,
   shouldAcceptPropertiesActionRequest,
 } from './propertiesBridge';
+import { copyEditablePropertiesPatch } from './components/PropertiesWindowBridgeHost';
 
 describe('Properties window bridge', () => {
   it('keeps optional override resets explicit across the JSON IPC boundary', () => {
@@ -127,6 +129,16 @@ describe('Properties window bridge', () => {
     expect(snapshot.lastErrorKind).toBe('nameResolution');
     expect(snapshot.lastResolverFallback).toBe(true);
     expect(snapshot).not.toHaveProperty('aria2ResolverMode');
+  });
+
+  it('redacts credentials from Properties errors at the renderer boundary', () => {
+    const error = redactPropertiesError(new Error(
+      'GET https://user:pa@ss@example.test/file?token=secret&x=1 Authorization: Bearer bearer-secret',
+    ));
+    expect(error).not.toContain('pa@ss@example');
+    expect(error).not.toContain('token=secret');
+    expect(error).not.toContain('bearer-secret');
+    expect(error).toContain('[redacted]');
   });
 
   it('projects the latest live telemetry without exposing secrets', () => {
@@ -353,9 +365,29 @@ describe('Properties window bridge', () => {
     expect(getPropertiesLifecycleAction('retrying')).toBe('pause');
     expect(getPropertiesLifecycleAction('paused')).toBe('resume');
     expect(getPropertiesLifecycleAction('ready')).toBe('start');
-    expect(getPropertiesLifecycleAction('staged')).toBe('start');
+    expect(getPropertiesLifecycleAction('staged')).toBe('pause');
     expect(getPropertiesLifecycleAction('failed')).toBe('retry');
     expect(getPropertiesLifecycleAction('completed')).toBeNull();
+  });
+
+  it('preserves validated SFTP fingerprints and rejects identity edits after dispatch', () => {
+    expect(copyEditablePropertiesPatch({ sftpHostKeyMd: 'MD5=0123456789abcdef0123456789abcdef' }, {
+      isTorrent: false,
+      status: 'ready',
+    })).toMatchObject({ sftpHostKeyMd: 'md5=0123456789abcdef0123456789abcdef' });
+
+    expect(() => copyEditablePropertiesPatch({ fileName: 'renamed.bin' }, {
+      isTorrent: false,
+      status: 'completed',
+    })).toThrow('read-only');
+    expect(() => copyEditablePropertiesPatch({ destination: '/new/path' }, {
+      isTorrent: true,
+      status: 'paused',
+    })).toThrow('read-only');
+    expect(() => copyEditablePropertiesPatch({ fileName: 'queued.bin' }, {
+      isTorrent: false,
+      status: 'queued',
+    })).toThrow('read-only');
   });
 
   it('keeps Torrent peer-cap telemetry distinct from generic connections', () => {

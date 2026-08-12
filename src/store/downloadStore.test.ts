@@ -92,6 +92,49 @@ describe('useDownloadProgressStore', () => {
     release();
   });
 
+  it('applies the authoritative destination carried by Torrent move completion', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'moving-torrent',
+        url: 'magnet:?xt=urn:btih:test',
+        fileName: 'data',
+        destination: '/old-root',
+        status: 'moving',
+        category: 'Other',
+        dateAdded: '',
+        isTorrent: true,
+      }],
+    });
+    useDownloadProgressStore.getState().setMoveProgress('moving-torrent', 0.8);
+
+    const release = await initDownloadListener();
+    handlers['download-state']({ payload: {
+      id: 'moving-torrent',
+      status: 'paused',
+      error: 'stale pause from the previous lifecycle',
+    } });
+
+    expect(useDownloadStore.getState().downloads[0].status).toBe('moving');
+    expect(useDownloadProgressStore.getState().moveProgressMap['moving-torrent']).toBe(0.8);
+
+    handlers['download-state']({ payload: {
+      id: 'moving-torrent',
+      status: 'completed',
+      error: null,
+      destination: '/new-root',
+    } });
+
+    expect(useDownloadStore.getState().downloads[0].destination).toBe('/new-root');
+    expect(useDownloadStore.getState().downloads[0].status).toBe('completed');
+    expect(useDownloadProgressStore.getState().moveProgressMap['moving-torrent']).toBeUndefined();
+    release();
+  });
+
   it('keeps Aria2 connection telemetry from the live progress event', async () => {
     const handlers: Record<string, (event: any) => void> = {};
     vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {

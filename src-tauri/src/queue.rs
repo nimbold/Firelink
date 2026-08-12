@@ -942,7 +942,7 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
     /// are scoped to the current GID and control epoch and never leave this
     /// process as durable state.
     torrent_telemetry: Mutex<HashMap<String, TorrentTelemetryState>>,
-    torrent_move_cancellations: Mutex<HashSet<String>>,
+    torrent_move_cancellations: StdMutex<HashSet<String>>,
 
     /// aria2 gid -> download id map (shared with the WS poller).
     pub aria2_gids: Arc<std::sync::RwLock<HashMap<String, Aria2GidMapping>>>,
@@ -1045,7 +1045,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             }),
             seed_budgets: StdMutex::new(HashMap::new()),
             torrent_telemetry: Mutex::new(HashMap::new()),
-            torrent_move_cancellations: Mutex::new(HashSet::new()),
+            torrent_move_cancellations: StdMutex::new(HashSet::new()),
             aria2_gids: Arc::new(std::sync::RwLock::new(HashMap::new())),
             pending_completion: Arc::new(Mutex::new(HashMap::new())),
             aria2_payloads: Mutex::new(HashMap::new()),
@@ -1135,23 +1135,32 @@ impl<R: tauri::Runtime> QueueManager<R> {
         true
     }
 
-    pub async fn begin_torrent_move(&self, id: &str) {
-        self.torrent_move_cancellations.lock().await.remove(id);
-    }
-
-    pub async fn cancel_torrent_move(&self, id: &str) {
+    pub fn begin_torrent_move(&self, id: &str) {
         self.torrent_move_cancellations
             .lock()
-            .await
+            .expect("Torrent move cancellation lock poisoned")
+            .remove(id);
+    }
+
+    pub fn cancel_torrent_move(&self, id: &str) {
+        self.torrent_move_cancellations
+            .lock()
+            .expect("Torrent move cancellation lock poisoned")
             .insert(id.to_string());
     }
 
-    pub async fn torrent_move_cancelled(&self, id: &str) -> bool {
-        self.torrent_move_cancellations.lock().await.contains(id)
+    pub fn torrent_move_cancelled(&self, id: &str) -> bool {
+        self.torrent_move_cancellations
+            .lock()
+            .expect("Torrent move cancellation lock poisoned")
+            .contains(id)
     }
 
-    pub async fn finish_torrent_move(&self, id: &str) {
-        self.torrent_move_cancellations.lock().await.remove(id);
+    pub fn finish_torrent_move(&self, id: &str) {
+        self.torrent_move_cancellations
+            .lock()
+            .expect("Torrent move cancellation lock poisoned")
+            .remove(id);
     }
 
     /// Drop counters after terminal cleanup/removal. Persisted lifetime

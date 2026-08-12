@@ -31,6 +31,7 @@ import {
   propertiesActionRequestKey,
   PROPERTIES_PATCH_CLEARABLE_KEYS,
   sanitizePropertiesSnapshot,
+  redactPropertiesError,
   sendPropertiesActionResult,
   sendPropertiesRemoved,
   sendPropertiesSnapshot,
@@ -46,7 +47,7 @@ import { getPlatformInfo } from '../utils/platform';
 import { resolveWindowControlSide, resolveWindowControlStyle } from '../utils/windowControlStyle';
 import i18n, { localeDirection, resolveAppLocale } from '../i18n';
 
-const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+const errorText = redactPropertiesError;
 let lastPropertiesBridgeGeneration = 0;
 
 const normalizeOptionalSpeed = (value: unknown, label: string): string | undefined => {
@@ -58,7 +59,10 @@ const normalizeOptionalSpeed = (value: unknown, label: string): string | undefin
   return normalized;
 };
 
-const copyEditablePatch = (rawPatch: PropertiesPatch): Partial<DownloadItem> => {
+export const copyEditablePropertiesPatch = (
+  rawPatch: PropertiesPatch,
+  item?: Pick<DownloadItem, 'isTorrent' | 'status'>,
+): Partial<DownloadItem> => {
   const safePatch: Partial<DownloadItem> = {};
   const copy = (key: keyof PropertiesPatch) => {
     if (Object.prototype.hasOwnProperty.call(rawPatch, key)) {
@@ -68,6 +72,7 @@ const copyEditablePatch = (rawPatch: PropertiesPatch): Partial<DownloadItem> => 
   for (const key of [
     'fileName',
     'destination',
+    'sftpHostKeyMd',
     'connections',
     'speedLimit',
     'torrentTrackers',
@@ -87,6 +92,13 @@ const copyEditablePatch = (rawPatch: PropertiesPatch): Partial<DownloadItem> => 
     'torrentEncryptionPolicy',
     'torrentFileAllocation',
   ] as const) copy(key);
+
+  if (item && (item.isTorrent === true || !['ready', 'staged'].includes(item.status))) {
+    if (Object.prototype.hasOwnProperty.call(rawPatch, 'fileName')
+      || Object.prototype.hasOwnProperty.call(rawPatch, 'destination')) {
+      throw new Error('File identity and destination are read-only for this download state');
+    }
+  }
 
   for (const key of PROPERTIES_PATCH_CLEARABLE_KEYS) {
     if (Object.prototype.hasOwnProperty.call(rawPatch, key)) {
@@ -383,7 +395,7 @@ export const PropertiesWindowBridgeHost = () => {
             if (Object.prototype.hasOwnProperty.call(rawPatch, 'torrentFileIndices')) {
               throw new Error('Torrent file selection requires the dedicated selection action');
             }
-            const safePatch = copyEditablePatch(rawPatch);
+            const safePatch = copyEditablePropertiesPatch(rawPatch, item);
             if ('password' in rawPatch) {
               safePatch.password = applySecretPatch(rawPatch.password, item.password);
             }
@@ -421,6 +433,7 @@ export const PropertiesWindowBridgeHost = () => {
             if (item.isTorrent === true && Object.prototype.hasOwnProperty.call(rawPatch, 'connections')) {
               throw new Error('Generic connection settings are not available for Torrent downloads');
             }
+            await assertCurrentAction(request);
             await store.applyProperties(request.downloadId, safePatch);
             break;
           }
@@ -437,12 +450,14 @@ export const PropertiesWindowBridgeHost = () => {
                 || selectedIndices.some(index => !Number.isInteger(index) || index < 1))) {
               throw new Error('Torrent file selection must contain at least one valid file');
             }
+            await assertCurrentAction(request);
             const selection = await invoke('set_torrent_file_selection', {
               id: request.downloadId,
               selected_indices: selectedIndices,
             });
             const selected = selection.files.filter(file => file.selected).map(file => file.index);
             const allSelected = selection.files.length > 0 && selected.length === selection.files.length;
+            await assertCurrentAction(request);
             store.updateDownload(request.downloadId, {
               torrentFileIndices: allSelected ? undefined : selected,
             });
@@ -484,29 +499,40 @@ export const PropertiesWindowBridgeHost = () => {
             }
             const previousVerifyOnly = item.torrentVerifyOnly;
             const previousRestoreStatus = item.torrentVerifyRestoreStatus;
+            await assertCurrentAction(request);
             store.updateDownload(request.downloadId, {
               torrentVerifyOnly: true,
               torrentVerifyRestoreStatus: item.status,
             });
             try {
+              await assertCurrentAction(request);
               await invoke('verify_torrent_data', { id: request.downloadId });
             } catch (verifyError) {
-              useDownloadStore.getState().updateDownload(request.downloadId, {
-                torrentVerifyOnly: previousVerifyOnly,
-                torrentVerifyRestoreStatus: previousRestoreStatus,
-              });
+              try {
+                await assertCurrentAction(request);
+                useDownloadStore.getState().updateDownload(request.downloadId, {
+                  torrentVerifyOnly: previousVerifyOnly,
+                  torrentVerifyRestoreStatus: previousRestoreStatus,
+                });
+              } catch {
+                // A newer Properties session owns the row now. Do not let a
+                // late verification failure roll back its marker.
+              }
               throw verifyError;
             }
             break;
           }
           case 'set-download-limit':
+            await assertCurrentAction(request);
             await store.setDownloadSpeedLimit(request.downloadId, request.payload && 'limit' in request.payload ? request.payload.limit : null);
             break;
           case 'set-torrent-upload-limit':
+            await assertCurrentAction(request);
             await store.setTorrentUploadLimit(request.downloadId, request.payload && 'limit' in request.payload ? request.payload.limit : null);
             break;
           case 'set-torrent-peer-options': {
             if (!request.payload || !('maxPeers' in request.payload)) throw new Error('Invalid Torrent peer options');
+            await assertCurrentAction(request);
             await store.setTorrentPeerOptions(request.downloadId, request.payload.maxPeers, request.payload.peerSpeedLimit);
             break;
           }

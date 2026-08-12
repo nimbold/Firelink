@@ -72,7 +72,7 @@ describe('download action policy', () => {
       { status: 'completed' },
     ]);
 
-    expect(counts).toEqual({ pause: 3, resume: 4 });
+    expect(counts).toEqual({ pause: 3, resume: 3 });
   });
 
   it('keeps large action badges compact without changing the accessible count', () => {

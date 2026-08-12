@@ -1060,23 +1060,53 @@ interface DownloadState {
 export const useDownloadStore = create<DownloadState>((set, get) => {
   const applyPropertiesInternal = async (id: string, updates: Partial<DownloadItem>): Promise<void> => {
     await waitForPendingStartupResume();
+    const initialItem = get().downloads.find(download => download.id === id);
+    if (!initialItem) return;
+    // Reject immutable identity edits before invalidating a live queued
+    // dispatch. Validation after invalidation would cancel a legitimate
+    // enqueue even though no mutation was accepted.
+    if ((updates.fileName !== undefined || updates.destination !== undefined)
+      && (initialItem.isTorrent === true || !['ready', 'staged'].includes(initialItem.status))) {
+      throw new Error(i18n.t($ => $.properties.identityReadOnly));
+    }
     const wasDispatching = await invalidateAndWaitForDispatch(id);
     const state = get();
     const item = state.downloads.find(d => d.id === id);
     if (!item) return;
     const previousItem = item;
+    const previousPendingOrder = [...state.pendingOrder];
+    const wasBackendRegistered = state.backendRegisteredIds.has(id);
     const commitProperties = async (): Promise<void> => {
       try {
         await commitDownloadState();
       } catch (error) {
-        // Do not leave a renderer-only Properties edit that will disappear on
-        // restart. Restore the prior row while retaining the native lifecycle
-        // fencing already performed for this operation.
+        // A queued item may already have been detached before persistence
+        // failed. Restore both projections, then rebuild the backend lifecycle
+        // when the previous row owned one; restoring only the React object
+        // would leave a visible queued row that can never dispatch.
         set(current => ({
-          downloads: current.downloads.map(download =>
-            download.id === id ? previousItem : download
-          )
+          downloads: current.downloads.map(download => download.id === id ? previousItem : download),
+          pendingOrder: previousPendingOrder,
+          backendRegisteredIds: new Set(
+            [...current.backendRegisteredIds].filter(registeredId => registeredId !== id)
+          ),
         }));
+        if ((wasBackendRegistered || wasDispatching) && previousItem.status === 'queued') {
+          const restored = await dispatchItemInternal(id);
+          if (!restored) {
+            set(current => ({
+              downloads: current.downloads.map(download =>
+                download.id === id
+                  ? { ...previousItem, status: 'failed' as const, hasBeenDispatched: false, lastError: errorMessage(error) }
+                  : download
+              ),
+              pendingOrder: current.pendingOrder.filter(value => value !== id),
+              backendRegisteredIds: new Set(
+                [...current.backendRegisteredIds].filter(registeredId => registeredId !== id)
+              ),
+            }));
+          }
+        }
         throw error;
       }
     };
@@ -1099,6 +1129,11 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     const disablingTorrentRemoval = item.isTorrent === true
       && normalizedUpdates.torrentRemoveUnselectedFile === false
       && item.torrentRemoveUnselectedFile !== false;
+
+    if ((normalizedUpdates.fileName !== undefined || normalizedUpdates.destination !== undefined)
+      && (item.isTorrent === true || !['ready', 'staged'].includes(item.status))) {
+      throw new Error(i18n.t($ => $.properties.identityReadOnly));
+    }
 
     if (item.status === 'downloading' || item.status === 'processing' || item.status === 'verifying' || item.status === 'seeding' || item.status === 'retrying') {
       throw new Error(i18n.t($ => $.downloadTable.transferActive));

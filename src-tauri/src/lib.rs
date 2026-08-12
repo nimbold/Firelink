@@ -8426,9 +8426,24 @@ async fn move_torrent_data(
     database: tauri::State<'_, crate::db::DbState>,
     id: String,
     destination: String,
+    session_id: Option<String>,
 ) -> Result<(), String> {
     properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
+    let properties_session_id = if caller.label() == "main" {
+        None
+    } else {
+        let session_id = session_id.ok_or_else(|| "Properties window session is required".to_string())?;
+        if !properties.session_matches(caller.label(), &session_id)? {
+            return Err("Properties window session is no longer current".to_string());
+        }
+        Some(session_id)
+    };
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    if let Some(session_id) = properties_session_id.as_deref() {
+        if !properties.session_matches(caller.label(), session_id)? {
+            return Err("Properties window session is no longer current".to_string());
+        }
+    }
     let item = load_persisted_torrent_item(database.inner(), &id)?;
     if item.is_torrent != Some(true) {
         return Err("data relocation is available only for Torrent downloads".to_string());
@@ -8576,7 +8591,14 @@ async fn move_torrent_data(
             .await
             .map_err(|_| "could not prepare Torrent move recovery".to_string())?;
     }
-    state.queue_manager.begin_torrent_move(&id).await;
+    if let Some(session_id) = properties_session_id.as_deref() {
+        properties.with_current_session(caller.label(), session_id, || {
+            state.queue_manager.begin_torrent_move(&id);
+            Ok(())
+        })?;
+    } else {
+        state.queue_manager.begin_torrent_move(&id);
+    }
     if let Err(error) = write_torrent_move_journal(
         &journal,
         "reserved",
@@ -8595,12 +8617,12 @@ async fn move_torrent_data(
     )
     .await
     {
-        state.queue_manager.finish_torrent_move(&id).await;
+        state.queue_manager.finish_torrent_move(&id);
         return Err(error);
     }
     if let Err(error) = tokio::fs::create_dir(&staging_root).await {
         let _ = tokio::fs::remove_file(&journal).await;
-        state.queue_manager.finish_torrent_move(&id).await;
+        state.queue_manager.finish_torrent_move(&id);
         return Err(format!("could not prepare Torrent move staging: {error}"));
     }
     if let Err(error) = crate::download_ownership::set_owned_paths_with_primary_and_removal(
@@ -8611,28 +8633,32 @@ async fn move_torrent_data(
         &new_removal_paths,
     ) {
         let _ = tokio::fs::remove_file(&journal).await;
-        state.queue_manager.finish_torrent_move(&id).await;
+        state.queue_manager.finish_torrent_move(&id);
         return Err(error);
     }
 
     use tauri::Emitter;
     let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, crate::ipc::DownloadStatus::Moving));
+    let move_restore_event = || {
+        crate::ipc::DownloadStateEvent::new(&id, item.status)
+            .with_destination(old_destination.to_string_lossy())
+    };
     let mut copied_bytes = 0u64;
     for (source, target) in move_old_paths.iter().zip(staging_paths.iter()) {
-        if state.queue_manager.torrent_move_cancelled(&id).await {
+        if state.queue_manager.torrent_move_cancelled(&id) {
             cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
             let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
             let _ = tokio::fs::remove_file(&journal).await;
-            state.queue_manager.finish_torrent_move(&id).await;
-            let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, item.status));
+            state.queue_manager.finish_torrent_move(&id);
+            let _ = app_handle.emit("download-state", move_restore_event());
             return Err("Torrent move canceled".to_string());
         }
         if let Err(error) = copy_torrent_move_file(source, target).await {
             cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
             let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
             let _ = tokio::fs::remove_file(&journal).await;
-            state.queue_manager.finish_torrent_move(&id).await;
-            let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, item.status));
+            state.queue_manager.finish_torrent_move(&id);
+            let _ = app_handle.emit("download-state", move_restore_event());
             return Err(error);
         }
         let source_size = match tokio::fs::metadata(source).await {
@@ -8641,10 +8667,10 @@ async fn move_torrent_data(
                 cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
                 let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
                 let _ = tokio::fs::remove_file(&journal).await;
-                state.queue_manager.finish_torrent_move(&id).await;
+                state.queue_manager.finish_torrent_move(&id);
                 let _ = app_handle.emit(
                     "download-state",
-                    crate::ipc::DownloadStateEvent::new(&id, item.status),
+                    move_restore_event(),
                 );
                 return Err("Torrent source changed during relocation".to_string());
             }
@@ -8655,10 +8681,10 @@ async fn move_torrent_data(
                 cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
                 let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
                 let _ = tokio::fs::remove_file(&journal).await;
-                state.queue_manager.finish_torrent_move(&id).await;
+                state.queue_manager.finish_torrent_move(&id);
                 let _ = app_handle.emit(
                     "download-state",
-                    crate::ipc::DownloadStateEvent::new(&id, item.status),
+                    move_restore_event(),
                 );
                 return Err("Torrent destination could not be verified".to_string());
             }
@@ -8667,7 +8693,7 @@ async fn move_torrent_data(
             cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
             let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
             let _ = tokio::fs::remove_file(&journal).await;
-            let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, item.status));
+            let _ = app_handle.emit("download-state", move_restore_event());
             return Err("Torrent data changed during relocation".to_string());
         }
         let source_digest = digest_torrent_move_file(source).await;
@@ -8676,7 +8702,7 @@ async fn move_torrent_data(
             cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
             let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
             let _ = tokio::fs::remove_file(&journal).await;
-            let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, item.status));
+            let _ = app_handle.emit("download-state", move_restore_event());
             return Err("Torrent data changed during relocation".to_string());
         }
         copied_bytes = copied_bytes.saturating_add(target_size);
@@ -8687,12 +8713,12 @@ async fn move_torrent_data(
             total_bytes,
         });
     }
-    if state.queue_manager.torrent_move_cancelled(&id).await {
+    if state.queue_manager.torrent_move_cancelled(&id) {
         cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
         let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
         let _ = tokio::fs::remove_file(&journal).await;
-        state.queue_manager.finish_torrent_move(&id).await;
-        let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, item.status));
+        state.queue_manager.finish_torrent_move(&id);
+        let _ = app_handle.emit("download-state", move_restore_event());
         return Err("Torrent move canceled".to_string());
     }
     for (staged, target) in staging_paths.iter().zip(move_new_paths.iter()) {
@@ -8700,10 +8726,10 @@ async fn move_torrent_data(
             cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
             let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
             let _ = tokio::fs::remove_file(&journal).await;
-            state.queue_manager.finish_torrent_move(&id).await;
+            state.queue_manager.finish_torrent_move(&id);
             let _ = app_handle.emit(
                 "download-state",
-                crate::ipc::DownloadStateEvent::new(&id, item.status),
+                move_restore_event(),
             );
             return Err("Torrent move destination could not be published".to_string());
         }
@@ -8712,10 +8738,10 @@ async fn move_torrent_data(
         cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
         let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
         let _ = tokio::fs::remove_file(&journal).await;
-        state.queue_manager.finish_torrent_move(&id).await;
+        state.queue_manager.finish_torrent_move(&id);
         let _ = app_handle.emit(
             "download-state",
-            crate::ipc::DownloadStateEvent::new(&id, item.status),
+            move_restore_event(),
         );
         return Err("Torrent move staging could not be finalized".to_string());
     }
@@ -8740,10 +8766,10 @@ async fn move_torrent_data(
         cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
         let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
         let _ = tokio::fs::remove_file(&journal).await;
-        state.queue_manager.finish_torrent_move(&id).await;
+        state.queue_manager.finish_torrent_move(&id);
         let _ = app_handle.emit(
             "download-state",
-            crate::ipc::DownloadStateEvent::new(&id, item.status),
+            move_restore_event(),
         );
         return Err(error);
     }
@@ -8761,8 +8787,8 @@ async fn move_torrent_data(
         cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
         let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
         let _ = tokio::fs::remove_file(&journal).await;
-        state.queue_manager.finish_torrent_move(&id).await;
-        let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, item.status));
+        state.queue_manager.finish_torrent_move(&id);
+        let _ = app_handle.emit("download-state", move_restore_event());
         return Err(error);
     }
     if let Err(error) = write_torrent_move_journal(
@@ -8787,10 +8813,11 @@ async fn move_torrent_data(
         // let startup recovery finish old-source cleanup from the committed
         // destination rather than rolling the row back after commit.
         let _ = persist_torrent_relocation_check(database.inner(), &id, true);
-        state.queue_manager.finish_torrent_move(&id).await;
+        state.queue_manager.finish_torrent_move(&id);
         let _ = app_handle.emit(
             "download-state",
-            crate::ipc::DownloadStateEvent::new(&id, item.status),
+            crate::ipc::DownloadStateEvent::new(&id, item.status)
+                .with_destination(new_destination.to_string_lossy()),
         );
         return Err(format!("Torrent data moved; cleanup recovery remains pending: {error}"));
     }
@@ -8828,23 +8855,32 @@ async fn move_torrent_data(
             &move_new_paths,
             total_bytes,
         ).await {
-            state.queue_manager.finish_torrent_move(&id).await;
+        state.queue_manager.finish_torrent_move(&id);
             let _ = app_handle.emit(
                 "download-state",
-                crate::ipc::DownloadStateEvent::new(&id, item.status),
+                crate::ipc::DownloadStateEvent::new(&id, item.status)
+                    .with_destination(new_destination.to_string_lossy()),
             );
             return Err(format!(
                 "Torrent data moved, but cleanup recovery could not be recorded: {journal_error}"
             ));
         }
-        state.queue_manager.finish_torrent_move(&id).await;
-        let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, item.status));
+        state.queue_manager.finish_torrent_move(&id);
+        let _ = app_handle.emit(
+            "download-state",
+            crate::ipc::DownloadStateEvent::new(&id, item.status)
+                .with_destination(new_destination.to_string_lossy()),
+        );
         drop(control_guard);
         return Err(format!("Torrent data moved, but old files need cleanup: {error}"));
     }
     let _ = tokio::fs::remove_file(&journal).await;
-    state.queue_manager.finish_torrent_move(&id).await;
-    let _ = app_handle.emit("download-state", crate::ipc::DownloadStateEvent::new(&id, item.status));
+    state.queue_manager.finish_torrent_move(&id);
+    let _ = app_handle.emit(
+        "download-state",
+        crate::ipc::DownloadStateEvent::new(&id, item.status)
+            .with_destination(new_destination.to_string_lossy()),
+    );
     drop(control_guard);
     Ok(())
 }
@@ -8852,14 +8888,26 @@ async fn move_torrent_data(
 #[tauri::command]
 async fn cancel_torrent_move_data(
     caller: tauri::WebviewWindow,
+    properties: tauri::State<'_, properties_window::PropertiesWindowRegistry>,
     state: tauri::State<'_, AppState>,
     id: String,
+    session_id: Option<String>,
 ) -> Result<(), String> {
-    properties_window::ensure_main_window(&caller)?;
     if id.trim().is_empty() {
         return Err("invalid Torrent download id".to_string());
     }
-    state.queue_manager.cancel_torrent_move(&id).await;
+    if caller.label() == "main" {
+        properties_window::ensure_main_window(&caller)?;
+    } else {
+        let session_id = session_id.ok_or_else(|| "Properties window session is required".to_string())?;
+        properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
+        properties.with_current_session(caller.label(), &session_id, || {
+            state.queue_manager.cancel_torrent_move(&id);
+            Ok(())
+        })?;
+        return Ok(());
+    }
+    state.queue_manager.cancel_torrent_move(&id);
     Ok(())
 }
 

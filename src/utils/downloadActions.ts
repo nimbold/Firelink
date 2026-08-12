@@ -45,7 +45,10 @@ export const countDownloadActions = (
   downloads: ReadonlyArray<{ status: DownloadStatus }>
 ): DownloadActionCounts => downloads.reduce<DownloadActionCounts>((counts, download) => {
   if (canPauseDownload(download.status)) counts.pause += 1;
-  if (canStartDownload(download.status)) counts.resume += 1;
+  if (download.status === 'paused'
+    || (canStartDownload(download.status) && !canPauseDownload(download.status))) {
+    counts.resume += 1;
+  }
   return counts;
 }, { pause: 0, resume: 0 });
 

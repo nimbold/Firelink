@@ -23,6 +23,7 @@
   --bg-input: 0 0% 100%;
   --border-modal: 0 0% 85%;
   --surface-raised: 0 0% 100%;
+  --properties-header-surface: hsl(var(--bg-modal));
   /* Keep this token alpha-free because some consumers apply their own /alpha. */
   --surface-overlay: 0 0% 100%;
   --shadow-color: 220 10% 20% / 0.1;
@@ -69,6 +70,7 @@
   --bg-input: 0 0% 100%;
   --border-modal: 0 0% 85%;
   --surface-raised: 0 0% 100%;
+  --properties-header-surface: hsl(var(--bg-modal));
   --surface-overlay: 0 0% 100%;
   --shadow-color: 220 10% 20% / 0.1;
   --sidebar-shell-bg: 0 0% 92%;
@@ -99,6 +101,7 @@
   --text-muted: 0 0% 60%;
   --bg-modal: 0 0% 13%;
   --bg-input: 0 0% 16%;
+  --properties-header-surface: hsl(0 0% 10%);
   --shadow-color: 0 0% 0% / 0.30;
   --status-completed: 136 62% 48%;
   --status-paused: 0 0% 56%;
@@ -145,6 +148,7 @@
   --text-muted: 229 12% 66%;
   --bg-modal: 232 14% 23%;
   --bg-input: 231 15% 20%;
+  --properties-header-surface: hsl(231 15% 17%);
   --shadow-color: 231 20% 8% / 0.35;
   --status-completed: 135 94% 65%;
   --status-paused: 65 92% 76%;
@@ -191,6 +195,7 @@
   --text-muted: 218 17% 70%;
   --bg-modal: 220 17% 27%;
   --bg-input: 220 16% 24%;
+  --properties-header-surface: hsl(220 16% 19%);
   --shadow-color: 220 25% 10% / 0.34;
   --status-completed: 92 28% 65%;
   --status-paused: 40 71% 73%;
@@ -578,7 +583,6 @@ html[data-list-density="relaxed"] {
 
   .properties-window-shell {
     --properties-body-surface: hsl(var(--main-bg));
-    --properties-header-surface: hsl(var(--bg-modal));
     --properties-card-surface: hsl(var(--bg-input));
     --properties-card-border: hsl(var(--border-modal));
     --properties-live-value: hsl(var(--properties-live-value-color));
@@ -622,8 +626,7 @@ html[data-list-density="relaxed"] {
   .properties-window-header {
     background: var(--properties-header-surface);
     box-shadow:
-      inset 0 -1px 0 var(--properties-card-border),
-      0 8px 24px hsl(var(--shadow-color));
+      inset 0 -1px 0 hsl(var(--text-primary) / 0.04);
   }
 
   .properties-window-hero-top {

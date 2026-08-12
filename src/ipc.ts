@@ -103,8 +103,8 @@ type CommandMap = {
   verify_torrent_data: { args: { id: string }; result: void };
   get_torrent_magnet_link: { args: { id: string }; result: string };
   export_torrent_metadata: { args: { id: string; destination: string }; result: void };
-  move_torrent_data: { args: { id: string; destination: string }; result: void };
-  cancel_torrent_move_data: { args: { id: string }; result: void };
+  move_torrent_data: { args: { id: string; destination: string; sessionId?: string }; result: void };
+  cancel_torrent_move_data: { args: { id: string; sessionId?: string }; result: void };
   get_torrent_web_seeds: { args: { id: string }; result: TorrentWebSeed[] };
   set_torrent_web_seeds: { args: { id: string; seeds: TorrentWebSeed[] }; result: TorrentWebSeed[] };
   set_torrent_max_open_files: { args: { max_open_files: number }; result: void };
@@ -172,7 +172,7 @@ type CommandMap = {
   open_download_properties_window: { args: { id: string }; result: string };
   get_properties_window_download_id: { args: undefined; result: string };
   properties_window_send_ready: { args: { sessionId: string }; result: void };
-  properties_window_reveal: { args: undefined; result: void };
+  properties_window_reveal: { args: { sessionId?: string }; result: void };
   properties_window_send_action: { args: { sessionId: string; requestId: number; action: string; payload?: unknown }; result: void };
   validate_properties_window_request: { args: { windowLabel: string; downloadId: string; sessionId: string; requestId?: number }; result: void };
   close_download_properties_window: { args: { id: string }; result: void };

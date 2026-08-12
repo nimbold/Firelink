@@ -190,6 +190,16 @@ export type PropertiesSnapshot = SafePropertiesFields & {
   hasMirrors: boolean;
 };
 
+export const redactPropertiesError = (error: unknown): string => {
+  const text = error instanceof Error ? error.message : String(error);
+  return text
+    .replace(/(authorization\s*:\s*(?:bearer|basic)\s+)[^\s,;]+/gi, '$1[redacted]')
+    .replace(/((?:cookie|set-cookie|proxy-authorization)\s*:\s*)[^\r\n]+/gi, '$1[redacted]')
+    .replace(/((?:https?|sftp|ftp):\/\/)[^\s]*@/gi, '$1[redacted]@')
+    .replace(/([?&](?:token|access_token|refresh_token|api[_-]?key|secret|password|passwd|signature|sig|auth|credential|code)=)[^&#\s]*/gi, '$1[redacted]')
+    .replace(/\b(?:token|access_token|refresh_token|api[_-]?key|secret|password|passwd|signature|sig|auth|credential)=\S+/gi, match => `${match.slice(0, match.indexOf('=') + 1)}[redacted]`);
+};
+
 export type SecretPatch =
   | { kind: 'unchanged' }
   | { kind: 'replace'; value: string }
@@ -252,7 +262,7 @@ export type PropertiesLifecycleAction = 'pause' | 'resume' | 'start' | 'retry';
 export const getPropertiesLifecycleAction = (
   status: DownloadStatus,
 ): PropertiesLifecycleAction | null => {
-  if (status === 'ready' || status === 'staged') return 'start';
+  if (status === 'ready') return 'start';
   if (canPauseDownload(status)) return 'pause';
   if (status === 'paused') return 'resume';
   if (status === 'failed') return 'retry';
@@ -388,6 +398,9 @@ const copyWithoutSecrets = (
       Object.prototype.hasOwnProperty.call(item, key) ? [[key, item[key]]] : []
     )),
   ) as SafePropertiesFields;
+  if (typeof safeItem.lastError === 'string') {
+    safeItem.lastError = redactPropertiesError(safeItem.lastError);
+  }
   if (item.isTorrent === true) delete safeItem.connections;
   const lastErrorKind = item.lastErrorKind ?? classifyDownloadError(item.lastError);
   return {

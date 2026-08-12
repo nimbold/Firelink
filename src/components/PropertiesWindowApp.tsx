@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { cloneElement, isValidElement, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
@@ -27,6 +27,7 @@ import {
   propertiesDiagnosticPhase,
   propertiesActionRequestKey,
   propertiesWindowEventTarget,
+  redactPropertiesError,
   resetPropertiesActionState,
   type PropertiesAction,
   type PropertiesActionRequest,
@@ -36,7 +37,7 @@ import {
   type PropertiesSnapshot,
   type PropertiesSnapshotEvent,
 } from '../propertiesBridge';
-import { formatDownloadBytes, formatTorrentRatio, resolveDownloadFraction } from '../utils/downloadProgress';
+import { formatDownloadBytes, formatTorrentRatio } from '../utils/downloadProgress';
 import { changeAppLocale } from '../i18n';
 import { synchronizeDocumentAppearance } from '../utils/documentAppearance';
 import { getWindowControlRailWidth } from '../utils/windowControlStyle';
@@ -49,7 +50,7 @@ import {
 } from '../utils/propertiesDiagnostics';
 import { shouldOfferPropertiesUrlExpansion, shouldResetPropertiesUrlExpansion } from '../utils/propertiesUrl';
 import { getPropertiesTabIndex, getPropertiesTabs, PROPERTIES_TABS_OVERFLOW_BREAKPOINT, shouldUsePropertiesTabOverflow, type PropertiesTab } from '../utils/propertiesTabs';
-import { getPropertiesConnectionPresentation } from '../utils/propertiesPresentation';
+import { getPropertiesConnectionPresentation, getPropertiesProgress } from '../utils/propertiesPresentation';
 import { WindowControls } from './WindowControls';
 import {
   TORRENT_ENCRYPTION_POLICY_DISABLED,
@@ -78,7 +79,7 @@ const safeTitle = (name: string) => {
   return `${bounded || 'Download'} - Properties - Firelink`;
 };
 
-const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+const errorText = redactPropertiesError;
 
 const PropertiesHelp = ({ text }: { text: string }) => (
   <button type="button" className="properties-help" aria-label={text}>
@@ -103,19 +104,30 @@ const PropertiesField = ({
   format?: ReactNode;
   children: ReactNode;
   className?: string;
-}) => (
+}) => {
+  const hintId = hint ? `${controlId}-hint` : undefined;
+  const describedChildren = hintId && isValidElement(children)
+    ? cloneElement(children, {
+      'aria-describedby': [
+        (children.props as { 'aria-describedby'?: string })['aria-describedby'],
+        hintId,
+      ].filter(Boolean).join(' '),
+    } as Record<string, unknown>)
+    : children;
+  return (
   <div className={`properties-field ${className}`}>
     <div className="properties-field-label">
       <label className="properties-field-label-text" htmlFor={controlId}>
         <span className="min-w-0">{label}</span>
       </label>
-      {hint && <PropertiesHelp text={hint} />}
+      {hint && <><PropertiesHelp text={hint} /><span id={hintId} className="sr-only">{hint}</span></>}
       {meta && <span className="properties-field-meta">{meta}</span>}
     </div>
-    {children}
+    {describedChildren}
     {format && <span className="properties-field-format">{format}</span>}
   </div>
-);
+  );
+};
 
 const PropertiesOptionToggle = ({
   label,
@@ -133,11 +145,12 @@ const PropertiesOptionToggle = ({
   const controlId = useId();
   return (
     <div className="properties-option-toggle">
-      <input id={controlId} type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} disabled={disabled} />
+      <input id={controlId} type="checkbox" aria-describedby={`${controlId}-hint`} checked={checked} onChange={event => onChange(event.target.checked)} disabled={disabled} />
       <span className="properties-option-toggle-copy">
         <label className="properties-option-toggle-label" htmlFor={controlId}>{label}</label>
       </span>
       <PropertiesHelp text={hint} />
+      <span id={`${controlId}-hint`} className="sr-only">{hint}</span>
     </div>
   );
 };
@@ -198,7 +211,7 @@ export const PropertiesWindowApp = () => {
   const [errorMessage, setErrorMessage] = useState('');
   const [notice, setNotice] = useState('');
   const [pendingAction, setPendingAction] = useState<PropertiesAction | null>(null);
-  const [pendingTorrentCommand, setPendingTorrentCommand] = useState<'magnet' | 'export' | 'move' | null>(null);
+  const [pendingTorrentCommand, setPendingTorrentCommand] = useState<'magnet' | 'export' | 'move' | 'cancel' | null>(null);
   const [fileProgress, setFileProgress] = useState<TorrentFileProgressSnapshot | null>(null);
   const [peers, setPeers] = useState<TorrentPeerDiagnostics | null>(null);
   const [availability, setAvailability] = useState<TorrentAvailabilitySnapshot | null>(null);
@@ -359,6 +372,11 @@ export const PropertiesWindowApp = () => {
   }, [currentWindow]);
 
   const revealWindow = useCallback(async () => {
+    // The native reveal command is session-bound. Before the first snapshot,
+    // the child has not completed its ready handshake yet, so revealing here
+    // would produce a false startup error and leave stale error copy in the
+    // footer. The snapshot path calls reveal again after registration.
+    if (latestSnapshotRevisionRef.current === 0) return;
     if (hasRevealedWindowRef.current) {
       if (latestSnapshotRevisionRef.current > 0 && readyRetryTimerRef.current !== undefined) {
         window.clearInterval(readyRetryTimerRef.current);
@@ -369,7 +387,7 @@ export const PropertiesWindowApp = () => {
     if (revealInFlightRef.current) return;
     revealInFlightRef.current = true;
     try {
-      await invoke('properties_window_reveal');
+      await invoke('properties_window_reveal', { sessionId });
       hasRevealedWindowRef.current = true;
       if (latestSnapshotRevisionRef.current > 0 && readyRetryTimerRef.current !== undefined) {
         window.clearInterval(readyRetryTimerRef.current);
@@ -1024,11 +1042,13 @@ export const PropertiesWindowApp = () => {
 
   const performTorrentAction = async (action: 'magnet' | 'export' | 'move' | 'verify') => {
     if (!downloadId) return;
+    if (action === 'move' && !['paused', 'completed', 'failed'].includes(snapshot?.status ?? '')) return;
     if (action === 'verify') {
+      if (pendingTorrentCommand !== null || snapshot?.status === 'moving') return;
       await requestAction('verify-torrent');
       return;
     }
-    if (pendingTorrentCommand !== null) return;
+    if (pendingTorrentCommand !== null || snapshot?.status === 'moving') return;
     setPendingTorrentCommand(action);
     try {
       if (action === 'magnet') {
@@ -1042,11 +1062,24 @@ export const PropertiesWindowApp = () => {
         }
       } else if (action === 'move') {
         const selected = await open({ directory: true, multiple: false });
-        if (selected && typeof selected === 'string') {
-          await invoke('move_torrent_data', { id: downloadId, destination: selected });
+        if (selected && typeof selected === 'string' && window.confirm(t($ => $.properties.torrentMoveConfirm))) {
+          await invoke('move_torrent_data', { id: downloadId, destination: selected, sessionId });
           setNotice(t($ => $.properties.torrentMoveCompleted));
         }
       }
+    } catch (error) {
+      setErrorMessage(errorText(error));
+    } finally {
+      setPendingTorrentCommand(null);
+    }
+  };
+
+  const cancelTorrentMove = async () => {
+    if (!downloadId || snapshot?.status !== 'moving' || pendingTorrentCommand === 'cancel') return;
+    setPendingTorrentCommand('cancel');
+    try {
+      await invoke('cancel_torrent_move_data', { id: downloadId, sessionId });
+      setNotice(t($ => $.properties.torrentMoveCancelRequested));
     } catch (error) {
       setErrorMessage(errorText(error));
     } finally {
@@ -1076,17 +1109,11 @@ export const PropertiesWindowApp = () => {
     );
   }
 
-  const progress = resolveDownloadFraction({
-    fraction: snapshot.fraction,
-    downloadedBytes: snapshot.downloadedBytes,
-    totalBytes: snapshot.totalBytes,
-    totalIsEstimate: snapshot.totalIsEstimate,
-    isMedia: snapshot.isMedia,
-    size: snapshot.size,
-    status: snapshot.status,
-  });
-  const lifecycleAction = getPropertiesLifecycleAction(snapshot.status);
   const editingEnabled = pendingAction === null && isEditableStatus(snapshot.status);
+  const identityEditingEnabled = editingEnabled && !isTorrent && ['ready', 'staged'].includes(snapshot.status);
+  const torrentMoveAvailable = ['paused', 'completed', 'failed'].includes(snapshot.status);
+  const progress = getPropertiesProgress(snapshot);
+  const lifecycleAction = getPropertiesLifecycleAction(snapshot.status);
   const footerActions = getPropertiesFooterActions({
     isDirty,
     hasUnsavedNavigation: pendingTab !== null || closePrompt,
@@ -1152,7 +1179,7 @@ export const PropertiesWindowApp = () => {
             {lifecycleAction && <button
               type="button"
               className="app-button app-button-primary properties-primary-action px-3 text-xs"
-              disabled={pendingAction !== null}
+              disabled={pendingAction !== null || pendingTorrentCommand !== null}
               title={lifecycleLabel}
               aria-label={lifecycleLabel}
               onClick={() => {
@@ -1169,16 +1196,16 @@ export const PropertiesWindowApp = () => {
             </button>}
             {isTorrent && <>
               <div className="properties-secondary-actions">
-                <button type="button" className="app-button properties-command-button px-3 text-xs" disabled={pendingTorrentCommand === 'magnet'} onClick={() => void performTorrentAction('magnet')} title={t($ => $.properties.torrentCopyMagnet)}><Copy size={14} /><span className="properties-command-label">{t($ => $.properties.torrentCopyMagnet)}</span></button>
-                <button type="button" className="app-button properties-command-button px-3 text-xs" disabled={pendingTorrentCommand === 'export'} onClick={() => void performTorrentAction('export')} title={t($ => $.properties.torrentExportMetadata)}><FileDown size={14} /><span className="properties-command-label">{t($ => $.properties.torrentExportMetadata)}</span></button>
-                <button type="button" className="app-button properties-command-button px-3 text-xs" disabled={pendingTorrentCommand === 'move'} onClick={() => void performTorrentAction('move')} title={t($ => $.properties.torrentMove)}><FolderOpen size={14} /><span className="properties-command-label">{t($ => $.properties.torrentMove)}</span></button>
+                <button type="button" className="app-button properties-command-button px-3 text-xs" disabled={pendingTorrentCommand !== null || snapshot.status === 'moving'} onClick={() => void performTorrentAction('magnet')} title={t($ => $.properties.torrentCopyMagnet)}><Copy size={14} /><span className="properties-command-label">{t($ => $.properties.torrentCopyMagnet)}</span></button>
+                <button type="button" className="app-button properties-command-button px-3 text-xs" disabled={pendingTorrentCommand !== null || snapshot.status === 'moving'} onClick={() => void performTorrentAction('export')} title={t($ => $.properties.torrentExportMetadata)}><FileDown size={14} /><span className="properties-command-label">{t($ => $.properties.torrentExportMetadata)}</span></button>
+                {snapshot.status === 'moving' ? <button type="button" className="app-button properties-command-button px-3 text-xs" disabled={pendingTorrentCommand === 'cancel'} onClick={() => void cancelTorrentMove()} title={t($ => $.properties.torrentMoveCancel)}><X size={14} /><span className="properties-command-label">{pendingTorrentCommand === 'cancel' ? t($ => $.properties.torrentMoveCancelRequested) : t($ => $.properties.torrentMoveCancel)}</span></button> : <button type="button" className="app-button properties-command-button px-3 text-xs" disabled={pendingTorrentCommand !== null || !torrentMoveAvailable} onClick={() => void performTorrentAction('move')} title={t($ => $.properties.torrentMove)}><FolderOpen size={14} /><span className="properties-command-label">{t($ => $.properties.torrentMove)}</span></button>}
               </div>
               <details className="properties-command-overflow">
                 <summary className="app-icon-button" title={t($ => $.downloads.actions.options)} aria-label={t($ => $.downloads.actions.options)}><MoreHorizontal size={16} /></summary>
                 <div className="properties-command-menu">
-                  <button type="button" disabled={pendingTorrentCommand === 'magnet'} onClick={() => void performTorrentAction('magnet')}><Copy size={14} />{t($ => $.properties.torrentCopyMagnet)}</button>
-                  <button type="button" disabled={pendingTorrentCommand === 'export'} onClick={() => void performTorrentAction('export')}><FileDown size={14} />{t($ => $.properties.torrentExportMetadata)}</button>
-                  <button type="button" disabled={pendingTorrentCommand === 'move'} onClick={() => void performTorrentAction('move')}><FolderOpen size={14} />{t($ => $.properties.torrentMove)}</button>
+                  <button type="button" disabled={pendingTorrentCommand !== null || snapshot.status === 'moving'} onClick={() => void performTorrentAction('magnet')}><Copy size={14} />{t($ => $.properties.torrentCopyMagnet)}</button>
+                  <button type="button" disabled={pendingTorrentCommand !== null || snapshot.status === 'moving'} onClick={() => void performTorrentAction('export')}><FileDown size={14} />{t($ => $.properties.torrentExportMetadata)}</button>
+                  {snapshot.status === 'moving' ? <button type="button" disabled={pendingTorrentCommand === 'cancel'} onClick={() => void cancelTorrentMove()}><X size={14} />{t($ => $.properties.torrentMoveCancel)}</button> : <button type="button" disabled={pendingTorrentCommand !== null || !torrentMoveAvailable} onClick={() => void performTorrentAction('move')}><FolderOpen size={14} />{t($ => $.properties.torrentMove)}</button>}
                 </div>
               </details>
             </>}
@@ -1255,9 +1282,10 @@ export const PropertiesWindowApp = () => {
       <section id={`properties-panel-${activeTab}`} role="tabpanel" aria-labelledby={useTabOverflow ? 'properties-active-section-label' : `properties-tab-${activeTab}`} className="properties-window-panel min-h-0 flex-1 overflow-auto p-5" data-diagnostic-phase={diagnosticPhase} tabIndex={0}>
         {activeTab === 'overview' && <div className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="text-xs text-text-muted">{t($ => $.properties.fileName)}<input className="app-control mt-1 w-full" value={fileName} onChange={event => { setFileName(event.target.value); setDraftTab('overview'); }} disabled={!editingEnabled} /></label>
-            <label className="text-xs text-text-muted">{t($ => $.properties.destination)}<input className="app-control mt-1 w-full" value={destination} onChange={event => { setDestination(event.target.value); setDraftTab('overview'); }} disabled={!editingEnabled} /></label>
+            <label className="text-xs text-text-muted">{t($ => $.properties.fileName)}<input className="app-control mt-1 w-full" value={fileName} onChange={event => { setFileName(event.target.value); setDraftTab('overview'); }} disabled={!identityEditingEnabled} /></label>
+            <label className="text-xs text-text-muted">{t($ => $.properties.destination)}<input className="app-control mt-1 w-full" value={destination} onChange={event => { setDestination(event.target.value); setDraftTab('overview'); }} disabled={!identityEditingEnabled} /></label>
           </div>
+          {!identityEditingEnabled && <p className="text-xs text-text-muted">{t($ => $.properties.identityReadOnly)}</p>}
           <div className="grid gap-3 sm:grid-cols-2">
             <div ref={urlCardRef} className="properties-url-card rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs">
               <div className="properties-url-card-header">
@@ -1314,7 +1342,7 @@ export const PropertiesWindowApp = () => {
             <span className="text-text-muted">{t($ => $.properties.torrentDetailsCreator)}</span><span>{details.creator || '—'}</span>
             <span className="text-text-muted">{t($ => $.properties.torrentDetailsComment)}</span><span className="break-words">{details.comment || '—'}</span>
           </div>}
-          {isTorrent && <div className="flex flex-wrap gap-2"><button type="button" className="app-button px-3 text-xs" disabled={pendingAction !== null || !['paused', 'completed', 'failed'].includes(snapshot.status)} onClick={() => void performTorrentAction('verify')}><RefreshCw size={14} />{t($ => $.properties.torrentVerifyNow)}</button></div>}
+          {isTorrent && <div className="flex flex-wrap gap-2"><button type="button" className="app-button px-3 text-xs" disabled={pendingAction !== null || pendingTorrentCommand !== null || snapshot.status === 'moving' || !['paused', 'completed', 'failed'].includes(snapshot.status)} onClick={() => void performTorrentAction('verify')}><RefreshCw size={14} />{t($ => $.properties.torrentVerifyNow)}</button></div>}
         </div>}
 
         {activeTab === 'files' && isTorrent && <div className="space-y-3">

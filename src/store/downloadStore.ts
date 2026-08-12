@@ -121,6 +121,12 @@ const startDownloadListeners = async () => {
         return;
       }
       const status = payload.status as DownloadStatus;
+      // A move terminal event carries its authoritative destination. Older
+      // lifecycle events do not, so they must not overwrite an active move or
+      // clear its progress while the native relocation still owns the row.
+      if (current.status === 'moving' && status !== 'moving' && payload.destination == null) {
+        return;
+      }
       if (status !== 'moving') {
         useDownloadProgressStore.getState().clearMoveProgress(payload.id);
       }
@@ -228,6 +234,9 @@ const startDownloadListeners = async () => {
           current.isTorrent === true,
           current.category
         );
+      }
+      if (payload.destination && payload.destination !== current.destination) {
+        updates.destination = payload.destination;
       }
       if (status !== 'downloading' && status !== 'verifying') {
         updates.speed = '-';

@@ -1,7 +1,33 @@
 import { describe, expect, it } from 'vitest';
-import { getPropertiesConnectionPresentation } from './propertiesPresentation';
+import { getPropertiesConnectionPresentation, getPropertiesProgress } from './propertiesPresentation';
 
 describe('Properties connection presentation', () => {
+  it('uses move progress instead of the completed download fraction during relocation', () => {
+    expect(getPropertiesProgress({
+      status: 'moving',
+      moveProgress: 0.42,
+      fraction: 1,
+      downloadedBytes: 100,
+      totalBytes: 100,
+      totalIsEstimate: false,
+      isMedia: false,
+      size: '100 B',
+    })).toBe(0.42);
+    expect(getPropertiesProgress({
+      status: 'moving',
+      moveProgress: 4,
+      fraction: 0,
+      isMedia: false,
+    })).toBe(1);
+    expect(getPropertiesProgress({
+      status: 'moving',
+      fraction: 1,
+      downloadedBytes: 100,
+      totalBytes: 100,
+      isMedia: false,
+    })).toBe(0);
+  });
+
   it('keeps media concurrency out of the live header metrics', () => {
     expect(getPropertiesConnectionPresentation({
       isMedia: true,

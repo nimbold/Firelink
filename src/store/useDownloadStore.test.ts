@@ -141,6 +141,28 @@ describe('useDownloadStore', () => {
     expect(fileName.endsWith('.mp4')).toBe(true);
   });
 
+  it('rejects queued identity edits before invalidating their dispatch', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'queued-identity',
+        url: 'https://example.com/file',
+        fileName: 'file.bin',
+        destination: '/tmp',
+        status: 'queued',
+        category: 'Other',
+        dateAdded: '',
+      }] as any[],
+    });
+
+    await expect(useDownloadStore.getState().applyProperties('queued-identity', {
+      fileName: 'renamed.bin',
+    })).rejects.toThrow('read-only');
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith(
+      'cancel_enqueue_generation',
+      expect.anything(),
+    );
+  });
+
   it('keeps the credential-required marker when the last secret is cleared', async () => {
     useDownloadStore.setState({
       downloads: [{
@@ -1228,10 +1250,10 @@ describe('useDownloadStore', () => {
     ).toHaveLength(2);
   });
 
-  it('re-enqueues the edited values only after an obsolete queued dispatch is removed', async () => {
+  it('re-enqueues queued transfer edits only after an obsolete dispatch is removed', async () => {
     useDownloadStore.setState({
       downloads: [
-        { id: 'edited', url: 'http://test', fileName: 'old.bin', destination: '/tmp', status: 'queued', category: 'Other', dateAdded: '', queueId: 'MAIN', hasBeenDispatched: false },
+        { id: 'edited', url: 'http://test', fileName: 'old.bin', destination: '/tmp', status: 'queued', category: 'Other', dateAdded: '', queueId: 'MAIN', hasBeenDispatched: false, speedLimit: '128K' },
       ] as any[],
     });
 
@@ -1245,7 +1267,7 @@ describe('useDownloadStore', () => {
         enqueueCount += 1;
         return (enqueueCount === 1
           ? firstEnqueue
-          : Promise.resolve({ id: 'edited', filename: 'new.bin' })) as never;
+          : Promise.resolve({ id: 'edited', filename: 'old.bin' })) as never;
       }
       if (command === 'get_pending_order') return Promise.resolve(['edited']) as never;
       return Promise.resolve(undefined) as never;
@@ -1253,7 +1275,7 @@ describe('useDownloadStore', () => {
 
     const start = useDownloadStore.getState().startQueue('MAIN');
     await vi.waitFor(() => expect(enqueueCount).toBe(1));
-    const update = useDownloadStore.getState().applyProperties('edited', { fileName: 'new.bin' });
+    const update = useDownloadStore.getState().applyProperties('edited', { speedLimit: '512K' });
     resolveFirstEnqueue({ id: 'edited', filename: 'old.bin' });
 
     await expect(update).resolves.toBeUndefined();
@@ -1264,7 +1286,8 @@ describe('useDownloadStore', () => {
       { queueId: 'MAIN' }
     );
     expect(useDownloadStore.getState().downloads[0]).toMatchObject({
-      fileName: 'new.bin',
+      fileName: 'old.bin',
+      speedLimit: '512K',
       hasBeenDispatched: true,
     });
   });

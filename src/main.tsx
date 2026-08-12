@@ -101,9 +101,12 @@ const renderPropertiesApp = async () => {
     // reveal command as the normal child path.
     console.error('Failed to initialize the Properties window:', error);
     renderRoot(PropertiesStartupFailure);
-    void invoke('properties_window_reveal').catch(revealError => {
-      console.error('Failed to reveal the Properties startup error:', revealError);
-    });
+    const fallbackSessionId = crypto.randomUUID();
+    void invoke('properties_window_send_ready', { sessionId: fallbackSessionId })
+      .then(() => invoke('properties_window_reveal', { sessionId: fallbackSessionId }))
+      .catch(revealError => {
+        console.error('Failed to reveal the Properties startup error:', revealError);
+      });
   }
 };
 
