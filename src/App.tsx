@@ -43,6 +43,7 @@ import { synchronizeDocumentAppearance } from './utils/documentAppearance';
 import { createMainWindowSizePersistence } from './utils/mainWindowState';
 import type { MainWindowSize } from './bindings/MainWindowSize';
 import { beginSchedulerControl, isSchedulerControlCurrent } from './utils/schedulerControl';
+import { createSerialTaskQueue } from './utils/serialTaskQueue';
 
 const loadSettingsView = () => import('./components/SettingsView');
 const loadSchedulerView = () => import('./components/SchedulerView');
@@ -254,6 +255,7 @@ function App() {
   const pendingPostActionTimer = useRef<number | null>(null);
   const startupResumeStarted = useRef(false);
   const startupInputReady = useRef(false);
+  const extensionProcessing = useRef(createSerialTaskQueue());
   const frontendReadyUpdate = useRef<Promise<void>>(Promise.resolve());
   const pendingStartupInputs = useRef<Array<
     | { type: 'extension'; payload: ExtensionDownloadRequest }
@@ -305,6 +307,24 @@ function App() {
       .then(() => invoke('set_extension_frontend_ready', { ready }));
     frontendReadyUpdate.current = update;
     return update;
+  }, []);
+
+  const acknowledgeExtensionDownload = useCallback(async (requestId?: string) => {
+    if (!requestId) return;
+    try {
+      await invoke('ack_extension_download', { requestId });
+    } catch (error) {
+      console.error('Failed to acknowledge browser extension download:', error);
+    }
+  }, []);
+
+  const processExtensionDownload = useCallback(async (payload: ExtensionDownloadRequest) => {
+    await useDownloadStore.getState().handleExtensionDownload(payload);
+    await acknowledgeExtensionDownload(payload.request_id);
+  }, [acknowledgeExtensionDownload]);
+
+  const enqueueAddInput = useCallback((task: () => void | Promise<void>) => {
+    return extensionProcessing.current(task);
   }, []);
 
   const schedulePostQueueAction = useCallback((action: Exclude<PostQueueAction, 'none'>) => {
@@ -646,16 +666,11 @@ function App() {
           }
         });
         unlistenExtension = await listen('extension-add-download', (event) => {
-          if (event.payload.request_id) {
-            void invoke('ack_extension_download', { requestId: event.payload.request_id }).catch(error => {
-              console.error('Failed to acknowledge browser extension download:', error);
-            });
-          }
           if (!startupInputReady.current || useSettingsStore.getState().showKeychainModal) {
             pendingStartupInputs.current.push({ type: 'extension', payload: event.payload });
             return;
           }
-          useDownloadStore.getState().handleExtensionDownload(event.payload).catch(error => {
+          enqueueAddInput(() => processExtensionDownload(event.payload)).catch(error => {
             console.error('Failed to handle browser extension download:', error);
           });
         });
@@ -664,7 +679,7 @@ function App() {
             pendingStartupInputs.current.push({ type: 'deep-link', payload: event.payload });
             return;
           }
-          useDownloadStore.getState().openAddModalWithUrls(event.payload);
+          enqueueAddInput(() => useDownloadStore.getState().openAddModalWithUrls(event.payload));
         });
 
         cleanupListeners = disposeListeners;
@@ -718,7 +733,7 @@ function App() {
       mainWindowSizePersistence.dispose();
       disposePersistence();
     };
-  }, [addToast, queueFrontendReadyUpdate]);
+  }, [addToast, enqueueAddInput, processExtensionDownload, queueFrontendReadyUpdate]);
 
   useEffect(() => {
     if (!coreReady) return;
@@ -740,14 +755,14 @@ function App() {
     const pendingInputs = pendingStartupInputs.current.splice(0);
     for (const input of pendingInputs) {
       if (input.type === 'extension') {
-        useDownloadStore.getState().handleExtensionDownload(input.payload).catch(error => {
+        enqueueAddInput(() => processExtensionDownload(input.payload)).catch(error => {
           console.error('Failed to handle queued browser extension download:', error);
         });
       } else {
-        useDownloadStore.getState().openAddModalWithUrls(input.payload);
+        enqueueAddInput(() => useDownloadStore.getState().openAddModalWithUrls(input.payload));
       }
     }
-  }, [coreReady, showKeychainModal]);
+  }, [coreReady, enqueueAddInput, processExtensionDownload, showKeychainModal]);
 
   useEffect(() => {
     if (!coreReady || showKeychainModal || startupResumeStarted.current) return;
