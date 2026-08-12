@@ -698,6 +698,9 @@ pub struct PersistedSettings {
     pub scheduler_running: bool,
     pub scheduler_active_download_ids: Vec<String>,
     pub scheduler_last_start_key: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub scheduler_triggered_start_key: Option<String>,
     pub scheduler_last_stop_key: String,
     pub last_custom_speed_limit_ki_b: u32,
     #[serde(default = "default_speed_limit_unit")]

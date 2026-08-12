@@ -517,11 +517,15 @@ export const useSettingsStore = create<SettingsState>()(
         });
       },
       setGlobalSpeedLimit: async (limit) => {
+        const normalized = normalizeSpeedLimitForBackend(limit);
+        if (limit.trim() && !normalized) {
+          return Promise.reject(new Error('Global speed limit is invalid'));
+        }
         await invoke('set_global_speed_limit', {
-          limit: normalizeSpeedLimitForBackend(limit)
+          limit: normalized
         });
         info('Settings updated: globalSpeedLimit');
-        set({ globalSpeedLimit: limit });
+        set({ globalSpeedLimit: normalized ?? '' });
       },
       setTorrentOverallUploadLimit: (limit) => {
         const normalizedLimit = normalizeSpeedLimitForBackend(limit);
@@ -1026,6 +1030,9 @@ export const useSettingsStore = create<SettingsState>()(
           torrentOverallUploadLimit: typeof persisted.torrentOverallUploadLimit === 'string'
             ? normalizeSpeedLimitForBackend(persisted.torrentOverallUploadLimit) ?? ''
             : currentState.torrentOverallUploadLimit,
+          globalSpeedLimit: typeof persisted.globalSpeedLimit === 'string'
+            ? normalizeSpeedLimitForBackend(persisted.globalSpeedLimit) ?? ''
+            : currentState.globalSpeedLimit,
           perServerConnections: clampSettingInteger(
             persisted.perServerConnections,
             1,

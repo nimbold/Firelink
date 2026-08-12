@@ -6305,12 +6305,17 @@ pub(crate) fn execute_system_action(action: crate::ipc::PostQueueAction) -> Resu
 }
 
 #[tauri::command]
-fn perform_system_action(
+async fn perform_system_action(
     caller: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
     action: crate::ipc::PostQueueAction,
+    force: bool,
 ) -> Result<(), String> {
     properties_window::ensure_main_window(&caller)?;
-    execute_system_action(action)
+    state.queue_manager.begin_system_action(force).await?;
+    let result = execute_system_action(action);
+    state.queue_manager.end_system_action();
+    result
 }
 
 #[tauri::command]
@@ -6325,6 +6330,7 @@ fn ack_schedule_trigger(
     crate::settings::update_settings_state(&app_handle, |state| match action.as_str() {
         "start" => {
             state.insert("schedulerLastStartKey".to_string(), serde_json::json!(key));
+            state.insert("schedulerTriggeredStartKey".to_string(), serde_json::json!(""));
         }
         "stop" => {
             state.insert("schedulerLastStopKey".to_string(), serde_json::json!(key));
@@ -6337,6 +6343,7 @@ fn ack_schedule_trigger(
                 if let Some(settings) = cached.as_mut() {
                     if action == "start" {
                         settings.scheduler_last_start_key = key;
+                        settings.scheduler_triggered_start_key = None;
                     } else {
                         settings.scheduler_last_stop_key = key;
                     }
@@ -8593,11 +8600,15 @@ async fn move_torrent_data(
     }
     if let Some(session_id) = properties_session_id.as_deref() {
         properties.with_current_session(caller.label(), session_id, || {
-            state.queue_manager.begin_torrent_move(&id);
             Ok(())
         })?;
-    } else {
-        state.queue_manager.begin_torrent_move(&id);
+    }
+    state.queue_manager.begin_torrent_move(&id).await?;
+    if let Some(session_id) = properties_session_id.as_deref() {
+        if let Err(error) = properties.with_current_session(caller.label(), session_id, || Ok(())) {
+            state.queue_manager.finish_torrent_move(&id);
+            return Err(error);
+        }
     }
     if let Err(error) = write_torrent_move_journal(
         &journal,
@@ -8693,6 +8704,7 @@ async fn move_torrent_data(
             cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
             let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
             let _ = tokio::fs::remove_file(&journal).await;
+            state.queue_manager.finish_torrent_move(&id);
             let _ = app_handle.emit("download-state", move_restore_event());
             return Err("Torrent data changed during relocation".to_string());
         }
@@ -8702,6 +8714,7 @@ async fn move_torrent_data(
             cleanup_torrent_move_outputs(&move_new_paths, &staging_paths, &staging_root).await;
             let _ = restore_download_ownership(&app_handle, &id, ownership.clone());
             let _ = tokio::fs::remove_file(&journal).await;
+            state.queue_manager.finish_torrent_move(&id);
             let _ = app_handle.emit("download-state", move_restore_event());
             return Err("Torrent data changed during relocation".to_string());
         }
@@ -9610,9 +9623,13 @@ async fn set_global_speed_limit(
     limit: Option<String>,
 ) -> Result<(), String> {
     properties_window::ensure_main_window(&caller)?;
-    let normalized_limit = limit
-        .as_deref()
-        .and_then(normalize_speed_limit_for_aria2);
+    let normalized_limit = match limit.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(raw) => Some(
+            normalize_speed_limit_for_aria2(raw)
+                .ok_or_else(|| "Global speed limit is invalid".to_string())?,
+        ),
+    };
     let limit_str = normalized_limit.clone().unwrap_or_else(|| "0".to_string());
     rpc_call(
         state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),

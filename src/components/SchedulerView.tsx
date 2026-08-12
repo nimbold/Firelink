@@ -12,6 +12,7 @@ import { useToast } from '../contexts/ToastContext';
 import { usePlatformInfo } from '../utils/platform';
 import { useTranslation } from 'react-i18next';
 import { formatDateTime } from '../utils/dateTime';
+import { beginSchedulerControl, isSchedulerControlCurrent } from '../utils/schedulerControl';
 
 const days = [
   { value: 0, key: 'su' },
@@ -30,7 +31,8 @@ const postActions: { value: PostQueueAction; icon: typeof Moon }[] = [
   { value: 'shutdown', icon: Power },
 ];
 
-const minuteOfDay = (value: string) => {
+const minuteOfDay = (value: string): number | null => {
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) return null;
   const [hour, minute] = value.split(':').map(Number);
   return hour * 60 + minute;
 };
@@ -38,7 +40,10 @@ const minuteOfDay = (value: string) => {
 function nextScheduledRun(settings: SchedulerSettings): Date | 'disabled' | 'none' {
   if (!settings.enabled) return 'disabled';
 
-  const [hour, minute] = settings.startTime.split(':').map(Number);
+  const startMinute = minuteOfDay(settings.startTime);
+  if (startMinute === null) return 'none';
+  const hour = Math.floor(startMinute / 60);
+  const minute = startMinute % 60;
   const now = new Date();
 
   for (let offset = 0; offset < 8; offset += 1) {
@@ -136,7 +141,13 @@ export default function SchedulerView() {
       addToast({ message: t($ => $.scheduler.validationQueue), variant: 'error', isActionable: true });
       return;
     }
-    if (draft.enabled && draft.stopTimeEnabled && minuteOfDay(draft.stopTime) === minuteOfDay(draft.startTime)) {
+    const startMinute = minuteOfDay(draft.startTime);
+    const stopMinute = minuteOfDay(draft.stopTime);
+    if (draft.enabled && (startMinute === null || (draft.stopTimeEnabled && stopMinute === null))) {
+      addToast({ message: t($ => $.scheduler.validationTime), variant: 'error', isActionable: true });
+      return;
+    }
+    if (draft.enabled && draft.stopTimeEnabled && stopMinute === startMinute) {
       addToast({ message: t($ => $.scheduler.validationStopTime), variant: 'error', isActionable: true });
       return;
     }
@@ -151,11 +162,18 @@ export default function SchedulerView() {
   };
 
   const runNow = async () => {
+    const generation = beginSchedulerControl();
     const previouslyTrackedIds = new Set(useSettingsStore.getState().schedulerActiveDownloadIds);
     const results = await Promise.all(
       effectiveSelectedQueueIds.map(queueId => useDownloadStore.getState().startQueue(queueId))
     );
     const acceptedIds = results.flat();
+    if (!isSchedulerControlCurrent(generation)) {
+      await Promise.allSettled(
+        acceptedIds.map(id => useDownloadStore.getState().pauseDownload(id))
+      );
+      return;
+    }
     const selectedQueueSet = new Set(effectiveSelectedQueueIds);
     const trackedIds = useDownloadStore.getState().downloads
       .filter(download =>
@@ -180,9 +198,11 @@ export default function SchedulerView() {
   };
 
   const pauseNow = async () => {
+    const generation = beginSchedulerControl();
     const counts = await Promise.all(
       effectiveSelectedQueueIds.map(queueId => useDownloadStore.getState().pauseQueue(queueId))
     );
+    if (!isSchedulerControlCurrent(generation)) return;
     const count = counts.reduce((total, queueCount) => total + queueCount, 0);
     useSettingsStore.getState().setSchedulerRunning(false);
     useSettingsStore.getState().setSchedulerActiveDownloadIds([]);

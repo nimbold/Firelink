@@ -83,7 +83,7 @@ type CommandMap = {
     args: { preventSystemSleep: boolean; preventDisplaySleep: boolean };
     result: void;
   };
-  perform_system_action: { args: { action: PostQueueAction }; result: void };
+  perform_system_action: { args: { action: PostQueueAction; force: boolean }; result: void };
   ack_schedule_trigger: { args: { action: 'start' | 'stop'; key: string }; result: void };
   set_concurrent_limit: { args: { limit: number }; result: void };
   set_queue_concurrency_limits: { args: { limits: QueueConcurrencyConfig[] }; result: void };

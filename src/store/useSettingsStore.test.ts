@@ -250,6 +250,17 @@ describe('useSettingsStore global speed limit persistence', () => {
     expect(useSettingsStore.getState().globalSpeedLimit).toBe('2M');
     expect(ipc.invokeCommand).toHaveBeenCalledWith('set_global_speed_limit', { limit: '3M' });
   });
+
+  it('rejects malformed limits before changing native or local state', async () => {
+    await expect(useSettingsStore.getState().setGlobalSpeedLimit('not-a-rate'))
+      .rejects.toThrow('Global speed limit is invalid');
+
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith(
+      'set_global_speed_limit',
+      expect.anything()
+    );
+    expect(useSettingsStore.getState().globalSpeedLimit).toBe('2M');
+  });
 });
 
 describe('useSettingsStore Torrent overall upload limit persistence', () => {

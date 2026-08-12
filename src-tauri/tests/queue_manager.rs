@@ -559,6 +559,81 @@ async fn live_aria2_speed_limit_updates_the_current_gid_and_payload() {
 }
 
 #[tokio::test]
+async fn explicit_zero_download_limit_overrides_the_global_limit_and_survives_admission() {
+    let (manager, spawner) = make_manager(1);
+    let manager = Arc::new(manager);
+    manager.set_aria2_global_speed_limit(Some("2M".to_string()));
+    let mut task = aria2_task("speed-unlimited-override");
+    task.payload.speed_limit = Some("0".to_string());
+    manager.push(task).await.unwrap();
+
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if manager
+                .aria2_gid_for_download("speed-unlimited-override")
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("aria2 dispatch should register a gid");
+
+    assert_eq!(
+        spawner.add_speed_limits.lock().unwrap().as_slice(),
+        &[Some("0".to_string())]
+    );
+    assert!(!manager
+        .aria2_speed_limited("speed-unlimited-override")
+        .await);
+
+    manager
+        .apply_completion(
+            "speed-unlimited-override",
+            firelink_lib::queue::PendingOutcome::Complete,
+        )
+        .await;
+    dispatcher.abort();
+}
+
+#[tokio::test]
+async fn system_action_fence_rejects_new_work_and_force_bypasses_only_firelink_safety() {
+    let (manager, _spawner) = make_manager(1);
+    let mut queued = aria2_task("queued-before-action");
+    manager.push(queued.clone()).await.unwrap();
+    assert!(manager.begin_system_action(false).await.is_err());
+    assert!(manager.remove_from_pending("queued-before-action").await);
+
+    assert!(manager.ensure_aria2_permit("active-before-action").await);
+    assert!(manager.begin_system_action(false).await.is_err());
+    manager.release_permit("active-before-action").await;
+
+    manager
+        .begin_torrent_move("moving-before-action")
+        .await
+        .unwrap();
+    assert!(manager.begin_system_action(false).await.is_err());
+    manager.finish_torrent_move("moving-before-action");
+
+    manager.begin_system_action(true).await.unwrap();
+    let candidate = manager.acquire_aria2_permit_candidate().await.unwrap();
+    assert!(!manager
+        .park_aria2_permit_if_missing("candidate-during-action", candidate)
+        .await);
+    assert!(!manager.has_active_permit("candidate-during-action").await);
+    queued.id = "queued-during-action".to_string();
+    assert!(manager.push(queued).await.is_err());
+    manager.end_system_action();
+    manager.push(aria2_task("queued-after-action")).await.unwrap();
+}
+
+#[tokio::test]
 async fn live_aria2_speed_limit_rejects_invalid_and_non_active_requests() {
     let (manager, spawner) = make_manager(1);
     assert!(manager

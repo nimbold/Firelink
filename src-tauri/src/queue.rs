@@ -52,6 +52,19 @@ pub const DEFAULT_ARIA2_DISK_CACHE: &str = "16M";
 pub const MAX_ARIA2_DISK_CACHE_MIB: u64 = 1024;
 pub const MAX_MINIMUM_NORMAL_DOWNLOAD_SPEED_KIB: u32 = 1_048_576;
 
+/// A per-download zero is different from an empty/global limit: Aria2 uses
+/// `0` to remove the item cap, which intentionally lets an item override the
+/// daemon-wide limit. Keep that sentinel through payloads, retries, and live
+/// GID updates instead of normalizing it to `None`.
+fn normalize_download_speed_limit(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed == "0" {
+        Some("0".to_string())
+    } else {
+        crate::normalize_speed_limit_for_aria2(trimmed)
+    }
+}
+
 pub fn normalize_minimum_normal_download_speed_kib(value: u32) -> Result<u32, String> {
     if value > MAX_MINIMUM_NORMAL_DOWNLOAD_SPEED_KIB {
         return Err(format!(
@@ -928,6 +941,10 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
     /// Serializes queue-slot selection with global permit acquisition and
     /// ownership transitions.
     admission_gate: Mutex<()>,
+    /// Prevents new enqueue/admission work after a system action has passed
+    /// its final safety check. The flag is set while holding admission_gate so
+    /// the check and the fence are one state transition.
+    system_action_pending: AtomicBool,
     /// Last queue selected by the dispatcher. Selection starts after this
     /// queue when multiple queues have eligible work.
     dispatch_cursor: Mutex<Option<String>>,
@@ -942,6 +959,7 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
     /// are scoped to the current GID and control epoch and never leave this
     /// process as durable state.
     torrent_telemetry: Mutex<HashMap<String, TorrentTelemetryState>>,
+    torrent_moves: StdMutex<HashSet<String>>,
     torrent_move_cancellations: StdMutex<HashSet<String>>,
 
     /// aria2 gid -> download id map (shared with the WS poller).
@@ -1034,6 +1052,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             queue_limits: Mutex::new(HashMap::new()),
             queue_permit_ownership: Mutex::new(HashMap::new()),
             admission_gate: Mutex::new(()),
+            system_action_pending: AtomicBool::new(false),
             dispatch_cursor: Mutex::new(None),
             target_capacity: AtomicUsize::new(capacity),
             slots_to_retire: AtomicUsize::new(0),
@@ -1045,6 +1064,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             }),
             seed_budgets: StdMutex::new(HashMap::new()),
             torrent_telemetry: Mutex::new(HashMap::new()),
+            torrent_moves: StdMutex::new(HashSet::new()),
             torrent_move_cancellations: StdMutex::new(HashSet::new()),
             aria2_gids: Arc::new(std::sync::RwLock::new(HashMap::new())),
             pending_completion: Arc::new(Mutex::new(HashMap::new())),
@@ -1135,11 +1155,20 @@ impl<R: tauri::Runtime> QueueManager<R> {
         true
     }
 
-    pub fn begin_torrent_move(&self, id: &str) {
+    pub async fn begin_torrent_move(&self, id: &str) -> Result<(), String> {
+        let _admission_gate = self.admission_gate.lock().await;
+        if self.system_action_pending.load(Ordering::Acquire) {
+            return Err("System action is already being performed".to_string());
+        }
+        self.torrent_moves
+            .lock()
+            .expect("Torrent move lock poisoned")
+            .insert(id.to_string());
         self.torrent_move_cancellations
             .lock()
             .expect("Torrent move cancellation lock poisoned")
             .remove(id);
+        Ok(())
     }
 
     pub fn cancel_torrent_move(&self, id: &str) {
@@ -1157,10 +1186,22 @@ impl<R: tauri::Runtime> QueueManager<R> {
     }
 
     pub fn finish_torrent_move(&self, id: &str) {
+        self.torrent_moves
+            .lock()
+            .expect("Torrent move lock poisoned")
+            .remove(id);
         self.torrent_move_cancellations
             .lock()
             .expect("Torrent move cancellation lock poisoned")
             .remove(id);
+    }
+
+    pub fn has_torrent_moves(&self) -> bool {
+        !self
+            .torrent_moves
+            .lock()
+            .expect("Torrent move lock poisoned")
+            .is_empty()
     }
 
     /// Drop counters after terminal cleanup/removal. Persisted lifetime
@@ -1737,6 +1778,10 @@ impl<R: tauri::Runtime> QueueManager<R> {
         mut task: QueuedTask,
         generation: u64,
     ) -> Result<(), String> {
+        let _admission_gate = self.admission_gate.lock().await;
+        if self.system_action_pending.load(Ordering::Acquire) {
+            return Err("System action is already being performed".to_string());
+        }
         let id = task.id.clone();
         let cancellations = self.enqueue_cancellations.lock().await;
         if cancellations
@@ -2391,22 +2436,22 @@ impl<R: tauri::Runtime> QueueManager<R> {
     }
 
     pub async fn aria2_speed_limited(&self, id: &str) -> bool {
-        if self
-            .aria2_global_speed_limit
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .is_some()
-        {
-            return true;
-        }
-
-        self.aria2_payloads
+        let item_limit = self
+            .aria2_payloads
             .lock()
             .await
             .get(id)
             .and_then(|payload| payload.speed_limit.as_deref())
-            .and_then(crate::normalize_speed_limit_for_aria2)
-            .is_some()
+            .and_then(normalize_download_speed_limit);
+        if item_limit.as_deref() == Some("0") {
+            return false;
+        }
+        item_limit.is_some()
+            || self
+                .aria2_global_speed_limit
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_some()
     }
 
     /// Change an active aria2 transfer's speed cap without replacing its GID
@@ -2421,7 +2466,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         let normalized_limit = match limit.as_deref().map(str::trim) {
             None | Some("") => None,
             Some(raw) => Some(
-                crate::normalize_speed_limit_for_aria2(raw)
+                normalize_download_speed_limit(raw)
                     .ok_or_else(|| "invalid download speed limit".to_string())?,
             ),
         };
@@ -3004,6 +3049,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
         lifecycle_generation: u64,
     ) -> Option<OwnedSemaphorePermit> {
         let _admission_gate = self.admission_gate.lock().await;
+        if self.system_action_pending.load(Ordering::Acquire) {
+            return None;
+        }
         let mut ownership = self.queue_permit_ownership.lock().await;
         if ownership.contains_key(id)
             || self.active_permits.lock().await.contains_key(id)
@@ -3063,6 +3111,21 @@ impl<R: tauri::Runtime> QueueManager<R> {
         permit: OwnedSemaphorePermit,
     ) -> bool {
         let _admission_gate = self.admission_gate.lock().await;
+        if self.system_action_pending.load(Ordering::Acquire) {
+            let removed = self
+                .queue_permit_ownership
+                .lock()
+                .await
+                .get(id)
+                .is_some_and(|entry| {
+                    entry.lifecycle_generation == lifecycle_generation && !entry.active
+                });
+            if removed {
+                self.queue_permit_ownership.lock().await.remove(id);
+                self.notify.notify_waiters();
+            }
+            return false;
+        }
         let mut ownership = self.queue_permit_ownership.lock().await;
         let owned = ownership
             .get(id)
@@ -3090,6 +3153,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
     async fn try_admit_next_task(&self) -> Option<(OwnedSemaphorePermit, QueuedTask)> {
         let _admission_gate = self.admission_gate.lock().await;
+        if self.system_action_pending.load(Ordering::Acquire) {
+            return None;
+        }
         let mut pending = self.pending.lock().await;
         if pending.is_empty() {
             return None;
@@ -3160,6 +3226,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
         permit: OwnedSemaphorePermit,
     ) {
         let _admission_gate = self.admission_gate.lock().await;
+        if self.system_action_pending.load(Ordering::Acquire) {
+            return;
+        }
         self.active_permits
             .lock()
             .await
@@ -3203,6 +3272,18 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .get(id)
             .copied();
         let mut ownership = self.queue_permit_ownership.lock().await;
+        if self.system_action_pending.load(Ordering::Acquire) {
+            let remove_reservation = ownership.get(id).is_some_and(|entry| {
+                entry.queue_id == queue_id
+                    && entry.lifecycle_generation == lifecycle_generation
+                    && !entry.active
+            });
+            if remove_reservation {
+                ownership.remove(id);
+                self.notify.notify_waiters();
+            }
+            return false;
+        }
         let has_matching_reservation = ownership.get(id).is_some_and(|entry| {
             entry.queue_id == queue_id
                 && entry.lifecycle_generation == lifecycle_generation
@@ -3360,6 +3441,31 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
     pub async fn has_active_permit(&self, id: &str) -> bool {
         self.active_permits.lock().await.contains_key(id)
+    }
+
+    /// Atomically fence new transfer admission after checking all backend-owned
+    /// work. The frontend performs the same check for a useful user message,
+    /// but this backend transition closes the check-to-action race.
+    pub async fn begin_system_action(&self, force: bool) -> Result<(), String> {
+        let _admission_gate = self.admission_gate.lock().await;
+        if self.system_action_pending.load(Ordering::Acquire) {
+            return Err("Another system action is already pending".to_string());
+        }
+        if !force
+            && (!self.pending.lock().await.is_empty()
+                || !self.queue_permit_ownership.lock().await.is_empty()
+                || !self.active_permits.lock().await.is_empty()
+                || self.has_torrent_moves())
+        {
+            return Err("System action was skipped because downloads are still active or queued".to_string());
+        }
+        self.system_action_pending.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub fn end_system_action(&self) {
+        self.system_action_pending.store(false, Ordering::Release);
+        self.notify.notify_waiters();
     }
 
     /// Clear all permits belonging to aria2. Useful when aria2 WS connection drops.
@@ -6532,7 +6638,7 @@ impl SidecarSpawner for ProductionSpawner {
         if let Some(speed) = payload
             .speed_limit
             .as_deref()
-            .and_then(crate::normalize_speed_limit_for_aria2)
+            .and_then(normalize_download_speed_limit)
         {
             options.insert("max-download-limit".to_string(), serde_json::json!(speed));
         }

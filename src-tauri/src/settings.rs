@@ -271,7 +271,11 @@ pub fn preserve_scheduler_runtime_keys(
     };
     let mut incoming_document = decode_document(&Value::String(incoming.to_string()))?;
     let incoming_state = settings_state_mut(&mut incoming_document)?;
-    for key in ["schedulerLastStartKey", "schedulerLastStopKey"] {
+    for key in [
+        "schedulerLastStartKey",
+        "schedulerTriggeredStartKey",
+        "schedulerLastStopKey",
+    ] {
         if let Some(value) = existing_state.get(key) {
             incoming_state.insert(key.to_string(), value.clone());
         }
@@ -606,6 +610,8 @@ fn validate_settings(settings: &mut PersistedSettings) {
             settings.minimum_normal_download_speed_ki_b,
         )
         .unwrap_or_default();
+    settings.global_speed_limit = crate::normalize_speed_limit_for_aria2(&settings.global_speed_limit)
+        .unwrap_or_default();
     settings.torrent_overall_upload_limit = crate::normalize_speed_limit_for_aria2(
         &settings.torrent_overall_upload_limit,
     )
@@ -875,6 +881,7 @@ fn default_settings() -> PersistedSettings {
         scheduler_running: false,
         scheduler_active_download_ids: Vec::new(),
         scheduler_last_start_key: String::new(),
+        scheduler_triggered_start_key: None,
         scheduler_last_stop_key: String::new(),
         last_custom_speed_limit_ki_b: 1024,
         last_custom_speed_limit_unit: "MB/s".to_string(),
@@ -940,6 +947,7 @@ mod tests {
         let existing = json!({
             "state": {
                 "schedulerLastStartKey": "2026-06-22-start",
+                "schedulerTriggeredStartKey": "2026-06-22-start",
                 "schedulerLastStopKey": "2026-06-22-stop"
             },
             "version": 3
@@ -948,6 +956,7 @@ mod tests {
         let incoming = json!({
             "state": {
                 "schedulerLastStartKey": "",
+                "schedulerTriggeredStartKey": "",
                 "schedulerLastStopKey": "",
                 "theme": "system"
             },
@@ -958,6 +967,10 @@ mod tests {
         let merged = preserve_scheduler_runtime_keys(Some(&existing), &incoming).unwrap();
         let merged: Value = serde_json::from_str(&merged).unwrap();
         assert_eq!(merged["state"]["schedulerLastStartKey"], "2026-06-22-start");
+        assert_eq!(
+            merged["state"]["schedulerTriggeredStartKey"],
+            "2026-06-22-start"
+        );
         assert_eq!(merged["state"]["schedulerLastStopKey"], "2026-06-22-stop");
     }
 
@@ -1049,6 +1062,19 @@ mod tests {
         let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
 
         assert!(settings.torrent_overall_upload_limit.is_empty());
+    }
+
+    #[test]
+    fn normalizes_invalid_global_speed_limit_to_unlimited() {
+        let stored = json!({
+            "state": {
+                "globalSpeedLimit": "not-a-rate"
+            }
+        });
+
+        let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
+
+        assert!(settings.global_speed_limit.is_empty());
     }
 
     #[test]

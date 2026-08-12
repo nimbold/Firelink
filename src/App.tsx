@@ -42,6 +42,7 @@ import { formatDownloadBytes } from './utils/downloadProgress';
 import { synchronizeDocumentAppearance } from './utils/documentAppearance';
 import { createMainWindowSizePersistence } from './utils/mainWindowState';
 import type { MainWindowSize } from './bindings/MainWindowSize';
+import { beginSchedulerControl, isSchedulerControlCurrent } from './utils/schedulerControl';
 
 const loadSettingsView = () => import('./components/SettingsView');
 const loadSchedulerView = () => import('./components/SchedulerView');
@@ -106,7 +107,6 @@ const PageLoadingFallback = () => {
 };
 
 let automaticUpdateCheckStarted = false;
-const processingScheduleKeys = new Set<string>();
 let powerPreferencesSync: Promise<void> = Promise.resolve();
 
 const waitForSettingsHydration = (): Promise<void> => {
@@ -264,7 +264,6 @@ function App() {
   const preventsDisplaySleepWhileDownloading = useSettingsStore(
     state => state.preventsDisplaySleepWhileDownloading
   );
-  const activeTransferCount = downloads.filter(download => isTransferActiveStatus(download.status)).length;
   const { addToast, removeToast } = useToast();
   const isMacUserAgent = navigator.userAgent.includes('Mac');
   const usesCustomWindowControls = shouldUseCustomWindowControls(platform.os, navigator.userAgent);
@@ -314,6 +313,55 @@ function App() {
     const actionLabel = t($ => $.scheduler.postActions[action]);
     let timerId: number | null = null;
     let toastId: string | null = null;
+    const showForceActionToast = () => {
+      let forceToastId: string | null = null;
+      const proceed = () => {
+        if (forceToastId !== null) {
+          removeToast(forceToastId);
+          forceToastId = null;
+        }
+        invoke('perform_system_action', { action, force: true }).catch(error => {
+          console.error('Forced scheduled post action failed:', error);
+          addToast({
+            message: t($ => $.app.systemActionFailed, { detail: String(error) }),
+            variant: 'error',
+            isActionable: true
+          });
+        });
+      };
+      forceToastId = addToast({
+        variant: 'warning',
+        isActionable: true,
+        duration: 0,
+        message: (
+          <div className="flex items-center gap-3">
+            <span>{t($ => $.app.systemActionCancelled)}</span>
+            <button
+              type="button"
+              className="app-button px-2 py-1"
+              onClick={proceed}
+            >
+              {t($ => $.app.systemActionProceedAnyway)}
+            </button>
+          </div>
+        )
+      });
+    };
+    const perform = (force: boolean) => {
+      invoke('perform_system_action', { action, force }).catch(error => {
+        const detail = String(error);
+        if (!force && detail.includes('active or queued')) {
+          showForceActionToast();
+          return;
+        }
+        console.error('Scheduled post action failed:', error);
+        addToast({
+          message: t($ => $.app.systemActionFailed, { detail }),
+          variant: 'error',
+          isActionable: true
+        });
+      });
+    };
     const cancel = () => {
       clearPendingPostActionTimer();
       timerId = null;
@@ -355,24 +403,13 @@ function App() {
         isActiveDownloadStatus(download.status)
       );
       if (activeTransfers) {
-        addToast({
-          message: t($ => $.app.systemActionCancelled),
-          variant: 'warning',
-          isActionable: true
-        });
+        showForceActionToast();
         return;
       }
-      invoke('perform_system_action', { action }).catch(error => {
-        console.error('Scheduled post action failed:', error);
-        addToast({
-          message: t($ => $.app.systemActionFailed, { detail: String(error) }),
-          variant: 'error',
-          isActionable: true
-        });
-      });
+      perform(false);
     }, 10_000);
     pendingPostActionTimer.current = timerId;
-  }, [addToast, clearPendingPostActionTimer, removeToast]);
+  }, [addToast, clearPendingPostActionTimer, removeToast, t]);
 
   const startSidebarResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -401,12 +438,6 @@ function App() {
   useEffect(() => {
     return clearPendingPostActionTimer;
   }, [clearPendingPostActionTimer]);
-
-  useEffect(() => {
-    if (activeTransferCount > 0) {
-      clearPendingPostActionTimer();
-    }
-  }, [activeTransferCount, clearPendingPostActionTimer]);
 
   useEffect(() => {
     initMediaDomains();
@@ -841,6 +872,11 @@ function App() {
 
   useEffect(() => {
     if (!coreReady) return;
+    // Scope duplicate suppression to this listener instance. A module-level
+    // set can retain a key across a webview/listener restart while the old
+    // async handler is still unwinding, causing the replacement listener to
+    // drop the only retry for that scheduled action.
+    const processingScheduleKeys = new Set<string>();
     const unlisten = listen('schedule-trigger', async (event) => {
       const state = useSettingsStore.getState();
       const payload = event.payload;
@@ -848,6 +884,7 @@ function App() {
       processingScheduleKeys.add(payload.key);
       try {
         if (payload.action === 'start') {
+          const generation = beginSchedulerControl();
           clearPendingPostActionTimer();
           const scheduledQueueIds = getScheduledQueueIds();
           if (scheduledQueueIds.length === 0) {
@@ -866,6 +903,13 @@ function App() {
             scheduledQueueIds.map(queueId => useDownloadStore.getState().startQueue(queueId))
           );
           const acceptedIds = startedResults.flat();
+          if (!isSchedulerControlCurrent(generation)) {
+            await Promise.allSettled(
+              acceptedIds.map(id => useDownloadStore.getState().pauseDownload(id))
+            );
+            await invoke('ack_schedule_trigger', { action: 'start', key: payload.key });
+            return;
+          }
           const scheduledQueueSet = new Set(scheduledQueueIds);
           const trackedIds = useDownloadStore.getState().downloads
             .filter(download =>
@@ -879,14 +923,18 @@ function App() {
           state.setSchedulerRunning(activeIds.length > 0);
           await invoke('ack_schedule_trigger', { action: 'start', key: payload.key });
         } else if (payload.action === 'stop') {
+          const generation = beginSchedulerControl();
+          // A stop event can race with the completion effect's post-action
+          // countdown after it has already cleared the tracked IDs. Always
+          // cancel that pending action before applying the stop transition.
+          clearPendingPostActionTimer();
           const trackedIds = state.schedulerActiveDownloadIds;
           if (trackedIds.length > 0) {
-            clearPendingPostActionTimer();
             const pauseResults = await Promise.allSettled(
               trackedIds.map(id => useDownloadStore.getState().pauseDownload(id))
             );
             const failedPauses = pauseResults.filter(result => result.status === 'rejected').length;
-            if (failedPauses > 0) {
+            if (failedPauses > 0 && isSchedulerControlCurrent(generation)) {
               addToast({
                 message: failedPauses === 1
                   ? t($ => $.app.schedulerPauseOneFailed)
@@ -896,8 +944,10 @@ function App() {
               });
             }
           }
-          state.setSchedulerActiveDownloadIds([]);
-          state.setSchedulerRunning(false);
+          if (isSchedulerControlCurrent(generation)) {
+            state.setSchedulerActiveDownloadIds([]);
+            state.setSchedulerRunning(false);
+          }
           await invoke('ack_schedule_trigger', { action: 'stop', key: payload.key });
         }
       } finally {
@@ -906,6 +956,7 @@ function App() {
     });
     
     return () => {
+      beginSchedulerControl();
       unlisten.then(f => f()).catch(console.error);
     };
   }, [addToast, clearPendingPostActionTimer, coreReady]);
@@ -929,15 +980,7 @@ function App() {
         isActionable: true
       });
     } else if (settings.scheduler.postQueueAction !== 'none') {
-      if (downloads.some(download => isActiveDownloadStatus(download.status))) {
-        addToast({
-          message: t($ => $.app.scheduledActionSkippedActive),
-          variant: 'warning',
-          isActionable: true
-        });
-      } else {
-        schedulePostQueueAction(settings.scheduler.postQueueAction);
-      }
+      schedulePostQueueAction(settings.scheduler.postQueueAction);
     }
   }, [
     addToast,

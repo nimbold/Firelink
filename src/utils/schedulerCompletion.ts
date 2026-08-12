@@ -7,6 +7,8 @@ export const schedulerCompletionState = (
   downloads: DownloadItem[],
   schedulerActiveDownloadIds: string[],
 ): SchedulerCompletionState => {
+  if (schedulerActiveDownloadIds.length === 0) return 'incomplete';
+
   const scheduledItems = schedulerActiveDownloadIds.map(id =>
     downloads.find(download => download.id === id)
   );
