@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { collectRegularFiles, sha256 } from './engine-payload-integrity.js';
+import {
+  promoteDirectory,
+  recoverInterruptedPromotion,
+  removePathWithRetry,
+} from './engine-payload-promotion.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -34,7 +38,13 @@ if (!targetSources) {
 }
 
 const destination = path.join(repoRoot, 'src-tauri', 'provisioned-engines', target);
-const temporary = fs.mkdtempSync(path.join(os.tmpdir(), `firelink-engines-${target}-`));
+const destinationParent = path.dirname(destination);
+fs.mkdirSync(destinationParent, { recursive: true });
+recoverInterruptedPromotion(destination);
+// Keep staging on the destination filesystem so the final rename is atomic.
+const temporary = fs.mkdtempSync(path.join(destinationParent, `.firelink-engines-${target}-`));
+const payloadDestination = path.join(temporary, 'payload');
+fs.mkdirSync(payloadDestination, { recursive: true });
 const isWindows = target.includes('windows');
 const executableSuffix = isWindows ? '.exe' : '';
 const DOWNLOAD_ATTEMPTS = 3;
@@ -160,13 +170,13 @@ function findFile(root, names) {
 }
 
 function copyExecutable(source, engine) {
-  const output = path.join(destination, `${engine}-${target}${executableSuffix}`);
+  const output = path.join(payloadDestination, `${engine}-${target}${executableSuffix}`);
   fs.copyFileSync(source, output);
   if (!isWindows) fs.chmodSync(output, 0o755);
 }
 
 function writePayloadManifest() {
-  const files = collectRegularFiles(destination, {
+  const files = collectRegularFiles(payloadDestination, {
     ignoredNames: ['payload-manifest.json'],
   });
   const manifest = {
@@ -184,27 +194,24 @@ function writePayloadManifest() {
     ),
     files: Object.fromEntries(
       files.map(file => [
-        path.relative(destination, file).split(path.sep).join('/'),
+        path.relative(payloadDestination, file).split(path.sep).join('/'),
         sha256(file)
       ])
     )
   };
   fs.writeFileSync(
-    path.join(destination, 'payload-manifest.json'),
+    path.join(payloadDestination, 'payload-manifest.json'),
     `${JSON.stringify(manifest, null, 2)}\n`
   );
 }
 
 try {
-  fs.rmSync(destination, { recursive: true, force: true });
-  fs.mkdirSync(destination, { recursive: true });
-
   const ytdlp = await download('yt-dlp', targetSources['yt-dlp']);
   copyExecutable(
     findFile(ytdlp, isWindows ? ['yt-dlp.exe'] : ['yt-dlp_linux']),
     'yt-dlp'
   );
-  fs.cpSync(path.join(ytdlp, '_internal'), path.join(destination, '_internal'), {
+  fs.cpSync(path.join(ytdlp, '_internal'), path.join(payloadDestination, '_internal'), {
     recursive: true,
     preserveTimestamps: true
   });
@@ -219,7 +226,8 @@ try {
   copyExecutable(findFile(aria2, isWindows ? ['aria2c.exe'] : ['aria2c']), 'aria2c');
 
   writePayloadManifest();
+  await promoteDirectory(payloadDestination, destination);
   console.log(`Provisioned locked engine payload at ${destination}`);
 } finally {
-  fs.rmSync(temporary, { recursive: true, force: true });
+  await removePathWithRetry(temporary);
 }
