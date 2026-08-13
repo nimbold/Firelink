@@ -364,7 +364,7 @@ export interface SettingsState {
   setTorrentLpdInterface: (value: string) => void;
   setTorrentPeerIdPrefix: (value: string) => void;
   setTorrentPeerAgent: (value: string) => void;
-  setTorrentBindAddress: (value: string) => void;
+  setTorrentBindAddress: (value: string) => boolean;
   setAria2DiskCache: (value: string) => void;
   setCustomUserAgent: (userAgent: string) => void;
   setAskWhereToSaveEachFile: (ask: boolean) => void;
@@ -612,7 +612,17 @@ export const useSettingsStore = create<SettingsState>()(
       setTorrentLpdInterface: (torrentLpdInterface) => set({ torrentLpdInterface }),
       setTorrentPeerIdPrefix: (torrentPeerIdPrefix) => set({ torrentPeerIdPrefix }),
       setTorrentPeerAgent: (torrentPeerAgent) => set({ torrentPeerAgent }),
-      setTorrentBindAddress: (torrentBindAddress) => set({ torrentBindAddress }),
+      setTorrentBindAddress: (torrentBindAddress) => {
+        let accepted = true;
+        set(state => {
+          if (!state.torrentIpv6Enabled && torrentBindAddress.includes(':')) {
+            accepted = false;
+            return state;
+          }
+          return { torrentBindAddress };
+        });
+        return accepted;
+      },
       setAria2DiskCache: (aria2DiskCache) => set({ aria2DiskCache }),
       setTorrentMaxOpenFiles: (value) => {
         const normalized = normalizeTorrentMaxOpenFiles(value);
@@ -643,7 +653,15 @@ export const useSettingsStore = create<SettingsState>()(
           ? value
           : DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS
       }),
-      setTorrentIpv6Enabled: (torrentIpv6Enabled) => set({ torrentIpv6Enabled }),
+      setTorrentIpv6Enabled: (torrentIpv6Enabled) => set(state => ({
+        torrentIpv6Enabled,
+        // An IPv6 bind address is invalid once IPv6 transport is disabled.
+        // Clear it as part of the same state transition so the next durable
+        // settings save cannot fail on a cross-field contradiction.
+        ...(torrentIpv6Enabled || !state.torrentBindAddress.includes(':')
+          ? {}
+          : { torrentBindAddress: '' })
+      })),
       setCustomUserAgent: (customUserAgent) => set({ customUserAgent }),
       setAskWhereToSaveEachFile: (askWhereToSaveEachFile) => set({ askWhereToSaveEachFile }),
       setPreventsSleepWhileDownloading: (preventsSleepWhileDownloading) => {

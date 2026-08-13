@@ -144,6 +144,10 @@ type CommandMap = {
   get_supported_media_domains: { args: undefined; result: string[] };
   db_save_settings: { args: { data: string }; result: void };
   db_load_settings: { args: undefined; result: string | null };
+  canonicalize_torrent_network_setting: {
+    args: { field: string; value: string };
+    result: string;
+  };
   db_get_all_downloads: { args: undefined; result: string[] };
   db_replace_downloads: { args: { data: string }; result: void };
   db_commit_download_state: {

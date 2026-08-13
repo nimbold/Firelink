@@ -1009,6 +1009,7 @@ const common = {
       aria2DiskCache: 'Aria2 disk cache',
       aria2DiskCacheDescription: 'Cache size for Aria2, using 0 or a positive value such as 16M. Accepts K/M values up to 1024M and applies after restart.',
       torrentMaxOpenFilesUpdateFailed: 'Could not apply the Torrent open-file limit: {{detail}}',
+      torrentNetworkInputInvalid: 'Could not apply this Torrent network setting: {{detail}}',
       torrentOverallUploadLimit: 'Overall Aria2 upload limit',
       torrentOverallUploadLimitDescription: 'Caps combined Aria2 upload traffic, primarily active Torrent seeding in Firelink. Leave blank for unlimited; the value is applied live and restored when Firelink restarts.',
       torrentOverallUploadLimitInvalid: 'Enter a valid upload limit, such as 512K or 2M.',

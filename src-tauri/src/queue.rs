@@ -32,7 +32,10 @@ pub const MIN_TORRENT_MAX_OPEN_FILES: u32 = 1;
 pub const MAX_TORRENT_MAX_OPEN_FILES: u32 = 4_096;
 pub const DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT: u32 = 10;
 pub const MIN_TORRENT_DHT_MESSAGE_TIMEOUT: u32 = 1;
-pub const MAX_TORRENT_DHT_MESSAGE_TIMEOUT: u32 = 600;
+// Aria2 1.37.0 rejects values above 60 during option parsing. Keep this
+// boundary aligned with the bundled engine so a saved setting cannot prevent
+// the daemon from starting.
+pub const MAX_TORRENT_DHT_MESSAGE_TIMEOUT: u32 = 60;
 pub const DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS: u32 = 2;
 pub const MIN_TORRENT_MAX_CONCURRENT_SEEDS: u32 = 1;
 pub const MAX_TORRENT_MAX_CONCURRENT_SEEDS: u32 = 64;
@@ -8509,8 +8512,9 @@ mod tests {
     #[test]
     fn torrent_network_limits_and_web_seed_normalization_are_bounded() {
         assert_eq!(normalize_torrent_dht_message_timeout(1).unwrap(), 1);
-        assert_eq!(normalize_torrent_dht_message_timeout(600).unwrap(), 600);
+        assert_eq!(normalize_torrent_dht_message_timeout(60).unwrap(), 60);
         assert!(normalize_torrent_dht_message_timeout(0).is_err());
+        assert!(normalize_torrent_dht_message_timeout(61).is_err());
         assert_eq!(normalize_torrent_max_concurrent_seeds(2).unwrap(), 2);
         assert!(normalize_torrent_max_concurrent_seeds(65).is_err());
 

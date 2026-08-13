@@ -10320,6 +10320,16 @@ fn db_load_settings(
 }
 
 #[tauri::command]
+fn canonicalize_torrent_network_setting(
+    caller: tauri::WebviewWindow,
+    field: String,
+    value: String,
+) -> Result<String, String> {
+    properties_window::ensure_main_window(&caller)?;
+    crate::settings::canonicalize_torrent_network_setting(&field, &value)
+}
+
+#[tauri::command]
 fn db_get_all_downloads(
     caller: tauri::WebviewWindow,
     state: tauri::State<'_, crate::db::DbState>,
@@ -11345,6 +11355,26 @@ mod tests {
         apply_aria2_torrent_dht_options(&mut command, 0);
         assert_eq!(
             command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["--dht-message-timeout=10"]
+        );
+
+        let mut maximum = std::process::Command::new("aria2c");
+        apply_aria2_torrent_dht_options(&mut maximum, queue::MAX_TORRENT_DHT_MESSAGE_TIMEOUT);
+        assert_eq!(
+            maximum
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["--dht-message-timeout=60"]
+        );
+
+        let mut out_of_range = std::process::Command::new("aria2c");
+        apply_aria2_torrent_dht_options(&mut out_of_range, 61);
+        assert_eq!(
+            out_of_range
                 .get_args()
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<_>>(),
@@ -15451,7 +15481,8 @@ pub fn run() {
             properties_window::properties_window_registry_remove_for_download,
             parity::get_system_proxy, parity::get_file_category, parity::check_for_updates, parity::is_supported_media, parity::get_supported_media_domains,
             parity::create_category_directories,
-            db_save_settings, db_load_settings, db_get_all_downloads, db_replace_downloads,
+            db_save_settings, db_load_settings, canonicalize_torrent_network_setting,
+            db_get_all_downloads, db_replace_downloads,
             db_commit_download_state,
             clear_torrent_removal_paths, reconcile_torrent_removal_reservations,
             db_get_all_queues, db_replace_queues,

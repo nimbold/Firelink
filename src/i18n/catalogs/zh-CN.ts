@@ -1009,6 +1009,7 @@ const zhCN = {
       aria2DiskCache: 'Aria2 磁盘缓存',
       aria2DiskCacheDescription: 'Aria2 缓存大小：0 或类似 16M 的值。接受最大 1024M 的 K/M 值，重启后生效。',
       torrentMaxOpenFilesUpdateFailed: '无法应用 Torrent 打开文件数限制：{{detail}}',
+      torrentNetworkInputInvalid: '无法应用此 Torrent 网络设置：{{detail}}',
       torrentOverallUploadLimit: 'Aria2 总上传限制',
       torrentOverallUploadLimitDescription: '限制 Aria2 的总上传速度，在 Firelink 中主要用于活动 Torrent 做种。留空表示不限速；新值会立即应用，并在 Firelink 重启后恢复。',
       torrentOverallUploadLimitInvalid: '请输入有效的上传限制，例如 512K 或 2M。',

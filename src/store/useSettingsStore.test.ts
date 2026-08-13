@@ -133,6 +133,33 @@ describe('Torrent peer discovery preferences', () => {
     });
   });
 
+  it('clears an IPv6 bind address when IPv6 transport is disabled', () => {
+    useSettingsStore.setState({
+      torrentIpv6Enabled: true,
+      torrentBindAddress: '2001:db8::10'
+    });
+
+    useSettingsStore.getState().setTorrentIpv6Enabled(false);
+
+    expect(useSettingsStore.getState()).toMatchObject({
+      torrentIpv6Enabled: false,
+      torrentBindAddress: ''
+    });
+  });
+
+  it('rejects an IPv6 bind address entered after IPv6 transport is disabled', () => {
+    useSettingsStore.setState({
+      torrentIpv6Enabled: false,
+      torrentBindAddress: ''
+    });
+
+    expect(useSettingsStore.getState().setTorrentBindAddress('2001:db8::10')).toBe(false);
+    expect(useSettingsStore.getState().torrentBindAddress).toBe('');
+
+    expect(useSettingsStore.getState().setTorrentBindAddress('192.0.2.10')).toBe(true);
+    expect(useSettingsStore.getState().torrentBindAddress).toBe('192.0.2.10');
+  });
+
   it('matches Aria2 defaults and persists explicit changes', async () => {
     expect(useSettingsStore.getState().torrentEnableDht).toBe(true);
     expect(useSettingsStore.getState().torrentEnableDht6).toBe(false);

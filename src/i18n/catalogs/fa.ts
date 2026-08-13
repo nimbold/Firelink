@@ -1009,6 +1009,7 @@ const fa = {
       aria2DiskCache: 'کش دیسک Aria2',
       aria2DiskCacheDescription: 'اندازهٔ کش Aria2؛ صفر یا مقداری مانند 16M وارد کنید. مقادیر K/M تا 1024M پذیرفته می‌شوند و پس از راه‌اندازی مجدد اعمال می‌شوند.',
       torrentMaxOpenFilesUpdateFailed: 'اعمال محدودیت فایل‌های باز تورنت ممکن نشد: {{detail}}',
+      torrentNetworkInputInvalid: 'اعمال این تنظیم شبکه تورنت ممکن نیست: {{detail}}',
       torrentOverallUploadLimit: 'محدودیت کلی آپلود Aria2',
       torrentOverallUploadLimitDescription: 'سرعت کلی آپلود Aria2 را محدود می‌کند؛ در Firelink این مقدار عمدتاً برای سیدینگ تورنت‌هاست. برای نامحدود بودن خالی بگذارید؛ مقدار جدید زنده اعمال می‌شود و پس از راه‌اندازی مجدد Firelink برمی‌گردد.',
       torrentOverallUploadLimitInvalid: 'یک محدودیت معتبر مثل 512K یا 2M برای آپلود وارد کنید.',

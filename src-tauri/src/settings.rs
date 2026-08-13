@@ -233,6 +233,37 @@ pub fn canonicalize_torrent_network_settings(stored: &str) -> Result<String, Str
         .map_err(|error| format!("failed to encode canonical settings: {error}"))
 }
 
+/// Normalize one text setting before the frontend commits it to durable state.
+/// Keep this on the native boundary so interactive validation and persisted
+/// settings use exactly the same Aria2-compatible rules.
+pub fn canonicalize_torrent_network_setting(field: &str, value: &str) -> Result<String, String> {
+    let normalized = match field {
+        "torrentListenPort" => {
+            crate::queue::normalize_torrent_port_spec(Some(value), "TCP listen ports")?
+        }
+        "torrentDhtListenPort" => {
+            crate::queue::normalize_torrent_port_spec(Some(value), "UDP listen ports")?
+        }
+        "torrentExternalIp" => crate::queue::normalize_torrent_external_ip(Some(value))?,
+        "torrentDhtEntryPoint" => {
+            crate::queue::normalize_torrent_dht_entry_point(Some(value), false)?
+        }
+        "torrentDhtEntryPoint6" => {
+            crate::queue::normalize_torrent_dht_entry_point(Some(value), true)?
+        }
+        "torrentDhtListenAddr6" => {
+            crate::queue::normalize_torrent_dht_listen_addr6(Some(value))?
+        }
+        "torrentLpdInterface" => crate::queue::normalize_torrent_lpd_interface(Some(value))?,
+        "torrentPeerIdPrefix" => crate::queue::normalize_torrent_peer_id_prefix(Some(value))?,
+        "torrentPeerAgent" => crate::queue::normalize_torrent_peer_agent(Some(value))?,
+        "torrentBindAddress" => crate::queue::normalize_torrent_bind_address(Some(value))?,
+        "aria2DiskCache" => return crate::queue::normalize_aria2_disk_cache(Some(value)),
+        _ => return Err("unknown Torrent network setting".to_string()),
+    };
+    Ok(normalized.unwrap_or_default())
+}
+
 pub fn update_settings_state(
     app_handle: &AppHandle,
     update: impl FnOnce(&mut Map<String, Value>),
@@ -936,7 +967,8 @@ fn default_settings() -> PersistedSettings {
 mod tests {
     use crate::ipc::{FontFamily, WindowControlStyle};
     use super::{
-        canonicalize_torrent_network_settings, decode_stored_settings, default_settings,
+        canonicalize_torrent_network_setting, canonicalize_torrent_network_settings,
+        decode_stored_settings, default_settings,
         preserve_portable_pairing_token, preserve_scheduler_runtime_keys,
         torrent_startup_settings,
     };
@@ -1374,6 +1406,29 @@ mod tests {
             crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS
         );
         assert_eq!(canonical["state"]["torrentSeparateSeedSlots"], false);
+    }
+
+    #[test]
+    fn canonicalizes_individual_torrent_network_inputs_with_shared_rules() {
+        assert_eq!(
+            canonicalize_torrent_network_setting("torrentListenPort", " 6881-6999 ").unwrap(),
+            "6881-6999"
+        );
+        assert_eq!(
+            canonicalize_torrent_network_setting("torrentDhtEntryPoint6", "[2001:db8::1]:6881")
+                .unwrap(),
+            "[2001:db8::1]:6881"
+        );
+        assert_eq!(
+            canonicalize_torrent_network_setting("aria2DiskCache", " 256m ").unwrap(),
+            "256M"
+        );
+        assert_eq!(
+            canonicalize_torrent_network_setting("torrentBindAddress", " ").unwrap(),
+            ""
+        );
+        assert!(canonicalize_torrent_network_setting("torrentListenPort", "61").is_err());
+        assert!(canonicalize_torrent_network_setting("unknown", "value").is_err());
     }
 
     #[test]

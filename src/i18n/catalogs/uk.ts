@@ -1009,6 +1009,7 @@ const uk = {
       aria2DiskCache: 'Дисковий кеш Aria2',
       aria2DiskCacheDescription: 'Розмір кешу Aria2: 0 або значення на кшталт 16M. Допустимі K/M до 1024M; застосовується після перезапуску.',
       torrentMaxOpenFilesUpdateFailed: 'Не вдалося застосувати обмеження відкритих файлів Torrent: {{detail}}',
+      torrentNetworkInputInvalid: 'Не вдалося застосувати мережеве налаштування Torrent: {{detail}}',
       torrentOverallUploadLimit: 'Загальне обмеження віддачі Aria2',
       torrentOverallUploadLimitDescription: 'Обмежує сумарну швидкість віддачі Aria2; у Firelink це переважно роздача активних торрентів. Залиште поле порожнім без обмеження; значення застосовується одразу й відновлюється після перезапуску Firelink.',
       torrentOverallUploadLimitInvalid: 'Введіть коректне обмеження віддачі, наприклад 512K або 2M.',

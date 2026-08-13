@@ -1009,6 +1009,7 @@ const ru = {
       aria2DiskCache: 'Дисковый кэш Aria2',
       aria2DiskCacheDescription: 'Размер кэша Aria2: 0 или значение вроде 16M. Допустимы K/M до 1024M; применяется после перезапуска.',
       torrentMaxOpenFilesUpdateFailed: 'Не удалось применить лимит открытых файлов Torrent: {{detail}}',
+      torrentNetworkInputInvalid: 'Не удалось применить сетевую настройку Torrent: {{detail}}',
       torrentOverallUploadLimit: 'Общий лимит отдачи Aria2',
       torrentOverallUploadLimitDescription: 'Ограничивает суммарную скорость отдачи Aria2; в Firelink это в основном раздача активных торрентов. Оставьте поле пустым для снятия ограничения; значение применяется сразу и восстанавливается после перезапуска Firelink.',
       torrentOverallUploadLimitInvalid: 'Введите корректный лимит отдачи, например 512K или 2M.',

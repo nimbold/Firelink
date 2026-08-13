@@ -1009,6 +1009,7 @@ const he = {
       aria2DiskCache: 'מטמון דיסק של Aria2',
       aria2DiskCacheDescription: 'גודל מטמון Aria2: 0 או ערך כמו 16M. ערכי K/M עד 1024M מתקבלים; חל לאחר הפעלה מחדש.',
       torrentMaxOpenFilesUpdateFailed: 'לא ניתן להחיל את מגבלת הקבצים הפתוחים של Torrent: {{detail}}',
+      torrentNetworkInputInvalid: 'לא ניתן להחיל את הגדרת רשת הטורנט: {{detail}}',
       torrentOverallUploadLimit: 'מגבלת העלאה כוללת של Aria2',
       torrentOverallUploadLimitDescription: 'מגבילה את מהירות ההעלאה המשולבת של Aria2, בעיקר עבור העלאת טורנטים פעילים ב-Firelink. השאר ריק ללא הגבלה; הערך מוחל מיד ומשוחזר לאחר הפעלה מחדש של Firelink.',
       torrentOverallUploadLimitInvalid: 'הזן מגבלת העלאה תקפה, למשל 512K או 2M.',

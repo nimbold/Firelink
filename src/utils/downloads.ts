@@ -81,7 +81,8 @@ export const MIN_TORRENT_MAX_OPEN_FILES = 1;
 export const MAX_TORRENT_MAX_OPEN_FILES = 4096;
 export const DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT = 10;
 export const MIN_TORRENT_DHT_MESSAGE_TIMEOUT = 1;
-export const MAX_TORRENT_DHT_MESSAGE_TIMEOUT = 600;
+// Aria2 1.37.0 accepts DHT message timeouts only from 1 through 60 seconds.
+export const MAX_TORRENT_DHT_MESSAGE_TIMEOUT = 60;
 export const DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS = 2;
 export const MIN_TORRENT_MAX_CONCURRENT_SEEDS = 1;
 export const MAX_TORRENT_MAX_CONCURRENT_SEEDS = 64;
