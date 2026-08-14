@@ -345,6 +345,7 @@ const he = {
     torrentWebSeedsRemove: 'הסר זריעת Web',
     torrentWebSeedsInvalid: 'כל שורת זריעת Web צריכה קובץ טורנט תקין וכתובת בסיס HTTP(S) ללא פרטי התחברות או fragment.',
     torrentPeerCount: '{{total}} עמיתים — {{seeders}} משתפים',
+    torrentPeerSummary: '{{total}} עמיתים · {{seeders}} משתפים',
     torrentPeerDownload: 'הורדה',
     torrentPeerUpload: 'העלאה',
     torrentPeerSeeder: 'משתף',

@@ -6783,12 +6783,57 @@ async fn remove_magnet_metadata_probe_dir(path: &std::path::Path) -> Result<(), 
     }
 }
 
+struct MagnetMetadataProbeTelemetry {
+    info_hash: String,
+    started_at: Instant,
+    outcome: Option<&'static str>,
+}
+
+impl MagnetMetadataProbeTelemetry {
+    fn new(info_hash: &str, tracker_bearing: bool, proxy_configured: bool) -> Self {
+        log::debug!(
+            "magnet metadata probe started: info_hash={info_hash}, tracker_bearing={tracker_bearing}, proxy_configured={proxy_configured}"
+        );
+        Self {
+            info_hash: info_hash.to_string(),
+            started_at: Instant::now(),
+            outcome: None,
+        }
+    }
+
+    fn finish(&mut self, outcome: &'static str) {
+        if self.outcome.is_some() {
+            return;
+        }
+        self.outcome = Some(outcome);
+        log::debug!(
+            "magnet metadata probe finished: info_hash={}, outcome={outcome}, elapsed_ms={}",
+            self.info_hash,
+            self.started_at.elapsed().as_millis()
+        );
+    }
+}
+
+impl Drop for MagnetMetadataProbeTelemetry {
+    fn drop(&mut self) {
+        if self.outcome.is_none() {
+            log::debug!(
+                "magnet metadata probe finished: info_hash={}, outcome=canceled, elapsed_ms={}",
+                self.info_hash,
+                self.started_at.elapsed().as_millis()
+            );
+        }
+    }
+}
+
 async fn resolve_magnet_metadata(
     app_handle: &tauri::AppHandle,
     state: &AppState,
     source: &str,
     id: &str,
     proxy: Option<&str>,
+    headers: Option<&str>,
+    cookies: Option<&str>,
     cache: bool,
 ) -> Result<crate::ipc::TorrentMetadata, String> {
     let expected = crate::torrent::inspect_source(source)?;
@@ -6798,6 +6843,7 @@ async fn resolve_magnet_metadata(
         .transpose()?
         .flatten();
     if cache && crate::torrent::magnet_allows_cached_metadata(source) {
+        let cache_started_at = Instant::now();
         match crate::torrent::read_cached_torrent_by_info_hash(app_handle, &expected.info_hash)
             .await
         {
@@ -6806,6 +6852,11 @@ async fn resolve_magnet_metadata(
                 crate::torrent::validate_info_hash(Some(&expected.info_hash), &parsed.info_hash)?;
                 let torrent_path =
                     crate::torrent::cache_torrent_bytes(app_handle, id, &bytes).await?;
+                log::debug!(
+                    "magnet metadata cache hit: info_hash={}, elapsed_ms={}",
+                    expected.info_hash,
+                    cache_started_at.elapsed().as_millis()
+                );
                 return Ok(crate::torrent::to_metadata(parsed, Some(torrent_path)));
             }
             Ok(None) => {}
@@ -6839,12 +6890,33 @@ async fn resolve_magnet_metadata(
     options.insert("connect-timeout".to_string(), serde_json::json!("20"));
     options.insert("timeout".to_string(), serde_json::json!("60"));
     options.insert("auto-file-renaming".to_string(), serde_json::json!("false"));
-    if let Some(proxy) = proxy_value {
+    if let Some(proxy) = proxy_value.as_deref() {
         options.insert("all-proxy".to_string(), serde_json::json!(proxy));
+    }
+    let mut header_list = Vec::new();
+    if let Some(cookies) = cookies.map(str::trim).filter(|value| !value.is_empty()) {
+        header_list.push(format!("Cookie: {cookies}"));
+    }
+    if let Some(headers) = headers {
+        header_list.extend(
+            headers
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string),
+        );
+    }
+    if !header_list.is_empty() {
+        options.insert("header".to_string(), serde_json::json!(header_list));
     }
 
     let client = std::sync::Arc::new(Aria2RpcClient { port, secret });
     let sanitized_source = crate::torrent::sanitize_magnet_uri_for_aria2(source)?;
+    let mut telemetry = MagnetMetadataProbeTelemetry::new(
+        &expected.info_hash,
+        sanitized_source.contains("tr="),
+        proxy_value.is_some(),
+    );
     let metadata_result = crate::torrent_probe::run_metadata_probe(
         client,
         &sanitized_source,
@@ -6854,6 +6926,12 @@ async fn resolve_magnet_metadata(
         Duration::from_millis(250),
     )
     .await;
+
+    match &metadata_result {
+        Ok(_) => telemetry.finish("probe-success"),
+        Err(crate::torrent_probe::ProbeFailure::Metadata(_)) => telemetry.finish("metadata-failure"),
+        Err(crate::torrent_probe::ProbeFailure::Cleanup(_)) => telemetry.finish("cleanup-failure"),
+    }
 
     let bytes = match metadata_result {
         Ok(bytes) => bytes,
@@ -6917,6 +6995,8 @@ async fn inspect_torrent(
             &source,
             &id,
             proxy.as_deref(),
+            headers.as_deref(),
+            cookies.as_deref(),
             cache == Some(true),
         )
         .await
@@ -7388,6 +7468,17 @@ async fn get_torrent_peers(
 ) -> Result<crate::ipc::TorrentPeerDiagnostics, String> {
     properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
     state.queue_manager.get_aria2_torrent_peers(&id).await
+}
+
+#[tauri::command]
+async fn get_torrent_peer_summary(
+    caller: tauri::WebviewWindow,
+    properties: tauri::State<'_, properties_window::PropertiesWindowRegistry>,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<crate::ipc::TorrentPeerSummary, String> {
+    properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
+    state.queue_manager.get_aria2_torrent_peer_summary(&id).await
 }
 
 #[tauri::command]
@@ -15467,7 +15558,7 @@ pub fn run() {
             authorize_keychain_access,
             acknowledge_pairing_token_change,
             check_file_exists, toggle_tray_icon, set_extension_pairing_token,
-            get_extension_server_port, set_extension_frontend_ready, ack_frontend_exit, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, get_torrent_availability, get_torrent_file_progress, get_torrent_piece_progress, get_torrent_file_selection, set_torrent_file_selection, get_torrent_details, get_torrent_magnet_link, export_torrent_metadata, move_torrent_data, cancel_torrent_move_data, verify_torrent_data, get_torrent_web_seeds, set_torrent_web_seeds, set_torrent_max_open_files, set_torrent_overall_upload_limit, set_global_speed_limit, remove_download, get_download_primary_path,
+            get_extension_server_port, set_extension_frontend_ready, ack_frontend_exit, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, get_torrent_peer_summary, get_torrent_availability, get_torrent_file_progress, get_torrent_piece_progress, get_torrent_file_selection, set_torrent_file_selection, get_torrent_details, get_torrent_magnet_link, export_torrent_metadata, move_torrent_data, cancel_torrent_move_data, verify_torrent_data, get_torrent_web_seeds, set_torrent_web_seeds, set_torrent_max_open_files, set_torrent_overall_upload_limit, set_global_speed_limit, remove_download, get_download_primary_path,
             detach_download_for_reconfigure,
             enqueue_download, enqueue_many, cancel_enqueue_generation, move_in_queue, move_many_in_queue, remove_from_queue, get_pending_order,
             commands::reveal_in_file_manager, commands::open_downloaded_file,

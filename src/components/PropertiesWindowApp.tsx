@@ -9,6 +9,7 @@ import type { TorrentAvailabilitySnapshot } from '../bindings/TorrentAvailabilit
 import type { TorrentDetails } from '../bindings/TorrentDetails';
 import type { TorrentFileProgressSnapshot } from '../bindings/TorrentFileProgressSnapshot';
 import type { TorrentPeerDiagnostics } from '../bindings/TorrentPeerDiagnostics';
+import type { TorrentPeerSummary } from '../bindings/TorrentPeerSummary';
 import { invokeCommand as invoke } from '../ipc';
 import {
   PROPERTIES_WINDOW_ACTION_RESULT,
@@ -51,6 +52,7 @@ import {
 import { shouldOfferPropertiesUrlExpansion, shouldResetPropertiesUrlExpansion } from '../utils/propertiesUrl';
 import { getPropertiesTabIndex, getPropertiesTabs, PROPERTIES_TABS_OVERFLOW_BREAKPOINT, shouldUsePropertiesTabOverflow, type PropertiesTab } from '../utils/propertiesTabs';
 import { getPropertiesConnectionPresentation, getPropertiesProgress } from '../utils/propertiesPresentation';
+import { isCurrentTorrentPeerSummary, isTorrentPeerSummaryStatus } from '../utils/propertiesPeerSummary';
 import { WindowControls } from './WindowControls';
 import {
   TORRENT_ENCRYPTION_POLICY_DISABLED,
@@ -66,8 +68,7 @@ const SECRET_NAMES: SecretName[] = ['username', 'password', 'cookies', 'headers'
 const isTorrentDiagnosticsStatus = (status: string) =>
   ['downloading', 'verifying', 'seeding', 'waitingToSeed', 'retrying', 'paused', 'completed'].includes(status);
 
-const isTorrentPollingStatus = (status: string) =>
-  ['downloading', 'verifying', 'seeding', 'waitingToSeed', 'retrying', 'paused'].includes(status);
+const isTorrentPollingStatus = isTorrentPeerSummaryStatus;
 
 const isEditableStatus = (status: string) => !['downloading', 'processing', 'verifying', 'seeding', 'waitingToSeed', 'retrying', 'moving'].includes(status);
 
@@ -214,6 +215,7 @@ export const PropertiesWindowApp = () => {
   const [pendingTorrentCommand, setPendingTorrentCommand] = useState<'magnet' | 'export' | 'move' | 'cancel' | null>(null);
   const [fileProgress, setFileProgress] = useState<TorrentFileProgressSnapshot | null>(null);
   const [peers, setPeers] = useState<TorrentPeerDiagnostics | null>(null);
+  const [peerSummary, setPeerSummary] = useState<TorrentPeerSummary | null>(null);
   const [availability, setAvailability] = useState<TorrentAvailabilitySnapshot | null>(null);
   const [details, setDetails] = useState<TorrentDetails | null>(null);
   const [diagnosticError, setDiagnosticError] = useState('');
@@ -267,11 +269,13 @@ export const PropertiesWindowApp = () => {
   const revealInFlightRef = useRef(false);
   const readyRetryTimerRef = useRef<number | undefined>(undefined);
   const diagnosticsInFlightRef = useRef(new Set<string>());
+  const peerSummaryInFlightRef = useRef(new Set<string>());
   const snapshotRef = useRef(snapshot);
   const activeTabRef = useRef(activeTab);
   const downloadIdRef = useRef(downloadId);
   const fileProgressRef = useRef(fileProgress);
   const peersRef = useRef(peers);
+  const peerSummaryRef = useRef(peerSummary);
   const availabilityRef = useRef(availability);
   const detailsRef = useRef(details);
   const diagnosticAttemptsRef = useRef(new Set<string>());
@@ -289,6 +293,7 @@ export const PropertiesWindowApp = () => {
   downloadIdRef.current = downloadId;
   fileProgressRef.current = fileProgress;
   peersRef.current = peers;
+  peerSummaryRef.current = peerSummary;
   availabilityRef.current = availability;
   detailsRef.current = details;
 
@@ -506,7 +511,19 @@ export const PropertiesWindowApp = () => {
           invoke('get_torrent_availability', { id }),
         ]);
         if (isCurrent()) {
-          if (peerResult.status === 'fulfilled') setPeers(peerResult.value);
+          if (peerResult.status === 'fulfilled') {
+            setPeers(peerResult.value);
+            if (isTorrentPollingStatus(snapshotRef.current?.status ?? '')) {
+              peerSummaryRef.current = {
+                totalPeers: peerResult.value.totalPeers,
+                totalSeeders: peerResult.value.totalSeeders,
+              };
+              setPeerSummary(peerSummaryRef.current);
+            }
+          } else if (isExpectedPropertiesDiagnosticUnavailable(peerResult.reason)) {
+            peerSummaryRef.current = null;
+            setPeerSummary(null);
+          }
           if (availabilityResult.status === 'fulfilled') setAvailability(availabilityResult.value);
           const peerOutcome = peerResult.status === 'fulfilled'
             ? 'success'
@@ -571,6 +588,40 @@ export const PropertiesWindowApp = () => {
     }
   }, []);
 
+  const refreshPeerSummary = useCallback(async (id: string) => {
+    if (!isTorrentPollingStatus(snapshotRef.current?.status ?? '')) return;
+    const requestLifecycleEpoch = diagnosticLifecycleEpochRef.current;
+    const requestKey = `${id}:${requestLifecycleEpoch}`;
+    if (peerSummaryInFlightRef.current.has(requestKey)) return;
+    peerSummaryInFlightRef.current.add(requestKey);
+    const isCurrent = () => isCurrentTorrentPeerSummary({
+      currentDownloadId: downloadIdRef.current,
+      requestDownloadId: id,
+      currentLifecycleEpoch: diagnosticLifecycleEpochRef.current,
+      requestLifecycleEpoch,
+      currentStatus: snapshotRef.current?.status ?? '',
+    });
+    try {
+      const nextSummary = await invoke('get_torrent_peer_summary', { id });
+      if (isCurrent()) {
+        peerSummaryRef.current = nextSummary;
+        setPeerSummary(nextSummary);
+      }
+    } catch (error) {
+      if (!isCurrent()) return;
+      // A GID replacement or terminal transition can invalidate an in-flight
+      // summary after Aria2 has already answered. The next fenced poll will
+      // acquire the new GID; do not turn that expected transition into a
+      // repeating Properties error.
+      if (isExpectedPropertiesDiagnosticUnavailable(error)) {
+        peerSummaryRef.current = null;
+        setPeerSummary(null);
+      }
+    } finally {
+      peerSummaryInFlightRef.current.delete(requestKey);
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     let readyHeartbeatTimer: number | undefined;
@@ -595,6 +646,8 @@ export const PropertiesWindowApp = () => {
             diagnosticLifecycleEpochRef.current += 1;
             diagnosticLifecycleKeyRef.current = '';
             diagnosticAttemptsRef.current.clear();
+            peerSummaryRef.current = null;
+            setPeerSummary(null);
             const lostAction = pendingActionRef.current;
             const lostDraftAction = lostAction === 'apply-properties'
               || lostAction === 'set-torrent-file-selection';
@@ -637,6 +690,8 @@ export const PropertiesWindowApp = () => {
             setFileProgress(null);
             setPeers(null);
             setAvailability(null);
+            peerSummaryRef.current = null;
+            setPeerSummary(null);
             setDiagnosticError('');
             setDiagnosticsLoading(false);
             setDiagnosticsRefreshing(false);
@@ -723,6 +778,8 @@ export const PropertiesWindowApp = () => {
             diagnosticLifecycleEpochRef.current += 1;
             diagnosticLifecycleKeyRef.current = '';
             diagnosticAttemptsRef.current.clear();
+            peerSummaryRef.current = null;
+            setPeerSummary(null);
             setSnapshot(null);
             draftTabRef.current = null;
             isDirtyRef.current = false;
@@ -797,6 +854,8 @@ export const PropertiesWindowApp = () => {
       setFileProgress(null);
       setPeers(null);
       setAvailability(null);
+      peerSummaryRef.current = null;
+      setPeerSummary(null);
       setDiagnosticError('');
       setDiagnosticsLoading(false);
       setDiagnosticsRefreshing(false);
@@ -812,19 +871,30 @@ export const PropertiesWindowApp = () => {
       setFileProgress(null);
       setPeers(null);
       setAvailability(null);
+      peerSummaryRef.current = null;
+      setPeerSummary(null);
+      diagnosticLifecycleEpochRef.current += 1;
       diagnosticAttemptsRef.current.clear();
       setDiagnosticPhase('idle');
       setPeerDiagnosticPhase('idle');
       setAvailabilityDiagnosticPhase('idle');
     }
     void refreshDiagnostics(activeTab, downloadId);
-    if (!isTorrentPollingStatus(snapshot.status) || !['files', 'peers'].includes(activeTab)) return;
+    if (isTorrentPollingStatus(snapshot.status) && activeTab !== 'peers') {
+      void refreshPeerSummary(downloadId);
+    }
+    const shouldPollDiagnostics = ['files', 'peers'].includes(activeTab);
+    const shouldPollSummary = activeTab !== 'peers';
+    if (!isTorrentPollingStatus(snapshot.status) || (!shouldPollDiagnostics && !shouldPollSummary)) return;
     // Match the 1-second cadence of the normal Aria2 progress poll. The
     // diagnostics request itself is still single-flight, so a slow RPC cannot
     // create overlapping refreshes.
-    const interval = window.setInterval(() => void refreshDiagnostics(activeTab, downloadId), 1000);
+    const interval = window.setInterval(() => {
+      if (shouldPollDiagnostics) void refreshDiagnostics(activeTab, downloadId);
+      if (shouldPollSummary) void refreshPeerSummary(downloadId);
+    }, 1000);
     return () => window.clearInterval(interval);
-  }, [activeTab, downloadId, isTorrent, refreshDiagnostics, snapshot?.status]);
+  }, [activeTab, downloadId, isTorrent, refreshDiagnostics, refreshPeerSummary, snapshot?.status]);
 
   useEffect(() => {
     let disposed = false;
@@ -1124,12 +1194,18 @@ export const PropertiesWindowApp = () => {
     ? t($ => $.addDownloads.unknownSize)
     : `${snapshot.totalIsEstimate ? '~' : ''}${formatDownloadBytes(snapshot.totalBytes)}`);
   const statusLabel = t($ => $.downloads.status[snapshot.status]);
-  const connectionPresentation = getPropertiesConnectionPresentation(snapshot);
+  const connectionPresentation = getPropertiesConnectionPresentation(snapshot, peerSummary);
   const connectionLabel = connectionPresentation.labelKey === 'fragmentConcurrency'
     ? t($ => $.properties.fragmentConcurrency)
     : connectionPresentation.labelKey === 'torrentConnectedPeers'
       ? t($ => $.properties.torrentConnectedPeers)
       : t($ => $.properties.connections);
+  const connectionValue = connectionPresentation.torrentPeerSummary
+    ? t($ => $.properties.torrentPeerSummary, {
+      total: connectionPresentation.torrentPeerSummary.totalPeers,
+      seeders: connectionPresentation.torrentPeerSummary.totalSeeders,
+    })
+    : connectionPresentation.value;
   const queuePlacement = formatPropertiesQueuePlacement(
     snapshot.queueName,
     snapshot.queuePosition,
@@ -1221,7 +1297,7 @@ export const PropertiesWindowApp = () => {
           <div className="properties-metric-card"><Download size={14} /><div><span>{t($ => $.properties.size)}</span><strong>{formatDownloadBytes(snapshot.downloadedBytes ?? 0)} / {total}</strong></div></div>
           <div className="properties-metric-card"><Gauge size={14} /><div><span>{t($ => $.properties.speed)}</span><strong>{snapshot.speed || '—'}</strong></div></div>
           <div className="properties-metric-card"><Timer size={14} /><div><span>{t($ => $.properties.eta)}</span><strong>{snapshot.eta || '—'}</strong></div></div>
-          {connectionPresentation.showHeaderMetric && <div className="properties-metric-card"><Users size={14} /><div><span>{connectionLabel}</span><strong>{connectionPresentation.value}</strong></div></div>}
+          {connectionPresentation.showHeaderMetric && <div className="properties-metric-card"><Users size={14} /><div><span>{connectionLabel}</span><strong>{connectionValue}</strong></div></div>}
           {isTorrent && <>
             <div className="properties-metric-card"><Upload size={14} /><div><span>{t($ => $.properties.torrentUploaded)}</span><strong>{formatDownloadBytes(snapshot.torrentUploadedBytes ?? 0)}</strong></div></div>
             <div className="properties-metric-card"><Activity size={14} /><div><span>{t($ => $.properties.torrentRatio)}</span><strong>{formatTorrentRatio(snapshot.torrentUploadedBytes ?? 0, snapshot.downloadedBytes ?? 0, 'en-US')}</strong></div></div>
@@ -1579,7 +1655,7 @@ export const PropertiesWindowApp = () => {
           {snapshot.credentialsRequired === true && <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200" role="alert">{t($ => $.properties.credentialsRequired)}</p>}
           {isSftp && <label className="block max-w-2xl text-xs text-text-muted">{t($ => $.properties.sftpHostKeyMd)}<input className="app-control mt-1 w-full font-mono" value={sftpHostKeyMd} onChange={event => { setSftpHostKeyMd(event.target.value); setDraftTab('advanced'); }} placeholder={t($ => $.properties.sftpHostKeyMdHint)} disabled={!editingEnabled} autoComplete="off" /><span className="mt-1 block text-[11px]">{t($ => $.properties.sftpHostKeyMdDescription)}</span></label>}
           <div className="grid max-w-2xl gap-3 rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs sm:grid-cols-2">
-            <div><span className="text-text-muted">{connectionLabel}</span><p className="mt-1">{connectionPresentation.value}</p></div>
+            <div><span className="text-text-muted">{connectionLabel}</span><p className="mt-1">{connectionValue}</p></div>
             <div><span className="text-text-muted">{t($ => $.properties.speedCap)}</span><p className="mt-1">{snapshot.speedLimit || '—'}</p></div>
             <div><span className="text-text-muted">{t($ => $.properties.username)}</span><p className="mt-1">{snapshot.hasUsername ? '✓' : '—'}</p></div>
             <div><span className="text-text-muted">{t($ => $.properties.password)}</span><p className="mt-1">{snapshot.hasPassword ? '✓' : '—'}</p></div>

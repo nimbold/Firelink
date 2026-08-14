@@ -345,6 +345,7 @@ const uk = {
     torrentWebSeedsRemove: 'Видалити вебсід',
     torrentWebSeedsInvalid: 'Кожен рядок вебсіду має містити дійсний файл торента й базову HTTP(S)-адресу без облікових даних або фрагмента.',
     torrentPeerCount: '{{total}} пірів — {{seeders}} сідів',
+    torrentPeerSummary: '{{total}} пірів · {{seeders}} сідів',
     torrentPeerDownload: 'Завантаження',
     torrentPeerUpload: 'Віддача',
     torrentPeerSeeder: 'Сідер',

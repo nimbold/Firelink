@@ -9,8 +9,9 @@ import {
 import { useSettingsStore } from '../store/useSettingsStore';
 import type { DownloadItem } from '../bindings/DownloadItem';
 import type { MediaPlaylistMetadata } from '../bindings/MediaPlaylistMetadata';
-import { FolderPlus, Save, Settings, Shield, RefreshCw, FileText, HardDrive, Database, Link, ArrowRight, Play, ChevronDown, ChevronRight, Video, Film, Music, type LucideIcon } from 'lucide-react';
+import { FolderPlus, Save, Settings, Shield, RefreshCw, FileText, HardDrive, Database, Link, ArrowRight, Play, ChevronDown, ChevronRight, Video, Film, Music, Copy, type LucideIcon } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
+import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import { invokeCommand as invoke } from '../ipc';
 import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResolutionModal';
 import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, MAX_TORRENT_TRACKER_INTERVAL, MAX_TORRENT_TRACKER_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentWebSeedDrafts, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, serializeTorrentPreviewPriority, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type TorrentEncryptionPolicy, type TorrentFileAllocation } from '../utils/downloads';
@@ -53,6 +54,7 @@ import {
 } from '../utils/addDownloadMetadata';
 import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
 import { TorrentWebSeedEditor } from './TorrentWebSeedEditor';
+import { copyTorrentFilePath as writeTorrentFilePath } from '../utils/torrentFilePath';
 
 const formatBytes = (bytes: number) => {
   const k = 1024;
@@ -186,6 +188,16 @@ export const AddDownloadsModal = () => {
       });
     });
   }, []);
+
+  const copyTorrentFilePath = useCallback(async (path: string) => {
+    try {
+      await writeTorrentFilePath(path, writeClipboardText);
+      addToast({ message: t($ => $.logs.copied), variant: 'success' });
+    } catch (error) {
+      console.warn('Failed to copy Torrent file path:', error);
+      addToast({ message: t($ => $.downloadTable.copyPathFailed), variant: 'error', isActionable: true });
+    }
+  }, [addToast, t]);
 
   useEffect(() => {
     if (!isAddModalOpen) cleanupDraftTorrentCache();
@@ -2219,20 +2231,35 @@ export const AddDownloadsModal = () => {
                         const selectedIndices = parsedItems[selectedItemIndex!].selectedTorrentFileIndices;
                         const checked = !selectedIndices || selectedIndices.includes(file.index);
                         return (
-                          <label
+                          <div
                             key={file.index}
-                            className="flex items-center gap-2 px-2 py-1.5 text-xs text-text-secondary hover:bg-surface-hover rounded"
+                            className="flex min-w-0 items-center gap-2 rounded px-2 py-1.5 text-xs text-text-secondary hover:bg-surface-hover"
                           >
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => toggleTorrentFile(file.index)}
-                              aria-label={file.path}
-                              className="accent-blue-500"
-                            />
-                            <span className="truncate flex-1" title={file.path}>{file.path}</span>
-                            <span className="font-mono text-text-muted shrink-0">{formatBytes(file.length)}</span>
-                          </label>
+                            <label className="flex min-w-0 flex-1 items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleTorrentFile(file.index)}
+                                aria-label={file.path}
+                                className="accent-blue-500"
+                              />
+                              <span className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap" dir="ltr" title={file.path}>{file.path}</span>
+                              <span className="font-mono text-text-muted shrink-0">{formatBytes(file.length)}</span>
+                            </label>
+                            <button
+                              type="button"
+                              className="app-icon-button shrink-0"
+                              aria-label={t($ => $.downloadTable.copyFilePath)}
+                              title={t($ => $.downloadTable.copyFilePath)}
+                              onClick={event => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                void copyTorrentFilePath(file.path);
+                              }}
+                            >
+                              <Copy size={13} aria-hidden="true" />
+                            </button>
+                          </div>
                         );
                       })}
                     </div>

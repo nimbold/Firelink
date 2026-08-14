@@ -58,16 +58,34 @@ describe('Properties connection presentation', () => {
     });
   });
 
-  it('uses connected peers for Torrents', () => {
+  it('does not use tellActive connections for the Torrent header', () => {
     expect(getPropertiesConnectionPresentation({
       isMedia: false,
       isTorrent: true,
-      connectedPeers: 4,
     })).toEqual({
       kind: 'torrent',
       showHeaderMetric: true,
       labelKey: 'torrentConnectedPeers',
-      value: '4',
+      value: '—',
+    });
+  });
+
+  it('exposes the explicit live peer and seeder summary values', () => {
+    expect(getPropertiesConnectionPresentation({
+      isMedia: false,
+      isTorrent: true,
+    }, {
+      totalPeers: 41,
+      totalSeeders: 2,
+    })).toEqual({
+      kind: 'torrent',
+      showHeaderMetric: true,
+      labelKey: 'torrentConnectedPeers',
+      value: '—',
+      torrentPeerSummary: {
+        totalPeers: 41,
+        totalSeeders: 2,
+      },
     });
   });
 });

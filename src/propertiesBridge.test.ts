@@ -191,7 +191,6 @@ describe('Properties window bridge', () => {
       downloadedBytes: 3,
       totalBytes: 4,
       totalIsEstimate: false,
-      connectedPeers: 4,
       torrentUploadedBytes: 9,
       uploadSpeed: '1 MiB/s',
       torrentSeeders: 6,
@@ -403,6 +402,7 @@ describe('Properties window bridge', () => {
     expect(isExpectedPropertiesDiagnosticUnavailable(new Error('active Torrent transfer has a stale control epoch'))).toBe(true);
     expect(isExpectedPropertiesDiagnosticUnavailable(new Error('active Torrent has a stale control epoch'))).toBe(true);
     expect(isExpectedPropertiesDiagnosticUnavailable(new Error('Torrent lifecycle changed while reading peer diagnostics'))).toBe(true);
+    expect(isExpectedPropertiesDiagnosticUnavailable(new Error('Torrent lifecycle changed while reading peer summary'))).toBe(true);
     expect(isExpectedPropertiesDiagnosticUnavailable(new Error('aria2.getPeers failed: unavailable response'))).toBe(false);
     expect(isExpectedPropertiesDiagnosticUnavailable(new Error('aria2.getFiles failed: connection refused'))).toBe(false);
   });

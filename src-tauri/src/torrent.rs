@@ -443,6 +443,48 @@ fn collect_torrent_uris(value: Option<&BencodeValue>, schemes: &[&str]) -> Vec<S
     values
 }
 
+fn torrent_tracker_uri_is_safe(value: &BencodeValue) -> bool {
+    let BencodeValue::Bytes(bytes) = value else {
+        return false;
+    };
+    let Ok(value) = String::from_utf8(bytes.clone()) else {
+        return false;
+    };
+    bounded_uri(value.trim(), &["http", "https", "udp"]).is_some()
+}
+
+fn torrent_tracker_metadata_is_safe(root: &BTreeMap<Vec<u8>, BencodeValue>) -> bool {
+    let mut tracker_count = 0usize;
+    let mut count_tracker = |value: &BencodeValue| {
+        tracker_count = tracker_count.saturating_add(1);
+        tracker_count <= 256 && torrent_tracker_uri_is_safe(value)
+    };
+
+    if let Some(announce) = root.get(b"announce".as_slice()) {
+        if !count_tracker(announce) {
+            return false;
+        }
+    }
+
+    let Some(announce_list) = root.get(b"announce-list".as_slice()) else {
+        return true;
+    };
+    let BencodeValue::List(tiers) = announce_list else {
+        return false;
+    };
+    for tier in tiers {
+        let BencodeValue::List(trackers) = tier else {
+            return false;
+        };
+        for tracker in trackers {
+            if !count_tracker(tracker) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn parse_torrent_web_seeds(value: Option<&BencodeValue>) -> Result<Vec<String>, String> {
     let Some(value) = value else {
         return Ok(Vec::new());
@@ -546,7 +588,11 @@ pub fn torrent_details_from_bytes(bytes: &[u8]) -> Result<crate::ipc::TorrentDet
     })
 }
 
-pub fn torrent_metadata_is_safe_for_plain_magnet_reuse(bytes: &[u8]) -> Result<bool, String> {
+/// Return whether validated metainfo may be reused for a Magnet identified by
+/// its info hash. Tracker lists are safe to retain because they are peer
+/// discovery metadata, while direct web-seed/source fields are deliberately
+/// excluded so a later Magnet cannot inherit arbitrary HTTP resources.
+pub fn torrent_metadata_is_safe_for_magnet_reuse(bytes: &[u8]) -> Result<bool, String> {
     if bytes.is_empty() || bytes.len() > MAX_TORRENT_BYTES {
         return Err(format!(
             "torrent metadata must be between 1 byte and {MAX_TORRENT_BYTES} bytes"
@@ -561,11 +607,16 @@ pub fn torrent_metadata_is_safe_for_plain_magnet_reuse(bytes: &[u8]) -> Result<b
         .get(b"info".as_slice())
         .ok_or_else(|| "torrent metadata is missing info".to_string())?;
     parse_info(info)?;
+    if !torrent_tracker_metadata_is_safe(&root) {
+        return Ok(false);
+    }
 
     Ok(root.keys().all(|key| {
         matches!(
             key.as_slice(),
             b"info"
+                | b"announce"
+                | b"announce-list"
                 | b"comment"
                 | b"comment.utf-8"
                 | b"created by"
@@ -665,7 +716,7 @@ pub fn magnet_allows_cached_metadata(source: &str) -> bool {
                 }
                 has_info_hash = true;
             }
-            "dn" => {}
+            "dn" | "tr" => {}
             _ => return false,
         }
     }
@@ -1076,7 +1127,7 @@ async fn read_cached_torrent_by_info_hash_unlocked<R: tauri::Runtime>(
         }
         Err(error) => return Err(format!("could not read cached torrent metadata: {error}")),
     };
-    let reusable = torrent_metadata_is_safe_for_plain_magnet_reuse(&bytes).is_ok_and(|safe| safe);
+    let reusable = torrent_metadata_is_safe_for_magnet_reuse(&bytes).is_ok_and(|safe| safe);
     match parse_torrent_bytes(&bytes) {
         Ok(parsed) if reusable && parsed.info_hash == info_hash => {}
         Ok(_) | Err(_) => {
@@ -1101,7 +1152,7 @@ pub async fn cache_torrent_info_hash<R: tauri::Runtime>(
 ) -> Result<Option<String>, String> {
     let _guard = canonical_torrent_cache_lock().lock().await;
     let parsed = parse_torrent_bytes(bytes)?;
-    if !torrent_metadata_is_safe_for_plain_magnet_reuse(bytes)? {
+    if !torrent_metadata_is_safe_for_magnet_reuse(bytes)? {
         return Ok(None);
     }
     let info_hash = parsed.info_hash;
@@ -1302,16 +1353,32 @@ mod tests {
     }
 
     #[test]
-    fn plain_magnet_reuse_rejects_tracker_and_web_seed_metadata() {
-        assert!(torrent_metadata_is_safe_for_plain_magnet_reuse(
+    fn magnet_reuse_rejects_web_seed_metadata_but_retains_tracker_metadata() {
+        assert!(torrent_metadata_is_safe_for_magnet_reuse(
             b"d4:infod6:lengthi5e4:name4:testee"
         )
         .expect("plain torrent metadata should parse"));
-        assert!(!torrent_metadata_is_safe_for_plain_magnet_reuse(
-            b"d8:announce1:x4:infod6:lengthi5e4:name4:testee"
+        assert!(torrent_metadata_is_safe_for_magnet_reuse(
+            b"d8:announce32:https://tracker.example/announce4:infod6:lengthi5e4:name4:testee"
         )
         .expect("tracker-bearing torrent metadata should parse"));
-        assert!(!torrent_metadata_is_safe_for_plain_magnet_reuse(
+        assert!(torrent_metadata_is_safe_for_magnet_reuse(
+            b"d13:announce-listll32:https://tracker.example/announceee4:infod6:lengthi5e4:name4:testee"
+        )
+        .expect("tracker-list-bearing torrent metadata should parse"));
+        assert!(!torrent_metadata_is_safe_for_magnet_reuse(
+            b"d8:announce30:ftp://tracker.example/announce4:infod6:lengthi5e4:name4:testee"
+        )
+        .expect("unsupported tracker metadata should parse"));
+        assert!(!torrent_metadata_is_safe_for_magnet_reuse(
+            b"d8:announce42:https://user:pass@tracker.example/announce4:infod6:lengthi5e4:name4:testee"
+        )
+        .expect("credential-bearing tracker metadata should parse"));
+        assert!(!torrent_metadata_is_safe_for_magnet_reuse(
+            b"d13:announce-listl1:xe4:infod6:lengthi5e4:name4:testee"
+        )
+        .expect("malformed tracker-list metadata should parse"));
+        assert!(!torrent_metadata_is_safe_for_magnet_reuse(
             b"d4:infod6:lengthi5e4:name4:teste8:url-list1:xe"
         )
         .expect("web-seed-bearing torrent metadata should parse"));
@@ -1365,13 +1432,29 @@ mod tests {
         );
         assert!(!path.exists());
 
+        let tracker_bytes = b"d8:announce32:https://tracker.example/announce4:infod6:lengthi5e4:name4:testee";
+        let tracker_hash = parse_torrent_bytes(tracker_bytes)
+            .expect("tracker-bearing torrent should parse")
+            .info_hash;
+        assert!(
+            cache_torrent_info_hash(app.handle(), tracker_bytes)
+                .await
+                .expect("tracker metadata should be reusable")
+                .is_some()
+        );
+        assert_eq!(
+            read_cached_torrent_by_info_hash(app.handle(), &tracker_hash)
+                .await
+                .expect("tracker cache should be readable"),
+            Some(tracker_bytes.to_vec())
+        );
         assert!(
             cache_torrent_info_hash(
                 app.handle(),
-                b"d8:announce1:x4:infod6:lengthi5e4:name4:testee"
+                b"d4:infod6:lengthi5e4:name4:teste8:url-list22:https://example.test/ae"
             )
             .await
-            .expect("source-specific metadata should be handled")
+            .expect("web-seed metadata should be handled")
             .is_none()
         );
     }
@@ -1405,15 +1488,18 @@ mod tests {
     }
 
     #[test]
-    fn only_plain_magnets_can_reuse_hash_keyed_metadata() {
+    fn magnets_with_safe_parameters_can_reuse_hash_keyed_metadata() {
         assert!(magnet_allows_cached_metadata(
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
         ));
         assert!(magnet_allows_cached_metadata(
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Example%20Torrent"
         ));
-        assert!(!magnet_allows_cached_metadata(
+        assert!(magnet_allows_cached_metadata(
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=https%3A%2F%2Ftracker.invalid%2Fannounce"
+        ));
+        assert!(magnet_allows_cached_metadata(
+            "magnet:?tr=udp%3A%2F%2Ftracker.invalid%3A1337%2Fannounce&xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
         ));
         assert!(!magnet_allows_cached_metadata(
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&ws=https%3A%2F%2Fexample.invalid%2Ffile"

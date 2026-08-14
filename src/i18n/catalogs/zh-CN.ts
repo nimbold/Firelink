@@ -345,6 +345,7 @@ const zhCN = {
     torrentWebSeedsRemove: '移除 Web 做种',
     torrentWebSeedsInvalid: '每行 Web 做种都需要有效的 Torrent 文件和不含凭据或片段的 HTTP(S) 基础地址。',
     torrentPeerCount: '{{total}} 个节点 — {{seeders}} 个做种节点',
+    torrentPeerSummary: '{{total}} 个节点 · {{seeders}} 个做种节点',
     torrentPeerDownload: '下载',
     torrentPeerUpload: '上传',
     torrentPeerSeeder: '做种',

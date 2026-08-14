@@ -179,7 +179,6 @@ export type PropertiesSnapshot = SafePropertiesFields & {
   lastResolverFallback?: boolean;
   activeConnections?: number;
   requestedConnections?: number;
-  connectedPeers?: number;
   uploadSpeed?: string;
   torrentSeeders?: number;
   moveProgress?: number;
@@ -424,9 +423,6 @@ const copyWithoutSecrets = (
         : {}),
       ...(live.progress.total_is_estimate !== undefined
         ? { totalIsEstimate: live.progress.total_is_estimate }
-        : {}),
-      ...(live.progress.active_connections !== undefined && item.isTorrent === true
-        ? { connectedPeers: live.progress.active_connections }
         : {}),
       ...(live.progress.active_connections !== undefined
         && item.isTorrent !== true
