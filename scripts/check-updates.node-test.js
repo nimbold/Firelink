@@ -51,3 +51,17 @@ test('checkRows fails closed when a latest version is unavailable', () => {
     /Latest version is unavailable for test-target test-engine/
   );
 });
+
+test('checkRows does not fall back to the generic release for target-specific engines', () => {
+  assert.throws(
+    () =>
+      checkRows(
+        [{ target: 'test-target', engine: 'ffmpeg', version: '8.1.2', url: 'https://example.test/engine' }],
+        { ffmpeg: '9.0.1' },
+        {},
+        {},
+        new Set(['ffmpeg'])
+      ),
+    /Latest provider version is unavailable for test-target ffmpeg/
+  );
+});

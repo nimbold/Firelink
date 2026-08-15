@@ -203,16 +203,34 @@ function packagedEngineVersions(engineLock) {
   return rows;
 }
 
-function checkRows(rows, latestByEngine, latestByTargetEngine = {}, latestUrlsByTargetEngine = {}) {
+function unavailableLatestVersionError(target, engine, targetSpecific) {
+  const error = new Error(
+    `${targetSpecific ? 'Latest provider version' : 'Latest version'} is unavailable for ${target} ${engine}`
+  );
+  error.code = 'LATEST_VERSION_UNAVAILABLE';
+  return error;
+}
+
+function checkRows(
+  rows,
+  latestByEngine,
+  latestByTargetEngine = {},
+  latestUrlsByTargetEngine = {},
+  targetSpecificEngines = new Set()
+) {
   let outdated = 0;
   for (const row of rows) {
-    const latest = latestByTargetEngine[`${row.target}:${row.engine}`] || latestByEngine[row.engine];
+    const targetSpecific = targetSpecificEngines.has(row.engine);
+    const targetKey = `${row.target}:${row.engine}`;
+    const latest = targetSpecific
+      ? latestByTargetEngine[targetKey]
+      : latestByTargetEngine[targetKey] || latestByEngine[row.engine];
     if (typeof latest !== 'string' || !latest.trim()) {
-      throw new Error(`Latest version is unavailable for ${row.target} ${row.engine}`);
+      throw unavailableLatestVersionError(row.target, row.engine, targetSpecific);
     }
     const current = normalizeVersion(row.version);
     const wanted = normalizeVersion(latest);
-    const latestUrl = latestUrlsByTargetEngine[`${row.target}:${row.engine}`];
+    const latestUrl = latestUrlsByTargetEngine[targetKey];
     const versionOutdated = compareVersions(current, wanted) < 0;
     const sourceOutdated = Boolean(latestUrl && row.url && row.url !== latestUrl);
     const status = versionOutdated ? 'outdated' : sourceOutdated ? 'source-outdated' : 'current';
@@ -232,76 +250,136 @@ async function main() {
     npmOutdated(path.join(repoRoot, 'Extensions', 'Browser'))
   );
 
-  const [
-    ytDlp,
-    deno,
-    aria2,
-    ffmpeg,
-    martinRiedlMacArm64Ffmpeg,
-    martinRiedlMacArm64Snapshot,
-    btbnFfmpegN81Build,
-  ] = await Promise.all([
-    githubLatest('yt-dlp/yt-dlp'),
-    githubLatest('denoland/deno'),
-    githubLatest('aria2/aria2'),
-    latestFfmpegStable(),
-    latestMartinRiedlMacArm64Release(),
-    latestMartinRiedlMacArm64Snapshot(),
-    latestBtbnFfmpegN81Build(),
-  ]);
+  const providerChecks = [
+    ['yt-dlp latest release', () => githubLatest('yt-dlp/yt-dlp')],
+    ['Deno latest release', () => githubLatest('denoland/deno')],
+    ['aria2 latest release', () => githubLatest('aria2/aria2')],
+    [
+      'FFmpeg stable release',
+      async () => {
+        const version = await latestFfmpegStable();
+        if (!version) throw new Error('FFmpeg release provider response has no usable version');
+        return version;
+      },
+    ],
+    [
+      'Martin Riedl macOS release',
+      async () => {
+        const version = await latestMartinRiedlMacArm64Release();
+        if (!version) throw new Error('Martin Riedl macOS release provider response has no usable version');
+        return version;
+      },
+    ],
+    [
+      'Martin Riedl macOS snapshot',
+      async () => {
+        const build = await latestMartinRiedlMacArm64Snapshot();
+        if (!build?.version || !build.url) {
+          throw new Error('Martin Riedl FFmpeg provider response has no complete macOS arm64 snapshot');
+        }
+        return build;
+      },
+    ],
+    [
+      'BtbN FFmpeg Windows/Linux build',
+      async () => {
+        const build = await latestBtbnFfmpegN81Build();
+        if (!build?.version || !build.urls?.windows || !build.urls?.linux) {
+          throw new Error('BtbN FFmpeg provider response has no complete Windows/Linux build');
+        }
+        return build;
+      },
+    ],
+  ];
+  const providerResults = await Promise.allSettled(providerChecks.map(([, check]) => check()));
+  const providerFailures = [];
+  for (const [index, [label]] of providerChecks.entries()) {
+    const result = providerResults[index];
+    if (result.status === 'rejected') {
+      const detail = result.reason instanceof Error ? result.reason.message : String(result.reason);
+      providerFailures.push(label);
+      console.error(`provider unavailable: ${label}: ${detail}`);
+    }
+  }
+  const providerValue = index =>
+    providerResults[index].status === 'fulfilled' ? providerResults[index].value : undefined;
+  const ytDlp = providerValue(0);
+  const deno = providerValue(1);
+  const aria2 = providerValue(2);
+  const ffmpeg = providerValue(3);
+  const martinRiedlMacArm64Snapshot = providerValue(5);
+  const btbnFfmpegN81Build = providerValue(6);
   const latestByEngine = {
-    'yt-dlp': ytDlp.tag_name,
-    deno: deno.tag_name,
-    aria2c: aria2.tag_name,
+    'yt-dlp': ytDlp?.tag_name,
+    deno: deno?.tag_name,
+    aria2c: aria2?.tag_name,
     ffmpeg,
   };
-  if (
-    !btbnFfmpegN81Build?.version ||
-    !btbnFfmpegN81Build.urls?.windows ||
-    !btbnFfmpegN81Build.urls?.linux
-  ) {
-    throw new Error('BtbN FFmpeg provider response has no complete Windows/Linux build');
+  const latestByTargetEngine = {};
+  const latestUrlsByTargetEngine = {};
+  if (btbnFfmpegN81Build?.version && btbnFfmpegN81Build.urls?.windows && btbnFfmpegN81Build.urls?.linux) {
+    latestByTargetEngine['x86_64-pc-windows-msvc:ffmpeg'] = btbnFfmpegN81Build.version;
+    latestByTargetEngine['x86_64-unknown-linux-gnu:ffmpeg'] = btbnFfmpegN81Build.version;
+    latestUrlsByTargetEngine['x86_64-pc-windows-msvc:ffmpeg'] = btbnFfmpegN81Build.urls.windows;
+    latestUrlsByTargetEngine['x86_64-unknown-linux-gnu:ffmpeg'] = btbnFfmpegN81Build.urls.linux;
   }
-  if (!martinRiedlMacArm64Snapshot?.version || !martinRiedlMacArm64Snapshot.url) {
-    throw new Error('Martin Riedl FFmpeg provider response has no complete macOS arm64 snapshot');
+  if (martinRiedlMacArm64Snapshot?.version && martinRiedlMacArm64Snapshot.url) {
+    latestByTargetEngine['aarch64-apple-darwin:ffmpeg'] = martinRiedlMacArm64Snapshot.version;
+    latestUrlsByTargetEngine['aarch64-apple-darwin:ffmpeg'] = martinRiedlMacArm64Snapshot.url;
   }
-  const latestByTargetEngine = {
-    'x86_64-pc-windows-msvc:ffmpeg': btbnFfmpegN81Build.version,
-    'x86_64-unknown-linux-gnu:ffmpeg': btbnFfmpegN81Build.version,
-    'aarch64-apple-darwin:ffmpeg': martinRiedlMacArm64Snapshot.version,
-  };
-  const latestUrlsByTargetEngine = {
-    'x86_64-pc-windows-msvc:ffmpeg': btbnFfmpegN81Build.urls.windows,
-    'x86_64-unknown-linux-gnu:ffmpeg': btbnFfmpegN81Build.urls.linux,
-    'aarch64-apple-darwin:ffmpeg': martinRiedlMacArm64Snapshot.url,
-  };
+  const displayVersion = value => (value ? normalizeVersion(value) : 'unavailable');
 
   console.log('\nlatest engines:');
   for (const [engine, version] of Object.entries(latestByEngine)) {
-    console.log(`  ${engine}: ${normalizeVersion(version)}`);
+    console.log(`  ${engine}: ${displayVersion(version)}`);
   }
   console.log('\nlatest engine provider builds:');
-  console.log(`  BtbN FFmpeg n8.1 Windows/Linux: ${normalizeVersion(btbnFfmpegN81Build?.version || ffmpeg)}`);
-  console.log(`  Martin Riedl FFmpeg macOS arm64 snapshot: ${normalizeVersion(martinRiedlMacArm64Snapshot?.version || martinRiedlMacArm64Ffmpeg)}`);
+  console.log(`  BtbN FFmpeg n8.1 Windows/Linux: ${displayVersion(btbnFfmpegN81Build?.version)}`);
+  console.log(`  Martin Riedl FFmpeg macOS arm64 snapshot: ${displayVersion(martinRiedlMacArm64Snapshot?.version)}`);
+
+  const targetSpecificEngines = new Set(['ffmpeg']);
+  const engineCheckFailures = [];
+  const runEngineCheck = (label, rows) => {
+    try {
+      return checkRows(
+        rows,
+        latestByEngine,
+        latestByTargetEngine,
+        latestUrlsByTargetEngine,
+        targetSpecificEngines
+      );
+    } catch (error) {
+      if (error?.code !== 'LATEST_VERSION_UNAVAILABLE') throw error;
+      const detail = error instanceof Error ? error.message : String(error);
+      engineCheckFailures.push(label);
+      console.error(`engine provider unavailable: ${label}: ${detail}`);
+      return 0;
+    }
+  };
 
   console.log('\nengine source lock:');
-  outdatedCount += checkRows(
+  outdatedCount += runEngineCheck(
+    'engine source lock',
     sourceEngineVersions(parseJsonFile('engine-sources.lock.json')),
-    latestByEngine,
-    latestByTargetEngine,
-    latestUrlsByTargetEngine
   );
 
   console.log('\npackaged engine lock:');
-  outdatedCount += checkRows(
+  outdatedCount += runEngineCheck(
+    'packaged engine lock',
     packagedEngineVersions(parseJsonFile('engines.lock.json')),
-    latestByEngine,
-    latestByTargetEngine,
-    latestUrlsByTargetEngine
   );
 
   if (outdatedCount > 0) {
     console.error(`\n${outdatedCount} outdated item(s) found.`);
+    process.exit(1);
+  }
+  if (providerFailures.length > 0) {
+    console.error(`\n${providerFailures.length} provider check(s) unavailable; refusing to claim that all updates are current.`);
+  }
+  if (engineCheckFailures.length > 0) {
+    console.error(`\n${engineCheckFailures.length} engine lock check(s) unavailable; refusing to claim that all engines are current.`);
+  }
+  if (providerFailures.length > 0 || engineCheckFailures.length > 0) {
     process.exit(1);
   }
   console.log('\nAll checked packages and engines are current.');
