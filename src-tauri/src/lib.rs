@@ -1996,6 +1996,7 @@ async fn fetch_metadata(
     properties_window::ensure_main_window(&caller)?;
     ensure_reqwest_crypto_provider();
 
+    let metadata_started = Instant::now();
     let mut current_url = url.clone();
     let original_origin = reqwest::Url::parse(&url).ok();
     let mut redirects = 0;
@@ -2007,17 +2008,28 @@ async fn fetch_metadata(
     let defer_cookies = defer_cookies.unwrap_or(false);
     let mut send_cookies = !defer_cookies || !cookies_available;
     let mut cookie_retry_attempted = false;
+    log::info!(
+        "metadata [stage=metadata operation=start host={} credentials_available={} deferred_cookies={} proxy_route={}]",
+        original_origin
+            .as_ref()
+            .and_then(|value| value.host_str())
+            .unwrap_or("<unknown host>"),
+        cookies_available,
+        defer_cookies,
+        crate::queue::proxy_route_for_log(proxy.as_deref())
+    );
     let res;
 
     loop {
         if redirects >= 5 {
             log::warn!(
-                "metadata [stage=metadata host={} redirects={} error_code=redirect_limit]",
+                "metadata [stage=metadata operation=redirect_limit host={} redirects={} error_code=redirect_limit elapsed_ms={}]",
                 reqwest::Url::parse(&current_url)
                     .ok()
                     .and_then(|value| value.host_str().map(str::to_string))
                     .unwrap_or_else(|| "<unknown host>".to_string()),
-                redirects
+                redirects,
+                metadata_started.elapsed().as_millis()
             );
             return Err("Too many redirects".to_string());
         }
@@ -2029,7 +2041,21 @@ async fn fetch_metadata(
             if proxy.eq_ignore_ascii_case("none") {
                 builder = builder.no_proxy();
             } else {
-                builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|e| e.to_string())?);
+                let proxy = match reqwest::Proxy::all(proxy) {
+                    Ok(proxy) => proxy,
+                    Err(error) => {
+                        log::warn!(
+                            "metadata [stage=metadata operation=client result=failed host={} error_code=proxy_configuration elapsed_ms={}]",
+                            reqwest::Url::parse(&current_url)
+                                .ok()
+                                .and_then(|value| value.host_str().map(str::to_string))
+                                .unwrap_or_else(|| "<unknown host>".to_string()),
+                            metadata_started.elapsed().as_millis()
+                        );
+                        return Err(crate::redact_sensitive_text(&error.to_string()));
+                    }
+                };
+                builder = builder.proxy(proxy);
             }
         }
 
@@ -2044,18 +2070,49 @@ async fn fetch_metadata(
             builder = builder.user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36");
         }
 
-        let parsed_current_url = reqwest::Url::parse(&current_url)
-            .map_err(|_| "SSRF blocked: Invalid URL".to_string())?;
+        let parsed_current_url = match reqwest::Url::parse(&current_url) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                log::warn!(
+                    "metadata [stage=metadata operation=parse host={} result=failed error_code=invalid_url elapsed_ms={}]",
+                    "<unknown host>",
+                    metadata_started.elapsed().as_millis()
+                );
+                return Err("SSRF blocked: Invalid URL".to_string());
+            }
+        };
         let metadata_host = parsed_current_url
             .host_str()
             .unwrap_or("<unknown host>")
             .to_string();
+        let dns_started = Instant::now();
         let resolved_addr = match parsed_current_url.scheme() {
-            "http" | "https" => validate_url_ssrf(&current_url).await?,
+            "http" | "https" => validate_url_ssrf(&current_url).await,
             "ftp" | "sftp" => resolve_and_validate_url_host(&parsed_current_url)
                 .await
-                .map(Some)?,
-            _ => return Err("Unsupported URL scheme".to_string()),
+                .map(Some),
+            _ => Err("Unsupported URL scheme".to_string()),
+        };
+        let resolved_addr = match resolved_addr {
+            Ok(resolved_addr) => {
+                log::info!(
+                    "metadata [stage=dns operation=resolve host={} result=ok elapsed_ms={} total_elapsed_ms={}]",
+                    metadata_host,
+                    dns_started.elapsed().as_millis(),
+                    metadata_started.elapsed().as_millis()
+                );
+                resolved_addr
+            }
+            Err(error) => {
+                log::warn!(
+                    "metadata [stage=dns operation=resolve host={} result=failed error_code={} elapsed_ms={} total_elapsed_ms={}]",
+                    metadata_host,
+                    metadata_error_code(&error),
+                    dns_started.elapsed().as_millis(),
+                    metadata_started.elapsed().as_millis()
+                );
+                return Err(error);
+            }
         };
 
         if let Some((host, addr)) = resolved_addr {
@@ -2089,7 +2146,18 @@ async fn fetch_metadata(
         };
         builder = builder.default_headers(header_map);
 
-        let client = builder.build().map_err(|e| e.to_string())?;
+        let client = match builder.build() {
+            Ok(client) => client,
+            Err(error) => {
+                log::warn!(
+                    "metadata [stage=metadata operation=client result=failed host={} error_code={} elapsed_ms={}]",
+                    metadata_host,
+                    reqwest_error_code(&error),
+                    metadata_started.elapsed().as_millis()
+                );
+                return Err(crate::redact_sensitive_text(&error.to_string()));
+            }
+        };
         let request_url = current_url.clone();
 
         let build_get_range = || {
@@ -2114,21 +2182,52 @@ async fn fetch_metadata(
                 }
             }
         }
+        let head_started = Instant::now();
         let mut current_res = match head_req.send().await {
-            Ok(response) => response,
-            Err(head_error) => build_get_range().send().await.map_err(|get_error| {
-                log::warn!(
-                    "metadata [stage=metadata host={} error_code=head_{}+get_{}]",
+            Ok(response) => {
+                log::info!(
+                    "metadata [stage=metadata operation=head host={} result=ok status={} elapsed_ms={} total_elapsed_ms={}]",
                     metadata_host,
-                    reqwest_error_code(&head_error),
-                    reqwest_error_code(&get_error)
+                    response.status().as_u16(),
+                    head_started.elapsed().as_millis(),
+                    metadata_started.elapsed().as_millis()
                 );
-                format!(
-                    "HEAD metadata request failed ({}); ranged GET fallback failed ({})",
-                    reqwest_error_code(&head_error),
-                    reqwest_error_code(&get_error)
-                )
-            })?,
+                response
+            }
+            Err(head_error) => {
+                let head_elapsed_ms = head_started.elapsed().as_millis();
+                let get_started = Instant::now();
+                match build_get_range().send().await {
+                    Ok(response) => {
+                        log::warn!(
+                            "metadata [stage=metadata operation=head result=fallback host={} error_code={} head_elapsed_ms={} get_status={} get_elapsed_ms={} total_elapsed_ms={}]",
+                            metadata_host,
+                            reqwest_error_code(&head_error),
+                            head_elapsed_ms,
+                            response.status().as_u16(),
+                            get_started.elapsed().as_millis(),
+                            metadata_started.elapsed().as_millis()
+                        );
+                        response
+                    }
+                    Err(get_error) => {
+                        log::warn!(
+                            "metadata [stage=metadata operation=head_get_fallback host={} result=failed error_code=head_{}+get_{} head_elapsed_ms={} get_elapsed_ms={} total_elapsed_ms={}]",
+                            metadata_host,
+                            reqwest_error_code(&head_error),
+                            reqwest_error_code(&get_error),
+                            head_elapsed_ms,
+                            get_started.elapsed().as_millis(),
+                            metadata_started.elapsed().as_millis()
+                        );
+                        return Err(format!(
+                            "HEAD metadata request failed ({}); ranged GET fallback failed ({})",
+                            reqwest_error_code(&head_error),
+                            reqwest_error_code(&get_error)
+                        ));
+                    }
+                }
+            }
         };
 
         if retry_metadata_with_cookies(
@@ -2140,6 +2239,12 @@ async fn fetch_metadata(
             &mut current_url,
             &mut redirects,
         ) {
+            log::info!(
+                "metadata [stage=metadata operation=credential_retry host={} redirect_count={} elapsed_ms={}]",
+                metadata_host,
+                redirects,
+                metadata_started.elapsed().as_millis()
+            );
             // Browser captures may carry a large cookie jar even when the
             // direct download is public. Probe without it first so a server
             // or proxy header limit cannot turn harmless metadata into the
@@ -2156,14 +2261,29 @@ async fn fetch_metadata(
         }
 
         if needs_fallback {
-            current_res = build_get_range().send().await.map_err(|error| {
-                log::warn!(
-                    "metadata [stage=metadata host={} error_code=get_{}]",
-                    metadata_host,
-                    reqwest_error_code(&error)
-                );
-                error.to_string()
-            })?;
+            let get_started = Instant::now();
+            current_res = match build_get_range().send().await {
+                Ok(response) => {
+                    log::info!(
+                        "metadata [stage=metadata operation=get_range host={} result=ok status={} elapsed_ms={} total_elapsed_ms={}]",
+                        metadata_host,
+                        response.status().as_u16(),
+                        get_started.elapsed().as_millis(),
+                        metadata_started.elapsed().as_millis()
+                    );
+                    response
+                }
+                Err(error) => {
+                    log::warn!(
+                        "metadata [stage=metadata operation=get_range host={} result=failed error_code={} elapsed_ms={} total_elapsed_ms={}]",
+                        metadata_host,
+                        reqwest_error_code(&error),
+                        get_started.elapsed().as_millis(),
+                        metadata_started.elapsed().as_millis()
+                    );
+                    return Err(error.to_string());
+                }
+            };
 
             if retry_metadata_with_cookies(
                 current_res.status(),
@@ -2174,6 +2294,12 @@ async fn fetch_metadata(
                 &mut current_url,
                 &mut redirects,
             ) {
+                log::info!(
+                    "metadata [stage=metadata operation=credential_retry host={} redirect_count={} elapsed_ms={}]",
+                    metadata_host,
+                    redirects,
+                    metadata_started.elapsed().as_millis()
+                );
                 // HEAD is advisory. Some origins reject it while requiring
                 // the captured session for the ranged GET that follows.
                 continue;
@@ -2185,12 +2311,21 @@ async fn fetch_metadata(
                 if let Ok(loc_str) = loc.to_str() {
                     if let Ok(parsed_base) = reqwest::Url::parse(&current_url) {
                         if let Ok(new_url) = parsed_base.join(loc_str) {
+                            let next_host = new_url.host_str().unwrap_or("<unknown host>");
+                            let credential_scope = if same_origin(&parsed_base, &new_url) {
+                                "same_origin"
+                            } else {
+                                "cross_origin"
+                            };
                             current_url = new_url.to_string();
                             redirects += 1;
-                            log::debug!(
-                                "metadata [stage=redirect host={} redirect_count={}]",
+                            log::info!(
+                                "metadata [stage=redirect operation=follow host={} next_host={} redirect_count={} credential_scope={} elapsed_ms={}]",
                                 metadata_host,
-                                redirects
+                                next_host,
+                                redirects,
+                                credential_scope,
+                                metadata_started.elapsed().as_millis()
                             );
                             continue;
                         }
@@ -2206,14 +2341,20 @@ async fn fetch_metadata(
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok()),
         ) {
+            log::warn!(
+                "metadata [stage=metadata operation=authentication host={} result=failed error_code=authentication elapsed_ms={}]",
+                metadata_host,
+                metadata_started.elapsed().as_millis()
+            );
             return Err(error);
         }
 
         if let Some(error) = metadata_response_error(current_res.status()) {
             log::warn!(
-                "metadata [stage=metadata host={} status={} error_code=response]",
+                "metadata [stage=metadata operation=response host={} status={} error_code=response elapsed_ms={}]",
                 metadata_host,
-                current_res.status().as_u16()
+                current_res.status().as_u16(),
+                metadata_started.elapsed().as_millis()
             );
             return Err(error);
         }
@@ -2273,6 +2414,19 @@ async fn fetch_metadata(
         }
     }
 
+    log::info!(
+        "metadata [stage=metadata operation=complete host={} status={} redirects={} size_bytes={} resumable={} elapsed_ms={}]",
+        reqwest::Url::parse(&current_url)
+            .ok()
+            .and_then(|value| value.host_str().map(str::to_string))
+            .unwrap_or_else(|| "<unknown host>".to_string()),
+        res.status().as_u16(),
+        redirects,
+        size_bytes,
+        resumable,
+        metadata_started.elapsed().as_millis()
+    );
+
     Ok(MetadataResponse {
         url,
         filename,
@@ -2293,6 +2447,25 @@ fn reqwest_error_code(error: &reqwest::Error) -> &'static str {
         "body"
     } else {
         "transport"
+    }
+}
+
+fn metadata_error_code(error: &str) -> &'static str {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("dns resolution timed out") {
+        "dns_timeout"
+    } else if lower.contains("dns resolution") || lower.contains("name resolution") {
+        "dns"
+    } else if lower.contains("private/local ip") {
+        "ssrf_private_address"
+    } else if lower.contains("invalid url") {
+        "invalid_url"
+    } else if lower.contains("unsupported url scheme") {
+        "unsupported_scheme"
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        "timeout"
+    } else {
+        crate::retry::network_error_class(error)
     }
 }
 
@@ -3001,11 +3174,13 @@ fn preflight_download_destination_access<R: tauri::Runtime>(
     id: &str,
     destination: &str,
 ) -> Result<(), String> {
+    let preflight_started = Instant::now();
     let resolved = resolve_path(destination.trim(), app_handle);
     if !is_safe_path(&resolved, app_handle) {
         log::warn!(
-            "download destination [{}]: access preflight rejected an unsafe destination",
-            id
+            "download destination [stage=destination_access id={} operation=preflight result=failed error_code=unsafe_path elapsed_ms={}]",
+            id,
+            preflight_started.elapsed().as_millis()
         );
         return Err(format!(
             "{RETRYABLE_DESTINATION_ACCESS_PREFIX} selected folder is not approved"
@@ -3015,9 +3190,10 @@ fn preflight_download_destination_access<R: tauri::Runtime>(
     if !resolved.exists() {
         std::fs::create_dir_all(&resolved).map_err(|error| {
             log::warn!(
-                "download destination [{}]: could not create destination for access preflight: {}",
+                "download destination [stage=destination_access id={} operation=create_directory result=failed error_code={} elapsed_ms={}]",
                 id,
-                crate::redact_sensitive_text(&error.to_string())
+                destination_io_error_code(&error),
+                preflight_started.elapsed().as_millis()
             );
             format!(
                 "{RETRYABLE_DESTINATION_ACCESS_PREFIX} grant Firelink access to the selected folder and retry"
@@ -3027,8 +3203,9 @@ fn preflight_download_destination_access<R: tauri::Runtime>(
 
     let canonical = canonicalize_with_missing_components(&resolved).ok_or_else(|| {
         log::warn!(
-            "download destination [{}]: destination could not be canonicalized during access preflight",
-            id
+            "download destination [stage=destination_access id={} operation=canonicalize result=failed error_code=canonicalization elapsed_ms={}]",
+            id,
+            preflight_started.elapsed().as_millis()
         );
         format!(
             "{RETRYABLE_DESTINATION_ACCESS_PREFIX} selected folder could not be verified"
@@ -3036,8 +3213,9 @@ fn preflight_download_destination_access<R: tauri::Runtime>(
     })?;
     if !is_safe_path(&canonical, app_handle) {
         log::warn!(
-            "download destination [{}]: canonical destination is outside the approved roots",
-            id
+            "download destination [stage=destination_access id={} operation=canonicalize result=failed error_code=unsafe_path elapsed_ms={}]",
+            id,
+            preflight_started.elapsed().as_millis()
         );
         return Err(format!(
             "{RETRYABLE_DESTINATION_ACCESS_PREFIX} selected folder is not approved"
@@ -3045,8 +3223,9 @@ fn preflight_download_destination_access<R: tauri::Runtime>(
     }
     if !canonical.is_dir() {
         log::warn!(
-            "download destination [{}]: selected destination is not a directory",
-            id
+            "download destination [stage=destination_access id={} operation=validate_directory result=failed error_code=not_directory elapsed_ms={}]",
+            id,
+            preflight_started.elapsed().as_millis()
         );
         return Err(format!(
             "{RETRYABLE_DESTINATION_ACCESS_PREFIX} selected destination is not a folder"
@@ -3072,15 +3251,16 @@ fn preflight_download_destination_access<R: tauri::Runtime>(
 
     if let Err(error) = probe_result {
         log::warn!(
-            "download destination [{}]: access probe failed: {}",
+            "download destination [stage=destination_access id={} operation=write_probe result=failed error_code={} elapsed_ms={}]",
             id,
-            crate::redact_sensitive_text(&error.to_string())
+            destination_io_error_code(&error),
+            preflight_started.elapsed().as_millis()
         );
         if let Err(cleanup_error) = cleanup_result {
             log::debug!(
-                "download destination [{}]: failed to clean access probe: {}",
+                "download destination [stage=destination_access id={} operation=cleanup_probe result=failed error_code={}]",
                 id,
-                crate::redact_sensitive_text(&cleanup_error.to_string())
+                destination_io_error_code(&cleanup_error)
             );
         }
         return Err(format!(
@@ -3089,17 +3269,32 @@ fn preflight_download_destination_access<R: tauri::Runtime>(
     }
     if let Err(error) = cleanup_result {
         log::warn!(
-            "download destination [{}]: access probe cleanup failed: {}",
+            "download destination [stage=destination_access id={} operation=cleanup_probe result=failed error_code={} elapsed_ms={}]",
             id,
-            crate::redact_sensitive_text(&error.to_string())
+            destination_io_error_code(&error),
+            preflight_started.elapsed().as_millis()
         );
         return Err(format!(
             "{RETRYABLE_DESTINATION_ACCESS_PREFIX} the selected folder could not be safely verified; retry"
         ));
     }
 
-    log::debug!("download destination [{}]: access preflight succeeded", id);
+    log::info!(
+        "download destination [stage=destination_access id={} operation=preflight result=ok elapsed_ms={}]",
+        id,
+        preflight_started.elapsed().as_millis()
+    );
     Ok(())
+}
+
+fn destination_io_error_code(error: &std::io::Error) -> &'static str {
+    match error.kind() {
+        std::io::ErrorKind::PermissionDenied => "permission_denied",
+        std::io::ErrorKind::NotFound => "not_found",
+        std::io::ErrorKind::AlreadyExists => "already_exists",
+        std::io::ErrorKind::InvalidInput => "invalid_input",
+        _ => "io_error",
+    }
 }
 
 pub(crate) fn path_has_symlink_component(path: &std::path::Path) -> bool {
@@ -11324,6 +11519,7 @@ mod tests {
         media_progress_speed,
         cookie_scope_for_url, metadata_authentication_error, metadata_cookie_header_present,
         metadata_headers, metadata_response_error,
+        metadata_error_code,
         is_remote_torrent_source,
         normalize_speed_limit_for_aria2,
         normalize_torrent_overall_upload_limit,
@@ -13154,6 +13350,19 @@ mod tests {
     }
 
     #[test]
+    fn metadata_diagnostic_codes_preserve_dns_and_policy_boundaries() {
+        assert_eq!(
+            metadata_error_code("SSRF blocked: DNS resolution timed out"),
+            "dns_timeout"
+        );
+        assert_eq!(
+            metadata_error_code("SSRF blocked: Private/local IP not allowed"),
+            "ssrf_private_address"
+        );
+        assert_eq!(metadata_error_code("HEAD request timed out"), "timeout");
+    }
+
+    #[test]
     fn metadata_filename_reads_redirect_disposition_query_before_opaque_path() {
         let redirected = "https://release-assets.githubusercontent.com/github-production-release-asset/1117828249/7aae36e6-00ec-4e7d-8dec-f14ace170bdb?rscd=attachment%3B+filename%3DOnionHop-3.5-macOS-arm64.dmg";
 
@@ -14084,6 +14293,8 @@ struct Aria2ConnectionObservation {
     last_refreshed_at: Option<Instant>,
     peak_speed_bytes: f64,
     last_completed: u64,
+    last_logged_active_connections: Option<i32>,
+    last_connection_logged_at: Option<Instant>,
     seeder: bool,
     verifying: bool,
 }
@@ -14128,6 +14339,7 @@ const ARIA2_DEGRADED_SPEED_FRACTION: f64 = 0.20;
 const ARIA2_CONNECTION_POOL_DEGRADED_FRACTION: f64 = 0.75;
 const ARIA2_MIN_HEALTHY_SPEED_SAMPLES: u8 = 3;
 const ARIA2_MAX_CONSECUTIVE_RECOVERY_ATTEMPTS: u8 = 3;
+const ARIA2_CONNECTION_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 // Keep the test scenarios explicit while the production path uses the typed sample.
@@ -15104,8 +15316,28 @@ pub fn run() {
                         "verifiedLength",
                         "verifyIntegrityPending"
                     ]]);
-                    if let Ok(active_list) = rpc_call(poll_port.load(std::sync::atomic::Ordering::Relaxed), &poll_secret, "aria2.tellActive", params).await {
-                        if let Some(active_arr) = active_list.as_array() {
+                    let active_poll_started = Instant::now();
+                    let active_list = match rpc_call(
+                        poll_port.load(std::sync::atomic::Ordering::Relaxed),
+                        &poll_secret,
+                        "aria2.tellActive",
+                        params,
+                    )
+                    .await
+                    {
+                        Ok(active_list) => active_list,
+                        Err(error) => {
+                            log::warn!(
+                                "aria2 poller [stage=poll operation=tell_active result=failed error_class={} error_code={} elapsed_ms={}]",
+                                crate::retry::network_error_class(&error),
+                                crate::retry::aria2_error_code(&error)
+                                    .unwrap_or_else(|| "none".to_string()),
+                                active_poll_started.elapsed().as_millis()
+                            );
+                            continue;
+                        }
+                    };
+                    if let Some(active_arr) = active_list.as_array() {
                             let mut seen_ids = HashSet::new();
                             let mut seen_gids = HashSet::new();
                             for status_info in active_arr {
@@ -15197,6 +15429,46 @@ pub fn run() {
                                             .await
                                     {
                                         continue;
+                                    }
+                                    let retry_strike = if !is_torrent {
+                                        poll_mgr.aria2_retry_strike(&id).await
+                                    } else {
+                                        0
+                                    };
+                                    if !poll_mgr.is_current_aria2_gid_mapping(gid, &mapping)
+                                        || !poll_mgr
+                                            .is_aria2_control_epoch_current(&id, control_epoch)
+                                            .await
+                                    {
+                                        continue;
+                                    }
+                                    if !is_torrent
+                                        && (observation.last_logged_active_connections
+                                            != Some(active_connections)
+                                            || observation.last_connection_logged_at.is_none_or(
+                                                |logged_at| {
+                                                    now.duration_since(logged_at)
+                                                        >= ARIA2_CONNECTION_DIAGNOSTIC_INTERVAL
+                                                },
+                                            ))
+                                    {
+                                        log::info!(
+                                            "aria2 progress [stage=connections id={} gid={} epoch={} retry_strike={} status={} active_connections={} requested_connections={} effective_connections={} completed_bytes={} total_bytes={} speed_bytes_per_second={}]",
+                                            id,
+                                            gid,
+                                            control_epoch,
+                                            retry_strike,
+                                            status,
+                                            active_connections,
+                                            requested_connections,
+                                            effective_connections,
+                                            completed,
+                                            total,
+                                            speed_bytes
+                                        );
+                                        observation.last_logged_active_connections =
+                                            Some(active_connections);
+                                        observation.last_connection_logged_at = Some(now);
                                     }
                                     let torrent_telemetry = if is_torrent {
                                         if !telemetry_hydrated.contains(&id) {
@@ -15423,10 +15695,12 @@ pub fn run() {
                                             .await
                                         {
                                             log::warn!(
-                                                "aria2 connection recovery [{}] for gid {} failed: {}",
+                                                "aria2 connection recovery [stage=recovery id={} gid={} operation=refresh result=failed error_class={} error_code={}]",
                                                 id,
                                                 gid,
-                                                error
+                                                crate::retry::network_error_class(&error),
+                                                crate::retry::aria2_error_code(&error)
+                                                    .unwrap_or_else(|| "none".to_string())
                                             );
                                         }
                                     }
@@ -15454,10 +15728,12 @@ pub fn run() {
                                     Ok(status) => status,
                                     Err(error) => {
                                         log::debug!(
-                                            "aria2 poller reconciliation [{}]: could not query gid {}: {}",
+                                            "aria2 poller [stage=poll operation=tell_status id={} gid={} result=failed error_class={} error_code={}]",
                                             id,
                                             gid,
-                                            error
+                                            crate::retry::network_error_class(&error),
+                                            crate::retry::aria2_error_code(&error)
+                                                .unwrap_or_else(|| "none".to_string())
                                         );
                                         let recovery_allowed = missing_gid_recovery_at
                                             .get(&id)
@@ -15493,10 +15769,16 @@ pub fn run() {
                                                     }
                                                     Err(recovery_error) => {
                                                         log::warn!(
-                                                            "aria2 poller reconciliation [{}]: payload recovery for missing gid {} failed: {}",
+                                                            "aria2 poller [stage=recovery operation=missing_gid id={} gid={} result=failed error_class={} error_code={}]",
                                                             id,
                                                             gid,
-                                                            recovery_error
+                                                            crate::retry::network_error_class(
+                                                                &recovery_error,
+                                                            ),
+                                                            crate::retry::aria2_error_code(
+                                                                &recovery_error,
+                                                            )
+                                                            .unwrap_or_else(|| "none".to_string())
                                                         );
                                                     }
                                                 }
@@ -15505,16 +15787,18 @@ pub fn run() {
                                         continue;
                                     }
                                 };
-                                if let Some(mapping) = poll_mgr
+                                let Some(mapping) = poll_mgr
                                     .aria2_gid_mapping(&gid)
                                     .filter(|mapping| mapping.id == id)
+                                else {
+                                    continue;
+                                };
+                                let is_torrent = poll_mgr.aria2_is_torrent(&id).await;
+                                if is_torrent
+                                    && poll_mgr
+                                        .is_aria2_control_epoch_current(&id, mapping.epoch)
+                                        .await
                                 {
-                                    let is_torrent = poll_mgr.aria2_is_torrent(&id).await;
-                                    if is_torrent
-                                        && poll_mgr
-                                            .is_aria2_control_epoch_current(&id, mapping.epoch)
-                                            .await
-                                    {
                                         let upload_length = status
                                             .get("uploadLength")
                                             .and_then(|value| value.as_str())
@@ -15557,7 +15841,36 @@ pub fn run() {
                                             }
                                         }
                                     }
-                                }
+                                    let retry_strike = if !is_torrent {
+                                        poll_mgr.aria2_retry_strike(&id).await
+                                    } else {
+                                        0
+                                    };
+                                    let requested_connections = if !is_torrent {
+                                        poll_mgr
+                                            .aria2_requested_connections(&id)
+                                            .await
+                                            .unwrap_or(1)
+                                            .max(1)
+                                    } else {
+                                        1
+                                    };
+                                    let effective_connections = if !is_torrent {
+                                        poll_mgr
+                                            .aria2_effective_connections(&id, mapping.epoch)
+                                            .await
+                                            .unwrap_or(requested_connections)
+                                            .max(1)
+                                    } else {
+                                        1
+                                    };
+                                    if !poll_mgr.is_current_aria2_gid_mapping(&gid, &mapping)
+                                        || !poll_mgr
+                                            .is_aria2_control_epoch_current(&id, mapping.epoch)
+                                            .await
+                                    {
+                                        continue;
+                                    }
                                 let status_name = status
                                     .get("status")
                                     .and_then(|value| value.as_str())
@@ -15591,18 +15904,36 @@ pub fn run() {
                                     _ => None,
                                 };
                                 if let Some(outcome) = outcome {
+                                    let terminal_error = match &outcome {
+                                        crate::queue::PendingOutcome::Error(error) => Some(error.as_str()),
+                                        _ => None,
+                                    };
                                     log::info!(
-                                        "aria2 poller reconciliation [{}]: gid {} reported terminal status {} outside tellActive",
+                                        "aria2 poller reconciliation [stage=terminal id={} gid={} epoch={} retry_strike={} status={} requested_connections={} effective_connections={} error_class={} error_code={} source=tell_status_outside_active]",
                                         id,
                                         gid,
-                                        status_name
+                                        mapping.epoch,
+                                        retry_strike,
+                                        status_name,
+                                        requested_connections,
+                                        effective_connections,
+                                        terminal_error
+                                            .map(crate::retry::network_error_class)
+                                            .unwrap_or("none"),
+                                        terminal_error
+                                            .and_then(crate::retry::aria2_error_code)
+                                            .unwrap_or_else(|| "none".to_string())
                                     );
                                     poll_mgr.handle_aria2_event(&gid, outcome).await;
                                 }
                             }
                             observations.retain(|id, _| seen_ids.contains(id));
+                        } else {
+                            log::warn!(
+                                "aria2 poller [stage=poll operation=tell_active result=malformed elapsed_ms={}]",
+                                active_poll_started.elapsed().as_millis()
+                            );
                         }
-                    }
                 }
             });
 

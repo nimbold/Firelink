@@ -2,8 +2,8 @@ use base64::Engine as _;
 use crate::ipc::{DownloadStateEvent, DownloadStatus, QueueDirection};
 use crate::power::PowerManager;
 use crate::retry::{
-    backoff_and_emit, is_aria2_name_resolution_error, is_transient_network_error,
-    BackoffOutcome, MAX_RETRIES,
+    aria2_error_code, backoff_and_emit, is_aria2_name_resolution_error,
+    is_transient_network_error, network_error_class, BackoffOutcome, MAX_RETRIES,
 };
 use log;
 use serde::Deserialize;
@@ -1921,6 +1921,15 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
     pub async fn has_aria2_retry_state(&self, id: &str) -> bool {
         self.aria2_retry_strikes.lock().await.contains_key(id)
+    }
+
+    pub async fn aria2_retry_strike(&self, id: &str) -> usize {
+        self.aria2_retry_strikes
+            .lock()
+            .await
+            .get(id)
+            .copied()
+            .unwrap_or_default()
     }
 
     pub async fn aria2_requested_connections(&self, id: &str) -> Option<i32> {
@@ -3952,7 +3961,14 @@ impl<R: tauri::Runtime> QueueManager<R> {
             }
             buffered.remove(&gid).map(|(_buf_id, outcome)| outcome)
         };
-        log::info!("aria2 gid transition [{}]: mapped {}", id, gid);
+        let retry_strike = self.aria2_retry_strike(&id).await;
+        log::info!(
+            "aria2 gid transition [stage=gid_transition id={} gid={} epoch={} retry_strike={} action=mapped]",
+            id,
+            gid,
+            epoch,
+            retry_strike
+        );
         buffered_outcome
     }
 
@@ -4182,16 +4198,17 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 if verification_only {
                     self.emit_paused_with_error(id, error);
                 } else {
-                    let safe_error = crate::redact_sensitive_text(&error);
+                    let aria2_code = aria2_error_code(&error).unwrap_or_else(|| "none".to_string());
                     log::error!(
-                        "aria2 terminal [stage=terminal id={} gid={} epoch={} retry_strike={} requested_connections={} effective_connections={} error={}]",
+                        "aria2 terminal [stage=terminal id={} gid={} epoch={} retry_strike={} requested_connections={} effective_connections={} error_class={} aria2_error_code={}]",
                         id,
                         terminal_gid,
                         terminal_epoch,
                         retry_strike,
                         requested_connections,
                         effective_connections,
-                        safe_error
+                        network_error_class(&error),
+                        aria2_code
                     );
                     self.emit_failed(id, error);
                 }
@@ -4258,21 +4275,23 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 }
                 Err(error) if attempt < MAX_ATTEMPTS => {
                     log::warn!(
-                        "aria2 lifecycle cleanup [{}]: failed to remove stale replacement gid {} on attempt {}: {}; retrying",
+                        "aria2 lifecycle cleanup [stage=cleanup id={} gid={} attempt={} result=retrying error_class={} error_code={}]",
                         id,
                         gid,
                         attempt,
-                        error
+                        network_error_class(&error),
+                        diagnostic_error_code(&error)
                     );
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 Err(error) => {
                     log::error!(
-                        "aria2 lifecycle cleanup [{}]: stale replacement gid {} could not be removed after {} attempts: {}",
+                        "aria2 lifecycle cleanup [stage=cleanup id={} gid={} attempts={} result=failed error_class={} error_code={}]",
                         id,
                         gid,
                         MAX_ATTEMPTS,
-                        error
+                        network_error_class(&error),
+                        diagnostic_error_code(&error)
                     );
                 }
             }
@@ -4579,10 +4598,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 self.release_permit(id).await;
                 self.emit_state(id, DownloadStatus::Paused);
                 log::warn!(
-                    "aria2 connection recovery [{}]: replacement job unavailable; retired stale gid {} and paused the download: {}",
+                    "aria2 connection recovery [stage=recovery id={} gid={} result=paused_unavailable error_class={} error_code={}]",
                     id,
                     gid,
-                    error
+                    network_error_class(&error),
+                    diagnostic_error_code(&error)
                 );
                 return Ok(());
             }
@@ -4771,6 +4791,37 @@ impl<R: tauri::Runtime> QueueManager<R> {
             self.aria2_system_resolver_fallback_available(),
         );
         let resolver_fallback = retry_action == Aria2RetryAction::SystemResolverFallback;
+        let requested_connections = self
+            .aria2_requested_connections(&id)
+            .await
+            .unwrap_or(DOWNLOAD_CONNECTIONS_MIN);
+        let effective_connections = self
+            .aria2_effective_connections(&id, mapping.epoch)
+            .await
+            .unwrap_or(requested_connections);
+        let action = match retry_action {
+            Aria2RetryAction::SystemResolverFallback => "system_resolver_fallback",
+            Aria2RetryAction::OrdinaryRetry => "ordinary_retry",
+            Aria2RetryAction::Terminal => "terminal",
+        };
+        let error_code = aria2_error_code(&error)
+            .unwrap_or_else(|| network_error_class(&error).to_string());
+        log::warn!(
+            "aria2 retry [stage=retry id={} gid={} epoch={} retry_strike={} action={} resolver_mode={} error_class={} error_code={} requested_connections={} effective_connections={}]",
+            id,
+            gid,
+            mapping.epoch,
+            strike,
+            action,
+            match payload.aria2_resolver_mode {
+                Aria2ResolverMode::Automatic => "automatic",
+                Aria2ResolverMode::System => "system",
+            },
+            network_error_class(&error),
+            error_code,
+            requested_connections,
+            effective_connections
+        );
         // Switching resolver strategy is a bounded transfer repair, not an
         // ordinary retry. It must still run when the user configured zero
         // automatic retries, while every later failure follows the normal
@@ -4901,10 +4952,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
                         drop(control_guard);
                         if let Err(error) = this.spawner.remove_uri(&new_gid).await {
                             log::error!(
-                                "aria2 retry cancellation [{}]: failed to remove late gid {}: {}",
+                                "aria2 retry cancellation [stage=cleanup id={} gid={} result=failed error_class={} error_code={}]",
                                 id_for_task,
                                 new_gid,
-                                error
+                                network_error_class(&error),
+                                diagnostic_error_code(&error)
                             );
                         } else {
                             log::info!(
@@ -5252,10 +5304,21 @@ enum BoundedRangeSupport {
     Unknown,
 }
 
+impl BoundedRangeSupport {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::Unsupported => "unsupported",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 struct HttpTransferProbe {
     final_uri: String,
     range_support: BoundedRangeSupport,
     credentials_allowed: bool,
+    redirect_count: usize,
 }
 
 struct PreparedNormalTransfer {
@@ -5334,6 +5397,7 @@ fn header_name_has_credential_material(name: &str) -> bool {
 
 async fn prepare_normal_transfer(
     id: &str,
+    epoch: u64,
     payload: &SpawnPayload,
 ) -> Result<PreparedNormalTransfer, String> {
     let credential_origin = reqwest::Url::parse(&payload.url)
@@ -5366,6 +5430,7 @@ async fn prepare_normal_transfer(
             continue;
         }
 
+        let probe_started = Instant::now();
         match probe_bounded_range_support(&uri, payload, &credential_origin).await {
             Ok(probe) => {
                 if index > 0
@@ -5379,19 +5444,37 @@ async fn prepare_normal_transfer(
                 }
                 credentials_allowed &= probe.credentials_allowed;
                 uris.push(probe.final_uri);
+                log::info!(
+                    "aria2 range probe [stage=range_probe id={} epoch={} host={} support={} redirect_count={} credentials_allowed={} requested_connections={} effective_connections={} elapsed_ms={}]",
+                    id,
+                    epoch,
+                    uri_host_for_log(&uri),
+                    probe.range_support.as_str(),
+                    probe.redirect_count,
+                    probe.credentials_allowed,
+                    requested,
+                    if probe.range_support == BoundedRangeSupport::Unsupported && requested > 1 {
+                        1
+                    } else {
+                        connections
+                    },
+                    probe_started.elapsed().as_millis()
+                );
                 match probe.range_support {
                     BoundedRangeSupport::Unsupported if requested > 1 => {
                         log::warn!(
-                            "aria2 range probe [{}]: {} does not honor bounded byte ranges; using one connection",
+                            "aria2 range probe [stage=range_probe id={} epoch={} host={} result=unsupported action=single_connection]",
                             id,
+                            epoch,
                             uri_host_for_log(&uri)
                         );
                         connections = 1;
                     }
                     BoundedRangeSupport::Unknown if requested > 1 => {
                         log::debug!(
-                            "aria2 range probe [{}]: {} range support unknown; keeping {} connections",
+                            "aria2 range probe [stage=range_probe id={} epoch={} host={} result=unknown action=keep_requested connections={}]",
                             id,
+                            epoch,
                             uri_host_for_log(&uri),
                             requested
                         );
@@ -5400,11 +5483,15 @@ async fn prepare_normal_transfer(
                 }
             }
             Err(error) if is_fatal_range_probe_error(&error) => {
-                log::error!(
-                    "aria2 redirect [{}]: fatal transfer validation failed host={} error_code={}",
+                    log::error!(
+                    "aria2 redirect [stage=redirect id={} epoch={} host={} result=rejected error_code={} requested_connections={} effective_connections={} elapsed_ms={}]",
                     id,
+                    epoch,
                     uri_host_for_log(&uri),
-                    range_probe_error_code(&error)
+                    range_probe_error_code(&error),
+                    requested,
+                    connections,
+                    probe_started.elapsed().as_millis()
                 );
                 return Err(format!(
                     "normal transfer preflight rejected for {}: {}",
@@ -5414,10 +5501,14 @@ async fn prepare_normal_transfer(
             }
             Err(error) if payload_has_credential_material(payload) => {
                 log::warn!(
-                    "aria2 range probe [{}]: credentialed route could not be verified host={} error_code={}; retryable",
+                    "aria2 range probe [stage=range_probe id={} epoch={} host={} result=retryable error_code={} credentials_verified=false requested_connections={} effective_connections={} elapsed_ms={}]",
                     id,
+                    epoch,
                     uri_host_for_log(&uri),
-                    range_probe_error_code(&error)
+                    range_probe_error_code(&error),
+                    requested,
+                    connections,
+                    probe_started.elapsed().as_millis()
                 );
                 return Err(format!(
                     "normal transfer preflight is retryable for {}: {}",
@@ -5427,10 +5518,14 @@ async fn prepare_normal_transfer(
             }
             Err(error) => {
                 log::warn!(
-                    "aria2 range probe [{}]: public route unavailable host={} error_code={}; trying the validated source URI",
+                    "aria2 range probe [stage=range_probe id={} epoch={} host={} result=unknown action=use_source_uri error_code={} credentials_verified=false requested_connections={} effective_connections={} elapsed_ms={}]",
                     id,
+                    epoch,
                     uri_host_for_log(&uri),
-                    range_probe_error_code(&error)
+                    range_probe_error_code(&error),
+                    requested,
+                    connections,
+                    probe_started.elapsed().as_millis()
                 );
                 uris.push(uri);
             }
@@ -5480,8 +5575,27 @@ fn range_probe_error_code(error: &str) -> &'static str {
     } else if lower.contains("invalid") {
         "invalid_route"
     } else {
-        "transport"
+        match network_error_class(error) {
+            "name_resolution" | "dns" => "dns",
+            "ssrf_policy" => "ssrf_private_address",
+            class => class,
+        }
     }
+}
+
+fn transfer_preflight_error_code(error: &str) -> &'static str {
+    if error
+        .to_ascii_lowercase()
+        .contains("credentialed mirrors must use the same origin")
+    {
+        "credential_policy"
+    } else {
+        range_probe_error_code(error)
+    }
+}
+
+fn diagnostic_error_code(error: &str) -> String {
+    aria2_error_code(error).unwrap_or_else(|| network_error_class(error).to_string())
 }
 
 fn is_http_uri(uri: &str) -> bool {
@@ -5517,6 +5631,14 @@ pub(crate) fn aria2_all_proxy_value(proxy: &str) -> Result<Option<String>, Strin
         );
     }
     Ok(Some(proxy.to_string()))
+}
+
+pub(crate) fn proxy_route_for_log(proxy: Option<&str>) -> &'static str {
+    match proxy.map(str::trim) {
+        None | Some("") => "none",
+        Some(value) if value.eq_ignore_ascii_case("none") => "disabled",
+        Some(_) => "configured",
+    }
 }
 
 async fn probe_bounded_range_support(
@@ -5630,6 +5752,7 @@ async fn probe_bounded_range_support_with_local_override(
             final_uri: current.to_string(),
             range_support: classify_bounded_range_response(response.status(), content_range),
             credentials_allowed,
+            redirect_count,
         });
     }
 
@@ -5763,17 +5886,35 @@ fn apply_checksum_options(
     }
 }
 
-async fn validate_aria2_transfer_network_policy(uris: &[String]) -> Result<(), String> {
+struct Aria2NetworkPolicyError {
+    host: String,
+    message: String,
+}
+
+async fn validate_aria2_transfer_network_policy(
+    uris: &[String],
+) -> Result<(), Aria2NetworkPolicyError> {
     for uri in uris {
-        let parsed = reqwest::Url::parse(uri).map_err(|_| "SSRF blocked: Invalid URL".to_string())?;
+        let parsed = reqwest::Url::parse(uri).map_err(|_| Aria2NetworkPolicyError {
+            host: uri_host_for_log(uri),
+            message: "SSRF blocked: Invalid URL".to_string(),
+        })?;
         if !matches!(parsed.scheme(), "http" | "https" | "ftp" | "sftp") {
-            return Err("Unsupported URL scheme".to_string());
+            return Err(Aria2NetworkPolicyError {
+                host: uri_host_for_log(uri),
+                message: "Unsupported URL scheme".to_string(),
+            });
         }
         // This is deliberately repeated immediately before addUri/addTorrent
         // so admission-time DNS is not the only policy check. Aria2 still
         // resolves independently later; Firelink therefore does not claim
         // that this is an IP pinning boundary.
-        crate::resolve_and_validate_url_host(&parsed).await?;
+        if let Err(error) = crate::resolve_and_validate_url_host(&parsed).await {
+            return Err(Aria2NetworkPolicyError {
+                host: uri_host_for_log(uri),
+                message: error,
+            });
+        }
     }
     Ok(())
 }
@@ -6887,6 +7028,7 @@ impl SidecarSpawner for ProductionSpawner {
     async fn add_uri(&self, id: &str, payload: &SpawnPayload) -> Result<String, String> {
         let state = self.app_handle.state::<crate::AppState>();
         let attempt_epoch = state.queue_manager.current_aria2_control_epoch(id).await;
+        let admission_started = Instant::now();
         let mut options = serde_json::Map::new();
         let mut connection_options = None;
         let resolved_dest = crate::resolve_path(&payload.destination, &self.app_handle);
@@ -6915,10 +7057,45 @@ impl SidecarSpawner for ProductionSpawner {
             if payload.is_torrent {
                 (Vec::new(), DOWNLOAD_CONNECTIONS_MIN, DOWNLOAD_CONNECTIONS_MIN, true)
             } else {
-                let requested =
+                let requested_uris =
                     crate::collect_download_uris(&payload.url, payload.mirrors.as_deref());
-                validate_aria2_transfer_network_policy(&requested).await?;
-                let prepared = prepare_normal_transfer(id, payload).await?;
+                let requested_connections =
+                    clamp_download_connections(payload.connections.unwrap_or(DOWNLOAD_CONNECTIONS_MIN));
+                if let Err(error) = validate_aria2_transfer_network_policy(&requested_uris).await {
+                    log::error!(
+                        "aria2 admission [stage=network_policy id={} epoch={} host={} proxy_route={} uri_count={} requested_connections={} effective_connections=not_established error_class={} error_code={} elapsed_ms={}]",
+                        id,
+                        attempt_epoch,
+                        error.host,
+                        proxy_route_for_log(payload.proxy.as_deref()),
+                        requested_uris.len(),
+                        requested_connections,
+                        network_error_class(&error.message),
+                        transfer_preflight_error_code(&error.message),
+                        admission_started.elapsed().as_millis()
+                    );
+                    return Err(error.message);
+                }
+                let prepared = match prepare_normal_transfer(id, attempt_epoch, payload).await {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        log::error!(
+                            "aria2 admission [stage=transfer_preflight id={} epoch={} host={} proxy_route={} requested_connections={} effective_connections=not_established error_class={} error_code={} elapsed_ms={}]",
+                            id,
+                            attempt_epoch,
+                            requested_uris
+                                .first()
+                                .map(|uri| uri_host_for_log(uri))
+                                .unwrap_or_else(|| "<unknown host>".to_string()),
+                            proxy_route_for_log(payload.proxy.as_deref()),
+                            requested_connections,
+                            network_error_class(&error),
+                            transfer_preflight_error_code(&error),
+                            admission_started.elapsed().as_millis()
+                        );
+                        return Err(error);
+                    }
+                };
                 connection_options = Some(prepared.effective_connections);
                 (
                     prepared.uris,
@@ -6977,18 +7154,27 @@ impl SidecarSpawner for ProductionSpawner {
             options.insert("all-proxy".to_string(), serde_json::json!(prox));
         }
         apply_aria2_resolver_options(&mut options, payload.aria2_resolver_mode);
+        let retry_strike = state.queue_manager.aria2_retry_strike(id).await;
+        let transfer_host = transfer_uris
+            .first()
+            .map(|uri| uri_host_for_log(uri))
+            .unwrap_or_else(|| "<torrent>".to_string());
 
         log::info!(
-            "aria2 admission [stage=admission id={} epoch={} host={} requested_connections={} effective_connections={} uri_count={}]",
+            "aria2 admission [stage=admission id={} epoch={} retry_strike={} host={} requested_connections={} effective_connections={} uri_count={} resolver_mode={} proxy_route={} elapsed_ms={}]",
             id,
             attempt_epoch,
-            transfer_uris
-                .first()
-                .map(|uri| uri_host_for_log(uri))
-                .unwrap_or_else(|| "<torrent>".to_string()),
+            retry_strike,
+            transfer_host,
             requested_connections,
             transfer_connections,
-            transfer_uris.len()
+            transfer_uris.len(),
+            match payload.aria2_resolver_mode {
+                Aria2ResolverMode::Automatic => "automatic",
+                Aria2ResolverMode::System => "system",
+            },
+            proxy_route_for_log(payload.proxy.as_deref()),
+            admission_started.elapsed().as_millis()
         );
 
         let (method, params) = if payload.is_torrent {
@@ -7057,6 +7243,25 @@ impl SidecarSpawner for ProductionSpawner {
             )
         };
 
+        let lifecycle_current = state
+            .queue_manager
+            .is_aria2_control_epoch_current(id, attempt_epoch)
+            .await
+            && state.queue_manager.is_registered(id).await;
+        if !lifecycle_current {
+            log::info!(
+                "aria2 admission [stage=admission id={} epoch={} retry_strike={} host={} requested_connections={} effective_connections={} result=stale_before_rpc elapsed_ms={}]",
+                id,
+                attempt_epoch,
+                retry_strike,
+                transfer_host,
+                requested_connections,
+                transfer_connections,
+                admission_started.elapsed().as_millis()
+            );
+            return Err("aria2 admission canceled before RPC".to_string());
+        }
+
         match self.add_transfer_rpc(&state, method, &params).await {
             Ok(result) => {
                 let gid = result.as_str().unwrap_or("").to_string();
@@ -7073,19 +7278,31 @@ impl SidecarSpawner for ProductionSpawner {
                             )
                             .await;
                     }
-                    log::info!("aria2 {} [{}]: created gid {}", method, id, gid);
+                    log::info!(
+                        "aria2 {} [stage=admission id={} gid={} epoch={} retry_strike={} elapsed_ms={} result=created]",
+                        method,
+                        id,
+                        gid,
+                        attempt_epoch,
+                        retry_strike,
+                        admission_started.elapsed().as_millis()
+                    );
                     Ok(gid)
                 }
             }
             Err(e) => {
-                let safe_error = crate::redact_sensitive_text(&e);
+                let error_code = aria2_error_code(&e)
+                    .unwrap_or_else(|| network_error_class(&e).to_string());
                 log::error!(
-                    "aria2 admission [stage=admission id={} epoch={} method={} error={}]",
+                    "aria2 admission [stage=admission id={} epoch={} method={} error_class={} error_code={} elapsed_ms={}]",
                     id,
                     attempt_epoch,
                     method,
-                    safe_error
+                    network_error_class(&e),
+                    error_code,
+                    admission_started.elapsed().as_millis()
                 );
+                let safe_error = crate::redact_sensitive_text(&e);
                 Err(format!("aria2 {method} failed: {safe_error}"))
             }
         }
@@ -7279,10 +7496,11 @@ impl SidecarSpawner for ProductionSpawner {
                         match crate::aria2_download_status(port, secret, gid).await {
                             Ok(status) if status == "paused" => {
                                 log::warn!(
-                                    "aria2 connection recovery [{}]: forcePause for gid {} returned an error after the daemon paused it: {}",
+                                    "aria2 connection recovery [stage=recovery id={} gid={} operation=force_pause result=verified_paused error_class={} error_code={}]",
                                     id,
                                     gid,
-                                    error
+                                    network_error_class(&error),
+                                    diagnostic_error_code(&error)
                                 );
                             }
                             Ok(status) if status == "complete" => {
@@ -7292,10 +7510,11 @@ impl SidecarSpawner for ProductionSpawner {
                                 if aria2_recovery_should_rebuild_after_pause_error(&status) =>
                             {
                                 log::warn!(
-                                    "aria2 connection recovery [{}]: gid {} disappeared after forcePause failed; rebuilding from the saved payload: {}",
+                                    "aria2 connection recovery [stage=recovery id={} gid={} operation=force_pause result=gid_missing_rebuild error_class={} error_code={}]",
                                     id,
                                     gid,
-                                    error
+                                    network_error_class(&error),
+                                    diagnostic_error_code(&error)
                                 );
                             }
                             Ok(status) => {
@@ -9118,10 +9337,24 @@ mod tests {
     fn public_probe_transport_failures_are_advisory_but_security_failures_are_fatal() {
         assert!(!is_fatal_range_probe_error("error sending request"));
         assert_eq!(range_probe_error_code("error sending request"), "transport");
+        assert_eq!(
+            range_probe_error_code("error sending request for https://example.test/file"),
+            "transport"
+        );
         assert!(is_fatal_range_probe_error("SSRF blocked: Private/local IP not allowed"));
         assert_eq!(
             range_probe_error_code("SSRF blocked: DNS resolution timed out"),
             "timeout"
+        );
+    }
+
+    #[test]
+    fn proxy_route_diagnostics_never_include_proxy_details() {
+        assert_eq!(proxy_route_for_log(None), "none");
+        assert_eq!(proxy_route_for_log(Some("none")), "disabled");
+        assert_eq!(
+            proxy_route_for_log(Some("http://user:secret@example.test:8080")),
+            "configured"
         );
     }
 

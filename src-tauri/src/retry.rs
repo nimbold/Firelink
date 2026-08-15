@@ -55,11 +55,114 @@ pub const MAX_RETRIES: usize = BACKOFF_SCHEDULE.len();
 /// the message forms cover older/alternate Aria2 wrappers that omit it.
 pub fn is_aria2_name_resolution_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    lower.contains("aria2 error code 19")
+    aria2_error_code(message).as_deref() == Some("19")
         || (lower.contains("name resolution")
             && lower.contains("failed")
             && lower.contains("could not contact dns"))
         || lower.contains("could not contact dns server")
+}
+
+/// Extract Aria2's numeric error code without retaining the rest of its
+/// message. Aria2 error messages can include the request URI, so diagnostics
+/// should record this code rather than the raw text.
+pub fn aria2_error_code(message: &str) -> Option<String> {
+    let lower = message.to_ascii_lowercase();
+    let marker = "aria2 error code";
+    let start = lower.find(marker)? + marker.len();
+    let remainder = lower[start..].trim_start_matches(|character: char| {
+        character.is_ascii_whitespace()
+            || matches!(character, ':' | '=' | '(' | ')' | '[' | ']')
+    });
+    let digits: String = remainder
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect();
+    (!digits.is_empty()).then_some(digits)
+}
+
+/// Coarse, secret-free classification for retry diagnostics. The returned
+/// value is intentionally stable and contains no provider or request text.
+pub fn network_error_class(message: &str) -> &'static str {
+    if is_aria2_name_resolution_error(message) {
+        return "name_resolution";
+    }
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("private/local ip") || lower.contains("ssrf") {
+        return "ssrf_policy";
+    }
+    if lower.contains("permission denied") || lower.contains("operation not permitted") {
+        return "permission";
+    }
+    if lower.contains("timed out") || lower.contains("timeout") {
+        return "timeout";
+    }
+    if lower.contains("connection refused") {
+        return "connection_refused";
+    }
+    if lower.contains("connection reset") || lower.contains("connection aborted") {
+        return "connection_reset";
+    }
+    if [
+        "invalid range",
+        "range not satisfiable",
+        "range request",
+        "range support",
+        "accept-ranges",
+        "bounded range",
+        "byte range",
+        "does not support range",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return "range";
+    }
+    if lower.contains("dns") || lower.contains("name resolution") {
+        return "dns";
+    }
+    let has_http_version_token = lower.split_whitespace().any(|token| {
+        let token = token.trim_start_matches(|character: char| {
+            matches!(character, '(' | '[' | '{')
+        });
+        token.starts_with("http/")
+            && token
+                .chars()
+                .nth(5)
+                .is_some_and(|character| character.is_ascii_digit())
+    });
+    if lower.contains("http error")
+        || has_http_version_token
+        || lower.contains("http status")
+        || lower.contains("response status")
+        || lower.contains("status code")
+        || [
+            "status=400",
+            "status=401",
+            "status=403",
+            "status=404",
+            "status=408",
+            "status=410",
+            "status=429",
+            "status=451",
+            "status=500",
+            "status=502",
+            "status=503",
+            "status=504",
+        ]
+        .iter()
+        .any(|marker| {
+            lower.split_whitespace().any(|token| {
+                token
+                    .trim_matches(|character: char| {
+                        !character.is_ascii_alphanumeric() && character != '='
+                    })
+                    == *marker
+            })
+        })
+    {
+        return "http";
+    }
+    "transport"
 }
 
 /// Resolve the backoff delay for a 0-based strike. Strikes at or beyond the
@@ -261,6 +364,44 @@ mod tests {
             ]
         );
         assert_eq!(MAX_RETRIES, 3);
+    }
+
+    #[test]
+    fn extracts_aria2_error_code_without_message_material() {
+        for error in [
+            "aria2 error code 19: Could not contact DNS servers",
+            "aria2 error code: 19: Could not contact DNS servers",
+            "aria2 error code (19): Could not contact DNS servers",
+            "aria2 error code=19: Could not contact DNS servers",
+        ] {
+            assert_eq!(aria2_error_code(error).as_deref(), Some("19"));
+        }
+        let error =
+            "aria2 error code 19: Could not contact DNS servers for https://example.test/file?token=secret";
+        assert_eq!(network_error_class(error), "name_resolution");
+        assert_eq!(aria2_error_code("aria2 error code: unknown 19"), None);
+        assert!(is_aria2_name_resolution_error("aria2 error code: 19"));
+    }
+
+    #[test]
+    fn classifies_diagnostic_errors_without_echoing_private_details() {
+        assert_eq!(network_error_class("operation not permitted"), "permission");
+        assert_eq!(network_error_class("connect timed out"), "timeout");
+        assert_eq!(network_error_class("invalid range header"), "range");
+        assert_eq!(
+            network_error_class("error sending request for https://example.test/file"),
+            "transport"
+        );
+        assert_eq!(
+            network_error_class("error sending request for http://example.test/file"),
+            "transport"
+        );
+        assert_eq!(
+            network_error_class("error sending request for https://example.test/file?status=503"),
+            "transport"
+        );
+        assert_eq!(network_error_class("ranged GET fallback failed"), "transport");
+        assert_eq!(network_error_class("HTTP Error 503"), "http");
     }
 
     #[test]
