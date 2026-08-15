@@ -1877,7 +1877,11 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     try {
       const resumed = await useDownloadStore.getState().resumeDownload(item.id);
       if (!resumed) {
-        throw new Error(t($ => $.downloadTable.backendRejectedStart));
+        const current = useDownloadStore.getState().downloads.find(
+          download => download.id === item.id
+        );
+        const reason = current?.lastError?.trim();
+        throw new Error(reason || t($ => $.downloadTable.backendRejectedStart));
       }
     } catch (error) {
       console.error("Failed to resume:", error);
