@@ -476,7 +476,14 @@ export const PropertiesWindowBridgeHost = () => {
                 throw new Error('The download did not reach a paused or terminal state');
               }
             } else {
-              const resumed = await store.resumeDownload(request.downloadId);
+              const resumeWithoutCredentials = typeof request.payload === 'object'
+                && request.payload !== null
+                && 'resumeWithoutCredentials' in request.payload
+                && request.payload.resumeWithoutCredentials === true;
+              const resumed = await store.resumeDownload(
+                request.downloadId,
+                resumeWithoutCredentials ? { resumeWithoutCredentials: true } : undefined,
+              );
               if (!resumed) {
                 throw new Error(i18n.t($ => $.downloadTable.backendRejectedStart));
               }

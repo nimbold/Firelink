@@ -1875,19 +1875,28 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
 
   const handleResume = useCallback(async (item: DownloadItem) => {
     try {
-      const resumed = await useDownloadStore.getState().resumeDownload(item.id);
+      const current = useDownloadStore.getState().downloads.find(download => download.id === item.id);
+      if (!current) return;
+      let resumeWithoutCredentials = false;
+      if (current.credentialsRequired === true) {
+        resumeWithoutCredentials = window.confirm(t($ => $.properties.resumeWithoutCredentialsConfirm));
+        if (!resumeWithoutCredentials) return;
+      }
+      const resumed = await useDownloadStore.getState().resumeDownload(item.id, {
+        resumeWithoutCredentials
+      });
       if (!resumed) {
-        const current = useDownloadStore.getState().downloads.find(
+        const latest = useDownloadStore.getState().downloads.find(
           download => download.id === item.id
         );
-        const reason = current?.lastError?.trim();
+        const reason = latest?.lastError?.trim();
         throw new Error(reason || t($ => $.downloadTable.backendRejectedStart));
       }
     } catch (error) {
       console.error("Failed to resume:", error);
         showInteractionError(t($ => $.downloadTable.resumeFailed, { fileName: item.fileName }), error);
     }
-  }, [showInteractionError]);
+  }, [showInteractionError, t]);
 
   const getCurrentSelectedDownloads = useCallback(() => {
     const selected = selectedIdsRef.current;
@@ -1919,7 +1928,26 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   const handleResumeSelected = useCallback(() => {
     const ids = Array.from(selectedIdsRef.current);
     if (ids.length === 0) return;
-    void startSelected(ids).catch(error => {
+    const selected = useDownloadStore.getState().downloads.filter(download => ids.includes(download.id));
+    const credentialMarkedIds = selected
+      .filter(download => download.credentialsRequired === true)
+      .map(download => download.id);
+    if (credentialMarkedIds.length > 0
+      && !window.confirm(t($ => $.properties.resumeWithoutCredentialsConfirm))) {
+      // Continue ordinary selected resumes. Credential-marked rows remain
+      // fail-closed and can be handled individually after the user supplies
+      // credentials or confirms a credentialless retry.
+      const credentialMarkedIdSet = new Set(credentialMarkedIds);
+      const ordinaryIds = ids.filter(id => !credentialMarkedIdSet.has(id));
+      if (ordinaryIds.length === 0) return;
+      void startSelected(ordinaryIds).catch(error => {
+        showInteractionError(t($ => $.downloadTable.resumeFailed), error);
+      });
+      return;
+    }
+    void startSelected(ids, {
+      resumeWithoutCredentialsIds: credentialMarkedIds
+    }).catch(error => {
       showInteractionError(t($ => $.downloadTable.resumeFailed), error);
     });
   }, [showInteractionError, startSelected, t]);

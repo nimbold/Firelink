@@ -1236,7 +1236,16 @@ export const PropertiesWindowApp = () => {
                   && !window.confirm(t($ => $.downloadTable.nonResumableOne))) {
                   return;
                 }
-                void requestAction('pause-resume');
+                const resumeWithoutCredentials = (lifecycleAction === 'resume' || lifecycleAction === 'retry')
+                  && snapshot.credentialsRequired === true;
+                if (resumeWithoutCredentials
+                  && !window.confirm(t($ => $.properties.resumeWithoutCredentialsConfirm))) {
+                  return;
+                }
+                void requestAction(
+                  'pause-resume',
+                  resumeWithoutCredentials ? { resumeWithoutCredentials: true } : undefined,
+                );
               }}
             >
               {lifecycleAction === 'pause' ? <Pause size={14} /> : <Play size={14} />}

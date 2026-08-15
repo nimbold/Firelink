@@ -45,6 +45,11 @@ const downloadControlIntents = new Map<string, DownloadControlIntent>();
 export interface ResumeDownloadOptions {
   preserveQueuePosition?: boolean;
   forceRequeue?: boolean;
+  resumeWithoutCredentials?: boolean;
+}
+
+export interface StartSelectedOptions {
+  resumeWithoutCredentialsIds?: readonly string[];
 }
 
 // State events do not carry a lifecycle generation. Keep the intent that
@@ -1059,7 +1064,7 @@ interface DownloadState {
   pauseDownload: (id: string) => Promise<void>;
   redownload: (id: string) => Promise<void>;
   resumeDownload: (id: string, options?: ResumeDownloadOptions) => Promise<boolean>;
-  startSelected: (ids: string[]) => Promise<number>;
+  startSelected: (ids: string[], options?: StartSelectedOptions) => Promise<number>;
   startQueue: (queueId: string) => Promise<string[]>;
   pauseQueue: (queueId: string) => Promise<number>;
   startAll: () => Promise<number>;
@@ -1223,26 +1228,48 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     let targetItem = get().downloads.find(d => d.id === id);
     if (!targetItem) return false;
 
+    const requestedResumeWithoutCredentials = options.resumeWithoutCredentials === true;
+    const resumeWithoutCredentials = requestedResumeWithoutCredentials
+      && targetItem.credentialsRequired === true;
+    const forceRequeue = options.forceRequeue === true || resumeWithoutCredentials;
+    const preserveQueuePosition = options.preserveQueuePosition === true || resumeWithoutCredentials;
+
+    if (resumeWithoutCredentials) {
+      // An explicit credentialless retry must not reuse secrets retained by
+      // the in-memory row or by a paused daemon lifecycle. Requeueing below
+      // creates a fresh backend lifecycle with the redacted payload.
+      get().updateDownload(id, {
+        username: undefined,
+        password: undefined,
+        cookies: undefined,
+        headers: undefined,
+      });
+      targetItem = get().downloads.find(download => download.id === id);
+      if (!targetItem) return false;
+    }
+
     if (targetItem.credentialsRequired === true
       && !hasCredentialMaterial(targetItem.password)
       && !hasCredentialMaterial(targetItem.cookies)
       && !hasCredentialMaterial(targetItem.headers)) {
-      const settings = useSettingsStore.getState();
-      const login = getSiteLogin(targetItem.url, settings);
-      let keychainPassword: string | null = null;
-      if (login && settings.keychainAccessReady) {
-        try {
-          keychainPassword = await invoke('get_keychain_password', { id: login.id });
-        } catch (error) {
-          console.warn('Could not fetch keychain password for resume:', error);
+      if (!resumeWithoutCredentials) {
+        const settings = useSettingsStore.getState();
+        const login = getSiteLogin(targetItem.url, settings);
+        let keychainPassword: string | null = null;
+        if (login && settings.keychainAccessReady) {
+          try {
+            keychainPassword = await invoke('get_keychain_password', { id: login.id });
+          } catch (error) {
+            console.warn('Could not fetch keychain password for resume:', error);
+          }
         }
-      }
-      if (!hasCredentialMaterial(keychainPassword)) {
-        if (login && !settings.keychainAccessReady && !settings.keychainPromptDismissed) {
-          settings.setShowKeychainModal(true);
+        if (!hasCredentialMaterial(keychainPassword)) {
+          if (login && !settings.keychainAccessReady && !settings.keychainPromptDismissed) {
+            settings.setShowKeychainModal(true);
+          }
+          markCredentialsRequired(id);
+          return false;
         }
-        markCredentialsRequired(id);
-        return false;
       }
       clearCredentialsRequired(id);
     }
@@ -1250,7 +1277,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     setDownloadControlIntent(id, 'resume');
     let previousStatus = targetItem.status;
     try {
-      if (options.forceRequeue) {
+      if (forceRequeue) {
         // Fence any older enqueue before replacing a paused backend lifecycle.
         // Otherwise a late addUri result can win the race and make this
         // selection start outside the requested order.
@@ -1267,7 +1294,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       const currentTargetItem = targetItem;
 
       if (
-        options.forceRequeue &&
+        forceRequeue &&
         currentTargetItem.status === 'paused' &&
         get().backendRegisteredIds.has(id)
       ) {
@@ -1275,7 +1302,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         get().unregisterBackendIds([id]);
       }
 
-      if (options.forceRequeue) {
+      if (forceRequeue) {
         set(state => ({
           pendingOrder: state.pendingOrder.filter(value => value !== id)
         }));
@@ -1311,7 +1338,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         (d.queueId || MAIN_QUEUE_ID) === (currentTargetItem.queueId || MAIN_QUEUE_ID)
       );
       const maxPos = queueItems.reduce((max, d) => Math.max(max, d.queuePosition ?? 0), -1);
-      const queuePosition = options.preserveQueuePosition
+      const queuePosition = preserveQueuePosition
         ? currentTargetItem.queuePosition
         : maxPos + 1;
 
@@ -1340,7 +1367,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         return false;
       }
 
-      const resumedExisting = options.forceRequeue
+      const resumedExisting = forceRequeue
         ? false
         : await invoke('resume_download', {
             id,
@@ -1987,9 +2014,10 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     true,
     preemptDispatch
   ),
-  startSelected: (ids) => {
+  startSelected: (ids, options = {}) => {
     const orderedIds = [...new Set(ids)];
     if (orderedIds.length === 0) return Promise.resolve(0);
+    const resumeWithoutCredentialsIds = new Set(options.resumeWithoutCredentialsIds ?? []);
 
     return runDownloadLifecycleOperations(orderedIds, 'start-selected', async () => {
       await waitForPendingStartupResume();
@@ -2033,7 +2061,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         }
         const resumed = await resumeDownloadInternal(id, {
           preserveQueuePosition: true,
-          forceRequeue: true
+          forceRequeue: true,
+          resumeWithoutCredentials: resumeWithoutCredentialsIds.has(id)
         });
         if (resumed && !isCurrentQueueControlGeneration(queueId, generation)) {
           // A queue pause can win while this item's requeue is in flight. The

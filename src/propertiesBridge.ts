@@ -301,7 +301,8 @@ export type PropertiesActionRequest = {
   payload?: PropertiesPatch
     | { selectedIndices: number[] | null }
     | { limit: string | null }
-    | { maxPeers: string | null; peerSpeedLimit: string | null };
+    | { maxPeers: string | null; peerSpeedLimit: string | null }
+    | { resumeWithoutCredentials: boolean };
 };
 
 export type PropertiesActionResult = {

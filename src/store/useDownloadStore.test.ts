@@ -1536,6 +1536,68 @@ describe('useDownloadStore', () => {
     expect(enqueueIds).toEqual(['selected-undispatched-a', 'selected-undispatched-b']);
   });
 
+  it('limits credentialless selected resume to the explicitly approved rows', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        {
+          id: 'selected-with-credentials',
+          url: 'http://with-credentials',
+          fileName: 'with-credentials',
+          destination: '/tmp',
+          status: 'paused',
+          category: 'Other',
+          dateAdded: '',
+          queueId: 'selection-credential-scope',
+          queuePosition: 0,
+          password: 'secret',
+        },
+        {
+          id: 'selected-without-credentials',
+          url: 'http://without-credentials',
+          fileName: 'without-credentials',
+          destination: '/tmp',
+          status: 'paused',
+          category: 'Other',
+          dateAdded: '',
+          queueId: 'selection-credential-scope',
+          queuePosition: 1,
+          credentialsRequired: true,
+        },
+      ] as any[],
+    });
+
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'enqueue_download') {
+        const item = (args as { item: { id: string; password: string | null } }).item;
+        return { id: item.id, filename: item.id };
+      }
+      if (command === 'get_pending_order') return [
+        'selected-with-credentials',
+        'selected-without-credentials',
+      ];
+      if (command === 'move_many_in_queue') return [
+        'selected-with-credentials',
+        'selected-without-credentials',
+      ];
+      return undefined;
+    });
+
+    await expect(useDownloadStore.getState().startSelected([
+      'selected-with-credentials',
+      'selected-without-credentials',
+    ], {
+      resumeWithoutCredentialsIds: ['selected-without-credentials'],
+    })).resolves.toBe(2);
+
+    const enqueues = vi.mocked(ipc.invokeCommand).mock.calls
+      .filter(([command]) => command === 'enqueue_download')
+      .map(([, args]) => (args as { item: { id: string; password: string | null } }).item);
+    expect(enqueues).toEqual([
+      expect.objectContaining({ id: 'selected-with-credentials', password: 'secret' }),
+      expect.objectContaining({ id: 'selected-without-credentials', password: null }),
+    ]);
+  });
+
   it('pauses queued items through the global pause action', async () => {
     useDownloadStore.setState({
       downloads: [
@@ -2245,6 +2307,50 @@ describe('useDownloadStore', () => {
       expect.anything()
     );
     expect(useDownloadStore.getState().downloads[0].status).toBe('paused');
+  });
+
+  it('explicitly requeues a credential-marked download without saved credentials', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'credentialless-resume',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        destination: '/tmp',
+        status: 'paused',
+        category: 'Other',
+        dateAdded: '',
+        credentialsRequired: true,
+        hasBeenDispatched: true,
+      }] as any[],
+      backendRegisteredIds: new Set(['credentialless-resume'])
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'get_pending_order') return ['credentialless-resume'];
+      if (command === 'enqueue_download') return { id: 'credentialless-resume', filename: 'file.bin' };
+      return undefined;
+    });
+
+    await expect(useDownloadStore.getState().resumeDownload('credentialless-resume', {
+      resumeWithoutCredentials: true
+    })).resolves.toBe(true);
+
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('resume_download', expect.anything());
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('get_keychain_password', expect.anything());
+    expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'enqueue_download',
+      expect.objectContaining({
+        item: expect.objectContaining({
+          username: null,
+          password: null,
+          cookies: null,
+          headers: null,
+        })
+      })
+    );
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      credentialsRequired: false,
+      status: 'queued',
+    });
   });
 
   it('preserves backend rejection reasons while auto-resuming saved queued items', async () => {
