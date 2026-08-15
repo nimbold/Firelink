@@ -5377,7 +5377,55 @@ async fn resume_download(
         state.queue_manager.release_registered_id(&id).await;
         return Ok(false);
     };
-    if state.queue_manager.is_waiting_to_seed(&id) {
+    let waiting_to_seed = state.queue_manager.is_waiting_to_seed(&id);
+    let status = match aria2_download_status(
+        state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+        &state.aria2_secret,
+        &gid,
+    )
+    .await
+    {
+        Ok(status) => status,
+        Err(error) if aria2_gid_not_found(&error) => {
+            // Aria2 GIDs are daemon-scoped. A daemon restart or an external
+            // removal can leave Firelink's mapping pointing at a GID that no
+            // longer exists. Treat only that verified absence as an
+            // unresumable lifecycle so the frontend can re-enqueue the saved
+            // payload; transport/RPC failures must remain errors because
+            // re-enqueueing without knowing the daemon state could duplicate
+            // an existing transfer.
+            log::warn!(
+                "aria2 resume [stage=status id={} gid={} result=stale_gid action=reenqueue]",
+                id,
+                gid
+            );
+            state.queue_manager.next_aria2_control_epoch(&id).await;
+            state.queue_manager.cancel_aria2_retries(&id).await;
+            state.queue_manager.clear_aria2_retry_state(&id).await;
+            state.queue_manager.forget_aria2_gid(&id).await;
+            state.queue_manager.release_permit(&id).await;
+            state.queue_manager.release_registered_id(&id).await;
+            return Ok(false);
+        }
+        Err(error) if waiting_to_seed => {
+            // WaitingToSeed normally has no active download permit, so a
+            // temporary RPC outage must keep using the seed scheduler rather
+            // than turning a recoverable wake-up into a failed resume. The
+            // verified missing-GID case above still retires the stale
+            // lifecycle and permits a fresh enqueue.
+            log::warn!(
+                "aria2 resume [stage=status id={} gid={} result=unverified_waiting_seed_status error_class={}]",
+                id,
+                gid,
+                crate::retry::network_error_class(&error)
+            );
+            state.queue_manager.wake_seed_waiters();
+            drop(control_guard);
+            return Ok(true);
+        }
+        Err(error) => return Err(error),
+    };
+    if waiting_to_seed {
         // WaitingToSeed is an intentional paused GID with no download
         // permit. A resume request only wakes the Firelink seed scheduler;
         // it must not bypass the seed-slot admission gate.
@@ -5385,12 +5433,6 @@ async fn resume_download(
         drop(control_guard);
         return Ok(true);
     }
-    let status = aria2_download_status(
-        state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
-        &state.aria2_secret,
-        &gid,
-    )
-    .await?;
     match status.as_str() {
         "paused" => {
             let control_epoch = state.queue_manager.next_aria2_control_epoch(&id).await;
@@ -11551,6 +11593,7 @@ mod tests {
         parse_media_playlist_metadata,
         normalize_media_connections,
         validate_enqueue_url, validate_enqueue_uris, validate_keychain_grant_request_id,
+        aria2_gid_not_found,
         retained_torrent_id_from_persisted_record,
         retained_torrent_info_hash_from_persisted_record,
         merge_durable_torrent_telemetry, torrent_identity_magnet, torrent_move_path_pair,
@@ -11568,6 +11611,15 @@ mod tests {
         assert!(validate_keychain_grant_request_id("").is_err());
         assert!(validate_keychain_grant_request_id("   ").is_err());
         assert!(validate_keychain_grant_request_id(&"x".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn aria2_missing_gid_detection_is_distinct_from_transport_and_resource_errors() {
+        assert!(aria2_gid_not_found(
+            r#"{"code": 1, "message": "GID#abc is not found"}"#
+        ));
+        assert!(!aria2_gid_not_found("error trying to connect: connection refused"));
+        assert!(!aria2_gid_not_found("aria2 error code 3: Resource not found"));
     }
 
     #[test]
