@@ -99,6 +99,7 @@ const uk = {
       failed: 'Помилка',
       retrying: 'Повторна спроба',
       moving: 'Переміщення даних',
+      allocatingFiles: 'Виділення місця для файлів…',
     },
     errors: {
       nameResolutionRetrying: 'Повторна спроба через системний DNS',

@@ -308,6 +308,7 @@ export const PropertiesWindowBridgeHost = () => {
         }, {
           queueName: queue?.name,
           windowChrome,
+          allocationPending: store.allocationPendingIds.has(downloadId),
         }),
       });
       return true;
@@ -688,7 +689,10 @@ export const PropertiesWindowBridgeHost = () => {
           snapshotRevisions.delete(windowLabel);
           clearWindowActionState(windowLabel);
           void invoke('properties_window_registry_remove_for_download', { id: downloadId }).catch(() => undefined);
-        } else if (next !== before) {
+        } else if (
+          next !== before
+          || state.allocationPendingIds.has(downloadId) !== previous.allocationPendingIds.has(downloadId)
+        ) {
           snapshotCoalescer.schedule(windowLabel);
         }
       }

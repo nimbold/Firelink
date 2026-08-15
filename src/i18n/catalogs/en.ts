@@ -99,6 +99,7 @@ const common = {
       failed: 'Failed',
       retrying: 'Retrying',
       moving: 'Moving data',
+      allocatingFiles: 'Allocating files…',
     },
     errors: {
       nameResolutionRetrying: 'Retrying with system network resolver',

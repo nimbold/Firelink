@@ -99,6 +99,7 @@ const ru = {
       failed: 'Ошибка',
       retrying: 'Повторная попытка',
       moving: 'Перемещение данных',
+      allocatingFiles: 'Выделение места под файлы…',
     },
     errors: {
       nameResolutionRetrying: 'Повторная попытка через системный DNS',

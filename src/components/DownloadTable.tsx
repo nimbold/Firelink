@@ -161,7 +161,8 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     moveManyInQueueToPosition,
     startAll,
     pauseAll,
-    startSelected
+    startSelected,
+    allocationPendingIds
   } = useDownloadStore();
   const progressMap = useDownloadProgressStore(state => state.progressMap);
   const { addToast } = useToast();
@@ -2303,6 +2304,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
                       <DownloadItemComponent
                         key={d.id}
                         download={d}
+                        allocationPending={allocationPendingIds.has(d.id)}
                         queueIndex={queuePositionsByDownloadId.get(d.id)?.index ?? -1}
                         columnOrder={orderedColumns}
                         columnAlignments={columnAlignments}

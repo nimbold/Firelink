@@ -1,6 +1,6 @@
 import React from 'react';
 import { useDownloadProgressStore } from '../store/downloadProgressStore';
-import { Play, Pause, MoreVertical, Clock } from 'lucide-react';
+import { Play, Pause, MoreVertical, Clock, RefreshCw } from 'lucide-react';
 import type { DownloadItem as DownloadItemType } from '../bindings/DownloadItem';
 import {
   canPauseDownload,
@@ -28,6 +28,7 @@ import {
 
 interface DownloadItemProps {
   download: DownloadItemType;
+  allocationPending: boolean;
   queueIndex: number;
   columnOrder: DownloadTableColumnKey[];
   columnAlignments: Record<DownloadTableColumnKey, DownloadColumnAlignment>;
@@ -51,6 +52,7 @@ interface DownloadItemProps {
 
 export const DownloadItem = React.memo<DownloadItemProps>(({
   download,
+  allocationPending,
   queueIndex,
   columnOrder,
   columnAlignments,
@@ -200,14 +202,18 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
       status: download.status,
     });
   const displayPercent = `${(displayFraction * 100).toFixed(0)}%`;
-  const displaySpeed = download.status === 'seeding'
+  const displaySpeed = allocationPending
+    ? '-'
+    : download.status === 'seeding'
     ? liveProgress?.upload_speed ?? '-'
     : download.status === 'downloading' || download.status === 'verifying'
     ? liveProgress?.speed ?? download.speed
     : download.status === 'processing'
       ? t($ => $.downloads.values.processing)
       : '-';
-  const displayEta = download.status === 'seeding'
+  const displayEta = allocationPending
+    ? '-'
+    : download.status === 'seeding'
     ? typeof download.torrentSeedRemaining === 'number' && Number.isFinite(download.torrentSeedRemaining) && download.torrentSeedRemaining > 0
       ? formatTorrentDuration(download.torrentSeedRemaining * 60, i18n.language)
       : '-'
@@ -228,7 +234,9 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     const value = download.status === 'completed' ? formatDownloadTotal(sizeDisplay) : sizeDisplay.fallback;
     return value === 'Unknown' ? t($ => $.addDownloads.unknown) : value;
   })();
-  const downloadStatusLabel = t($ => $.downloads.status[download.status]);
+  const downloadStatusLabel = allocationPending
+    ? t($ => $.downloads.status.allocatingFiles)
+    : t($ => $.downloads.status[download.status]);
   const visibleErrorStatusLabel = download.lastErrorKind === 'nameResolution'
     ? download.status === 'retrying' && download.lastResolverFallback === true
       ? t($ => $.downloads.errors.nameResolutionRetrying)
@@ -318,9 +326,10 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
           </div>
         ) : (
           <div className="download-cell-content download-status-content">
-            <div className="download-progress-track">
+            <div className="download-progress-track" aria-label={allocationPending ? downloadStatusLabel : undefined}>
               <div
                 className={`download-progress-fill ${
+                  allocationPending ? 'allocating' :
                   download.status === 'paused' ? 'paused' :
                   download.status === 'seeding' ? 'seeding' :
                   download.status === 'processing' ? 'processing' :
@@ -329,12 +338,14 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                   download.status === 'queued' || download.status === 'staged' ? 'queued' :
                   download.status === 'retrying' ? 'retrying' : ''
                 }`}
-                style={{ width: `${displayFraction * 100}%` }}
+                style={{ width: allocationPending ? undefined : `${displayFraction * 100}%` }}
               />
             </div>
             <span
               title={
-                download.lastError && (
+                allocationPending
+                  ? downloadStatusLabel
+                  : download.lastError && (
                   download.status === 'failed'
                   || download.status === 'retrying'
                   || download.lastErrorKind === 'destinationAccess'
@@ -349,6 +360,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                   : downloadStatusLabel
               }
               className={`download-status flex items-center gap-1.5 ${
+                allocationPending ? 'download-status-downloading' :
                 download.status === 'paused' ? 'download-status-paused' :
                 download.status === 'seeding' ? 'download-status-seeding' :
                 download.status === 'failed' ? 'download-status-failed' :
@@ -360,7 +372,12 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                 download.status === 'retrying' ? 'download-status-retrying' : ''
               }`}
             >
-              {(download.status === 'queued' || download.status === 'staged') && queueIndex !== -1 ? (
+              {allocationPending ? (
+                <>
+                  <RefreshCw size={12} className="animate-spin motion-reduce:animate-none shrink-0" aria-hidden="true" />
+                  <span className="truncate">{downloadStatusLabel}</span>
+                </>
+              ) : (download.status === 'queued' || download.status === 'staged') && queueIndex !== -1 ? (
                 <>
                   <Clock size={12} className={download.status === 'queued' ? 'animate-pulse motion-reduce:animate-none shrink-0' : 'shrink-0'} />
                   <span className="truncate">

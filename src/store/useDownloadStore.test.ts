@@ -94,6 +94,7 @@ describe('useDownloadStore', () => {
     useDownloadStore.setState({
       downloads: [],
       backendRegisteredIds: new Set(),
+      allocationPendingIds: new Set(),
       pendingOrder: [],
       isAddModalOpen: false,
       pendingAddUrls: '',
@@ -1277,6 +1278,67 @@ describe('useDownloadStore', () => {
     expect(
       vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) => command === 'remove_download')
     ).toHaveLength(2);
+  });
+
+  it('exposes an indeterminate allocation phase while normal enqueue is blocked', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'allocation-phase',
+        url: 'https://example.test/file.bin',
+        fileName: 'file.bin',
+        destination: '/tmp',
+        status: 'queued',
+        category: 'Other',
+        dateAdded: '',
+        queueId: 'MAIN',
+      }] as any[],
+      backendRegisteredIds: new Set(),
+      allocationPendingIds: new Set(),
+    });
+
+    let resolveEnqueue!: (value: { id: string; filename: string }) => void;
+    const enqueue = new Promise<{ id: string; filename: string }>(resolve => {
+      resolveEnqueue = resolve;
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation((command: string) => {
+      if (command === 'enqueue_download') return enqueue as never;
+      if (command === 'get_pending_order') return Promise.resolve(['allocation-phase']) as never;
+      return Promise.resolve(undefined) as never;
+    });
+
+    const dispatch = dispatchItem('allocation-phase');
+    await vi.waitFor(() => {
+      expect(useDownloadStore.getState().allocationPendingIds.has('allocation-phase')).toBe(true);
+    });
+
+    resolveEnqueue({ id: 'allocation-phase', filename: 'file.bin' });
+    await expect(dispatch).resolves.toBe(true);
+    expect(useDownloadStore.getState().allocationPendingIds.has('allocation-phase')).toBe(false);
+  });
+
+  it('clears allocation state when a terminal status wins the race', () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'allocation-terminal',
+        url: 'https://example.test/file.bin',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: '',
+      }] as any[],
+      allocationPendingIds: new Set(['allocation-terminal']),
+    });
+
+    useDownloadStore.getState().updateDownload('allocation-terminal', {
+      status: 'failed',
+      lastError: 'disk full',
+    });
+
+    expect(useDownloadStore.getState().allocationPendingIds.has('allocation-terminal')).toBe(false);
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'failed',
+      lastError: 'disk full',
+    });
   });
 
   it('re-enqueues queued transfer edits only after an obsolete dispatch is removed', async () => {

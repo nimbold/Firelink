@@ -99,6 +99,7 @@ const zhCN = {
       failed: '失败',
       retrying: '重试中',
       moving: '正在移动数据',
+      allocatingFiles: '正在分配文件空间…',
     },
     errors: {
       nameResolutionRetrying: '正在使用系统 DNS 重试',

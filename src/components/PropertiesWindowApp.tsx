@@ -1140,10 +1140,13 @@ export const PropertiesWindowApp = () => {
   });
   const isPromptFooter = footerActions.includes('keepEditing');
   const fileSelectionEditingEnabled = editingEnabled && isTorrentFileSelectionEditable(snapshot.status);
+  const allocationPending = snapshot.allocationPending === true;
   const total = snapshot.size || (snapshot.totalBytes === undefined
     ? t($ => $.addDownloads.unknownSize)
     : `${snapshot.totalIsEstimate ? '~' : ''}${formatDownloadBytes(snapshot.totalBytes)}`);
-  const statusLabel = t($ => $.downloads.status[snapshot.status]);
+  const statusLabel = allocationPending
+    ? t($ => $.downloads.status.allocatingFiles)
+    : t($ => $.downloads.status[snapshot.status]);
   const connectionPresentation = getPropertiesConnectionPresentation(snapshot);
   const connectionHeaderLabel = connectionPresentation.labelKey === 'fragmentConcurrency'
     ? t($ => $.properties.fragmentConcurrency)
@@ -1183,8 +1186,8 @@ export const PropertiesWindowApp = () => {
     snapshot.queuePosition,
     position => t($ => $.properties.queuePosition, { position }),
   );
-  const progressPercent = `${Math.round(progress * 100)}%`;
-  const statusTone = propertiesStatusTone(snapshot.status);
+  const progressPercent = allocationPending ? '—' : `${Math.round(progress * 100)}%`;
+  const statusTone = allocationPending ? 'downloading' : propertiesStatusTone(snapshot.status);
   const lifecycleLabel = lifecycleAction === 'pause'
     ? t($ => $.downloads.actions.pause)
     : lifecycleAction === 'resume'
@@ -1269,15 +1272,27 @@ export const PropertiesWindowApp = () => {
           </div>
         </div>
         <div className="properties-window-progress-row" dir="ltr">
-          <div className="properties-window-progress-track" aria-label={t($ => $.properties.progress)} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress * 100)}>
-            <div className={`properties-window-progress-fill properties-progress-${statusTone}`} style={{ width: `${progress * 100}%` }} />
+          <div
+            className="properties-window-progress-track"
+            aria-label={t($ => $.properties.progress)}
+            aria-busy={allocationPending}
+            aria-valuetext={allocationPending ? statusLabel : undefined}
+            role="progressbar"
+            aria-valuemin={allocationPending ? undefined : 0}
+            aria-valuemax={allocationPending ? undefined : 100}
+            aria-valuenow={allocationPending ? undefined : Math.round(progress * 100)}
+          >
+            <div
+              className={`properties-window-progress-fill ${allocationPending ? 'properties-progress-allocating' : `properties-progress-${statusTone}`}`}
+              style={{ width: allocationPending ? undefined : `${progress * 100}%` }}
+            />
           </div>
           <span className="properties-window-progress-percent">{progressPercent}</span>
         </div>
         <div className="properties-window-metrics" dir="ltr">
           <div className="properties-metric-card"><Download size={14} /><div><span>{t($ => $.properties.size)}</span><strong>{formatDownloadBytes(snapshot.downloadedBytes ?? 0)} / {total}</strong></div></div>
-          <div className="properties-metric-card"><Gauge size={14} /><div><span>{t($ => $.properties.speed)}</span><strong>{snapshot.speed || '—'}</strong></div></div>
-          <div className="properties-metric-card"><Timer size={14} /><div><span>{t($ => $.properties.eta)}</span><strong>{snapshot.eta || '—'}</strong></div></div>
+          <div className="properties-metric-card"><Gauge size={14} /><div><span>{t($ => $.properties.speed)}</span><strong>{allocationPending ? '—' : snapshot.speed || '—'}</strong></div></div>
+          <div className="properties-metric-card"><Timer size={14} /><div><span>{t($ => $.properties.eta)}</span><strong>{allocationPending ? '—' : snapshot.eta || '—'}</strong></div></div>
           {connectionPresentation.showHeaderMetric && <div className="properties-metric-card"><Users size={14} /><div><span className={connectionPresentation.labelKey === 'torrentPeersSeeders' ? 'properties-metric-label--wide' : undefined}>{connectionHeaderLabel}</span>{connectionValue}</div></div>}
           {isTorrent && <>
             <div className="properties-metric-card"><Upload size={14} /><div><span>{t($ => $.properties.torrentUploaded)}</span><strong>{formatDownloadBytes(snapshot.torrentUploadedBytes ?? 0)}</strong></div></div>

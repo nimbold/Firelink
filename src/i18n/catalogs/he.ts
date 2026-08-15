@@ -99,6 +99,7 @@ const he = {
       failed: 'נכשל',
       retrying: 'ניסיון חוזר',
       moving: 'מעביר נתונים',
+      allocatingFiles: 'מקצה קבצים…',
     },
     errors: {
       nameResolutionRetrying: 'מנסה שוב באמצעות פותר השמות של המערכת',

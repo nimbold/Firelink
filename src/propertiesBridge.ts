@@ -169,12 +169,14 @@ type SafePropertiesFields = Pick<DownloadItem, (typeof PROPERTIES_SNAPSHOT_KEYS)
 export type PropertiesSnapshotContext = {
   queueName?: string;
   windowChrome?: PropertiesWindowChrome;
+  allocationPending?: boolean;
 };
 
 export type PropertiesSnapshot = SafePropertiesFields & {
   appearance: DocumentAppearance;
   windowChrome: PropertiesWindowChrome;
   queueName?: string;
+  allocationPending?: boolean;
   lastErrorKind?: DownloadErrorKind;
   lastResolverFallback?: boolean;
   activeConnections?: number;
@@ -411,6 +413,7 @@ const copyWithoutSecrets = (
     windowChrome: context?.windowChrome ?? DEFAULT_PROPERTIES_WINDOW_CHROME,
     ...(lastErrorKind ? { lastErrorKind } : {}),
     ...(context?.queueName ? { queueName: context.queueName } : {}),
+    ...(context?.allocationPending === true ? { allocationPending: true } : {}),
     ...(live?.progress ? {
       fraction: live.progress.fraction,
       speed: item.status === 'seeding'

@@ -99,6 +99,7 @@ const fa = {
       failed: 'ناموفق',
       retrying: 'در حال تلاش مجدد',
       moving: 'در حال جابه‌جایی داده',
+      allocatingFiles: 'در حال تخصیص فایل‌ها…',
     },
     errors: {
       nameResolutionRetrying: 'تلاش مجدد با DNS سیستم',

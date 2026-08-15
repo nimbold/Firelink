@@ -434,7 +434,18 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
       ) {
         return false;
       }
-      const accepted = await invoke('enqueue_download', { item: enqueueItem });
+      const showsAllocationPhase = item.isMedia !== true && item.isTorrent !== true;
+      if (showsAllocationPhase) {
+        useDownloadStore.getState().setAllocationPending(id, true);
+      }
+      let accepted;
+      try {
+        accepted = await invoke('enqueue_download', { item: enqueueItem });
+      } finally {
+        if (showsAllocationPhase) {
+          useDownloadStore.getState().setAllocationPending(id, false);
+        }
+      }
       backendAccepted = true;
       if (!isCurrentDownloadLifecycle(id, lifecycleGeneration)) {
         await removeStaleBackendDispatch(id);
@@ -1014,8 +1025,10 @@ interface DownloadState {
   pendingOrder: string[];
   setPendingOrder: (order: string[]) => void;
   backendRegisteredIds: Set<string>;
+  allocationPendingIds: Set<string>;
   registerBackendIds: (ids: string[]) => void;
   unregisterBackendIds: (ids: string[]) => void;
+  setAllocationPending: (id: string, pending: boolean) => void;
   applyProperties: (id: string, updates: Partial<DownloadItem>) => Promise<void>;
   moveInQueue: (ids: string | string[], direction: 'up' | 'down') => Promise<void>;
   moveManyInQueueToPosition: (
@@ -1606,6 +1619,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     }
   },
   backendRegisteredIds: new Set(),
+  allocationPendingIds: new Set(),
   registerBackendIds: (ids) => set((state) => {
     const nextSet = new Set(state.backendRegisteredIds);
     for (const id of ids) nextSet.add(id);
@@ -1615,6 +1629,12 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     const nextSet = new Set(state.backendRegisteredIds);
     for (const id of ids) nextSet.delete(id);
     return { backendRegisteredIds: nextSet };
+  }),
+  setAllocationPending: (id, pending) => set((state) => {
+    const nextSet = new Set(state.allocationPendingIds);
+    if (pending) nextSet.add(id);
+    else nextSet.delete(id);
+    return { allocationPendingIds: nextSet };
   }),
   isAddModalOpen: false,
   pendingAddUrls: '',
@@ -1868,6 +1888,13 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
           : downloads,
         ...(updates.status === 'paused'
           ? { pendingOrder: state.pendingOrder.filter(value => value !== id) }
+          : {}),
+        ...(updates.status && ['completed', 'failed', 'paused'].includes(updates.status)
+          ? {
+              allocationPendingIds: new Set(
+                [...state.allocationPendingIds].filter(pendingId => pendingId !== id)
+              )
+            }
           : {})
       };
     });
@@ -1905,6 +1932,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       pendingOrder: state.pendingOrder.filter(x => x !== id),
       backendRegisteredIds: new Set(
         Array.from(state.backendRegisteredIds).filter(registeredId => registeredId !== id)
+      ),
+      allocationPendingIds: new Set(
+        Array.from(state.allocationPendingIds).filter(pendingId => pendingId !== id)
       )
     }));
     try {

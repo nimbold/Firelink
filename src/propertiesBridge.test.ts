@@ -258,6 +258,26 @@ describe('Properties window bridge', () => {
     expect(snapshot.queueId).toBe('internal-queue-id');
   });
 
+  it('projects the transient allocation phase without changing the persisted download status', () => {
+    const snapshot = sanitizePropertiesSnapshot({
+      id: 'allocating-1',
+      fileName: 'large.bin',
+      url: 'https://example.test/file',
+      status: 'downloading',
+      category: 'Other',
+      dateAdded: '',
+    } as DownloadItem, {
+      theme: 'dark',
+      fontFamily: 'system',
+      appFontSize: 'standard',
+      listRowDensity: 'standard',
+      locale: 'en',
+    }, undefined, { allocationPending: true });
+
+    expect(snapshot.status).toBe('downloading');
+    expect(snapshot.allocationPending).toBe(true);
+  });
+
   it('does not project Aria2 connection telemetry onto media snapshots', () => {
     const snapshot = sanitizePropertiesSnapshot({
       id: 'media-1',
