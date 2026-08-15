@@ -2734,19 +2734,6 @@ impl<R: tauri::Runtime> QueueManager<R> {
         parse_torrent_peer_diagnostics(result)
     }
 
-    /// Return only aggregate peer/seeder counts for the current Torrent GID.
-    /// No peer addresses, IDs, bitfields, or transfer rates cross the IPC
-    /// boundary.
-    pub async fn get_aria2_torrent_peer_summary(
-        &self,
-        id: &str,
-    ) -> Result<crate::ipc::TorrentPeerSummary, String> {
-        let result = self
-            .get_aria2_torrent_peer_result(id, "peer summary")
-            .await?;
-        parse_torrent_peer_summary(result)
-    }
-
     /// Compute bounded, anonymized swarm availability for the current
     /// Torrent lifecycle. The raw local/peer bitfields are consumed in native
     /// memory and never returned to the frontend.
@@ -5955,9 +5942,14 @@ pub(crate) fn parse_torrent_availability(
     })
 }
 
-fn torrent_peer_summary_from_array(
+struct TorrentPeerCounts {
+    total_peers: u32,
+    total_seeders: u32,
+}
+
+fn torrent_peer_counts_from_array(
     peers: &[serde_json::Value],
-) -> Result<crate::ipc::TorrentPeerSummary, String> {
+) -> Result<TorrentPeerCounts, String> {
     if peers.len() > MAX_TORRENT_PEER_RESPONSE {
         return Err("aria2.getPeers returned too many peers".to_string());
     }
@@ -5973,19 +5965,10 @@ fn torrent_peer_summary_from_array(
             total_seeders = total_seeders.saturating_add(1);
         }
     }
-    Ok(crate::ipc::TorrentPeerSummary {
+    Ok(TorrentPeerCounts {
         total_peers: u32::try_from(peers.len()).unwrap_or(u32::MAX),
         total_seeders,
     })
-}
-
-pub(crate) fn parse_torrent_peer_summary(
-    result: serde_json::Value,
-) -> Result<crate::ipc::TorrentPeerSummary, String> {
-    let peers = result
-        .as_array()
-        .ok_or_else(|| "aria2.getPeers returned a non-array result".to_string())?;
-    torrent_peer_summary_from_array(peers)
 }
 
 pub(crate) fn parse_torrent_peer_diagnostics(
@@ -5994,7 +5977,7 @@ pub(crate) fn parse_torrent_peer_diagnostics(
     let peers = result
         .as_array()
         .ok_or_else(|| "aria2.getPeers returned a non-array result".to_string())?;
-    let summary = torrent_peer_summary_from_array(peers)?;
+    let summary = torrent_peer_counts_from_array(peers)?;
     let mut sanitized = Vec::with_capacity(peers.len().min(MAX_TORRENT_PEER_DIAGNOSTICS));
 
     for peer in peers.iter().take(MAX_TORRENT_PEER_DIAGNOSTICS) {
@@ -8345,27 +8328,9 @@ mod tests {
     }
 
     #[test]
-    fn torrent_peer_summary_counts_all_seeders_without_returning_peer_data() {
-        let result = serde_json::json!([
-            {"ip": "192.0.2.10", "seeder": "true", "bitfield": "secret"},
-            {"ip": "192.0.2.11", "seeder": false},
-            {"ip": "192.0.2.12", "seeder": true}
-        ]);
-
-        let summary = parse_torrent_peer_summary(result).unwrap();
-        assert_eq!(summary.total_peers, 3);
-        assert_eq!(summary.total_seeders, 2);
-        let serialized = serde_json::to_string(&summary).unwrap();
-        assert!(!serialized.contains("192.0.2."));
-        assert!(!serialized.contains("bitfield"));
-    }
-
-    #[test]
     fn torrent_peer_diagnostics_reject_non_array_results() {
         let error = parse_torrent_peer_diagnostics(serde_json::json!({"peers": []})).unwrap_err();
         assert!(error.contains("non-array"));
-        let summary_error = parse_torrent_peer_summary(serde_json::json!({"peers": []})).unwrap_err();
-        assert!(summary_error.contains("non-array"));
     }
 
     #[test]
@@ -8375,11 +8340,6 @@ mod tests {
         }, "not-a-peer"]))
         .unwrap_err();
         assert!(error.contains("malformed"));
-        let summary_error = parse_torrent_peer_summary(serde_json::json!([{
-            "seeder": true
-        }, "not-a-peer"]))
-        .unwrap_err();
-        assert!(summary_error.contains("malformed"));
     }
 
     fn test_torrent_progress_metadata() -> Vec<crate::ipc::TorrentFile> {

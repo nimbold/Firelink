@@ -349,16 +349,6 @@ pub struct TorrentPeerDiagnostics {
 #[derive(Clone, Debug, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
-pub struct TorrentPeerSummary {
-    #[ts(type = "number")]
-    pub total_peers: u32,
-    #[ts(type = "number")]
-    pub total_seeders: u32,
-}
-
-#[derive(Clone, Debug, Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../src/bindings/")]
 pub struct TorrentFileProgress {
     pub index: u32,
     pub relative_path: String,

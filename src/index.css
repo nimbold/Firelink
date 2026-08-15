@@ -835,6 +835,16 @@ html[data-list-density="relaxed"] {
     white-space: nowrap;
   }
 
+  .properties-metric-card .properties-metric-label--wide {
+    overflow: visible;
+    font-size: 9px;
+    letter-spacing: 0.01em;
+    line-height: 1.15;
+    min-height: 20px;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
   .properties-metric-card strong {
     overflow: hidden;
     color: hsl(var(--text-primary));
@@ -843,6 +853,18 @@ html[data-list-density="relaxed"] {
     font-weight: 650;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .properties-metric-card .properties-torrent-peer-count {
+    display: inline-flex;
+    overflow: visible;
+    align-items: baseline;
+    gap: 1px;
+    text-overflow: clip;
+  }
+
+  .properties-metric-card .properties-torrent-peer-count-primary {
+    color: hsl(var(--accent-color));
   }
 
   .properties-window-destination {

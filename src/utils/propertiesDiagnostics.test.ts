@@ -4,6 +4,7 @@ import {
   formatPropertiesDiagnosticCount,
   getPropertiesAvailabilityDiagnosticState,
   getPropertiesPeerDiagnosticState,
+  hasLiveTorrentPeerWithoutDetails,
 } from './propertiesDiagnostics';
 
 const emptyPeerDiagnostics = {
@@ -48,5 +49,12 @@ describe('Properties peer diagnostics presentation state', () => {
   it('does not reuse peer state for unavailable availability data', () => {
     expect(getPropertiesAvailabilityDiagnosticState(null, false, 'idle')).toBe('unavailable');
     expect(getPropertiesAvailabilityDiagnosticState(null, false, 'error')).toBe('error');
+  });
+
+  it('distinguishes a live connection from an empty peer-detail snapshot', () => {
+    expect(hasLiveTorrentPeerWithoutDetails(1, 0)).toBe(true);
+    expect(hasLiveTorrentPeerWithoutDetails(0, 0)).toBe(false);
+    expect(hasLiveTorrentPeerWithoutDetails(undefined, 0)).toBe(false);
+    expect(hasLiveTorrentPeerWithoutDetails(2, 1)).toBe(false);
   });
 });

@@ -65,26 +65,29 @@ describe('Properties connection presentation', () => {
     })).toEqual({
       kind: 'torrent',
       showHeaderMetric: true,
-      labelKey: 'torrentConnectedPeers',
+      labelKey: 'torrentPeersSeeders',
       value: '—',
+      torrentPeerCounts: {
+        connectedPeers: undefined,
+        connectedSeeders: undefined,
+      },
     });
   });
 
-  it('exposes the explicit live peer and seeder summary values', () => {
+  it('uses live connected peer and seeder counts from the Properties snapshot', () => {
     expect(getPropertiesConnectionPresentation({
       isMedia: false,
       isTorrent: true,
-    }, {
-      totalPeers: 41,
-      totalSeeders: 2,
+      torrentConnectedPeers: 10,
+      torrentConnectedSeeders: 2,
     })).toEqual({
       kind: 'torrent',
       showHeaderMetric: true,
-      labelKey: 'torrentConnectedPeers',
+      labelKey: 'torrentPeersSeeders',
       value: '—',
-      torrentPeerSummary: {
-        totalPeers: 41,
-        totalSeeders: 2,
+      torrentPeerCounts: {
+        connectedPeers: 10,
+        connectedSeeders: 2,
       },
     });
   });

@@ -7471,17 +7471,6 @@ async fn get_torrent_peers(
 }
 
 #[tauri::command]
-async fn get_torrent_peer_summary(
-    caller: tauri::WebviewWindow,
-    properties: tauri::State<'_, properties_window::PropertiesWindowRegistry>,
-    state: tauri::State<'_, AppState>,
-    id: String,
-) -> Result<crate::ipc::TorrentPeerSummary, String> {
-    properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
-    state.queue_manager.get_aria2_torrent_peer_summary(&id).await
-}
-
-#[tauri::command]
 async fn get_torrent_availability(
     caller: tauri::WebviewWindow,
     properties: tauri::State<'_, properties_window::PropertiesWindowRegistry>,
@@ -11194,7 +11183,7 @@ mod tests {
         observe_aria2_connections, observe_aria2_connections_with_epoch,
         Aria2ConnectionObservation, Aria2ConnectionSample, Aria2RecoveryReason,
         FrontendExitFlush,
-        aria2_active_connection_count,
+        aria2_active_connection_count, aria2_nonnegative_count,
         parse_media_playlist_metadata,
         normalize_media_connections,
         validate_enqueue_url, validate_enqueue_uris, validate_keychain_grant_request_id,
@@ -11734,6 +11723,10 @@ mod tests {
             0
         );
         assert_eq!(aria2_active_connection_count(&json!({})), 0);
+        assert_eq!(aria2_nonnegative_count(&json!({"numSeeders": "6"}), "numSeeders"), Some(6));
+        assert_eq!(aria2_nonnegative_count(&json!({"numSeeders": 6}), "numSeeders"), Some(6));
+        assert_eq!(aria2_nonnegative_count(&json!({"numSeeders": "-1"}), "numSeeders"), None);
+        assert_eq!(aria2_nonnegative_count(&json!({}), "numSeeders"), None);
     }
 
     #[test]
@@ -13940,17 +13933,23 @@ struct Aria2ConnectionSample<'a> {
     now: Instant,
 }
 
-fn aria2_active_connection_count(status_info: &serde_json::Value) -> i32 {
+fn aria2_count_value(value: &serde_json::Value) -> Option<i32> {
+    value
+        .as_str()
+        .and_then(|value| value.parse::<i64>().ok())
+        .or_else(|| value.as_i64())
+        .and_then(|value| i32::try_from(value).ok())
+}
+
+fn aria2_nonnegative_count(status_info: &serde_json::Value, key: &str) -> Option<i32> {
     status_info
-        .get("connections")
-        .and_then(|value| {
-            value
-                .as_str()
-                .and_then(|value| value.parse::<i32>().ok())
-                .or_else(|| value.as_i64().and_then(|value| i32::try_from(value).ok()))
-        })
+        .get(key)
+        .and_then(aria2_count_value)
         .filter(|value| *value >= 0)
-        .unwrap_or(0)
+}
+
+fn aria2_active_connection_count(status_info: &serde_json::Value) -> i32 {
+    aria2_nonnegative_count(status_info, "connections").unwrap_or(0)
 }
 
 const ARIA2_CONNECTION_RECOVERY_DELAY: Duration = Duration::from_secs(30);
@@ -14968,7 +14967,7 @@ pub fn run() {
                                     let speed_bytes = status_info.get("downloadSpeed").and_then(|s| s.as_str()).unwrap_or("0").parse::<f64>().unwrap_or(0.0);
                                     let uploaded_bytes = status_info.get("uploadLength").and_then(|s| s.as_str()).and_then(|value| value.parse::<u64>().ok());
                                     let upload_speed_bytes = status_info.get("uploadSpeed").and_then(|s| s.as_str()).and_then(|value| value.parse::<f64>().ok());
-                                    let num_seeders = status_info.get("numSeeders").and_then(|s| s.as_str()).and_then(|value| value.parse::<i32>().ok());
+                                    let num_seeders = aria2_nonnegative_count(status_info, "numSeeders");
                                     let is_seeder = status_info.get("seeder").is_some_and(|value| {
                                         value.as_str() == Some("true") || value.as_bool() == Some(true)
                                     });
@@ -15558,7 +15557,7 @@ pub fn run() {
             authorize_keychain_access,
             acknowledge_pairing_token_change,
             check_file_exists, toggle_tray_icon, set_extension_pairing_token,
-            get_extension_server_port, set_extension_frontend_ready, ack_frontend_exit, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, get_torrent_peer_summary, get_torrent_availability, get_torrent_file_progress, get_torrent_piece_progress, get_torrent_file_selection, set_torrent_file_selection, get_torrent_details, get_torrent_magnet_link, export_torrent_metadata, move_torrent_data, cancel_torrent_move_data, verify_torrent_data, get_torrent_web_seeds, set_torrent_web_seeds, set_torrent_max_open_files, set_torrent_overall_upload_limit, set_global_speed_limit, remove_download, get_download_primary_path,
+            get_extension_server_port, set_extension_frontend_ready, ack_frontend_exit, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, get_torrent_availability, get_torrent_file_progress, get_torrent_piece_progress, get_torrent_file_selection, set_torrent_file_selection, get_torrent_details, get_torrent_magnet_link, export_torrent_metadata, move_torrent_data, cancel_torrent_move_data, verify_torrent_data, get_torrent_web_seeds, set_torrent_web_seeds, set_torrent_max_open_files, set_torrent_overall_upload_limit, set_global_speed_limit, remove_download, get_download_primary_path,
             detach_download_for_reconfigure,
             enqueue_download, enqueue_many, cancel_enqueue_generation, move_in_queue, move_many_in_queue, remove_from_queue, get_pending_order,
             commands::reveal_in_file_manager, commands::open_downloaded_file,

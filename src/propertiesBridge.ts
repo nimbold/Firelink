@@ -180,7 +180,8 @@ export type PropertiesSnapshot = SafePropertiesFields & {
   activeConnections?: number;
   requestedConnections?: number;
   uploadSpeed?: string;
-  torrentSeeders?: number;
+  torrentConnectedPeers?: number;
+  torrentConnectedSeeders?: number;
   moveProgress?: number;
   hasPassword: boolean;
   hasCookies: boolean;
@@ -425,9 +426,11 @@ const copyWithoutSecrets = (
         ? { totalIsEstimate: live.progress.total_is_estimate }
         : {}),
       ...(live.progress.active_connections !== undefined
-        && item.isTorrent !== true
-        && item.isMedia !== true
-        ? { activeConnections: live.progress.active_connections }
+        ? item.isTorrent === true
+          ? { torrentConnectedPeers: live.progress.active_connections }
+          : item.isMedia !== true
+            ? { activeConnections: live.progress.active_connections }
+            : {}
         : {}),
       ...(item.isTorrent !== true
         && item.isMedia !== true
@@ -440,8 +443,8 @@ const copyWithoutSecrets = (
       ...(live.progress.upload_speed !== undefined
         ? { uploadSpeed: live.progress.upload_speed }
         : {}),
-      ...(live.progress.num_seeders !== undefined
-        ? { torrentSeeders: live.progress.num_seeders }
+      ...(live.progress.num_seeders !== undefined && item.isTorrent === true
+        ? { torrentConnectedSeeders: live.progress.num_seeders }
         : {}),
       ...(live.progress.torrent_seeded_seconds !== undefined
         ? { torrentSeededSeconds: live.progress.torrent_seeded_seconds }

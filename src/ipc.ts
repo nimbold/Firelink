@@ -20,7 +20,6 @@ import type { PlatformInfo } from './bindings/PlatformInfo';
 import type { QueueConcurrencyConfig } from './bindings/QueueConcurrencyConfig';
 import type { TorrentMetadata } from './bindings/TorrentMetadata';
 import type { TorrentPeerDiagnostics } from './bindings/TorrentPeerDiagnostics';
-import type { TorrentPeerSummary } from './bindings/TorrentPeerSummary';
 import type { TorrentFileProgressSnapshot } from './bindings/TorrentFileProgressSnapshot';
 import type { TorrentPieceProgressSnapshot } from './bindings/TorrentPieceProgressSnapshot';
 import type { TorrentWebSeed } from './bindings/TorrentWebSeed';
@@ -95,7 +94,6 @@ type CommandMap = {
     result: void;
   };
   get_torrent_peers: { args: { id: string }; result: TorrentPeerDiagnostics };
-  get_torrent_peer_summary: { args: { id: string }; result: TorrentPeerSummary };
   get_torrent_file_progress: { args: { id: string }; result: TorrentFileProgressSnapshot };
   get_torrent_piece_progress: { args: { id: string }; result: TorrentPieceProgressSnapshot };
   get_torrent_file_selection: { args: { id: string }; result: TorrentFileSelectionSnapshot };

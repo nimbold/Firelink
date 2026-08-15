@@ -2,10 +2,10 @@ import type { PropertiesSnapshot } from '../propertiesBridge';
 import { resolveDownloadFraction } from './downloadProgress';
 
 export type PropertiesConnectionKind = 'media' | 'torrent' | 'aria2';
-export type PropertiesConnectionLabelKey = 'fragmentConcurrency' | 'torrentConnectedPeers' | 'connections';
-export type PropertiesTorrentPeerSummary = {
-  totalPeers: number;
-  totalSeeders: number;
+export type PropertiesConnectionLabelKey = 'fragmentConcurrency' | 'torrentPeersSeeders' | 'connections';
+export type PropertiesTorrentPeerCounts = {
+  connectedPeers?: number;
+  connectedSeeders?: number;
 };
 
 export type PropertiesConnectionPresentation = {
@@ -13,7 +13,7 @@ export type PropertiesConnectionPresentation = {
   showHeaderMetric: boolean;
   labelKey: PropertiesConnectionLabelKey;
   value: string;
-  torrentPeerSummary?: PropertiesTorrentPeerSummary;
+  torrentPeerCounts?: PropertiesTorrentPeerCounts;
 };
 
 const displayCount = (value: number | undefined): string => value == null ? '—' : String(value);
@@ -25,8 +25,7 @@ export const getPropertiesProgress = (
   : resolveDownloadFraction(snapshot);
 
 export const getPropertiesConnectionPresentation = (
-  snapshot: Pick<PropertiesSnapshot, 'isMedia' | 'isTorrent' | 'connections' | 'activeConnections' | 'requestedConnections'>,
-  torrentPeerSummary?: PropertiesTorrentPeerSummary | null,
+  snapshot: Pick<PropertiesSnapshot, 'isMedia' | 'isTorrent' | 'connections' | 'activeConnections' | 'requestedConnections' | 'torrentConnectedPeers' | 'torrentConnectedSeeders'>,
 ): PropertiesConnectionPresentation => {
   if (snapshot.isMedia === true) {
     return {
@@ -41,9 +40,12 @@ export const getPropertiesConnectionPresentation = (
     return {
       kind: 'torrent',
       showHeaderMetric: true,
-      labelKey: 'torrentConnectedPeers',
+      labelKey: 'torrentPeersSeeders',
       value: '—',
-      ...(torrentPeerSummary ? { torrentPeerSummary } : {}),
+      torrentPeerCounts: {
+        connectedPeers: snapshot.torrentConnectedPeers,
+        connectedSeeders: snapshot.torrentConnectedSeeders,
+      },
     };
   }
 

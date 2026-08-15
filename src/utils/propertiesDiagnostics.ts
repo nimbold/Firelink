@@ -10,6 +10,14 @@ export const formatPropertiesDiagnosticCount = (value: number, locale: string): 
   return new Intl.NumberFormat(resolveAppLocale(locale)).format(value);
 };
 
+export const hasLiveTorrentPeerWithoutDetails = (
+  connectedPeers: number | undefined,
+  detailedPeers: number,
+): boolean => Number.isSafeInteger(connectedPeers)
+  && (connectedPeers ?? 0) > 0
+  && Number.isSafeInteger(detailedPeers)
+  && detailedPeers === 0;
+
 export const formatPropertiesAvailability = (availability: number, locale: string): string => {
   if (!Number.isFinite(availability) || availability < 0) return '—';
   return new Intl.NumberFormat(resolveAppLocale(locale), { maximumFractionDigits: 2 }).format(availability);
