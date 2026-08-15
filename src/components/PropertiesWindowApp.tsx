@@ -58,6 +58,7 @@ import {
   TORRENT_ENCRYPTION_POLICY_DISABLED,
   TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION,
   TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO,
+  isAllocationPhaseVisible,
   type TorrentEncryptionPolicy,
   type TorrentFileAllocation,
 } from '../utils/downloads';
@@ -1140,7 +1141,7 @@ export const PropertiesWindowApp = () => {
   });
   const isPromptFooter = footerActions.includes('keepEditing');
   const fileSelectionEditingEnabled = editingEnabled && isTorrentFileSelectionEditable(snapshot.status);
-  const allocationPending = snapshot.allocationPending === true;
+  const allocationPending = isAllocationPhaseVisible(snapshot.allocationPending === true, snapshot.status);
   const total = snapshot.size || (snapshot.totalBytes === undefined
     ? t($ => $.addDownloads.unknownSize)
     : `${snapshot.totalIsEstimate ? '~' : ''}${formatDownloadBytes(snapshot.totalBytes)}`);

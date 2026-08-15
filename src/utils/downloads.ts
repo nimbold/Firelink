@@ -45,6 +45,16 @@ export const isActiveDownloadStatus = (status: DownloadStatus): boolean =>
 export const isTransferActiveStatus = (status: DownloadStatus): boolean =>
   status === 'downloading' || status === 'processing' || status === 'verifying' || status === 'seeding' || status === 'retrying';
 
+/**
+ * A transient allocation flag must never replace a terminal or user-paused
+ * status in the UI. Failed rows remain eligible because retry admission can
+ * begin from the failed state before the backend accepts the new lifecycle.
+ */
+export const isAllocationPhaseVisible = (
+  allocationPending: boolean,
+  status: DownloadStatus,
+): boolean => allocationPending && status !== 'completed' && status !== 'paused';
+
 export const DOWNLOAD_CONNECTIONS_MIN = 1;
 export const DOWNLOAD_CONNECTIONS_MAX = 16;
 

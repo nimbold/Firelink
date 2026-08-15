@@ -8,6 +8,7 @@ import {
   canonicalizeDownloadFileName,
   categoryForDownload,
   categoryForFileName,
+  isAllocationPhaseVisible,
   isValidTorrentExcludeTrackerList,
   isValidTorrentTrackerList,
   normalizeTorrentEncryptionPolicy,
@@ -104,6 +105,16 @@ describe('download persistence progress snapshots', () => {
     expect(persisted.downloadedBytes).toBeUndefined();
     expect(persisted.totalBytes).toBeUndefined();
     expect(persisted.totalIsEstimate).toBeUndefined();
+  });
+});
+
+describe('allocation phase visibility', () => {
+  it('does not override paused or completed statuses', () => {
+    expect(isAllocationPhaseVisible(true, 'ready')).toBe(true);
+    expect(isAllocationPhaseVisible(true, 'failed')).toBe(true);
+    expect(isAllocationPhaseVisible(true, 'paused')).toBe(false);
+    expect(isAllocationPhaseVisible(true, 'completed')).toBe(false);
+    expect(isAllocationPhaseVisible(false, 'downloading')).toBe(false);
   });
 });
 
