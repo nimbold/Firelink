@@ -3,6 +3,7 @@ import { info } from '../utils/logger';
 import { invokeCommand as invoke } from '../ipc';
 
 import type { DownloadItem } from '../bindings/DownloadItem';
+import type { DownloadErrorKind } from '../bindings/DownloadErrorKind';
 import type { DownloadStatus } from '../bindings/DownloadStatus';
 import type { ExtensionDownload } from '../bindings/ExtensionDownload';
 import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
@@ -258,6 +259,18 @@ export class SystemProxyResolutionError extends Error {
 const isSystemProxyConfigurationError = (error: unknown): boolean =>
   error instanceof SystemProxyResolutionError;
 
+const DESTINATION_ACCESS_ERROR_MARKER = 'destination access retryable:';
+
+const isRetryableDestinationAccessError = (error: unknown): boolean =>
+  errorMessage(error).toLowerCase().includes(DESTINATION_ACCESS_ERROR_MARKER);
+
+const destinationAccessErrorMessage = (message: string): string => {
+  const markerIndex = message.toLowerCase().indexOf(DESTINATION_ACCESS_ERROR_MARKER);
+  if (markerIndex === -1) return message;
+  const detail = message.slice(markerIndex + DESTINATION_ACCESS_ERROR_MARKER.length).trim();
+  return detail || message;
+};
+
 const stripSensitiveMediaHeaders = (value: string | null | undefined): string =>
   (value || '')
     .split(/\r?\n/)
@@ -442,7 +455,10 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
 
       useDownloadStore.getState().setPendingOrder(order);
       useDownloadStore.getState().registerBackendIds([id]);
-      useDownloadStore.getState().updateDownload(id, { lastError: undefined });
+      useDownloadStore.getState().updateDownload(id, {
+        lastError: undefined,
+        lastErrorKind: undefined
+      });
       return true;
     } catch (e) {
       console.error(`Failed to dispatch ${id}:`, e);
@@ -451,9 +467,17 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
       }
       if (lifecycleGeneration !== null && isCurrentDownloadLifecycle(id, lifecycleGeneration)) {
         const proxyBlocked = isSystemProxyConfigurationError(e);
+        const destinationAccessBlocked = isRetryableDestinationAccessError(e);
+        const message = errorMessage(e);
         useDownloadStore.getState().updateDownload(id, {
-          status: proxyBlocked ? 'queued' : 'failed',
-          lastError: errorMessage(e)
+          status: proxyBlocked ? 'queued' : destinationAccessBlocked ? 'ready' : 'failed',
+          hasBeenDispatched: false,
+          lastErrorKind: destinationAccessBlocked
+            ? ('destinationAccess' as DownloadErrorKind)
+            : undefined,
+          lastError: destinationAccessBlocked
+            ? destinationAccessErrorMessage(message)
+            : message
         });
       }
       return false;

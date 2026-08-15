@@ -1082,6 +1082,35 @@ describe('useDownloadStore', () => {
     expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
   });
 
+  it('keeps destination permission failures retryable before backend admission', async () => {
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'enqueue_download') {
+        throw new Error('Internal error: destination access retryable: Firelink could not write to the selected folder; grant access and retry');
+      }
+      return undefined;
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'destination-permission',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        destination: '/tmp',
+        status: 'ready',
+        category: 'Other',
+        dateAdded: ''
+      }] as any[],
+      backendRegisteredIds: new Set()
+    });
+
+    await expect(dispatchItem('destination-permission')).resolves.toBe(false);
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'ready',
+      lastError: 'Firelink could not write to the selected folder; grant access and retry',
+      lastErrorKind: 'destinationAccess'
+    });
+  });
+
   it('matches site logins by host, wildcard host, path, and full URL patterns', () => {
     const settings = {
       siteLogins: [

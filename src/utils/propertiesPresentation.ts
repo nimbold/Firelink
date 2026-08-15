@@ -25,7 +25,7 @@ export const getPropertiesProgress = (
   : resolveDownloadFraction(snapshot);
 
 export const getPropertiesConnectionPresentation = (
-  snapshot: Pick<PropertiesSnapshot, 'isMedia' | 'isTorrent' | 'connections' | 'activeConnections' | 'requestedConnections' | 'torrentConnectedPeers' | 'torrentConnectedSeeders'>,
+  snapshot: Pick<PropertiesSnapshot, 'isMedia' | 'isTorrent' | 'connections' | 'activeConnections' | 'requestedConnections' | 'effectiveConnections' | 'torrentConnectedPeers' | 'torrentConnectedSeeders'>,
 ): PropertiesConnectionPresentation => {
   if (snapshot.isMedia === true) {
     return {
@@ -53,6 +53,6 @@ export const getPropertiesConnectionPresentation = (
     kind: 'aria2',
     showHeaderMetric: true,
     labelKey: 'connections',
-    value: `${displayCount(snapshot.activeConnections)} / ${displayCount(snapshot.requestedConnections ?? snapshot.connections)}`,
+    value: `${displayCount(snapshot.activeConnections)} / ${displayCount(snapshot.effectiveConnections ?? snapshot.requestedConnections ?? snapshot.connections)}`,
   };
 };

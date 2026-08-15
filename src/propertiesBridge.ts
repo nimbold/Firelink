@@ -179,6 +179,7 @@ export type PropertiesSnapshot = SafePropertiesFields & {
   lastResolverFallback?: boolean;
   activeConnections?: number;
   requestedConnections?: number;
+  effectiveConnections?: number;
   uploadSpeed?: string;
   torrentConnectedPeers?: number;
   torrentConnectedSeeders?: number;
@@ -436,6 +437,11 @@ const copyWithoutSecrets = (
         && item.isMedia !== true
         && live.progress.requested_connections !== undefined
         ? { requestedConnections: live.progress.requested_connections }
+        : {}),
+      ...(item.isTorrent !== true
+        && item.isMedia !== true
+        && live.progress.effective_connections !== undefined
+        ? { effectiveConnections: live.progress.effective_connections }
         : {}),
       ...(live.progress.uploaded_bytes !== undefined
         ? { torrentUploadedBytes: live.progress.uploaded_bytes }

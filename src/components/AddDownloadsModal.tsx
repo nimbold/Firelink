@@ -1496,7 +1496,8 @@ export const AddDownloadsModal = () => {
                      lastError: undefined
                    }, pendingAction);
                    if (!replaced) {
-                     throw new Error(t($ => $.addDownloads.backendRejectedStart));
+                     const rejected = useDownloadStore.getState().downloads.find(download => download.id === existingItem.id);
+                     throw new Error(rejected?.lastError || t($ => $.addDownloads.backendRejectedStart));
                    }
 
                    // The existing row was updated in place; do not create a
@@ -1625,7 +1626,8 @@ export const AddDownloadsModal = () => {
           sizeBytes: item.sizeBytes
         }, action);
         if (!added) {
-          throw new Error(t($ => $.addDownloads.backendRejectedStart));
+          const rejected = useDownloadStore.getState().downloads.find(download => download.id === id);
+          throw new Error(rejected?.lastError || t($ => $.addDownloads.backendRejectedStart));
         }
         addedCount += 1;
         } catch (e) {

@@ -1470,6 +1470,7 @@ fn emit_media_progress(
                 total_is_estimate,
                 active_connections: None,
                 requested_connections: None,
+                effective_connections: None,
                 uploaded_bytes: None,
                 upload_speed: None,
                 num_seeders: None,
@@ -2010,6 +2011,14 @@ async fn fetch_metadata(
 
     loop {
         if redirects >= 5 {
+            log::warn!(
+                "metadata [stage=metadata host={} redirects={} error_code=redirect_limit]",
+                reqwest::Url::parse(&current_url)
+                    .ok()
+                    .and_then(|value| value.host_str().map(str::to_string))
+                    .unwrap_or_else(|| "<unknown host>".to_string()),
+                redirects
+            );
             return Err("Too many redirects".to_string());
         }
 
@@ -2037,6 +2046,10 @@ async fn fetch_metadata(
 
         let parsed_current_url = reqwest::Url::parse(&current_url)
             .map_err(|_| "SSRF blocked: Invalid URL".to_string())?;
+        let metadata_host = parsed_current_url
+            .host_str()
+            .unwrap_or("<unknown host>")
+            .to_string();
         let resolved_addr = match parsed_current_url.scheme() {
             "http" | "https" => validate_url_ssrf(&current_url).await?,
             "ftp" | "sftp" => resolve_and_validate_url_host(&parsed_current_url)
@@ -2104,10 +2117,16 @@ async fn fetch_metadata(
         let mut current_res = match head_req.send().await {
             Ok(response) => response,
             Err(head_error) => build_get_range().send().await.map_err(|get_error| {
-                let head_error = crate::redact_sensitive_text(&head_error.to_string());
-                let get_error = crate::redact_sensitive_text(&get_error.to_string());
+                log::warn!(
+                    "metadata [stage=metadata host={} error_code=head_{}+get_{}]",
+                    metadata_host,
+                    reqwest_error_code(&head_error),
+                    reqwest_error_code(&get_error)
+                );
                 format!(
-                    "HEAD metadata request failed ({head_error}); ranged GET fallback failed ({get_error})"
+                    "HEAD metadata request failed ({}); ranged GET fallback failed ({})",
+                    reqwest_error_code(&head_error),
+                    reqwest_error_code(&get_error)
                 )
             })?,
         };
@@ -2137,7 +2156,14 @@ async fn fetch_metadata(
         }
 
         if needs_fallback {
-            current_res = build_get_range().send().await.map_err(|e| e.to_string())?;
+            current_res = build_get_range().send().await.map_err(|error| {
+                log::warn!(
+                    "metadata [stage=metadata host={} error_code=get_{}]",
+                    metadata_host,
+                    reqwest_error_code(&error)
+                );
+                error.to_string()
+            })?;
 
             if retry_metadata_with_cookies(
                 current_res.status(),
@@ -2161,6 +2187,11 @@ async fn fetch_metadata(
                         if let Ok(new_url) = parsed_base.join(loc_str) {
                             current_url = new_url.to_string();
                             redirects += 1;
+                            log::debug!(
+                                "metadata [stage=redirect host={} redirect_count={}]",
+                                metadata_host,
+                                redirects
+                            );
                             continue;
                         }
                     }
@@ -2179,6 +2210,11 @@ async fn fetch_metadata(
         }
 
         if let Some(error) = metadata_response_error(current_res.status()) {
+            log::warn!(
+                "metadata [stage=metadata host={} status={} error_code=response]",
+                metadata_host,
+                current_res.status().as_u16()
+            );
             return Err(error);
         }
 
@@ -2244,6 +2280,20 @@ async fn fetch_metadata(
         size_bytes,
         resumable,
     })
+}
+
+fn reqwest_error_code(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_request() {
+        "request"
+    } else if error.is_body() {
+        "body"
+    } else {
+        "transport"
+    }
 }
 
 const MEDIA_METADATA_CACHE_TTL: Duration = Duration::from_secs(60);
@@ -2940,6 +2990,118 @@ pub(crate) fn is_safe_path<R: tauri::Runtime>(path: &std::path::Path, app_handle
         .any(|root| crate::platform::path_is_within(&canonical_path, &root))
 }
 
+const RETRYABLE_DESTINATION_ACCESS_PREFIX: &str = "destination access retryable:";
+
+/// Verify the destination before queue ownership is committed. This is an
+/// app-owned, uniquely named probe so macOS privacy prompts and ordinary
+/// filesystem permission failures happen at admission time rather than
+/// during cleanup or after Aria2 has already started.
+fn preflight_download_destination_access<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    id: &str,
+    destination: &str,
+) -> Result<(), String> {
+    let resolved = resolve_path(destination.trim(), app_handle);
+    if !is_safe_path(&resolved, app_handle) {
+        log::warn!(
+            "download destination [{}]: access preflight rejected an unsafe destination",
+            id
+        );
+        return Err(format!(
+            "{RETRYABLE_DESTINATION_ACCESS_PREFIX} selected folder is not approved"
+        ));
+    }
+
+    if !resolved.exists() {
+        std::fs::create_dir_all(&resolved).map_err(|error| {
+            log::warn!(
+                "download destination [{}]: could not create destination for access preflight: {}",
+                id,
+                crate::redact_sensitive_text(&error.to_string())
+            );
+            format!(
+                "{RETRYABLE_DESTINATION_ACCESS_PREFIX} grant Firelink access to the selected folder and retry"
+            )
+        })?;
+    }
+
+    let canonical = canonicalize_with_missing_components(&resolved).ok_or_else(|| {
+        log::warn!(
+            "download destination [{}]: destination could not be canonicalized during access preflight",
+            id
+        );
+        format!(
+            "{RETRYABLE_DESTINATION_ACCESS_PREFIX} selected folder could not be verified"
+        )
+    })?;
+    if !is_safe_path(&canonical, app_handle) {
+        log::warn!(
+            "download destination [{}]: canonical destination is outside the approved roots",
+            id
+        );
+        return Err(format!(
+            "{RETRYABLE_DESTINATION_ACCESS_PREFIX} selected folder is not approved"
+        ));
+    }
+    if !canonical.is_dir() {
+        log::warn!(
+            "download destination [{}]: selected destination is not a directory",
+            id
+        );
+        return Err(format!(
+            "{RETRYABLE_DESTINATION_ACCESS_PREFIX} selected destination is not a folder"
+        ));
+    }
+
+    let probe_path = canonical.join(format!(
+        ".firelink-access-check-{}.probe",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let probe_result = (|| -> Result<(), std::io::Error> {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe_path)?;
+        file.write_all(b"firelink")?;
+        file.flush()?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    let cleanup_result = std::fs::remove_file(&probe_path);
+
+    if let Err(error) = probe_result {
+        log::warn!(
+            "download destination [{}]: access probe failed: {}",
+            id,
+            crate::redact_sensitive_text(&error.to_string())
+        );
+        if let Err(cleanup_error) = cleanup_result {
+            log::debug!(
+                "download destination [{}]: failed to clean access probe: {}",
+                id,
+                crate::redact_sensitive_text(&cleanup_error.to_string())
+            );
+        }
+        return Err(format!(
+            "{RETRYABLE_DESTINATION_ACCESS_PREFIX} Firelink could not write to the selected folder; grant access and retry"
+        ));
+    }
+    if let Err(error) = cleanup_result {
+        log::warn!(
+            "download destination [{}]: access probe cleanup failed: {}",
+            id,
+            crate::redact_sensitive_text(&error.to_string())
+        );
+        return Err(format!(
+            "{RETRYABLE_DESTINATION_ACCESS_PREFIX} the selected folder could not be safely verified; retry"
+        ));
+    }
+
+    log::debug!("download destination [{}]: access preflight succeeded", id);
+    Ok(())
+}
+
 pub(crate) fn path_has_symlink_component(path: &std::path::Path) -> bool {
     use std::path::Component;
 
@@ -3336,6 +3498,8 @@ pub struct DownloadProgressEvent {
     active_connections: Option<i32>,
     #[ts(optional)]
     requested_connections: Option<i32>,
+    #[ts(optional)]
+    effective_connections: Option<i32>,
     #[ts(optional)]
     uploaded_bytes: Option<f64>,
     #[ts(optional)]
@@ -4612,6 +4776,7 @@ pub(crate) async fn start_media_download_internal(
                                         total_is_estimate: Some(false),
                                         active_connections: None,
                                         requested_connections: None,
+                                        effective_connections: None,
                                         uploaded_bytes: None,
                                         upload_speed: None,
                                         num_seeders: None,
@@ -4689,6 +4854,7 @@ pub(crate) async fn start_media_download_internal(
                                             total_is_estimate: Some(false),
                                             active_connections: None,
                                             requested_connections: None,
+                                            effective_connections: None,
                                             uploaded_bytes: None,
                                             upload_speed: None,
                                             num_seeders: None,
@@ -7123,6 +7289,8 @@ async fn enqueue_download_locked(
             .await
             .map_err(AppError::Internal)?;
     }
+    preflight_download_destination_access(app_handle, &item.id, &item.destination)
+        .map_err(AppError::Internal)?;
     let id = item.id.clone();
     item.filename = crate::download_ownership::canonical_download_filename(&item.filename);
     let accepted_filename = item.filename.clone();
@@ -11984,7 +12152,7 @@ mod tests {
                     completed,
                     speed_bytes: speed,
                     active_connections: 16,
-                    requested_connections: 16,
+                    effective_connections: 16,
                     speed_limited: false,
                     now: start + Duration::from_secs(offset),
                 },
@@ -12000,7 +12168,7 @@ mod tests {
                 completed: 13 * 1024 * 1024,
                 speed_bytes: 1024.0 * 1024.0,
                 active_connections: 16,
-                requested_connections: 16,
+                effective_connections: 16,
                 speed_limited: false,
                 now: start + Duration::from_secs(31),
             },
@@ -12018,7 +12186,7 @@ mod tests {
                     completed: 13 * 1024 * 1024,
                     speed_bytes: 1024.0 * 1024.0,
                     active_connections: 1,
-                    requested_connections: 16,
+                    effective_connections: 16,
                     speed_limited: false,
                     now: start + Duration::from_secs(62),
                 },
@@ -12051,7 +12219,7 @@ mod tests {
                     completed: 10,
                     speed_bytes: 1024.0,
                     active_connections: 16,
-                    requested_connections: 16,
+                    effective_connections: 16,
                     speed_limited: false,
                     now,
                 },
@@ -12073,7 +12241,7 @@ mod tests {
                 completed: 10,
                 speed_bytes: 1024.0,
                 active_connections: 16,
-                requested_connections: 16,
+                effective_connections: 16,
                 speed_limited: false,
                 now: now + Duration::from_secs(1),
             },
@@ -13928,7 +14096,7 @@ struct Aria2ConnectionSample<'a> {
     completed: u64,
     speed_bytes: f64,
     active_connections: i32,
-    requested_connections: i32,
+    effective_connections: i32,
     speed_limited: bool,
     now: Instant,
 }
@@ -13972,7 +14140,7 @@ fn observe_aria2_connections(
     completed: u64,
     speed_bytes: f64,
     active_connections: i32,
-    requested_connections: i32,
+    effective_connections: i32,
     speed_limited: bool,
     now: Instant,
 ) -> Option<Aria2RecoveryReason> {
@@ -13986,7 +14154,7 @@ fn observe_aria2_connections(
             completed,
             speed_bytes,
             active_connections,
-            requested_connections,
+            effective_connections,
             speed_limited,
             now,
         },
@@ -14005,7 +14173,7 @@ fn observe_aria2_connections_with_epoch(
         completed,
         speed_bytes,
         active_connections,
-        requested_connections,
+        effective_connections,
         speed_limited,
         now,
     } = sample;
@@ -14043,7 +14211,7 @@ fn observe_aria2_connections_with_epoch(
             observation.no_progress_since = None;
         }
 
-        let multi_connection_candidate = requested_connections > 1
+        let multi_connection_candidate = effective_connections > 1
             && remaining >= ARIA2_MIN_REMAINING_FOR_CONNECTION_RECOVERY;
         if multi_connection_candidate {
             let healthy_connection_sample = active_connections > 1
@@ -14064,9 +14232,9 @@ fn observe_aria2_connections_with_epoch(
             let partial_connection_pool_collapse = !speed_limited
                 && observation.saw_multiple_connections
                 && observation.healthy_speed_samples >= ARIA2_MIN_HEALTHY_SPEED_SAMPLES
-                && requested_connections >= 4
+                && effective_connections >= 4
                 && (active_connections as f64)
-                    <= (requested_connections as f64) * ARIA2_CONNECTION_POOL_DEGRADED_FRACTION
+                    <= (effective_connections as f64) * ARIA2_CONNECTION_POOL_DEGRADED_FRACTION
                 && observation.peak_speed_bytes >= ARIA2_MIN_PEAK_SPEED_FOR_DEGRADED_RECOVERY
                 && speed_bytes > 0.0
                 && speed_bytes < observation.peak_speed_bytes * 0.5;
@@ -14978,10 +15146,15 @@ pub fn run() {
                                         .await
                                         .unwrap_or(1)
                                         .max(1);
+                                    let effective_connections = poll_mgr
+                                        .aria2_effective_connections(&id, mapping.epoch)
+                                        .await
+                                        .unwrap_or(requested_connections)
+                                        .max(1);
                                     let speed_limited = poll_mgr.aria2_speed_limited(&id).await;
                                     let control_epoch = mapping.epoch;
-                                    // The status snapshot and the requested
-                                    // connection lookup both await. A pause,
+                                    // The status snapshot and both connection
+                                    // lookups await. A pause,
                                     // retry, or same-GID resume may replace the
                                     // mapping while those awaits are in
                                     // flight. Only emit telemetry if this
@@ -15007,7 +15180,7 @@ pub fn run() {
                                             completed,
                                             speed_bytes,
                                             active_connections,
-                                            requested_connections,
+                                            effective_connections,
                                             speed_limited,
                                             now,
                                         },
@@ -15212,6 +15385,8 @@ pub fn run() {
                                         total_is_estimate: Some(false),
                                         active_connections: Some(active_connections),
                                         requested_connections: (!is_torrent).then_some(requested_connections),
+                                        effective_connections: (!is_torrent)
+                                            .then_some(effective_connections),
                                         uploaded_bytes: torrent_telemetry
                                             .map(|value| value.uploaded_bytes as f64)
                                             .or_else(|| uploaded_bytes.map(|value| value as f64)),
@@ -15234,13 +15409,14 @@ pub fn run() {
 
                                     if let Some(reason) = recovery_reason {
                                         log::warn!(
-                                            "aria2 connection recovery [{}]: gid {} reason={} speed={}B/s active_connections={} requested_connections={}",
+                                            "aria2 connection recovery [{}]: gid {} reason={} speed={}B/s active_connections={} requested_connections={} effective_connections={}",
                                             id,
                                             gid,
                                             reason.as_str(),
                                             speed_bytes,
                                             active_connections,
-                                            requested_connections
+                                            requested_connections,
+                                            effective_connections
                                         );
                                         if let Err(error) = poll_mgr
                                             .refresh_aria2_connections(&id, gid, control_epoch)

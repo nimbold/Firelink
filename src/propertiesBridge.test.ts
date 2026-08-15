@@ -227,9 +227,14 @@ describe('Properties window bridge', () => {
         size_is_final: true,
         active_connections: 3,
         requested_connections: 8,
+        effective_connections: 1,
       },
     });
-    expect(normalSnapshot).toMatchObject({ activeConnections: 3, requestedConnections: 8 });
+    expect(normalSnapshot).toMatchObject({
+      activeConnections: 3,
+      requestedConnections: 8,
+      effectiveConnections: 1,
+    });
     expect(normalSnapshot).not.toHaveProperty('connectedPeers');
   });
 

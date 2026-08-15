@@ -58,6 +58,21 @@ describe('Properties connection presentation', () => {
     });
   });
 
+  it('shows effective Aria2 connections when the transfer is degraded', () => {
+    expect(getPropertiesConnectionPresentation({
+      isMedia: false,
+      isTorrent: false,
+      connections: 16,
+      activeConnections: 1,
+      requestedConnections: 16,
+      effectiveConnections: 1,
+    })).toMatchObject({
+      kind: 'aria2',
+      labelKey: 'connections',
+      value: '1 / 1',
+    });
+  });
+
   it('does not use tellActive connections for the Torrent header', () => {
     expect(getPropertiesConnectionPresentation({
       isMedia: false,

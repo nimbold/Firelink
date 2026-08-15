@@ -9,6 +9,13 @@ export const classifyDownloadError = (message: unknown): DownloadErrorKind | und
   if (typeof message !== 'string') return undefined;
   const lower = message.toLowerCase();
   if (
+    lower.includes('destination access retryable')
+    || lower.includes('could not write to the selected folder')
+    || lower.includes('selected folder could not be verified')
+  ) {
+    return 'destinationAccess';
+  }
+  if (
     lower.includes('aria2 error code 19')
     || (
       lower.includes('name resolution')

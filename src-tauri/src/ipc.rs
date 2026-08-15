@@ -150,6 +150,7 @@ pub struct QueueConcurrencyConfig {
 #[ts(export, export_to = "../../src/bindings/")]
 pub enum DownloadErrorKind {
     NameResolution,
+    DestinationAccess,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]

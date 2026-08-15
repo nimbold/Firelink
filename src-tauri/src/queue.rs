@@ -534,6 +534,12 @@ pub struct Aria2GidMapping {
     pub epoch: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Aria2ConnectionOptions {
+    epoch: u64,
+    effective: i32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TorrentTelemetrySnapshot {
     pub uploaded_bytes: u64,
@@ -974,6 +980,10 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
 
     /// download id -> spawn payload for aria2 transient-error re-addUri retries.
     aria2_payloads: Mutex<HashMap<String, SpawnPayload>>,
+    /// Attempt-scoped Aria2 connection options. The persisted payload keeps
+    /// the user's requested count; this map records the effective count after
+    /// range probing for the currently admitted attempt.
+    aria2_connection_options: Mutex<HashMap<String, Aria2ConnectionOptions>>,
     /// Initial aria2 addUri handoffs that have not yet either published a GID
     /// or removed a stale late GID. Removal waits for these handoffs before
     /// deleting owned assets so a magnet cannot leave an orphaned output.
@@ -1072,6 +1082,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             aria2_gids: Arc::new(std::sync::RwLock::new(HashMap::new())),
             pending_completion: Arc::new(Mutex::new(HashMap::new())),
             aria2_payloads: Mutex::new(HashMap::new()),
+            aria2_connection_options: Mutex::new(HashMap::new()),
             aria2_dispatch_inflight: Mutex::new(HashMap::new()),
             aria2_dispatch_notify: Notify::new(),
             aria2_global_speed_limit: Arc::new(StdMutex::new(None)),
@@ -1925,6 +1936,37 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 }
             })
             .map(clamp_download_connections)
+    }
+
+    pub async fn set_aria2_connection_options(
+        &self,
+        id: &str,
+        epoch: u64,
+        effective: i32,
+    ) {
+        let mut options = self.aria2_connection_options.lock().await;
+        if options
+            .get(id)
+            .is_some_and(|current| current.epoch > epoch)
+        {
+            return;
+        }
+        options.insert(
+            id.to_string(),
+            Aria2ConnectionOptions {
+                epoch,
+                effective: clamp_download_connections(effective),
+            },
+        );
+    }
+
+    pub async fn aria2_effective_connections(&self, id: &str, epoch: u64) -> Option<i32> {
+        self.aria2_connection_options
+            .lock()
+            .await
+            .get(id)
+            .filter(|options| options.epoch == epoch)
+            .map(|options| options.effective)
     }
 
     pub async fn aria2_torrent_seeding_requested(&self, id: &str) -> bool {
@@ -3709,7 +3751,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
                         // lets the UI (and a concurrent Properties pause)
                         // act on a lifecycle that does not yet exist.
                         let buffered_outcome = self.remember_gid(id.clone(), gid.clone()).await;
-                        self.emit_state(&id, DownloadStatus::Downloading);
+                        if buffered_outcome.is_none() {
+                            self.emit_state(&id, DownloadStatus::Downloading);
+                        }
                         let install_web_seeds = buffered_outcome.is_none()
                             && task.payload.is_torrent
                             && !task.payload.torrent_verify_only
@@ -3917,14 +3961,19 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// epoch must not be reused after a pause invalidated that lifecycle.
     pub async fn rebind_aria2_gid_epoch(&self, id: &str, gid: &str, epoch: u64) -> bool {
         let _gid_state = self.aria2_gid_state.lock().await;
-        let mut gids = self.aria2_gids.write().unwrap();
-        let Some(mapping) = gids.get_mut(gid) else {
-            return false;
-        };
-        if mapping.id != id {
-            return false;
+        {
+            let mut gids = self.aria2_gids.write().unwrap();
+            let Some(mapping) = gids.get_mut(gid) else {
+                return false;
+            };
+            if mapping.id != id {
+                return false;
+            }
+            mapping.epoch = epoch;
         }
-        mapping.epoch = epoch;
+        if let Some(options) = self.aria2_connection_options.lock().await.get_mut(id) {
+            options.epoch = epoch;
+        }
         true
     }
 
@@ -4068,6 +4117,28 @@ impl<R: tauri::Runtime> QueueManager<R> {
             }
             PendingOutcome::Error(error) => {
                 self.forget_torrent_telemetry(id).await;
+                let terminal_gid = self
+                    .aria2_gid_for_download(id)
+                    .unwrap_or_else(|| "<none>".to_string());
+                let terminal_epoch = self
+                    .aria2_gid_for_download(id)
+                    .and_then(|gid| self.aria2_gid_mapping(&gid).map(|mapping| mapping.epoch))
+                    .unwrap_or(self.current_aria2_control_epoch(id).await);
+                let retry_strike = self
+                    .aria2_retry_strikes
+                    .lock()
+                    .await
+                    .get(id)
+                    .copied()
+                    .unwrap_or_default();
+                let requested_connections = self
+                    .aria2_requested_connections(id)
+                    .await
+                    .unwrap_or(DOWNLOAD_CONNECTIONS_MIN);
+                let effective_connections = self
+                    .aria2_effective_connections(id, terminal_epoch)
+                    .await
+                    .unwrap_or(requested_connections);
                 if !verification_only && error.to_ascii_lowercase().contains("checksum") {
                     log::warn!("Checksum error detected for {}, cleaning up assets", id);
                     if let Ok(paths) =
@@ -4112,7 +4183,16 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     self.emit_paused_with_error(id, error);
                 } else {
                     let safe_error = crate::redact_sensitive_text(&error);
-                    log::error!("aria2 download {} failed: {}", id, safe_error);
+                    log::error!(
+                        "aria2 terminal [stage=terminal id={} gid={} epoch={} retry_strike={} requested_connections={} effective_connections={} error={}]",
+                        id,
+                        terminal_gid,
+                        terminal_epoch,
+                        retry_strike,
+                        requested_connections,
+                        effective_connections,
+                        safe_error
+                    );
                     self.emit_failed(id, error);
                 }
             }
@@ -4123,6 +4203,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
     pub async fn clear_aria2_retry_state(&self, id: &str) {
         self.aria2_payloads.lock().await.remove(id);
         self.aria2_retry_strikes.lock().await.remove(id);
+        self.aria2_connection_options.lock().await.remove(id);
     }
 
     pub async fn cancel_aria2_retries(&self, id: &str) {
@@ -4842,16 +4923,21 @@ impl<R: tauri::Runtime> QueueManager<R> {
                             .await
                             .insert(id_for_task.clone(), strike + 1);
                     }
-                    this.emit_state(&id_for_task, DownloadStatus::Downloading);
-                    // Stop suppressing events for the id before exposing the
-                    // new gid. The old gid remains marked as retrying until
-                    // remember_gid atomically replaces its mapping, so a
-                    // duplicate old event is still ignored while a genuine
-                    // new-gid error is allowed through.
-                    this.release_aria2_retry_inflight(&id_for_task, retry_epoch)
-                        .await;
                     let new_gid_for_event = new_gid.clone();
                     let buffered_outcome = this.remember_gid(id_for_task.clone(), new_gid).await;
+                    // Install the replacement GID before exposing the
+                    // Downloading state. If Aria2 completed or failed the
+                    // replacement before the mapping was installed, apply
+                    // that buffered terminal outcome directly and never
+                    // publish a stale transient state.
+                    if buffered_outcome.is_none() {
+                        this.emit_state(&id_for_task, DownloadStatus::Downloading);
+                    }
+                    // The old gid remains marked as retrying until the new
+                    // mapping is installed, so a duplicate old event is
+                    // ignored while a genuine new-gid event is accepted.
+                    this.release_aria2_retry_inflight(&id_for_task, retry_epoch)
+                        .await;
                     this.aria2_retrying_gids.lock().await.remove(&retry_gid);
                     drop(control_guard);
                     if let Some(outcome) = buffered_outcome {
@@ -5174,20 +5260,76 @@ struct HttpTransferProbe {
 
 struct PreparedNormalTransfer {
     uris: Vec<String>,
-    connections: i32,
+    requested_connections: i32,
+    effective_connections: i32,
     credentials_allowed: bool,
 }
 
 fn payload_has_credential_material(payload: &SpawnPayload) -> bool {
-    [
-        payload.username.as_deref(),
-        payload.password.as_deref(),
-        payload.cookies.as_deref(),
-        payload.headers.as_deref(),
+    let inline_url_credentials = crate::collect_download_uris(&payload.url, payload.mirrors.as_deref())
+        .into_iter()
+        .any(|uri| {
+            reqwest::Url::parse(&uri)
+                .ok()
+                .is_some_and(|parsed| !parsed.username().is_empty() || parsed.password().is_some())
+        });
+    if inline_url_credentials {
+        return true;
+    }
+
+    if payload
+        .username
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || payload
+            .password
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || payload
+            .cookies
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return true;
+    }
+
+    payload
+        .headers
+        .as_deref()
+        .into_iter()
+        .flat_map(str::lines)
+        .filter_map(|line| {
+            line.split_once(':')
+                .map(|(name, _)| name.trim().to_ascii_lowercase())
+        })
+        .any(|name| header_name_has_credential_material(&name))
+}
+
+fn header_name_has_credential_material(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "authorization"
+            | "cookie"
+            | "cookie2"
+            | "proxy-authorization"
+            | "set-cookie"
+            | "x-api-key"
+            | "x-auth-token"
+            | "x-access-token"
+    ) || [
+        "auth",
+        "credential",
+        "key",
+        "password",
+        "passwd",
+        "secret",
+        "session",
+        "signature",
+        "token",
     ]
-    .into_iter()
-    .flatten()
-    .any(|value| !value.trim().is_empty())
+    .iter()
+    .any(|marker| name.contains(marker))
 }
 
 async fn prepare_normal_transfer(
@@ -5206,10 +5348,20 @@ async fn prepare_normal_transfer(
         .enumerate()
     {
         if !is_http_uri(&uri) {
-            crate::resolve_and_validate_url_host(
-                &reqwest::Url::parse(&uri).map_err(|_| "SSRF blocked: Invalid URL".to_string())?,
-            )
-            .await?;
+            let parsed =
+                reqwest::Url::parse(&uri).map_err(|_| "SSRF blocked: Invalid URL".to_string())?;
+            crate::resolve_and_validate_url_host(&parsed).await?;
+            let uri_credentials_allowed = can_forward_payload_credentials(&credential_origin, &parsed);
+            if index > 0
+                && payload_has_credential_material(payload)
+                && !uri_credentials_allowed
+            {
+                return Err(
+                    "credentialed mirrors must use the same origin as the primary URL"
+                        .to_string(),
+                );
+            }
+            credentials_allowed &= uri_credentials_allowed;
             uris.push(uri);
             continue;
         }
@@ -5247,12 +5399,40 @@ async fn prepare_normal_transfer(
                     _ => {}
                 }
             }
-            Err(error) => {
-                return Err(format!(
-                    "normal transfer preflight failed for {}: {}",
+            Err(error) if is_fatal_range_probe_error(&error) => {
+                log::error!(
+                    "aria2 redirect [{}]: fatal transfer validation failed host={} error_code={}",
+                    id,
                     uri_host_for_log(&uri),
-                    crate::redact_sensitive_text(&error)
+                    range_probe_error_code(&error)
+                );
+                return Err(format!(
+                    "normal transfer preflight rejected for {}: {}",
+                    uri_host_for_log(&uri),
+                    range_probe_error_code(&error)
                 ));
+            }
+            Err(error) if payload_has_credential_material(payload) => {
+                log::warn!(
+                    "aria2 range probe [{}]: credentialed route could not be verified host={} error_code={}; retryable",
+                    id,
+                    uri_host_for_log(&uri),
+                    range_probe_error_code(&error)
+                );
+                return Err(format!(
+                    "normal transfer preflight is retryable for {}: {}",
+                    uri_host_for_log(&uri),
+                    range_probe_error_code(&error)
+                ));
+            }
+            Err(error) => {
+                log::warn!(
+                    "aria2 range probe [{}]: public route unavailable host={} error_code={}; trying the validated source URI",
+                    id,
+                    uri_host_for_log(&uri),
+                    range_probe_error_code(&error)
+                );
+                uris.push(uri);
             }
         }
     }
@@ -5268,9 +5448,40 @@ async fn prepare_normal_transfer(
     }
     Ok(PreparedNormalTransfer {
         uris,
-        connections,
+        requested_connections: requested,
+        effective_connections: connections,
         credentials_allowed,
     })
+}
+
+fn is_fatal_range_probe_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("private/local ip not allowed")
+        || lower.contains("invalid url")
+        || lower.contains("no host")
+        || lower.contains("unsupported scheme")
+        || lower.contains("invalid range probe redirect")
+        || lower.contains("range probe redirect uses an unsupported scheme")
+        || lower.contains("range probe redirect has no valid location")
+        || lower.contains("range probe redirect limit exceeded")
+        || lower.contains("range probe redirect loop exhausted")
+}
+
+fn range_probe_error_code(error: &str) -> &'static str {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("timed out") || lower.contains("timeout") {
+        "timeout"
+    } else if lower.contains("dns") || lower.contains("name resolution") {
+        "dns"
+    } else if lower.contains("private/local") {
+        "ssrf_private_address"
+    } else if lower.contains("redirect") {
+        "redirect"
+    } else if lower.contains("invalid") {
+        "invalid_route"
+    } else {
+        "transport"
+    }
 }
 
 fn is_http_uri(uri: &str) -> bool {
@@ -5313,16 +5524,54 @@ async fn probe_bounded_range_support(
     payload: &SpawnPayload,
     credential_origin: &reqwest::Url,
 ) -> Result<HttpTransferProbe, String> {
+    probe_bounded_range_support_with_local_override(uri, payload, credential_origin, false).await
+}
+
+#[cfg(test)]
+async fn probe_bounded_range_support_local_test(
+    uri: &str,
+    payload: &SpawnPayload,
+    credential_origin: &reqwest::Url,
+) -> Result<HttpTransferProbe, String> {
+    probe_bounded_range_support_with_local_override(uri, payload, credential_origin, true).await
+}
+
+async fn probe_bounded_range_support_with_local_override(
+    uri: &str,
+    payload: &SpawnPayload,
+    credential_origin: &reqwest::Url,
+    allow_localhost: bool,
+) -> Result<HttpTransferProbe, String> {
     crate::ensure_reqwest_crypto_provider();
 
     let mut current = reqwest::Url::parse(uri).map_err(|error| error.to_string())?;
     let mut credentials_allowed = can_forward_payload_credentials(credential_origin, &current);
     for redirect_count in 0..=5 {
-        let (host, address) = crate::resolve_and_validate_url_host(&current).await?;
+        let (host, address) = if allow_localhost {
+            let host = current
+                .host_str()
+                .ok_or_else(|| "range probe test URL has no host".to_string())?;
+            let ip = host
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| "range probe test URL must use an IP host".to_string())?;
+            (
+                host.to_string(),
+                std::net::SocketAddr::new(
+                    ip,
+                    current.port_or_known_default().unwrap_or(80),
+                ),
+            )
+        } else {
+            crate::resolve_and_validate_url_host(&current).await?
+        };
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(10))
             .resolve(&host, address);
+
+        if allow_localhost {
+            builder = builder.no_proxy();
+        }
 
         if let Some(proxy) = payload
             .proxy
@@ -5363,8 +5612,12 @@ async fn probe_bounded_range_support(
             if !matches!(next.scheme(), "http" | "https") {
                 return Err("range probe redirect uses an unsupported scheme".to_string());
             }
-            credentials_allowed =
-                credentials_allowed && can_forward_payload_credentials(credential_origin, &next);
+            let (next, next_credentials_allowed) = apply_redirect_credentials_policy(
+                credential_origin,
+                credentials_allowed,
+                next,
+            );
+            credentials_allowed = next_credentials_allowed;
             current = next;
             continue;
         }
@@ -5392,6 +5645,20 @@ fn can_forward_payload_credentials(original: &reqwest::Url, current: &reqwest::U
                 && current.port_or_known_default() == Some(443)))
         && (original.scheme() == current.scheme()
             || (original.scheme() == "http" && current.scheme() == "https"))
+}
+
+fn apply_redirect_credentials_policy(
+    credential_origin: &reqwest::Url,
+    credentials_already_allowed: bool,
+    mut next: reqwest::Url,
+) -> (reqwest::Url, bool) {
+    let credentials_allowed = credentials_already_allowed
+        && can_forward_payload_credentials(credential_origin, &next);
+    if !credentials_allowed {
+        let _ = next.set_username("");
+        let _ = next.set_password(None);
+    }
+    (next, credentials_allowed)
 }
 
 fn apply_payload_headers(
@@ -5515,17 +5782,24 @@ fn classify_bounded_range_response(
     status: reqwest::StatusCode,
     content_range: Option<&str>,
 ) -> BoundedRangeSupport {
+    // A 416 for the deliberately tiny `bytes=0-0` request is the one
+    // response we can classify as an explicit range rejection. Successful
+    // 200 responses and larger 206 responses remain ambiguous because
+    // servers and proxies commonly normalize or expand bounded requests.
+    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        return BoundedRangeSupport::Unsupported;
+    }
     if status == reqwest::StatusCode::PARTIAL_CONTENT {
         return match content_range.and_then(parse_content_range_bounds) {
             Some((0, 0)) => BoundedRangeSupport::Supported,
-            Some((0, _)) => BoundedRangeSupport::Unsupported,
+            Some((0, _)) => BoundedRangeSupport::Unknown,
             Some(_) => BoundedRangeSupport::Unknown,
             None => BoundedRangeSupport::Unknown,
         };
     }
 
     if status.is_success() {
-        BoundedRangeSupport::Unsupported
+        BoundedRangeSupport::Unknown
     } else {
         BoundedRangeSupport::Unknown
     }
@@ -5586,6 +5860,13 @@ fn apply_aria2_connection_options(
         "stream-piece-selector".to_string(),
         serde_json::json!(ARIA2_STREAM_PIECE_SELECTOR),
     );
+}
+
+fn aria2_add_uri_params(
+    transfer_uris: Vec<String>,
+    options: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!([transfer_uris, options])
 }
 
 fn apply_aria2_normal_reliability_options(
@@ -6605,7 +6886,9 @@ impl ProductionSpawner {
 impl SidecarSpawner for ProductionSpawner {
     async fn add_uri(&self, id: &str, payload: &SpawnPayload) -> Result<String, String> {
         let state = self.app_handle.state::<crate::AppState>();
+        let attempt_epoch = state.queue_manager.current_aria2_control_epoch(id).await;
         let mut options = serde_json::Map::new();
+        let mut connection_options = None;
         let resolved_dest = crate::resolve_path(&payload.destination, &self.app_handle);
         if !crate::is_safe_path(&resolved_dest, &self.app_handle) {
             return Err("Path traversal blocked".to_string());
@@ -6628,18 +6911,22 @@ impl SidecarSpawner for ProductionSpawner {
         if !payload.is_torrent {
             options.insert("out".to_string(), serde_json::json!(safe_filename));
         }
-        let (transfer_uris, transfer_connections, credentials_allowed) = if payload.is_torrent {
-            (Vec::new(), DOWNLOAD_CONNECTIONS_MIN, true)
-        } else {
-            let requested = crate::collect_download_uris(&payload.url, payload.mirrors.as_deref());
-            validate_aria2_transfer_network_policy(&requested).await?;
-            let prepared = prepare_normal_transfer(id, payload).await?;
-            (
-                prepared.uris,
-                prepared.connections,
-                prepared.credentials_allowed,
-            )
-        };
+        let (transfer_uris, requested_connections, transfer_connections, credentials_allowed) =
+            if payload.is_torrent {
+                (Vec::new(), DOWNLOAD_CONNECTIONS_MIN, DOWNLOAD_CONNECTIONS_MIN, true)
+            } else {
+                let requested =
+                    crate::collect_download_uris(&payload.url, payload.mirrors.as_deref());
+                validate_aria2_transfer_network_policy(&requested).await?;
+                let prepared = prepare_normal_transfer(id, payload).await?;
+                connection_options = Some(prepared.effective_connections);
+                (
+                    prepared.uris,
+                    prepared.requested_connections,
+                    prepared.effective_connections,
+                    prepared.credentials_allowed,
+                )
+            };
         if should_apply_aria2_connection_options(payload) {
             apply_aria2_connection_options(&mut options, transfer_connections);
         }
@@ -6690,6 +6977,19 @@ impl SidecarSpawner for ProductionSpawner {
             options.insert("all-proxy".to_string(), serde_json::json!(prox));
         }
         apply_aria2_resolver_options(&mut options, payload.aria2_resolver_mode);
+
+        log::info!(
+            "aria2 admission [stage=admission id={} epoch={} host={} requested_connections={} effective_connections={} uri_count={}]",
+            id,
+            attempt_epoch,
+            transfer_uris
+                .first()
+                .map(|uri| uri_host_for_log(uri))
+                .unwrap_or_else(|| "<torrent>".to_string()),
+            requested_connections,
+            transfer_connections,
+            transfer_uris.len()
+        );
 
         let (method, params) = if payload.is_torrent {
             if let Some(path) = payload.torrent_path.as_deref() {
@@ -6751,8 +7051,10 @@ impl SidecarSpawner for ProductionSpawner {
                 ("aria2.addUri", serde_json::json!([[magnet], options]))
             }
         } else {
-            let uris = crate::collect_download_uris(&payload.url, payload.mirrors.as_deref());
-            ("aria2.addUri", serde_json::json!([uris, options]))
+            (
+                "aria2.addUri",
+                aria2_add_uri_params(transfer_uris, options),
+            )
         };
 
         match self.add_transfer_rpc(&state, method, &params).await {
@@ -6761,13 +7063,29 @@ impl SidecarSpawner for ProductionSpawner {
                 if gid.is_empty() {
                     Err(format!("{method} returned an empty gid"))
                 } else {
+                    if let Some(effective) = connection_options {
+                        state
+                            .queue_manager
+                            .set_aria2_connection_options(
+                                id,
+                                attempt_epoch,
+                                effective,
+                            )
+                            .await;
+                    }
                     log::info!("aria2 {} [{}]: created gid {}", method, id, gid);
                     Ok(gid)
                 }
             }
             Err(e) => {
                 let safe_error = crate::redact_sensitive_text(&e);
-                log::error!("aria2 {} [{}] failed: {}", method, id, safe_error);
+                log::error!(
+                    "aria2 admission [stage=admission id={} epoch={} method={} error={}]",
+                    id,
+                    attempt_epoch,
+                    method,
+                    safe_error
+                );
                 Err(format!("aria2 {method} failed: {safe_error}"))
             }
         }
@@ -8619,6 +8937,21 @@ mod tests {
     }
 
     #[test]
+    fn inline_url_credentials_are_treated_as_credential_material() {
+        assert!(payload_has_credential_material(&SpawnPayload {
+            url: "https://alice:secret@example.test/file".to_string(),
+            ..SpawnPayload::default()
+        }));
+        assert!(payload_has_credential_material(&SpawnPayload {
+            url: "https://example.test/file".to_string(),
+            mirrors: Some("https://alice:secret@mirror.example/file".to_string()),
+            ..SpawnPayload::default()
+        }));
+        assert!(header_name_has_credential_material("X-Request-Signature"));
+        assert!(!header_name_has_credential_material("Referer"));
+    }
+
+    #[test]
     fn normal_checksum_options_enable_aria2_integrity_checks() {
         let mut options = serde_json::Map::new();
         apply_checksum_options(&mut options, Some("SHA-256=ABCDEF"));
@@ -8693,6 +9026,103 @@ mod tests {
             &reqwest::Url::parse("https://example.test/file").unwrap(),
             &reqwest::Url::parse("http://example.test/file").unwrap()
         ));
+
+        let ftp_origin = reqwest::Url::parse("ftp://example.test/file").unwrap();
+        assert!(can_forward_payload_credentials(
+            &ftp_origin,
+            &reqwest::Url::parse("ftp://example.test/other").unwrap(),
+        ));
+        assert!(!can_forward_payload_credentials(
+            &ftp_origin,
+            &reqwest::Url::parse("ftp://mirror.example.test/file").unwrap(),
+        ));
+
+        let redirected_with_credentials = reqwest::Url::parse(
+            "https://alice:secret@cdn.example.test/file",
+        )
+        .unwrap();
+        let (sanitized, credentials_allowed) = apply_redirect_credentials_policy(
+            &original,
+            true,
+            redirected_with_credentials,
+        );
+        assert!(!credentials_allowed);
+        assert!(sanitized.username().is_empty());
+        assert!(sanitized.password().is_none());
+    }
+
+    #[tokio::test]
+    async fn range_probe_fixture_follows_redirect_and_forwards_same_origin_credentials() {
+        use axum::{
+            http::{HeaderMap, StatusCode},
+            response::{IntoResponse, Redirect},
+            routing::get,
+            Router,
+        };
+
+        async fn source() -> Redirect {
+            Redirect::temporary("/final")
+        }
+
+        async fn final_resource(headers: HeaderMap) -> impl IntoResponse {
+            let range = headers
+                .get("range")
+                .and_then(|value| value.to_str().ok());
+            let cookie = headers
+                .get("cookie")
+                .and_then(|value| value.to_str().ok());
+            if range == Some("bytes=0-0") && cookie == Some("session=secret") {
+                (
+                    StatusCode::PARTIAL_CONTENT,
+                    [("content-range", "bytes 0-0/8")],
+                )
+                    .into_response()
+            } else {
+                StatusCode::UNAUTHORIZED.into_response()
+            }
+        }
+
+        let app = Router::new()
+            .route("/source", get(source))
+            .route("/final", get(final_resource));
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("fixture listener");
+        let port = listener.local_addr().expect("fixture address").port();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let source_url = format!("http://127.0.0.1:{port}/source");
+        let payload = SpawnPayload {
+            url: source_url.clone(),
+            cookies: Some("session=secret".to_string()),
+            connections: Some(16),
+            ..SpawnPayload::default()
+        };
+        let origin = reqwest::Url::parse(&source_url).expect("fixture URL");
+        let probe = probe_bounded_range_support_local_test(&source_url, &payload, &origin)
+            .await
+            .expect("range probe");
+
+        assert_eq!(
+            probe.final_uri,
+            format!("http://127.0.0.1:{port}/final")
+        );
+        assert_eq!(probe.range_support, BoundedRangeSupport::Supported);
+        assert!(probe.credentials_allowed);
+        server.abort();
+    }
+
+    #[test]
+    fn public_probe_transport_failures_are_advisory_but_security_failures_are_fatal() {
+        assert!(!is_fatal_range_probe_error("error sending request"));
+        assert_eq!(range_probe_error_code("error sending request"), "transport");
+        assert!(is_fatal_range_probe_error("SSRF blocked: Private/local IP not allowed"));
+        assert_eq!(
+            range_probe_error_code("SSRF blocked: DNS resolution timed out"),
+            "timeout"
+        );
     }
 
     #[test]
@@ -9087,6 +9517,55 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn stale_aria2_connection_options_cannot_overwrite_a_newer_epoch() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
+        let first_epoch = manager.next_aria2_control_epoch("download").await;
+
+        manager
+            .set_aria2_connection_options("download", first_epoch, 1)
+            .await;
+        assert_eq!(
+            manager
+                .aria2_effective_connections("download", first_epoch)
+                .await,
+            Some(1)
+        );
+
+        let second_epoch = manager.next_aria2_control_epoch("download").await;
+        assert_eq!(
+            manager
+                .aria2_effective_connections("download", second_epoch)
+                .await,
+            None
+        );
+        manager
+            .set_aria2_connection_options("download", second_epoch, 4)
+            .await;
+        manager
+            .set_aria2_connection_options("download", first_epoch, 1)
+            .await;
+        assert_eq!(
+            manager
+                .aria2_effective_connections("download", second_epoch)
+                .await,
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn aria2_add_uri_uses_the_prepared_attempt_uris() {
+        let prepared = vec!["https://cdn.example.test/signed-attempt".to_string()];
+        let source = "https://downloads.example.test/stable-source";
+        let params = aria2_add_uri_params(prepared.clone(), serde_json::Map::new());
+
+        assert_eq!(params[0], serde_json::json!(prepared));
+        assert_ne!(params[0], serde_json::json!([source]));
+    }
+
     #[test]
     fn bounded_range_probe_accepts_exact_requested_byte() {
         assert_eq!(
@@ -9124,20 +9603,28 @@ mod tests {
     }
 
     #[test]
-    fn bounded_range_probe_rejects_server_that_expands_to_end() {
+    fn bounded_range_probe_treats_expanded_response_as_unknown() {
         assert_eq!(
             classify_bounded_range_response(
                 reqwest::StatusCode::PARTIAL_CONTENT,
                 Some("bytes 0-383882117/383882118"),
             ),
-            BoundedRangeSupport::Unsupported
+            BoundedRangeSupport::Unknown
         );
     }
 
     #[test]
-    fn bounded_range_probe_rejects_ignored_range_request() {
+    fn bounded_range_probe_treats_ignored_range_request_as_unknown() {
         assert_eq!(
             classify_bounded_range_response(reqwest::StatusCode::OK, None),
+            BoundedRangeSupport::Unknown
+        );
+    }
+
+    #[test]
+    fn bounded_range_probe_classifies_explicit_range_rejection() {
+        assert_eq!(
+            classify_bounded_range_response(reqwest::StatusCode::RANGE_NOT_SATISFIABLE, None),
             BoundedRangeSupport::Unsupported
         );
     }

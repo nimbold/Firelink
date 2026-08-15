@@ -334,7 +334,11 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
             </div>
             <span
               title={
-                download.lastError && (download.status === 'failed' || download.status === 'retrying')
+                download.lastError && (
+                  download.status === 'failed'
+                  || download.status === 'retrying'
+                  || download.lastErrorKind === 'destinationAccess'
+                )
                   ? download.lastError
                   : (download.status === 'queued' || download.status === 'staged') && queueIndex !== -1
                   ? `${downloadStatusLabel} #${queueIndex + 1}`
