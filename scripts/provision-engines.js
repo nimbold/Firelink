@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { Readable, Transform } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { collectRegularFiles, sha256 } from './engine-payload-integrity.js';
+import { downloadEngineArchive } from './engine-download.js';
 import {
   promoteDirectory,
   recoverInterruptedPromotion,
@@ -47,44 +46,6 @@ const payloadDestination = path.join(temporary, 'payload');
 fs.mkdirSync(payloadDestination, { recursive: true });
 const isWindows = target.includes('windows');
 const executableSuffix = isWindows ? '.exe' : '';
-const DOWNLOAD_ATTEMPTS = 3;
-const DOWNLOAD_IDLE_TIMEOUT_MS = 120_000;
-const DOWNLOAD_RETRY_DELAYS_MS = [2_000, 5_000];
-const FILE_LOCK_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000];
-
-function sleep(milliseconds) {
-  return new Promise(resolve => setTimeout(resolve, milliseconds));
-}
-
-async function removeFileWithRetry(file) {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      fs.rmSync(file, { force: true });
-      return;
-    } catch (error) {
-      const retryable = process.platform === 'win32'
-        && ['EACCES', 'EBUSY', 'EPERM'].includes(error?.code);
-      if (!retryable || attempt >= FILE_LOCK_RETRY_DELAYS_MS.length) {
-        throw error;
-      }
-      await sleep(FILE_LOCK_RETRY_DELAYS_MS[attempt]);
-    }
-  }
-}
-
-function createDownloadTimeout() {
-  const controller = new AbortController();
-  let timer;
-  const refresh = () => {
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      controller.abort(new Error(`Download idle for ${DOWNLOAD_IDLE_TIMEOUT_MS}ms`));
-    }, DOWNLOAD_IDLE_TIMEOUT_MS);
-  };
-  const dispose = () => clearTimeout(timer);
-  refresh();
-  return { signal: controller.signal, refresh, dispose };
-}
 
 async function download(name, source) {
   const sourcePath = new URL(source.url).pathname;
@@ -92,56 +53,12 @@ async function download(name, source) {
     temporary,
     `${name}${sourcePath.endsWith('.tar.xz') ? '.tar.xz' : '.zip'}`
   );
-
-  let lastError;
-  for (let attempt = 1; attempt <= DOWNLOAD_ATTEMPTS; attempt += 1) {
-    const downloadTimeout = createDownloadTimeout();
-    try {
-      const response = await fetch(source.url, {
-        redirect: 'follow',
-        signal: downloadTimeout.signal,
-      });
-      if (!response.ok || !response.body) {
-        throw new Error(`Failed to download ${name}: HTTP ${response.status}`);
-      }
-
-      await pipeline(
-        Readable.fromWeb(response.body),
-        new Transform({
-          transform(chunk, encoding, callback) {
-            downloadTimeout.refresh();
-            callback(null, chunk, encoding);
-          },
-        }),
-        fs.createWriteStream(archive),
-        { signal: downloadTimeout.signal }
-      );
-      break;
-    } catch (error) {
-      lastError = error;
-      await removeFileWithRetry(archive);
-      if (attempt === DOWNLOAD_ATTEMPTS) {
-        throw new Error(
-          `Failed to download ${name} after ${DOWNLOAD_ATTEMPTS} attempts: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-          { cause: error }
-        );
-      }
-      await sleep(DOWNLOAD_RETRY_DELAYS_MS[attempt - 1]);
-    } finally {
-      downloadTimeout.dispose();
-    }
-  }
-
-  if (lastError && !fs.existsSync(archive)) {
-    throw lastError;
-  }
-
-  const actual = sha256(archive);
-  if (actual !== source.sha256) {
-    throw new Error(`Archive checksum mismatch for ${name}. Expected ${source.sha256}, got ${actual}`);
-  }
+  await downloadEngineArchive({
+    name,
+    url: source.url,
+    archive,
+    expectedSha256: source.sha256,
+  });
   const extracted = path.join(temporary, `${name}-extracted`);
   fs.mkdirSync(extracted);
   if (archive.endsWith('.zip') && process.platform !== 'win32') {
