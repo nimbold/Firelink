@@ -9,6 +9,7 @@ import {
   categoryForDownload,
   categoryForFileName,
   isAllocationPhaseVisible,
+  isAllocationPhaseEligible,
   isValidTorrentExcludeTrackerList,
   isValidTorrentTrackerList,
   normalizeTorrentEncryptionPolicy,
@@ -88,6 +89,24 @@ describe('download persistence progress snapshots', () => {
     expect(persisted.headers).toBeUndefined();
   });
 
+  it('does not create a credential gate for Torrent metadata context', () => {
+    const persisted = redactDownloadForPersistence({
+      ...item('paused'),
+      isTorrent: true,
+      username: 'browser-user',
+      password: 'secret',
+      cookies: 'session=metadata-only',
+      headers: 'User-Agent: browser',
+      credentialsRequired: true,
+    });
+
+    expect(persisted.credentialsRequired).toBeUndefined();
+    expect(persisted.username).toBeUndefined();
+    expect(persisted.password).toBeUndefined();
+    expect(persisted.cookies).toBeUndefined();
+    expect(persisted.headers).toBeUndefined();
+  });
+
   it.each(['queued', 'staged', 'retrying', 'processing'] as const)(
     'keeps byte counters for %s snapshots',
     (status) => {
@@ -115,6 +134,15 @@ describe('allocation phase visibility', () => {
     expect(isAllocationPhaseVisible(true, 'paused')).toBe(false);
     expect(isAllocationPhaseVisible(true, 'completed')).toBe(false);
     expect(isAllocationPhaseVisible(false, 'downloading')).toBe(false);
+  });
+
+  it('uses Torrent allocation settings and excludes media and verify-only work', () => {
+    expect(isAllocationPhaseEligible({ isTorrent: true, torrentFileAllocation: undefined })).toBe(true);
+    expect(isAllocationPhaseEligible({ isTorrent: true, torrentFileAllocation: 'prealloc' })).toBe(true);
+    expect(isAllocationPhaseEligible({ isTorrent: true, torrentFileAllocation: 'none' })).toBe(false);
+    expect(isAllocationPhaseEligible({ isTorrent: true, torrentVerifyOnly: true })).toBe(false);
+    expect(isAllocationPhaseEligible({ isTorrent: true, isMedia: true })).toBe(false);
+    expect(isAllocationPhaseEligible({ isTorrent: false, isMedia: false })).toBe(true);
   });
 });
 

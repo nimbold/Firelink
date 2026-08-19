@@ -1563,16 +1563,16 @@ export const AddDownloadsModal = () => {
           // and must not inherit the generic 1–16 HTTP setting.
           connections: item.isTorrent ? undefined : Number(connections),
           speedLimit: speedLimitEnabled ? `${speedLimit}K` : undefined,
-          username: useAuth ? username.trim() : undefined,
-          password: useAuth ? password.trim() : undefined,
+          username: item.isTorrent ? undefined : useAuth ? username.trim() : undefined,
+          password: item.isTorrent ? undefined : useAuth ? password.trim() : undefined,
           sftpHostKeyMd: !item.isTorrent && item.sourceUrl.trim().toLowerCase().startsWith('sftp:')
             ? sftpHostKeyMd.trim() || undefined
             : undefined,
-          headers: headersForRow(contextUrl) || undefined,
+          headers: item.isTorrent ? undefined : headersForRow(contextUrl) || undefined,
           checksum: checksumEnabled && checksumValue.trim()
             ? `${checksumAlgo}=${checksumValue.trim()}`
             : undefined,
-          cookies: cookiesForRow(contextUrl, item.downloadUrl) || undefined,
+          cookies: item.isTorrent ? undefined : cookiesForRow(contextUrl, item.downloadUrl) || undefined,
           mirrors: mirrors.trim() || undefined,
           destination: useSharedDestination || saveInDedicatedFolder || destinationOverrides[itemIndex]
             ? await destinationForFile(

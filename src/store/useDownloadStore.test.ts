@@ -993,6 +993,36 @@ describe('useDownloadStore', () => {
     expect(normalized.torrentEncryptionPolicy).toBeUndefined();
   });
 
+  it('migrates legacy Torrent credential context before restart resume', () => {
+    const normalized = normalizePersistedDownloadProgress({
+      id: 'legacy-torrent-credentials',
+      url: 'torrent:0123456789abcdef0123456789abcdef01234567',
+      fileName: 'payload',
+      status: 'paused',
+      category: 'Other',
+      dateAdded: '',
+      isTorrent: true,
+      torrentPath: '/managed/legacy-torrent.torrent',
+      torrentInfoHash: '0123456789abcdef0123456789abcdef01234567',
+      username: 'browser-user',
+      password: 'secret',
+      headers: 'User-Agent: browser',
+      cookies: 'session=metadata-only',
+      credentialsRequired: true,
+    });
+
+    expect(normalized).toMatchObject({
+      isTorrent: true,
+      torrentPath: '/managed/legacy-torrent.torrent',
+      torrentInfoHash: '0123456789abcdef0123456789abcdef01234567',
+    });
+    expect(normalized.username).toBeUndefined();
+    expect(normalized.password).toBeUndefined();
+    expect(normalized.headers).toBeUndefined();
+    expect(normalized.cookies).toBeUndefined();
+    expect(normalized.credentialsRequired).toBeUndefined();
+  });
+
   it('recovers an interrupted Torrent move without discarding the native destination marker', () => {
     const normalized = normalizePersistedDownloadProgress({
       id: 'interrupted-torrent-move',
@@ -1314,6 +1344,52 @@ describe('useDownloadStore', () => {
     resolveEnqueue({ id: 'allocation-phase', filename: 'file.bin' });
     await expect(dispatch).resolves.toBe(true);
     expect(useDownloadStore.getState().allocationPendingIds.has('allocation-phase')).toBe(false);
+  });
+
+  it('exposes allocation phase for a preallocated Torrent and strips metadata credentials', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'torrent-allocation-phase',
+        url: 'torrent:0123456789abcdef0123456789abcdef01234567',
+        fileName: 'payload',
+        destination: '/tmp',
+        status: 'queued',
+        category: 'Other',
+        dateAdded: '',
+        queueId: 'MAIN',
+        isTorrent: true,
+        torrentFileAllocation: 'prealloc',
+        username: 'browser-user',
+        password: 'secret',
+        headers: 'User-Agent: browser',
+        cookies: 'session=metadata-only',
+      }] as any[],
+      backendRegisteredIds: new Set(),
+      allocationPendingIds: new Set(),
+    });
+
+    let resolveEnqueue!: (value: { id: string; filename: string }) => void;
+    const enqueue = new Promise<{ id: string; filename: string }>(resolve => {
+      resolveEnqueue = resolve;
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation((command: string, args?: unknown) => {
+      if (command === 'enqueue_download') {
+        expect((args as { item: { username: string | null; password: string | null; headers: string | null; cookies: string | null } }).item)
+          .toMatchObject({ username: null, password: null, headers: null, cookies: null });
+        return enqueue as never;
+      }
+      if (command === 'get_pending_order') return Promise.resolve(['torrent-allocation-phase']) as never;
+      return Promise.resolve(undefined) as never;
+    });
+
+    const dispatch = dispatchItem('torrent-allocation-phase');
+    await vi.waitFor(() => {
+      expect(useDownloadStore.getState().allocationPendingIds.has('torrent-allocation-phase')).toBe(true);
+    });
+
+    resolveEnqueue({ id: 'torrent-allocation-phase', filename: 'payload' });
+    await expect(dispatch).resolves.toBe(true);
+    expect(useDownloadStore.getState().allocationPendingIds.has('torrent-allocation-phase')).toBe(false);
   });
 
   it('clears allocation state when a terminal status wins the race', () => {
@@ -2448,6 +2524,61 @@ describe('useDownloadStore', () => {
       status: 'failed',
       lastError: 'aria2 addUri failed: connection refused'
     });
+  });
+
+  it('shows and clears allocation phase for a blocked startup Torrent batch', async () => {
+    let releaseEnqueue!: (value: Array<{ id: string; success: boolean; filename: string }>) => void;
+    const enqueue = new Promise<Array<{ id: string; success: boolean; filename: string }>>(resolve => {
+      releaseEnqueue = resolve;
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation((cmd: string) => {
+      if (cmd === 'db_get_all_queues') return Promise.resolve([]) as never;
+      if (cmd === 'db_get_all_downloads') {
+        return Promise.resolve([JSON.stringify({
+          id: 'startup-torrent-allocation',
+          url: 'torrent:0123456789abcdef0123456789abcdef01234567',
+          fileName: 'payload',
+          status: 'queued',
+          category: 'Other',
+          dateAdded: '',
+          queueId: '00000000-0000-0000-0000-000000000001',
+          hasBeenDispatched: true,
+          isTorrent: true,
+          torrentFileAllocation: 'prealloc',
+          username: 'browser-user',
+          password: 'secret',
+          headers: 'User-Agent: browser',
+          cookies: 'session=metadata-only',
+          credentialsRequired: true,
+        })]) as never;
+      }
+      if (cmd === 'enqueue_many') return enqueue as never;
+      if (cmd === 'get_pending_order') return Promise.resolve([]) as never;
+      return Promise.resolve(undefined) as never;
+    });
+
+    await useDownloadStore.getState().initDB();
+    const resume = useDownloadStore.getState().resumePendingDownloads();
+
+    await vi.waitFor(() => {
+      expect(useDownloadStore.getState().allocationPendingIds.has('startup-torrent-allocation')).toBe(true);
+      expect(ipc.invokeCommand).toHaveBeenCalledWith(
+        'enqueue_many',
+        expect.objectContaining({
+          items: [expect.objectContaining({
+            username: null,
+            password: null,
+            headers: null,
+            cookies: null,
+          })]
+        })
+      );
+    });
+
+    releaseEnqueue([{ id: 'startup-torrent-allocation', success: true, filename: 'payload' }]);
+    await resume;
+    expect(useDownloadStore.getState().allocationPendingIds.has('startup-torrent-allocation')).toBe(false);
+    expect(useDownloadStore.getState().downloads[0].credentialsRequired).toBeUndefined();
   });
 
   it('keeps all startup items retryable when system proxy resolution fails', async () => {

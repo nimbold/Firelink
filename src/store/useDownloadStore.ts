@@ -10,7 +10,7 @@ import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
 import type { Queue } from '../bindings/Queue';
 import { useSettingsStore } from './useSettingsStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
-import { canonicalizeDownloadFileName, categoryForDownload, categoryForFileName, isActiveDownloadStatus, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForDownload, categoryForFileName, isActiveDownloadStatus, isAllocationPhaseEligible, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
 import {
   resolveCategoryDestination
 } from '../utils/downloadLocations';
@@ -339,7 +339,7 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
         await resolveCategoryDestination(settings, item.category);
       if (!isCurrentDownloadLifecycle(id, lifecycleGeneration)) return false;
 
-      const login = getSiteLogin(item.url, settings);
+      const login = item.isTorrent === true ? null : getSiteLogin(item.url, settings);
       if (login && !item.password && !settings.keychainAccessReady && !settings.keychainPromptDismissed) {
         settings.setShowKeychainModal(true);
         return false;
@@ -354,7 +354,7 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
       }
       if (!isCurrentDownloadLifecycle(id, lifecycleGeneration)) return false;
 
-      if (item.credentialsRequired === true
+      if (item.isTorrent !== true && item.credentialsRequired === true
         && !hasCredentialMaterial(item.password)
         && !hasCredentialMaterial(item.cookies)
         && !hasCredentialMaterial(item.headers)
@@ -379,12 +379,12 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
           ? null
           : resolveDownloadConnections(item.connections, settings.perServerConnections),
         speed_limit: speedLimitForDispatch(item.speedLimit, settings.globalSpeedLimit, item.isMedia),
-        username: item.username || (login ? login.username : null),
-        password: item.password || keychainPassword,
-        sftp_host_key_md: item.sftpHostKeyMd || undefined,
-        headers: item.headers || null,
+        username: item.isTorrent === true ? null : item.username || (login ? login.username : null),
+        password: item.isTorrent === true ? null : item.password || keychainPassword,
+        sftp_host_key_md: item.isTorrent === true ? undefined : item.sftpHostKeyMd || undefined,
+        headers: item.isTorrent === true ? null : item.headers || null,
         checksum: item.checksum || null,
-        cookies: item.cookies || null,
+        cookies: item.isTorrent === true ? null : item.cookies || null,
         mirrors: item.mirrors || null,
         user_agent: settings.customUserAgent.trim() || null,
         max_tries: settings.maxAutomaticRetries,
@@ -434,7 +434,7 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
       ) {
         return false;
       }
-      const showsAllocationPhase = item.isMedia !== true && item.isTorrent !== true;
+      const showsAllocationPhase = isAllocationPhaseEligible(admittedItem);
       if (showsAllocationPhase) {
         useDownloadStore.getState().setAllocationPending(id, true);
       }
@@ -834,6 +834,13 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
     && ['paused', 'failed', 'completed'].includes(rawVerifyRestoreStatus)
     ? rawVerifyRestoreStatus
     : undefined;
+  const torrentCredentialStateChanged = download.isTorrent === true && (
+    download.username !== undefined
+    || download.password !== undefined
+    || download.headers !== undefined
+    || download.cookies !== undefined
+    || download.credentialsRequired !== undefined
+  );
   const normalizedOptions = rawSeedRemaining !== normalizedSeedRemaining ||
     download.connections !== normalizedConnections ||
     rawUploadedBytes !== normalizedUploadedBytes ||
@@ -858,7 +865,8 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
     rawMoveDestination !== normalizedMoveDestination ||
     rawMoveRestoreStatus !== normalizedMoveRestoreStatus ||
     recoveredMoveStatus !== download.status ||
-    rawVerifyRestoreStatus !== normalizedVerifyRestoreStatus
+    rawVerifyRestoreStatus !== normalizedVerifyRestoreStatus ||
+    torrentCredentialStateChanged
       ? {
         ...download,
         connections: normalizedConnections,
@@ -885,7 +893,16 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
         torrentRelocationCheckPending: normalizedRelocationCheckPending,
         torrentMoveDestination: normalizedMoveDestination,
         torrentMoveRestoreStatus: normalizedMoveRestoreStatus,
-        torrentVerifyRestoreStatus: normalizedVerifyRestoreStatus
+        torrentVerifyRestoreStatus: normalizedVerifyRestoreStatus,
+        ...(download.isTorrent === true
+          ? {
+              username: undefined,
+              password: undefined,
+              headers: undefined,
+              cookies: undefined,
+              credentialsRequired: undefined,
+            }
+          : {})
       }
     : recoveredMoveStatus !== download.status
       ? { ...download, status: recoveredMoveStatus, torrentMoveRestoreStatus: normalizedMoveRestoreStatus }
@@ -1167,6 +1184,15 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         : credentialsUpdated && item.credentialsRequired === true
           ? { credentialsRequired: true }
           : {}),
+      ...(item.isTorrent === true
+        ? {
+            username: undefined,
+            password: undefined,
+            headers: undefined,
+            cookies: undefined,
+            credentialsRequired: undefined,
+          }
+        : {}),
     };
     const disablingTorrentRemoval = item.isTorrent === true
       && normalizedUpdates.torrentRemoveUnselectedFile === false
@@ -1261,7 +1287,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       if (!targetItem) return false;
     }
 
-    if (targetItem.credentialsRequired === true
+    if (targetItem.isTorrent !== true && targetItem.credentialsRequired === true
       && !hasCredentialMaterial(targetItem.password)
       && !hasCredentialMaterial(targetItem.cookies)
       && !hasCredentialMaterial(targetItem.headers)) {
@@ -1284,6 +1310,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
           return false;
         }
       }
+      clearCredentialsRequired(id);
+    } else if (targetItem.isTorrent === true && targetItem.credentialsRequired === true) {
       clearCredentialsRequired(id);
     }
 
@@ -1784,6 +1812,15 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     const settings = useSettingsStore.getState();
     const normalizedItem = {
       ...item,
+      ...(item.isTorrent === true
+        ? {
+            username: undefined,
+            password: undefined,
+            headers: undefined,
+            cookies: undefined,
+            credentialsRequired: undefined,
+          }
+        : {}),
       fileName: canonicalizeDownloadFileName(item.fileName),
       category: categoryForFileName(item.fileName, item.isTorrent === true)
     };
@@ -2628,7 +2665,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
           const item = get().downloads.find(download => download.id === pendingItem.id);
           if (!item || item.status !== 'queued' || get().backendRegisteredIds.has(item.id)) continue;
 
-          const login = getSiteLogin(item.url, settings);
+          const login = item.isTorrent === true ? null : getSiteLogin(item.url, settings);
           let keychainPassword = null;
           if (login && !item.password && settings.keychainAccessReady) {
             try {
@@ -2637,7 +2674,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
               console.warn("Could not fetch keychain password for login:", e);
             }
           }
-          if (item.credentialsRequired === true
+          if (item.isTorrent !== true && item.credentialsRequired === true
             && !hasCredentialMaterial(item.password)
             && !hasCredentialMaterial(item.cookies)
             && !hasCredentialMaterial(item.headers)
@@ -2658,12 +2695,12 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
               ? null
               : resolveDownloadConnections(item.connections, settings.perServerConnections),
             speed_limit: speedLimitForDispatch(item.speedLimit, settings.globalSpeedLimit, item.isMedia),
-            username: item.username || (login ? login.username : null),
-            password: item.password || keychainPassword,
-            sftp_host_key_md: item.sftpHostKeyMd || undefined,
-            headers: item.headers || null,
+            username: item.isTorrent === true ? null : item.username || (login ? login.username : null),
+            password: item.isTorrent === true ? null : item.password || keychainPassword,
+            sftp_host_key_md: item.isTorrent === true ? undefined : item.sftpHostKeyMd || undefined,
+            headers: item.isTorrent === true ? null : item.headers || null,
             checksum: item.checksum || null,
-            cookies: item.cookies || null,
+            cookies: item.isTorrent === true ? null : item.cookies || null,
             mirrors: item.mirrors || null,
             user_agent: settings.customUserAgent.trim() || null,
             max_tries: settings.maxAutomaticRetries,
@@ -2724,7 +2761,20 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             currentDownloadLifecycle(item.id).toString() === item.lifecycle_generation;
         });
         if (dispatchableItems.length === 0) return;
-        const results = await invoke('enqueue_many', { items: dispatchableItems });
+        const allocationPendingIds = dispatchableItems
+          .filter(item => {
+            const current = latestItems.get(item.id);
+            return current !== undefined && isAllocationPhaseEligible(current);
+          })
+          .map(item => item.id);
+        allocationPendingIds.forEach(id => get().setAllocationPending(id, true));
+
+        let results;
+        try {
+          results = await invoke('enqueue_many', { items: dispatchableItems });
+        } finally {
+          allocationPendingIds.forEach(id => get().setAllocationPending(id, false));
+        }
         const registeredIds = results.filter(result => result.success).map(result => result.id);
         const failedErrors = new Map(
           results

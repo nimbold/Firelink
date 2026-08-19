@@ -55,6 +55,20 @@ export const isAllocationPhaseVisible = (
   status: DownloadStatus,
 ): boolean => allocationPending && status !== 'completed' && status !== 'paused';
 
+/**
+ * Allocation is a transient admission phase. Normal downloads retain the
+ * existing preallocation behavior; Torrent rows use Aria2's Torrent-specific
+ * allocation setting and never show the hint for verification-only work.
+ */
+export const isAllocationPhaseEligible = (
+  download: Pick<DownloadItem, 'isMedia' | 'isTorrent' | 'torrentFileAllocation' | 'torrentVerifyOnly'>,
+): boolean => {
+  if (download.isMedia === true) return false;
+  if (download.isTorrent !== true) return true;
+  return download.torrentVerifyOnly !== true
+    && normalizeTorrentFileAllocation(download.torrentFileAllocation) !== 'none';
+};
+
 export const DOWNLOAD_CONNECTIONS_MIN = 1;
 export const DOWNLOAD_CONNECTIONS_MAX = 16;
 
@@ -590,7 +604,13 @@ const VOLATILE_PROGRESS_STATUSES = new Set([
  */
 export const redactDownloadForPersistence = (item: DownloadItem): DownloadItem => {
   const copy: DownloadItem = { ...item };
-  if (item.credentialsRequired === true
+  if (item.isTorrent === true) {
+    // Torrent request credentials belong only to metadata acquisition. A
+    // legacy row may still carry the marker or username in memory, but neither
+    // may turn a cached-metadata Torrent into a credential-gated restart.
+    delete copy.credentialsRequired;
+    delete copy.username;
+  } else if (item.credentialsRequired === true
     || DOWNLOAD_SECRET_FIELDS.some(field => Boolean(item[field]))) {
     copy.credentialsRequired = true;
   }

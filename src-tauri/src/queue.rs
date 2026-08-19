@@ -6948,6 +6948,30 @@ fn apply_aria2_torrent_options(
     Ok(())
 }
 
+fn apply_aria2_header_options(
+    options: &mut serde_json::Map<String, serde_json::Value>,
+    payload: &SpawnPayload,
+    credentials_allowed: bool,
+) {
+    if !credentials_allowed {
+        return;
+    }
+    let mut header_list = Vec::new();
+    if let Some(cookies) = &payload.cookies {
+        header_list.push(format!("Cookie: {cookies}"));
+    }
+    if let Some(headers) = &payload.headers {
+        for line in headers.lines() {
+            if !line.trim().is_empty() {
+                header_list.push(line.trim().to_string());
+            }
+        }
+    }
+    if !header_list.is_empty() {
+        options.insert("header".to_string(), serde_json::json!(header_list));
+    }
+}
+
 impl ProductionSpawner {
     pub fn new(app_handle: AppHandle<tauri::Wry>) -> Self {
         Self { app_handle }
@@ -7055,7 +7079,10 @@ impl SidecarSpawner for ProductionSpawner {
         }
         let (transfer_uris, requested_connections, transfer_connections, credentials_allowed) =
             if payload.is_torrent {
-                (Vec::new(), DOWNLOAD_CONNECTIONS_MIN, DOWNLOAD_CONNECTIONS_MIN, true)
+                // Torrent metadata acquisition credentials are never transfer
+                // credentials. Torrent trackers and web seeds use their own
+                // validated URI/options paths below.
+                (Vec::new(), DOWNLOAD_CONNECTIONS_MIN, DOWNLOAD_CONNECTIONS_MIN, false)
             } else {
                 let requested_uris =
                     crate::collect_download_uris(&payload.url, payload.mirrors.as_deref());
@@ -7134,22 +7161,7 @@ impl SidecarSpawner for ProductionSpawner {
         if let Some(ua) = &payload.user_agent {
             options.insert("user-agent".to_string(), serde_json::json!(ua));
         }
-        let mut header_list = Vec::new();
-        if payload.is_torrent || credentials_allowed {
-            if let Some(cook) = &payload.cookies {
-                header_list.push(format!("Cookie: {}", cook));
-            }
-            if let Some(hdrs) = &payload.headers {
-                for line in hdrs.lines() {
-                    if !line.trim().is_empty() {
-                        header_list.push(line.trim().to_string());
-                    }
-                }
-            }
-        }
-        if !header_list.is_empty() {
-            options.insert("header".to_string(), serde_json::json!(header_list));
-        }
+        apply_aria2_header_options(&mut options, payload, credentials_allowed);
         if let Some(prox) = proxy_value {
             options.insert("all-proxy".to_string(), serde_json::json!(prox));
         }
@@ -7715,7 +7727,7 @@ impl SidecarSpawner for ProductionSpawner {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, TS)]
+#[derive(Debug, Clone, Default, Deserialize, TS)]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct EnqueueItem {
     pub id: String,
@@ -7827,73 +7839,84 @@ pub struct EnqueueItem {
 }
 
 impl EnqueueItem {
+    pub fn strip_torrent_credentials(&mut self) {
+        if self.is_torrent.unwrap_or(false) {
+            self.username = None;
+            self.password = None;
+            self.headers = None;
+            self.cookies = None;
+        }
+    }
+
     pub fn into_task(self) -> QueuedTask {
-        let media = self.is_media.unwrap_or(false);
+        let mut item = self;
+        item.strip_torrent_credentials();
+        let media = item.is_media.unwrap_or(false);
         let kind = if media {
             TaskKind::Media
         } else {
             TaskKind::Aria2
         };
-        let id = self.id.clone();
+        let id = item.id.clone();
         QueuedTask {
             id,
-            queue_id: self.queue_id,
+            queue_id: item.queue_id,
             kind,
-            lifecycle_generation: self
+            lifecycle_generation: item
                 .lifecycle_generation
                 .as_deref()
                 .and_then(|generation| generation.parse().ok())
                 .unwrap_or_default(),
             payload: SpawnPayload {
-                url: self.url,
-                destination: self.destination,
-                filename: self.filename,
-                connections: self.connections,
-                speed_limit: self.speed_limit,
-                username: self.username,
-                password: self.password,
-                sftp_host_key_md: self.sftp_host_key_md,
-                headers: self.headers,
-                checksum: self.checksum,
-                cookies: self.cookies,
-                mirrors: self.mirrors,
-                user_agent: self.user_agent,
-                max_tries: self.max_tries,
-                minimum_normal_download_speed_kib: self
+                url: item.url,
+                destination: item.destination,
+                filename: item.filename,
+                connections: item.connections,
+                speed_limit: item.speed_limit,
+                username: item.username,
+                password: item.password,
+                sftp_host_key_md: item.sftp_host_key_md,
+                headers: item.headers,
+                checksum: item.checksum,
+                cookies: item.cookies,
+                mirrors: item.mirrors,
+                user_agent: item.user_agent,
+                max_tries: item.max_tries,
+                minimum_normal_download_speed_kib: item
                     .minimum_normal_download_speed_kib
                     .unwrap_or_default(),
-                retry_not_found_errors: self.retry_not_found_errors.unwrap_or(false),
-                adaptive_mirror_selection: self.adaptive_mirror_selection.unwrap_or(true),
-                proxy: self.proxy,
+                retry_not_found_errors: item.retry_not_found_errors.unwrap_or(false),
+                adaptive_mirror_selection: item.adaptive_mirror_selection.unwrap_or(true),
+                proxy: item.proxy,
                 aria2_resolver_mode: Aria2ResolverMode::Automatic,
-                format_selector: self.format_selector,
-                cookie_source: self.cookie_source,
+                format_selector: item.format_selector,
+                cookie_source: item.cookie_source,
                 is_media: media,
-                is_torrent: self.is_torrent.unwrap_or(false),
-                torrent_path: self.torrent_path,
-                torrent_file_indices: self.torrent_file_indices,
-                torrent_seed_time: self.torrent_seed_remaining.or(self.torrent_seed_time),
-                torrent_seed_ratio: self.torrent_seed_ratio,
-                torrent_seed_remaining: self.torrent_seed_remaining,
-                torrent_web_seeds: self.torrent_web_seeds,
-                torrent_upload_limit: self.torrent_upload_limit,
-                torrent_max_peers: self.torrent_max_peers,
-                torrent_peer_speed_limit: self.torrent_peer_speed_limit,
-                torrent_check_integrity: self.torrent_check_integrity.unwrap_or(false),
-                torrent_trackers: self.torrent_trackers,
-                torrent_exclude_trackers: self.torrent_exclude_trackers,
-                torrent_tracker_connect_timeout: self.torrent_tracker_connect_timeout,
-                torrent_tracker_timeout: self.torrent_tracker_timeout,
-                torrent_tracker_interval: self.torrent_tracker_interval,
-                torrent_stop_timeout: self.torrent_stop_timeout,
-                torrent_prioritize_piece: self.torrent_prioritize_piece,
-                torrent_remove_unselected_file: self
+                is_torrent: item.is_torrent.unwrap_or(false),
+                torrent_path: item.torrent_path,
+                torrent_file_indices: item.torrent_file_indices,
+                torrent_seed_time: item.torrent_seed_remaining.or(item.torrent_seed_time),
+                torrent_seed_ratio: item.torrent_seed_ratio,
+                torrent_seed_remaining: item.torrent_seed_remaining,
+                torrent_web_seeds: item.torrent_web_seeds,
+                torrent_upload_limit: item.torrent_upload_limit,
+                torrent_max_peers: item.torrent_max_peers,
+                torrent_peer_speed_limit: item.torrent_peer_speed_limit,
+                torrent_check_integrity: item.torrent_check_integrity.unwrap_or(false),
+                torrent_trackers: item.torrent_trackers,
+                torrent_exclude_trackers: item.torrent_exclude_trackers,
+                torrent_tracker_connect_timeout: item.torrent_tracker_connect_timeout,
+                torrent_tracker_timeout: item.torrent_tracker_timeout,
+                torrent_tracker_interval: item.torrent_tracker_interval,
+                torrent_stop_timeout: item.torrent_stop_timeout,
+                torrent_prioritize_piece: item.torrent_prioritize_piece,
+                torrent_remove_unselected_file: item
                     .torrent_remove_unselected_file
                     .unwrap_or(false),
-                torrent_encryption_policy: self.torrent_encryption_policy,
-                torrent_file_allocation: self.torrent_file_allocation,
-                torrent_verify_only: self.torrent_verify_only.unwrap_or(false),
-                torrent_verify_restore_status: self.torrent_verify_restore_status,
+                torrent_encryption_policy: item.torrent_encryption_policy,
+                torrent_file_allocation: item.torrent_file_allocation,
+                torrent_verify_only: item.torrent_verify_only.unwrap_or(false),
+                torrent_verify_restore_status: item.torrent_verify_restore_status,
                 torrent_verified_length: None,
             },
         }
@@ -8073,6 +8096,41 @@ mod tests {
         }
         assert_eq!(normal_options.get("split"), Some(&serde_json::json!("16")));
         assert_eq!(normal_options.get("max-connection-per-server"), Some(&serde_json::json!("16")));
+    }
+
+    #[test]
+    fn torrent_payloads_do_not_emit_generic_headers_or_cookies() {
+        let payload = SpawnPayload {
+            is_torrent: true,
+            headers: Some("User-Agent: browser\nAuthorization: secret".to_string()),
+            cookies: Some("session=secret".to_string()),
+            ..Default::default()
+        };
+        let mut options = serde_json::Map::new();
+
+        apply_aria2_header_options(&mut options, &payload, false);
+
+        assert!(!options.contains_key("header"));
+    }
+
+    #[test]
+    fn torrent_enqueue_items_strip_generic_credentials_before_task_creation() {
+        let mut item = EnqueueItem {
+            is_torrent: Some(true),
+            username: Some("browser-user".to_string()),
+            password: Some("secret".to_string()),
+            headers: Some("Authorization: secret".to_string()),
+            cookies: Some("session=secret".to_string()),
+            ..Default::default()
+        };
+
+        item.strip_torrent_credentials();
+        let task = item.into_task();
+
+        assert!(task.payload.username.is_none());
+        assert!(task.payload.password.is_none());
+        assert!(task.payload.headers.is_none());
+        assert!(task.payload.cookies.is_none());
     }
 
     #[test]

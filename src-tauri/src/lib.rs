@@ -6855,6 +6855,7 @@ async fn validate_torrent_enqueue(
     app_handle: &tauri::AppHandle,
     item: &mut queue::EnqueueItem,
 ) -> Result<(), String> {
+    item.strip_torrent_credentials();
     if item.is_media.unwrap_or(false) {
         return Err("torrent transfer cannot be a media download".to_string());
     }
