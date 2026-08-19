@@ -76,13 +76,18 @@ jobs:
         if: runner.os != 'Windows'
         working-directory: src-tauri
         run: cargo test --all-targets --target ${{ matrix.target }}
-      - name: Test Rust backend
+      - name: Test Windows Torrent RPC integration
         if: runner.os == 'Windows'
         working-directory: src-tauri
-        run: |
-          cargo test --test queue_manager --target ${{ matrix.target }} -- --nocapture
-          cargo test --test torrent_rpc --target ${{ matrix.target }} -- --nocapture
-          cargo test --lib --no-run --target ${{ matrix.target }}
+        run: cargo test --test torrent_rpc --target ${{ matrix.target }} -- --nocapture
+      - name: Compile Windows queue-manager integration
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        run: cargo test --test queue_manager --no-run --target ${{ matrix.target }}
+      - name: Compile Windows Rust library tests
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        run: cargo test --lib --no-run --target ${{ matrix.target }}
       - name: Verify Windows atomic Torrent storage
         if: runner.os == 'Windows'
         working-directory: src-tauri

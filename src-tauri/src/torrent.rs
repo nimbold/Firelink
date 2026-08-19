@@ -890,9 +890,13 @@ pub fn managed_torrent_info_hash_path<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     info_hash: &str,
 ) -> Result<PathBuf, String> {
+    let root = managed_torrent_storage_root(app_handle)?;
+    managed_torrent_info_hash_path_at(&root, info_hash)
+}
+
+fn managed_torrent_info_hash_path_at(root: &Path, info_hash: &str) -> Result<PathBuf, String> {
     let info_hash = canonical_btih(info_hash)
         .ok_or_else(|| "invalid torrent info hash cache key".to_string())?;
-    let root = managed_torrent_storage_root(app_handle)?;
     Ok(root.join(format!(".info-{info_hash}.torrent")))
 }
 
@@ -1166,13 +1170,13 @@ fn canonical_torrent_cache_lock() -> &'static tokio::sync::Mutex<()> {
     CANONICAL_TORRENT_CACHE_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-async fn read_cached_torrent_by_info_hash_unlocked<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
+async fn read_cached_torrent_by_info_hash_unlocked(
+    root: &Path,
     info_hash: &str,
 ) -> Result<Option<Vec<u8>>, String> {
     let info_hash = canonical_btih(info_hash)
         .ok_or_else(|| "invalid torrent info hash cache key".to_string())?;
-    let path = managed_torrent_info_hash_path(app_handle, &info_hash)?;
+    let path = managed_torrent_info_hash_path_at(root, &info_hash)?;
     let metadata = match tokio::fs::symlink_metadata(&path).await {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1182,9 +1186,8 @@ async fn read_cached_torrent_by_info_hash_unlocked<R: tauri::Runtime>(
         return Ok(None);
     }
 
-    let validated_path = match validate_managed_torrent_info_hash_path(
-        app_handle,
-        &info_hash,
+    let validated_path = match validate_managed_torrent_path_against_expected(
+        &path,
         &path.to_string_lossy(),
     ) {
         Ok(path) => path,
@@ -1218,12 +1221,30 @@ pub async fn read_cached_torrent_by_info_hash<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     info_hash: &str,
 ) -> Result<Option<Vec<u8>>, String> {
+    let root = managed_torrent_storage_root(app_handle)?;
+    read_cached_torrent_by_info_hash_at(&root, info_hash).await
+}
+
+#[doc(hidden)]
+pub async fn read_cached_torrent_by_info_hash_at(
+    root: &Path,
+    info_hash: &str,
+) -> Result<Option<Vec<u8>>, String> {
     let _guard = canonical_torrent_cache_lock().lock().await;
-    read_cached_torrent_by_info_hash_unlocked(app_handle, info_hash).await
+    read_cached_torrent_by_info_hash_unlocked(root, info_hash).await
 }
 
 pub async fn cache_torrent_info_hash<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
+    bytes: &[u8],
+) -> Result<Option<String>, String> {
+    let root = managed_torrent_storage_root(app_handle)?;
+    cache_torrent_info_hash_at(&root, bytes).await
+}
+
+#[doc(hidden)]
+pub async fn cache_torrent_info_hash_at(
+    root: &Path,
     bytes: &[u8],
 ) -> Result<Option<String>, String> {
     let _guard = canonical_torrent_cache_lock().lock().await;
@@ -1232,8 +1253,8 @@ pub async fn cache_torrent_info_hash<R: tauri::Runtime>(
         return Ok(None);
     }
     let info_hash = parsed.info_hash;
-    let destination = managed_torrent_info_hash_path(app_handle, &info_hash)?;
-    if read_cached_torrent_by_info_hash_unlocked(app_handle, &info_hash)
+    let destination = managed_torrent_info_hash_path_at(root, &info_hash)?;
+    if read_cached_torrent_by_info_hash_unlocked(root, &info_hash)
         .await?
         .is_some()
     {
@@ -1494,6 +1515,69 @@ mod tests {
         assert!(!is_canonical_torrent_temp_file(
             ".cache-0123456789abcdef0123456789abcdef01234567.torrent.tmp"
         ));
+    }
+
+    #[tokio::test]
+    async fn canonical_cache_round_trip_rejects_invalid_bytes_and_source_metadata() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let bytes = b"d4:infod6:lengthi5e4:name4:testee";
+        let parsed = parse_torrent_bytes(bytes).expect("test torrent should parse");
+        let path = managed_torrent_info_hash_path(app.handle(), &parsed.info_hash)
+            .expect("canonical cache path should resolve");
+        let _ = tokio::fs::remove_file(&path).await;
+
+        assert!(
+            cache_torrent_info_hash(app.handle(), bytes)
+                .await
+                .expect("canonical cache write should succeed")
+                .is_some()
+        );
+        assert_eq!(
+            read_cached_torrent_by_info_hash(app.handle(), &parsed.info_hash)
+                .await
+                .expect("canonical cache read should succeed"),
+            Some(bytes.to_vec())
+        );
+
+        tokio::fs::write(&path, b"not a torrent")
+            .await
+            .expect("invalid cache fixture should be writable");
+        assert!(
+            read_cached_torrent_by_info_hash(app.handle(), &parsed.info_hash)
+                .await
+                .expect("invalid cache should be handled")
+                .is_none()
+        );
+        assert!(!path.exists());
+
+        let tracker_bytes =
+            b"d8:announce32:https://tracker.example/announce4:infod6:lengthi5e4:name4:testee";
+        let tracker_hash = parse_torrent_bytes(tracker_bytes)
+            .expect("tracker-bearing torrent should parse")
+            .info_hash;
+        assert!(
+            cache_torrent_info_hash(app.handle(), tracker_bytes)
+                .await
+                .expect("tracker metadata should be reusable")
+                .is_some()
+        );
+        assert_eq!(
+            read_cached_torrent_by_info_hash(app.handle(), &tracker_hash)
+                .await
+                .expect("tracker cache should be readable"),
+            Some(tracker_bytes.to_vec())
+        );
+        assert!(
+            cache_torrent_info_hash(
+                app.handle(),
+                b"d4:infod6:lengthi5e4:name4:teste8:url-list22:https://example.test/ae"
+            )
+            .await
+            .expect("web-seed metadata should be handled")
+            .is_none()
+        );
     }
 
     #[test]
