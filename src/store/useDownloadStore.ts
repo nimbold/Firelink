@@ -751,7 +751,7 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
       !!seed && typeof seed === 'object' &&
       typeof (seed as { fileIndex?: unknown }).fileIndex === 'number' &&
       Number.isInteger((seed as { fileIndex: number }).fileIndex) &&
-      (seed as { fileIndex: number }).fileIndex >= 0 &&
+      (seed as { fileIndex: number }).fileIndex >= 1 &&
       typeof (seed as { uri?: unknown }).uri === 'string' &&
       (seed as { uri: string }).uri.length <= 2048
     ).slice(0, 256)
@@ -762,7 +762,7 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
       !!seed && typeof seed === 'object' &&
       typeof (seed as { fileIndex?: unknown }).fileIndex === 'number' &&
       Number.isInteger((seed as { fileIndex: number }).fileIndex) &&
-      (seed as { fileIndex: number }).fileIndex >= 0 &&
+      (seed as { fileIndex: number }).fileIndex >= 1 &&
       typeof (seed as { uri?: unknown }).uri === 'string' &&
       (seed as { uri: string }).uri.length <= 2048
     ).slice(0, 256)

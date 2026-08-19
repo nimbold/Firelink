@@ -66,7 +66,7 @@ export const TorrentWebSeedEditor = ({ files, rows, onChange, disabled = false, 
                   aria-invalid={!rowIsValid}
                   className="app-control w-full min-h-[30px] px-2 py-1.5 text-xs disabled:opacity-70"
                 >
-                  <option value={files[0].index}>{files[0].index + 1}: {filePath(files[0])}</option>
+                  <option value={files[0].index}>{files[0].index}: {filePath(files[0])}</option>
                 </select>
               ) : (
                 <select
@@ -81,7 +81,7 @@ export const TorrentWebSeedEditor = ({ files, rows, onChange, disabled = false, 
                   <option value="" disabled>{t($ => $.properties.torrentWebSeedsFile)}</option>
                   {files.map(file => (
                     <option key={file.index} value={file.index}>
-                      {file.index + 1}: {filePath(file)}
+                      {file.index}: {filePath(file)}
                     </option>
                   ))}
                 </select>

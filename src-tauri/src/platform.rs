@@ -1,5 +1,140 @@
 use std::ffi::OsString;
+use std::io;
 use std::path::{Path, PathBuf};
+
+const ATOMIC_TEMP_PREFIX: &str = ".firelink-atomic-";
+
+/// Write bytes to a same-directory temporary file, synchronize them, and
+/// replace the destination without ever opening the destination for writing.
+///
+/// The destination is checked with `symlink_metadata` so managed callers fail
+/// closed when an attacker or another process has substituted a link or a
+/// non-file. The final rename is atomic on Unix and uses Windows replace
+/// semantics rather than the non-replacing `std::fs::rename` behavior.
+pub async fn atomic_write_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "atomic path has no parent"))?;
+
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "atomic destination cannot be a symbolic link",
+            ));
+        }
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "atomic destination is not a regular file",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let temporary = parent.join(format!(
+        "{ATOMIC_TEMP_PREFIX}{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let write_result = async {
+        use tokio::io::AsyncWriteExt;
+
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .await?;
+        file.write_all(bytes).await?;
+        file.sync_all().await
+    }
+    .await;
+
+    if let Err(error) = write_result {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error);
+    }
+
+    if let Err(error) = replace_staged_file(&temporary, path) {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error);
+    }
+
+    #[cfg(unix)]
+    {
+        // A directory sync makes the rename durable across a power loss on
+        // platforms that support opening directories as file descriptors.
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+
+    Ok(())
+}
+
+pub fn is_atomic_temp_file_name(name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix(ATOMIC_TEMP_PREFIX) else {
+        return false;
+    };
+    let Some(identifier) = suffix.strip_suffix(".tmp") else {
+        return false;
+    };
+    identifier.len() == 32 && identifier.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn replace_staged_file(temporary: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::fs::rename(temporary, destination)
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use std::thread;
+        use std::time::Duration;
+        use windows_sys::Win32::Foundation::{
+            GetLastError, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+
+        let temporary = temporary
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let destination = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+
+        for attempt in 0..5 {
+            // SAFETY: both paths are NUL-terminated UTF-16 buffers owned for
+            // the duration of the call, and the flags request same-volume
+            // replacement with write-through semantics.
+            let replaced = unsafe {
+                MoveFileExW(
+                    temporary.as_ptr(),
+                    destination.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if replaced != 0 {
+                return Ok(());
+            }
+
+            let error = unsafe { GetLastError() };
+            if !matches!(error, ERROR_LOCK_VIOLATION | ERROR_SHARING_VIOLATION) || attempt == 4 {
+                return Err(io::Error::from_raw_os_error(error as i32));
+            }
+            thread::sleep(Duration::from_millis(25 * (attempt + 1) as u64));
+        }
+
+        unreachable!("atomic Windows replacement loop always returns");
+    }
+}
 
 pub fn target_arch() -> &'static str {
     if cfg!(target_arch = "aarch64") {

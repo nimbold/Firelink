@@ -3567,6 +3567,8 @@ pub mod ipc;
 mod parity;
 mod power;
 mod platform;
+#[doc(hidden)]
+pub use platform::atomic_write_replace;
 mod properties_window;
 pub mod queue;
 pub mod process;
@@ -6797,7 +6799,7 @@ async fn validate_enqueue_uris(url: &str, mirrors: Option<&str>) -> Result<(), S
     Ok(())
 }
 
-async fn validate_torrent_web_seed_destinations(seeds: &[String]) -> Result<(), String> {
+pub(crate) async fn validate_torrent_web_seed_destinations(seeds: &[String]) -> Result<(), String> {
     for uri in seeds {
         let parsed = reqwest::Url::parse(uri)
             .map_err(|_| "Torrent web-seed URI is invalid".to_string())?;
@@ -6877,7 +6879,9 @@ async fn validate_torrent_enqueue(
     item.torrent_encryption_policy = queue::normalize_torrent_encryption_policy(
         item.torrent_encryption_policy.as_deref(),
     )?;
-    validate_enqueue_uris("", item.mirrors.as_deref()).await?;
+    let legacy_web_seeds = queue::normalize_torrent_mirror_uris(item.mirrors.as_deref())?;
+    validate_torrent_web_seed_destinations(&legacy_web_seeds).await?;
+    item.mirrors = (!legacy_web_seeds.is_empty()).then_some(legacy_web_seeds.join("\n"));
     if let Some(path) = item.torrent_path.as_deref() {
         let path = crate::torrent::validate_managed_torrent_path(app_handle, &item.id, path)?;
         let bytes = std::fs::read(path)
@@ -8443,11 +8447,7 @@ async fn write_torrent_move_journal(
     });
     let bytes = serde_json::to_vec_pretty(&data)
         .map_err(|_| "could not encode Torrent move journal".to_string())?;
-    let temporary = path.with_extension("json.tmp");
-    tokio::fs::write(&temporary, bytes)
-        .await
-        .map_err(|_| "could not write Torrent move journal".to_string())?;
-    tokio::fs::rename(&temporary, path)
+    crate::platform::atomic_write_replace(path, &bytes)
         .await
         .map_err(|_| "could not commit Torrent move journal".to_string())
 }
@@ -8671,6 +8671,18 @@ fn recover_torrent_move_journals(
             Err(_) => continue,
         };
         let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if crate::platform::is_atomic_temp_file_name(&name) {
+            if file_type.is_file() || file_type.is_symlink() {
+                let _ = std::fs::remove_file(&path);
+            }
+            continue;
+        }
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
@@ -11728,7 +11740,7 @@ mod tests {
 
     #[test]
     fn renderer_download_snapshots_cannot_roll_back_native_web_seed_changes() {
-        let native_seeds = json!([{ "fileIndex": 0, "uri": "https://mirror.example/file" }]);
+        let native_seeds = json!([{ "fileIndex": 1, "uri": "https://mirror.example/file" }]);
         let existing = vec![
             json!({
                 "id": "torrent-1",

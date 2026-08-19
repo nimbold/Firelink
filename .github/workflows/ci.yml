@@ -71,6 +71,10 @@ jobs:
         run: |
           cargo test --tests --target ${{ matrix.target }}
           cargo test --lib --no-run --target ${{ matrix.target }}
+      - name: Verify Windows atomic Torrent storage
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        run: cargo test --test atomic_file --target ${{ matrix.target }} -- --nocapture
       - name: Provision locked engines
         if: runner.os != 'macOS'
         run: node scripts/provision-engines.js --target ${{ matrix.target }}

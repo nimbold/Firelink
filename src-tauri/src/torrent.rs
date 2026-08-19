@@ -632,9 +632,8 @@ pub fn torrent_metadata_is_safe_for_magnet_reuse(bytes: &[u8]) -> Result<bool, S
 
 fn magnet_metadata(source: &str) -> Result<ParsedTorrent, String> {
     let parsed = url::Url::parse(source).map_err(|_| "invalid magnet URI".to_string())?;
-    if parsed.scheme() != "magnet" {
-        return Err("unsupported torrent source".to_string());
-    }
+    validate_magnet_authority(&parsed)?;
+    let _ = normalized_magnet_trackers(&parsed)?;
     let info_hash = parsed
         .query_pairs()
         .find_map(|(key, value)| {
@@ -654,15 +653,11 @@ fn magnet_metadata(source: &str) -> Result<ParsedTorrent, String> {
     Ok(ParsedTorrent { name, total_bytes: 0, files: Vec::new(), info_hash, web_seeds: Vec::new() })
 }
 
-/// Return the Magnet URI form that Firelink may hand to Aria2. Direct source
-/// parameters can make Aria2 fetch arbitrary HTTP/FTP/SFTP resources during
-/// metadata resolution, so keep the peer/tracker identity parameters but
-/// remove `ws`, `as`, and `xs` sources. Users can add validated web seeds after
-/// metadata is available through the transactional per-file path.
-pub fn sanitize_magnet_uri_for_aria2(source: &str) -> Result<String, String> {
-    let mut parsed = url::Url::parse(source.trim()).map_err(|_| "invalid magnet URI".to_string())?;
-    if parsed.scheme() != "magnet"
-        || !parsed.username().is_empty()
+fn validate_magnet_authority(parsed: &url::Url) -> Result<(), String> {
+    if parsed.scheme() != "magnet" {
+        return Err("unsupported torrent source".to_string());
+    }
+    if !parsed.username().is_empty()
         || parsed.password().is_some()
         || parsed.fragment().is_some()
         || parsed.host_str().is_some()
@@ -670,6 +665,47 @@ pub fn sanitize_magnet_uri_for_aria2(source: &str) -> Result<String, String> {
     {
         return Err("magnet URI contains an invalid authority or fragment".to_string());
     }
+    Ok(())
+}
+
+fn normalized_magnet_trackers(parsed: &url::Url) -> Result<Vec<String>, String> {
+    let mut trackers = Vec::new();
+    let mut serialized_bytes = 0usize;
+    for (key, value) in parsed.query_pairs() {
+        if key != "tr" {
+            continue;
+        }
+        if trackers.len() >= crate::queue::MAX_TORRENT_TRACKERS {
+            return Err(format!(
+                "magnet tracker list must contain at most {} trackers",
+                crate::queue::MAX_TORRENT_TRACKERS
+            ));
+        }
+        let normalized = crate::queue::normalize_torrent_tracker_uri(&value)?;
+        serialized_bytes = serialized_bytes
+            .checked_add(normalized.len())
+            .ok_or_else(|| "magnet tracker list is too large".to_string())?;
+        if serialized_bytes > crate::queue::MAX_TORRENT_TRACKER_BYTES {
+            return Err(format!(
+                "magnet tracker list must be at most {} bytes",
+                crate::queue::MAX_TORRENT_TRACKER_BYTES
+            ));
+        }
+        trackers.push(normalized);
+    }
+    Ok(trackers)
+}
+
+/// Return the Magnet URI form that Firelink may hand to Aria2. Direct source
+/// parameters can make Aria2 fetch arbitrary HTTP/FTP/SFTP resources during
+/// metadata resolution, so keep the peer/tracker identity parameters but
+/// remove `ws`, `as`, and `xs` sources. Users can add validated web seeds after
+/// metadata is available through the transactional per-file path.
+pub fn sanitize_magnet_uri_for_aria2(source: &str) -> Result<String, String> {
+    let mut parsed = url::Url::parse(source.trim()).map_err(|_| "invalid magnet URI".to_string())?;
+    validate_magnet_authority(&parsed)?;
+    let normalized_trackers = normalized_magnet_trackers(&parsed)?;
+    let mut tracker_index = 0;
 
     let mut has_info_hash = false;
     let mut query = url::form_urlencoded::Serializer::new(String::new());
@@ -684,6 +720,12 @@ pub fn sanitize_magnet_uri_for_aria2(source: &str) -> Result<String, String> {
                 .ok_or_else(|| "magnet URI has no valid BitTorrent info hash".to_string())?;
             query.append_pair("xt", &format!("urn:btih:{hash}"));
             has_info_hash = true;
+        } else if key == "tr" {
+            let tracker = normalized_trackers
+                .get(tracker_index)
+                .ok_or_else(|| "magnet tracker normalization lost an entry".to_string())?;
+            tracker_index += 1;
+            query.append_pair("tr", tracker);
         } else {
             query.append_pair(&key, &value);
         }
@@ -700,7 +742,7 @@ pub fn magnet_allows_cached_metadata(source: &str) -> bool {
     let Ok(parsed) = url::Url::parse(source.trim()) else {
         return false;
     };
-    if parsed.scheme() != "magnet" {
+    if validate_magnet_authority(&parsed).is_err() || normalized_magnet_trackers(&parsed).is_err() {
         return false;
     }
 
@@ -930,7 +972,23 @@ fn remove_orphaned_cached_torrents_at(
         let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
             continue;
         };
-        if file_type.is_file() && is_canonical_torrent_temp_file(&name) {
+        if crate::platform::is_atomic_temp_file_name(&name) {
+            if file_type.is_file() || file_type.is_symlink() {
+                match std::fs::remove_file(entry.path()) {
+                    Ok(()) => removed += 1,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "could not remove orphaned torrent metadata temporary file: {error}"
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
+        if (file_type.is_file() || file_type.is_symlink())
+            && is_canonical_torrent_temp_file(&name)
+        {
             match std::fs::remove_file(entry.path()) {
                 Ok(()) => removed += 1,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -963,9 +1021,7 @@ fn remove_orphaned_cached_torrents_at(
             }
             continue;
         }
-        if !file_type.is_file()
-            || entry.path().extension().and_then(|ext| ext.to_str()) != Some("torrent")
-        {
+        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("torrent") {
             continue;
         }
         let path = entry.path();
@@ -973,6 +1029,9 @@ fn remove_orphaned_cached_torrents_at(
             continue;
         };
         if retained_ids.contains(id) {
+            continue;
+        }
+        if !file_type.is_file() && !file_type.is_symlink() {
             continue;
         }
         match std::fs::remove_file(path) {
@@ -1047,7 +1106,7 @@ pub async fn cache_torrent_bytes<R: tauri::Runtime>(
             .await
             .map_err(|error| format!("could not create torrent storage: {error}"))?;
     }
-    tokio::fs::write(&destination, bytes)
+    crate::platform::atomic_write_replace(&destination, bytes)
         .await
         .map_err(|error| format!("could not cache torrent metadata: {error}"))?;
     Ok(destination.to_string_lossy().to_string())
@@ -1170,32 +1229,10 @@ pub async fn cache_torrent_info_hash<R: tauri::Runtime>(
     tokio::fs::create_dir_all(parent)
         .await
         .map_err(|error| format!("could not create torrent storage: {error}"))?;
-    let temporary = parent.join(format!(
-        ".cache-{info_hash}.torrent.{}.tmp",
-        uuid::Uuid::new_v4().simple()
-    ));
-    if let Err(error) = tokio::fs::write(&temporary, bytes).await {
-        let _ = tokio::fs::remove_file(&temporary).await;
-        return Err(format!("could not stage canonical torrent metadata: {error}"));
-    }
-    match tokio::fs::rename(&temporary, &destination).await {
-        Ok(()) => Ok(Some(destination.to_string_lossy().to_string())),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let _ = tokio::fs::remove_file(&temporary).await;
-            if read_cached_torrent_by_info_hash_unlocked(app_handle, &info_hash)
-                .await?
-                .is_some()
-            {
-                Ok(Some(destination.to_string_lossy().to_string()))
-            } else {
-                Err("canonical torrent metadata already exists but is invalid".to_string())
-            }
-        }
-        Err(error) => {
-            let _ = tokio::fs::remove_file(&temporary).await;
-            Err(format!("could not commit canonical torrent metadata: {error}"))
-        }
-    }
+    crate::platform::atomic_write_replace(&destination, bytes)
+        .await
+        .map_err(|error| format!("could not commit canonical torrent metadata: {error}"))?;
+    Ok(Some(destination.to_string_lossy().to_string()))
 }
 
 pub fn validate_managed_torrent_path<R: tauri::Runtime>(
@@ -1296,6 +1333,51 @@ mod tests {
         assert!(sanitized.contains("tr=udp%3A%2F%2Ftracker.example%3A80"));
         assert!(!sanitized.contains("ws="));
         assert!(!sanitized.contains("as="));
+    }
+
+    #[test]
+    fn magnet_trackers_use_the_shared_bounded_tracker_policy() {
+        let valid = "magnet:?xt=urn:btih:0123456789012345678901234567890123456789&tr=https%3A%2F%2Ftracker.example%2Fannounce";
+        assert!(magnet_allows_cached_metadata(valid));
+        assert!(sanitize_magnet_uri_for_aria2(valid).is_ok());
+
+        for suffix in [
+            "&tr=ftp%3A%2F%2Ftracker.example%2Fannounce",
+            "&tr=https%3A%2F%2Fuser%3Apass%40tracker.example%2Fannounce",
+            "&tr=https%3A%2F%2Ftracker.example%2Fannounce%23fragment",
+            "&tr=https%3A%2F%2F",
+        ] {
+            let magnet = format!(
+                "magnet:?xt=urn:btih:0123456789012345678901234567890123456789{suffix}"
+            );
+            assert!(!magnet_allows_cached_metadata(&magnet), "{magnet}");
+            assert!(sanitize_magnet_uri_for_aria2(&magnet).is_err(), "{magnet}");
+        }
+
+        assert!(!magnet_allows_cached_metadata(
+            "magnet://tracker.example/?xt=urn:btih:0123456789012345678901234567890123456789"
+        ));
+        assert!(sanitize_magnet_uri_for_aria2(
+            "magnet://tracker.example/?xt=urn:btih:0123456789012345678901234567890123456789"
+        )
+        .is_err());
+
+        let too_many = (0..=crate::queue::MAX_TORRENT_TRACKERS)
+            .map(|index| format!("tr=https%3A%2F%2Ftracker{index}.example%2Fannounce"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let magnet = format!(
+            "magnet:?xt=urn:btih:0123456789012345678901234567890123456789&{too_many}"
+        );
+        assert!(sanitize_magnet_uri_for_aria2(&magnet).is_err());
+        assert!(!magnet_allows_cached_metadata(&magnet));
+
+        let oversized = format!(
+            "magnet:?xt=urn:btih:0123456789012345678901234567890123456789&tr=https://tracker.example/{}",
+            "a".repeat(crate::queue::MAX_TORRENT_TRACKER_BYTES)
+        );
+        assert!(sanitize_magnet_uri_for_aria2(&oversized).is_err());
+        assert!(!magnet_allows_cached_metadata(&oversized));
     }
 
     #[test]
@@ -1612,6 +1694,11 @@ mod tests {
             b"orphan temporary",
         )
             .expect("orphan temporary metadata should exist");
+        std::fs::write(
+            root.join(".firelink-atomic-0123456789abcdef0123456789abcdef.tmp"),
+            b"interrupted atomic staging",
+        )
+        .expect("interrupted atomic staging should exist");
         std::fs::write(root.join("notes.txt"), b"unrelated")
             .expect("unrelated file should exist");
         let retained = HashSet::from(["keep-id".to_string()]);
@@ -1619,7 +1706,7 @@ mod tests {
 
         assert_eq!(
             remove_orphaned_cached_torrents_at(root, &retained, &retained_hashes).unwrap(),
-            4
+            5
         );
         assert!(root.join("keep-id.torrent").is_file());
         assert!(!root.join("orphan-id.torrent").exists());
@@ -1633,6 +1720,34 @@ mod tests {
                 ".cache-{retained_hash}.torrent.0123456789abcdef0123456789abcdef.tmp"
             ))
             .exists());
+        assert!(!root
+            .join(".firelink-atomic-0123456789abcdef0123456789abcdef.tmp")
+            .exists());
         assert!(root.join("notes.txt").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removes_unretained_torrent_symlinks_without_following_targets() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary torrent storage should exist");
+        let root = temporary.path();
+        let target = root.join("target.bin");
+        let link = root.join("orphan-link.torrent");
+        let temporary_link = root.join(
+            ".cache-0123456789abcdef0123456789abcdef01234567.torrent.0123456789abcdef0123456789abcdef.tmp",
+        );
+        std::fs::write(&target, b"target should remain").expect("target should exist");
+        symlink(&target, &link).expect("orphan symlink should exist");
+        symlink(&target, &temporary_link).expect("orphan temporary symlink should exist");
+
+        assert_eq!(
+            remove_orphaned_cached_torrents_at(root, &HashSet::new(), &HashSet::new()).unwrap(),
+            2
+        );
+        assert!(!link.exists());
+        assert!(!temporary_link.exists());
+        assert!(target.is_file());
     }
 }

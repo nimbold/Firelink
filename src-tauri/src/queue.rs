@@ -172,7 +172,7 @@ pub fn normalize_torrent_dht_message_timeout(value: u32) -> Result<u32, String> 
     Ok(value)
 }
 
-fn normalize_torrent_web_seed_uri(value: &str) -> Result<String, String> {
+pub(crate) fn normalize_torrent_web_seed_uri(value: &str) -> Result<String, String> {
     let value = value.trim();
     if value.is_empty() || value.len() > MAX_TORRENT_WEB_SEED_URI_LENGTH {
         return Err(format!(
@@ -223,6 +223,24 @@ pub fn normalize_torrent_web_seeds(
     Ok(normalized)
 }
 
+pub(crate) fn normalize_torrent_mirror_uris(
+    mirrors: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut normalized = Vec::new();
+    for uri in crate::collect_download_uris("", mirrors) {
+        let uri = normalize_torrent_web_seed_uri(&uri)?;
+        if !normalized.iter().any(|existing| existing == &uri) {
+            if normalized.len() >= MAX_TORRENT_WEB_SEEDS {
+                return Err(format!(
+                    "a Torrent may have at most {MAX_TORRENT_WEB_SEEDS} fallback web seeds"
+                ));
+            }
+            normalized.push(uri);
+        }
+    }
+    Ok(normalized)
+}
+
 fn expand_torrent_web_seed_uri(
     seed: &crate::ipc::TorrentWebSeed,
     files: &[crate::ipc::TorrentFile],
@@ -259,6 +277,17 @@ pub fn expand_torrent_web_seeds(
     normalized
         .iter()
         .map(|seed| Ok((seed.file_index, expand_torrent_web_seed_uri(seed, files)?)))
+        .collect()
+}
+
+fn expected_initial_torrent_web_seed_uris(
+    current: &[String],
+    explicit: &[(u32, String)],
+) -> HashSet<String> {
+    current
+        .iter()
+        .cloned()
+        .chain(explicit.iter().map(|(_, uri)| uri.clone()))
         .collect()
 }
 
@@ -2425,6 +2454,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             return Err("Torrent lifecycle changed while reading initial web seeds".to_string());
         }
         let expanded = expand_torrent_web_seeds(&desired, &files)?;
+        let expected = expected_initial_torrent_web_seed_uris(&current, &expanded);
         let mut current_set = current.into_iter().collect::<HashSet<_>>();
         let mut changes = Vec::<(u32, Vec<String>, Vec<String>)>::new();
         for (file_index, uri) in &expanded {
@@ -2473,7 +2503,6 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 .await;
             return Err("Torrent lifecycle changed while reading initial web seeds".to_string());
         }
-        let expected = expanded.into_iter().map(|(_, uri)| uri).collect::<HashSet<_>>();
         if readback.into_iter().collect::<HashSet<_>>() != expected {
             self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
                 .await;
@@ -5970,8 +5999,8 @@ const MAX_TORRENT_MAX_PEERS: u32 = 1000;
 pub(crate) const MAX_TORRENT_STOP_TIMEOUT: u32 = 7 * 24 * 60 * 60;
 pub(crate) const MAX_TORRENT_PEER_DIAGNOSTICS: usize = 128;
 const MAX_TORRENT_PEER_RESPONSE: usize = 4096;
-const MAX_TORRENT_TRACKERS: usize = 64;
-const MAX_TORRENT_TRACKER_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_TORRENT_TRACKERS: usize = 64;
+pub(crate) const MAX_TORRENT_TRACKER_BYTES: usize = 16 * 1024;
 
 fn apply_aria2_connection_options(
     options: &mut serde_json::Map<String, serde_json::Value>,
@@ -6620,6 +6649,30 @@ pub(crate) fn parse_torrent_piece_progress(
     })
 }
 
+pub(crate) fn normalize_torrent_tracker_uri(value: &str) -> Result<String, String> {
+    let token = value.trim();
+    if token.is_empty() {
+        return Err("torrent tracker URI is empty".to_string());
+    }
+    if token.chars().any(char::is_control) {
+        return Err("torrent tracker URI contains a control character".to_string());
+    }
+    let parsed = url::Url::parse(token).map_err(|_| "torrent tracker URI is invalid".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https" | "udp") {
+        return Err("torrent tracker URI must use http, https, or udp".to_string());
+    }
+    if parsed.host_str().is_none_or(str::is_empty) {
+        return Err("torrent tracker URI must include a host".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("torrent tracker URI must not contain credentials".to_string());
+    }
+    if parsed.fragment().is_some() {
+        return Err("torrent tracker URI must not contain a fragment".to_string());
+    }
+    Ok(parsed.to_string())
+}
+
 fn normalize_torrent_tracker_list(
     value: Option<&str>,
     allow_wildcard: bool,
@@ -6646,9 +6699,6 @@ fn normalize_torrent_tracker_list(
             if token.is_empty() {
                 return Err("torrent tracker list contains an empty entry".to_string());
             }
-            if token.chars().any(char::is_control) {
-                return Err("torrent tracker URI contains a control character".to_string());
-            }
             if allow_wildcard && token == "*" {
                 if !trackers.is_empty() {
                     return Err(
@@ -6665,22 +6715,7 @@ fn normalize_torrent_tracker_list(
                         .to_string(),
                 );
             }
-            let parsed = url::Url::parse(token)
-                .map_err(|_| "torrent tracker URI is invalid".to_string())?;
-            if !matches!(parsed.scheme(), "http" | "https" | "udp") {
-                return Err("torrent tracker URI must use http, https, or udp".to_string());
-            }
-            if parsed.host_str().is_none_or(str::is_empty) {
-                return Err("torrent tracker URI must include a host".to_string());
-            }
-            if !parsed.username().is_empty() || parsed.password().is_some() {
-                return Err("torrent tracker URI must not contain credentials".to_string());
-            }
-            if parsed.fragment().is_some() {
-                return Err("torrent tracker URI must not contain a fragment".to_string());
-            }
-
-            let normalized = parsed.to_string();
+            let normalized = normalize_torrent_tracker_uri(token)?;
             if trackers.iter().any(|tracker| tracker == &normalized) {
                 continue;
             }
@@ -7219,18 +7254,13 @@ impl SidecarSpawner for ProductionSpawner {
                     );
                 }
                 let encoded = base64::engine::general_purpose::STANDARD.encode(sanitized_bytes);
+                let fallback_web_seeds =
+                    normalize_torrent_mirror_uris(payload.mirrors.as_deref())?;
+                crate::validate_torrent_web_seed_destinations(&fallback_web_seeds).await?;
                 let mut uris = embedded_web_seeds;
-                if payload.torrent_web_seeds.is_none() {
-                    uris.extend(
-                        payload
-                            .mirrors
-                            .as_deref()
-                            .map(|mirrors| crate::collect_download_uris("", Some(mirrors)))
-                            .unwrap_or_default(),
-                    );
-                    uris.sort();
-                    uris.dedup();
-                }
+                uris.extend(fallback_web_seeds);
+                uris.sort();
+                uris.dedup();
                 ("aria2.addTorrent", serde_json::json!([encoded, uris, options]))
             } else {
                 let parsed = url::Url::parse(&payload.url)
@@ -8599,6 +8629,46 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(normalize_torrent_trackers(Some(&too_many)).is_err());
+    }
+
+    #[test]
+    fn torrent_fallback_mirrors_use_the_dedicated_http_policy() {
+        assert_eq!(
+            normalize_torrent_mirror_uris(Some(
+                " https://mirror.example/one\nhttps://mirror.example/one\nhttps://mirror.example/two "
+            ))
+            .unwrap(),
+            vec![
+                "https://mirror.example/one".to_string(),
+                "https://mirror.example/two".to_string()
+            ]
+        );
+        for value in [
+            "ftp://mirror.example/file",
+            "sftp://mirror.example/file",
+            "https://user:pass@mirror.example/file",
+            "https://mirror.example/file#fragment",
+        ] {
+            assert!(normalize_torrent_mirror_uris(Some(value)).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn initial_torrent_web_seed_readback_keeps_existing_and_explicit_uris() {
+        let current = vec![
+            "https://embedded.example/file".to_string(),
+            "https://legacy.example/file".to_string(),
+        ];
+        let explicit = vec![(1, "https://explicit.example/file".to_string())];
+
+        assert_eq!(
+            expected_initial_torrent_web_seed_uris(&current, &explicit),
+            HashSet::from([
+                "https://embedded.example/file".to_string(),
+                "https://legacy.example/file".to_string(),
+                "https://explicit.example/file".to_string(),
+            ])
+        );
     }
 
     #[test]

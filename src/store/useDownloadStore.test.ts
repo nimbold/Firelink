@@ -993,6 +993,33 @@ describe('useDownloadStore', () => {
     expect(normalized.torrentEncryptionPolicy).toBeUndefined();
   });
 
+  it('drops zero-based persisted Torrent web-seed indices', () => {
+    const normalized = normalizePersistedDownloadProgress({
+      id: 'torrent-web-seed-indexes',
+      url: 'magnet:?xt=urn:btih:bad',
+      fileName: 'payload',
+      status: 'queued',
+      category: 'Other',
+      dateAdded: '',
+      isTorrent: true,
+      torrentWebSeeds: [
+        { fileIndex: 0, uri: 'https://mirror.example/zero' },
+        { fileIndex: 1, uri: 'https://mirror.example/one' },
+      ],
+      torrentWebSeedsNative: [
+        { fileIndex: 0, uri: 'https://mirror.example/native-zero' },
+        { fileIndex: 1, uri: 'https://mirror.example/native-one' },
+      ],
+    });
+
+    expect(normalized.torrentWebSeeds).toEqual([
+      { fileIndex: 1, uri: 'https://mirror.example/one' },
+    ]);
+    expect(normalized.torrentWebSeedsNative).toEqual([
+      { fileIndex: 1, uri: 'https://mirror.example/native-one' },
+    ]);
+  });
+
   it('migrates legacy Torrent credential context before restart resume', () => {
     const normalized = normalizePersistedDownloadProgress({
       id: 'legacy-torrent-credentials',
