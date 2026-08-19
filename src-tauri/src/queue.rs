@@ -280,34 +280,205 @@ pub fn expand_torrent_web_seeds(
         .collect()
 }
 
-fn expected_initial_torrent_web_seed_uris(
-    current: &[String],
-    explicit: &[(u32, String)],
-) -> HashSet<String> {
-    current
+type TorrentFileUriSets = HashMap<u32, HashSet<String>>;
+type TorrentWebSeedPair = (u32, String);
+
+fn normalize_aria2_torrent_file_uris(
+    entries: Vec<(u32, Vec<String>)>,
+    files: &[crate::ipc::TorrentFile],
+) -> Result<TorrentFileUriSets, String> {
+    let expected_indices = files.iter().map(|file| file.index).collect::<HashSet<_>>();
+    if expected_indices.len() != files.len() || entries.len() != files.len() {
+        return Err("aria2.getFiles returned an unexpected Torrent file set".to_string());
+    }
+
+    let mut normalized = HashMap::with_capacity(entries.len());
+    for (file_index, uris) in entries {
+        if file_index == 0 || !expected_indices.contains(&file_index) {
+            return Err("aria2.getFiles returned an unknown Torrent file index".to_string());
+        }
+        if normalized.contains_key(&file_index) {
+            return Err("aria2.getFiles returned a duplicate Torrent file index".to_string());
+        }
+        if uris.len() > MAX_TORRENT_WEB_SEEDS.saturating_mul(3) {
+            return Err(
+                "aria2.getFiles returned too many Torrent web seeds for one file".to_string(),
+            );
+        }
+        let mut file_uris = HashSet::with_capacity(uris.len());
+        for uri in uris {
+            file_uris.insert(normalize_torrent_web_seed_uri(&uri)?);
+        }
+        normalized.insert(file_index, file_uris);
+    }
+
+    if files
         .iter()
-        .cloned()
-        .chain(explicit.iter().map(|(_, uri)| uri.clone()))
-        .collect()
+        .any(|file| !normalized.contains_key(&file.index))
+    {
+        return Err("aria2.getFiles omitted a Torrent file".to_string());
+    }
+    Ok(normalized)
 }
 
-fn parse_aria2_web_seed_uris(value: &serde_json::Value) -> Result<Vec<String>, String> {
+fn parse_aria2_torrent_file_uris(
+    value: &serde_json::Value,
+) -> Result<Vec<(u32, Vec<String>)>, String> {
     let entries = value
         .as_array()
-        .ok_or_else(|| "aria2.getUris returned a non-array result".to_string())?;
-    let mut uris = Vec::with_capacity(entries.len());
-    let mut seen = HashSet::new();
+        .ok_or_else(|| "aria2.getFiles returned a non-array result".to_string())?;
+    let mut file_uris = Vec::with_capacity(entries.len());
     for entry in entries {
-        let uri = entry
-            .get("uri")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "aria2.getUris returned a malformed URI entry".to_string())?;
-        let uri = normalize_torrent_web_seed_uri(uri)?;
-        if seen.insert(uri.clone()) {
-            uris.push(uri);
+        let object = entry
+            .as_object()
+            .ok_or_else(|| "aria2.getFiles returned malformed Torrent file data".to_string())?;
+        let file_index = parse_aria2_decimal(object.get("index"), "file index")?
+            .try_into()
+            .map_err(|_| "aria2.getFiles returned an invalid Torrent file index".to_string())?;
+        let uris = object
+            .get("uris")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "aria2.getFiles returned malformed Torrent URI data".to_string())?;
+        let mut parsed_uris = Vec::with_capacity(uris.len());
+        for entry in uris {
+            let uri = entry
+                .get("uri")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    "aria2.getFiles returned a malformed Torrent URI entry".to_string()
+                })?;
+            parsed_uris.push(uri.to_string());
+        }
+        file_uris.push((file_index, parsed_uris));
+    }
+    Ok(file_uris)
+}
+
+fn expected_initial_torrent_web_seed_state(
+    current: &TorrentFileUriSets,
+    explicit: &[TorrentWebSeedPair],
+) -> TorrentFileUriSets {
+    let mut expected = current.clone();
+    for (file_index, uri) in explicit {
+        expected.entry(*file_index).or_default().insert(uri.clone());
+    }
+    expected
+}
+
+fn expand_aria2_torrent_web_seed_source(
+    source: &str,
+    metadata: &crate::torrent::ParsedTorrent,
+    file: &crate::ipc::TorrentFile,
+) -> Result<String, String> {
+    let uri = normalize_torrent_web_seed_uri(source)?;
+    let mut parsed =
+        url::Url::parse(&uri).map_err(|_| "Torrent web-seed URI is invalid".to_string())?;
+    if metadata.files.len() == 1 {
+        if parsed.path().ends_with('/') {
+            let mut segments = parsed
+                .path_segments_mut()
+                .map_err(|_| "Torrent web-seed URI cannot accept a file path".to_string())?;
+            segments.push(&metadata.name);
+        }
+        return Ok(parsed.to_string());
+    }
+
+    {
+        let mut segments = parsed
+            .path_segments_mut()
+            .map_err(|_| "Torrent web-seed URI cannot accept a file path".to_string())?;
+        segments.push(&metadata.name);
+        for segment in file.path.split('/') {
+            if !segment.is_empty() && segment != "." && segment != ".." {
+                segments.push(segment);
+            }
         }
     }
-    Ok(uris)
+    Ok(parsed.to_string())
+}
+
+fn expand_torrent_web_seed_sources(
+    sources: &[String],
+    metadata: &crate::torrent::ParsedTorrent,
+) -> Result<HashSet<TorrentWebSeedPair>, String> {
+    let mut expanded = HashSet::new();
+    for source in sources {
+        for file in &metadata.files {
+            expanded.insert((
+                file.index,
+                expand_aria2_torrent_web_seed_source(source, metadata, file)?,
+            ));
+        }
+    }
+    Ok(expanded)
+}
+
+fn plan_torrent_web_seed_change(
+    current: &TorrentFileUriSets,
+    baseline: &HashSet<TorrentWebSeedPair>,
+    old: &[TorrentWebSeedPair],
+    new: &[TorrentWebSeedPair],
+) -> Result<(TorrentFileUriSets, Vec<(u32, Vec<String>, Vec<String>)>), String> {
+    if old.iter().any(|(file_index, uri)| {
+        !current
+            .get(file_index)
+            .is_some_and(|uris| uris.contains(uri))
+    }) {
+        return Err("Aria2 web-seed state differs from Firelink's persisted state".to_string());
+    }
+
+    let mut allowed_current = baseline.clone();
+    allowed_current.extend(old.iter().cloned());
+    if current.iter().any(|(file_index, uris)| {
+        uris.iter()
+            .any(|uri| !allowed_current.contains(&(*file_index, uri.clone())))
+    }) {
+        return Err("Aria2 web-seed state differs from Firelink's persisted state".to_string());
+    }
+
+    let mut expected = current.clone();
+    for (file_index, uri) in old {
+        if !baseline.contains(&(*file_index, uri.clone())) {
+            let Some(file_uris) = expected.get_mut(file_index) else {
+                return Err("Aria2 web-seed state contains an unknown Torrent file index".to_string());
+            };
+            file_uris.remove(uri);
+        }
+    }
+    for (file_index, uri) in new {
+        let Some(file_uris) = expected.get_mut(file_index) else {
+            return Err("Aria2 web-seed state contains an unknown Torrent file index".to_string());
+        };
+        file_uris.insert(uri.clone());
+    }
+
+    let mut file_indices = current.keys().copied().collect::<HashSet<_>>();
+    file_indices.extend(expected.keys().copied());
+    let mut file_indices = file_indices.into_iter().collect::<Vec<_>>();
+    file_indices.sort_unstable();
+    let mut changes = Vec::new();
+    for file_index in file_indices {
+        let Some(current_uris) = current.get(&file_index) else {
+            return Err("Aria2 web-seed state contains an unknown Torrent file index".to_string());
+        };
+        let Some(expected_uris) = expected.get(&file_index) else {
+            return Err("Aria2 web-seed state contains an unknown Torrent file index".to_string());
+        };
+        let mut delete = current_uris
+            .difference(expected_uris)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut add = expected_uris
+            .difference(current_uris)
+            .cloned()
+            .collect::<Vec<_>>();
+        delete.sort();
+        add.sort();
+        if !delete.is_empty() || !add.is_empty() {
+            changes.push((file_index, delete, add));
+        }
+    }
+    Ok((expected, changes))
 }
 
 pub fn normalize_torrent_max_concurrent_seeds(value: u32) -> Result<u32, String> {
@@ -934,7 +1105,7 @@ pub trait SidecarSpawner: Send + Sync + 'static {
         Err("live Torrent seed-slot resuming is unavailable".to_string())
     }
 
-    async fn get_torrent_uris(&self, _gid: &str) -> Result<Vec<String>, String> {
+    async fn get_torrent_file_uris(&self, _gid: &str) -> Result<Vec<(u32, Vec<String>)>, String> {
         Err("live Torrent web-seed inspection is unavailable".to_string())
     }
 
@@ -2124,11 +2295,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
         }
     }
 
-    async fn torrent_files_for_payload(
+    async fn torrent_metadata_for_payload(
         &self,
         id: &str,
         payload: &SpawnPayload,
-    ) -> Result<Vec<crate::ipc::TorrentFile>, String> {
+    ) -> Result<crate::torrent::ParsedTorrent, String> {
         let path = payload
             .torrent_path
             .as_deref()
@@ -2137,7 +2308,25 @@ impl<R: tauri::Runtime> QueueManager<R> {
         let bytes = tokio::fs::read(path)
             .await
             .map_err(|error| format!("could not read cached Torrent metadata: {error}"))?;
-        Ok(crate::torrent::parse_torrent_bytes(&bytes)?.files)
+        crate::torrent::parse_torrent_bytes(&bytes)
+    }
+
+    async fn torrent_files_for_payload(
+        &self,
+        id: &str,
+        payload: &SpawnPayload,
+    ) -> Result<Vec<crate::ipc::TorrentFile>, String> {
+        Ok(self.torrent_metadata_for_payload(id, payload).await?.files)
+    }
+
+    fn torrent_baseline_web_seed_pairs(
+        &self,
+        payload: &SpawnPayload,
+        metadata: &crate::torrent::ParsedTorrent,
+    ) -> Result<HashSet<TorrentWebSeedPair>, String> {
+        let mut sources = metadata.web_seeds.clone();
+        sources.extend(normalize_torrent_mirror_uris(payload.mirrors.as_deref())?);
+        expand_torrent_web_seed_sources(&sources, metadata)
     }
 
     async fn current_torrent_mapping(
@@ -2183,22 +2372,31 @@ impl<R: tauri::Runtime> QueueManager<R> {
         let files = self.torrent_files_for_payload(id, &payload).await?;
         let desired = normalize_torrent_web_seeds(payload.torrent_web_seeds.as_deref(), &files)?;
         let (gid, mapping) = self.current_torrent_mapping(id).await?;
-        let current = self.spawner.get_torrent_uris(&gid).await?;
+        let current = normalize_aria2_torrent_file_uris(
+            self.spawner.get_torrent_file_uris(&gid).await?,
+            &files,
+        )?;
         if !self.is_aria2_control_epoch_current(id, mapping.epoch).await
             || !self.is_current_aria2_gid_mapping(&gid, &mapping)
         {
             return Err("Torrent lifecycle changed while reading web seeds".to_string());
         }
         let expected = expand_torrent_web_seeds(&desired, &files)?;
-        if expected.iter().any(|(_, uri)| !current.iter().any(|candidate| candidate == uri)) {
+        if expected.iter().any(|(file_index, uri)| {
+            !current
+                .get(file_index)
+                .is_some_and(|uris| uris.contains(uri))
+        }) {
             return Err("Aria2 web-seed state differs from Firelink's persisted state".to_string());
         }
         Ok(desired
             .into_iter()
             .filter(|seed| {
-                expand_torrent_web_seed_uri(seed, &files)
-                    .ok()
-                    .is_some_and(|uri| current.iter().any(|candidate| candidate == &uri))
+                expand_torrent_web_seed_uri(seed, &files).ok().is_some_and(|uri| {
+                    current
+                        .get(&seed.file_index)
+                        .is_some_and(|uris| uris.contains(&uri))
+                })
             })
             .collect())
     }
@@ -2313,45 +2511,31 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .get(id)
             .cloned()
             .ok_or_else(|| "Torrent retry payload is unavailable".to_string())?;
-        let files = self.torrent_files_for_payload(id, &old_payload).await?;
+        let metadata = self.torrent_metadata_for_payload(id, &old_payload).await?;
+        let files = metadata.files.clone();
         let desired = normalize_torrent_web_seeds(Some(&seeds), &files)?;
         let old = normalize_torrent_web_seeds(old_payload.torrent_web_seeds.as_deref(), &files)?;
         let (gid, mapping) = self.current_torrent_mapping(id).await?;
-        let current = self.spawner.get_torrent_uris(&gid).await?;
+        let mut current = normalize_aria2_torrent_file_uris(
+            self.spawner.get_torrent_file_uris(&gid).await?,
+            &files,
+        )?;
         let old_expanded = expand_torrent_web_seeds(&old, &files)?;
         let new_expanded = expand_torrent_web_seeds(&desired, &files)?;
+        let baseline = self.torrent_baseline_web_seed_pairs(&old_payload, &metadata)?;
         if !self.is_aria2_control_epoch_current(id, mapping.epoch).await
             || !self.is_current_aria2_gid_mapping(&gid, &mapping)
         {
             return Err("Torrent lifecycle changed while reading web seeds".to_string());
         }
-        if old_expanded.iter().any(|(_, uri)| !current.iter().any(|candidate| candidate == uri)) {
-            return Err("Aria2 web-seed state differs from Firelink's persisted state".to_string());
-        }
+        let (expected, planned_changes) =
+            plan_torrent_web_seed_change(&current, &baseline, &old_expanded, &new_expanded)?;
 
         if let Some(payload) = self.aria2_payloads.lock().await.get_mut(id) {
             payload.torrent_web_seeds = Some(desired.clone());
         }
         let mut changes = Vec::<(u32, Vec<String>, Vec<String>)>::new();
-        let mut current_set = current.into_iter().collect::<HashSet<_>>();
-        let mut file_indices = old_expanded.iter().map(|(index, _)| *index).collect::<HashSet<_>>();
-        file_indices.extend(new_expanded.iter().map(|(index, _)| *index));
-        let mut file_indices = file_indices.into_iter().collect::<Vec<_>>();
-        file_indices.sort_unstable();
-        for file_index in file_indices {
-            let delete = old_expanded
-                .iter()
-                .filter(|(index, uri)| *index == file_index && current_set.contains(uri))
-                .map(|(_, uri)| uri.clone())
-                .collect::<Vec<_>>();
-            let add = new_expanded
-                .iter()
-                .filter(|(index, uri)| *index == file_index && !current_set.contains(uri))
-                .map(|(_, uri)| uri.clone())
-                .collect::<Vec<_>>();
-            if delete.is_empty() && add.is_empty() {
-                continue;
-            }
+        for (file_index, delete, add) in planned_changes {
             changes.push((file_index, delete.clone(), add.clone()));
             if let Err(error) = self.spawner.change_torrent_uris(&gid, file_index, &delete, &add).await {
                 self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
@@ -2365,10 +2549,22 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 .await;
                 return Err(error);
             }
+            let Some(current_uris) = current.get_mut(&file_index) else {
+                self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
+                    .await;
+                self.restore_torrent_web_seed_payload_if_current(
+                    id,
+                    &gid,
+                    &mapping,
+                    &old_payload,
+                )
+                .await;
+                return Err("Aria2 web-seed state contains an unknown Torrent file index".to_string());
+            };
             for uri in &delete {
-                current_set.remove(uri);
+                current_uris.remove(uri);
             }
-            current_set.extend(add.iter().cloned());
+            current_uris.extend(add.iter().cloned());
             if !self.is_aria2_control_epoch_current(id, mapping.epoch).await
                 || !self.is_current_aria2_gid_mapping(&gid, &mapping)
             {
@@ -2384,8 +2580,22 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 return Err("Torrent lifecycle changed while changing web seeds".to_string());
             }
         }
-        let readback = match self.spawner.get_torrent_uris(&gid).await {
-            Ok(readback) => readback,
+        let readback = match self.spawner.get_torrent_file_uris(&gid).await {
+            Ok(readback) => match normalize_aria2_torrent_file_uris(readback, &files) {
+                Ok(readback) => readback,
+                Err(error) => {
+                    self.rollback_torrent_web_seed_changes(id, &gid, &mapping, &changes)
+                        .await;
+                    self.restore_torrent_web_seed_payload_if_current(
+                        id,
+                        &gid,
+                        &mapping,
+                        &old_payload,
+                    )
+                    .await;
+                    return Err(error);
+                }
+            },
             Err(error) => {
                 self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
                     .await;
@@ -2413,8 +2623,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .await;
             return Err("Torrent lifecycle changed while reading back web seeds".to_string());
         }
-        let expected = new_expanded.into_iter().map(|(_, uri)| uri).collect::<HashSet<_>>();
-        if readback.iter().cloned().collect::<HashSet<_>>() != expected {
+        if readback != expected {
             self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
                 .await;
             self.restore_torrent_web_seed_payload_if_current(
@@ -2447,18 +2656,23 @@ impl<R: tauri::Runtime> QueueManager<R> {
         }
         let files = self.torrent_files_for_payload(id, &payload).await?;
         let (gid, mapping) = self.current_torrent_mapping(id).await?;
-        let current = self.spawner.get_torrent_uris(&gid).await?;
+        let mut current = normalize_aria2_torrent_file_uris(
+            self.spawner.get_torrent_file_uris(&gid).await?,
+            &files,
+        )?;
         if !self.is_aria2_control_epoch_current(id, mapping.epoch).await
             || !self.is_current_aria2_gid_mapping(&gid, &mapping)
         {
             return Err("Torrent lifecycle changed while reading initial web seeds".to_string());
         }
         let expanded = expand_torrent_web_seeds(&desired, &files)?;
-        let expected = expected_initial_torrent_web_seed_uris(&current, &expanded);
-        let mut current_set = current.into_iter().collect::<HashSet<_>>();
+        let expected = expected_initial_torrent_web_seed_state(&current, &expanded);
         let mut changes = Vec::<(u32, Vec<String>, Vec<String>)>::new();
         for (file_index, uri) in &expanded {
-            if current_set.contains(uri) {
+            if current
+                .get(file_index)
+                .is_some_and(|uris| uris.contains(uri))
+            {
                 continue;
             }
             if !self.is_aria2_control_epoch_current(id, mapping.epoch).await
@@ -2479,7 +2693,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     .await;
                 return Err(error);
             }
-            current_set.insert(uri.clone());
+            let Some(current_uris) = current.get_mut(file_index) else {
+                self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
+                    .await;
+                return Err("Aria2 web-seed state contains an unknown Torrent file index".to_string());
+            };
+            current_uris.insert(uri.clone());
             if !self.is_aria2_control_epoch_current(id, mapping.epoch).await
                 || !self.is_current_aria2_gid_mapping(&gid, &mapping)
             {
@@ -2488,7 +2707,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 return Err("Torrent lifecycle changed while attaching web seeds".to_string());
             }
         }
-        let readback = match self.spawner.get_torrent_uris(&gid).await {
+        let readback = match self.spawner.get_torrent_file_uris(&gid).await {
             Ok(readback) => readback,
             Err(error) => {
                 self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
@@ -2503,7 +2722,15 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 .await;
             return Err("Torrent lifecycle changed while reading initial web seeds".to_string());
         }
-        if readback.into_iter().collect::<HashSet<_>>() != expected {
+        let readback = match normalize_aria2_torrent_file_uris(readback, &files) {
+            Ok(readback) => readback,
+            Err(error) => {
+                self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
+                    .await;
+                return Err(error);
+            }
+        };
+        if readback != expected {
             self.rollback_torrent_web_seed_changes(&id, &gid, &mapping, &changes)
                 .await;
             return Err("Aria2 did not retain the persisted Torrent web-seed set".to_string());
@@ -7464,17 +7691,17 @@ impl SidecarSpawner for ProductionSpawner {
         self.control_seed_rpc(gid, "aria2.unpause").await
     }
 
-    async fn get_torrent_uris(&self, gid: &str) -> Result<Vec<String>, String> {
+    async fn get_torrent_file_uris(&self, gid: &str) -> Result<Vec<(u32, Vec<String>)>, String> {
         let state = self.app_handle.state::<crate::AppState>();
         let result = crate::rpc_call(
             state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
             &state.aria2_secret,
-            "aria2.getUris",
+            "aria2.getFiles",
             serde_json::json!([gid]),
         )
         .await
-        .map_err(|error| format!("aria2.getUris failed for gid {gid}: {}", crate::redact_sensitive_text(&error.to_string())))?;
-        parse_aria2_web_seed_uris(&result)
+        .map_err(|error| format!("aria2.getFiles failed for gid {gid}: {}", crate::redact_sensitive_text(&error.to_string())))?;
+        parse_aria2_torrent_file_uris(&result)
     }
 
     async fn change_torrent_uris(
@@ -8649,26 +8876,190 @@ mod tests {
             "https://user:pass@mirror.example/file",
             "https://mirror.example/file#fragment",
         ] {
-            assert!(normalize_torrent_mirror_uris(Some(value)).is_err(), "{value}");
+            assert!(
+                normalize_torrent_mirror_uris(Some(value)).is_err(),
+                "{value}"
+            );
         }
     }
 
     #[test]
     fn initial_torrent_web_seed_readback_keeps_existing_and_explicit_uris() {
-        let current = vec![
-            "https://embedded.example/file".to_string(),
-            "https://legacy.example/file".to_string(),
-        ];
+        let current = HashMap::from([
+            (
+                1,
+                HashSet::from(["https://embedded.example/file".to_string()]),
+            ),
+            (
+                2,
+                HashSet::from(["https://legacy.example/file".to_string()]),
+            ),
+        ]);
         let explicit = vec![(1, "https://explicit.example/file".to_string())];
+        let mut expected = current.clone();
+        expected
+            .get_mut(&1)
+            .expect("file 1 should be present")
+            .insert("https://explicit.example/file".to_string());
 
         assert_eq!(
-            expected_initial_torrent_web_seed_uris(&current, &explicit),
+            expected_initial_torrent_web_seed_state(&current, &explicit),
+            expected
+        );
+    }
+
+    #[test]
+    fn aria2_web_seed_readback_keeps_file_ownership_separate() {
+        let files = vec![
+            crate::ipc::TorrentFile {
+                index: 1,
+                path: "one.bin".to_string(),
+                length: 1,
+            },
+            crate::ipc::TorrentFile {
+                index: 2,
+                path: "two.bin".to_string(),
+                length: 1,
+            },
+        ];
+        let result = serde_json::json!([
+            {
+                "index": "1",
+                "uris": [{"uri": "https://mirror.example/bundle/one.bin"}]
+            },
+            {
+                "index": "2",
+                "uris": [{"uri": "https://mirror.example/bundle/two.bin"}]
+            }
+        ]);
+        let state = normalize_aria2_torrent_file_uris(
+            parse_aria2_torrent_file_uris(&result).unwrap(),
+            &files,
+        )
+        .unwrap();
+
+        assert!(state[&1].contains("https://mirror.example/bundle/one.bin"));
+        assert!(!state[&1].contains("https://mirror.example/bundle/two.bin"));
+        assert!(state[&2].contains("https://mirror.example/bundle/two.bin"));
+        assert!(normalize_aria2_torrent_file_uris(
+            parse_aria2_torrent_file_uris(&serde_json::json!([
+                {"index": "0", "uris": []},
+                {"index": "2", "uris": []}
+            ]))
+            .unwrap(),
+            &files,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn aria2_expands_unscoped_web_seed_baselines_per_torrent_file() {
+        let metadata = crate::torrent::ParsedTorrent {
+            name: "bundle".to_string(),
+            total_bytes: 2,
+            files: vec![
+                crate::ipc::TorrentFile {
+                    index: 1,
+                    path: "folder/one.bin".to_string(),
+                    length: 1,
+                },
+                crate::ipc::TorrentFile {
+                    index: 2,
+                    path: "two.bin".to_string(),
+                    length: 1,
+                },
+            ],
+            info_hash: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            web_seeds: Vec::new(),
+        };
+        let expanded = expand_torrent_web_seed_sources(
+            &["https://mirror.example/base".to_string()],
+            &metadata,
+        )
+        .unwrap();
+
+        assert_eq!(
+            expanded,
             HashSet::from([
-                "https://embedded.example/file".to_string(),
-                "https://legacy.example/file".to_string(),
-                "https://explicit.example/file".to_string(),
+                (
+                    1,
+                    "https://mirror.example/base/bundle/folder/one.bin".to_string()
+                ),
+                (2, "https://mirror.example/base/bundle/two.bin".to_string()),
             ])
         );
+    }
+
+    #[test]
+    fn torrent_web_seed_change_preserves_baseline_and_removes_only_explicit_pairs() {
+        let current = HashMap::from([
+            (
+                1,
+                HashSet::from([
+                    "https://mirror.example/bundle/one.bin".to_string(),
+                    "https://explicit.example/one.bin".to_string(),
+                ]),
+            ),
+            (
+                2,
+                HashSet::from(["https://mirror.example/bundle/two.bin".to_string()]),
+            ),
+        ]);
+        let baseline = HashSet::from([
+            (1, "https://mirror.example/bundle/one.bin".to_string()),
+            (2, "https://mirror.example/bundle/two.bin".to_string()),
+        ]);
+        let old = vec![
+            (1, "https://mirror.example/bundle/one.bin".to_string()),
+            (1, "https://explicit.example/one.bin".to_string()),
+        ];
+        let new = vec![(2, "https://explicit.example/two.bin".to_string())];
+
+        let (expected, changes) =
+            plan_torrent_web_seed_change(&current, &baseline, &old, &new).unwrap();
+        assert_eq!(
+            changes,
+            vec![
+                (
+                    1,
+                    vec!["https://explicit.example/one.bin".to_string()],
+                    Vec::new(),
+                ),
+                (
+                    2,
+                    Vec::new(),
+                    vec!["https://explicit.example/two.bin".to_string()],
+                ),
+            ]
+        );
+        assert_eq!(
+            expected[&1],
+            HashSet::from(["https://mirror.example/bundle/one.bin".to_string()])
+        );
+        assert_eq!(
+            expected[&2],
+            HashSet::from([
+                "https://mirror.example/bundle/two.bin".to_string(),
+                "https://explicit.example/two.bin".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn torrent_web_seed_change_rejects_unknown_file_indices_without_panicking() {
+        let current = HashMap::from([
+            (1, HashSet::from(["https://mirror.example/one".to_string()])),
+            (2, HashSet::from(["https://mirror.example/two".to_string()])),
+        ]);
+
+        let result = plan_torrent_web_seed_change(
+            &current,
+            &HashSet::new(),
+            &[],
+            &[(999, "https://explicit.example/unknown".to_string())],
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]

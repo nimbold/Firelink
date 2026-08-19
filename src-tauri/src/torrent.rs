@@ -974,14 +974,11 @@ fn remove_orphaned_cached_torrents_at(
         };
         if crate::platform::is_atomic_temp_file_name(&name) {
             if file_type.is_file() || file_type.is_symlink() {
-                match std::fs::remove_file(entry.path()) {
-                    Ok(()) => removed += 1,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(format!(
-                            "could not remove orphaned torrent metadata temporary file: {error}"
-                        ));
-                    }
+                if remove_cached_torrent_entry(
+                    &entry.path(),
+                    "could not remove orphaned torrent metadata temporary file",
+                )? {
+                    removed += 1;
                 }
             }
             continue;
@@ -989,14 +986,11 @@ fn remove_orphaned_cached_torrents_at(
         if (file_type.is_file() || file_type.is_symlink())
             && is_canonical_torrent_temp_file(&name)
         {
-            match std::fs::remove_file(entry.path()) {
-                Ok(()) => removed += 1,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(format!(
-                        "could not remove orphaned torrent metadata temporary file: {error}"
-                    ));
-                }
+            if remove_cached_torrent_entry(
+                &entry.path(),
+                "could not remove orphaned torrent metadata temporary file",
+            )? {
+                removed += 1;
             }
             continue;
         }
@@ -1012,12 +1006,8 @@ fn remove_orphaned_cached_torrents_at(
             if retained {
                 continue;
             }
-            match std::fs::remove_file(entry.path()) {
-                Ok(()) => removed += 1,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(format!("could not remove orphaned torrent metadata: {error}"));
-                }
+            if remove_cached_torrent_entry(&entry.path(), "could not remove orphaned torrent metadata")? {
+                removed += 1;
             }
             continue;
         }
@@ -1029,20 +1019,47 @@ fn remove_orphaned_cached_torrents_at(
             continue;
         };
         if retained_ids.contains(id) {
+            if file_type.is_symlink() {
+                if remove_cached_torrent_entry(
+                    &path,
+                    "could not remove invalid retained torrent metadata link",
+                )? {
+                    removed += 1;
+                }
+            }
             continue;
         }
         if !file_type.is_file() && !file_type.is_symlink() {
             continue;
         }
-        match std::fs::remove_file(path) {
-            Ok(()) => removed += 1,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(format!("could not remove orphaned torrent metadata: {error}"));
-            }
+        if remove_cached_torrent_entry(&path, "could not remove orphaned torrent metadata")? {
+            removed += 1;
         }
     }
     Ok(removed)
+}
+
+fn remove_cached_torrent_entry(path: &Path, message: &str) -> Result<bool, String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => {
+            let is_link = std::fs::symlink_metadata(path)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false);
+            if is_link {
+                match std::fs::remove_dir_all(path) {
+                    Ok(()) => Ok(true),
+                    Err(dir_error) if dir_error.kind() == std::io::ErrorKind::NotFound => {
+                        Ok(false)
+                    }
+                    Err(_) => Err(format!("{message}: {error}")),
+                }
+            } else {
+                Err(format!("{message}: {error}"))
+            }
+        }
+    }
 }
 
 pub fn validate_selected_indices(
@@ -1748,6 +1765,31 @@ mod tests {
         );
         assert!(!link.exists());
         assert!(!temporary_link.exists());
+        assert!(target.is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removes_retained_torrent_symlinks_without_following_targets() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary torrent storage should exist");
+        let root = temporary.path();
+        let target = root.join("target.bin");
+        let link = root.join("retained-id.torrent");
+        std::fs::write(&target, b"target should remain").expect("target should exist");
+        symlink(&target, &link).expect("retained symbolic link should be created");
+
+        assert_eq!(
+            remove_orphaned_cached_torrents_at(
+                root,
+                &HashSet::from(["retained-id".to_string()]),
+                &HashSet::new(),
+            )
+            .unwrap(),
+            1
+        );
+        assert!(!link.exists());
         assert!(target.is_file());
     }
 }

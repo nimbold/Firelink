@@ -75,6 +75,14 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: src-tauri
         run: cargo test --test atomic_file --target ${{ matrix.target }} -- --nocapture
+      - name: Verify Windows Torrent cache safety
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        run: cargo test --lib --target ${{ matrix.target }} canonical_cache_round_trip_rejects_invalid_bytes_and_source_metadata -- --nocapture
+      - name: Verify Windows Torrent web-seed lifecycle
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        run: cargo test --lib --target ${{ matrix.target }} web_seed -- --nocapture
       - name: Provision locked engines
         if: runner.os != 'macOS'
         run: node scripts/provision-engines.js --target ${{ matrix.target }}

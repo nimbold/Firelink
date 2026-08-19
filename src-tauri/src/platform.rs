@@ -15,6 +15,7 @@ pub async fn atomic_write_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "atomic path has no parent"))?;
+    validate_atomic_parent(parent).await?;
 
     match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -69,6 +70,67 @@ pub async fn atomic_write_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+async fn validate_atomic_parent(parent: &Path) -> io::Result<()> {
+    use std::path::Component;
+
+    let mut current = PathBuf::new();
+    for component in parent.components() {
+        match component {
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir => current.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "atomic parent contains a parent-directory component",
+                ));
+            }
+            Component::Normal(name) => {
+                current.push(name);
+                let metadata = tokio::fs::symlink_metadata(&current).await?;
+                if metadata.file_type().is_symlink() {
+                    if let Some(canonical_alias) = resolve_atomic_system_alias(&current)? {
+                        current = canonical_alias;
+                        continue;
+                    }
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "atomic parent cannot contain a symbolic link",
+                    ));
+                }
+                if !metadata.is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotADirectory,
+                        "atomic parent is not a directory",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_atomic_system_alias(path: &Path) -> io::Result<Option<PathBuf>> {
+    #[cfg(target_os = "macos")]
+    {
+        let expected = match path {
+            path if path == Path::new("/tmp") => Some(Path::new("/private/tmp")),
+            path if path == Path::new("/var") => Some(Path::new("/private/var")),
+            path if path == Path::new("/etc") => Some(Path::new("/private/etc")),
+            _ => None,
+        };
+        if let Some(expected) = expected {
+            let canonical = std::fs::canonicalize(path)?;
+            if canonical == expected {
+                return Ok(Some(canonical));
+            }
+        }
+    }
+
+    let _ = path;
+    Ok(None)
 }
 
 pub fn is_atomic_temp_file_name(name: &str) -> bool {
