@@ -53,6 +53,16 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
+          # The hosted Ubuntu image can expose an unreachable Azure mirror in
+          # its apt sources while the public Ubuntu archive is reachable.
+          # Normalize every apt source, including the image's mirror list,
+          # before refreshing indexes so a transient runner-local mirror does
+          # not consume the whole job timeout.
+          sudo find /etc/apt -type f \
+            -exec sed -i \
+              -e 's#http://azure\.archive\.ubuntu\.com#https://archive.ubuntu.com#g' \
+              -e 's#https://azure\.archive\.ubuntu\.com#https://archive.ubuntu.com#g' \
+              {} +
           sudo env DEBIAN_FRONTEND=noninteractive timeout --foreground --signal=TERM --kill-after=30s 10m apt-get \
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=30 \
