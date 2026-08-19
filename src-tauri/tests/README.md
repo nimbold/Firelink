@@ -51,7 +51,8 @@ npm run smoke:torrent:failure-paths
 ```
 
 Native CI runs this failure-path smoke after staging the target-specific
-bundled engines on macOS, Windows, and Linux. Windows runs this RPC
-integration test through its target-qualified `cargo test --tests` step;
-the general Rust job compiles the library tests without executing the
-known-broken Tauri library harness.
+bundled engines on macOS, Windows, and Linux. Windows runs the queue-manager
+and Torrent RPC integration targets explicitly, plus atomic-storage,
+canonical-cache, and web-seed normalization targets; the general Rust job
+compiles the library tests without executing the known-broken Tauri library
+harness.

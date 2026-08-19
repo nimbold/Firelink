@@ -27,6 +27,7 @@ jobs:
 
   desktop:
     name: Desktop checks (${{ matrix.target }})
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -52,8 +53,18 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo env DEBIAN_FRONTEND=noninteractive timeout --foreground --signal=TERM --kill-after=30s 5m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            -o DPkg::Lock::Timeout=60 \
+            update
+          sudo env DEBIAN_FRONTEND=noninteractive timeout --foreground --signal=TERM --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            -o DPkg::Lock::Timeout=60 \
+            install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
@@ -69,7 +80,8 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: src-tauri
         run: |
-          cargo test --tests --target ${{ matrix.target }}
+          cargo test --test queue_manager --target ${{ matrix.target }} -- --nocapture
+          cargo test --test torrent_rpc --target ${{ matrix.target }} -- --nocapture
           cargo test --lib --no-run --target ${{ matrix.target }}
       - name: Verify Windows atomic Torrent storage
         if: runner.os == 'Windows'
@@ -78,11 +90,11 @@ jobs:
       - name: Verify Windows Torrent cache safety
         if: runner.os == 'Windows'
         working-directory: src-tauri
-        run: cargo test --lib --target ${{ matrix.target }} canonical_cache_round_trip_rejects_invalid_bytes_and_source_metadata -- --nocapture
-      - name: Verify Windows Torrent web-seed lifecycle
+        run: cargo test --test torrent_cache --target ${{ matrix.target }} -- --nocapture
+      - name: Verify Windows Torrent web-seed normalization
         if: runner.os == 'Windows'
         working-directory: src-tauri
-        run: cargo test --lib --target ${{ matrix.target }} web_seed -- --nocapture
+        run: cargo test --test torrent_web_seed --target ${{ matrix.target }} -- --nocapture
       - name: Provision locked engines
         if: runner.os != 'macOS'
         run: node scripts/provision-engines.js --target ${{ matrix.target }}
