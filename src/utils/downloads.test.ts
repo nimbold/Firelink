@@ -89,6 +89,57 @@ describe('download persistence progress snapshots', () => {
     expect(persisted.headers).toBeUndefined();
   });
 
+  it('does not gate browser request context headers after restart', () => {
+    const persisted = redactDownloadForPersistence({
+      ...item('paused'),
+      headers: 'Referer: https://example.com/page\nUser-Agent: Browser',
+    });
+
+    expect(persisted.credentialsRequired).toBeUndefined();
+    expect(persisted.headers).toBe('Referer: https://example.com/page\nUser-Agent: Browser');
+  });
+
+  it('requires confirmation when a Referer contains restart-sensitive URL context', () => {
+    const persisted = redactDownloadForPersistence({
+      ...item('paused'),
+      headers: 'Referer: https://example.com/page?session=secret#part',
+    });
+
+    expect(persisted.credentialsRequired).toBe(true);
+    expect(persisted.headers).toBe('Referer: https://example.com/page');
+    expect(JSON.stringify(persisted)).not.toContain('secret');
+  });
+
+  it('marks username-only authentication as requiring credentials after restart', () => {
+    const persisted = redactDownloadForPersistence({
+      ...item('paused'),
+      username: 'alice',
+    });
+
+    expect(persisted.credentialsRequired).toBe(true);
+    expect(persisted.username).toBe('alice');
+  });
+
+  it('fails closed for unknown custom headers that may carry credentials', () => {
+    const persisted = redactDownloadForPersistence({
+      ...item('paused'),
+      headers: 'X-Download-Token: secret',
+    });
+
+    expect(persisted.credentialsRequired).toBe(true);
+    expect(persisted.headers).toBeUndefined();
+  });
+
+  it('fails closed for empty unknown credential headers', () => {
+    const persisted = redactDownloadForPersistence({
+      ...item('paused'),
+      headers: 'X-Auth-Token:',
+    });
+
+    expect(persisted.credentialsRequired).toBe(true);
+    expect(persisted.headers).toBeUndefined();
+  });
+
   it('does not create a credential gate for Torrent metadata context', () => {
     const persisted = redactDownloadForPersistence({
       ...item('paused'),

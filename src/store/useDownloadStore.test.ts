@@ -2459,6 +2459,8 @@ describe('useDownloadStore', () => {
         status: 'paused',
         category: 'Other',
         dateAdded: '',
+        username: 'alice',
+        headers: 'Referer: https://example.com/page',
         credentialsRequired: true
       }] as any[],
       backendRegisteredIds: new Set(['credential-resume-gated'])

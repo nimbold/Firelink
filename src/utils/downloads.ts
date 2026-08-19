@@ -580,12 +580,162 @@ export const isMediaUrl = (rawUrl: string): boolean => {
  * session (see `enqueue_download` payloads) but are stripped at the
  * persistence boundary so the user-data database contains no plaintext credentials.
  */
-const DOWNLOAD_SECRET_FIELDS = ['password', 'cookies', 'headers'] as const;
+const DOWNLOAD_SECRET_FIELDS = ['password', 'cookies'] as const;
+// Browser captures commonly include request context such as Referer and
+// User-Agent. Keep this an explicit allowlist so those known non-credential
+// headers do not gate a restart, while an unknown custom header fails closed
+// and remains eligible for a credential-confirmation retry.
+const NON_CREDENTIAL_REQUEST_HEADERS = new Set([
+  'accept',
+  'accept-charset',
+  'accept-encoding',
+  'accept-language',
+  'cache-control',
+  'connection',
+  'dnt',
+  'host',
+  'if-match',
+  'if-modified-since',
+  'if-none-match',
+  'if-range',
+  'if-unmodified-since',
+  'origin',
+  'pragma',
+  'priority',
+  'range',
+  'referer',
+  'sec-ch-ua',
+  'sec-ch-ua-mobile',
+  'sec-ch-ua-platform',
+  'sec-fetch-dest',
+  'sec-fetch-mode',
+  'sec-fetch-site',
+  'sec-fetch-user',
+  'sec-gpc',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+  'user-agent',
+  'via',
+  'warning',
+]);
+// Only stable request context is safe to carry into a later lifecycle. Range,
+// conditional, hop-by-hop, and routing headers describe the old HTTP request
+// and can conflict with Aria2's own resume negotiation.
+const PERSISTABLE_REQUEST_HEADERS = new Set([
+  'accept',
+  'accept-charset',
+  'accept-encoding',
+  'accept-language',
+  'cache-control',
+  'dnt',
+  'origin',
+  'pragma',
+  'priority',
+  'referer',
+  'sec-ch-ua',
+  'sec-ch-ua-mobile',
+  'sec-ch-ua-platform',
+  'sec-fetch-dest',
+  'sec-fetch-mode',
+  'sec-fetch-site',
+  'sec-fetch-user',
+  'sec-gpc',
+  'user-agent',
+]);
 const VOLATILE_PROGRESS_STATUSES = new Set([
   'downloading',
   'verifying',
   'seeding'
 ]);
+
+const hasCredentialMaterial = (value: string | null | undefined): boolean =>
+  typeof value === 'string' && value.trim().length > 0;
+
+const headerValueRequiresRecovery = (name: string, value: string): boolean => {
+  if (!value.trim()) return false;
+  if (/[\u0000-\u001f\u007f]/.test(value)) return true;
+
+  if (name === 'referer' || name === 'origin') {
+    try {
+      const parsed = new URL(value);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return true;
+      if (parsed.username || parsed.password || parsed.search || parsed.hash) return true;
+      // Origin must not carry a path that would be silently discarded by the
+      // persistence sanitizer.
+      return name === 'origin' && parsed.pathname !== '/' && parsed.pathname !== '';
+    } catch {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+export const hasCredentialBearingHeaders = (headers: string | null | undefined): boolean => {
+  if (!hasCredentialMaterial(headers)) return false;
+  return headers!.split(/\r?\n/).some(line => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    const separator = trimmed.indexOf(':');
+    if (separator <= 0) return true;
+    const name = trimmed.slice(0, separator).trim().toLowerCase();
+    // An unknown header is sensitive even when its value is empty: the
+    // redacted value cannot tell us whether it was a placeholder for a token
+    // or an intentionally empty request field.
+    return !NON_CREDENTIAL_REQUEST_HEADERS.has(name)
+      || headerValueRequiresRecovery(name, trimmed.slice(separator + 1).trim());
+  });
+};
+
+const persistableHeaderValue = (name: string, value: string): string | undefined => {
+  if (/[\u0000-\u001f\u007f]/.test(value)) return undefined;
+
+  if (name === 'referer') {
+    try {
+      const parsed = new URL(value);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined;
+      parsed.username = '';
+      parsed.password = '';
+      // A Referer query or fragment can carry a signed URL or user token.
+      parsed.search = '';
+      parsed.hash = '';
+      return parsed.toString();
+    } catch {
+      return undefined;
+    }
+  }
+
+  if (name === 'origin') {
+    try {
+      const parsed = new URL(value);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined;
+      return parsed.origin;
+    } catch {
+      return undefined;
+    }
+  }
+
+  return value;
+};
+
+const persistableRequestHeaders = (headers: string | null | undefined): string | undefined => {
+  if (!hasCredentialMaterial(headers)) return undefined;
+
+  const lines = headers!.split(/\r?\n/).flatMap(line => {
+    const trimmed = line.trim();
+    if (!trimmed) return [];
+    const separator = trimmed.indexOf(':');
+    if (separator <= 0) return [];
+    const name = trimmed.slice(0, separator).trim().toLowerCase();
+    if (!PERSISTABLE_REQUEST_HEADERS.has(name)) return [];
+    const value = persistableHeaderValue(name, trimmed.slice(separator + 1).trim());
+    return value === undefined ? [] : [`${trimmed.slice(0, separator).trim()}: ${value}`];
+  });
+
+  return lines.length > 0 ? lines.join('\n') : undefined;
+};
 
 /**
  * Returns a shallow copy of `item` with secret fields removed. Volatile
@@ -596,6 +746,12 @@ const VOLATILE_PROGRESS_STATUSES = new Set([
  * state stay in memory to avoid a database write for every progress tick.
  * Non-ticking states retain counters so paused, queued, staged, retrying, and
  * processing snapshots remain useful across restart and reconfiguration.
+ * The credential marker is narrower than the redacted field set: ordinary
+ * browser request context such as Referer does not require a credentialed
+ * restart, while passwords, cookies, usernames, and unknown custom headers
+ * do. A sanitized subset of stable browser context is retained so a resumed
+ * download keeps anti-hotlink and content-negotiation context without
+ * persisting credentials or stale range state.
  *
  * Note: standard persistence intentionally retains `url` because it is the
  * download source. The backend applies a stricter portable-mode policy: URL
@@ -611,7 +767,10 @@ export const redactDownloadForPersistence = (item: DownloadItem): DownloadItem =
     delete copy.credentialsRequired;
     delete copy.username;
   } else if (item.credentialsRequired === true
-    || DOWNLOAD_SECRET_FIELDS.some(field => Boolean(item[field]))) {
+    || hasCredentialMaterial(item.username)
+    || hasCredentialMaterial(item.password)
+    || hasCredentialMaterial(item.cookies)
+    || hasCredentialBearingHeaders(item.headers)) {
     copy.credentialsRequired = true;
   }
   delete copy.fraction;
@@ -624,6 +783,13 @@ export const redactDownloadForPersistence = (item: DownloadItem): DownloadItem =
   }
   for (const field of DOWNLOAD_SECRET_FIELDS) {
     delete copy[field];
+  }
+  if (item.isTorrent === true) {
+    delete copy.headers;
+  } else {
+    const savedHeaders = persistableRequestHeaders(item.headers);
+    if (savedHeaders) copy.headers = savedHeaders;
+    else delete copy.headers;
   }
   // Error classification is derived from the live native state and must not
   // become a persistence field or influence a new lifecycle after restart.

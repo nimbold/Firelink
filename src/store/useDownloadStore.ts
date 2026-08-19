@@ -10,7 +10,7 @@ import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
 import type { Queue } from '../bindings/Queue';
 import { useSettingsStore } from './useSettingsStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
-import { canonicalizeDownloadFileName, categoryForDownload, categoryForFileName, isActiveDownloadStatus, isAllocationPhaseEligible, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForDownload, categoryForFileName, hasCredentialBearingHeaders, isActiveDownloadStatus, isAllocationPhaseEligible, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
 import {
   resolveCategoryDestination
 } from '../utils/downloadLocations';
@@ -357,7 +357,7 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
       if (item.isTorrent !== true && item.credentialsRequired === true
         && !hasCredentialMaterial(item.password)
         && !hasCredentialMaterial(item.cookies)
-        && !hasCredentialMaterial(item.headers)
+        && !hasCredentialBearingHeaders(item.headers)
         && !hasCredentialMaterial(keychainPassword)) {
         markCredentialsRequired(id);
         return false;
@@ -1172,9 +1172,13 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     const credentialsUpdated = (['password', 'cookies', 'headers'] as const)
       .some(field => Object.prototype.hasOwnProperty.call(updates, field));
     const nextCredentialMaterial = (['password', 'cookies', 'headers'] as const)
-      .some(field => hasCredentialMaterial(
-        Object.prototype.hasOwnProperty.call(updates, field) ? updates[field] : item[field]
-      ));
+      .some(field => field === 'headers'
+        ? hasCredentialBearingHeaders(
+          Object.prototype.hasOwnProperty.call(updates, field) ? updates[field] : item[field]
+        )
+        : hasCredentialMaterial(
+          Object.prototype.hasOwnProperty.call(updates, field) ? updates[field] : item[field]
+        ));
     const normalizedUpdates = {
       ...(updates.fileName === undefined
         ? updates
@@ -1290,7 +1294,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     if (targetItem.isTorrent !== true && targetItem.credentialsRequired === true
       && !hasCredentialMaterial(targetItem.password)
       && !hasCredentialMaterial(targetItem.cookies)
-      && !hasCredentialMaterial(targetItem.headers)) {
+      && !hasCredentialBearingHeaders(targetItem.headers)) {
       if (!resumeWithoutCredentials) {
         const settings = useSettingsStore.getState();
         const login = getSiteLogin(targetItem.url, settings);
@@ -2677,7 +2681,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
           if (item.isTorrent !== true && item.credentialsRequired === true
             && !hasCredentialMaterial(item.password)
             && !hasCredentialMaterial(item.cookies)
-            && !hasCredentialMaterial(item.headers)
+            && !hasCredentialBearingHeaders(item.headers)
             && !hasCredentialMaterial(keychainPassword)) {
             markCredentialsRequired(item.id);
             continue;

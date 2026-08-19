@@ -1049,11 +1049,16 @@ fn remove_persisted_transfer_secrets(value: &mut Value) {
     // These values are accepted from users, browser extensions, or URLs and
     // may contain credentials or bearer tokens. Portable queues keep their
     // useful metadata, but never persist these values beside the executable.
-    let mut removed_transfer_context = false;
-    for key in ["password", "cookies", "headers", "mirrors", "proxy"] {
+    // Safe, stable browser context is sanitized in place so a normal captured
+    // download does not become unresumable merely because it has a Referer or
+    // User-Agent. Unknown and credential-bearing headers still fail closed.
+    let is_torrent = object.get("isTorrent").and_then(Value::as_bool) == Some(true);
+    let mut removed_transfer_context = sanitize_portable_request_headers(object);
+    for key in ["password", "cookies", "mirrors", "proxy"] {
         if object
             .get(key)
             .is_some_and(|value| !value.is_null() && !value_is_empty(value))
+            && !(is_torrent && matches!(key, "password" | "cookies"))
         {
             removed_transfer_context = true;
         }
@@ -1125,6 +1130,190 @@ fn remove_persisted_transfer_secrets(value: &mut Value) {
     if removed_transfer_context {
         mark_portable_download_unresumable(object);
     }
+}
+
+const PORTABLE_NON_CREDENTIAL_REQUEST_HEADERS: &[&str] = &[
+    "accept",
+    "accept-charset",
+    "accept-encoding",
+    "accept-language",
+    "cache-control",
+    "connection",
+    "dnt",
+    "host",
+    "if-match",
+    "if-modified-since",
+    "if-none-match",
+    "if-range",
+    "if-unmodified-since",
+    "origin",
+    "pragma",
+    "priority",
+    "range",
+    "referer",
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
+    "sec-fetch-dest",
+    "sec-fetch-mode",
+    "sec-fetch-site",
+    "sec-fetch-user",
+    "sec-gpc",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "user-agent",
+    "via",
+    "warning",
+];
+
+const PORTABLE_PERSISTABLE_REQUEST_HEADERS: &[&str] = &[
+    "accept",
+    "accept-charset",
+    "accept-encoding",
+    "accept-language",
+    "cache-control",
+    "dnt",
+    "origin",
+    "pragma",
+    "priority",
+    "referer",
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
+    "sec-fetch-dest",
+    "sec-fetch-mode",
+    "sec-fetch-site",
+    "sec-fetch-user",
+    "sec-gpc",
+    "user-agent",
+];
+
+fn portable_header_is_known_non_credential(name: &str) -> bool {
+    PORTABLE_NON_CREDENTIAL_REQUEST_HEADERS
+        .iter()
+        .any(|candidate| *candidate == name)
+}
+
+fn portable_header_is_persistable(name: &str) -> bool {
+    PORTABLE_PERSISTABLE_REQUEST_HEADERS
+        .iter()
+        .any(|candidate| *candidate == name)
+}
+
+fn sanitize_portable_request_header_value(name: &str, value: &str) -> Option<String> {
+    if value.chars().any(char::is_control) {
+        return None;
+    }
+
+    match name {
+        "referer" => {
+            let mut parsed = url::Url::parse(value).ok()?;
+            if !matches!(parsed.scheme(), "http" | "https") {
+                return None;
+            }
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            Some(parsed.to_string())
+        }
+        "origin" => {
+            let parsed = url::Url::parse(value).ok()?;
+            matches!(parsed.scheme(), "http" | "https")
+                .then(|| parsed.origin().ascii_serialization())
+        }
+        _ => Some(value.to_string()),
+    }
+}
+
+fn portable_request_header_requires_recovery(name: &str, value: &str) -> bool {
+    if value.trim().is_empty() {
+        return false;
+    }
+    if value.chars().any(char::is_control) {
+        return true;
+    }
+
+    if name == "referer" || name == "origin" {
+        let Ok(parsed) = url::Url::parse(value) else {
+            return true;
+        };
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return true;
+        }
+        if !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return true;
+        }
+        return name == "origin" && !parsed.path().is_empty() && parsed.path() != "/";
+    }
+
+    false
+}
+
+/// Remove unsafe request headers from portable persistence while retaining
+/// sanitized, stable browser context. The boolean reports whether the input
+/// contained credential-bearing, unknown, or malformed header context that
+/// makes automatic restart unsafe. Torrent browser context is metadata-only:
+/// it is removed without making a cached-metadata Torrent unresumable.
+fn sanitize_portable_request_headers(object: &mut serde_json::Map<String, Value>) -> bool {
+    let Some(raw_value) = object.get("headers").cloned() else {
+        return false;
+    };
+    if raw_value.is_null() || value_is_empty(&raw_value) {
+        object.remove("headers");
+        return false;
+    }
+
+    let Some(raw_headers) = raw_value.as_str() else {
+        object.remove("headers");
+        return true;
+    };
+
+    if object.get("isTorrent").and_then(Value::as_bool) == Some(true) {
+        object.remove("headers");
+        return false;
+    }
+
+    let mut retained = Vec::new();
+    let mut removed_context = false;
+    for line in raw_headers.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some((raw_name, raw_value)) = trimmed.split_once(':') else {
+            removed_context = true;
+            continue;
+        };
+        let name = raw_name.trim().to_ascii_lowercase();
+        if !portable_header_is_known_non_credential(&name) {
+            removed_context = true;
+            continue;
+        }
+        if portable_request_header_requires_recovery(&name, raw_value.trim()) {
+            removed_context = true;
+        }
+        let Some(sanitized_value) = sanitize_portable_request_header_value(&name, raw_value.trim())
+        else {
+            continue;
+        };
+        if portable_header_is_persistable(&name) {
+            retained.push(format!("{}: {sanitized_value}", raw_name.trim()));
+        }
+    }
+
+    if retained.is_empty() {
+        object.remove("headers");
+    } else {
+        object.insert("headers".to_string(), Value::String(retained.join("\n")));
+    }
+    removed_context
 }
 
 fn sanitize_portable_torrent_tracker_field(
@@ -2381,6 +2570,104 @@ mod tests {
         }
         assert_eq!(saved["torrentTrackers"], "https://tracker.example/announce");
         assert_eq!(saved["torrentExcludeTrackers"], "https://tracker.example/exclude");
+    }
+
+    #[test]
+    fn portable_download_persistence_keeps_sanitized_safe_browser_context() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let mut connection = state.lock().unwrap();
+        let data = json!([{
+            "id": "download-safe-headers",
+            "status": "queued",
+            "queueId": "main",
+            "url": "https://example.com/file",
+            "headers": "Referer: https://example.com/page\nUser-Agent: Firelink-Test"
+        }])
+        .to_string();
+
+        replace_downloads(&mut connection, &data, true).unwrap();
+
+        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
+        assert_eq!(saved["status"], "queued");
+        assert_ne!(saved.get("resumable"), Some(&Value::Bool(false)));
+        assert_eq!(
+            saved["headers"],
+            "Referer: https://example.com/page\nUser-Agent: Firelink-Test"
+        );
+    }
+
+    #[test]
+    fn portable_download_persistence_rejects_sensitive_referer_context() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let mut connection = state.lock().unwrap();
+        let data = json!([{
+            "id": "download-sensitive-referer",
+            "status": "queued",
+            "queueId": "main",
+            "url": "https://example.com/file",
+            "headers": "Referer: https://example.com/page?token=secret#fragment"
+        }])
+        .to_string();
+
+        replace_downloads(&mut connection, &data, true).unwrap();
+
+        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
+        assert_eq!(saved["status"], "failed");
+        assert_eq!(saved["resumable"], false);
+        assert_eq!(saved["headers"], "Referer: https://example.com/page");
+        assert!(!saved.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn portable_download_persistence_rejects_unknown_header_context() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let mut connection = state.lock().unwrap();
+        let data = json!([{
+            "id": "download-unknown-header",
+            "status": "queued",
+            "queueId": "main",
+            "url": "https://example.com/file",
+            "headers": "X-Request-Signature:"
+        }])
+        .to_string();
+
+        replace_downloads(&mut connection, &data, true).unwrap();
+
+        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
+        assert_eq!(saved["status"], "failed");
+        assert_eq!(saved["resumable"], false);
+        assert!(saved.get("headers").is_none());
+    }
+
+    #[test]
+    fn portable_torrent_persistence_strips_metadata_credentials_without_blocking_restart() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let mut connection = state.lock().unwrap();
+        let data = json!([{
+            "id": "torrent-browser-context",
+            "status": "queued",
+            "queueId": "main",
+            "isTorrent": true,
+            "url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            "password": "metadata-only-secret",
+            "cookies": "session=metadata-only",
+            "headers": "User-Agent: Browser"
+        }])
+        .to_string();
+
+        replace_downloads(&mut connection, &data, true).unwrap();
+
+        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
+        assert_eq!(saved["status"], "queued");
+        assert_ne!(saved.get("resumable"), Some(&Value::Bool(false)));
+        assert!(saved.get("password").is_none());
+        assert!(saved.get("cookies").is_none());
+        assert!(saved.get("headers").is_none());
+        assert!(!saved.to_string().contains("metadata-only-secret"));
     }
 
     #[test]
