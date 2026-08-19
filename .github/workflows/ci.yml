@@ -53,7 +53,7 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo env DEBIAN_FRONTEND=noninteractive timeout --foreground --signal=TERM --kill-after=30s 5m apt-get \
+          sudo env DEBIAN_FRONTEND=noninteractive timeout --foreground --signal=TERM --kill-after=30s 10m apt-get \
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=30 \
             -o Acquire::https::Timeout=30 \
