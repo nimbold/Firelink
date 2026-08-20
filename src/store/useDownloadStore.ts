@@ -10,7 +10,7 @@ import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
 import type { Queue } from '../bindings/Queue';
 import { useSettingsStore } from './useSettingsStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
-import { canonicalizeDownloadFileName, categoryForDownload, categoryForFileName, hasCredentialBearingHeaders, isActiveDownloadStatus, isAllocationPhaseEligible, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForDownload, categoryForFileName, hasCredentialBearingHeaders, isActiveDownloadStatus, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
 import {
   resolveCategoryDestination
 } from '../utils/downloadLocations';
@@ -214,14 +214,26 @@ const advanceDownloadLifecycle = (id: string): bigint => {
 const currentDownloadLifecycle = (id: string): bigint =>
   downloadLifecycleGenerations.get(id) ?? 0n;
 
+export const currentDownloadLifecycleGeneration = (id: string): string =>
+  currentDownloadLifecycle(id).toString();
+
 type DispatchInvalidation = {
   generation: bigint;
   pendingDispatch?: Promise<boolean>;
 };
 
-const invalidateDispatch = async (id: string): Promise<DispatchInvalidation> => {
+const invalidateDispatch = async (
+  id: string,
+  resetRetainedProgress = false,
+): Promise<DispatchInvalidation> => {
   const generation = currentDownloadLifecycle(id);
   const nextGeneration = advanceDownloadLifecycle(id);
+  // A new lifecycle cannot inherit the previous native allocation phase. The
+  // backend will emit a fresh marker for the new generation after admission.
+  useDownloadStore.getState().clearAllocationPending(id);
+  if (resetRetainedProgress) {
+    useDownloadProgressStore.getState().resetDownloadProgress(id);
+  }
   try {
     await invoke('cancel_enqueue_generation', { id, generation: generation.toString() });
   } catch (error) {
@@ -230,8 +242,11 @@ const invalidateDispatch = async (id: string): Promise<DispatchInvalidation> => 
   return { generation: nextGeneration, pendingDispatch: backendDispatchPromises.get(id) };
 };
 
-const invalidateAndWaitForDispatch = async (id: string): Promise<boolean> => {
-  const { pendingDispatch } = await invalidateDispatch(id);
+const invalidateAndWaitForDispatch = async (
+  id: string,
+  resetRetainedProgress = false,
+): Promise<boolean> => {
+  const { pendingDispatch } = await invalidateDispatch(id, resetRetainedProgress);
   if (!pendingDispatch) return false;
   await pendingDispatch;
   return true;
@@ -434,18 +449,7 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
       ) {
         return false;
       }
-      const showsAllocationPhase = isAllocationPhaseEligible(admittedItem);
-      if (showsAllocationPhase) {
-        useDownloadStore.getState().setAllocationPending(id, true);
-      }
-      let accepted;
-      try {
-        accepted = await invoke('enqueue_download', { item: enqueueItem });
-      } finally {
-        if (showsAllocationPhase) {
-          useDownloadStore.getState().setAllocationPending(id, false);
-        }
-      }
+      const accepted = await invoke('enqueue_download', { item: enqueueItem });
       backendAccepted = true;
       if (!isCurrentDownloadLifecycle(id, lifecycleGeneration)) {
         await removeStaleBackendDispatch(id);
@@ -485,6 +489,12 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
         const proxyBlocked = isSystemProxyConfigurationError(e);
         const destinationAccessBlocked = isRetryableDestinationAccessError(e);
         const message = errorMessage(e);
+        if (destinationAccessBlocked) {
+          useDownloadStore.getState().clearAllocationPending(id);
+          useDownloadStore.setState(state => ({
+            pendingOrder: state.pendingOrder.filter(value => value !== id)
+          }));
+        }
         useDownloadStore.getState().updateDownload(id, {
           status: proxyBlocked ? 'queued' : destinationAccessBlocked ? 'ready' : 'failed',
           hasBeenDispatched: false,
@@ -1045,7 +1055,8 @@ interface DownloadState {
   allocationPendingIds: Set<string>;
   registerBackendIds: (ids: string[]) => void;
   unregisterBackendIds: (ids: string[]) => void;
-  setAllocationPending: (id: string, pending: boolean) => void;
+  setAllocationPending: (id: string, pending: boolean, lifecycleGeneration: string) => void;
+  clearAllocationPending: (id: string) => void;
   applyProperties: (id: string, updates: Partial<DownloadItem>) => Promise<void>;
   moveInQueue: (ids: string | string[], direction: 'up' | 'down') => Promise<void>;
   moveManyInQueueToPosition: (
@@ -1326,7 +1337,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         // Fence any older enqueue before replacing a paused backend lifecycle.
         // Otherwise a late addUri result can win the race and make this
         // selection start outside the requested order.
-        const { pendingDispatch } = await invalidateDispatch(id);
+        const { pendingDispatch } = await invalidateDispatch(id, true);
         if (pendingDispatch) await pendingDispatch;
         targetItem = get().downloads.find(download => download.id === id);
         if (!targetItem || !canStartDownload(targetItem.status)) {
@@ -1425,7 +1436,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         // A terminal aria2 gid is intentionally re-enqueued as a new
         // lifecycle. Advance and cancel the old generation before dispatching
         // so QueueManager does not reject the legitimate user retry as stale.
-        await invalidateAndWaitForDispatch(id);
+        await invalidateAndWaitForDispatch(id, true);
         dispatchSucceeded = await dispatchItemInternal(id);
       }
 
@@ -1662,10 +1673,20 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     for (const id of ids) nextSet.delete(id);
     return { backendRegisteredIds: nextSet };
   }),
-  setAllocationPending: (id, pending) => set((state) => {
+  setAllocationPending: (id, pending, lifecycleGeneration) => set((state) => {
+    // Native allocation events can arrive while persisted rows are still
+    // hydrating. Validate against the frontend lifecycle counter even when no
+    // row exists yet, then retain the marker until that row is projected.
+    if (lifecycleGeneration !== currentDownloadLifecycleGeneration(id)) return state;
     const nextSet = new Set(state.allocationPendingIds);
     if (pending) nextSet.add(id);
     else nextSet.delete(id);
+    return { allocationPendingIds: nextSet };
+  }),
+  clearAllocationPending: (id) => set((state) => {
+    if (!state.allocationPendingIds.has(id)) return state;
+    const nextSet = new Set(state.allocationPendingIds);
+    nextSet.delete(id);
     return { allocationPendingIds: nextSet };
   }),
   isAddModalOpen: false,
@@ -1852,6 +1873,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       hasBeenDispatched: false
     };
     advanceDownloadLifecycle(item.id);
+    get().clearAllocationPending(item.id);
+    useDownloadProgressStore.getState().resetDownloadProgress(item.id);
     set((state) => ({
       downloads: reorderQueueWithPausedAtEnd([...state.downloads, ownedItem], queueId)
     }));
@@ -1997,7 +2020,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       }
       throw error;
     }
-    useDownloadProgressStore.getState().clearDownloadProgress(id);
+    useDownloadProgressStore.getState().resetDownloadProgress(id);
     info(`Download ${id} removed`);
     syncSystemIntegrations();
     },
@@ -2066,6 +2089,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       hasBeenDispatched: false,
       dateAdded: new Date().toISOString()
     });
+    useDownloadProgressStore.getState().resetDownloadProgress(id);
 
     await commitDownloadState();
 
@@ -2765,25 +2789,24 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             currentDownloadLifecycle(item.id).toString() === item.lifecycle_generation;
         });
         if (dispatchableItems.length === 0) return;
-        const allocationPendingIds = dispatchableItems
-          .filter(item => {
-            const current = latestItems.get(item.id);
-            return current !== undefined && isAllocationPhaseEligible(current);
-          })
-          .map(item => item.id);
-        allocationPendingIds.forEach(id => get().setAllocationPending(id, true));
-
-        let results;
-        try {
-          results = await invoke('enqueue_many', { items: dispatchableItems });
-        } finally {
-          allocationPendingIds.forEach(id => get().setAllocationPending(id, false));
-        }
+        const results = await invoke('enqueue_many', { items: dispatchableItems });
         const registeredIds = results.filter(result => result.success).map(result => result.id);
-        const failedErrors = new Map(
+        const failedResults = new Map(
           results
             .filter(result => !result.success)
-            .map(result => [result.id, result.error || 'Backend rejected the queued download.'])
+            .map(result => {
+              const message = result.error || 'Backend rejected the queued download.';
+              const destinationAccess = isRetryableDestinationAccessError(message);
+              return [result.id, {
+                message: destinationAccess
+                  ? destinationAccessErrorMessage(message)
+                  : message,
+                status: destinationAccess ? 'ready' as const : 'failed' as const,
+                errorKind: destinationAccess
+                  ? ('destinationAccess' as DownloadErrorKind)
+                  : undefined
+              }];
+            })
         );
         const acceptedFilenames = new Map(
           results
@@ -2816,12 +2839,15 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
               ...state.backendRegisteredIds,
               ...liveAcceptedIds
             ]),
+            pendingOrder: state.pendingOrder.filter(id => !failedResults.has(id)),
             downloads: state.downloads.map(download =>
-              failedErrors.has(download.id)
+              failedResults.has(download.id)
                 ? {
                     ...download,
-                    status: 'failed' as const,
-                    lastError: failedErrors.get(download.id)
+                    status: failedResults.get(download.id)!.status,
+                    hasBeenDispatched: false,
+                    lastError: failedResults.get(download.id)!.message,
+                    lastErrorKind: failedResults.get(download.id)!.errorKind
                   }
                 : liveAcceptedIds.has(download.id)
                   ? {

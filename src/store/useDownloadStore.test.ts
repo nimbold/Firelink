@@ -108,7 +108,7 @@ describe('useDownloadStore', () => {
       pendingAddRequestContexts: {},
       pendingAddRequestVersion: 0,
     });
-    useDownloadProgressStore.setState({ progressMap: {} });
+    useDownloadProgressStore.setState({ progressMap: {}, retainedProgressMap: {}, moveProgressMap: {} });
   });
 
   it('invalidates in-flight Add-modal handoffs when the modal is toggled', () => {
@@ -1337,7 +1337,7 @@ describe('useDownloadStore', () => {
     ).toHaveLength(2);
   });
 
-  it('exposes an indeterminate allocation phase while normal enqueue is blocked', async () => {
+  it('does not expose allocation while admission is merely blocked', async () => {
     useDownloadStore.setState({
       downloads: [{
         id: 'allocation-phase',
@@ -1365,15 +1365,19 @@ describe('useDownloadStore', () => {
 
     const dispatch = dispatchItem('allocation-phase');
     await vi.waitFor(() => {
-      expect(useDownloadStore.getState().allocationPendingIds.has('allocation-phase')).toBe(true);
+      expect(ipc.invokeCommand).toHaveBeenCalledWith(
+        'enqueue_download',
+        expect.objectContaining({ item: expect.objectContaining({ id: 'allocation-phase' }) })
+      );
     });
+    expect(useDownloadStore.getState().allocationPendingIds.has('allocation-phase')).toBe(false);
 
     resolveEnqueue({ id: 'allocation-phase', filename: 'file.bin' });
     await expect(dispatch).resolves.toBe(true);
     expect(useDownloadStore.getState().allocationPendingIds.has('allocation-phase')).toBe(false);
   });
 
-  it('exposes allocation phase for a preallocated Torrent and strips metadata credentials', async () => {
+  it('does not expose Torrent allocation while admission is merely blocked and strips metadata credentials', async () => {
     useDownloadStore.setState({
       downloads: [{
         id: 'torrent-allocation-phase',
@@ -1411,8 +1415,12 @@ describe('useDownloadStore', () => {
 
     const dispatch = dispatchItem('torrent-allocation-phase');
     await vi.waitFor(() => {
-      expect(useDownloadStore.getState().allocationPendingIds.has('torrent-allocation-phase')).toBe(true);
+      expect(ipc.invokeCommand).toHaveBeenCalledWith(
+        'enqueue_download',
+        expect.objectContaining({ item: expect.objectContaining({ id: 'torrent-allocation-phase' }) })
+      );
     });
+    expect(useDownloadStore.getState().allocationPendingIds.has('torrent-allocation-phase')).toBe(false);
 
     resolveEnqueue({ id: 'torrent-allocation-phase', filename: 'payload' });
     await expect(dispatch).resolves.toBe(true);
@@ -2555,7 +2563,46 @@ describe('useDownloadStore', () => {
     });
   });
 
-  it('shows and clears allocation phase for a blocked startup Torrent batch', async () => {
+  it('keeps startup destination permission failures retryable without backend registration', async () => {
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'db_get_all_queues') return [];
+      if (cmd === 'db_get_all_downloads') {
+        return [JSON.stringify({
+          id: 'startup-destination-access',
+          url: 'https://example.com/file.bin',
+          fileName: 'file.bin',
+          destination: '/protected',
+          status: 'queued',
+          category: 'Other',
+          dateAdded: '',
+          queueId: '00000000-0000-0000-0000-000000000001',
+          hasBeenDispatched: true
+        })];
+      }
+      if (cmd === 'enqueue_many') {
+        return [{
+          id: 'startup-destination-access',
+          success: false,
+          error: 'destination access retryable: grant Firelink access to the selected folder and retry'
+        }];
+      }
+      if (cmd === 'get_pending_order') return [];
+      return undefined;
+    });
+
+    await useDownloadStore.getState().initDB();
+    await useDownloadStore.getState().resumePendingDownloads();
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'ready',
+      hasBeenDispatched: false,
+      lastErrorKind: 'destinationAccess',
+      lastError: 'grant Firelink access to the selected folder and retry'
+    });
+    expect(useDownloadStore.getState().backendRegisteredIds.has('startup-destination-access')).toBe(false);
+  });
+
+  it('does not show allocation for a startup Torrent batch while it is merely queued', async () => {
     let releaseEnqueue!: (value: Array<{ id: string; success: boolean; filename: string }>) => void;
     const enqueue = new Promise<Array<{ id: string; success: boolean; filename: string }>>(resolve => {
       releaseEnqueue = resolve;
@@ -2590,7 +2637,7 @@ describe('useDownloadStore', () => {
     const resume = useDownloadStore.getState().resumePendingDownloads();
 
     await vi.waitFor(() => {
-      expect(useDownloadStore.getState().allocationPendingIds.has('startup-torrent-allocation')).toBe(true);
+      expect(useDownloadStore.getState().allocationPendingIds.has('startup-torrent-allocation')).toBe(false);
       expect(ipc.invokeCommand).toHaveBeenCalledWith(
         'enqueue_many',
         expect.objectContaining({

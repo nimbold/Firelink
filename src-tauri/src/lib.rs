@@ -5144,8 +5144,14 @@ async fn pause_download(
     let removed_pending = state.queue_manager.remove_from_pending(&id).await;
 
     let gid = state.queue_manager.aria2_gid_for_download(&id);
+    if gid.is_none() {
+        // A queued or not-yet-registered transfer cannot be verified through
+        // Aria2. Removing it from pending is the terminal pause boundary for
+        // this lifecycle, so its native allocation marker can be cleared now.
+        state.queue_manager.clear_aria2_allocation(&id).await;
+    }
     if let Some(gid) = gid.as_deref() {
-        let status = aria2_download_status(
+        let (status, mut status_progress) = aria2_download_status_snapshot(
             state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
             &state.aria2_secret,
             gid,
@@ -5153,6 +5159,7 @@ async fn pause_download(
         .await?;
         match status.as_str() {
             "paused" => {
+                state.queue_manager.clear_aria2_allocation(&id).await;
                 state.queue_manager.next_aria2_control_epoch(&id).await;
                 state.queue_manager.cancel_aria2_retries(&id).await;
                 log::info!("aria2 pause [{}]: gid {} was already paused", id, gid);
@@ -5171,14 +5178,16 @@ async fn pause_download(
                     Err(error) => Err(format!("failed to pause aria2 gid {gid}: {error}")),
                 };
                 if let Err(pause_error) = pause_result {
-                    match aria2_download_status(
+                    match aria2_download_status_snapshot(
                         state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
                         &state.aria2_secret,
                         gid,
                     )
                     .await
                     {
-                        Ok(status) if status == "paused" => {
+                        Ok((status, progress)) if status == "paused" => {
+                            state.queue_manager.clear_aria2_allocation(&id).await;
+                            status_progress = progress.or(status_progress);
                             // forcePause may have returned an RPC error after
                             // the daemon actually paused the GID. Invalidate
                             // terminal events already in flight before
@@ -5191,27 +5200,34 @@ async fn pause_download(
                                 gid
                             );
                         }
-                        Ok(status) if status == "complete" => {
+                        Ok((status, progress)) if status == "complete" => {
+                            state.queue_manager.clear_aria2_allocation(&id).await;
                             state
                                 .queue_manager
-                                .apply_completion_locked(&id, crate::queue::PendingOutcome::Complete)
+                                .apply_completion_locked_with_progress(
+                                    &id,
+                                    crate::queue::PendingOutcome::Complete,
+                                    progress.or(status_progress.clone()),
+                                )
                                 .await;
                             return Ok(());
                         }
-                        Ok(status) if matches!(status.as_str(), "error" | "removed") => {
+                        Ok((status, progress)) if matches!(status.as_str(), "error" | "removed") => {
+                            state.queue_manager.clear_aria2_allocation(&id).await;
                             let terminal_error = format!(
                                 "cannot pause aria2 gid {gid}: {pause_error}; daemon reports terminal state {status}"
                             );
                             state
                                 .queue_manager
-                                .apply_completion_locked(
+                                .apply_completion_locked_with_progress(
                                     &id,
                                     crate::queue::PendingOutcome::Error(terminal_error.clone()),
+                                    progress.or(status_progress.clone()),
                                 )
                                 .await;
                             return Err(terminal_error);
                         }
-                        Ok(status) => {
+                        Ok((status, _)) => {
                             state.queue_manager.allow_aria2_retries(&id).await;
                             return Err(format!(
                                 "{pause_error}; aria2 gid {gid} is still {status}"
@@ -5225,10 +5241,12 @@ async fn pause_download(
                         }
                     }
                 }
+                state.queue_manager.clear_aria2_allocation(&id).await;
                 state.queue_manager.next_aria2_control_epoch(&id).await;
                 log::info!("aria2 pause [{}]: gid {} paused", id, gid);
             }
             "complete" => {
+                state.queue_manager.clear_aria2_allocation(&id).await;
                 // Aria2 can reach complete before its terminal event updates
                 // Firelink's row. Treat a pause request in that narrow window
                 // as an idempotent completion reconciliation, not as an
@@ -5240,11 +5258,16 @@ async fn pause_download(
                 );
                 state
                     .queue_manager
-                    .apply_completion_locked(&id, crate::queue::PendingOutcome::Complete)
+                    .apply_completion_locked_with_progress(
+                        &id,
+                        crate::queue::PendingOutcome::Complete,
+                        status_progress.clone(),
+                    )
                     .await;
                 return Ok(());
             }
             terminal => {
+                state.queue_manager.clear_aria2_allocation(&id).await;
                 let retrying = state.queue_manager.has_aria2_retry_state(&id).await;
                 state.queue_manager.clear_aria2_retry_state(&id).await;
                 state.queue_manager.forget_aria2_gid(&id).await;
@@ -5259,13 +5282,14 @@ async fn pause_download(
                     // to repair it.
                     state.queue_manager.release_registered_id(&id).await;
                     use tauri::Emitter;
-                    let _ = app_handle.emit(
-                        "download-state",
-                        crate::ipc::DownloadStateEvent::new(
-                            id,
-                            crate::ipc::DownloadStatus::Paused,
-                        ),
+                    let mut event = crate::ipc::DownloadStateEvent::new(
+                        id,
+                        crate::ipc::DownloadStatus::Paused,
                     );
+                    if let Some(progress) = status_progress {
+                        event = event.with_progress(progress);
+                    }
+                    let _ = app_handle.emit("download-state", event);
                     return Ok(());
                 }
                 state.queue_manager.release_registered_id(&id).await;
@@ -5282,11 +5306,21 @@ async fn pause_download(
         };
         state.queue_manager.release_seed_tracking(&id);
         state.queue_manager.release_permit(&id).await;
+        let paused_progress = aria2_download_status_snapshot(
+            state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+            &state.aria2_secret,
+            gid,
+        )
+        .await
+        .ok()
+        .and_then(|(_, progress)| progress)
+        .or(status_progress);
         use tauri::Emitter;
-        let _ = app_handle.emit(
-            "download-state",
-            crate::ipc::DownloadStateEvent::paused_with_seed_remaining(id, seed_remaining),
-        );
+        let mut event = crate::ipc::DownloadStateEvent::paused_with_seed_remaining(id, seed_remaining);
+        if let Some(progress) = paused_progress {
+            event = event.with_progress(progress);
+        }
+        let _ = app_handle.emit("download-state", event);
         return Ok(());
     }
 
@@ -5544,8 +5578,14 @@ async fn resume_download(
                     Err(error) => Some(format!("failed to resume aria2 gid {gid_clone}: {error}")),
                 };
                 if let Some(unpause_error) = unpause_error {
-                    match verify_aria2_resume_status(aria2_port, &aria2_secret, &gid_clone).await {
-                        Ok(status) if matches!(status.as_str(), "active" | "waiting") => {
+                    match verify_aria2_resume_status_snapshot(
+                        aria2_port,
+                        &aria2_secret,
+                        &gid_clone,
+                    )
+                    .await
+                    {
+                        Ok((status, _)) if matches!(status.as_str(), "active" | "waiting") => {
                             let still_current = queue_manager
                                 .is_aria2_control_epoch_current(&id_clone, control_epoch)
                                 .await
@@ -5578,7 +5618,7 @@ async fn resume_download(
                             );
                             return;
                         }
-                        Ok(status) if status == "complete" => {
+                        Ok((status, progress)) if status == "complete" => {
                             log::info!(
                                 "aria2 resume [{}]: {} but daemon reports gid {} complete; reconciling completion",
                                 id_clone,
@@ -5586,14 +5626,15 @@ async fn resume_download(
                                 gid_clone
                             );
                             queue_manager
-                                .apply_completion_locked(
+                                .apply_completion_locked_with_progress(
                                     &id_clone,
                                     crate::queue::PendingOutcome::Complete,
+                                    progress,
                                 )
                                 .await;
                             return;
                         }
-                        Ok(status) if status == "paused" => {
+                        Ok((status, progress)) if status == "paused" => {
                             queue_manager.next_aria2_control_epoch(&id_clone).await;
                             queue_manager.cancel_aria2_retries(&id_clone).await;
                             queue_manager.release_permit(&id_clone).await;
@@ -5603,28 +5644,30 @@ async fn resume_download(
                                 unpause_error,
                                 gid_clone
                             );
-                            let _ = app_handle_clone.emit(
-                                "download-state",
-                                crate::ipc::DownloadStateEvent::paused_with_error(
-                                    &id_clone,
-                                    unpause_error,
-                                ),
+                            let mut event = crate::ipc::DownloadStateEvent::paused_with_error(
+                                &id_clone,
+                                unpause_error,
                             );
+                            if let Some(progress) = progress {
+                                event = event.with_progress(progress);
+                            }
+                            let _ = app_handle_clone.emit("download-state", event);
                             return;
                         }
-                        Ok(status) if matches!(status.as_str(), "error" | "removed") => {
+                        Ok((status, progress)) if matches!(status.as_str(), "error" | "removed") => {
                             let terminal_error = format!(
                                 "{unpause_error}; daemon reports gid {gid_clone} as {status}"
                             );
                             queue_manager
-                                .apply_completion_locked(
+                                .apply_completion_locked_with_progress(
                                     &id_clone,
                                     crate::queue::PendingOutcome::Error(terminal_error),
+                                    progress,
                                 )
                                 .await;
                             return;
                         }
-                        Ok(status) => {
+                        Ok((status, _)) => {
                             // An unrecognized daemon state is not proof that
                             // the transfer stopped. Keep its permit and
                             // mapping so a later reconciliation can observe
@@ -5654,7 +5697,7 @@ async fn resume_download(
                 // aria2 may still report the GID as paused, complete, or
                 // otherwise unavailable. Verify the daemon state before
                 // publishing Downloading to the renderer.
-                let status_after_unpause = match verify_aria2_resume_status(
+                let (status_after_unpause, status_after_unpause_progress) = match verify_aria2_resume_status_snapshot(
                     aria2_port,
                     &aria2_secret,
                     &gid_clone,
@@ -5676,9 +5719,10 @@ async fn resume_download(
                     "active" | "waiting" => {}
                     "complete" => {
                         queue_manager
-                            .apply_completion_locked(
+                            .apply_completion_locked_with_progress(
                                 &id_clone,
                                 crate::queue::PendingOutcome::Complete,
+                                status_after_unpause_progress,
                             )
                             .await;
                         return;
@@ -5688,9 +5732,10 @@ async fn resume_download(
                             "aria2 resume left gid {gid_clone} in terminal state {status_after_unpause}"
                         );
                         queue_manager
-                            .apply_completion_locked(
+                            .apply_completion_locked_with_progress(
                                 &id_clone,
                                 crate::queue::PendingOutcome::Error(terminal_error),
+                                status_after_unpause_progress,
                             )
                             .await;
                         return;
@@ -5706,10 +5751,14 @@ async fn resume_download(
                             error,
                             gid_clone
                         );
-                        let _ = app_handle_clone.emit(
-                            "download-state",
-                            crate::ipc::DownloadStateEvent::paused_with_error(&id_clone, error),
+                        let mut event = crate::ipc::DownloadStateEvent::paused_with_error(
+                            &id_clone,
+                            error,
                         );
+                        if let Some(progress) = status_after_unpause_progress {
+                            event = event.with_progress(progress);
+                        }
+                        let _ = app_handle_clone.emit("download-state", event);
                         return;
                     }
                     other => {
@@ -5972,6 +6021,10 @@ async fn remove_download(
             state
                 .queue_manager
                 .release_permit_for_generation(&id, media_lifecycle_generation)
+                .await;
+            state
+                .queue_manager
+                .clear_aria2_allocation_for_epoch(&id, removal_epoch)
                 .await;
             return Err("download lifecycle changed while waiting for aria2 dispatch".to_string());
         }
@@ -6395,17 +6448,78 @@ async fn aria2_download_status(port: u16, secret: &str, gid: &str) -> Result<Str
         .ok_or_else(|| format!("aria2.tellStatus returned no status for gid {gid}"))
 }
 
+async fn aria2_download_status_snapshot(
+    port: u16,
+    secret: &str,
+    gid: &str,
+) -> Result<(String, Option<crate::ipc::DownloadStateProgress>), String> {
+    let result = rpc_call(
+        port,
+        secret,
+        "aria2.tellStatus",
+        serde_json::json!([gid, ["status", "completedLength", "totalLength"]]),
+    )
+    .await
+    .map_err(|error| format!("failed to query aria2 gid {gid}: {error}"))?;
+    let status = result
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| format!("aria2.tellStatus returned no status for gid {gid}"))?;
+    let progress = aria2_download_state_progress(Some(&result));
+    Ok((status, progress))
+}
+
+fn aria2_u64(value: Option<&serde_json::Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            .or_else(|| value.as_u64())
+    })
+}
+
+fn aria2_download_state_progress(
+    status: Option<&serde_json::Value>,
+) -> Option<crate::ipc::DownloadStateProgress> {
+    let status = status?;
+    let downloaded = aria2_u64(status.get("completedLength"));
+    let total = aria2_u64(status.get("totalLength"));
+    if downloaded.is_none() && total.is_none() {
+        return None;
+    }
+    let is_complete = status.get("status").and_then(|value| value.as_str()) == Some("complete");
+    let fraction = if is_complete {
+        1.0
+    } else if let Some(total) = total.filter(|total| *total > 0) {
+        (downloaded.unwrap_or_default().min(total) as f64 / total as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let total_bytes = total.filter(|value| *value > 0).map(|value| value as f64);
+    Some(crate::ipc::DownloadStateProgress {
+        fraction,
+        downloaded_bytes: downloaded.map(|value| value as f64),
+        total_bytes,
+        total_is_estimate: total_bytes.map(|_| false),
+    })
+}
+
 /// Verify a retained-GID resume against Aria2's actual state. `unpause` can
 /// return before a paused GID becomes observable as active, and a transient
 /// tellStatus failure must not turn a successful resume into a false failure.
 /// Retry only that ambiguous observation; terminal and active states return
 /// immediately and remain authoritative.
-async fn verify_aria2_resume_status(port: u16, secret: &str, gid: &str) -> Result<String, String> {
+async fn verify_aria2_resume_status_snapshot(
+    port: u16,
+    secret: &str,
+    gid: &str,
+) -> Result<(String, Option<crate::ipc::DownloadStateProgress>), String> {
     let mut last_observation = Err(format!("aria2 resume status for gid {gid} was not observed"));
     for attempt in 0..4u32 {
-        last_observation = match aria2_download_status(port, secret, gid).await {
-            Ok(status) if status != "paused" => return Ok(status),
-            Ok(status) => Ok(status),
+        last_observation = match aria2_download_status_snapshot(port, secret, gid).await {
+            Ok((status, progress)) if status != "paused" => return Ok((status, progress)),
+            Ok((status, progress)) => Ok((status, progress)),
             Err(error) => Err(error),
         };
         if attempt < 3 {
@@ -6426,7 +6540,7 @@ async fn reconcile_aria2_downloads(app_handle: &tauri::AppHandle) {
             port,
             &secret,
             "aria2.tellStatus",
-            serde_json::json!([gid, ["status", "seeder", "errorCode", "errorMessage"]]),
+            serde_json::json!([gid, ["status", "seeder", "errorCode", "errorMessage", "completedLength", "totalLength"]]),
         )
         .await
         {
@@ -6502,7 +6616,11 @@ async fn reconcile_aria2_downloads(app_handle: &tauri::AppHandle) {
         };
 
         if let Some(outcome) = outcome {
-            state.queue_manager.handle_aria2_event(&gid, outcome).await;
+            let progress = aria2_download_state_progress(Some(&status));
+            state
+                .queue_manager
+                .handle_aria2_event_with_progress(&gid, outcome, progress)
+                .await;
         }
     }
 }
@@ -7605,6 +7723,10 @@ async fn cancel_enqueue_generation(
         .queue_manager
         .cancel_enqueue_generation(&id, generation)
         .await;
+    state
+        .queue_manager
+        .clear_aria2_allocation_for_lifecycle_generation(&id, generation)
+        .await;
     Ok(())
 }
 
@@ -7635,6 +7757,19 @@ async fn enqueue_many(
             }
         };
         if let Err(error) = validation {
+            results.push(crate::ipc::EnqueueResult {
+                id,
+                success: false,
+                filename: None,
+                error: Some(error),
+            });
+            continue;
+        }
+        if let Err(error) = preflight_download_destination_access(
+            &app_handle,
+            &id,
+            &item.destination,
+        ) {
             results.push(crate::ipc::EnqueueResult {
                 id,
                 success: false,
@@ -11607,6 +11742,7 @@ mod tests {
         normalize_media_connections,
         validate_enqueue_url, validate_enqueue_uris, validate_keychain_grant_request_id,
         aria2_gid_not_found,
+        aria2_download_state_progress, preflight_download_destination_access,
         retained_torrent_id_from_persisted_record,
         retained_torrent_info_hash_from_persisted_record,
         merge_durable_torrent_telemetry, torrent_identity_magnet, torrent_move_path_pair,
@@ -11633,6 +11769,36 @@ mod tests {
         ));
         assert!(!aria2_gid_not_found("error trying to connect: connection refused"));
         assert!(!aria2_gid_not_found("aria2 error code 3: Resource not found"));
+    }
+
+    #[test]
+    fn terminal_aria2_status_preserves_exact_progress_snapshot() {
+        let snapshot = aria2_download_state_progress(Some(&json!({
+            "status": "error",
+            "completedLength": "420",
+            "totalLength": "1000"
+        })))
+        .expect("length fields should produce a progress snapshot");
+
+        assert!((snapshot.fraction - 0.42).abs() < f64::EPSILON);
+        assert_eq!(snapshot.downloaded_bytes, Some(420.0));
+        assert_eq!(snapshot.total_bytes, Some(1000.0));
+        assert_eq!(snapshot.total_is_estimate, Some(false));
+    }
+
+    #[test]
+    fn destination_preflight_returns_the_retryable_marker_before_admission() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let error = preflight_download_destination_access(
+            app.handle(),
+            "preflight-only",
+            "relative/not-approved",
+        )
+        .expect_err("an unapproved destination must not enter admission");
+
+        assert!(error.starts_with("destination access retryable:"));
     }
 
     #[test]
@@ -15699,42 +15865,95 @@ pub fn run() {
                                             if let Some(event) = params.first().and_then(|p| p.as_object()) {
                                                 if let Some(gid) = event.get("gid").and_then(|g| g.as_str()) {
                                                     let state = app_handle_bg.state::<AppState>();
+                                                    let mut progress = None;
                                                     let outcome = match method {
-                                                        "aria2.onDownloadComplete" => Some(crate::queue::PendingOutcome::Complete),
-                                                        "aria2.onBtDownloadComplete" => Some(crate::queue::PendingOutcome::Seeding),
+                                                        "aria2.onDownloadStart" => {
+                                                            let downloaded_bytes = aria2_download_status_snapshot(
+                                                                state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+                                                                &state.aria2_secret,
+                                                                gid,
+                                                            )
+                                                            .await
+                                                            .ok()
+                                                            .and_then(|(_, progress)| progress)
+                                                            .and_then(|progress| progress.downloaded_bytes)
+                                                            .filter(|value| value.is_finite() && *value > 0.0)
+                                                            .map(|value| value as u64)
+                                                            .unwrap_or_default();
+                                                            state
+                                                                .queue_manager
+                                                                .handle_aria2_download_start(gid, downloaded_bytes)
+                                                                .await;
+                                                            None
+                                                        }
+                                                        "aria2.onDownloadComplete" => {
+                                                            progress = aria2_download_state_progress(
+                                                                rpc_call(
+                                                                    state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+                                                                    &state.aria2_secret,
+                                                                    "aria2.tellStatus",
+                                                                    serde_json::json!([gid, ["status", "completedLength", "totalLength"]]),
+                                                                )
+                                                                .await
+                                                                .ok()
+                                                                .as_ref(),
+                                                            );
+                                                            Some(crate::queue::PendingOutcome::Complete)
+                                                        }
+                                                        "aria2.onBtDownloadComplete" => {
+                                                            progress = aria2_download_state_progress(
+                                                                rpc_call(
+                                                                    state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+                                                                    &state.aria2_secret,
+                                                                    "aria2.tellStatus",
+                                                                    serde_json::json!([gid, ["status", "completedLength", "totalLength"]]),
+                                                                )
+                                                                .await
+                                                                .ok()
+                                                                .as_ref(),
+                                                            );
+                                                            Some(crate::queue::PendingOutcome::Seeding)
+                                                        }
                                                         "aria2.onDownloadError" => {
                                                             let mut msg = event.get("error_message").and_then(|m| m.as_str()).unwrap_or("aria2 download error").to_string();
-                                                            let aria2_port = state.aria2_port.load(std::sync::atomic::Ordering::Relaxed);
-                                                            let aria2_secret = state.aria2_secret.clone();
-                                                    if let Ok(status) = rpc_call(aria2_port, &aria2_secret, "aria2.tellStatus", serde_json::json!([gid, ["errorCode", "errorMessage"]])).await {
-                                                        let err_msg = status
-                                                            .get("errorMessage")
-                                                            .and_then(|m| m.as_str())
-                                                            .filter(|m| !m.is_empty());
-                                                        let err_code = status
-                                                            .get("errorCode")
-                                                            .and_then(|m| m.as_str())
-                                                            .filter(|m| !m.is_empty());
-                                                        match (err_code, err_msg) {
-                                                            (Some(code), Some(message)) => {
-                                                                msg = format!("aria2 error code {code}: {message}");
+                                                            let status = rpc_call(
+                                                                state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+                                                                &state.aria2_secret,
+                                                                "aria2.tellStatus",
+                                                                serde_json::json!([gid, ["errorCode", "errorMessage", "completedLength", "totalLength", "status"]]),
+                                                            )
+                                                            .await
+                                                            .ok();
+                                                            if let Some(status) = status.as_ref() {
+                                                                progress = aria2_download_state_progress(Some(status));
+                                                                let err_msg = status
+                                                                    .get("errorMessage")
+                                                                    .and_then(|m| m.as_str())
+                                                                    .filter(|m| !m.is_empty());
+                                                                let err_code = status
+                                                                    .get("errorCode")
+                                                                    .and_then(|m| m.as_str())
+                                                                    .filter(|m| !m.is_empty());
+                                                                match (err_code, err_msg) {
+                                                                    (Some(code), Some(message)) => {
+                                                                        msg = format!("aria2 error code {code}: {message}");
+                                                                    }
+                                                                    (Some(code), None) => {
+                                                                        msg = format!("aria2 error code {code}: {msg}");
+                                                                    }
+                                                                    (None, Some(message)) => {
+                                                                        msg = message.to_string();
+                                                                    }
+                                                                    (None, None) => {}
+                                                                }
                                                             }
-                                                            (Some(code), None) => {
-                                                                msg = format!("aria2 error code {code}: {msg}");
-                                                            }
-                                                            (None, Some(message)) => {
-                                                                msg = message.to_string();
-                                                            }
-                                                            (None, None) => {}
-                                                        }
-                                                    }
                                                             Some(crate::queue::PendingOutcome::Error(msg))
                                                         }
                                                         _ => None,
                                                     };
                                                     if let Some(outcome) = outcome {
                                                         Arc::clone(&state.queue_manager)
-                                                            .handle_aria2_event(gid, outcome)
+                                                            .handle_aria2_event_with_progress(gid, outcome, progress)
                                                             .await;
                                                     }
                                                 }
@@ -16129,6 +16348,22 @@ pub fn run() {
                                         None
                                     };
 
+                                    // tellActive is the poller's confirmed native
+                                    // progress path. If the WebSocket start
+                                    // notification was lost, this is sufficient
+                                    // to end the allocation phase for the same
+                                    // mapped lifecycle.
+                                    poll_mgr
+                                        .complete_aria2_allocation_for_gid(gid, completed)
+                                        .await;
+                                    if !poll_mgr.is_current_aria2_gid_mapping(gid, &mapping)
+                                        || !poll_mgr
+                                            .is_aria2_control_epoch_current(&id, control_epoch)
+                                            .await
+                                    {
+                                        continue;
+                                    }
+
                                     use tauri::Emitter;
                                     let _ = app_handle_poll.emit("download-progress", DownloadProgressEvent {
                                         id: id.clone(),
@@ -16206,7 +16441,7 @@ pub fn run() {
                                     poll_port.load(std::sync::atomic::Ordering::Relaxed),
                                     &poll_secret,
                                     "aria2.tellStatus",
-                                    serde_json::json!([gid, ["status", "seeder", "errorCode", "errorMessage"]]),
+                                    serde_json::json!([gid, ["status", "seeder", "errorCode", "errorMessage", "completedLength", "totalLength"]]),
                                 )
                                 .await
                                 {
@@ -16389,6 +16624,7 @@ pub fn run() {
                                     _ => None,
                                 };
                                 if let Some(outcome) = outcome {
+                                    let progress = aria2_download_state_progress(Some(&status));
                                     let terminal_error = match &outcome {
                                         crate::queue::PendingOutcome::Error(error) => Some(error.as_str()),
                                         _ => None,
@@ -16409,7 +16645,9 @@ pub fn run() {
                                             .and_then(crate::retry::aria2_error_code)
                                             .unwrap_or_else(|| "none".to_string())
                                     );
-                                    poll_mgr.handle_aria2_event(&gid, outcome).await;
+                                    poll_mgr
+                                        .handle_aria2_event_with_progress(&gid, outcome, progress)
+                                        .await;
                                 }
                             }
                             observations.retain(|id, _| seen_ids.contains(id));

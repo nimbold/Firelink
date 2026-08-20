@@ -8,6 +8,7 @@ import { useDownloadProgressStore } from './downloadProgressStore';
 import {
   clearDownloadControlIntent,
   commitDownloadState,
+  currentDownloadLifecycleGeneration,
   downloadControlIntentFor,
   hasStaleTemporaryMediaEstimate,
   useDownloadStore
@@ -16,15 +17,94 @@ import {
 export { useDownloadProgressStore } from './downloadProgressStore';
 
 let unlistenProgress: UnlistenFn | null = null;
+let unlistenAllocation: UnlistenFn | null = null;
 let unlistenState: UnlistenFn | null = null;
 let unlistenMoveProgress: UnlistenFn | null = null;
 let unlistenTray: UnlistenFn | null = null;
 let listenerSetup: Promise<void> | null = null;
 let listenerConsumers = 0;
 
+type ProgressFields = {
+  fraction?: number;
+  downloadedBytes?: number;
+  totalBytes?: number;
+  totalIsEstimate?: boolean;
+};
+
+const finiteNonNegative = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0;
+
+const progressFields = (source: unknown): ProgressFields => {
+  if (!source || typeof source !== 'object') return {};
+  const value = source as Record<string, unknown>;
+  const downloadedBytes = value.downloadedBytes ?? value.downloaded_bytes;
+  const totalBytes = value.totalBytes ?? value.total_bytes;
+  const totalIsEstimate = value.totalIsEstimate ?? value.total_is_estimate;
+  return {
+    ...(finiteNonNegative(value.fraction) ? { fraction: value.fraction } : {}),
+    ...(finiteNonNegative(downloadedBytes) ? { downloadedBytes } : {}),
+    ...(finiteNonNegative(totalBytes) ? { totalBytes } : {}),
+    ...(typeof totalIsEstimate === 'boolean' ? { totalIsEstimate } : {})
+  };
+};
+
+const mergeTerminalProgress = (
+  current: DownloadItem,
+  status: DownloadStatus,
+  nativeSnapshot: unknown,
+  retainedSnapshot: unknown,
+  liveSnapshot: unknown
+): ProgressFields => {
+  const ordered = [nativeSnapshot, retainedSnapshot, liveSnapshot]
+    .map(progressFields);
+  const row = progressFields({
+    fraction: current.fraction,
+    downloadedBytes: current.downloadedBytes,
+    totalBytes: current.totalBytes,
+    totalIsEstimate: current.totalIsEstimate
+  });
+  const all = [...ordered, row];
+  const downloadedCandidates = all
+    .map(snapshot => snapshot.downloadedBytes)
+    .filter((value): value is number => finiteNonNegative(value));
+  const downloadedBytes = downloadedCandidates.length > 0
+    ? Math.max(...downloadedCandidates)
+    : undefined;
+
+  const exactTotals = all
+    .filter(snapshot => snapshot.totalIsEstimate === false && finiteNonNegative(snapshot.totalBytes))
+    .map(snapshot => snapshot.totalBytes!);
+  const anyTotals = all
+    .map(snapshot => snapshot.totalBytes)
+    .filter((value): value is number => finiteNonNegative(value));
+  const totalBytes = exactTotals[0] ?? anyTotals[0];
+  const fractions = all
+    .map(snapshot => snapshot.fraction)
+    .filter((value): value is number => finiteNonNegative(value));
+  if (downloadedBytes !== undefined && totalBytes !== undefined && totalBytes > 0) {
+    fractions.push(Math.min(downloadedBytes, totalBytes) / totalBytes);
+  }
+  if (status === 'completed') fractions.push(1);
+  const fraction = fractions.length > 0
+    ? Math.min(1, Math.max(0, Math.max(...fractions)))
+    : undefined;
+  return {
+    ...(fraction !== undefined ? { fraction } : {}),
+    ...(downloadedBytes !== undefined ? { downloadedBytes } : {}),
+    ...(totalBytes !== undefined ? { totalBytes } : {}),
+    ...(exactTotals.length > 0
+      ? { totalIsEstimate: false }
+      : ordered.find(snapshot => snapshot.totalIsEstimate !== undefined)?.totalIsEstimate !== undefined
+        ? { totalIsEstimate: ordered.find(snapshot => snapshot.totalIsEstimate !== undefined)!.totalIsEstimate }
+        : {})
+  };
+};
+
 const disposeDownloadListeners = () => {
   unlistenProgress?.();
   unlistenProgress = null;
+  unlistenAllocation?.();
+  unlistenAllocation = null;
   unlistenState?.();
   unlistenState = null;
   unlistenMoveProgress?.();
@@ -43,7 +123,7 @@ const startDownloadListeners = async () => {
       if (!current) {
         // A removed row can still have one queued sidecar event in flight.
         // Do not let that event recreate an orphaned progress entry.
-        useDownloadProgressStore.getState().clearDownloadProgress(payload.id);
+        useDownloadProgressStore.getState().resetDownloadProgress(payload.id);
         return;
       }
       // A sidecar can flush one last progress chunk after a pause, failure,
@@ -112,12 +192,39 @@ const startDownloadListeners = async () => {
         mainStore.updateDownload(payload.id, updates);
       }
     }),
+    listen('download-allocation', (event) => {
+      const payload = event.payload;
+      const mainStore = useDownloadStore.getState();
+      const current = mainStore.downloads.find(download => download.id === payload.id);
+      if (!current) {
+        // Keep a validated native marker until persisted startup state or a
+        // just-admitted row is projected. Dropping it here makes allocation
+        // invisible when the event wins the hydration race.
+        mainStore.setAllocationPending(
+          payload.id,
+          payload.pending,
+          payload.lifecycleGeneration
+        );
+        return;
+      }
+      // Allocation events are native lifecycle markers. A late marker from an
+      // older GID/queue lifecycle must never hide the current lifecycle's
+      // phase or clear its pending state.
+      if (payload.lifecycleGeneration !== currentDownloadLifecycleGeneration(payload.id)) {
+        return;
+      }
+      mainStore.setAllocationPending(
+        payload.id,
+        payload.pending,
+        payload.lifecycleGeneration
+      );
+    }),
     listen('download-state', async (event) => {
       const payload = event.payload;
       const mainStore = useDownloadStore.getState();
       const current = mainStore.downloads.find(d => d.id === payload.id);
       if (!current) {
-        useDownloadProgressStore.getState().clearDownloadProgress(payload.id);
+        useDownloadProgressStore.getState().resetDownloadProgress(payload.id);
         return;
       }
       const status = payload.status as DownloadStatus;
@@ -184,8 +291,26 @@ const startDownloadListeners = async () => {
         return;
       }
 
-      const progress = useDownloadProgressStore.getState().progressMap[payload.id];
-      if (['queued', 'retrying', 'completed', 'failed', 'paused', 'waitingToSeed'].includes(status)) {
+      const progressState = useDownloadProgressStore.getState();
+      const liveProgress = progressState.progressMap[payload.id];
+      const retainedProgress = progressState.retainedProgressMap[payload.id];
+      const isTerminalOrPaused = ['completed', 'failed', 'paused', 'retrying', 'waitingToSeed'].includes(status);
+      const terminalProgress = isTerminalOrPaused
+        ? mergeTerminalProgress(
+            current,
+            status,
+            payload.progress,
+            retainedProgress,
+            liveProgress
+          )
+        : undefined;
+      if (status === 'queued') {
+        // A queued event can represent either a genuinely new admission or a
+        // same-GID resume of a paused Aria2 transfer. Lifecycle-changing
+        // callers reset the retained snapshot before admission; this event
+        // only ends the old live frame so a same-GID resume keeps its bytes.
+        useDownloadProgressStore.getState().clearDownloadProgress(payload.id);
+      } else if (['retrying', 'completed', 'failed', 'paused', 'waitingToSeed'].includes(status)) {
         useDownloadProgressStore.getState().clearDownloadProgress(payload.id);
       }
       const moveRestoreStatus = status === 'moving'
@@ -196,16 +321,18 @@ const startDownloadListeners = async () => {
       const updates: Partial<DownloadItem> = {
         status,
         torrentMoveRestoreStatus: moveRestoreStatus,
-        ...(progress ? {
-          fraction: progress.fraction,
-          ...(progress.downloaded_bytes != null
-            ? { downloadedBytes: progress.downloaded_bytes }
+        ...(terminalProgress ? {
+          ...(terminalProgress.fraction !== undefined
+            ? { fraction: terminalProgress.fraction }
             : {}),
-          ...(progress.total_bytes != null
-            ? { totalBytes: progress.total_bytes }
+          ...(terminalProgress.downloadedBytes !== undefined
+            ? { downloadedBytes: terminalProgress.downloadedBytes }
             : {}),
-          ...(progress.total_is_estimate != null
-            ? { totalIsEstimate: progress.total_is_estimate }
+          ...(terminalProgress.totalBytes !== undefined
+            ? { totalBytes: terminalProgress.totalBytes }
+            : {}),
+          ...(terminalProgress.totalIsEstimate !== undefined
+            ? { totalIsEstimate: terminalProgress.totalIsEstimate }
             : {})
         } : {}),
         ...(payload.error ? {
@@ -326,13 +453,15 @@ const startDownloadListeners = async () => {
     throw failedRegistration.reason;
   }
 
-  const [progress, state, moveProgress, tray] = registrations as [
+  const [progress, allocation, state, moveProgress, tray] = registrations as [
+    PromiseFulfilledResult<UnlistenFn>,
     PromiseFulfilledResult<UnlistenFn>,
     PromiseFulfilledResult<UnlistenFn>,
     PromiseFulfilledResult<UnlistenFn>,
     PromiseFulfilledResult<UnlistenFn>,
   ];
   unlistenProgress = progress.value;
+  unlistenAllocation = allocation.value;
   unlistenState = state.value;
   unlistenMoveProgress = moveProgress.value;
   unlistenTray = tray.value;

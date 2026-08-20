@@ -1,5 +1,8 @@
 use base64::Engine as _;
-use crate::ipc::{DownloadStateEvent, DownloadStatus, QueueDirection};
+use crate::ipc::{
+    DownloadAllocationEvent, DownloadStateEvent, DownloadStateProgress, DownloadStatus,
+    QueueDirection,
+};
 use crate::power::PowerManager;
 use crate::retry::{
     aria2_error_code, backoff_and_emit, is_aria2_name_resolution_error,
@@ -21,6 +24,7 @@ use ts_rs::TS;
 /// Default capacity when no setting is read yet.
 pub const DEFAULT_MAX_CONCURRENT: usize = 3;
 pub const MAX_QUEUE_CONCURRENT: usize = 12;
+const MAX_PENDING_DOWNLOAD_STARTS: usize = 1024;
 pub const MEDIA_RUN_CANCELLED: &str = "__firelink_media_run_cancelled__";
 pub const DOWNLOAD_CONNECTIONS_MIN: i32 = 1;
 pub const DOWNLOAD_CONNECTIONS_MAX: i32 = 16;
@@ -868,6 +872,21 @@ pub enum PendingOutcome {
     Error(String),
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingAria2Outcome {
+    pub outcome: PendingOutcome,
+    pub progress: Option<DownloadStateProgress>,
+}
+
+impl PendingAria2Outcome {
+    pub fn new(outcome: PendingOutcome) -> Self {
+        Self {
+            outcome,
+            progress: None,
+        }
+    }
+}
+
 /// Result of recycling an aria2 transfer's connections. A refresh can race
 /// with daemon completion or leave the transfer paused after an ambiguous
 /// unpause failure, so callers must handle the verified daemon outcome.
@@ -1176,7 +1195,14 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
 
     /// gid -> buffered (id_placeholder, outcome) for completions that arrived
     /// before the gid was stored. Drained by `remember_gid`.
-    pub pending_completion: Arc<Mutex<HashMap<String, (String, PendingOutcome)>>>,
+    pub pending_completion: Arc<Mutex<HashMap<String, (String, PendingAria2Outcome)>>>,
+    /// Aria2 can emit onDownloadStart before addUri's response has been
+    /// mapped to the Firelink download. Buffer that start marker until the
+    /// current GID mapping is installed.
+    pending_download_starts: Arc<Mutex<HashSet<String>>>,
+    /// Current Aria2 lifecycles whose files are expected to be preallocated.
+    /// The generation fences late start/clear events from an older GID.
+    aria2_allocation_pending: Mutex<HashMap<String, (u64, u64)>>,
 
     /// download id -> spawn payload for aria2 transient-error re-addUri retries.
     aria2_payloads: Mutex<HashMap<String, SpawnPayload>>,
@@ -1281,6 +1307,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
             torrent_move_cancellations: StdMutex::new(HashSet::new()),
             aria2_gids: Arc::new(std::sync::RwLock::new(HashMap::new())),
             pending_completion: Arc::new(Mutex::new(HashMap::new())),
+            pending_download_starts: Arc::new(Mutex::new(HashSet::new())),
+            aria2_allocation_pending: Mutex::new(HashMap::new()),
             aria2_payloads: Mutex::new(HashMap::new()),
             aria2_connection_options: Mutex::new(HashMap::new()),
             aria2_dispatch_inflight: Mutex::new(HashMap::new()),
@@ -3808,6 +3836,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 .await;
             }
         }
+        // Unknown start notifications belong to the current Aria2 daemon
+        // session. A reconnect/restart invalidates that association; the
+        // poller will provide a fresh positive-progress fallback after the
+        // next GID mapping instead of letting an old GID clear a new phase.
+        self.pending_download_starts.lock().await.clear();
     }
 
     /// Number of un-acquired permits currently in the semaphore pool.
@@ -3820,6 +3853,159 @@ impl<R: tauri::Runtime> QueueManager<R> {
         let _ = self
             .app_handle
             .emit("download-state", DownloadStateEvent::new(id, status));
+    }
+
+    fn emit_allocation_event(&self, id: &str, pending: bool, lifecycle_generation: u64) {
+        use tauri::Emitter;
+        let _ = self.app_handle.emit(
+            "download-allocation",
+            DownloadAllocationEvent {
+                id: id.to_string(),
+                pending,
+                lifecycle_generation: lifecycle_generation.to_string(),
+            },
+        );
+    }
+
+    pub fn aria2_allocation_phase_eligible(payload: &SpawnPayload) -> bool {
+        if payload.is_media || payload.torrent_verify_only {
+            return false;
+        }
+        if !payload.is_torrent {
+            return true;
+        }
+        normalize_torrent_file_allocation(payload.torrent_file_allocation.as_deref())
+            .is_ok_and(|allocation| allocation != "none")
+    }
+
+    async fn begin_aria2_allocation(
+        &self,
+        id: &str,
+        control_epoch: u64,
+        lifecycle_generation: u64,
+        payload: &SpawnPayload,
+    ) {
+        if !Self::aria2_allocation_phase_eligible(payload) {
+            return;
+        }
+        self.aria2_allocation_pending
+            .lock()
+            .await
+            .insert(id.to_string(), (control_epoch, lifecycle_generation));
+        self.emit_allocation_event(id, true, lifecycle_generation);
+    }
+
+    pub async fn clear_aria2_allocation_for_lifecycle_generation(
+        &self,
+        id: &str,
+        lifecycle_generation: u64,
+    ) {
+        let cleared_generation = {
+            let mut pending = self.aria2_allocation_pending.lock().await;
+            let Some((_, pending_generation)) = pending.get(id).copied() else {
+                return;
+            };
+            if pending_generation != lifecycle_generation {
+                return;
+            }
+            pending.remove(id).map(|(_, generation)| generation)
+        };
+        if let Some(cleared_generation) = cleared_generation {
+            self.emit_allocation_event(id, false, cleared_generation);
+        }
+    }
+
+    pub async fn clear_aria2_allocation_for_epoch(&self, id: &str, control_epoch: u64) {
+        let lifecycle_generation = {
+            let mut pending = self.aria2_allocation_pending.lock().await;
+            let Some((pending_epoch, lifecycle_generation)) = pending.get(id).copied() else {
+                return;
+            };
+            if pending_epoch != control_epoch {
+                return;
+            }
+            pending.remove(id);
+            lifecycle_generation
+        };
+        self.emit_allocation_event(id, false, lifecycle_generation);
+    }
+
+    pub async fn clear_aria2_allocation(&self, id: &str) {
+        let lifecycle_generation = self
+            .aria2_allocation_pending
+            .lock()
+            .await
+            .remove(id)
+            .map(|(_, lifecycle_generation)| lifecycle_generation);
+        if let Some(lifecycle_generation) = lifecycle_generation {
+            self.emit_allocation_event(id, false, lifecycle_generation);
+        }
+    }
+
+    pub async fn complete_aria2_allocation_for_gid(&self, gid: &str, downloaded_bytes: u64) {
+        // Aria2 reports an active GID with completedLength=0 while it is still
+        // creating preallocated files. That observation is not native
+        // transfer progress and must not hide the allocation phase.
+        if downloaded_bytes == 0 {
+            return;
+        }
+        let mapping = {
+            let _gid_state = self.aria2_gid_state.lock().await;
+            if self.is_aria2_gid_ignored_locked(gid).await {
+                return;
+            }
+            let Some(mapping) = self.aria2_gid_mapping(gid) else {
+                let mut starts = self.pending_download_starts.lock().await;
+                if starts.len() < MAX_PENDING_DOWNLOAD_STARTS {
+                    starts.insert(gid.to_string());
+                }
+                return;
+            };
+            mapping
+        };
+        if !self
+            .is_current_aria2_gid_mapping(gid, &mapping)
+            || !self
+                .is_aria2_control_epoch_current(&mapping.id, mapping.epoch)
+                .await
+        {
+            return;
+        }
+        self.clear_aria2_allocation_for_epoch(&mapping.id, mapping.epoch)
+            .await;
+    }
+
+    pub async fn handle_aria2_download_start(&self, gid: &str, downloaded_bytes: u64) {
+        // Aria2 can publish onDownloadStart before it finishes creating
+        // preallocated files. A zero-byte start is therefore not native
+        // transfer progress and must leave the allocation phase visible.
+        if downloaded_bytes == 0 {
+            return;
+        }
+        let mapping = {
+            let _gid_state = self.aria2_gid_state.lock().await;
+            if self.is_aria2_gid_ignored_locked(gid).await {
+                return;
+            }
+            let Some(mapping) = self.aria2_gid_mapping(gid) else {
+                let mut starts = self.pending_download_starts.lock().await;
+                if starts.len() < MAX_PENDING_DOWNLOAD_STARTS {
+                    starts.insert(gid.to_string());
+                }
+                return;
+            };
+            mapping
+        };
+        if !self
+            .is_current_aria2_gid_mapping(gid, &mapping)
+            || !self
+                .is_aria2_control_epoch_current(&mapping.id, mapping.epoch)
+                .await
+        {
+            return;
+        }
+        self.clear_aria2_allocation_for_epoch(&mapping.id, mapping.epoch)
+            .await;
     }
 
     /// Resize the global concurrency limit. Grow adds permits immediately;
@@ -3947,6 +4133,17 @@ impl<R: tauri::Runtime> QueueManager<R> {
         };
         if let Some(epoch) = aria2_lifecycle_epoch {
             self.begin_aria2_dispatch(&id, epoch).await;
+            // Register the native allocation phase before releasing the
+            // lifecycle lock. A pause/remove can otherwise invalidate this
+            // dispatch in the gap and leave a stale pending marker behind
+            // when the asynchronous addUri call starts.
+            self.begin_aria2_allocation(
+                &id,
+                epoch,
+                lifecycle_generation,
+                &task.payload,
+            )
+            .await;
         }
         drop(control_guard);
 
@@ -4008,6 +4205,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
                                 self.clear_aria2_retry_state(&id).await;
                                 self.release_permit(&id).await;
                             }
+                            self.clear_aria2_allocation_for_epoch(&id, lifecycle_epoch)
+                                .await;
                             return;
                         }
                         // A queued task is not a live transfer until aria2 has
@@ -4074,10 +4273,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
                             }
                         }
                         if let Some(outcome) = buffered_outcome {
-                            self.handle_aria2_event(&gid, outcome).await;
+                            self.handle_aria2_pending_event(&gid, outcome).await;
                         }
                     }
                     Err(error) => {
+                        self.clear_aria2_allocation_for_epoch(&id, lifecycle_epoch)
+                            .await;
                         let _control_guard = self.acquire_aria2_control(&id).await;
                         let current_lifecycle = self
                             .is_aria2_control_epoch_current(&id, lifecycle_epoch)
@@ -4161,24 +4362,46 @@ impl<R: tauri::Runtime> QueueManager<R> {
     }
 
     fn emit_failed(&self, id: &str, error: String) {
-        use tauri::Emitter;
-        let _ = self
-            .app_handle
-            .emit("download-state", DownloadStateEvent::failed(id, error));
+        self.emit_failed_with_progress(id, error, None);
     }
 
-    fn emit_paused_with_error(&self, id: &str, error: String) {
+    fn emit_failed_with_progress(
+        &self,
+        id: &str,
+        error: String,
+        progress: Option<DownloadStateProgress>,
+    ) {
         use tauri::Emitter;
+        let mut event = DownloadStateEvent::failed(id, error);
+        if let Some(progress) = progress {
+            event = event.with_progress(progress);
+        }
+        let _ = self
+            .app_handle
+            .emit("download-state", event);
+    }
+
+    fn emit_paused_with_error_and_progress(
+        &self,
+        id: &str,
+        error: String,
+        progress: Option<DownloadStateProgress>,
+    ) {
+        use tauri::Emitter;
+        let mut event = DownloadStateEvent::paused_with_error(id, error);
+        if let Some(progress) = progress {
+            event = event.with_progress(progress);
+        }
         let _ = self.app_handle.emit(
             "download-state",
-            DownloadStateEvent::paused_with_error(id, error),
+            event,
         );
     }
 
     /// Store gid -> id and return any buffered terminal event for the caller
     /// to reconcile against the correct event path. In particular, buffered
     /// errors must still pass through transient retry classification.
-    pub async fn remember_gid(&self, id: String, gid: String) -> Option<PendingOutcome> {
+    pub async fn remember_gid(&self, id: String, gid: String) -> Option<PendingAria2Outcome> {
         let epoch = self.current_aria2_control_epoch(&id).await;
         let buffered_outcome = {
             let _gid_state = self.aria2_gid_state.lock().await;
@@ -4217,6 +4440,14 @@ impl<R: tauri::Runtime> QueueManager<R> {
             }
             buffered.remove(&gid).map(|(_buf_id, outcome)| outcome)
         };
+        let start_buffered = self
+            .pending_download_starts
+            .lock()
+            .await
+            .remove(&gid);
+        if start_buffered {
+            self.clear_aria2_allocation_for_epoch(&id, epoch).await;
+        }
         let retry_strike = self.aria2_retry_strike(&id).await;
         log::info!(
             "aria2 gid transition [stage=gid_transition id={} gid={} epoch={} retry_strike={} action=mapped]",
@@ -4261,6 +4492,17 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// and lets commands reconcile an Aria2 terminal status without releasing
     /// the lock first.
     pub(crate) async fn apply_completion_locked(&self, id: &str, outcome: PendingOutcome) {
+        self.apply_completion_locked_with_progress(id, outcome, None)
+            .await;
+    }
+
+    pub(crate) async fn apply_completion_locked_with_progress(
+        &self,
+        id: &str,
+        outcome: PendingOutcome,
+        progress: Option<DownloadStateProgress>,
+    ) {
+        self.clear_aria2_allocation(id).await;
         if matches!(&outcome, PendingOutcome::Complete) {
             self.capture_torrent_verification_evidence(id).await;
         }
@@ -4385,7 +4627,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
                         _ => DownloadStatus::Completed,
                     }
                 };
-                self.emit_state(id, restored_status);
+                let mut event = DownloadStateEvent::new(id, restored_status);
+                if let Some(progress) = progress {
+                    event = event.with_progress(progress);
+                }
+                use tauri::Emitter;
+                let _ = self.app_handle.emit("download-state", event);
             }
             PendingOutcome::Error(error) => {
                 self.forget_torrent_telemetry(id).await;
@@ -4452,7 +4699,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 self.release_registered_id(id).await;
                 self.release_permit(id).await;
                 if verification_only {
-                    self.emit_paused_with_error(id, error);
+                    self.emit_paused_with_error_and_progress(id, error, progress);
                 } else {
                     let aria2_code = aria2_error_code(&error).unwrap_or_else(|| "none".to_string());
                     log::error!(
@@ -4466,7 +4713,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                         network_error_class(&error),
                         aria2_code
                     );
-                    self.emit_failed(id, error);
+                    self.emit_failed_with_progress(id, error, progress);
                 }
             }
             PendingOutcome::Seeding => unreachable!("seeding outcomes are normalized before terminal cleanup"),
@@ -4556,6 +4803,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
     async fn ignore_aria2_gid_locked(&self, gid: &str) {
         const MAX_IGNORED_GIDS: usize = 1024;
+        self.pending_download_starts.lock().await.remove(gid);
         let mut ignored = self.aria2_ignored_gids.lock().await;
         if !ignored.iter().any(|known| known == gid) {
             ignored.push_back(gid.to_string());
@@ -4788,7 +5036,20 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
         let payload = self.aria2_payloads.lock().await.get(id).cloned();
         let recreation = if let Some(payload) = payload.as_ref() {
-            self.spawner.recreate_uri(id, gid, payload).await?
+            let lifecycle_generation = self
+                .registered_lifecycle_generation(id)
+                .await
+                .unwrap_or_default();
+            self.begin_aria2_allocation(id, observed_epoch, lifecycle_generation, payload)
+                .await;
+            match self.spawner.recreate_uri(id, gid, payload).await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    self.clear_aria2_allocation_for_epoch(id, observed_epoch)
+                        .await;
+                    return Err(error);
+                }
+            }
         } else {
             // Older persisted rows may briefly reach recovery before their
             // payload has been rebuilt. Keep the current lifecycle intact and
@@ -4798,6 +5059,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
         if let Aria2RecreateOutcome::NewGid(new_gid) = recreation {
             if new_gid.trim().is_empty() || new_gid == gid {
+                self.clear_aria2_allocation_for_epoch(id, observed_epoch)
+                    .await;
                 return Err(format!(
                     "aria2 connection recovery returned an invalid replacement gid for {gid}"
                 ));
@@ -4808,6 +5071,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 && self.is_aria2_control_epoch_current(id, observed_epoch).await
                 && self.aria2_gid_for_download(id).as_deref() == Some(gid);
             if !still_current {
+                self.clear_aria2_allocation_for_epoch(id, observed_epoch)
+                    .await;
                 self.ignore_aria2_gid(&new_gid).await;
                 drop(_control_guard);
                 self.remove_stale_aria2_gid(id, &new_gid).await;
@@ -4828,15 +5093,24 @@ impl<R: tauri::Runtime> QueueManager<R> {
             );
             drop(_control_guard);
             if let Some(outcome) = buffered_outcome {
-                self.handle_aria2_event(&new_gid, outcome).await;
+                self.handle_aria2_pending_event(&new_gid, outcome).await;
             }
             return Ok(());
         }
 
         let outcome = match recreation {
             Aria2RecreateOutcome::Complete => Aria2RefreshOutcome::Complete,
-            Aria2RecreateOutcome::Refresh => self.spawner.refresh_uri(gid).await?,
+            Aria2RecreateOutcome::Refresh => match self.spawner.refresh_uri(gid).await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    self.clear_aria2_allocation_for_epoch(id, observed_epoch)
+                        .await;
+                    return Err(error);
+                }
+            },
             Aria2RecreateOutcome::Unavailable(error) => {
+                self.clear_aria2_allocation_for_epoch(id, observed_epoch)
+                    .await;
                 let still_current = self.is_registered(id).await
                     && self.has_active_permit(id).await
                     && !self.is_aria2_retry_cancelled(id).await
@@ -4907,6 +5181,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// Remove every gid mapping for a download and discard buffered terminal
     /// events for those gids. Returns the most recently encountered gid.
     pub async fn forget_aria2_gid(&self, id: &str) -> Option<String> {
+        self.clear_aria2_allocation(id).await;
         let _gid_state = self.aria2_gid_state.lock().await;
         let removed = {
             let mut gids = self.aria2_gids.write().unwrap();
@@ -4944,10 +5219,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
         self: &Arc<Self>,
         gid: String,
         error: String,
+        progress: Option<DownloadStateProgress>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
         let this = Arc::clone(self);
         Box::pin(async move {
-            this.handle_aria2_download_error_inner(&gid, error).await;
+            this.handle_aria2_download_error_inner(&gid, error, progress)
+                .await;
         })
     }
 
@@ -4957,8 +5234,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
     async fn map_or_buffer_aria2_event(
         &self,
         gid: &str,
-        outcome: PendingOutcome,
-    ) -> Option<(Aria2GidMapping, PendingOutcome)> {
+        outcome: PendingAria2Outcome,
+    ) -> Option<(Aria2GidMapping, PendingAria2Outcome)> {
         let _gid_state = self.aria2_gid_state.lock().await;
         if self.is_aria2_gid_ignored_locked(gid).await {
             return None;
@@ -4977,10 +5254,28 @@ impl<R: tauri::Runtime> QueueManager<R> {
         None
     }
 
-    async fn handle_aria2_download_error_inner(self: &Arc<Self>, gid: &str, error: String) {
-        let Some((mapping, PendingOutcome::Error(error))) = self
-            .map_or_buffer_aria2_event(gid, PendingOutcome::Error(error))
+    async fn handle_aria2_download_error_inner(
+        self: &Arc<Self>,
+        gid: &str,
+        error: String,
+        progress: Option<DownloadStateProgress>,
+    ) {
+        let Some((mapping, pending)) = self
+            .map_or_buffer_aria2_event(
+                gid,
+                PendingAria2Outcome {
+                    outcome: PendingOutcome::Error(error),
+                    progress,
+                },
+            )
             .await
+        else {
+            return;
+        };
+        let PendingAria2Outcome {
+            outcome: PendingOutcome::Error(error),
+            progress,
+        } = pending
         else {
             return;
         };
@@ -5000,6 +5295,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
             return;
         }
         let id = mapping.id;
+        // The failed GID is no longer allocating. Keep the native phase
+        // marker scoped to an actual replacement addUri rather than showing
+        // "Allocating files" throughout retry backoff or a failed pause.
+        self.clear_aria2_allocation_for_epoch(&id, mapping.epoch)
+            .await;
         if self.aria2_retry_cancelled.lock().await.contains(&id) {
             log::info!(
                 "aria2 retry cancellation [{}]: ignoring error for gid {} during removal",
@@ -5028,7 +5328,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
         let payload = self.aria2_payloads.lock().await.get(&id).cloned();
         if payload.is_none() {
-            self.apply_completion_locked(&id, PendingOutcome::Error(error))
+            self.apply_completion_locked_with_progress(
+                &id,
+                PendingOutcome::Error(error),
+                progress,
+            )
                 .await;
             return;
         }
@@ -5083,7 +5387,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
         // automatic retries, while every later failure follows the normal
         // retry budget and never switches back to the first strategy.
         if retry_action == Aria2RetryAction::Terminal {
-            self.apply_completion_locked(&id, PendingOutcome::Error(error))
+            self.apply_completion_locked_with_progress(
+                &id,
+                PendingOutcome::Error(error),
+                progress,
+            )
                 .await;
             return;
         }
@@ -5133,6 +5441,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         let this = Arc::clone(self);
         let id_for_task = id.clone();
         let error_for_emit = error.clone();
+        let progress_for_retry = progress.clone();
         tauri::async_runtime::spawn(async move {
             let retry_cancel = async {
                 loop {
@@ -5191,6 +5500,17 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 return;
             }
 
+            let lifecycle_generation = this
+                .registered_lifecycle_generation(&id_for_task)
+                .await
+                .unwrap_or_default();
+            this.begin_aria2_allocation(
+                &id_for_task,
+                retry_epoch,
+                lifecycle_generation,
+                &current_payload,
+            )
+            .await;
             match this
                 .spawner
                 .add_uri(&id_for_task, &current_payload)
@@ -5205,6 +5525,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
                         || this.aria2_gid_for_download(&id_for_task).as_deref()
                             != Some(retry_gid.as_str());
                     if stale {
+                        this.clear_aria2_allocation_for_epoch(&id_for_task, retry_epoch)
+                            .await;
                         drop(control_guard);
                         if let Err(error) = this.spawner.remove_uri(&new_gid).await {
                             log::error!(
@@ -5249,18 +5571,22 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     this.aria2_retrying_gids.lock().await.remove(&retry_gid);
                     drop(control_guard);
                     if let Some(outcome) = buffered_outcome {
-                        this.handle_aria2_event(&new_gid_for_event, outcome).await;
+                        this.handle_aria2_pending_event(&new_gid_for_event, outcome)
+                            .await;
                     }
                 }
                 Err(retry_error) => {
+                    this.clear_aria2_allocation_for_epoch(&id_for_task, retry_epoch)
+                        .await;
                     let stale = this.is_aria2_retry_cancelled(&id_for_task).await
                         || !this
                             .is_aria2_control_epoch_current(&id_for_task, retry_epoch)
                             .await;
                     if !stale {
-                        this.apply_completion_locked(
+                        this.apply_completion_locked_with_progress(
                             &id_for_task,
                             PendingOutcome::Error(retry_error),
+                            progress_for_retry,
                         )
                         .await;
                     }
@@ -5275,14 +5601,44 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// Entry point for the aria2 WS poller. Resolves gid -> id; if not yet
     /// stored, buffers the outcome for reconciliation by remember_gid.
     pub async fn handle_aria2_event(self: &Arc<Self>, gid: &str, outcome: PendingOutcome) {
+        self.handle_aria2_pending_event(gid, PendingAria2Outcome::new(outcome))
+            .await;
+    }
+
+    pub async fn handle_aria2_event_with_progress(
+        self: &Arc<Self>,
+        gid: &str,
+        outcome: PendingOutcome,
+        progress: Option<DownloadStateProgress>,
+    ) {
+        self.handle_aria2_pending_event(
+            gid,
+            PendingAria2Outcome { outcome, progress },
+        )
+        .await;
+    }
+
+    async fn handle_aria2_pending_event(
+        self: &Arc<Self>,
+        gid: &str,
+        pending: PendingAria2Outcome,
+    ) {
+        let PendingAria2Outcome { outcome, progress } = pending;
         if let PendingOutcome::Error(error) = outcome {
-            self.handle_aria2_download_error(gid.to_string(), error)
+            self.handle_aria2_download_error(gid.to_string(), error, progress)
                 .await;
             return;
         }
-        let Some((mapping, outcome)) = self.map_or_buffer_aria2_event(gid, outcome).await else {
+        let Some((mapping, pending)) = self
+            .map_or_buffer_aria2_event(
+                gid,
+                PendingAria2Outcome { outcome, progress },
+            )
+            .await
+        else {
             return;
         };
+        let PendingAria2Outcome { outcome, progress } = pending;
 
         let _control_guard = self.acquire_aria2_control(&mapping.id).await;
         if self.aria2_retrying_gids.lock().await.contains(gid) {
@@ -5301,7 +5657,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
         {
             return;
         }
-        self.apply_completion_locked(&mapping.id, outcome).await;
+        self.apply_completion_locked_with_progress(&mapping.id, outcome, progress)
+            .await;
     }
 
     /// Reorder a pending task up or down. Returns the new pending order.
@@ -8204,6 +8561,315 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    struct BlockingSpawner {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl SidecarSpawner for BlockingSpawner {
+        async fn add_uri(&self, _id: &str, _payload: &SpawnPayload) -> Result<String, String> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok("blocking-gid".to_string())
+        }
+
+        async fn remove_uri(&self, _gid: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn run_media(
+            &self,
+            _id: &str,
+            _payload: &SpawnPayload,
+            _lifecycle_generation: u64,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn allocation_pending_epoch<R: tauri::Runtime>(
+        manager: &QueueManager<R>,
+        id: &str,
+    ) -> Option<(u64, u64)> {
+        manager
+            .aria2_allocation_pending
+            .try_lock()
+            .ok()
+            .and_then(|pending| pending.get(id).copied())
+    }
+
+    #[test]
+    fn aria2_allocation_eligibility_matches_download_type_and_torrent_policy() {
+        assert!(QueueManager::<tauri::Wry>::aria2_allocation_phase_eligible(
+            &SpawnPayload::default()
+        ));
+        assert!(!QueueManager::<tauri::Wry>::aria2_allocation_phase_eligible(
+            &SpawnPayload {
+                is_media: true,
+                ..SpawnPayload::default()
+            }
+        ));
+        assert!(QueueManager::<tauri::Wry>::aria2_allocation_phase_eligible(
+            &SpawnPayload {
+                is_torrent: true,
+                torrent_file_allocation: Some("prealloc".to_string()),
+                ..SpawnPayload::default()
+            }
+        ));
+        assert!(!QueueManager::<tauri::Wry>::aria2_allocation_phase_eligible(
+            &SpawnPayload {
+                is_torrent: true,
+                torrent_file_allocation: Some("none".to_string()),
+                ..SpawnPayload::default()
+            }
+        ));
+        assert!(!QueueManager::<tauri::Wry>::aria2_allocation_phase_eligible(
+            &SpawnPayload {
+                is_torrent: true,
+                torrent_verify_only: true,
+                ..SpawnPayload::default()
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn allocation_stays_pending_while_async_add_uri_is_in_flight() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let manager = Arc::new(QueueManager::test_new(
+            app.handle().clone(),
+            1,
+            Arc::new(BlockingSpawner {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            }),
+        ));
+        manager
+            .reserve_enqueue_generation("allocation", 7)
+            .await
+            .expect("lifecycle reservation");
+        manager
+            .commit_reserved_enqueue(
+                QueuedTask {
+                    id: "allocation".to_string(),
+                    queue_id: "main".to_string(),
+                    kind: TaskKind::Aria2,
+                    payload: SpawnPayload::default(),
+                    lifecycle_generation: 7,
+                },
+                7,
+            )
+            .await
+            .expect("queued task");
+
+        let dispatcher = tokio::spawn(Arc::clone(&manager).run_dispatcher());
+        tokio::time::timeout(Duration::from_secs(1), started.notified())
+            .await
+            .expect("addUri should begin");
+        assert_eq!(allocation_pending_epoch(&manager, "allocation"), Some((1, 7)));
+
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if manager.aria2_gid_for_download("allocation").as_deref() == Some("blocking-gid") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("async addUri should install its GID");
+        manager.handle_aria2_download_start("blocking-gid", 1).await;
+        assert_eq!(allocation_pending_epoch(&manager, "allocation"), None);
+        dispatcher.abort();
+    }
+
+    #[tokio::test]
+    async fn download_start_before_gid_registration_is_buffered_and_consumed() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
+        let epoch = manager.next_aria2_control_epoch("buffered-start").await;
+        manager
+            .begin_aria2_allocation(
+                "buffered-start",
+                epoch,
+                9,
+                &SpawnPayload::default(),
+            )
+            .await;
+        manager.handle_aria2_download_start("early-gid", 1).await;
+        assert!(manager
+            .pending_download_starts
+            .lock()
+            .await
+            .contains("early-gid"));
+
+        manager
+            .remember_gid("buffered-start".to_string(), "early-gid".to_string())
+            .await;
+        assert_eq!(allocation_pending_epoch(&manager, "buffered-start"), None);
+        assert!(!manager
+            .pending_download_starts
+            .lock()
+            .await
+            .contains("early-gid"));
+    }
+
+    #[tokio::test]
+    async fn allocation_fallback_and_stale_epochs_cannot_clear_a_new_lifecycle() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
+        let first_epoch = manager.next_aria2_control_epoch("stale-allocation").await;
+        manager
+            .begin_aria2_allocation(
+                "stale-allocation",
+                first_epoch,
+                10,
+                &SpawnPayload::default(),
+            )
+            .await;
+        let second_epoch = manager.next_aria2_control_epoch("stale-allocation").await;
+        manager
+            .begin_aria2_allocation(
+                "stale-allocation",
+                second_epoch,
+                11,
+                &SpawnPayload::default(),
+            )
+            .await;
+        manager
+            .clear_aria2_allocation_for_epoch("stale-allocation", first_epoch)
+            .await;
+        manager
+            .clear_aria2_allocation_for_lifecycle_generation("stale-allocation", 10)
+            .await;
+        assert_eq!(
+            allocation_pending_epoch(&manager, "stale-allocation"),
+            Some((second_epoch, 11))
+        );
+
+        manager
+            .remember_gid("stale-allocation".to_string(), "fallback-gid".to_string())
+            .await;
+        manager
+            .handle_aria2_download_start("fallback-gid", 0)
+            .await;
+        assert_eq!(
+            allocation_pending_epoch(&manager, "stale-allocation"),
+            Some((second_epoch, 11))
+        );
+        manager
+            .complete_aria2_allocation_for_gid("fallback-gid", 0)
+            .await;
+        assert_eq!(
+            allocation_pending_epoch(&manager, "stale-allocation"),
+            Some((second_epoch, 11))
+        );
+        manager
+            .complete_aria2_allocation_for_gid("fallback-gid", 1)
+            .await;
+        assert_eq!(allocation_pending_epoch(&manager, "stale-allocation"), None);
+
+        manager
+            .begin_aria2_allocation(
+                "stale-allocation",
+                second_epoch,
+                11,
+                &SpawnPayload::default(),
+            )
+            .await;
+        manager.handle_aria2_download_start("fallback-gid", 1).await;
+        assert_eq!(allocation_pending_epoch(&manager, "stale-allocation"), None);
+    }
+
+    #[tokio::test]
+    async fn ignored_gid_start_markers_cannot_clear_a_new_lifecycle() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
+        let old_epoch = manager.next_aria2_control_epoch("ignored-start").await;
+        manager
+            .begin_aria2_allocation(
+                "ignored-start",
+                old_epoch,
+                20,
+                &SpawnPayload::default(),
+            )
+            .await;
+        manager
+            .remember_gid("ignored-start".to_string(), "reused-gid".to_string())
+            .await;
+        manager.forget_aria2_gid("ignored-start").await;
+
+        manager.handle_aria2_download_start("reused-gid", 1).await;
+        assert!(!manager
+            .pending_download_starts
+            .lock()
+            .await
+            .contains("reused-gid"));
+
+        let new_epoch = manager.next_aria2_control_epoch("ignored-start").await;
+        manager
+            .begin_aria2_allocation(
+                "ignored-start",
+                new_epoch,
+                21,
+                &SpawnPayload::default(),
+            )
+            .await;
+        manager
+            .remember_gid("ignored-start".to_string(), "new-gid".to_string())
+            .await;
+        assert_eq!(
+            allocation_pending_epoch(&manager, "ignored-start"),
+            Some((new_epoch, 21))
+        );
+        manager.handle_aria2_download_start("new-gid", 1).await;
+        assert_eq!(allocation_pending_epoch(&manager, "ignored-start"), None);
+    }
+
+    #[tokio::test]
+    async fn allocation_is_cleared_by_terminal_reconciliation_and_cancellation() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
+        let epoch = manager.next_aria2_control_epoch("terminal-allocation").await;
+        manager
+            .begin_aria2_allocation(
+                "terminal-allocation",
+                epoch,
+                12,
+                &SpawnPayload::default(),
+            )
+            .await;
+        manager
+            .apply_completion("terminal-allocation", PendingOutcome::Error("disk full".to_string()))
+            .await;
+        assert_eq!(allocation_pending_epoch(&manager, "terminal-allocation"), None);
+
+        let next_epoch = manager.next_aria2_control_epoch("terminal-allocation").await;
+        manager
+            .begin_aria2_allocation(
+                "terminal-allocation",
+                next_epoch,
+                13,
+                &SpawnPayload::default(),
+            )
+            .await;
+        manager.clear_aria2_allocation("terminal-allocation").await;
+        assert_eq!(allocation_pending_epoch(&manager, "terminal-allocation"), None);
     }
 
     struct SeedSpawner;

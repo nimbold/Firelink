@@ -799,6 +799,31 @@ pub enum QueueDirection {
 #[derive(Clone, Debug, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
+pub struct DownloadStateProgress {
+    pub fraction: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub downloaded_bytes: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub total_bytes: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub total_is_estimate: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct DownloadAllocationEvent {
+    pub id: String,
+    pub pending: bool,
+    pub lifecycle_generation: String,
+}
+
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub struct DownloadStateEvent {
     pub id: String,
     pub status: String,
@@ -816,6 +841,9 @@ pub struct DownloadStateEvent {
     pub destination: Option<String>,
     #[ts(optional)]
     pub torrent_seed_remaining: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub progress: Option<DownloadStateProgress>,
 }
 
 impl DownloadStateEvent {
@@ -829,6 +857,7 @@ impl DownloadStateEvent {
             file_name: None,
             destination: None,
             torrent_seed_remaining: None,
+            progress: None,
         }
     }
 
@@ -843,6 +872,7 @@ impl DownloadStateEvent {
             file_name: None,
             destination: None,
             torrent_seed_remaining: None,
+            progress: None,
         }
     }
 
@@ -857,6 +887,7 @@ impl DownloadStateEvent {
             file_name: None,
             destination: None,
             torrent_seed_remaining: None,
+            progress: None,
         }
     }
 
@@ -870,6 +901,7 @@ impl DownloadStateEvent {
             file_name: None,
             destination: None,
             torrent_seed_remaining: remaining,
+            progress: None,
         }
     }
 
@@ -883,6 +915,7 @@ impl DownloadStateEvent {
             file_name: Some(file_name.into()),
             destination: None,
             torrent_seed_remaining: None,
+            progress: None,
         }
     }
 
@@ -899,6 +932,7 @@ impl DownloadStateEvent {
             file_name: None,
             destination: None,
             torrent_seed_remaining: None,
+            progress: None,
         }
     }
 
@@ -912,6 +946,7 @@ impl DownloadStateEvent {
             file_name: None,
             destination: None,
             torrent_seed_remaining: remaining,
+            progress: None,
         }
     }
 
@@ -926,6 +961,11 @@ impl DownloadStateEvent {
 
     pub fn with_destination(mut self, destination: impl Into<String>) -> Self {
         self.destination = Some(destination.into());
+        self
+    }
+
+    pub fn with_progress(mut self, progress: DownloadStateProgress) -> Self {
+        self.progress = Some(progress);
         self
     }
 

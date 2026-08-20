@@ -18,7 +18,7 @@ describe('useDownloadProgressStore', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined);
-    useDownloadProgressStore.setState({ progressMap: {}, moveProgressMap: {} });
+    useDownloadProgressStore.setState({ progressMap: {}, retainedProgressMap: {}, moveProgressMap: {} });
     clearDownloadControlIntents();
   });
 
@@ -44,7 +44,7 @@ describe('useDownloadProgressStore', () => {
     const first = initDownloadListener();
     const second = initDownloadListener();
 
-    expect(ipc.listenEvent).toHaveBeenCalledTimes(4);
+    expect(ipc.listenEvent).toHaveBeenCalledTimes(5);
 
     const releaseFirst = await first;
     const releaseSecond = await second;
@@ -52,7 +52,7 @@ describe('useDownloadProgressStore', () => {
     expect(unlisten).not.toHaveBeenCalled();
 
     releaseSecond();
-    expect(unlisten).toHaveBeenCalledTimes(4);
+    expect(unlisten).toHaveBeenCalledTimes(5);
   });
 
   it('ignores late progress and opposite terminal events from an older lifecycle', async () => {
@@ -89,6 +89,88 @@ describe('useDownloadProgressStore', () => {
 
     expect(useDownloadProgressStore.getState().progressMap).toEqual({});
     expect(useDownloadStore.getState().downloads[0].status).toBe('completed');
+    release();
+  });
+
+  it('projects native allocation events after admission and ignores stale generations', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'native-allocation',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'queued',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-allocation']({ payload: {
+      id: 'native-allocation',
+      pending: true,
+      lifecycleGeneration: '0'
+    } });
+    expect(useDownloadStore.getState().allocationPendingIds.has('native-allocation')).toBe(true);
+
+    handlers['download-allocation']({ payload: {
+      id: 'native-allocation',
+      pending: false,
+      lifecycleGeneration: '1'
+    } });
+    expect(useDownloadStore.getState().allocationPendingIds.has('native-allocation')).toBe(true);
+
+    handlers['download-allocation']({ payload: {
+      id: 'native-allocation',
+      pending: false,
+      lifecycleGeneration: '0'
+    } });
+    expect(useDownloadStore.getState().allocationPendingIds.has('native-allocation')).toBe(false);
+    release();
+  });
+
+  it('retains a native allocation marker received before row hydration', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [],
+      allocationPendingIds: new Set()
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-allocation']({ payload: {
+      id: 'hydrating-allocation',
+      pending: true,
+      lifecycleGeneration: '0'
+    } });
+
+    expect(useDownloadStore.getState().allocationPendingIds.has('hydrating-allocation')).toBe(true);
+
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'hydrating-allocation',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+    expect(useDownloadStore.getState().allocationPendingIds.has('hydrating-allocation')).toBe(true);
+
+    handlers['download-allocation']({ payload: {
+      id: 'hydrating-allocation',
+      pending: false,
+      lifecycleGeneration: '0'
+    } });
+    expect(useDownloadStore.getState().allocationPendingIds.has('hydrating-allocation')).toBe(false);
     release();
   });
 
@@ -470,6 +552,182 @@ describe('useDownloadProgressStore', () => {
     expect(row.totalBytes).toBe(10240);
     expect(row.totalIsEstimate).toBe(true);
     expect(useDownloadProgressStore.getState().progressMap).toEqual({});
+    expect(useDownloadProgressStore.getState().retainedProgressMap.snapshot).toMatchObject({
+      fraction: 0.8,
+      downloaded_bytes: 8192,
+      total_bytes: 10240
+    });
+    release();
+  });
+
+  it('retains progress for failed and paused rows when the live entry is absent', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'terminal-progress',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-progress']({ payload: {
+      id: 'terminal-progress',
+      fraction: 0.7,
+      speed: '1 MB/s',
+      eta: '2s',
+      size: '10 MB',
+      size_is_final: false,
+      downloaded_bytes: 7000,
+      total_bytes: 10000,
+      total_is_estimate: false
+    } });
+    handlers['download-state']({ payload: {
+      id: 'terminal-progress',
+      status: 'paused',
+    } });
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'paused',
+      fraction: 0.7,
+      downloadedBytes: 7000
+    });
+
+    useDownloadStore.setState(state => ({
+      downloads: state.downloads.map(download => ({ ...download, status: 'downloading' as const }))
+    }));
+    handlers['download-state']({ payload: {
+      id: 'terminal-progress',
+      status: 'failed',
+      error: 'network stopped',
+      progress: {
+        fraction: 0.8,
+        downloadedBytes: 8000,
+        totalBytes: 10000,
+        totalIsEstimate: false
+      }
+    } });
+    expect(useDownloadProgressStore.getState().progressMap['terminal-progress']).toBeUndefined();
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'failed',
+      fraction: 0.8,
+      downloadedBytes: 8000,
+      totalBytes: 10000,
+      totalIsEstimate: false
+    });
+    release();
+  });
+
+  it('keeps retained bytes when a paused GID resumes through a queued state', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'same-gid-resume',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-progress']({ payload: {
+      id: 'same-gid-resume',
+      fraction: 0.6,
+      speed: '1 MB/s',
+      eta: '4s',
+      size: '10 KB',
+      size_is_final: false,
+      downloaded_bytes: 6000,
+      total_bytes: 10000,
+      total_is_estimate: false
+    } });
+    useDownloadStore.setState(state => ({
+      downloads: state.downloads.map(download => ({
+        ...download,
+        status: 'queued' as const
+      }))
+    }));
+    handlers['download-state']({ payload: {
+      id: 'same-gid-resume',
+      status: 'queued'
+    } });
+
+    expect(useDownloadProgressStore.getState().progressMap['same-gid-resume']).toBeUndefined();
+    expect(useDownloadProgressStore.getState().retainedProgressMap['same-gid-resume']).toMatchObject({
+      downloaded_bytes: 6000,
+      total_bytes: 10000
+    });
+    release();
+  });
+
+  it('keeps the greatest retained byte count across retry frames', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'retry-progress',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+
+    const release = await initDownloadListener();
+    const progress = (fraction: number, downloadedBytes: number) => handlers['download-progress']({ payload: {
+      id: 'retry-progress',
+      fraction,
+      speed: '1 MB/s',
+      eta: '2s',
+      size: '10 KB',
+      size_is_final: false,
+      downloaded_bytes: downloadedBytes,
+      total_bytes: 10000,
+      total_is_estimate: false
+    } });
+    progress(0.8, 8000);
+    handlers['download-state']({ payload: {
+      id: 'retry-progress',
+      status: 'retrying',
+      error: 'network dropped'
+    } });
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'retrying',
+      fraction: 0.8,
+      downloadedBytes: 8000,
+      totalBytes: 10000,
+      totalIsEstimate: false
+    });
+    useDownloadStore.getState().updateDownload('retry-progress', { status: 'downloading' });
+    progress(0.1, 1000);
+    handlers['download-state']({ payload: {
+      id: 'retry-progress',
+      status: 'failed',
+      error: 'retry exhausted'
+    } });
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      fraction: 0.8,
+      downloadedBytes: 8000,
+      totalBytes: 10000,
+      totalIsEstimate: false
+    });
     release();
   });
 
