@@ -65,6 +65,32 @@ describe('durable main-window and sidebar preferences', () => {
       .toEqual({ width: 1440, height: 900 });
   });
 
+  it('rejects malformed consumer values during hydration', () => {
+    const merge = useSettingsStore.persist.getOptions().merge;
+    expect(merge).toBeTypeOf('function');
+    const current = useSettingsStore.getState();
+
+    expect(merge?.({
+      proxyMode: 'custom',
+      proxyHost: 123,
+      proxyPort: 70000,
+      customUserAgent: ['not-a-string'],
+      isSidebarVisible: 'yes',
+      lastCustomSpeedLimitKiB: Number.POSITIVE_INFINITY,
+      approvedDownloadRoots: ['/safe', 42],
+      speedLimitPresetValues: [1, '5', Number.NaN]
+    }, current)).toMatchObject({
+      proxyMode: 'custom',
+      proxyHost: current.proxyHost,
+      proxyPort: current.proxyPort,
+      customUserAgent: current.customUserAgent,
+      isSidebarVisible: current.isSidebarVisible,
+      lastCustomSpeedLimitKiB: current.lastCustomSpeedLimitKiB,
+      approvedDownloadRoots: ['/safe'],
+      speedLimitPresetValues: [1]
+    });
+  });
+
   it('uses the legacy localStorage value only when durable state is absent', () => {
     const originalWindow = globalThis.window;
     Object.defineProperty(globalThis, 'window', {

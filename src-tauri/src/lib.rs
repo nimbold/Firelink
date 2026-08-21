@@ -10912,8 +10912,12 @@ fn db_save_settings(
         crate::db::preserve_legacy_pairing_token(existing.as_deref(), &sanitized)?
     };
     let merged = crate::settings::canonicalize_torrent_network_settings(&merged)?;
+    let decoded = crate::settings::decode_stored_settings(&serde_json::Value::String(merged.clone()))?;
+    // Validate the complete settings document before replacing the durable
+    // copy. A malformed renderer snapshot must not poison restart hydration or
+    // leave the previous valid settings unrecoverable after this command
+    // reports an error.
     crate::db::save_settings(&connection, &merged)?;
-    let decoded = crate::settings::decode_stored_settings(&serde_json::Value::String(merged))?;
     let prevent_system_sleep = decoded.prevents_sleep_while_downloading;
     let prevent_display_sleep = decoded.prevents_display_sleep_while_downloading;
     if let Ok(mut cached) = app_state.scheduler_settings.write() {

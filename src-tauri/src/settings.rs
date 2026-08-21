@@ -229,6 +229,19 @@ pub fn canonicalize_torrent_network_settings(stored: &str) -> Result<String, Str
             "IPv6 Torrent bind address requires IPv6 transport to remain enabled".to_string(),
         );
     }
+    // Renderer snapshots are also a persistence boundary. Remove malformed
+    // scalar values before the document is written so a recoverable default
+    // is not hidden behind a hostile value that will fail on the next save or
+    // restart. Keep the network canonicalization above first so invalid text
+    // fields retain their established empty-string representation.
+    let state_value = if document.get("state").is_some() {
+        document
+            .get_mut("state")
+            .ok_or_else(|| "persisted settings state is missing".to_string())?
+    } else {
+        &mut document
+    };
+    sanitize_persisted_setting_values(state_value);
     serde_json::to_string(&document)
         .map_err(|error| format!("failed to encode canonical settings: {error}"))
 }
@@ -441,6 +454,11 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
     sanitize_integer_setting(state, "maxConcurrentDownloads", |value| value.as_u64().is_some());
     sanitize_integer_setting(state, "perServerConnections", |value| value.as_i64().is_some());
     sanitize_integer_setting(state, "maxAutomaticRetries", |value| value.as_i64().is_some());
+    sanitize_integer_setting(state, "proxyPort", |value| {
+        value
+            .as_u64()
+            .is_some_and(|value| (1..=u16::MAX as u64).contains(&value))
+    });
     sanitize_integer_setting(state, "torrentMaxOpenFiles", |value| {
         value
             .as_u64()
@@ -465,6 +483,7 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
         })
     });
     for key in [
+        "isSidebarVisible",
         "torrentEnableDht",
         "torrentEnableDht6",
         "torrentEnablePex",
@@ -473,6 +492,9 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
         "torrentIpv6Enabled",
     ] {
         sanitize_boolean_setting(state, key);
+    }
+    for key in ["proxyHost", "customUserAgent"] {
+        sanitize_string_setting(state, key);
     }
     sanitize_torrent_network_string(state, "torrentListenPort", |value| {
         crate::queue::normalize_torrent_port_spec(Some(value), "TCP listen ports").is_ok()
@@ -594,6 +616,12 @@ fn sanitize_integer_setting(
 
 fn sanitize_boolean_setting(state: &mut serde_json::Map<String, Value>, key: &str) {
     if state.get(key).is_some_and(|value| !value.is_boolean()) {
+        state.remove(key);
+    }
+}
+
+fn sanitize_string_setting(state: &mut serde_json::Map<String, Value>, key: &str) {
+    if state.get(key).is_some_and(|value| !value.is_string()) {
         state.remove(key);
     }
 }
@@ -1348,6 +1376,27 @@ mod tests {
     }
 
     #[test]
+    fn malformed_proxy_and_user_agent_values_fall_back_to_safe_defaults() {
+        let stored = json!({
+            "state": {
+                "proxyMode": "custom",
+                "proxyHost": 123,
+                "proxyPort": 70000,
+                "customUserAgent": ["not-a-string"],
+                "isSidebarVisible": "yes"
+            }
+        });
+
+        let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
+
+        assert!(matches!(settings.proxy_mode, crate::ipc::ProxyMode::Custom));
+        assert!(settings.proxy_host.is_empty());
+        assert_eq!(settings.proxy_port, 8080);
+        assert!(settings.custom_user_agent.is_empty());
+        assert!(settings.is_sidebar_visible);
+    }
+
+    #[test]
     fn preserves_valid_torrent_network_settings() {
         let stored = json!({
             "state": {
@@ -1386,7 +1435,10 @@ mod tests {
                 "torrentPeerAgent": " Firelink/1.3.1 ",
                 "torrentDhtMessageTimeout": 601,
                 "torrentMaxConcurrentSeeds": 65,
-                "torrentSeparateSeedSlots": "yes"
+                "torrentSeparateSeedSlots": "yes",
+                "proxyPort": 70000,
+                "proxyHost": 123,
+                "customUserAgent": ["not-a-string"]
             },
             "version": 6
         });
@@ -1406,6 +1458,9 @@ mod tests {
             crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS
         );
         assert_eq!(canonical["state"]["torrentSeparateSeedSlots"], false);
+        assert!(canonical["state"].get("proxyPort").is_none());
+        assert!(canonical["state"].get("proxyHost").is_none());
+        assert!(canonical["state"].get("customUserAgent").is_none());
     }
 
     #[test]

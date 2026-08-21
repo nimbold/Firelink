@@ -162,6 +162,21 @@ const sanitizeSiteLogins = (value: unknown): SiteLogin[] => {
 const persistedBoolean = (value: unknown, fallback: boolean) =>
   typeof value === 'boolean' ? value : fallback;
 
+const persistedString = (value: unknown, fallback: string): string =>
+  typeof value === 'string' ? value : fallback;
+
+const persistedFiniteInteger = (
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  fallback: number
+): number => {
+  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value)) {
+    return fallback;
+  }
+  return value >= minimum && value <= maximum ? value : fallback;
+};
+
 const tauriStorage: StateStorage = {
   getItem: async (name: string): Promise<string | null> => {
     if (name === 'firelink-settings') {
@@ -928,6 +943,10 @@ export const useSettingsStore = create<SettingsState>()(
             persisted.isFoldersCollapsed,
             foldersCollapsedFallback
           ),
+          isSidebarVisible: persistedBoolean(
+            persisted.isSidebarVisible,
+            currentState.isSidebarVisible
+          ),
           mainWindowSize: normalizeMainWindowSize(persisted.mainWindowSize)
             ?? currentState.mainWindowSize,
           appFontSize: isAllowedSetting(APP_FONT_SIZE_VALUES, persisted.appFontSize)
@@ -988,15 +1007,16 @@ export const useSettingsStore = create<SettingsState>()(
           torrentBindAddress: typeof persisted.torrentBindAddress === 'string'
             ? persisted.torrentBindAddress
             : currentState.torrentBindAddress,
-          aria2DiskCache: typeof persisted.aria2DiskCache === 'string'
-            ? persisted.aria2DiskCache
-            : currentState.aria2DiskCache,
+          aria2DiskCache: persistedString(persisted.aria2DiskCache, currentState.aria2DiskCache),
+          customUserAgent: persistedString(persisted.customUserAgent, currentState.customUserAgent),
           sidebarPosition: isAllowedSetting(SIDEBAR_POSITION_VALUES, persisted.sidebarPosition)
             ? persisted.sidebarPosition
             : currentState.sidebarPosition,
           proxyMode: isAllowedSetting(PROXY_MODE_VALUES, persisted.proxyMode)
             ? persisted.proxyMode
             : currentState.proxyMode,
+          proxyHost: persistedString(persisted.proxyHost, currentState.proxyHost),
+          proxyPort: persistedFiniteInteger(persisted.proxyPort, 1, 65_535, currentState.proxyPort),
           mediaCookieSource: isAllowedSetting(MEDIA_COOKIE_SOURCE_VALUES, persisted.mediaCookieSource)
             ? persisted.mediaCookieSource
             : 'none',
@@ -1078,15 +1098,23 @@ export const useSettingsStore = create<SettingsState>()(
             currentState.adaptiveMirrorSelection
           ),
           speedLimitPresetValues: Array.isArray(persisted.speedLimitPresetValues)
-            ? persisted.speedLimitPresetValues
+            ? persisted.speedLimitPresetValues.filter(
+              (value): value is number => typeof value === 'number' && Number.isFinite(value)
+            )
             : currentState.speedLimitPresetValues,
+          lastCustomSpeedLimitKiB: persistedFiniteInteger(
+            persisted.lastCustomSpeedLimitKiB,
+            1,
+            10_485_760,
+            currentState.lastCustomSpeedLimitKiB
+          ),
           lastCustomSpeedLimitUnit: persisted.lastCustomSpeedLimitUnit === 'KB/s'
             || persisted.lastCustomSpeedLimitUnit === 'MB/s'
             ? persisted.lastCustomSpeedLimitUnit
             : currentState.lastCustomSpeedLimitUnit,
           logsEnabled: persisted.logsEnabled === true,
           approvedDownloadRoots: Array.isArray(persisted.approvedDownloadRoots)
-            ? persisted.approvedDownloadRoots
+            ? persisted.approvedDownloadRoots.filter((root): root is string => typeof root === 'string')
             : currentState.approvedDownloadRoots,
         scheduler: {
           ...currentState.scheduler,
