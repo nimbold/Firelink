@@ -6435,6 +6435,30 @@ fn ensure_aria2_gid_result(
     }
 }
 
+fn ensure_aria2_ok_result(method: &str, result: &serde_json::Value) -> Result<(), String> {
+    match result.as_str() {
+        Some("OK") => Ok(()),
+        Some(value) => Err(format!(
+            "aria2.{method} returned unexpected result {value}"
+        )),
+        None => Err(format!("aria2.{method} returned a non-string result")),
+    }
+}
+
+const ARIA2_RECONCILIATION_STATUS_FIELDS: &[&str] = &[
+    "status",
+    "seeder",
+    "errorCode",
+    "errorMessage",
+    "completedLength",
+    "totalLength",
+    "uploadLength",
+];
+
+fn aria2_reconciliation_status_params(gid: &str) -> serde_json::Value {
+    serde_json::json!([gid, ARIA2_RECONCILIATION_STATUS_FIELDS])
+}
+
 async fn aria2_download_status(port: u16, secret: &str, gid: &str) -> Result<String, String> {
     let result = rpc_call(
         port,
@@ -6543,7 +6567,7 @@ async fn reconcile_aria2_downloads(app_handle: &tauri::AppHandle) {
             port,
             &secret,
             "aria2.tellStatus",
-            serde_json::json!([gid, ["status", "seeder", "errorCode", "errorMessage", "completedLength", "totalLength"]]),
+            aria2_reconciliation_status_params(&gid),
         )
         .await
         {
@@ -7005,7 +7029,7 @@ async fn validate_torrent_enqueue(
     item.mirrors = (!legacy_web_seeds.is_empty()).then_some(legacy_web_seeds.join("\n"));
     if let Some(path) = item.torrent_path.as_deref() {
         let path = crate::torrent::validate_managed_torrent_path(app_handle, &item.id, path)?;
-        let bytes = std::fs::read(path)
+        let bytes = crate::torrent::read_bounded_torrent_bytes_sync(&path)
             .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
         let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
         let normalized_user_web_seeds = queue::normalize_torrent_web_seeds(
@@ -7120,7 +7144,7 @@ fn expected_torrent_output_paths(
         return Ok(None);
     };
     let torrent_path = crate::torrent::validate_managed_torrent_path(app_handle, id, torrent_path)?;
-    let bytes = std::fs::read(torrent_path)
+    let bytes = crate::torrent::read_bounded_torrent_bytes_sync(&torrent_path)
         .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
     let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
     let selected = crate::torrent::validate_selected_indices(
@@ -7585,7 +7609,7 @@ async fn rekey_torrent_metadata(
         &source.to_string_lossy(),
     )
     .map_err(AppError::Internal)?;
-    let bytes = tokio::fs::read(&source)
+    let bytes = crate::torrent::read_bounded_torrent_bytes(&source)
         .await
         .map_err(|error| {
             AppError::Internal(format!("could not read cached torrent metadata: {error}"))
@@ -8237,7 +8261,7 @@ async fn get_torrent_file_selection(
         .as_deref()
         .ok_or_else(|| "Torrent metadata is not resolved yet".to_string())?;
     let path = crate::torrent::validate_managed_torrent_path(&app_handle, &id, path)?;
-    let bytes = tokio::fs::read(path)
+    let bytes = crate::torrent::read_bounded_torrent_bytes(&path)
         .await
         .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
     let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
@@ -8279,7 +8303,7 @@ async fn set_torrent_file_selection(
         .as_deref()
         .ok_or_else(|| "Torrent metadata is not resolved yet".to_string())?;
     let path = crate::torrent::validate_managed_torrent_path(&app_handle, &id, path)?;
-    let bytes = tokio::fs::read(path)
+    let bytes = crate::torrent::read_bounded_torrent_bytes(&path)
         .await
         .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
     let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
@@ -8419,7 +8443,7 @@ async fn get_torrent_details(
         .as_deref()
         .ok_or_else(|| "Torrent metadata is not resolved yet".to_string())?;
     let path = crate::torrent::validate_managed_torrent_path(&app_handle, &id, path)?;
-    let bytes = tokio::fs::read(path)
+    let bytes = crate::torrent::read_bounded_torrent_bytes(&path)
         .await
         .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
     crate::torrent::torrent_details_from_bytes(&bytes)
@@ -8457,7 +8481,7 @@ async fn get_torrent_magnet_link(
         .as_deref()
         .ok_or_else(|| "Torrent metadata is not resolved yet".to_string())?;
     let path = crate::torrent::validate_managed_torrent_path(&app_handle, &id, path)?;
-    let bytes = tokio::fs::read(path)
+    let bytes = crate::torrent::read_bounded_torrent_bytes(&path)
         .await
         .map_err(|_| "Torrent metadata is unavailable".to_string())?;
     let details = crate::torrent::torrent_details_from_bytes(&bytes)?;
@@ -8510,7 +8534,7 @@ async fn export_torrent_metadata(
         .as_deref()
         .ok_or_else(|| "Torrent metadata is not resolved yet".to_string())?;
     let path = crate::torrent::validate_managed_torrent_path(&app_handle, &id, path)?;
-    let bytes = tokio::fs::read(path)
+    let bytes = crate::torrent::read_bounded_torrent_bytes(&path)
         .await
         .map_err(|_| "Torrent metadata is unavailable".to_string())?;
     let details = crate::torrent::torrent_details_from_bytes(&bytes)?;
@@ -9131,7 +9155,7 @@ async fn move_torrent_data(
         .as_deref()
         .ok_or_else(|| "Torrent metadata is not resolved yet".to_string())?;
     let torrent_path = crate::torrent::validate_managed_torrent_path(&app_handle, &id, torrent_path)?;
-    let bytes = tokio::fs::read(&torrent_path)
+    let bytes = crate::torrent::read_bounded_torrent_bytes(&torrent_path)
         .await
         .map_err(|_| "Torrent metadata is unavailable".to_string())?;
     let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
@@ -9635,7 +9659,7 @@ async fn verify_torrent_data(
         .as_deref()
         .ok_or_else(|| "Torrent metadata is not resolved yet".to_string())?;
     let path = crate::torrent::validate_managed_torrent_path(&app_handle, &id, path)?;
-    let bytes = tokio::fs::read(path)
+    let bytes = crate::torrent::read_bounded_torrent_bytes(&path)
         .await
         .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
     let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
@@ -9899,7 +9923,7 @@ async fn normalize_persisted_torrent_web_seeds(
         .as_deref()
         .ok_or_else(|| "Torrent metadata is unavailable for web-seed management".to_string())?;
     let path = crate::torrent::validate_managed_torrent_path(app_handle, id, path)?;
-    let bytes = tokio::fs::read(path)
+    let bytes = crate::torrent::read_bounded_torrent_bytes(&path)
         .await
         .map_err(|error| format!("could not read cached Torrent metadata: {error}"))?;
     let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
@@ -10228,7 +10252,7 @@ async fn set_torrent_max_open_files(
         serde_json::json!([{"bt-max-open-files": max_open_files.to_string()}]),
     )
     .await
-    .map(|_| ())
+    .and_then(|result| ensure_aria2_ok_result("changeGlobalOption", &result))
     .map_err(|error| format!("Failed to set Torrent maximum open files: {error}"))
 }
 
@@ -10248,7 +10272,7 @@ async fn set_torrent_overall_upload_limit(
         serde_json::json!([{"max-overall-upload-limit": limit_str}]),
     )
     .await
-    .map(|_| ())
+    .and_then(|result| ensure_aria2_ok_result("changeGlobalOption", &result))
     .map_err(|error| format!("Failed to set Torrent overall upload limit: {error}"))
 }
 
@@ -10274,6 +10298,7 @@ async fn set_global_speed_limit(
         serde_json::json!([{"max-overall-download-limit": limit_str}]),
     )
     .await
+    .and_then(|result| ensure_aria2_ok_result("changeGlobalOption", &result))
     .map(|_| {
         state
             .queue_manager
@@ -11963,6 +11988,29 @@ mod tests {
         );
         assert!(!magnet.contains("tracker"));
         assert!(!magnet.contains("passkey"));
+    }
+
+    #[test]
+    fn aria2_global_option_results_require_the_documented_ok_value() {
+        assert!(super::ensure_aria2_ok_result("changeGlobalOption", &json!("OK")).is_ok());
+        let unexpected = super::ensure_aria2_ok_result("changeGlobalOption", &json!("accepted"))
+            .expect_err("unexpected global-option results must not claim success");
+        assert!(unexpected.contains("unexpected result accepted"));
+        let malformed = super::ensure_aria2_ok_result("changeGlobalOption", &json!({}))
+            .expect_err("non-string global-option results must not claim success");
+        assert!(malformed.contains("non-string result"));
+    }
+
+    #[test]
+    fn aria2_reconciliation_requests_upload_length_for_torrent_telemetry() {
+        let params = super::aria2_reconciliation_status_params("gid-1");
+        let fields = params
+            .get(1)
+            .and_then(serde_json::Value::as_array)
+            .expect("reconciliation params should contain a status field list");
+        assert!(fields
+            .iter()
+            .any(|field| field.as_str() == Some("uploadLength")));
     }
 
     #[test]
@@ -16460,7 +16508,7 @@ pub fn run() {
                                     poll_port.load(std::sync::atomic::Ordering::Relaxed),
                                     &poll_secret,
                                     "aria2.tellStatus",
-                                    serde_json::json!([gid, ["status", "seeder", "errorCode", "errorMessage", "completedLength", "totalLength"]]),
+                                    aria2_reconciliation_status_params(&gid),
                                 )
                                 .await
                                 {

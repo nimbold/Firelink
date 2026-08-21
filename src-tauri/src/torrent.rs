@@ -1,5 +1,6 @@
 use sha1::{Digest, Sha1};
 use std::collections::{BTreeMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use tauri::Manager;
@@ -788,7 +789,8 @@ pub fn inspect_source(source: &str) -> Result<ParsedTorrent, String> {
         return magnet_metadata(source.trim());
     }
     let path = local_torrent_path(source)?;
-    let bytes = std::fs::read(&path).map_err(|error| format!("could not read torrent file: {error}"))?;
+    let bytes = read_bounded_torrent_bytes_sync(&path)
+        .map_err(|error| format!("could not read torrent file: {error}"))?;
     parse_torrent_bytes(&bytes)
 }
 
@@ -1148,7 +1150,21 @@ fn is_canonical_torrent_temp_file(name: &str) -> bool {
         && temporary_id.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-async fn read_bounded_torrent_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_bounded_torrent_bytes_sync(path: &Path) -> std::io::Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::with_capacity(std::cmp::min(MAX_TORRENT_BYTES, 64 * 1024));
+    file.take((MAX_TORRENT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_TORRENT_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("torrent metadata exceeds {MAX_TORRENT_BYTES} bytes"),
+        ));
+    }
+    Ok(bytes)
+}
+
+pub(crate) async fn read_bounded_torrent_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
     let file = tokio::fs::File::open(path).await?;
     let mut bytes = Vec::with_capacity(std::cmp::min(MAX_TORRENT_BYTES, 64 * 1024));
     file.take((MAX_TORRENT_BYTES + 1) as u64)
@@ -1685,6 +1701,19 @@ mod tests {
         assert!(!is_remote_torrent_url(
             "magnet:?xt=urn:btih:0123456789012345678901234567890123456789"
         ));
+    }
+
+    #[test]
+    fn bounded_local_torrent_reads_reject_oversized_files() {
+        let temporary = tempfile::tempdir().expect("temporary torrent directory should exist");
+        let path = temporary.path().join("oversized.torrent");
+        let file = std::fs::File::create(&path).expect("oversized torrent fixture should exist");
+        file.set_len((MAX_TORRENT_BYTES + 1) as u64)
+            .expect("oversized torrent fixture should be sparse-writable");
+
+        let error = read_bounded_torrent_bytes_sync(&path)
+            .expect_err("oversized torrent metadata must be rejected before parsing");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

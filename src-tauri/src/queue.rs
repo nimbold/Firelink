@@ -1517,6 +1517,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
         })
     }
 
+    fn seed_starting(&self, id: &str) -> bool {
+        self.seed_capacity
+            .lock()
+            .map_or(false, |state| state.starting.contains(id))
+    }
+
     fn add_seed_waiter(&self, waiter: SeedWaiter) {
         if let Ok(mut state) = self.seed_capacity.lock() {
             if !state.owners.contains(&waiter.id)
@@ -1825,14 +1831,113 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 // An unverified unpause must not release either the seed
                 // owner or its download permit: the daemon may already be
                 // active even though the RPC/status check was unavailable.
-                // Keep the item fenced in the starting state until a
-                // terminal event or an explicit user pause resolves it.
+                // Keep the item fenced in the starting state and retry the
+                // status-verified control until the daemon or a newer
+                // lifecycle resolves it.
                 log::warn!(
                     "Torrent seed resume [{}] could not be verified; retaining seed ownership and permit: {}",
                     id,
                     error
                 );
                 self.emit_waiting_to_seed(&id, None);
+                let retry_waiter = SeedWaiter {
+                    id: id.clone(),
+                    queue_id: waiter.queue_id.clone(),
+                    lifecycle_generation: waiter.lifecycle_generation,
+                };
+                let manager = Arc::clone(&self);
+                tauri::async_runtime::spawn(async move {
+                    manager
+                        .retry_ambiguous_seed_resume(retry_waiter, gid, epoch)
+                        .await;
+                });
+            }
+        }
+    }
+
+    async fn retry_ambiguous_seed_resume(
+        self: Arc<Self>,
+        waiter: SeedWaiter,
+        gid: String,
+        epoch: u64,
+    ) {
+        let mut delay = Duration::from_millis(250);
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = self.notify.notified() => {}
+            }
+
+            let _control_guard = self.acquire_aria2_control(&waiter.id).await;
+            let lifecycle_current = self
+                .is_registered_generation_or_legacy(&waiter.id, waiter.lifecycle_generation)
+                .await
+                && self.seed_starting(&waiter.id)
+                && matches!(self.active_kind(&waiter.id).await, Some(TaskKind::Aria2))
+                && self.has_active_permit(&waiter.id).await
+                && self.aria2_gid_for_download(&waiter.id).as_deref() == Some(gid.as_str())
+                && self.is_aria2_control_epoch_current(&waiter.id, epoch).await
+                && self.is_current_aria2_gid_mapping(
+                    &gid,
+                    &Aria2GidMapping {
+                        id: waiter.id.clone(),
+                        epoch,
+                    },
+                );
+            if !lifecycle_current {
+                return;
+            }
+
+            match self.spawner.resume_for_seed(&gid).await {
+                Ok(Aria2SeedControlOutcome::Resumed) => {
+                    if !self.is_aria2_control_epoch_current(&waiter.id, epoch).await
+                        || !self.is_current_aria2_gid_mapping(
+                            &gid,
+                            &Aria2GidMapping {
+                                id: waiter.id.clone(),
+                                epoch,
+                            },
+                        )
+                    {
+                        let _ = self.spawner.pause_for_seed(&gid).await;
+                        let _ = self.spawner.pause_for_seed(&gid).await;
+                        self.release_download_permit_for_seed(&waiter.id).await;
+                        self.abandon_seed_start(&waiter.id);
+                        return;
+                    }
+                    self.record_seed_started(&waiter.id).await;
+                    self.release_download_permit_for_seed(&waiter.id).await;
+                    self.finish_seed_start(&waiter.id);
+                    self.emit_state(&waiter.id, DownloadStatus::Seeding);
+                    return;
+                }
+                Ok(Aria2SeedControlOutcome::Complete) => {
+                    self.finish_seed_start(&waiter.id);
+                    self.apply_completion_locked(&waiter.id, PendingOutcome::Complete)
+                        .await;
+                    return;
+                }
+                Ok(Aria2SeedControlOutcome::Paused) => {
+                    let remaining = self.capture_seed_remaining(&waiter.id).await;
+                    self.release_download_permit_for_seed(&waiter.id).await;
+                    self.finish_seed_start(&waiter.id);
+                    self.abandon_seed_start(&waiter.id);
+                    self.add_seed_waiter(SeedWaiter {
+                        id: waiter.id.clone(),
+                        queue_id: waiter.queue_id.clone(),
+                        lifecycle_generation: waiter.lifecycle_generation,
+                    });
+                    self.emit_waiting_to_seed(&waiter.id, remaining);
+                    return;
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Torrent seed resume [{}] remains unverified; retaining seed ownership and permit: {}",
+                        waiter.id,
+                        error
+                    );
+                    delay = (delay * 2).min(Duration::from_secs(5));
+                }
             }
         }
     }
@@ -2333,7 +2438,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .as_deref()
             .ok_or_else(|| "Torrent metadata is unavailable for web-seed management".to_string())?;
         let path = crate::torrent::validate_managed_torrent_path(&self.app_handle, id, path)?;
-        let bytes = tokio::fs::read(path)
+        let bytes = crate::torrent::read_bounded_torrent_bytes(&path)
             .await
             .map_err(|error| format!("could not read cached Torrent metadata: {error}"))?;
         crate::torrent::parse_torrent_bytes(&bytes)
@@ -3178,7 +3283,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             id,
             torrent_path,
         )?;
-        let bytes = tokio::fs::read(&torrent_path)
+        let bytes = crate::torrent::read_bounded_torrent_bytes(&torrent_path)
             .await
             .map_err(|_| "live Torrent file progress is unavailable".to_string())?;
         let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
@@ -7815,7 +7920,7 @@ impl SidecarSpawner for ProductionSpawner {
                     id,
                     path,
                 )?;
-                let bytes = tokio::fs::read(&path)
+                let bytes = crate::torrent::read_bounded_torrent_bytes(&path)
                     .await
                     .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
                 let (sanitized_bytes, embedded_web_seeds) =
@@ -8890,6 +8995,42 @@ mod tests {
 
         async fn resume_for_seed(&self, _gid: &str) -> Result<Aria2SeedControlOutcome, String> {
             Ok(Aria2SeedControlOutcome::Resumed)
+        }
+
+        async fn run_media(
+            &self,
+            _id: &str,
+            _payload: &SpawnPayload,
+            _lifecycle_generation: u64,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct AmbiguousResumeSeedSpawner {
+        resume_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl SidecarSpawner for AmbiguousResumeSeedSpawner {
+        async fn add_uri(&self, id: &str, _payload: &SpawnPayload) -> Result<String, String> {
+            Ok(format!("gid-{id}"))
+        }
+
+        async fn remove_uri(&self, _gid: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn pause_for_seed(&self, _gid: &str) -> Result<Aria2SeedControlOutcome, String> {
+            Ok(Aria2SeedControlOutcome::Paused)
+        }
+
+        async fn resume_for_seed(&self, _gid: &str) -> Result<Aria2SeedControlOutcome, String> {
+            if self.resume_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err("seed resume status verification unavailable".to_string())
+            } else {
+                Ok(Aria2SeedControlOutcome::Resumed)
+            }
         }
 
         async fn run_media(
@@ -10868,6 +11009,82 @@ mod tests {
         .await;
         assert!(result.is_ok(), "waiting seed did not resume after capacity was released");
         assert!(!manager.has_active_permit("second").await);
+        assert_eq!(manager.current_aria2_control_epoch("second").await, 1);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_seed_resume_retries_without_stranding_the_seed_permit() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let spawner = Arc::new(AmbiguousResumeSeedSpawner {
+            resume_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let manager = Arc::new(QueueManager::test_new(
+            app.handle().clone(),
+            1,
+            spawner.clone(),
+        ));
+        manager.configure_seed_capacity(true, 1);
+        for id in ["first", "second"] {
+            manager.reserve_enqueue_generation(id, 0).await.unwrap();
+            assert!(manager.ensure_aria2_permit(id).await);
+            manager
+                .aria2_payloads
+                .lock()
+                .await
+                .insert(
+                    id.to_string(),
+                    SpawnPayload {
+                        is_torrent: true,
+                        torrent_seed_time: Some(5.0),
+                        ..Default::default()
+                    },
+                );
+            manager
+                .remember_gid(id.to_string(), format!("gid-{id}"))
+                .await;
+            manager
+                .apply_completion(id, PendingOutcome::Seeding)
+                .await;
+        }
+
+        assert!(manager.is_waiting_to_seed("second"));
+        manager.release_registered_id("first").await;
+        assert!(manager.try_start_waiting_seed().await);
+
+        let first_attempt = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if spawner.resume_calls.load(Ordering::SeqCst) >= 1
+                    && manager.has_active_permit("second").await
+                    && manager.is_waiting_to_seed("second")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(first_attempt.is_ok(), "ambiguous seed resume was not retained safely");
+
+        manager.wake_seed_waiters();
+        let recovered = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if spawner.resume_calls.load(Ordering::SeqCst) >= 2
+                    && manager.is_seed_owner("second")
+                    && !manager.is_waiting_to_seed("second")
+                    && !manager.has_active_permit("second").await
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            recovered.is_ok(),
+            "ambiguous seed resume did not reconcile after the daemon became reachable"
+        );
         assert_eq!(manager.current_aria2_control_epoch("second").await, 1);
     }
 
