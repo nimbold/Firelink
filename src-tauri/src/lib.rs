@@ -4754,12 +4754,10 @@ pub(crate) async fn start_media_download_internal(
     let mut progress_state = MediaProgressEmitterState::new();
 
     // Resolve absolute paths to bundled binaries
-    let aria2c_path = resolve_bundled_binary_path(&app_handle, "aria2c")?;
     let ffmpeg_path = resolve_bundled_binary_path(&app_handle, "ffmpeg")?;
     let deno_path = resolve_bundled_binary_path(&app_handle, "deno")?;
-    log::info!("Using bundled aria2c: {:?}", aria2c_path);
-    log::info!("Using bundled ffmpeg: {:?}", ffmpeg_path);
-    log::info!("Using bundled deno: {:?}", deno_path);
+    log::info!("Using bundled FFmpeg engine");
+    log::info!("Using bundled Deno engine");
 
     // yt-dlp accepts an absolute path for its external downloader. Keep every
     // engine explicit so behavior never depends on PATH, symlink privileges,
@@ -4982,13 +4980,18 @@ pub(crate) async fn start_media_download_internal(
                                 }
                                 let lower = line.to_lowercase();
                                 if lower.contains("error") || lower.contains("critical") {
-                                    log::error!("yt-dlp stderr [{}]: {}", id, line.trim());
+                                    log::error!(
+                                        "yt-dlp stderr [{}]: {}",
+                                        id,
+                                        redact_log_line_for_app(line.trim(), &app_handle)
+                                    );
                                 }
                             }
                         }
                         Some(tauri_plugin_shell::process::CommandEvent::Error(err)) => {
-                            log::error!("yt-dlp shell error [{}]: {}", id, err);
-                            break err;
+                            let safe_error = redact_log_line_for_app(&err, &app_handle);
+                            log::error!("yt-dlp shell error [{}]: {}", id, safe_error);
+                            break safe_error;
                         }
                         Some(tauri_plugin_shell::process::CommandEvent::Terminated(payload)) => {
                             if let Some(line) = flush_media_output_line(&mut stdout_buffer) {
@@ -5065,7 +5068,7 @@ pub(crate) async fn start_media_download_internal(
                             break if stderr_tail.is_empty() {
                                 format!("yt-dlp exited with code {:?}", payload.code)
                             } else {
-                                stderr_tail.clone()
+                                redact_log_line_for_app(&stderr_tail, &app_handle)
                             };
                         }
                         Some(_) => {}
@@ -5073,7 +5076,7 @@ pub(crate) async fn start_media_download_internal(
                             break if stderr_tail.is_empty() {
                                 "yt-dlp process ended unexpectedly".to_string()
                             } else {
-                                stderr_tail.clone()
+                                redact_log_line_for_app(&stderr_tail, &app_handle)
                             };
                         }
                     }

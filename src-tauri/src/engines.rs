@@ -11,7 +11,7 @@ pub fn resolve_bundled_binary_path(
     if let Ok(resource_dir) = app_handle.path().resource_dir() {
         for candidate in packaged_candidates(&resource_dir, &target, &binary_name) {
             if candidate.is_file() {
-                log::info!("Resolved bundled '{}' at: {:?}", engine, candidate);
+                log::info!("Resolved bundled '{}' for target '{}'", engine, target);
                 return Ok(candidate);
             }
         }
@@ -20,19 +20,24 @@ pub fn resolve_bundled_binary_path(
     if let Ok(exe_path) = std::env::current_exe() {
         for candidate in executable_relative_candidates(&exe_path, &target, &binary_name) {
             if candidate.is_file() {
-                log::info!("Resolved bundled '{}' at: {:?}", engine, candidate);
+                log::info!("Resolved bundled '{}' for target '{}'", engine, target);
                 return Ok(candidate);
             }
         }
     }
 
+    // Development payloads are intentionally discoverable from the checkout,
+    // but a packaged/release app must never execute an engine selected by its
+    // working directory. If the packaged resource or executable-relative
+    // payload is missing, fail closed instead of allowing a same-named binary
+    // from an untrusted CWD to take over the media/download process.
     if let Ok(cwd) = std::env::current_dir() {
-        for candidate in development_candidates(&cwd, &target, &binary_name) {
+        for candidate in development_candidates_for_runtime(&cwd, &target, &binary_name) {
             if candidate.is_file() {
                 let absolute = candidate.canonicalize().map_err(|error| {
                     format!("Failed to canonicalize '{}': {error}", candidate.display())
                 })?;
-                log::info!("Resolved bundled '{}' at: {:?}", engine, absolute);
+                log::info!("Resolved bundled '{}' for target '{}'", engine, target);
                 return Ok(absolute);
             }
         }
@@ -42,6 +47,22 @@ pub fn resolve_bundled_binary_path(
         "Could not find bundled binary '{}' for target '{}' (expected name: {})",
         engine, target, binary_name
     ))
+}
+
+fn development_candidates_for_runtime(
+    cwd: &Path,
+    target: &str,
+    binary_name: &str,
+) -> Vec<PathBuf> {
+    #[cfg(debug_assertions)]
+    {
+        development_candidates(cwd, target, binary_name)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (cwd, target, binary_name);
+        Vec::new()
+    }
 }
 
 fn packaged_candidates(resource_dir: &Path, target: &str, binary_name: &str) -> Vec<PathBuf> {
@@ -98,6 +119,7 @@ fn executable_relative_candidates(
     candidates
 }
 
+#[cfg(any(debug_assertions, test))]
 fn development_candidates(cwd: &Path, target: &str, binary_name: &str) -> Vec<PathBuf> {
     let roots = [cwd.to_path_buf(), cwd.join("src-tauri")];
     let mut candidates = Vec::new();
@@ -141,7 +163,7 @@ fn aria2_openssl_modules_dir(binary_path: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{development_candidates, packaged_candidates};
+    use super::{development_candidates, development_candidates_for_runtime, packaged_candidates};
     use std::path::Path;
 
     #[test]
@@ -170,5 +192,20 @@ mod tests {
             candidates[0],
             Path::new("/repo/engine-dist/x86_64-pc-windows-msvc/aria2c-x86_64-pc-windows-msvc.exe")
         );
+    }
+
+    #[test]
+    fn development_resolution_is_disabled_in_release_builds() {
+        let candidates = development_candidates_for_runtime(
+            Path::new("/repo"),
+            "x86_64-unknown-linux-gnu",
+            "yt-dlp-x86_64-unknown-linux-gnu",
+        );
+
+        if cfg!(debug_assertions) {
+            assert!(!candidates.is_empty());
+        } else {
+            assert!(candidates.is_empty());
+        }
     }
 }
