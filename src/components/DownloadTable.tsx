@@ -53,7 +53,8 @@ import {
 import {
   moveSelectedBlockToIndex
 } from '../utils/queueOrdering';
-import { updateDownloadSelection } from '../utils/downloadSelection';
+import { selectContextMenuTarget, updateDownloadSelection } from '../utils/downloadSelection';
+import { createColumnResizeSession } from '../utils/columnResize';
 import { clampFloatingPosition } from '../utils/floatingPosition';
 import { FloatingQueueSubmenu } from './FloatingQueueSubmenu';
 import { openPropertiesWindow } from '../propertiesBridge';
@@ -671,33 +672,27 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     const startX = event.clientX;
     const startWidth = columnWidthsRef.current[index];
 
-    const handlePointerMove = (moveEvent: PointerEvent) => {
-      const nextWidth = Math.max(COLUMN_MINIMUMS[index], startWidth + moveEvent.clientX - startX);
+    const cleanup = createColumnResizeSession({
+      windowTarget: window,
+      documentTarget: document,
+      body: document.body,
+      pointerId: event.pointerId,
+      startX,
+      startWidth,
+      minWidth: COLUMN_MINIMUMS[index],
+      onWidth: nextWidth => {
       const nextWidths = columnWidthsRef.current.map((width, columnIndex) =>
         columnIndex === index ? nextWidth : width
       );
       columnWidthsRef.current = nextWidths;
       setColumnWidths(nextWidths);
-    };
-
-    const handlePointerUp = () => {
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', handlePointerUp);
-      window.removeEventListener('pointercancel', handlePointerUp);
-      window.removeEventListener('blur', handlePointerUp);
-      document.removeEventListener('visibilitychange', handlePointerUp);
-      persistColumnWidths(columnWidthsRef.current);
-      document.body.classList.remove('is-column-resizing');
-      resizeCleanupRef.current = null;
-    };
-
-    resizeCleanupRef.current = handlePointerUp;
-    document.body.classList.add('is-column-resizing');
-    window.addEventListener('pointermove', handlePointerMove);
-    window.addEventListener('pointerup', handlePointerUp);
-    window.addEventListener('pointercancel', handlePointerUp);
-    window.addEventListener('blur', handlePointerUp);
-    document.addEventListener('visibilitychange', handlePointerUp);
+      },
+      onEnd: () => {
+        persistColumnWidths(columnWidthsRef.current);
+        resizeCleanupRef.current = null;
+      },
+    });
+    resizeCleanupRef.current = cleanup;
   };
 
   const clampMenuPosition = useCallback((x: number, y: number, menuWidth: number, menuHeight: number) => {
@@ -1335,7 +1330,9 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
         finishQueueDrag(true);
       }
     };
-    const lostPointerCapture = () => finishQueueDrag(true);
+    const lostPointerCapture = (event: Event) => {
+      if ((event as PointerEvent).pointerId === pointerId) finishQueueDrag(true);
+    };
     const cancel = () => finishQueueDrag(true);
     window.addEventListener('pointermove', pointerMove);
     window.addEventListener('pointerup', pointerUp);
@@ -1779,10 +1776,13 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   }, [clearQueueClickSuppression, handleDownloadDoubleClick]);
 
   const handleContextMenu = useCallback((menu: { x: number; y: number; id: string }) => {
-    if (!selectedIdsRef.current.has(menu.id)) {
-      setSelectedIds(new Set([menu.id]));
-      setLastSelectedId(menu.id);
-    }
+    const nextSelection = selectContextMenuTarget({
+      selectedIds: selectedIdsRef.current,
+      lastSelectedId: lastSelectedIdRef.current,
+      targetId: menu.id,
+    });
+    setSelectedIds(nextSelection.selectedIds);
+    setLastSelectedId(nextSelection.lastSelectedId);
     setColumnMenu(null);
     const position = clampMenuPosition(menu.x, menu.y, 200, 300);
     setContextMenuPosition(position);

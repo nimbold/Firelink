@@ -2,7 +2,7 @@ import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronRight } from 'lucide-react';
 import type { Queue } from '../store/useDownloadStore';
-import { positionFloatingSubmenu, type FloatingSubmenuPosition } from '../utils/floatingPosition';
+import { isFloatingSubmenuCloseKey, positionFloatingSubmenu, type FloatingSubmenuPosition } from '../utils/floatingPosition';
 
 interface FloatingQueueSubmenuProps {
   label: React.ReactNode;
@@ -167,7 +167,7 @@ export const FloatingQueueSubmenu: React.FC<FloatingQueueSubmenuProps> = ({ labe
             }
           }}
           onKeyDown={event => {
-            if (event.key !== 'Escape' && event.key !== 'ArrowLeft') return;
+            if (!isFloatingSubmenuCloseKey(event.key, isRtl)) return;
             event.preventDefault();
             event.stopPropagation();
             closeMenu();

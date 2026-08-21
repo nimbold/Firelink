@@ -5,6 +5,9 @@ export interface FloatingPosition {
 
 export type FloatingSubmenuSide = 'left' | 'right';
 
+export const isFloatingSubmenuCloseKey = (key: string, isRtl: boolean): boolean =>
+  key === 'Escape' || key === (isRtl ? 'ArrowRight' : 'ArrowLeft');
+
 export interface FloatingSubmenuPosition extends FloatingPosition {
   side: FloatingSubmenuSide;
 }

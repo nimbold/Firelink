@@ -1,9 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import { updateDownloadSelection } from './downloadSelection';
+import { selectContextMenuTarget, updateDownloadSelection } from './downloadSelection';
 
 const orderedIds = ['a', 'b', 'c', 'd'];
 
 describe('download selection', () => {
+  it('selects an unselected context-menu target without losing an existing selected target', () => {
+    expect(selectContextMenuTarget({
+      selectedIds: new Set(['a', 'b']),
+      lastSelectedId: 'b',
+      targetId: 'c',
+    })).toEqual({ selectedIds: new Set(['c']), lastSelectedId: 'c' });
+
+    expect(selectContextMenuTarget({
+      selectedIds: new Set(['a', 'b']),
+      lastSelectedId: 'b',
+      targetId: 'b',
+    })).toEqual({ selectedIds: new Set(['a', 'b']), lastSelectedId: 'b' });
+  });
+
   it('collapses select-all to the clicked row', () => {
     const result = updateDownloadSelection({
       orderedIds,
