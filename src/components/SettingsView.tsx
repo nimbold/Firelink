@@ -51,6 +51,7 @@ import {
 } from '../utils/downloads';
 import { useTranslation } from 'react-i18next';
 import { localeDirection, resolveAppLocale } from '../i18n';
+import { createEngineStatusRequestTracker } from '../utils/engineStatusRequests';
 
 const settingsTabs: { type: SettingsTab; icon: typeof Download }[] = [
   { type: 'downloads', icon: Download },
@@ -222,6 +223,7 @@ const networkSettingsSectionFromStorage = (): NetworkSettingsSection => {
 
 const engineStatusCache = new Map<string, EngineStatusItem>();
 const engineStatusInFlight = new Map<string, Promise<EngineStatusItem>>();
+const engineStatusRequests = createEngineStatusRequestTracker();
 
 const upsertEngineStatus = (items: EngineStatusItem[], item: EngineStatusItem) => {
   const next = items.filter(existing => existing.kind !== item.kind);
@@ -309,10 +311,13 @@ const runEngineStatusCheck = (check: EngineCheck, force: boolean) => {
   }
 
   if (force) engineStatusCache.delete(check.kind);
+  const requestId = engineStatusRequests.begin(check.kind);
 
   const promise = invoke(check.command)
     .then(item => {
-      if (item.ready) engineStatusCache.set(item.kind, item);
+      if (item.ready && engineStatusRequests.isCurrent(check.kind, requestId)) {
+        engineStatusCache.set(item.kind, item);
+      }
       return item;
     })
     .catch(error => buildEngineStatusError(check, error))

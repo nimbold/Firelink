@@ -61,6 +61,19 @@ describe('log entry streaming', () => {
     ).map(item => item.message)).toEqual(['one', 'repeat', 'three', 'repeat', 'four']);
   });
 
+  it('deduplicates a persisted line and its differently formatted live event', () => {
+    const snapshot = [persistedLogEntry('[2026-07-10][18:00:00][INFO][firelink] repeat')];
+    const live = [liveLogEntry(3, 'repeat', new Date('2026-07-10T14:30:00Z'))];
+
+    expect(mergeLogSnapshotAndLiveEntries(snapshot, live)).toEqual(snapshot);
+  });
+
+  it('preserves compact JSON delimiters while redacting URL queries', () => {
+    const redacted = redactLogText('{"url":"https://example.com/file?token=secret","next":1}');
+
+    expect(redacted).toBe('{"url":"https://example.com/file?[redacted]","next":1}');
+  });
+
   it('bounds burst updates to the newest entries', () => {
     expect(appendBoundedLogEntries(
       [entry('old')],

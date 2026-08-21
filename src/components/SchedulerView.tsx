@@ -12,7 +12,12 @@ import { useToast } from '../contexts/ToastContext';
 import { usePlatformInfo } from '../utils/platform';
 import { useTranslation } from 'react-i18next';
 import { formatDateTime } from '../utils/dateTime';
-import { beginSchedulerControl, isSchedulerControlCurrent } from '../utils/schedulerControl';
+import {
+  beginSchedulerControl,
+  consumeSchedulerHandoffIds,
+  handoffSupersededSchedulerIds,
+  isSchedulerControlCurrent
+} from '../utils/schedulerControl';
 
 const days = [
   { value: 0, key: 'su' },
@@ -162,22 +167,29 @@ export default function SchedulerView() {
   };
 
   const runNow = async () => {
-    const generation = beginSchedulerControl();
+    const generation = beginSchedulerControl(effectiveSelectedQueueIds);
     const previouslyTrackedIds = new Set(useSettingsStore.getState().schedulerActiveDownloadIds);
     const results = await Promise.all(
       effectiveSelectedQueueIds.map(queueId => useDownloadStore.getState().startQueue(queueId))
     );
     const acceptedIds = results.flat();
     if (!isSchedulerControlCurrent(generation)) {
+      const handoffIds = handoffSupersededSchedulerIds(
+        acceptedIds,
+        id => useDownloadStore.getState().downloads.find(download => download.id === id)?.queueId || MAIN_QUEUE_ID
+      );
       await Promise.allSettled(
-        acceptedIds.map(id => useDownloadStore.getState().pauseDownload(id))
+        acceptedIds
+          .filter(id => !handoffIds.has(id))
+          .map(id => useDownloadStore.getState().pauseDownload(id))
       );
       return;
     }
     const selectedQueueSet = new Set(effectiveSelectedQueueIds);
+    const handoffIds = consumeSchedulerHandoffIds(generation);
     const trackedIds = useDownloadStore.getState().downloads
       .filter(download =>
-        previouslyTrackedIds.has(download.id) &&
+        (previouslyTrackedIds.has(download.id) || handoffIds.has(download.id)) &&
         selectedQueueSet.has(download.queueId || MAIN_QUEUE_ID) &&
         isActiveDownloadStatus(download.status)
       )
@@ -199,11 +211,23 @@ export default function SchedulerView() {
 
   const pauseNow = async () => {
     const generation = beginSchedulerControl();
+    const savedQueueIds = savedSettings.selectedQueueIds
+      .filter(queueId => availableQueueIds.has(queueId));
+    const savedQueueSet = new Set(savedQueueIds);
+    const trackedIdsOutsideSavedQueues = useSettingsStore.getState().schedulerActiveDownloadIds
+      .filter(id => {
+        const queueId = useDownloadStore.getState().downloads.find(download => download.id === id)?.queueId || MAIN_QUEUE_ID;
+        return !savedQueueSet.has(queueId);
+      });
     const counts = await Promise.all(
-      effectiveSelectedQueueIds.map(queueId => useDownloadStore.getState().pauseQueue(queueId))
+      savedQueueIds.map(queueId => useDownloadStore.getState().pauseQueue(queueId))
+    );
+    const directPauseResults = await Promise.allSettled(
+      trackedIdsOutsideSavedQueues.map(id => useDownloadStore.getState().pauseDownload(id))
     );
     if (!isSchedulerControlCurrent(generation)) return;
-    const count = counts.reduce((total, queueCount) => total + queueCount, 0);
+    const count = counts.reduce((total, queueCount) => total + queueCount, 0)
+      + directPauseResults.filter(result => result.status === 'fulfilled').length;
     useSettingsStore.getState().setSchedulerRunning(false);
     useSettingsStore.getState().setSchedulerActiveDownloadIds([]);
     addToast({

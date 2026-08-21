@@ -11364,7 +11364,7 @@ pub(crate) fn redact_sensitive_text(line: &str) -> String {
             .expect("valid sensitive header redaction regex")
     });
     let query = QUERY.get_or_init(|| {
-        regex::Regex::new(r"([A-Za-z][A-Za-z0-9+.-]*://[^\s?]+)\?[^\s]+")
+        regex::Regex::new(r#"([A-Za-z][A-Za-z0-9+.-]*://[^\s?\"'<>},\]]+)\?[^\s\"'<>},\]]+"#)
             .expect("valid URL query redaction regex")
     });
     let userinfo = USERINFO.get_or_init(|| {
@@ -11375,13 +11375,13 @@ pub(crate) fn redact_sensitive_text(line: &str) -> String {
         regex::Regex::new(r"([A-Za-z][A-Za-z0-9+.-]*://[^\s?#]+)#\S+")
             .expect("valid URL fragment redaction regex")
     });
-    let redacted = header.replace_all(line, "$1: [redacted]");
-    let redacted = quoted_secret.replace_all(&redacted, "$1$2$3$4[redacted]");
-    let redacted = secret.replace_all(&redacted, "$1=[redacted]");
+    let redacted = query.replace_all(line, "$1?[redacted]");
+    let redacted = fragment.replace_all(&redacted, "$1#[redacted]");
     let redacted = userinfo.replace_all(&redacted, "$1[redacted]@");
-    let redacted = query.replace_all(&redacted, "$1?[redacted]");
-    fragment
-        .replace_all(&redacted, "$1#[redacted]")
+    let redacted = header.replace_all(&redacted, "$1: [redacted]");
+    let redacted = quoted_secret.replace_all(&redacted, "$1$2$3$4[redacted]");
+    secret
+        .replace_all(&redacted, "$1=[redacted]")
         .into_owned()
 }
 
@@ -14120,6 +14120,17 @@ mod tests {
         assert!(!redacted.contains("json-secret"));
         assert!(!redacted.contains("session=secret"));
         assert!(redacted.contains("[redacted]"));
+    }
+
+    #[test]
+    fn preserves_compact_json_delimiters_while_redacting_url_queries() {
+        let redacted = redact_log_line(
+            r#"{"url":"https://example.com/file?token=secret","next":1}"#,
+        );
+        assert_eq!(
+            redacted,
+            r#"{"url":"https://example.com/file?[redacted]","next":1}"#
+        );
     }
 
     #[test]

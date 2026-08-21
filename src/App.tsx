@@ -43,7 +43,12 @@ import { synchronizeDocumentAppearance } from './utils/documentAppearance';
 import { createMainWindowSizePersistence } from './utils/mainWindowState';
 import { createSidebarResizeSession } from './utils/sidebarResize';
 import type { MainWindowSize } from './bindings/MainWindowSize';
-import { beginSchedulerControl, isSchedulerControlCurrent } from './utils/schedulerControl';
+import {
+  beginSchedulerControl,
+  consumeSchedulerHandoffIds,
+  handoffSupersededSchedulerIds,
+  isSchedulerControlCurrent
+} from './utils/schedulerControl';
 import { createSerialTaskQueue } from './utils/serialTaskQueue';
 
 const loadSettingsView = () => import('./components/SettingsView');
@@ -921,9 +926,9 @@ function App() {
       processingScheduleKeys.add(payload.key);
       try {
         if (payload.action === 'start') {
-          const generation = beginSchedulerControl();
           clearPendingPostActionTimer();
           const scheduledQueueIds = getScheduledQueueIds();
+          const generation = beginSchedulerControl(scheduledQueueIds);
           if (scheduledQueueIds.length === 0) {
             state.setSchedulerActiveDownloadIds([]);
             state.setSchedulerRunning(false);
@@ -941,16 +946,23 @@ function App() {
           );
           const acceptedIds = startedResults.flat();
           if (!isSchedulerControlCurrent(generation)) {
+            const handoffIds = handoffSupersededSchedulerIds(
+              acceptedIds,
+              id => useDownloadStore.getState().downloads.find(download => download.id === id)?.queueId || MAIN_QUEUE_ID
+            );
             await Promise.allSettled(
-              acceptedIds.map(id => useDownloadStore.getState().pauseDownload(id))
+              acceptedIds
+                .filter(id => !handoffIds.has(id))
+                .map(id => useDownloadStore.getState().pauseDownload(id))
             );
             await invoke('ack_schedule_trigger', { action: 'start', key: payload.key });
             return;
           }
           const scheduledQueueSet = new Set(scheduledQueueIds);
+          const handoffIds = consumeSchedulerHandoffIds(generation);
           const trackedIds = useDownloadStore.getState().downloads
             .filter(download =>
-              previouslyTrackedIds.has(download.id) &&
+              (previouslyTrackedIds.has(download.id) || handoffIds.has(download.id)) &&
               scheduledQueueSet.has(download.queueId || MAIN_QUEUE_ID) &&
               isActiveDownloadStatus(download.status)
             )
