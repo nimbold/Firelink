@@ -11,7 +11,15 @@ export function extractValidDownloadUrls(text: string): string[] {
     for (const part of parts) {
       try {
         const url = new URL(part);
-        if (url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'ftp:' || url.protocol === 'sftp:') {
+        const isValidMagnet = url.protocol !== 'magnet:' || (
+          !url.username
+          && !url.password
+          && !url.hostname
+          && !url.port
+          && !url.hash
+          && url.searchParams.getAll('xt').some(value => /^urn:btih:(?:[0-9a-f]{40}|[a-z2-7]{32})$/i.test(value))
+        );
+        if ((url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'ftp:' || url.protocol === 'sftp:' || url.protocol === 'magnet:') && isValidMagnet) {
           urls.push(url.toString());
         }
       } catch (e) {

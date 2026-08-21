@@ -1834,6 +1834,11 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
   },
   setSelectedPropertiesDownloadId: (id) => set({ selectedPropertiesDownloadId: id }),
   addDownload: async (item, action) => {
+    if (action.type === 'add-to-queue' && !get().queues.some(queue => queue.id === action.queueId)) {
+      // The Add window can outlive a queue deletion in another view. Never
+      // persist an orphaned staged row under a queue ID that no longer exists.
+      throw new Error('Queue no longer exists.');
+    }
     const settings = useSettingsStore.getState();
     const normalizedItem = {
       ...item,

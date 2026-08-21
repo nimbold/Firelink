@@ -1633,10 +1633,10 @@ fn append_ytdlp_add_header(config: &mut String, header: &str) -> Result<bool, St
         return Ok(false);
     }
     let Some((name, _)) = safe_header.split_once(':') else {
-        return Err(format!("invalid HTTP header: {safe_header}"));
+        return Err("invalid HTTP header".to_string());
     };
     if name.trim().is_empty() {
-        return Err(format!("invalid HTTP header: {safe_header}"));
+        return Err("invalid HTTP header name".to_string());
     }
     append_ytdlp_config_option(config, "--add-header", &safe_header);
     Ok(name.trim().eq_ignore_ascii_case("cookie"))
@@ -13831,10 +13831,11 @@ mod tests {
     #[test]
     fn ytdlp_media_headers_reject_invalid_lines() {
         let mut config = String::new();
-        let error = append_ytdlp_http_headers(&mut config, Some("not a header"), None)
+        let error = append_ytdlp_http_headers(&mut config, Some("Cookie=super-secret-value"), None)
             .expect_err("invalid header line should be rejected");
 
         assert!(error.contains("invalid HTTP header"));
+        assert!(!error.contains("super-secret-value"));
     }
 
     #[test]

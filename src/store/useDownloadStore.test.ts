@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { commitDownloadState, dispatchItem, flushDownloadPersistence, getProxyArgs, getSiteLogin, hasStaleTemporaryMediaEstimate, initializeDownloadPersistence, normalizeCustomProxy, normalizePersistedDownloadProgress, normalizePersistedQueueState, normalizePersistedQueues, useDownloadStore } from './useDownloadStore';
+import { commitDownloadState, dispatchItem, flushDownloadPersistence, getProxyArgs, getSiteLogin, hasStaleTemporaryMediaEstimate, initializeDownloadPersistence, MAIN_QUEUE_ID, normalizeCustomProxy, normalizePersistedDownloadProgress, normalizePersistedQueueState, normalizePersistedQueues, useDownloadStore } from './useDownloadStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
 import { useSettingsStore } from './useSettingsStore';
 import * as ipc from '../ipc';
@@ -107,6 +107,7 @@ describe('useDownloadStore', () => {
       pendingAddBatchName: '',
       pendingAddRequestContexts: {},
       pendingAddRequestVersion: 0,
+      queues: [{ id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true }],
     });
     useDownloadProgressStore.setState({ progressMap: {}, retainedProgressMap: {}, moveProgressMap: {} });
   });
@@ -1879,6 +1880,12 @@ describe('useDownloadStore', () => {
 
 
   it('adds to the selected queue without dispatching', async () => {
+    useDownloadStore.setState({
+      queues: [
+        { id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true },
+        { id: 'queue-b', name: 'Downloads', isMain: false }
+      ]
+    });
     await useDownloadStore.getState().addDownload({
       id: 'queue-1',
       url: 'https://example.com/queue.bin',
@@ -1892,6 +1899,23 @@ describe('useDownloadStore', () => {
     expect(item.queueId).toBe('queue-b');
     expect(item.queuePosition).toBe(0);
     expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
+  });
+
+  it('rejects Add-to-Queue admission when the selected queue was deleted', async () => {
+    useDownloadStore.setState({
+      queues: [{ id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true }]
+    });
+
+    await expect(useDownloadStore.getState().addDownload({
+      id: 'orphaned-queue-row',
+      url: 'https://example.com/orphaned.bin',
+      fileName: 'orphaned.bin',
+      category: 'Other',
+      dateAdded: ''
+    }, { type: 'add-to-queue', queueId: 'deleted-queue' })).rejects.toThrow('Queue no longer exists.');
+
+    expect(useDownloadStore.getState().downloads).toEqual([]);
+    expect(vi.mocked(ipc.invokeCommand)).not.toHaveBeenCalledWith('db_commit_download_state', expect.anything());
   });
 
   it('waits for durable admission before dispatching a start-now download', async () => {
@@ -2170,6 +2194,12 @@ describe('useDownloadStore', () => {
   });
 
   it('normalizes new Torrent rows before resolving their default destination', async () => {
+    useDownloadStore.setState({
+      queues: [
+        { id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true },
+        { id: 'queue-torrents', name: 'Torrents', isMain: false }
+      ]
+    });
     await useDownloadStore.getState().addDownload({
       id: 'torrent-default',
       url: 'magnet:?xt=urn:btih:default',
@@ -2187,6 +2217,12 @@ describe('useDownloadStore', () => {
   });
 
   it('inserts a newly staged queue item before paused rows', async () => {
+    useDownloadStore.setState({
+      queues: [
+        { id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true },
+        { id: 'queue-b', name: 'Downloads', isMain: false }
+      ]
+    });
     useDownloadStore.setState({
       downloads: [{
         id: 'already-paused',
@@ -2216,6 +2252,12 @@ describe('useDownloadStore', () => {
   });
 
   it('carries a media format estimate into numeric progress state', async () => {
+    useDownloadStore.setState({
+      queues: [
+        { id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true },
+        { id: 'queue-b', name: 'Downloads', isMain: false }
+      ]
+    });
     await useDownloadStore.getState().addDownload({
       id: 'media-estimate',
       url: 'https://youtube.com/watch?v=estimate',

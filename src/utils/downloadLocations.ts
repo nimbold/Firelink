@@ -307,7 +307,14 @@ export const downloadLocationEquals = (
   os: string
 ): boolean => {
   const normalize = (value: string) => {
-    const normalized = value.replace(/\\/g, '/').replace(/\/+$/, '');
+    const slashPath = value.replace(/\\/g, '/');
+    // Collapse redundant separators without destroying a Windows UNC prefix.
+    // Destination strings can come from legacy settings as well as the folder
+    // picker, so lexical equality must not miss the same filesystem target.
+    const leadingSeparators = slashPath.match(/^\/+/);
+    const leadingCount = leadingSeparators ? leadingSeparators[0].length : 0;
+    const prefix = os === 'windows' && leadingCount >= 2 ? '//' : leadingCount > 0 ? '/' : '';
+    const normalized = `${prefix}${slashPath.slice(leadingCount).replace(/\/{2,}/g, '/')}`.replace(/\/+$/, '');
     return os === 'windows'
       ? normalized.toLocaleLowerCase()
       : normalized;
