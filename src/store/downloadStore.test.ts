@@ -92,6 +92,127 @@ describe('useDownloadProgressStore', () => {
     release();
   });
 
+  it('removes a row from backend pending order when its lifecycle becomes active or retrying', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'pending-transition',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'queued',
+        category: 'Other',
+        dateAdded: ''
+      }],
+      pendingOrder: ['pending-transition']
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-state']({ payload: {
+      id: 'pending-transition',
+      status: 'downloading'
+    } });
+    expect(useDownloadStore.getState().pendingOrder).toEqual([]);
+
+    useDownloadStore.getState().updateDownload('pending-transition', { status: 'downloading' });
+    useDownloadStore.setState({ pendingOrder: ['pending-transition'] });
+    handlers['download-state']({ payload: {
+      id: 'pending-transition',
+      status: 'retrying',
+      error: 'network dropped'
+    } });
+    expect(useDownloadStore.getState().pendingOrder).toEqual([]);
+    release();
+  });
+
+  it('rejects malformed live progress values at the event boundary', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'malformed-progress',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-progress']({ payload: {
+      id: 'malformed-progress',
+      fraction: 0.5,
+      speed: '1 MB/s',
+      eta: '1s',
+      size: '1 MB',
+      size_is_final: false,
+      downloaded_bytes: -1,
+      total_bytes: Number.NaN,
+      active_connections: -2
+    } });
+
+    expect(useDownloadProgressStore.getState().progressMap['malformed-progress'])
+      .not.toHaveProperty('downloaded_bytes');
+    expect(useDownloadProgressStore.getState().progressMap['malformed-progress'])
+      .not.toHaveProperty('total_bytes');
+    expect(useDownloadStore.getState().downloads[0]).not.toHaveProperty('downloadedBytes');
+    expect(useDownloadStore.getState().downloads[0]).not.toHaveProperty('totalBytes');
+    release();
+  });
+
+  it('keeps the last valid live frame when a malformed fraction arrives', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'invalid-fraction',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-progress']({ payload: {
+      id: 'invalid-fraction',
+      fraction: 0.4,
+      speed: '1 MB/s',
+      eta: '1s',
+      size: '1 MB',
+      size_is_final: false,
+      downloaded_bytes: 400
+    } });
+    handlers['download-progress']({ payload: {
+      id: 'invalid-fraction',
+      fraction: 2,
+      speed: '2 MB/s',
+      eta: '0s',
+      size: '1 MB',
+      size_is_final: false,
+      downloaded_bytes: 2000
+    } });
+
+    expect(useDownloadProgressStore.getState().progressMap['invalid-fraction'])
+      .toMatchObject({ fraction: 0.4, downloaded_bytes: 400 });
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      fraction: 0.4,
+      downloadedBytes: 400
+    });
+    release();
+  });
+
   it('projects native allocation events after admission and ignores stale generations', async () => {
     const handlers: Record<string, (event: any) => void> = {};
     vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {

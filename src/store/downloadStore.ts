@@ -2,6 +2,7 @@ import type { UnlistenFn } from '@tauri-apps/api/event';
 import type { DownloadStatus } from '../bindings/DownloadStatus';
 import { listenEvent as listen } from '../ipc';
 import type { DownloadItem } from '../bindings/DownloadItem';
+import type { DownloadProgressEvent } from '../bindings/DownloadProgressEvent';
 import { categoryForDownload } from '../utils/downloads';
 import { useDownloadProgressStore } from './downloadProgressStore';
 
@@ -33,6 +34,39 @@ type ProgressFields = {
 
 const finiteNonNegative = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0;
+
+const sanitizeProgressPayload = (
+  payload: DownloadProgressEvent,
+): DownloadProgressEvent | null => {
+  if (typeof payload.fraction !== 'number'
+    || !Number.isFinite(payload.fraction)
+    || payload.fraction < 0
+    || payload.fraction > 1) {
+    return null;
+  }
+
+  const sanitized = { ...payload };
+  const numericFields: Array<keyof DownloadProgressEvent> = [
+    'downloaded_bytes',
+    'total_bytes',
+    'active_connections',
+    'requested_connections',
+    'effective_connections',
+    'uploaded_bytes',
+    'num_seeders',
+    'torrent_seeded_seconds',
+  ];
+  for (const field of numericFields) {
+    if (sanitized[field] !== undefined && !finiteNonNegative(sanitized[field])) {
+      delete sanitized[field];
+    }
+  }
+  if (sanitized.total_is_estimate !== undefined
+    && typeof sanitized.total_is_estimate !== 'boolean') {
+    delete sanitized.total_is_estimate;
+  }
+  return sanitized;
+};
 
 const progressFields = (source: unknown): ProgressFields => {
   if (!source || typeof source !== 'object') return {};
@@ -133,51 +167,55 @@ const startDownloadListeners = async () => {
         useDownloadProgressStore.getState().clearDownloadProgress(payload.id);
         return;
       }
-      useDownloadProgressStore.getState().updateDownloadProgress(payload.id, payload);
-      const shouldUpdateSize = Boolean(payload.size && (!current.isMedia || payload.size_is_final));
+      const sanitizedPayload = sanitizeProgressPayload(payload);
+      if (!sanitizedPayload) {
+        return;
+      }
+      useDownloadProgressStore.getState().updateDownloadProgress(payload.id, sanitizedPayload);
+      const shouldUpdateSize = Boolean(sanitizedPayload.size && (!current.isMedia || sanitizedPayload.size_is_final));
       const updates: Partial<DownloadItem> = {};
       if (current.status === 'downloading' || current.status === 'processing' || current.status === 'verifying' || current.status === 'seeding') {
-        updates.fraction = payload.fraction;
+        updates.fraction = sanitizedPayload.fraction;
         updates.speed = current.status === 'seeding'
-          ? payload.upload_speed ?? '-'
-          : payload.speed;
-        updates.eta = current.status === 'seeding' ? '-' : payload.eta;
+          ? sanitizedPayload.upload_speed ?? '-'
+          : sanitizedPayload.speed;
+        updates.eta = current.status === 'seeding' ? '-' : sanitizedPayload.eta;
       }
-      if (shouldUpdateSize && current.size !== payload.size) {
-        updates.size = payload.size!;
+      if (shouldUpdateSize && current.size !== sanitizedPayload.size) {
+        updates.size = sanitizedPayload.size!;
       }
-      if (payload.downloaded_bytes !== null && payload.downloaded_bytes !== undefined) {
-        updates.downloadedBytes = payload.downloaded_bytes;
+      if (sanitizedPayload.downloaded_bytes !== null && sanitizedPayload.downloaded_bytes !== undefined) {
+        updates.downloadedBytes = sanitizedPayload.downloaded_bytes;
       }
-      if (payload.total_bytes !== null && payload.total_bytes !== undefined) {
-        updates.totalBytes = payload.total_bytes;
+      if (sanitizedPayload.total_bytes !== null && sanitizedPayload.total_bytes !== undefined) {
+        updates.totalBytes = sanitizedPayload.total_bytes;
       }
-      if (payload.total_is_estimate !== null && payload.total_is_estimate !== undefined) {
-        updates.totalIsEstimate = payload.total_is_estimate;
+      if (sanitizedPayload.total_is_estimate !== null && sanitizedPayload.total_is_estimate !== undefined) {
+        updates.totalIsEstimate = sanitizedPayload.total_is_estimate;
       }
       if (current.isTorrent) {
-        if (payload.uploaded_bytes !== null
-            && payload.uploaded_bytes !== undefined
-            && Number.isSafeInteger(payload.uploaded_bytes)
-            && payload.uploaded_bytes >= 0) {
-          updates.torrentUploadedBytes = payload.uploaded_bytes;
+        if (sanitizedPayload.uploaded_bytes !== null
+            && sanitizedPayload.uploaded_bytes !== undefined
+            && Number.isSafeInteger(sanitizedPayload.uploaded_bytes)
+            && sanitizedPayload.uploaded_bytes >= 0) {
+          updates.torrentUploadedBytes = sanitizedPayload.uploaded_bytes;
         }
-        if (payload.torrent_seeded_seconds !== null
-            && payload.torrent_seeded_seconds !== undefined
-            && Number.isSafeInteger(payload.torrent_seeded_seconds)
-            && payload.torrent_seeded_seconds >= 0) {
-          updates.torrentSeededSeconds = payload.torrent_seeded_seconds;
+        if (sanitizedPayload.torrent_seeded_seconds !== null
+            && sanitizedPayload.torrent_seeded_seconds !== undefined
+            && Number.isSafeInteger(sanitizedPayload.torrent_seeded_seconds)
+            && sanitizedPayload.torrent_seeded_seconds >= 0) {
+          updates.torrentSeededSeconds = sanitizedPayload.torrent_seeded_seconds;
         }
       }
       const observedDownloadedBytes = Math.max(
         current.downloadedBytes ?? 0,
-        payload.downloaded_bytes ?? 0
+        sanitizedPayload.downloaded_bytes ?? 0
       );
       // Older lifecycles may have persisted yt-dlp's temporary fragmented
       // estimate (often 1 KiB). Once actual bytes exceed it and the current
       // progress frame has no reliable total, discard that stale denominator
       // so it cannot survive a pause, queue transition, or app restart.
-      if (payload.total_bytes == null && hasStaleTemporaryMediaEstimate({
+      if (sanitizedPayload.total_bytes == null && hasStaleTemporaryMediaEstimate({
         isMedia: current.isMedia,
         downloadedBytes: observedDownloadedBytes,
         totalBytes: current.totalBytes,
@@ -375,14 +413,14 @@ const startDownloadListeners = async () => {
         ['ready', 'staged', 'paused', 'completed', 'failed'].includes(status);
       mainStore.updateDownload(payload.id, updates);
 
-      if (status === 'completed' || status === 'failed' || status === 'paused' || status === 'seeding' || status === 'waitingToSeed') {
-        useDownloadStore.setState(state => ({
-          pendingOrder: state.pendingOrder.filter(id => id !== payload.id)
-        }));
-      } else if (status === 'queued') {
+      if (status === 'queued') {
         useDownloadStore.setState(state => state.pendingOrder.includes(payload.id)
           ? {}
           : { pendingOrder: [...state.pendingOrder, payload.id] });
+      } else {
+        useDownloadStore.setState(state => ({
+          pendingOrder: state.pendingOrder.filter(id => id !== payload.id)
+        }));
       }
 
       if (status === 'queued' || status === 'downloading' || status === 'processing' || status === 'verifying' || status === 'seeding' || status === 'waitingToSeed' || status === 'retrying') {
