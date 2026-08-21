@@ -40,6 +40,24 @@ function compareVersions(left, right) {
   return 0;
 }
 
+function parseSha256Digest(value) {
+  const match = /^sha256:([0-9a-f]{64})$/i.exec(String(value || ''));
+  return match?.[1].toLowerCase();
+}
+
+function releaseAssetHashes(release) {
+  return Object.fromEntries(
+    (release?.assets || [])
+      .map(asset => {
+        const digest = parseSha256Digest(asset.digest);
+        return digest && typeof asset.browser_download_url === 'string'
+          ? [asset.browser_download_url, digest]
+          : undefined;
+      })
+      .filter(Boolean),
+  );
+}
+
 function npmOutdated(cwd) {
   if (!fs.existsSync(path.join(cwd, 'package.json'))) {
     throw new Error(`npm workspace is missing package.json: ${cwd}`);
@@ -155,15 +173,21 @@ async function latestBtbnFfmpegN81Build() {
           target: match[2] === 'win64' ? 'windows' : 'linux',
           version: match[1],
           url: asset.browser_download_url,
+          sha256: parseSha256Digest(asset.digest),
         };
       })
       .filter(Boolean);
     const unique = [...new Set(assets.map(asset => asset.version))];
     const byTarget = Object.fromEntries(assets.map(asset => [asset.target, asset]));
-    if (unique.length === 1 && byTarget.windows && byTarget.linux) {
+    if (
+      unique.length === 1 &&
+      byTarget.windows?.sha256 &&
+      byTarget.linux?.sha256
+    ) {
       return {
         version: unique[0],
         urls: { windows: byTarget.windows.url, linux: byTarget.linux.url },
+        hashes: { windows: byTarget.windows.sha256, linux: byTarget.linux.sha256 },
       };
     }
   }
@@ -187,7 +211,7 @@ function sourceEngineVersions(sourceLock) {
   const rows = [];
   for (const [target, engines] of Object.entries(sourceLock.targets || {})) {
     for (const [engine, meta] of Object.entries(engines)) {
-      rows.push({ target, engine, version: meta.version, url: meta.url });
+      rows.push({ target, engine, version: meta.version, url: meta.url, sha256: meta.sha256 });
     }
   }
   return rows;
@@ -197,7 +221,7 @@ function packagedEngineVersions(engineLock) {
   const rows = [];
   for (const [target, targetLock] of Object.entries(engineLock.targets || {})) {
     for (const [engine, meta] of Object.entries(targetLock.engines || {})) {
-      rows.push({ target, engine, version: meta.version, url: meta.url });
+      rows.push({ target, engine, version: meta.version, url: meta.url, sha256: meta.sha256 });
     }
   }
   return rows;
@@ -216,7 +240,9 @@ function checkRows(
   latestByEngine,
   latestByTargetEngine = {},
   latestUrlsByTargetEngine = {},
-  targetSpecificEngines = new Set()
+  targetSpecificEngines = new Set(),
+  latestHashesByTargetEngine = {},
+  latestHashesByUrl = {},
 ) {
   let outdated = 0;
   for (const row of rows) {
@@ -233,10 +259,20 @@ function checkRows(
     const latestUrl = latestUrlsByTargetEngine[targetKey];
     const versionOutdated = compareVersions(current, wanted) < 0;
     const sourceOutdated = Boolean(latestUrl && row.url && row.url !== latestUrl);
-    const status = versionOutdated ? 'outdated' : sourceOutdated ? 'source-outdated' : 'current';
+    const latestHash = latestHashesByTargetEngine[targetKey] || latestHashesByUrl[row.url];
+    const currentHash = typeof row.sha256 === 'string' ? row.sha256.toLowerCase() : '';
+    const hashOutdated = Boolean(latestHash && currentHash !== latestHash);
+    const status = versionOutdated
+      ? 'outdated'
+      : sourceOutdated
+        ? 'source-outdated'
+        : hashOutdated
+          ? 'hash-outdated'
+          : 'current';
     if (status !== 'current') outdated += 1;
     console.log(`  ${row.target} ${row.engine}: ${current} -> ${wanted} ${status}`);
     if (sourceOutdated) console.log(`    source: ${row.url} -> ${latestUrl}`);
+    if (hashOutdated) console.log(`    sha256: ${row.sha256 || 'missing'} -> ${latestHash}`);
   }
   return outdated;
 }
@@ -284,8 +320,14 @@ async function main() {
       'BtbN FFmpeg Windows/Linux build',
       async () => {
         const build = await latestBtbnFfmpegN81Build();
-        if (!build?.version || !build.urls?.windows || !build.urls?.linux) {
-          throw new Error('BtbN FFmpeg provider response has no complete Windows/Linux build');
+        if (
+          !build?.version ||
+          !build.urls?.windows ||
+          !build.urls?.linux ||
+          !build.hashes?.windows ||
+          !build.hashes?.linux
+        ) {
+          throw new Error('BtbN FFmpeg provider response has no complete Windows/Linux build with SHA-256 digests');
         }
         return build;
       },
@@ -317,11 +359,18 @@ async function main() {
   };
   const latestByTargetEngine = {};
   const latestUrlsByTargetEngine = {};
+  const latestHashesByTargetEngine = {};
+  const latestHashesByUrl = {
+    ...releaseAssetHashes(ytDlp),
+    ...releaseAssetHashes(deno),
+  };
   if (btbnFfmpegN81Build?.version && btbnFfmpegN81Build.urls?.windows && btbnFfmpegN81Build.urls?.linux) {
     latestByTargetEngine['x86_64-pc-windows-msvc:ffmpeg'] = btbnFfmpegN81Build.version;
     latestByTargetEngine['x86_64-unknown-linux-gnu:ffmpeg'] = btbnFfmpegN81Build.version;
     latestUrlsByTargetEngine['x86_64-pc-windows-msvc:ffmpeg'] = btbnFfmpegN81Build.urls.windows;
     latestUrlsByTargetEngine['x86_64-unknown-linux-gnu:ffmpeg'] = btbnFfmpegN81Build.urls.linux;
+    latestHashesByTargetEngine['x86_64-pc-windows-msvc:ffmpeg'] = btbnFfmpegN81Build.hashes?.windows;
+    latestHashesByTargetEngine['x86_64-unknown-linux-gnu:ffmpeg'] = btbnFfmpegN81Build.hashes?.linux;
   }
   if (martinRiedlMacArm64Snapshot?.version && martinRiedlMacArm64Snapshot.url) {
     latestByTargetEngine['aarch64-apple-darwin:ffmpeg'] = martinRiedlMacArm64Snapshot.version;
@@ -346,7 +395,9 @@ async function main() {
         latestByEngine,
         latestByTargetEngine,
         latestUrlsByTargetEngine,
-        targetSpecificEngines
+        targetSpecificEngines,
+        latestHashesByTargetEngine,
+        latestHashesByUrl,
       );
     } catch (error) {
       if (error?.code !== 'LATEST_VERSION_UNAVAILABLE') throw error;

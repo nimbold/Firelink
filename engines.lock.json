@@ -4,10 +4,10 @@
     "aarch64-apple-darwin": {
       "engines": {
         "yt-dlp": {
-          "version": "2026.07.04",
+          "version": "2026.08.19",
           "source": "https://github.com/yt-dlp/yt-dlp",
           "build": "PyInstaller onedir distribution with embedded Python and yt_dlp_ejs",
-          "sha256": "ff7d4fc44b8fbf42da021c1bca950da0326cdb0cdb84992fdc7fb7ec215df435"
+          "sha256": "4f54eb67e4e96c7c3ffa49dd5deb81bc348bbb495080889b47d157d5c6d74443"
         },
         "aria2c": {
           "version": "1.37.0",
@@ -31,8 +31,8 @@
       },
       "runtimeTrees": {
         "_internal": {
-          "files": 142,
-          "sha256": "769507d9b8d97164ef81ebb449873072697bf82acac8c7d61c7bfd96c551e210"
+          "files": 133,
+          "sha256": "24ac8c7557dbef0ef9e5685365b4620bc441a168daf314b71218276b782dc449"
         },
         "aria2-libs": {
           "files": 7,

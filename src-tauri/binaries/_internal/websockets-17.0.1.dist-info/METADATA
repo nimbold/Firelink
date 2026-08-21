@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: websockets
-Version: 16.0
+Version: 17.0.1
 Summary: An implementation of the WebSocket Protocol (RFC 6455 & 7692)
 Author-email: Aymeric Augustin <aymeric.augustin@m4x.org>
 License-Expression: BSD-3-Clause
@@ -16,12 +16,12 @@ Classifier: Intended Audience :: Developers
 Classifier: Operating System :: OS Independent
 Classifier: Programming Language :: Python
 Classifier: Programming Language :: Python :: 3
-Classifier: Programming Language :: Python :: 3.10
 Classifier: Programming Language :: Python :: 3.11
 Classifier: Programming Language :: Python :: 3.12
 Classifier: Programming Language :: Python :: 3.13
 Classifier: Programming Language :: Python :: 3.14
-Requires-Python: >=3.10
+Classifier: Programming Language :: Python :: 3.15
+Requires-Python: >=3.11
 Description-Content-Type: text/x-rst
 License-File: LICENSE
 Dynamic: description
@@ -32,7 +32,7 @@ Dynamic: license-file
    :width: 480px
    :alt: websockets
 
-|licence| |version| |pyversions| |tests| |docs| |openssf|
+|licence| |version| |pyversions|
 
 .. |licence| image:: https://img.shields.io/pypi/l/websockets.svg
     :target: https://pypi.python.org/pypi/websockets
@@ -42,15 +42,6 @@ Dynamic: license-file
 
 .. |pyversions| image:: https://img.shields.io/pypi/pyversions/websockets.svg
     :target: https://pypi.python.org/pypi/websockets
-
-.. |tests| image:: https://img.shields.io/github/checks-status/python-websockets/websockets/main?label=tests
-   :target: https://github.com/python-websockets/websockets/actions/workflows/tests.yml
-
-.. |docs| image:: https://img.shields.io/readthedocs/websockets.svg
-   :target: https://websockets.readthedocs.io/
-
-.. |openssf| image:: https://bestpractices.coreinfrastructure.org/projects/6475/badge
-   :target: https://bestpractices.coreinfrastructure.org/projects/6475
 
 What is ``websockets``?
 -----------------------
@@ -63,8 +54,8 @@ with a focus on correctness, simplicity, robustness, and performance.
 Built on top of ``asyncio``, Python's standard asynchronous I/O framework, the
 default implementation provides an elegant coroutine-based API.
 
-An implementation on top of ``threading`` and a Sans-I/O implementation are also
-available.
+Implementations on top of ``threading`` and ``trio`` are also provided, as well
+as a Sans-I/O layer for integration in third-party projects.
 
 `Documentation is available on Read the Docs. <https://websockets.readthedocs.io/>`_
 
@@ -84,8 +75,8 @@ Here's an echo server with the ``asyncio`` API:
             await websocket.send(message)
 
     async def main():
-        async with serve(echo, "localhost", 8765) as server:
-            await server.serve_forever()
+        server = await serve(echo, "localhost", 8765)
+        await server.serve_forever()
 
     asyncio.run(main())
 

@@ -65,3 +65,23 @@ test('checkRows does not fall back to the generic release for target-specific en
     /Latest provider version is unavailable for test-target ffmpeg/
   );
 });
+
+test('checkRows detects a provider hash change when version and URL are current', () => {
+  const outdated = checkRows(
+    [{
+      target: 'test-target',
+      engine: 'test-engine',
+      version: '1.0.0',
+      url: 'https://example.test/engine',
+      sha256: 'a'.repeat(64),
+    }],
+    { 'test-engine': '1.0.0' },
+    {},
+    {},
+    new Set(),
+    {},
+    { 'https://example.test/engine': 'b'.repeat(64) },
+  );
+
+  assert.equal(outdated, 1);
+});
