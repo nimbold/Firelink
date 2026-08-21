@@ -98,6 +98,10 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: src-tauri
         run: cargo test --lib --no-run --target ${{ matrix.target }}
+      - name: Run Windows headless production contracts
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        run: cargo test --test production_contract --target ${{ matrix.target }} -- --nocapture
       - name: Verify Windows atomic Torrent storage
         if: runner.os == 'Windows'
         working-directory: src-tauri

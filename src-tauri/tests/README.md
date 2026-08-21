@@ -54,4 +54,7 @@ Native CI runs this failure-path smoke after staging the target-specific
 bundled engines on macOS, Windows, and Linux. Windows executes the Torrent RPC,
 atomic-storage, canonical-cache, and web-seed normalization targets, while
 compiling (but not executing) the queue-manager and library test binaries;
-the Tauri mock harness exits before running on the Windows runner.
+the Tauri mock harness exits before running on the Windows runner. The
+headless `production_contract` target still executes queue admission,
+normalization, credential-boundary, and retry contracts on Windows without
+constructing a Tauri mock application.
