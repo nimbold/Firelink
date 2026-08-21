@@ -5,10 +5,28 @@ import type { PropertiesDiagnosticPhase } from '../propertiesBridge';
 
 export type PropertiesDiagnosticValueState = 'live' | 'loading' | 'stale' | 'error' | 'unavailable';
 
+const isValidDiagnosticCount = (value: number | undefined): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+
 export const formatPropertiesDiagnosticCount = (value: number, locale: string): string => {
-  if (!Number.isSafeInteger(value) || value < 0) return '—';
+  if (!isValidDiagnosticCount(value)) return '—';
   return new Intl.NumberFormat(resolveAppLocale(locale)).format(value);
 };
+
+export const hasTorrentPeerCountDifference = (
+  connectedPeers: number | undefined,
+  connectedSeeders: number | undefined,
+  listedPeers: number,
+  listedSeeders: number,
+): boolean => (
+  isValidDiagnosticCount(connectedPeers)
+  && isValidDiagnosticCount(listedPeers)
+  && connectedPeers !== listedPeers
+) || (
+  isValidDiagnosticCount(connectedSeeders)
+  && isValidDiagnosticCount(listedSeeders)
+  && connectedSeeders !== listedSeeders
+);
 
 export const hasLiveTorrentPeerWithoutDetails = (
   connectedPeers: number | undefined,

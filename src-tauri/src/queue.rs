@@ -6978,8 +6978,8 @@ pub(crate) fn parse_torrent_availability(
 }
 
 struct TorrentPeerCounts {
-    total_peers: u32,
-    total_seeders: u32,
+    listed_peers: u32,
+    listed_seeders: u32,
 }
 
 fn torrent_peer_counts_from_array(
@@ -7001,8 +7001,8 @@ fn torrent_peer_counts_from_array(
         }
     }
     Ok(TorrentPeerCounts {
-        total_peers: u32::try_from(peers.len()).unwrap_or(u32::MAX),
-        total_seeders,
+        listed_peers: u32::try_from(peers.len()).unwrap_or(u32::MAX),
+        listed_seeders: total_seeders,
     })
 }
 
@@ -7032,8 +7032,8 @@ pub(crate) fn parse_torrent_peer_diagnostics(
     }
 
     Ok(crate::ipc::TorrentPeerDiagnostics {
-        total_peers: summary.total_peers,
-        total_seeders: summary.total_seeders,
+        listed_peers: summary.listed_peers,
+        listed_seeders: summary.listed_seeders,
         peers: sanitized,
         truncated: peers.len() > MAX_TORRENT_PEER_DIAGNOSTICS,
     })
@@ -10035,8 +10035,8 @@ mod tests {
         }));
 
         let diagnostics = parse_torrent_peer_diagnostics(serde_json::Value::Array(result)).unwrap();
-        assert_eq!(diagnostics.total_peers, (MAX_TORRENT_PEER_DIAGNOSTICS + 2) as u32);
-        assert_eq!(diagnostics.total_seeders, 2);
+        assert_eq!(diagnostics.listed_peers, (MAX_TORRENT_PEER_DIAGNOSTICS + 2) as u32);
+        assert_eq!(diagnostics.listed_seeders, 2);
         assert_eq!(diagnostics.peers.len(), MAX_TORRENT_PEER_DIAGNOSTICS);
         assert!(diagnostics.truncated);
         assert_eq!(diagnostics.peers[0].ip.as_deref(), Some("192.0.2.10"));

@@ -340,9 +340,9 @@ pub struct TorrentPeer {
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct TorrentPeerDiagnostics {
     #[ts(type = "number")]
-    pub total_peers: u32,
+    pub listed_peers: u32,
     #[ts(type = "number")]
-    pub total_seeders: u32,
+    pub listed_seeders: u32,
     pub peers: Vec<TorrentPeer>,
     pub truncated: bool,
 }

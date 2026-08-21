@@ -868,7 +868,7 @@ html[data-list-density="relaxed"] {
     text-overflow: clip;
   }
 
-  .properties-metric-card .properties-torrent-peer-count-primary {
+  .properties-metric-card .properties-torrent-peer-count-connected {
     color: hsl(var(--accent-color));
   }
 
@@ -1062,6 +1062,10 @@ html[data-list-density="relaxed"] {
     font-variant-numeric: tabular-nums;
     font-weight: 650;
     line-height: 1.25;
+  }
+
+  .properties-diagnostic-value--secondary {
+    color: hsl(var(--text-primary));
   }
 
   .properties-diagnostic-hint {

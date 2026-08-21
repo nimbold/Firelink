@@ -4,12 +4,13 @@ import {
   formatPropertiesDiagnosticCount,
   getPropertiesAvailabilityDiagnosticState,
   getPropertiesPeerDiagnosticState,
+  hasTorrentPeerCountDifference,
   hasLiveTorrentPeerWithoutDetails,
 } from './propertiesDiagnostics';
 
 const emptyPeerDiagnostics = {
-  totalPeers: 0,
-  totalSeeders: 0,
+  listedPeers: 0,
+  listedSeeders: 0,
   peers: [],
   truncated: false,
 };
@@ -27,6 +28,15 @@ describe('Properties peer diagnostics presentation state', () => {
     expect(formatPropertiesDiagnosticCount(1234, 'fa')).toBe(new Intl.NumberFormat('fa').format(1234));
     expect(formatPropertiesDiagnosticCount(-1, 'en-US')).toBe('—');
     expect(formatPropertiesDiagnosticCount(Number.MAX_SAFE_INTEGER + 1, 'en-US')).toBe('—');
+  });
+
+  it('identifies when the connected telemetry differs from the listed peer response', () => {
+    expect(hasTorrentPeerCountDifference(38, 2, 5, 2)).toBe(true);
+    expect(hasTorrentPeerCountDifference(5, 2, 5, 2)).toBe(false);
+    expect(hasTorrentPeerCountDifference(undefined, 2, 5, 2)).toBe(false);
+    expect(hasTorrentPeerCountDifference(38, 2, 5, 1)).toBe(true);
+    expect(hasTorrentPeerCountDifference(Number.NaN, 2, 5, 2)).toBe(false);
+    expect(hasTorrentPeerCountDifference(38, 2, Number.POSITIVE_INFINITY, 2)).toBe(false);
   });
 
   it('keeps a genuine empty response live instead of treating it as unavailable', () => {
