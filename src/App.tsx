@@ -41,6 +41,7 @@ import { useTranslation } from 'react-i18next';
 import { formatDownloadBytes } from './utils/downloadProgress';
 import { synchronizeDocumentAppearance } from './utils/documentAppearance';
 import { createMainWindowSizePersistence } from './utils/mainWindowState';
+import { createSidebarResizeSession } from './utils/sidebarResize';
 import type { MainWindowSize } from './bindings/MainWindowSize';
 import { beginSchedulerControl, isSchedulerControlCurrent } from './utils/schedulerControl';
 import { createSerialTaskQueue } from './utils/serialTaskQueue';
@@ -194,6 +195,9 @@ function App() {
     const stored = Number(window.localStorage.getItem('firelink-sidebar-width'));
     return Number.isFinite(stored) && stored >= 190 && stored <= 260 ? stored : 220;
   });
+  const sidebarResizeCleanupRef = useRef<(() => void) | null>(null);
+  const sidebarRevealRef = useRef<HTMLButtonElement>(null);
+  const restoreSidebarFocusRef = useRef(false);
 
   const theme = useSettingsStore(state => state.theme);
   const windowControlStylePreference = useSettingsStore(state => state.windowControlStyle);
@@ -432,27 +436,45 @@ function App() {
   }, [addToast, clearPendingPostActionTimer, removeToast, t]);
 
   const startSidebarResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    sidebarResizeCleanupRef.current?.();
     event.preventDefault();
-    const startX = event.clientX;
-    const startWidth = sidebarWidth;
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is best-effort; the session still listens on window.
+    }
+    const cleanup = createSidebarResizeSession({
+      windowTarget: window,
+      body: document.body,
+      captureTarget: event.currentTarget,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: sidebarWidth,
+      isRight: isSidebarOnRight,
+      onWidth: setSidebarWidth,
+    });
+    sidebarResizeCleanupRef.current = cleanup;
+  };
 
-    const handlePointerMove = (moveEvent: PointerEvent) => {
-      const delta = isSidebarOnRight
-        ? startX - moveEvent.clientX
-        : moveEvent.clientX - startX;
-      const nextWidth = Math.min(260, Math.max(190, startWidth + delta));
-      setSidebarWidth(nextWidth);
-    };
+  useEffect(() => () => {
+    sidebarResizeCleanupRef.current?.();
+  }, []);
 
-    const handlePointerUp = () => {
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', handlePointerUp);
-      document.body.classList.remove('is-resizing');
-    };
+  useEffect(() => {
+    if (isSidebarVisible) return;
+    if (restoreSidebarFocusRef.current) {
+      restoreSidebarFocusRef.current = false;
+      sidebarRevealRef.current?.focus({ preventScroll: true });
+    }
+  }, [isSidebarVisible]);
 
-    document.body.classList.add('is-resizing');
-    window.addEventListener('pointermove', handlePointerMove);
-    window.addEventListener('pointerup', handlePointerUp);
+  const handleSidebarToggle = () => {
+    if (isSidebarVisible) {
+      const activeElement = document.activeElement;
+      restoreSidebarFocusRef.current = activeElement instanceof HTMLElement
+        && Boolean(activeElement.closest('.app-sidebar-shell'));
+    }
+    toggleSidebar();
   };
 
   useEffect(() => {
@@ -1161,6 +1183,8 @@ function App() {
         } ${
           isSidebarVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
+        aria-hidden={!isSidebarVisible}
+        inert={!isSidebarVisible}
         style={{ 
           width: sidebarWidth,
           marginInlineStart: isSidebarVisible || isSidebarOnRight ? 0 : -sidebarWidth,
@@ -1173,6 +1197,7 @@ function App() {
         >
           <Sidebar
             selectedFilter={filter}
+            onToggleSidebar={handleSidebarToggle}
             onSelectFilter={(f) => {
               setFilter(f);
               useSettingsStore.getState().setActiveView('downloads');
@@ -1196,6 +1221,7 @@ function App() {
         {!isSidebarVisible && (
           <button
             type="button"
+            ref={sidebarRevealRef}
             onClick={toggleSidebar}
             className="app-icon-button app-sidebar-reveal-button h-7 w-7"
             title={t($ => $.actions.showSidebar)}

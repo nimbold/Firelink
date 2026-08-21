@@ -19,11 +19,12 @@ export type SidebarFilter = 'all' | 'active' | 'completed' | 'unfinished' | Down
 
 interface SidebarProps {
   selectedFilter: SidebarFilter;
+  onToggleSidebar?: () => void;
   onSelectFilter: (filter: SidebarFilter) => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = (props) => {
-  const { selectedFilter, onSelectFilter } = props;
+  const { selectedFilter, onToggleSidebar, onSelectFilter } = props;
   const { downloads, queues, addQueue, renameQueue, removeQueue, startQueue, pauseQueue, setQueueConcurrency } = useDownloadStore();
   const {
     activeView,
@@ -44,6 +45,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
   const [contextMenuPosition, setContextMenuPosition] = useState<{ x: number; y: number } | null>(null);
   const foldersToggleRef = useRef<HTMLButtonElement>(null);
   const foldersListRef = useRef<HTMLDivElement>(null);
+  const contextMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const addInputRef = useRef<HTMLInputElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -95,6 +97,21 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
       window.removeEventListener('resize', updateContextMenuPosition);
     };
   }, [contextMenu, queues, i18n.language]);
+
+  useEffect(() => {
+    if (!contextMenu) {
+      const trigger = contextMenuTriggerRef.current;
+      if (trigger?.isConnected && document.activeElement === document.body) {
+        trigger.focus({ preventScroll: true });
+      }
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      contextMenuRef.current?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [contextMenu]);
 
   useEffect(() => {
     const handleCloseMenu = () => setContextMenu(null);
@@ -196,11 +213,24 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
     );
   };
 
-  const handleQueueContextMenu = (e: React.MouseEvent, id: string) => {
+  const openQueueContextMenu = (id: string, x: number, y: number, trigger?: HTMLButtonElement) => {
+    if (trigger) contextMenuTriggerRef.current = trigger;
+    setContextMenuPosition(null);
+    setContextMenu({ x, y, id });
+  };
+
+  const handleQueueContextMenu = (e: React.MouseEvent<HTMLButtonElement>, id: string) => {
     e.preventDefault();
     e.stopPropagation();
-    setContextMenuPosition(null);
-    setContextMenu({ x: e.clientX, y: e.clientY, id });
+    openQueueContextMenu(id, e.clientX, e.clientY, e.currentTarget);
+  };
+
+  const handleQueueKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>, id: string) => {
+    if (e.key !== 'ContextMenu' && !(e.key === 'F10' && e.shiftKey)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = e.currentTarget.getBoundingClientRect();
+    openQueueContextMenu(id, rect.left, rect.bottom, e.currentTarget);
   };
 
   const handleAddQueueSubmit = (trigger: 'submit' | 'blur' = 'submit') => {
@@ -320,6 +350,8 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
         data-active={isSelected}
         data-sidebar-queue-id={queue.id}
         onContextMenu={e => handleQueueContextMenu(e, queue.id)}
+        onKeyDown={e => handleQueueKeyDown(e, queue.id)}
+        aria-keyshortcuts="Shift+F10"
         onClick={() => onSelectFilter(filterId)}
         className="sidebar-nav-item group flex w-full items-center text-[13px] text-start cursor-default font-medium"
       >
@@ -356,7 +388,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
 
         <button
           type="button"
-          onClick={toggleSidebar}
+          onClick={onToggleSidebar ?? toggleSidebar}
           className="sidebar-toggle-button"
           title={t($ => $.actions.hideSidebar)}
         >
@@ -479,6 +511,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
       {contextMenu && createPortal(
         <div
           role="menu"
+          id="sidebar-queue-context-menu"
           ref={contextMenuRef}
           className="fixed z-[70] w-48 py-1 rounded-xl shadow-lg border border-border-modal bg-bg-context-menu backdrop-blur-xl animate-fade-in text-[13px] text-text-primary overflow-hidden"
           style={{
