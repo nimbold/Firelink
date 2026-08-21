@@ -34,7 +34,7 @@ import {
   sendPropertiesSnapshot,
   shouldAcceptPropertiesActionRequest,
 } from './propertiesBridge';
-import { copyEditablePropertiesPatch } from './components/PropertiesWindowBridgeHost';
+import { copyEditablePropertiesPatch, isLivePropertiesPatch } from './components/PropertiesWindowBridgeHost';
 
 describe('Properties window bridge', () => {
   it('keeps optional override resets explicit across the JSON IPC boundary', () => {
@@ -413,6 +413,41 @@ describe('Properties window bridge', () => {
       isTorrent: false,
       status: 'queued',
     })).toThrow('read-only');
+  });
+
+  it('allows only native live controls for active Properties saves', () => {
+    expect(isLivePropertiesPatch(
+      { isMedia: false, isTorrent: false, status: 'downloading' },
+      { speedLimit: '2M' },
+    )).toBe(true);
+    expect(isLivePropertiesPatch(
+      { isMedia: false, isTorrent: true, status: 'seeding' },
+      { torrentUploadLimit: '1M', torrentMaxPeers: 120, torrentPeerSpeedLimit: '256K' },
+    )).toBe(true);
+    expect(isLivePropertiesPatch(
+      { isMedia: false, isTorrent: true, status: 'seeding' },
+      { speedLimit: '2M' },
+    )).toBe(false);
+    expect(isLivePropertiesPatch(
+      { isMedia: false, isTorrent: true, status: 'verifying' },
+      { torrentUploadLimit: '1M' },
+    )).toBe(false);
+    expect(isLivePropertiesPatch(
+      { isMedia: false, isTorrent: true, status: 'waitingToSeed' },
+      { torrentMaxPeers: 120 },
+    )).toBe(false);
+    expect(isLivePropertiesPatch(
+      { isMedia: false, isTorrent: true, status: 'downloading' },
+      { torrentTrackers: 'https://tracker.example/announce' },
+    )).toBe(false);
+    expect(isLivePropertiesPatch(
+      { isMedia: true, isTorrent: false, status: 'downloading' },
+      { speedLimit: '2M' },
+    )).toBe(false);
+    expect(isLivePropertiesPatch(
+      { isMedia: false, isTorrent: false, status: 'paused' },
+      { speedLimit: '2M' },
+    )).toBe(false);
   });
 
   it('keeps Torrent peer-cap telemetry distinct from generic connections', () => {

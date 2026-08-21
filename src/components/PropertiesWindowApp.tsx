@@ -73,6 +73,8 @@ const isTorrentDiagnosticsStatus = (status: string) =>
 const isTorrentPollingStatus = isTorrentLiveStatus;
 
 const isEditableStatus = (status: string) => !['downloading', 'processing', 'verifying', 'seeding', 'waitingToSeed', 'retrying', 'moving'].includes(status);
+const isLiveNormalSpeedStatus = (status: string) => ['downloading', 'retrying'].includes(status);
+const isLiveTorrentControlStatus = (status: string) => ['downloading', 'seeding', 'retrying'].includes(status);
 
 const isTorrentFileSelectionEditable = (status: string) =>
   ['ready', 'staged', 'queued', 'paused', 'failed'].includes(status);
@@ -932,7 +934,15 @@ export const PropertiesWindowApp = () => {
   };
 
   const applyActiveTab = useCallback(async () => {
-    if (!snapshot || !isEditableStatus(snapshot.status)) {
+    if (!snapshot) return;
+    const canApplyLiveNormalSpeed = snapshot.isMedia !== true
+      && snapshot.isTorrent !== true
+      && isLiveNormalSpeedStatus(snapshot.status);
+    const canApplyLiveTorrentOptions = snapshot.isTorrent === true
+      && isLiveTorrentControlStatus(snapshot.status);
+    if (!isEditableStatus(snapshot.status)
+      && !((activeTab === 'transfer' && canApplyLiveNormalSpeed)
+        || (activeTab === 'options' && canApplyLiveTorrentOptions))) {
       closeAfterSaveRef.current = false;
       switchAfterSaveRef.current = null;
       setErrorMessage(t($ => $.properties.editingUnavailable));
@@ -982,13 +992,16 @@ export const PropertiesWindowApp = () => {
         patch.torrentTrackerInterval = encodePropertiesPatchValue(trackerInterval.trim() ? Number(trackerInterval) : undefined);
       }
     } else if (activeTab === 'options' || activeTab === 'transfer') {
-      if (downloadLimit !== (snapshot.speedLimit ?? '')) patch.speedLimit = encodePropertiesPatchValue(downloadLimit.trim() ? downloadLimit : undefined);
-      if (activeTab === 'transfer' && !isTorrent && connections.trim()) {
+      const canApplyLiveTorrentSpeed = !isTorrent || isLiveNormalSpeedStatus(snapshot.status);
+      if (downloadLimit !== (snapshot.speedLimit ?? '') && canApplyLiveTorrentSpeed) {
+        patch.speedLimit = encodePropertiesPatchValue(downloadLimit.trim() ? downloadLimit : undefined);
+      }
+      if (isEditableStatus(snapshot.status) && activeTab === 'transfer' && !isTorrent && connections.trim()) {
         const nextConnections = Number(connections);
         if (nextConnections !== snapshot.connections) patch.connections = nextConnections;
       }
       if (isTorrent) {
-        if (removeUnselectedFile && (!snapshot.torrentFileIndices || snapshot.torrentFileIndices.length === 0)) {
+        if (isEditableStatus(snapshot.status) && removeUnselectedFile && (!snapshot.torrentFileIndices || snapshot.torrentFileIndices.length === 0)) {
           setErrorMessage(t($ => $.properties.torrentRemoveUnselectedFileSelectionRequired));
           closeAfterSaveRef.current = false;
           switchAfterSaveRef.current = null;
@@ -999,22 +1012,24 @@ export const PropertiesWindowApp = () => {
           patch.torrentMaxPeers = encodePropertiesPatchValue(maxPeers.trim() ? Number(maxPeers) : undefined);
         }
         if (peerSpeedLimit !== (snapshot.torrentPeerSpeedLimit ?? '')) patch.torrentPeerSpeedLimit = encodePropertiesPatchValue(peerSpeedLimit.trim() ? peerSpeedLimit : undefined);
-        if (seedTime !== String(snapshot.torrentSeedTime ?? '')) {
-          patch.torrentSeedTime = encodePropertiesPatchValue(seedTime.trim() ? Number(seedTime) : undefined);
+        if (isEditableStatus(snapshot.status)) {
+          if (seedTime !== String(snapshot.torrentSeedTime ?? '')) {
+            patch.torrentSeedTime = encodePropertiesPatchValue(seedTime.trim() ? Number(seedTime) : undefined);
+          }
+          if (seedRatio !== String(snapshot.torrentSeedRatio ?? '')) {
+            patch.torrentSeedRatio = encodePropertiesPatchValue(seedRatio.trim() ? Number(seedRatio) : undefined);
+          }
+          if (checkIntegrity !== (snapshot.torrentCheckIntegrity === true)) patch.torrentCheckIntegrity = checkIntegrity;
+          if (removeUnselectedFile !== (snapshot.torrentRemoveUnselectedFile === true)) patch.torrentRemoveUnselectedFile = removeUnselectedFile;
+          if (stopTimeout !== String(snapshot.torrentStopTimeout ?? '')) {
+            patch.torrentStopTimeout = encodePropertiesPatchValue(stopTimeout.trim() ? Number(stopTimeout) : undefined);
+          }
+          if (prioritizePiece !== (snapshot.torrentPrioritizePiece ?? '')) patch.torrentPrioritizePiece = encodePropertiesPatchValue(prioritizePiece.trim() || undefined);
+          const nextEncryptionPolicy = encryptionPolicy || undefined;
+          if (nextEncryptionPolicy !== snapshot.torrentEncryptionPolicy) patch.torrentEncryptionPolicy = encodePropertiesPatchValue(nextEncryptionPolicy);
+          const nextFileAllocation = fileAllocation || undefined;
+          if (nextFileAllocation !== snapshot.torrentFileAllocation) patch.torrentFileAllocation = encodePropertiesPatchValue(nextFileAllocation);
         }
-        if (seedRatio !== String(snapshot.torrentSeedRatio ?? '')) {
-          patch.torrentSeedRatio = encodePropertiesPatchValue(seedRatio.trim() ? Number(seedRatio) : undefined);
-        }
-        if (checkIntegrity !== (snapshot.torrentCheckIntegrity === true)) patch.torrentCheckIntegrity = checkIntegrity;
-        if (removeUnselectedFile !== (snapshot.torrentRemoveUnselectedFile === true)) patch.torrentRemoveUnselectedFile = removeUnselectedFile;
-        if (stopTimeout !== String(snapshot.torrentStopTimeout ?? '')) {
-          patch.torrentStopTimeout = encodePropertiesPatchValue(stopTimeout.trim() ? Number(stopTimeout) : undefined);
-        }
-        if (prioritizePiece !== (snapshot.torrentPrioritizePiece ?? '')) patch.torrentPrioritizePiece = encodePropertiesPatchValue(prioritizePiece.trim() || undefined);
-        const nextEncryptionPolicy = encryptionPolicy || undefined;
-        if (nextEncryptionPolicy !== snapshot.torrentEncryptionPolicy) patch.torrentEncryptionPolicy = encodePropertiesPatchValue(nextEncryptionPolicy);
-        const nextFileAllocation = fileAllocation || undefined;
-        if (nextFileAllocation !== snapshot.torrentFileAllocation) patch.torrentFileAllocation = encodePropertiesPatchValue(nextFileAllocation);
       }
     } else if (activeTab === 'advanced') {
       if (isSftp && sftpHostKeyMd !== (snapshot.sftpHostKeyMd ?? '')) {
@@ -1132,6 +1147,14 @@ export const PropertiesWindowApp = () => {
   }
 
   const editingEnabled = pendingAction === null && isEditableStatus(snapshot.status);
+  const liveNormalSpeedEnabled = pendingAction === null
+    && snapshot.isMedia !== true
+    && snapshot.isTorrent !== true
+    && isLiveNormalSpeedStatus(snapshot.status);
+  const liveTorrentOptionsEnabled = pendingAction === null
+    && snapshot.isTorrent === true
+    && isLiveTorrentControlStatus(snapshot.status);
+  const liveTorrentSpeedEnabled = liveTorrentOptionsEnabled && isLiveNormalSpeedStatus(snapshot.status);
   const identityEditingEnabled = editingEnabled && !isTorrent && ['ready', 'staged'].includes(snapshot.status);
   const torrentMoveAvailable = ['paused', 'completed', 'failed'].includes(snapshot.status);
   const progress = getPropertiesProgress(snapshot);
@@ -1498,12 +1521,12 @@ export const PropertiesWindowApp = () => {
           <PropertiesField
             label={t($ => $.properties.speedCap)}
             controlId="properties-transfer-speed-cap"
-            hint={t($ => $.properties.speedLimitHint)}
+            hint={liveNormalSpeedEnabled ? t($ => $.properties.liveSpeedLimitHint) : t($ => $.properties.speedLimitHint)}
             meta={downloadLimit.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
             className="max-w-sm"
             format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatSpeedLimit) })}
           >
-            <input id="properties-transfer-speed-cap" className="app-control w-full" value={downloadLimit} onChange={event => { setDownloadLimit(event.target.value); setDraftTab('transfer'); }} placeholder={t($ => $.properties.inputExampleSpeedLimit)} disabled={!editingEnabled} />
+            <input id="properties-transfer-speed-cap" className="app-control w-full" value={downloadLimit} onChange={event => { setDownloadLimit(event.target.value); setDraftTab('transfer'); }} placeholder={t($ => $.properties.inputExampleSpeedLimit)} disabled={!(editingEnabled || liveNormalSpeedEnabled)} />
           </PropertiesField>
           <PropertiesField
             label={connectionControlLabel}
@@ -1524,18 +1547,18 @@ export const PropertiesWindowApp = () => {
             <div className="properties-option-group-heading">
               <div>
                 <h2 id="properties-options-limits-heading">{t($ => $.properties.liveTorrentPeerOptions)}</h2>
-                <p>{t($ => $.properties.speedLimitHint)}</p>
+                <p>{t($ => $.properties.liveTorrentPeerOptionsHint)}</p>
               </div>
             </div>
             <div className="grid max-w-4xl gap-4 sm:grid-cols-2">
               <PropertiesField
                 label={t($ => $.properties.speedCap)}
                 controlId="properties-options-speed-cap"
-                hint={t($ => $.properties.speedLimitHint)}
+                hint={liveTorrentSpeedEnabled ? t($ => $.properties.liveSpeedLimitHint) : t($ => $.properties.speedLimitHint)}
                 meta={downloadLimit.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
                 format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatSpeedLimit) })}
               >
-                <input id="properties-options-speed-cap" className="app-control w-full" value={downloadLimit} onChange={event => { setDownloadLimit(event.target.value); setDraftTab('options'); }} placeholder={t($ => $.properties.inputExampleSpeedLimit)} disabled={!editingEnabled} />
+                <input id="properties-options-speed-cap" className="app-control w-full" value={downloadLimit} onChange={event => { setDownloadLimit(event.target.value); setDraftTab('options'); }} placeholder={t($ => $.properties.inputExampleSpeedLimit)} disabled={!(editingEnabled || liveTorrentSpeedEnabled)} />
               </PropertiesField>
               <PropertiesField
                 label={t($ => $.properties.liveTorrentUploadLimit)}
@@ -1544,7 +1567,7 @@ export const PropertiesWindowApp = () => {
                 meta={uploadLimit.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
                 format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatSpeedLimit) })}
               >
-                <input id="properties-options-upload-limit" className="app-control w-full" value={uploadLimit} onChange={event => { setUploadLimit(event.target.value); setDraftTab('options'); }} placeholder={t($ => $.properties.inputExampleSpeedLimit)} disabled={!editingEnabled} />
+                <input id="properties-options-upload-limit" className="app-control w-full" value={uploadLimit} onChange={event => { setUploadLimit(event.target.value); setDraftTab('options'); }} placeholder={t($ => $.properties.liveTorrentUploadLimitPlaceholder)} disabled={!(editingEnabled || liveTorrentOptionsEnabled)} />
               </PropertiesField>
               <PropertiesField
                 label={t($ => $.properties.torrentMaxPeers)}
@@ -1553,7 +1576,7 @@ export const PropertiesWindowApp = () => {
                 meta={maxPeers.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
                 format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatMaxPeers) })}
               >
-                <input id="properties-options-max-peers" className="app-control w-full" value={maxPeers} onChange={event => { setMaxPeers(event.target.value); setDraftTab('options'); }} inputMode="numeric" placeholder={t($ => $.properties.inputExampleMaxPeers)} disabled={!editingEnabled} />
+                <input id="properties-options-max-peers" className="app-control w-full" value={maxPeers} onChange={event => { setMaxPeers(event.target.value); setDraftTab('options'); }} inputMode="numeric" placeholder={t($ => $.properties.inputExampleMaxPeers)} disabled={!(editingEnabled || liveTorrentOptionsEnabled)} />
               </PropertiesField>
               <PropertiesField
                 label={t($ => $.properties.torrentPeerSpeedLimit)}
@@ -1562,7 +1585,7 @@ export const PropertiesWindowApp = () => {
                 meta={peerSpeedLimit.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
                 format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatSpeedLimit) })}
               >
-                <input id="properties-options-peer-speed-limit" className="app-control w-full" value={peerSpeedLimit} onChange={event => { setPeerSpeedLimit(event.target.value); setDraftTab('options'); }} placeholder={t($ => $.properties.inputExampleSpeedLimit)} disabled={!editingEnabled} />
+                <input id="properties-options-peer-speed-limit" className="app-control w-full" value={peerSpeedLimit} onChange={event => { setPeerSpeedLimit(event.target.value); setDraftTab('options'); }} placeholder={t($ => $.properties.inputExampleSpeedLimit)} disabled={!(editingEnabled || liveTorrentOptionsEnabled)} />
               </PropertiesField>
             </div>
           </section>

@@ -205,6 +205,33 @@ export const copyEditablePropertiesPatch = (
   return safePatch;
 };
 
+const LIVE_PROPERTIES_STATUSES = new Set(['downloading', 'seeding', 'retrying']);
+const LIVE_PROPERTIES_KEYS = new Set<keyof PropertiesPatch>([
+  'speedLimit',
+  'torrentUploadLimit',
+  'torrentMaxPeers',
+  'torrentPeerSpeedLimit',
+]);
+
+/**
+ * Active transfers may change only the controls whose native consumers expose
+ * an in-place Aria2 mutation. Keep this check at the main-webview boundary so
+ * an active Properties save cannot enter applyPropertiesInternal and detach a
+ * live lifecycle before being rejected by its status gate.
+ */
+export const isLivePropertiesPatch = (
+  item: Pick<DownloadItem, 'isMedia' | 'isTorrent' | 'status'>,
+  patch: Partial<DownloadItem>,
+): boolean => {
+  if (!LIVE_PROPERTIES_STATUSES.has(item.status) || item.isMedia === true) return false;
+  const keys = Object.keys(patch) as Array<keyof PropertiesPatch>;
+  if (item.isTorrent !== true) {
+    return keys.every(key => key === 'speedLimit' && ['downloading', 'retrying'].includes(item.status));
+  }
+  return keys.every(key => key !== 'speedLimit' || ['downloading', 'retrying'].includes(item.status))
+    && keys.every(key => LIVE_PROPERTIES_KEYS.has(key));
+};
+
 export const PropertiesWindowBridgeHost = () => {
   useEffect(() => {
     const mainWindowTarget = propertiesWindowEventTarget(getCurrentWindow().label);
@@ -435,7 +462,41 @@ export const PropertiesWindowBridgeHost = () => {
               throw new Error('Generic connection settings are not available for Torrent downloads');
             }
             await assertCurrentAction(request);
-            await store.applyProperties(request.downloadId, safePatch);
+            if (LIVE_PROPERTIES_STATUSES.has(item.status)) {
+              if (!isLivePropertiesPatch(item, safePatch)) {
+                throw new Error(i18n.t($ => $.downloadTable.transferActive));
+              }
+              if (Object.prototype.hasOwnProperty.call(safePatch, 'speedLimit')) {
+                await store.setDownloadSpeedLimit(
+                  request.downloadId,
+                  safePatch.speedLimit ?? null,
+                );
+              }
+              if (item.isTorrent === true
+                && Object.prototype.hasOwnProperty.call(safePatch, 'torrentUploadLimit')) {
+                await store.setTorrentUploadLimit(
+                  request.downloadId,
+                  safePatch.torrentUploadLimit ?? null,
+                );
+              }
+              if (item.isTorrent === true
+                && (Object.prototype.hasOwnProperty.call(safePatch, 'torrentMaxPeers')
+                  || Object.prototype.hasOwnProperty.call(safePatch, 'torrentPeerSpeedLimit'))) {
+                const maxPeers = Object.prototype.hasOwnProperty.call(safePatch, 'torrentMaxPeers')
+                  ? safePatch.torrentMaxPeers == null ? null : String(safePatch.torrentMaxPeers)
+                  : item.torrentMaxPeers == null ? null : String(item.torrentMaxPeers);
+                const peerSpeedLimit = Object.prototype.hasOwnProperty.call(safePatch, 'torrentPeerSpeedLimit')
+                  ? safePatch.torrentPeerSpeedLimit ?? null
+                  : item.torrentPeerSpeedLimit ?? null;
+                await store.setTorrentPeerOptions(
+                  request.downloadId,
+                  maxPeers,
+                  peerSpeedLimit,
+                );
+              }
+            } else {
+              await store.applyProperties(request.downloadId, safePatch);
+            }
             break;
           }
           case 'set-torrent-file-selection': {
