@@ -14,7 +14,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import { invokeCommand as invoke } from '../ipc';
 import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResolutionModal';
-import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, MAX_TORRENT_TRACKER_INTERVAL, MAX_TORRENT_TRACKER_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentWebSeedDrafts, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, serializeTorrentPreviewPriority, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type TorrentEncryptionPolicy, type TorrentFileAllocation } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, headerNameHasCredentialMaterial, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, MAX_TORRENT_TRACKER_INTERVAL, MAX_TORRENT_TRACKER_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentWebSeedDrafts, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, serializeTorrentPreviewPriority, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type TorrentEncryptionPolicy, type TorrentFileAllocation } from '../utils/downloads';
 import { fetchMediaMetadataDeduped, fetchMediaPlaylistMetadataDeduped } from '../utils/mediaMetadata';
 import {
   expandTilde,
@@ -124,12 +124,12 @@ const extensionHeaders = (context: PendingAddRequestContext | undefined) => [
   context?.referer ? `Referer: ${context.referer.replace(/[\r\n]/g, '')}` : '',
   context?.media
     ? (context.headers || '')
-        .split(/\r?\n/)
-        .filter(line => {
-          const separator = line.indexOf(':');
-          return separator < 0 || line.slice(0, separator).trim().toLowerCase() !== 'cookie';
-        })
-        .join('\n')
+      .split(/\r?\n/)
+      .filter(line => {
+        const separator = line.indexOf(':');
+        return separator > 0 && !headerNameHasCredentialMaterial(line.slice(0, separator));
+      })
+      .join('\n')
     : context?.headers
 ].filter(Boolean).join('\n');
 

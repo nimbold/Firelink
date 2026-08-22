@@ -566,18 +566,8 @@ fn normalize_headers(headers: Option<String>, media: bool) -> Option<String> {
         .lines()
         .filter(|line| {
             line.split_once(':')
-                .map(|(name, _)| {
-                    !matches!(
-                        name.trim().to_ascii_lowercase().as_str(),
-                        "authorization"
-                            | "cookie"
-                            | "cookie2"
-                            | "proxy-authorization"
-                            | "set-cookie"
-                            | "set-cookie2"
-                    )
-                })
-                .unwrap_or(true)
+                .map(|(name, _)| !crate::queue::header_name_has_credential_material(name))
+                .unwrap_or(false)
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -919,7 +909,7 @@ mod tests {
             silent: false,
             filename: None,
             headers: Some(format!(
-                "Cookie: stale={};\nCookie2: stale=1\nAuthorization: Bearer stale\nProxy-Authorization: Basic stale\nSet-Cookie: stale=1\nSet-Cookie2: stale=1\nUser-Agent: Firefox",
+                "Cookie: stale={};\nCookie2: stale=1\nAuthorization: Bearer stale\nProxy-Authorization: Basic stale\nSet-Cookie: stale=1\nSet-Cookie2: stale=1\nX-Api-Key: stale\nX-Auth-Token: stale\nX-Access-Token: stale\nX-Request-Signature: stale\nX-Session: stale\n: malformed\nUser-Agent: Firefox\nX-Trace: safe",
                 "x".repeat(64 * 1024)
             )),
             cookies: Some(format!("large={}", "x".repeat(64 * 1024))),
@@ -933,7 +923,10 @@ mod tests {
 
         assert!(download.media);
         assert!(download.cookies.is_none());
-        assert_eq!(download.headers.as_deref(), Some("User-Agent: Firefox"));
+        assert_eq!(
+            download.headers.as_deref(),
+            Some("User-Agent: Firefox\nX-Trace: safe")
+        );
     }
 
     #[test]
@@ -957,6 +950,37 @@ mod tests {
         assert_eq!(
             download.cookies.as_deref(),
             Some("session=browser-cookie-header")
+        );
+    }
+
+    #[test]
+    fn multi_url_capture_drops_shared_credentials_but_keeps_safe_headers() {
+        let download = normalize_download(ExtensionRequest {
+            urls: vec![
+                "https://one.example/file.zip".to_string(),
+                "https://two.example/file.zip".to_string(),
+            ],
+            referer: None,
+            silent: false,
+            filename: None,
+            headers: Some(
+                "X-Api-Key: shared-secret\nX-Request-Signature: signature-secret\n: malformed\nUser-Agent: Firefox\nX-Trace: safe"
+                    .to_string(),
+            ),
+            cookies: Some("session=must-not-cross-hosts".to_string()),
+            cookie_scopes: None,
+            media: false,
+            torrent: false,
+            batch: true,
+            batch_name: Some("batch".to_string()),
+        })
+        .expect("valid multi-url handoff");
+
+        assert!(download.batch);
+        assert!(download.cookies.is_none());
+        assert_eq!(
+            download.headers.as_deref(),
+            Some("User-Agent: Firefox\nX-Trace: safe")
         );
     }
 

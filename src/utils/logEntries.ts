@@ -49,11 +49,15 @@ export const redactLogText = (message: string, homePath = ''): string => {
     '$1[redacted]@'
   );
   redacted = redacted.replace(
-    /(["'])(authorization|proxy-authorization|cookie|set-cookie|password|token|secret|credential|pairing[-_ ]?token|api[-_ ]?key)(["'])(\s*[:=]\s*)["'][^"\r\n,;]*["']/gi,
+    /([A-Za-z0-9_-]*(?:authorization|proxy-authorization|cookie2|cookie|set-cookie2|set-cookie|password|passwd|auth|token|secret|credential|key|pairing[-_ ]?token|api[-_ ]?key|access[-_ ]?token|auth[-_ ]?token|signature|session)[A-Za-z0-9_-]*)\s*[:=]\s*[^\r\n]*?(;?)(?=\s+(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|[A-Za-z0-9_-]*(?:authorization|proxy-authorization|cookie2|cookie|set-cookie2|set-cookie|password|passwd|auth|token|secret|credential|key|pairing[-_ ]?token|api[-_ ]?key|access[-_ ]?token|auth[-_ ]?token|signature|session)\s*[:=])|$)/gi,
+    '$1: [redacted]$2'
+  );
+  redacted = redacted.replace(
+    /(["'])(authorization|proxy-authorization|cookie2|cookie|set-cookie2|set-cookie|password|passwd|auth|token|secret|credential|key|pairing[-_ ]?token|api[-_ ]?key|access[-_ ]?token|auth[-_ ]?token|signature|session)(["'])(\s*[:=]\s*)["'][^"\r\n,;]*["']/gi,
     '$1$2$3$4[redacted]'
   );
   return redacted.replace(
-    /(authorization|proxy-authorization|cookie|set-cookie|password|token|secret|credential|pairing[-_ ]?token|api[-_ ]?key)(\s*)([:=])(\s*)([^\r\n,;]+)/gi,
+    /(authorization|proxy-authorization|cookie2|cookie|set-cookie2|set-cookie|password|passwd|auth|token|secret|credential|key|pairing[-_ ]?token|api[-_ ]?key|access[-_ ]?token|auth[-_ ]?token|signature|session)(\s*)([:=])(\s*)([^\r\n,;]+)/gi,
     '$1$2$3$4[redacted]'
   );
 };

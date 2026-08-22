@@ -6086,15 +6086,16 @@ fn payload_has_credential_material(payload: &SpawnPayload) -> bool {
         .any(|name| header_name_has_credential_material(&name))
 }
 
-fn header_name_has_credential_material(name: &str) -> bool {
+pub(crate) fn header_name_has_credential_material(name: &str) -> bool {
     let name = name.trim().to_ascii_lowercase();
-    matches!(
+    name.is_empty() || matches!(
         name.as_str(),
         "authorization"
             | "cookie"
             | "cookie2"
             | "proxy-authorization"
             | "set-cookie"
+            | "set-cookie2"
             | "x-api-key"
             | "x-auth-token"
             | "x-access-token"

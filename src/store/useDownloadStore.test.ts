@@ -3643,7 +3643,7 @@ describe('useDownloadStore', () => {
       silent: false,
       filename: null,
       headers: null,
-      cookies: null,
+      cookies: 'shared=session',
       cookie_scopes: null,
       media: false,
       torrent: false,
@@ -3659,6 +3659,7 @@ describe('useDownloadStore', () => {
       'https://example.com/one.zip\nhttps://example.com/two.zip'
     );
     expect(useDownloadStore.getState().pendingAddBatch).toBe(false);
+    expect(useDownloadStore.getState().pendingAddCookies).toBe('');
   });
 
   it('keeps each extension handoff context attached to its own URL while the Add Modal is open', async () => {
@@ -3720,7 +3721,7 @@ describe('useDownloadStore', () => {
       referer: 'https://adult.example/watch/123',
       silent: false,
       filename: null,
-      headers: `Cookie: stale=${'x'.repeat(64 * 1024)}\nCookie2: stale=1\nAuthorization: Bearer stale\nProxy-Authorization: Basic stale\nSet-Cookie: stale=1\nSet-Cookie2: stale=1\nUser-Agent: Firefox Test`,
+      headers: `Cookie: stale=${'x'.repeat(64 * 1024)}\nCookie2: stale=1\nAuthorization: Bearer stale\nProxy-Authorization: Basic stale\nSet-Cookie: stale=1\nSet-Cookie2: stale=1\nX-Api-Key: stale\nX-Auth-Token: stale\nX-Request-Signature: stale\nX-Session: stale\nUser-Agent: Firefox Test`,
       cookies: `oversized=${'x'.repeat(64 * 1024)}`,
       cookie_scopes: null,
       media: true,

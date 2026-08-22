@@ -11408,27 +11408,25 @@ pub(crate) fn redact_sensitive_text(line: &str) -> String {
     use std::sync::OnceLock;
     static SECRET: OnceLock<regex::Regex> = OnceLock::new();
     static QUOTED_SECRET: OnceLock<regex::Regex> = OnceLock::new();
-    static HEADER: OnceLock<regex::Regex> = OnceLock::new();
+    static COOKIE_HEADER: OnceLock<regex::Regex> = OnceLock::new();
     static QUERY: OnceLock<regex::Regex> = OnceLock::new();
     static USERINFO: OnceLock<regex::Regex> = OnceLock::new();
     static FRAGMENT: OnceLock<regex::Regex> = OnceLock::new();
     let secret = SECRET.get_or_init(|| {
         regex::Regex::new(
-            r"(?i)(authorization|proxy-authorization|cookie|set-cookie|password|token|secret|credential|pairing[-_ ]?token|api[-_ ]?key)\s*[:=]\s*([^\r\n,;]+)",
+            r"(?i)(authorization|proxy-authorization|cookie2|cookie|set-cookie2|set-cookie|password|passwd|auth|token|secret|credential|key|pairing[-_ ]?token|api[-_ ]?key|access[-_ ]?token|auth[-_ ]?token|signature|session)\s*[:=]\s*([^\r\n,;]+)",
         )
             .expect("valid secret redaction regex")
     });
     let quoted_secret = QUOTED_SECRET.get_or_init(|| {
         regex::Regex::new(
-            r#"(?i)(["'])(authorization|proxy-authorization|cookie|set-cookie|password|token|secret|credential|pairing[-_ ]?token|api[-_ ]?key)(["'])(\s*[:=]\s*)["'][^"\r\n,;]*["']"#,
+            r#"(?i)(["'])(authorization|proxy-authorization|cookie2|cookie|set-cookie2|set-cookie|password|passwd|auth|token|secret|credential|key|pairing[-_ ]?token|api[-_ ]?key|access[-_ ]?token|auth[-_ ]?token|signature|session)(["'])(\s*[:=]\s*)["'][^"\r\n,;]*["']"#,
         )
         .expect("valid quoted secret redaction regex")
     });
-    let header = HEADER.get_or_init(|| {
-        regex::Regex::new(
-            r"(?i)(authorization|proxy-authorization|cookie|set-cookie)\s*:\s*[^\r\n]+",
-        )
-            .expect("valid sensitive header redaction regex")
+    let cookie_header = COOKIE_HEADER.get_or_init(|| {
+        regex::Regex::new(r"(?i)((?:set-)?cookie2?)\s*[:=]\s*[^\r\n]+")
+            .expect("valid cookie header redaction regex")
     });
     let query = QUERY.get_or_init(|| {
         regex::Regex::new(r#"([A-Za-z][A-Za-z0-9+.-]*://[^\s?\"'<>},\]]+)\?[^\s\"'<>},\]]+"#)
@@ -11445,7 +11443,7 @@ pub(crate) fn redact_sensitive_text(line: &str) -> String {
     let redacted = query.replace_all(line, "$1?[redacted]");
     let redacted = fragment.replace_all(&redacted, "$1#[redacted]");
     let redacted = userinfo.replace_all(&redacted, "$1[redacted]@");
-    let redacted = header.replace_all(&redacted, "$1: [redacted]");
+    let redacted = cookie_header.replace_all(&redacted, "$1: [redacted]");
     let redacted = quoted_secret.replace_all(&redacted, "$1$2$3$4[redacted]");
     secret
         .replace_all(&redacted, "$1=[redacted]")
@@ -14218,6 +14216,29 @@ mod tests {
         assert!(!redacted.contains("json-secret"));
         assert!(!redacted.contains("session=secret"));
         assert!(redacted.contains("[redacted]"));
+    }
+
+    #[test]
+    fn redacts_legacy_cookie_and_compound_custom_headers() {
+        let line = "Set-Cookie2: legacy-cookie X-Session: id=session-secret; key=compound-secret";
+        let redacted = redact_log_line(line);
+        assert!(!redacted.contains("legacy-cookie"));
+        assert!(!redacted.contains("session-secret"));
+        assert!(!redacted.contains("compound-secret"));
+        assert!(redacted.contains("[redacted]"));
+    }
+
+    #[test]
+    fn redacts_all_pairs_in_cookie_headers() {
+        let redacted = redact_log_line("Cookie: a=1; user_id=secret; state=xyz");
+        assert!(!redacted.contains("a=1"));
+        assert!(!redacted.contains("user_id=secret"));
+        assert!(!redacted.contains("state=xyz"));
+        assert!(redacted.contains("[redacted]"));
+
+        let redacted = redact_log_line("Cookie2=a=1; user_id=secret; state=xyz");
+        assert!(!redacted.contains("user_id=secret"));
+        assert!(!redacted.contains("state=xyz"));
     }
 
     #[test]

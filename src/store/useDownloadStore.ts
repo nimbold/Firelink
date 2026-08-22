@@ -10,7 +10,7 @@ import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
 import type { Queue } from '../bindings/Queue';
 import { useSettingsStore } from './useSettingsStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
-import { canonicalizeDownloadFileName, categoryForDownload, categoryForFileName, hasCredentialBearingHeaders, isActiveDownloadStatus, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForDownload, categoryForFileName, hasCredentialBearingHeaders, headerNameHasCredentialMaterial, isActiveDownloadStatus, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
 import {
   resolveCategoryDestination
 } from '../utils/downloadLocations';
@@ -300,16 +300,8 @@ const stripSensitiveMediaHeaders = (value: string | null | undefined): string =>
     .split(/\r?\n/)
     .filter(line => {
       const separator = line.indexOf(':');
-      if (separator < 0) return true;
-      const name = line.slice(0, separator).trim().toLowerCase();
-      return ![
-        'authorization',
-        'cookie',
-        'cookie2',
-        'proxy-authorization',
-        'set-cookie',
-        'set-cookie2'
-      ].includes(name);
+      if (separator <= 0) return false;
+      return !headerNameHasCredentialMaterial(line.slice(0, separator));
     })
     .join('\n')
     .trim();
@@ -1818,8 +1810,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     // Explicit media authentication belongs to yt-dlp's configured browser
     // cookie source. Keep this frontend guard for events from older desktop or
     // extension builds; ordinary captured downloads retain their cookies.
-    const cookies = request.media === true ? null : request.cookies;
-    const headers = request.media === true
+    const cookies = request.media === true || urls.length > 1 ? null : request.cookies;
+    const headers = request.media === true || urls.length > 1
       ? stripSensitiveMediaHeaders(request.headers) || null
       : request.headers;
 

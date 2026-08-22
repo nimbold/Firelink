@@ -21,6 +21,7 @@ import {
   torrentWebSeedDraftsFromSeeds,
   normalizeTorrentTrackerInterval,
   normalizeTorrentTrackerTimeout,
+  headerNameHasCredentialMaterial,
   redactDownloadForPersistence,
   resolveDownloadConnections
 } from './downloads';
@@ -175,6 +176,17 @@ describe('download persistence progress snapshots', () => {
     expect(persisted.downloadedBytes).toBeUndefined();
     expect(persisted.totalBytes).toBeUndefined();
     expect(persisted.totalIsEstimate).toBeUndefined();
+  });
+});
+
+describe('credential-bearing extension header names', () => {
+  it('classifies named and marker-based credential headers while preserving browser context names', () => {
+    expect(headerNameHasCredentialMaterial('X-Api-Key')).toBe(true);
+    expect(headerNameHasCredentialMaterial('X-Request-Signature')).toBe(true);
+    expect(headerNameHasCredentialMaterial('X-Session')).toBe(true);
+    expect(headerNameHasCredentialMaterial('Set-Cookie2')).toBe(true);
+    expect(headerNameHasCredentialMaterial('User-Agent')).toBe(false);
+    expect(headerNameHasCredentialMaterial('X-Trace')).toBe(false);
   });
 });
 

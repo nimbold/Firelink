@@ -640,6 +640,37 @@ const NON_CREDENTIAL_REQUEST_HEADERS = new Set([
   'via',
   'warning',
 ]);
+
+const CREDENTIAL_HEADER_NAMES = new Set([
+  'authorization',
+  'cookie',
+  'cookie2',
+  'proxy-authorization',
+  'set-cookie',
+  'set-cookie2',
+  'x-api-key',
+  'x-auth-token',
+  'x-access-token',
+]);
+const CREDENTIAL_HEADER_MARKERS = [
+  'auth',
+  'credential',
+  'key',
+  'password',
+  'passwd',
+  'secret',
+  'session',
+  'signature',
+  'token',
+] as const;
+
+/** Header-name classifier shared by extension handoff defenses. */
+export const headerNameHasCredentialMaterial = (rawName: string): boolean => {
+  const name = rawName.trim().toLowerCase();
+  return name.length === 0
+    || CREDENTIAL_HEADER_NAMES.has(name)
+    || CREDENTIAL_HEADER_MARKERS.some(marker => name.includes(marker));
+};
 // Only stable request context is safe to carry into a later lifecycle. Range,
 // conditional, hop-by-hop, and routing headers describe the old HTTP request
 // and can conflict with Aria2's own resume negotiation.
