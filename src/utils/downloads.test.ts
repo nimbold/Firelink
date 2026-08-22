@@ -22,6 +22,7 @@ import {
   normalizeTorrentTrackerInterval,
   normalizeTorrentTrackerTimeout,
   headerNameHasCredentialMaterial,
+  headersWithoutCredentialMaterial,
   redactDownloadForPersistence,
   resolveDownloadConnections
 } from './downloads';
@@ -109,6 +110,12 @@ describe('download persistence progress snapshots', () => {
     expect(persisted.credentialsRequired).toBe(true);
     expect(persisted.headers).toBe('Referer: https://example.com/page');
     expect(JSON.stringify(persisted)).not.toContain('secret');
+  });
+
+  it('sanitizes saved request context for an explicit credentialless retry', () => {
+    expect(headersWithoutCredentialMaterial(
+      'Referer: https://example.com/page?session=secret#part\nAuthorization: Bearer secret\nUser-Agent: Browser'
+    )).toBe('Referer: https://example.com/page\nUser-Agent: Browser');
   });
 
   it('marks username-only authentication as requiring credentials after restart', () => {

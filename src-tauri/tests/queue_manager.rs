@@ -433,7 +433,9 @@ async fn cancellation_between_reservation_and_commit_cannot_start_the_task() {
         .expect("reservation should succeed");
     mgr.cancel_enqueue_generation("a", 7).await;
 
-    let committed = mgr.commit_reserved_enqueue(sample_task("a"), 7).await;
+    let committed = mgr
+        .commit_reserved_enqueue(sample_task("a"), 7, previous)
+        .await;
     assert!(committed.is_err(), "cancelled reservation must not commit");
     mgr.rollback_enqueue_reservation("a", 7, previous).await;
 
@@ -1799,12 +1801,16 @@ async fn duplicate_pending_id_cannot_replace_an_existing_queue_ownership() {
     assert!(manager
         .ensure_aria2_permit_for_queue("duplicate", "queue-b")
         .await);
-    manager
+    let previous = manager
         .reserve_enqueue_generation("duplicate", 1)
         .await
         .unwrap();
     manager
-        .commit_reserved_enqueue(aria2_task_in_queue("duplicate", "queue-a"), 1)
+        .commit_reserved_enqueue(
+            aria2_task_in_queue("duplicate", "queue-a"),
+            1,
+            previous,
+        )
         .await
         .unwrap();
 

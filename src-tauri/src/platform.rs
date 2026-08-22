@@ -305,39 +305,115 @@ fn trusted_system_path_entries() -> Vec<PathBuf> {
 pub fn path_is_within(path: &Path, root: &Path) -> bool {
     #[cfg(target_os = "windows")]
     {
-        let path = path.to_string_lossy().to_lowercase();
-        let root = root.to_string_lossy().to_lowercase();
+        let path = path_identity(path);
+        let root = path_identity(root);
         path == root
+            || (root.len() == 3
+                && root.ends_with('/')
+                && root.as_bytes()[1] == b':'
+                && path.starts_with(&root))
             || path
                 .strip_prefix(&root)
-                .is_some_and(|suffix| suffix.starts_with(['\\', '/']))
+                .is_some_and(|suffix| suffix.starts_with('/'))
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        // Containment is a scope check, not an equality check. Do not fold
+        // case here: case-sensitive APFS/HFS+ volumes are valid macOS
+        // configurations, and lowercasing could admit `/Users/nima2` or a
+        // differently-cased sibling outside the approved root. Callers pass
+        // canonical paths (with only missing leaf components preserved), so
+        // NFC normalization is enough to compare macOS path spellings.
+        use unicode_normalization::UnicodeNormalization;
+
+        let path = path.to_string_lossy().nfc().collect::<String>();
+        let root = root.to_string_lossy().nfc().collect::<String>();
+        let root = root.trim_end_matches('/');
+        if path == root || (root.is_empty() && path == "/") {
+            return true;
+        }
+
+        if root.is_empty() {
+            return path.starts_with('/');
+        }
+
+        path.strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        path.starts_with(root)
+    }
+
+    #[cfg(not(any(unix, target_os = "windows", target_os = "macos")))]
     {
         path.starts_with(root)
     }
 }
 
 pub fn paths_equal(left: &Path, right: &Path) -> bool {
+    path_identity(left) == path_identity(right)
+}
+
+/// Return the in-process lock identity for a path using the same platform
+/// equivalence rules as `paths_equal`. Callers use this for serialization,
+/// not for display or persistence.
+pub fn path_identity(path: &Path) -> String {
     #[cfg(target_os = "windows")]
     {
-        left.to_string_lossy()
-            .to_lowercase()
-            == right.to_string_lossy().to_lowercase()
+        let mut normalized = path.to_string_lossy().replace('\\', "/");
+        if normalized
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("//?/UNC/"))
+        {
+            normalized.replace_range(..8, "//");
+        } else if normalized
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("//?/"))
+        {
+            normalized.replace_range(..4, "");
+        }
+
+        let is_unc = normalized.starts_with("//");
+        let mut collapsed = String::with_capacity(normalized.len());
+        for character in normalized.chars() {
+            if character == '/' && collapsed.ends_with('/') && !(is_unc && collapsed.len() == 1) {
+                continue;
+            }
+            collapsed.push(character);
+        }
+        while collapsed.len() > 1
+            && collapsed.ends_with('/')
+            && !(collapsed.len() == 3 && collapsed.as_bytes()[1] == b':')
+        {
+            collapsed.pop();
+        }
+        collapsed.to_lowercase()
     }
     #[cfg(target_os = "macos")]
     {
         use unicode_normalization::UnicodeNormalization;
 
-        let normalize = |path: &Path| {
-            path.to_string_lossy().to_lowercase().nfc().collect::<String>()
-        };
-        normalize(left) == normalize(right)
+        path.to_string_lossy()
+            .to_lowercase()
+            .nfc()
+            .collect::<String>()
     }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
-        left == right
+        use std::os::unix::ffi::OsStrExt;
+
+        path.as_os_str()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+    #[cfg(not(any(unix, target_os = "windows", target_os = "macos")))]
+    {
+        path.to_string_lossy().to_string()
     }
 }
 
@@ -362,6 +438,8 @@ fn numbered_windows_device(stem: &str, prefix: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    use super::path_is_within;
     use super::{engine_binary_name, is_windows_reserved_filename, paths_equal, target_triple};
     use std::path::Path;
 
@@ -406,6 +484,27 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_path_identity_normalizes_separators_and_verbatim_prefixes() {
+        assert!(paths_equal(
+            Path::new(r"C:\downloads\file.bin"),
+            Path::new("c:/DOWNLOADS/file.bin")
+        ));
+        assert!(paths_equal(
+            Path::new(r"C:\downloads\file.bin"),
+            Path::new(r"\\?\C:\downloads\file.bin")
+        ));
+        assert!(paths_equal(
+            Path::new(r"\\server\share\file.bin"),
+            Path::new(r"\\?\UNC\server\share\file.bin")
+        ));
+        assert!(path_is_within(
+            Path::new("c:/downloads/file.bin"),
+            Path::new(r"C:\downloads")
+        ));
+    }
+
     #[test]
     fn path_identity_handles_non_ascii_case_differences() {
         let left = Path::new("/downloads/Ärt/File.bin");
@@ -426,5 +525,35 @@ mod tests {
         } else {
             assert!(!paths_equal(composed, decomposed));
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_path_is_within_preserves_scope_and_unicode_identity() {
+        assert!(path_is_within(
+            Path::new("/Downloads/cafe\u{301}/movie.bin"),
+            Path::new("/Downloads/café")
+        ));
+        assert!(path_is_within(
+            Path::new("/Downloads/movie.bin"),
+            Path::new("/Downloads")
+        ));
+        assert!(path_is_within(
+            Path::new("/Downloads"),
+            Path::new("/Downloads/")
+        ));
+        assert!(path_is_within(Path::new("/"), Path::new("////")));
+        assert!(path_is_within(
+            Path::new("/Downloads/movie.bin"),
+            Path::new("/")
+        ));
+        assert!(!path_is_within(
+            Path::new("/downloads/cafeteria/movie.bin"),
+            Path::new("/Downloads/café")
+        ));
+        assert!(!path_is_within(
+            Path::new("/downloads/movie.bin"),
+            Path::new("/Downloads")
+        ));
     }
 }

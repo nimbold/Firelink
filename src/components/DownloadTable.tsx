@@ -1931,7 +1931,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     if (ids.length === 0) return;
     const selected = useDownloadStore.getState().downloads.filter(download => ids.includes(download.id));
     const credentialMarkedIds = selected
-      .filter(download => download.credentialsRequired === true)
+      .filter(download => download.credentialsRequired === true && canStartDownload(download.status))
       .map(download => download.id);
     if (credentialMarkedIds.length > 0
       && !window.confirm(t($ => $.properties.resumeWithoutCredentialsConfirm))) {
@@ -1954,7 +1954,17 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   }, [showInteractionError, startSelected, t]);
 
   const handleStartAll = useCallback(() => {
-    void startAll().catch(error => {
+    const credentialMarkedIds = useDownloadStore.getState().downloads
+      .filter(download =>
+        download.credentialsRequired === true
+        && (download.status === 'queued' || canStartDownload(download.status))
+      )
+      .map(download => download.id);
+    const resumeWithoutCredentials = credentialMarkedIds.length > 0
+      && window.confirm(t($ => $.properties.resumeWithoutCredentialsConfirm));
+    void startAll({
+      resumeWithoutCredentialsIds: resumeWithoutCredentials ? credentialMarkedIds : []
+    }).catch(error => {
       showInteractionError(t($ => $.downloadTable.resumeFailed), error);
     });
   }, [showInteractionError, startAll, t]);

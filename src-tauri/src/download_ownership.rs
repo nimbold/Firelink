@@ -346,15 +346,91 @@ pub fn known_primary_paths<R: tauri::Runtime>(
         })
         .collect();
 
-    // One-time compatibility for downloads created before the backend-owned
-    // registry existed. This imports the exact persisted queue path only.
-    for path in legacy_download_queue_paths(app_handle)? {
-        if !paths.iter().any(|existing| existing == &path) {
+    let database = app_handle.state::<crate::db::DbState>();
+    let connection = database.lock()?;
+    for (_, removal_paths) in crate::db::load_all_torrent_removal_paths(&connection)? {
+        for path in removal_paths.into_iter().map(PathBuf::from) {
+            if !paths
+                .iter()
+                .any(|existing| crate::platform::paths_equal(existing, &path))
+            {
+                paths.push(path);
+            }
+        }
+    }
+    drop(connection);
+
+    // Compatibility for downloads created before the backend-owned registry
+    // existed. Import only the exact persisted queue paths.
+    for (_, path) in legacy_download_queue_path_records(app_handle)? {
+        if !paths
+            .iter()
+            .any(|existing| crate::platform::paths_equal(existing, &path))
+        {
             paths.push(path);
         }
     }
 
     Ok(paths)
+}
+
+/// Return the Firelink download that owns an exact output path, if any.
+///
+/// This is intentionally based on the persisted ownership registry rather
+/// than on the visible download list. The renderer can be stale while a
+/// queued/native lifecycle is being admitted, so duplicate replacement must
+/// make this decision at the native boundary.
+pub fn owner_for_path<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    path: &Path,
+) -> Result<Option<String>, String> {
+    let canonical = crate::canonicalize_with_missing_components(path)
+        .ok_or_else(|| "Download target could not be canonicalized".to_string())?;
+    let mut owners = Vec::new();
+    for record in load_records(app_handle)? {
+        let primary = PathBuf::from(&record.primary_path);
+        if crate::platform::paths_equal(&primary, &canonical)
+            || record
+                .owned_paths
+                .iter()
+                .map(PathBuf::from)
+                .any(|owned| crate::platform::paths_equal(&owned, &canonical))
+        {
+            owners.push(record.id);
+        }
+    }
+
+    let database = app_handle.state::<crate::db::DbState>();
+    let connection = database.lock()?;
+    for (id, removal_paths) in crate::db::load_all_torrent_removal_paths(&connection)? {
+        if removal_paths
+            .into_iter()
+            .map(PathBuf::from)
+            .any(|removal| crate::platform::paths_equal(&removal, &canonical))
+            && !owners.contains(&id)
+        {
+            owners.push(id);
+        }
+    }
+    drop(connection);
+
+    // Older rows may predate the ownership registry. They still represent
+    // Firelink-owned targets and must not be downgraded to unmanaged disk
+    // files merely because their migration record is absent.
+    for (id, legacy_path) in legacy_download_queue_path_records(app_handle)? {
+        if crate::platform::paths_equal(&legacy_path, &canonical) && !owners.contains(&id) {
+            owners.push(id);
+        }
+    }
+
+    match owners.len() {
+        0 => Ok(None),
+        1 => Ok(owners.pop()),
+        _ => Err(format!(
+            "Download target is claimed by multiple Firelink downloads: {}",
+            owners.join(", ")
+        )),
+    }
 }
 
 fn load_records<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<Vec<DownloadOwnershipRecord>, String> {
@@ -372,9 +448,9 @@ fn load_records<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<V
     })
 }
 
-fn legacy_download_queue_paths<R: tauri::Runtime>(
+fn legacy_download_queue_path_records<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<Vec<(String, PathBuf)>, String> {
     let settings = crate::settings::load_settings(app_handle).ok();
 
     let downloads = {
@@ -383,7 +459,7 @@ fn legacy_download_queue_paths<R: tauri::Runtime>(
         parse_legacy_download_items(crate::db::load_downloads(&connection)?)
     };
 
-    let mut paths = Vec::new();
+    let mut paths: Vec<(String, PathBuf)> = Vec::new();
     for download in downloads {
         let category = format!("{:?}", download.category);
         let mut destinations = Vec::new();
@@ -442,8 +518,10 @@ fn legacy_download_queue_paths<R: tauri::Runtime>(
 
         for destination in destinations {
             if let Ok(path) = expected_primary_path(app_handle, &destination, &download.file_name) {
-                if !paths.iter().any(|existing| existing == &path) {
-                    paths.push(path);
+                if !paths.iter().any(|(id, existing)| {
+                    id == &download.id && crate::platform::paths_equal(existing, &path)
+                }) {
+                    paths.push((download.id.clone(), path));
                 }
             }
         }

@@ -1678,17 +1678,33 @@ pub fn load_ownership(connection: &Connection) -> Result<Vec<(String, String, Ve
         .map_err(|error| format!("failed to prepare ownership query: {error}"))?;
     let rows = statement
         .query_map([], |row| {
-            let primary_path: String = row.get(1)?;
-            let owned_paths = row
-                .get::<_, Option<String>>(2)?
-                .and_then(|paths| serde_json::from_str::<Vec<String>>(&paths).ok())
-                .filter(|paths| !paths.is_empty())
-                .unwrap_or_else(|| vec![primary_path.clone()]);
-            Ok((row.get(0)?, primary_path, owned_paths))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
         })
         .map_err(|error| format!("failed to query ownership data: {error}"))?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("failed to read ownership data: {error}"))
+    let mut ownership = Vec::new();
+    for row in rows {
+        let (id, primary_path, encoded_paths) =
+            row.map_err(|error| format!("failed to read ownership data: {error}"))?;
+        let owned_paths = match encoded_paths {
+            Some(encoded) => {
+                let paths = serde_json::from_str::<Vec<String>>(&encoded).map_err(|error| {
+                    format!("failed to decode owned paths for download '{id}': {error}")
+                })?;
+                if paths.is_empty() {
+                    vec![primary_path.clone()]
+                } else {
+                    paths
+                }
+            }
+            None => vec![primary_path.clone()],
+        };
+        ownership.push((id, primary_path, owned_paths));
+    }
+    Ok(ownership)
 }
 
 pub fn set_ownership_paths(
@@ -1697,7 +1713,17 @@ pub fn set_ownership_paths(
     primary_path: &str,
     paths: &[String],
 ) -> Result<(), String> {
-    set_ownership_paths_checked(connection, id, primary_path, paths, &[])
+    // The path collision check and both ownership writes must be one SQLite
+    // transaction. Otherwise two concurrent admissions can both observe an
+    // empty registry and claim the same output before either insert becomes
+    // visible to the other.
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("failed to begin download ownership transaction: {error}"))?;
+    set_ownership_paths_checked(&transaction, id, primary_path, paths, &[])?;
+    transaction
+        .commit()
+        .map_err(|error| format!("failed to commit download ownership transaction: {error}"))
 }
 
 fn set_ownership_paths_checked(
@@ -1718,21 +1744,38 @@ fn set_ownership_paths_checked(
         .map_err(|error| format!("failed to prepare download ownership check: {error}"))?;
     let existing = statement
         .query_map(params![id], |row| {
-            let primary: String = row.get(1)?;
-            let owned = row
-                .get::<_, Option<String>>(2)?
-                .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
-                .unwrap_or_else(|| vec![primary.clone()]);
-            let removal = row
-                .get::<_, Option<String>>(3)?
-                .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
-                .unwrap_or_default();
-            Ok((primary, owned, removal))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
         })
         .map_err(|error| format!("failed to check download ownership paths: {error}"))?;
     for row in existing {
-        let (existing_primary, owned, removal) =
+        let (existing_id, existing_primary, encoded_owned, encoded_removal) =
             row.map_err(|error| format!("failed to read download ownership paths: {error}"))?;
+        let owned = match encoded_owned {
+            Some(encoded) => {
+                let paths = serde_json::from_str::<Vec<String>>(&encoded).map_err(|error| {
+                    format!("failed to decode owned paths for download '{existing_id}': {error}")
+                })?;
+                if paths.is_empty() {
+                    vec![existing_primary.clone()]
+                } else {
+                    paths
+                }
+            }
+            None => vec![existing_primary.clone()],
+        };
+        let removal = match encoded_removal {
+            Some(encoded) => serde_json::from_str::<Vec<String>>(&encoded).map_err(|error| {
+                format!(
+                    "failed to decode removal paths for download '{existing_id}': {error}"
+                )
+            })?,
+            None => Vec::new(),
+        };
         let new_paths = std::iter::once(primary_path)
             .chain(paths.iter().map(String::as_str))
             .chain(removal_paths.iter().map(String::as_str));
@@ -1922,6 +1965,31 @@ pub fn load_torrent_removal_paths(
         })
         .transpose()
         .map(|paths| paths.unwrap_or_default())
+}
+
+pub fn load_all_torrent_removal_paths(
+    connection: &Connection,
+) -> Result<Vec<(String, Vec<String>)>, String> {
+    let mut statement = connection
+        .prepare("SELECT id, paths FROM download_removal_paths")
+        .map_err(|error| format!("failed to prepare torrent removal ownership query: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let encoded: String = row.get(1)?;
+            Ok((id, encoded))
+        })
+        .map_err(|error| format!("failed to query torrent removal ownership: {error}"))?;
+
+    rows.map(|row| {
+        let (id, encoded) = row
+            .map_err(|error| format!("failed to read torrent removal ownership: {error}"))?;
+        let paths = serde_json::from_str::<Vec<String>>(&encoded).map_err(|error| {
+            format!("failed to decode torrent removal paths for download '{id}': {error}")
+        })?;
+        Ok((id, paths))
+    })
+    .collect()
 }
 
 pub fn has_user_data(connection: &Connection) -> Result<bool, String> {
@@ -3469,6 +3537,90 @@ mod tests {
             &["/downloads/unselected.bin".to_string()],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn malformed_owned_path_json_fails_closed_for_loading_and_new_claims() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let connection = state.lock().unwrap();
+        connection
+            .execute(
+                "INSERT INTO download_ownership (id, primary_path) VALUES (?1, ?2)",
+                params!["broken-owned", "/downloads/broken.bin"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO download_owned_paths (id, paths) VALUES (?1, ?2)",
+                params!["broken-owned", "{not-json"],
+            )
+            .unwrap();
+
+        let error =
+            load_ownership(&connection).expect_err("malformed owned paths must not be ignored");
+        assert!(error.contains("broken-owned"));
+
+        let error = set_ownership_paths(
+            &connection,
+            "later",
+            "/downloads/later.bin",
+            &["/downloads/later.bin".to_string()],
+        )
+        .expect_err("new ownership claims must fail closed");
+        assert!(error.contains("broken-owned"));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM download_ownership WHERE id = 'later'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn malformed_removal_path_json_fails_closed_for_loading_and_new_claims() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let connection = state.lock().unwrap();
+        connection
+            .execute(
+                "INSERT INTO download_ownership (id, primary_path) VALUES (?1, ?2)",
+                params!["broken-removal", "/downloads/broken.bin"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO download_removal_paths (id, paths) VALUES (?1, ?2)",
+                params!["broken-removal", "{not-json"],
+            )
+            .unwrap();
+
+        let error = load_all_torrent_removal_paths(&connection)
+            .expect_err("malformed removal paths must not be ignored");
+        assert!(error.contains("broken-removal"));
+
+        let error = set_ownership_paths(
+            &connection,
+            "later",
+            "/downloads/later.bin",
+            &["/downloads/later.bin".to_string()],
+        )
+        .expect_err("new ownership claims must fail closed");
+        assert!(error.contains("broken-removal"));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM download_ownership WHERE id = 'later'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

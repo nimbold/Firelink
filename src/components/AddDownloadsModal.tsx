@@ -1281,27 +1281,44 @@ export const AddDownloadsModal = () => {
           }
         }
 
-        let fileExistsOnDisk = false;
+        let diskTargetKind: string | null = null;
+        let diskTargetFingerprint: string | undefined;
+        let diskTargetOwner: string | undefined;
         try {
-          fileExistsOnDisk = await invoke('check_file_exists', {
+          const targetInfo = await invoke('inspect_download_target', {
             path: await resolveDownloadFilePath(itemLocation, finalFile)
           });
+          diskTargetKind = targetInfo.kind;
+          diskTargetFingerprint = targetInfo.fingerprint;
+          diskTargetOwner = targetInfo.ownedBy;
         } catch (e) {
           console.error("Failed to check if file exists on disk:", e);
         }
 
-        if (existingDownload || fileExistsOnDisk) {
+        const fileExistsOnDisk = diskTargetKind !== null && diskTargetKind !== 'missing';
+        const hasFirelinkOwnedTarget = Boolean(diskTargetOwner);
+        const diskReplaceAllowed = diskTargetKind === 'regularFile'
+          && !diskTargetOwner
+          && Boolean(diskTargetFingerprint);
+        const canReplaceExistingDownload = existingDownload
+          ? !isTransferLocked(existingDownload.status)
+            && (!diskTargetOwner || diskTargetOwner === existingDownload.id)
+          : false;
+        if (existingDownload || fileExistsOnDisk || hasFirelinkOwnedTarget) {
           newConflicts.push({
             id: i.toString(),
             fileName: finalFile,
             reason: {
               type: 'file',
-              msg: existingDownload
+              msg: existingDownload || hasFirelinkOwnedTarget
                 ? t($ => $.addDownloads.existingDownloadDestination)
                 : t($ => $.addDownloads.fileExistsOnDisk)
             },
             resolution: 'rename',
-            replaceAllowed: Boolean(existingDownload),
+            replaceAllowed: existingDownload ? canReplaceExistingDownload : diskReplaceAllowed,
+            ...(existingDownload ? {} : diskReplaceAllowed
+              ? { replaceFingerprint: diskTargetFingerprint }
+              : {}),
             existingDownloadId: existingDownload?.id
           });
         }
@@ -1332,7 +1349,11 @@ export const AddDownloadsModal = () => {
     action: AddDownloadAction,
     finalLocation: string,
     useSharedDestination: boolean,
-    resolutions?: { id: string, resolution: 'rename' | 'replace' | 'skip' }[],
+    resolutions?: {
+      id: string;
+      resolution: 'rename' | 'replace' | 'skip';
+      replaceFingerprint?: string;
+    }[],
     destinationOverrides: Record<number, string> = {}
   ) => {
       let itemsToAdd: Array<AddDownloadDraftRow | null> = parsedItems.map(item =>
@@ -1351,6 +1372,7 @@ export const AddDownloadsModal = () => {
              if (res.resolution === 'skip') {
                  itemsToAdd[idx] = null;
              } else if (res.resolution === 'rename') {
+                 itemsToAdd[idx] = { ...item, replaceExistingFingerprint: undefined };
                  let finalFile = item.isMedia
                    ? mediaFileNameForSelectedFormat(item.file, item)
                    : canonicalizeDownloadFileName(item.file);
@@ -1404,9 +1426,10 @@ export const AddDownloadsModal = () => {
           }
                      let diskHas = false;
                      try {
-                       diskHas = await invoke('check_file_exists', {
+                       const targetInfo = await invoke('inspect_download_target', {
                          path: await resolveDownloadFilePath(itemLocation, newName)
                        });
+                       diskHas = targetInfo.kind !== 'missing';
                      } catch(e) {}
                      const batchHas = batchTargets.some(target => downloadLocationEquals(
                          target.location,
@@ -1422,7 +1445,7 @@ export const AddDownloadsModal = () => {
                    throw new Error(t($ => $.addDownloads.noAvailableName, { file: finalFile }));
                  }
                  
-                 itemsToAdd[idx] = { ...item, file: newName };
+                 itemsToAdd[idx] = { ...item, file: newName, replaceExistingFingerprint: undefined };
              } else if (res.resolution === 'replace') {
               if (!conflict?.replaceAllowed) {
                 const finalFile = item.isMedia
@@ -1469,7 +1492,14 @@ export const AddDownloadsModal = () => {
                  }
 
                  if (!existingItem) {
-                   throw new Error(t($ => $.addDownloads.cannotReplace, { file: finalFile }));
+                   if (!res.replaceFingerprint || conflict?.existingDownloadId) {
+                     throw new Error(t($ => $.addDownloads.cannotReplace, { file: finalFile }));
+                   }
+                   itemsToAdd[idx] = {
+                     ...item,
+                     replaceExistingFingerprint: res.replaceFingerprint
+                   };
+                   continue;
                  }
                 const incomingMediaFormat = mediaFormatSelectorForRow(item);
                 const mediaFormatChanged = item.isMedia
@@ -1623,7 +1653,8 @@ export const AddDownloadsModal = () => {
             ? normalizeTorrentWebSeedDrafts(item.torrentWebSeedRows ?? [], item.torrentFiles) || undefined
             : undefined,
           size: item.size || (item.sizeBytes ? formatBytes(item.sizeBytes) : undefined),
-          sizeBytes: item.sizeBytes
+          sizeBytes: item.sizeBytes,
+          replaceExistingFingerprint: item.replaceExistingFingerprint
         }, action);
         if (!added) {
           const rejected = useDownloadStore.getState().downloads.find(download => download.id === id);

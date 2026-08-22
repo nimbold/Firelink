@@ -2122,23 +2122,92 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
     pub async fn commit_reserved_enqueue(
         &self,
+        task: QueuedTask,
+        generation: u64,
+        previous_generation: Option<u64>,
+    ) -> Result<(), String> {
+        self.commit_reserved_enqueue_with_finalizer(task, generation, previous_generation, || async {
+            Ok(())
+        })
+        .await
+    }
+
+    /// Commit an enqueue and its final durable admission marker as one
+    /// dispatcher-visible boundary. The task is placed in the pending list
+    /// before the finalizer runs, but the admission gate stays held so the
+    /// dispatcher cannot pop it until the finalizer succeeds. If the
+    /// finalizer fails, the task is removed before any worker can observe it.
+    pub async fn commit_reserved_enqueue_with_finalizer<F, Fut>(
+        &self,
         mut task: QueuedTask,
         generation: u64,
-    ) -> Result<(), String> {
+        previous_generation: Option<u64>,
+        finalizer: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
+        let id = task.id.clone();
         let _admission_gate = self.admission_gate.lock().await;
         if self.system_action_pending.load(Ordering::Acquire) {
+            self.rollback_enqueue_reservation(&id, generation, previous_generation)
+                .await;
             return Err("System action is already being performed".to_string());
         }
-        let id = task.id.clone();
-        let cancellations = self.enqueue_cancellations.lock().await;
-        if cancellations
-            .get(&id)
-            .is_some_and(|cancelled| *cancelled >= generation)
+        if self
+            .registered_lifecycle_generation(&id)
+            .await
+            .is_none_or(|registered| registered != generation)
         {
-            return Err("Download enqueue was superseded by a newer user action".to_string());
+            self.rollback_enqueue_reservation(&id, generation, previous_generation)
+                .await;
+            return Err("Download enqueue reservation is no longer current".to_string());
+        }
+        {
+            let cancellations = self.enqueue_cancellations.lock().await;
+            if cancellations
+                .get(&id)
+                .is_some_and(|cancelled| *cancelled >= generation)
+            {
+                self.rollback_enqueue_reservation(&id, generation, previous_generation)
+                    .await;
+                return Err("Download enqueue was superseded by a newer user action".to_string());
+            }
         }
         task.lifecycle_generation = generation;
         self.pending.lock().await.push_back(task);
+
+        if let Err(error) = finalizer().await {
+            let mut pending = self.pending.lock().await;
+            pending.retain(|candidate| {
+                !(candidate.id == id && candidate.lifecycle_generation == generation)
+            });
+            self.rollback_enqueue_reservation(&id, generation, previous_generation)
+                .await;
+            return Err(error);
+        }
+
+        // Cancellation can arrive while the durable admission marker is being
+        // written. Recheck it before making the task visible to the rest of
+        // the lifecycle; the admission gate prevents a dispatcher or queue
+        // mutation from observing a half-committed replacement.
+        {
+            let cancellations = self.enqueue_cancellations.lock().await;
+            if cancellations
+                .get(&id)
+                .is_some_and(|cancelled| *cancelled >= generation)
+            {
+                let mut pending = self.pending.lock().await;
+                pending.retain(|candidate| {
+                    !(candidate.id == id && candidate.lifecycle_generation == generation)
+                });
+                self.rollback_enqueue_reservation(&id, generation, previous_generation)
+                    .await;
+                return Err("Download enqueue was superseded by a newer user action".to_string());
+            }
+        }
+
         self.emit_state(id, DownloadStatus::Queued);
         self.notify.notify_one();
         Ok(())
@@ -2152,7 +2221,10 @@ impl<R: tauri::Runtime> QueueManager<R> {
     ) -> Result<(), String> {
         let id = task.id.clone();
         let previous_generation = self.reserve_enqueue_generation(&id, generation).await?;
-        if let Err(error) = self.commit_reserved_enqueue(task, generation).await {
+        if let Err(error) = self
+            .commit_reserved_enqueue(task, generation, previous_generation)
+            .await
+        {
             self.rollback_enqueue_reservation(&id, generation, previous_generation)
                 .await;
             return Err(error);
@@ -3395,6 +3467,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
     /// Pop the next task, or None if empty.
     pub async fn pop_front(&self) -> Option<QueuedTask> {
+        let _admission_gate = self.admission_gate.lock().await;
         self.pending.lock().await.pop_front()
     }
 
@@ -5789,6 +5862,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         queue_id: &str,
         direction: QueueDirection,
     ) -> Vec<String> {
+        let _admission_gate = self.admission_gate.lock().await;
         let mut pending = self.pending.lock().await;
         let queue_positions = pending
             .iter()
@@ -5852,6 +5926,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         queue_id: &str,
         target_index: usize,
     ) -> Vec<String> {
+        let _admission_gate = self.admission_gate.lock().await;
         let mut pending = self.pending.lock().await;
         let queue_positions = pending
             .iter()
@@ -5880,6 +5955,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// Does NOT release a permit (the caller handles active permits via
     /// release_permit if the task was already dispatched).
     pub async fn remove_from_pending(&self, id: &str) -> bool {
+        let _admission_gate = self.admission_gate.lock().await;
         let mut pending = self.pending.lock().await;
         let before = pending.len();
         pending.retain(|t| t.id != id);
@@ -5891,6 +5967,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
     }
 
     pub async fn remove_from_pending_for_generation(&self, id: &str, generation: u64) -> bool {
+        let _admission_gate = self.admission_gate.lock().await;
         let mut pending = self.pending.lock().await;
         let before = pending.len();
         pending.retain(|task| !(task.id == id && task.lifecycle_generation == generation));
@@ -8556,6 +8633,9 @@ pub struct EnqueueItem {
     #[serde(default)]
     #[ts(optional)]
     pub lifecycle_generation: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub replace_existing_fingerprint: Option<String>,
 }
 
 impl EnqueueItem {
@@ -8756,7 +8836,7 @@ mod tests {
                 release: Arc::clone(&release),
             }),
         ));
-        manager
+        let previous_generation = manager
             .reserve_enqueue_generation("allocation", 7)
             .await
             .expect("lifecycle reservation");
@@ -8770,6 +8850,7 @@ mod tests {
                     lifecycle_generation: 7,
                 },
                 7,
+                previous_generation,
             )
             .await
             .expect("queued task");
@@ -8794,6 +8875,106 @@ mod tests {
         manager.handle_aria2_download_start("blocking-gid", 1).await;
         assert_eq!(allocation_pending_epoch(&manager, "allocation"), None);
         dispatcher.abort();
+    }
+
+    #[tokio::test]
+    async fn enqueue_finalizer_failure_removes_pending_task_before_dispatch() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
+        let id = "finalizer-failure";
+        let generation = 3;
+        let previous_generation = manager
+            .reserve_enqueue_generation(id, generation)
+            .await
+            .expect("lifecycle reservation");
+
+        let error = manager
+            .commit_reserved_enqueue_with_finalizer(
+                QueuedTask {
+                    id: id.to_string(),
+                    queue_id: "main".to_string(),
+                    kind: TaskKind::Aria2,
+                    payload: SpawnPayload::default(),
+                    lifecycle_generation: generation,
+                    },
+                    generation,
+                    previous_generation,
+                    || async { Err("journal commit failed".to_string()) },
+            )
+            .await
+            .expect_err("a failed finalizer must reject admission");
+
+        assert_eq!(error, "journal commit failed");
+        assert!(manager.pending_order(None).await.is_empty());
+        assert_eq!(manager.registered_lifecycle_generation(id).await, None);
+        assert!(!manager.is_registered(id).await);
+    }
+
+    #[tokio::test]
+    async fn enqueue_cancellation_during_finalizer_rejects_admission() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(QueueManager::test_new(
+            app.handle().clone(),
+            1,
+            Arc::new(TestSpawner),
+        ));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let finalizer_started = Arc::clone(&started);
+        let finalizer_release = Arc::clone(&release);
+        let id = "finalizer-cancelled".to_string();
+        let generation = 4;
+        let previous_generation = manager
+            .reserve_enqueue_generation(&id, generation)
+            .await
+            .expect("lifecycle reservation");
+
+        let commit_manager = Arc::clone(&manager);
+        let commit_id = id.clone();
+        let commit = tokio::spawn(async move {
+            commit_manager
+                .commit_reserved_enqueue_with_finalizer(
+                    QueuedTask {
+                        id: commit_id,
+                        queue_id: "main".to_string(),
+                        kind: TaskKind::Aria2,
+                        payload: SpawnPayload::default(),
+                        lifecycle_generation: generation,
+                        },
+                        generation,
+                        previous_generation,
+                        {
+                        move || async move {
+                            finalizer_started.notify_one();
+                            finalizer_release.notified().await;
+                            Ok(())
+                        }
+                    },
+                )
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), started.notified())
+            .await
+            .expect("finalizer should begin");
+        manager.cancel_enqueue_generation(&id, generation).await;
+        release.notify_one();
+
+        let error = tokio::time::timeout(Duration::from_secs(1), commit)
+            .await
+            .expect("enqueue should finish")
+            .expect("enqueue task should not panic")
+            .expect_err("cancellation must reject the in-flight admission");
+        assert_eq!(
+            error,
+            "Download enqueue was superseded by a newer user action"
+        );
+        assert!(manager.pending_order(None).await.is_empty());
+        assert!(!manager.is_registered(&id).await);
     }
 
     #[tokio::test]

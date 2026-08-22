@@ -789,6 +789,16 @@ const persistableRequestHeaders = (headers: string | null | undefined): string |
 };
 
 /**
+ * Preserve only stable, non-credential request context for an explicit
+ * credentialless retry. This uses the same allow-list and URL sanitization as
+ * persistence so a retry cannot accidentally reuse a signed Referer or an
+ * unknown token-bearing header.
+ */
+export const headersWithoutCredentialMaterial = (
+  headers: string | null | undefined
+): string | undefined => persistableRequestHeaders(headers);
+
+/**
  * Returns a shallow copy of `item` with secret fields removed. Volatile
  * progress fields (`fraction`, `speed`, `eta`) are also dropped as in the
  * existing persistence path. Numeric byte totals remain for paused, failed,

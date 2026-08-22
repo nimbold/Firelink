@@ -11,14 +11,27 @@ export interface DuplicateConflict {
   reason: DuplicateReason;
   resolution: DuplicateResolution;
   replaceAllowed?: boolean;
+  replaceFingerprint?: string;
   existingDownloadId?: string;
 }
 
 interface Props {
   conflicts: DuplicateConflict[];
-  onConfirm: (resolutions: { id: string, resolution: DuplicateResolution }[]) => void;
+  onConfirm: (resolutions: {
+    id: string;
+    resolution: DuplicateResolution;
+    replaceFingerprint?: string;
+  }[]) => void;
   onCancel: () => void;
 }
+
+export const duplicateConflictCanReplace = (
+  conflict: Pick<DuplicateConflict, 'replaceAllowed'>
+): boolean => conflict.replaceAllowed === true;
+
+export const canReplaceAllDuplicateConflicts = (
+  conflicts: readonly Pick<DuplicateConflict, 'replaceAllowed'>[]
+): boolean => conflicts.length > 0 && conflicts.every(duplicateConflictCanReplace);
 
 export const DuplicateResolutionModal = ({ conflicts: initialConflicts, onConfirm, onCancel }: Props) => {
   const { t } = useTranslation();
@@ -40,9 +53,7 @@ export const DuplicateResolutionModal = ({ conflicts: initialConflicts, onConfir
     setConflicts(current => current.map(c => c.id === id ? { ...c, resolution } : c));
   };
 
-  const canReplaceAll = conflicts.length > 0 && conflicts.every(conflict =>
-    conflict.replaceAllowed === true
-  );
+  const canReplaceAll = canReplaceAllDuplicateConflicts(conflicts);
 
   const applyResolutionToAll = (resolution: DuplicateResolution) => {
     if (resolution === 'replace' && !canReplaceAll) return;
@@ -113,7 +124,7 @@ export const DuplicateResolutionModal = ({ conflicts: initialConflicts, onConfir
                 className="app-control w-24 shrink-0 px-2 py-1 text-xs"
               >
                 <option value="rename">{t($ => $.dialogs.duplicateDownloads.rename)}</option>
-                {conflict.replaceAllowed && <option value="replace">{t($ => $.dialogs.duplicateDownloads.replace)}</option>}
+                {duplicateConflictCanReplace(conflict) && <option value="replace">{t($ => $.dialogs.duplicateDownloads.replace)}</option>}
                 <option value="skip">{t($ => $.dialogs.duplicateDownloads.skip)}</option>
               </select>
             </div>
@@ -125,7 +136,11 @@ export const DuplicateResolutionModal = ({ conflicts: initialConflicts, onConfir
             {t($ => $.actions.cancel)}
           </button>
           <button 
-            onClick={() => onConfirm(conflicts.map(c => ({ id: c.id, resolution: c.resolution })))}
+            onClick={() => onConfirm(conflicts.map(c => ({
+              id: c.id,
+              resolution: c.resolution,
+              ...(c.replaceFingerprint ? { replaceFingerprint: c.replaceFingerprint } : {})
+            })))}
             className="app-button app-button-primary px-5 text-xs"
           >
             {t($ => $.actions.continue)}

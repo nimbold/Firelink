@@ -54,6 +54,8 @@ export interface AddDownloadDraftRow {
   playlistError?: string;
   metadataBlockedReason?: 'unsafe-url';
   selected?: boolean;
+  /** Opaque native fingerprint captured for an exact unmanaged-file replace. */
+  replaceExistingFingerprint?: string;
   isTorrent?: boolean;
   torrentPath?: string;
   torrentCacheId?: string;

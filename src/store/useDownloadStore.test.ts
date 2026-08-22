@@ -2555,6 +2555,15 @@ describe('useDownloadStore', () => {
   });
 
   it('explicitly requeues a credential-marked download without saved credentials', async () => {
+    vi.mocked(useSettingsStore.getState).mockReturnValue({
+      ...useSettingsStore.getState(),
+      siteLogins: [{
+        id: 'example-login',
+        urlPattern: 'example.com',
+        username: 'alice',
+      }],
+      keychainAccessReady: true,
+    } as unknown as ReturnType<typeof useSettingsStore.getState>);
     useDownloadStore.setState({
       downloads: [{
         id: 'credentialless-resume',
@@ -2566,6 +2575,7 @@ describe('useDownloadStore', () => {
         dateAdded: '',
         credentialsRequired: true,
         hasBeenDispatched: true,
+        headers: 'Referer: https://example.com/page?session=secret#part\nAuthorization: Bearer secret\nUser-Agent: Browser',
       }] as any[],
       backendRegisteredIds: new Set(['credentialless-resume'])
     });
@@ -2588,13 +2598,310 @@ describe('useDownloadStore', () => {
           username: null,
           password: null,
           cookies: null,
-          headers: null,
+          headers: 'Referer: https://example.com/page\nUser-Agent: Browser',
         })
       })
     );
     expect(useDownloadStore.getState().downloads[0]).toMatchObject({
       credentialsRequired: false,
       status: 'queued',
+    });
+  });
+
+  it('replaces a stale registered queued lifecycle during credentialless retry', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'credentialless-queued-lifecycle',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        destination: '/tmp',
+        status: 'queued',
+        category: 'Other',
+        dateAdded: '',
+        credentialsRequired: true,
+        headers: 'Authorization: Bearer secret\nUser-Agent: Browser',
+      }] as any[],
+      backendRegisteredIds: new Set(['credentialless-queued-lifecycle'])
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'enqueue_download') {
+        return { id: 'credentialless-queued-lifecycle', filename: 'file.bin' };
+      }
+      if (command === 'get_pending_order') return [];
+      return undefined;
+    });
+
+    await expect(useDownloadStore.getState().resumeDownload('credentialless-queued-lifecycle', {
+      resumeWithoutCredentials: true
+    })).resolves.toBe(true);
+
+    expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'detach_download_for_reconfigure',
+      { id: 'credentialless-queued-lifecycle' }
+    );
+    expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'enqueue_download',
+      expect.objectContaining({
+        item: expect.objectContaining({
+          password: null,
+          cookies: null,
+          headers: 'User-Agent: Browser',
+        })
+      })
+    );
+  });
+
+  it('keeps credential recovery available when credentialless detach fails', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'credentialless-detach-failure',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        destination: '/tmp',
+        status: 'paused',
+        category: 'Other',
+        dateAdded: '',
+        credentialsRequired: true,
+        username: 'alice',
+        password: 'secret',
+        headers: 'Authorization: Bearer secret\nUser-Agent: Browser',
+      }] as any[],
+      backendRegisteredIds: new Set(['credentialless-detach-failure'])
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'detach_download_for_reconfigure') {
+        throw new Error('detach unavailable');
+      }
+      return undefined;
+    });
+
+    await expect(useDownloadStore.getState().resumeDownload('credentialless-detach-failure', {
+      resumeWithoutCredentials: true
+    })).resolves.toBe(false);
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'paused',
+      credentialsRequired: true,
+      username: undefined,
+      password: undefined,
+      headers: 'User-Agent: Browser',
+    });
+  });
+
+  it('uses the configured media browser-cookie source during startup recovery', async () => {
+    const disposePersistence = initializeDownloadPersistence('main');
+    const id = 'startup-media-browser-cookies';
+    vi.mocked(useSettingsStore.getState).mockReturnValue({
+      ...useSettingsStore.getState(),
+      mediaCookieSource: 'chrome'
+    } as unknown as ReturnType<typeof useSettingsStore.getState>);
+    useDownloadStore.setState({
+      downloads: [{
+        id,
+        url: 'https://www.youtube.com/watch?v=browser-cookie-source',
+        fileName: 'video.mp4',
+        destination: '/tmp',
+        status: 'queued',
+        category: 'Movies',
+        dateAdded: '',
+        isMedia: true,
+        credentialsRequired: true,
+        hasBeenDispatched: true,
+        queueId: MAIN_QUEUE_ID,
+      }] as any[],
+      pendingOrder: [id],
+    });
+    let enqueuedItems: Array<Record<string, unknown>> = [];
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'enqueue_many') {
+        enqueuedItems = (args as { items: Array<Record<string, unknown>> }).items;
+        return [{ id, success: true, filename: 'video.mp4' }];
+      }
+      if (command === 'get_pending_order') return [id];
+      return undefined;
+    });
+
+    try {
+      await useDownloadStore.getState().resumePendingDownloads();
+
+      expect(enqueuedItems).toHaveLength(1);
+      expect(enqueuedItems[0]).toMatchObject({
+        id,
+        is_media: true,
+        cookie_source: 'chrome',
+      });
+      expect(useDownloadStore.getState().downloads[0].credentialsRequired).toBe(false);
+    } finally {
+      disposePersistence();
+    }
+  });
+
+  it('durably pauses startup media rows when no recoverable credential source exists', async () => {
+    const disposePersistence = initializeDownloadPersistence('main');
+    const id = 'startup-media-credential-block';
+    const persistedSnapshots: Array<Array<{ id: string; status: string }>> = [];
+    vi.mocked(useSettingsStore.getState).mockReturnValue({
+      ...useSettingsStore.getState(),
+      mediaCookieSource: 'none',
+      proxyMode: 'system'
+    } as unknown as ReturnType<typeof useSettingsStore.getState>);
+    useDownloadStore.setState({
+      downloads: [{
+        id,
+        url: 'https://www.youtube.com/watch?v=missing-cookie-source',
+        fileName: 'video.mp4',
+        destination: '/tmp',
+        status: 'queued',
+        category: 'Movies',
+        dateAdded: '',
+        isMedia: true,
+        credentialsRequired: true,
+        hasBeenDispatched: true,
+        queueId: MAIN_QUEUE_ID,
+      }] as any[],
+      pendingOrder: [id],
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'get_system_proxy') throw new Error('proxy unavailable');
+      if (command === 'db_commit_download_state') {
+        const downloads = JSON.parse((args as { downloadsData: string }).downloadsData) as Array<{
+          id: string;
+          status: string;
+        }>;
+        persistedSnapshots.push(downloads);
+        return undefined;
+      }
+      return undefined;
+    });
+
+    try {
+      await useDownloadStore.getState().resumePendingDownloads();
+      await flushDownloadPersistence();
+
+      expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_many', expect.anything());
+      expect(ipc.invokeCommand).not.toHaveBeenCalledWith('get_system_proxy', expect.anything());
+      expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+        id,
+        status: 'paused',
+        credentialsRequired: true,
+      });
+      expect(useDownloadStore.getState().pendingOrder).not.toContain(id);
+      expect(persistedSnapshots.some(snapshot => snapshot.some(item =>
+        item.id === id && item.status === 'paused'
+      ))).toBe(true);
+    } finally {
+      disposePersistence();
+    }
+  });
+
+  it('treats an invalid media-cookie source as unavailable during recovery', async () => {
+    vi.mocked(useSettingsStore.getState).mockReturnValue({
+      ...useSettingsStore.getState(),
+      mediaCookieSource: undefined
+    } as unknown as ReturnType<typeof useSettingsStore.getState>);
+    const id = 'invalid-media-cookie-source';
+    useDownloadStore.setState({
+      downloads: [{
+        id,
+        url: 'https://www.youtube.com/watch?v=invalid-cookie-source',
+        fileName: 'video.mp4',
+        status: 'paused',
+        category: 'Movies',
+        dateAdded: '',
+        isMedia: true,
+        credentialsRequired: true,
+        hasBeenDispatched: true,
+      }] as any[],
+      backendRegisteredIds: new Set([id])
+    });
+
+    await expect(useDownloadStore.getState().resumeDownload(id)).resolves.toBe(false);
+
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('resume_download', expect.anything());
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'paused',
+      credentialsRequired: true
+    });
+  });
+
+  it('applies one explicit credentialless approval to queue and global starts', async () => {
+    const ids = ['queue-recovery-approved', 'global-recovery-approved'];
+    useDownloadStore.setState({
+      downloads: ids.map((id, index) => ({
+        id,
+        url: `https://www.youtube.com/watch?v=${id}`,
+        fileName: `${id}.mp4`,
+        destination: '/tmp',
+        status: 'paused',
+        category: 'Movies',
+        dateAdded: '',
+        isMedia: true,
+        credentialsRequired: true,
+        hasBeenDispatched: true,
+        queueId: `recovery-queue-${index}`,
+      })) as any[],
+      queues: [
+        { id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true },
+        { id: 'recovery-queue-0', name: 'Queue recovery', isMain: false },
+        { id: 'recovery-queue-1', name: 'Global recovery', isMain: false },
+      ],
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'enqueue_download') {
+        const item = (args as { item: { id: string; password: string | null; cookies: string | null; headers: string | null } }).item;
+        return { id: item.id, filename: item.id };
+      }
+      if (command === 'get_pending_order') return [];
+      return undefined;
+    });
+
+    await expect(useDownloadStore.getState().startQueue('recovery-queue-0', {
+      resumeWithoutCredentialsIds: [ids[0]]
+    })).resolves.toEqual([ids[0]]);
+    useDownloadStore.getState().updateDownload(ids[0], { status: 'completed' });
+    await expect(useDownloadStore.getState().startAll({
+      resumeWithoutCredentialsIds: [ids[1]]
+    })).resolves.toBe(1);
+
+    const enqueuedItems = vi.mocked(ipc.invokeCommand).mock.calls
+      .filter(([command]) => command === 'enqueue_download')
+      .map(([, args]) => (args as { item: Record<string, unknown> }).item);
+    expect(enqueuedItems).toHaveLength(2);
+    expect(enqueuedItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: ids[0], password: null, cookies: null, headers: null }),
+      expect.objectContaining({ id: ids[1], password: null, cookies: null, headers: null }),
+    ]));
+    expect(useDownloadStore.getState().downloads.every(item => item.credentialsRequired === false)).toBe(true);
+  });
+
+  it('does not let a media browser-cookie setting bypass normal-download credential recovery', async () => {
+    vi.mocked(useSettingsStore.getState).mockReturnValue({
+      ...useSettingsStore.getState(),
+      mediaCookieSource: 'chrome'
+    } as unknown as ReturnType<typeof useSettingsStore.getState>);
+    const id = 'normal-download-credential-isolation';
+    useDownloadStore.setState({
+      downloads: [{
+        id,
+        url: 'https://example.com/private.bin',
+        fileName: 'private.bin',
+        status: 'paused',
+        category: 'Other',
+        dateAdded: '',
+        credentialsRequired: true,
+        hasBeenDispatched: true,
+        queueId: MAIN_QUEUE_ID,
+      }] as any[],
+      backendRegisteredIds: new Set([id]),
+    });
+
+    await expect(useDownloadStore.getState().resumeDownload(id)).resolves.toBe(false);
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('resume_download', expect.anything());
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'paused',
+      credentialsRequired: true,
     });
   });
 
@@ -3518,6 +3825,29 @@ describe('useDownloadStore', () => {
       id: 'paused',
       deleteAssets: true,
       preserveResumable: true
+    });
+  });
+
+  it('passes permanent-if-unfinished only for the user Delete File action', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'unfinished-delete', url: 'https://example.com/file', fileName: 'file', status: 'paused', category: 'Other', dateAdded: '' }
+      ] as any[]
+    });
+    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
+
+    await useDownloadStore.getState().removeDownload(
+      'unfinished-delete',
+      true,
+      false,
+      'permanentIfUnfinished'
+    );
+
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('remove_download', {
+      id: 'unfinished-delete',
+      deleteAssets: true,
+      preserveResumable: false,
+      assetRemovalPolicy: 'permanentIfUnfinished'
     });
   });
 

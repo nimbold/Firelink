@@ -6,7 +6,7 @@ import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
 
 export const DeleteConfirmationModal: React.FC = () => {
   const { t } = useTranslation();
-  const { deleteModalState, closeDeleteModal, removeDownload } = useDownloadStore();
+  const { deleteModalState, closeDeleteModal, removeDownload, downloads } = useDownloadStore();
   const [errorMessage, setErrorMessage] = useState('');
   const [isRemoving, setIsRemoving] = useState(false);
   const modalRef = useModalFocus(deleteModalState.isOpen);
@@ -49,7 +49,12 @@ export const DeleteConfirmationModal: React.FC = () => {
     const failures: string[] = [];
     for (const id of ids) {
       try {
-        await removeDownload(id, deleteFile);
+        await removeDownload(
+          id,
+          deleteFile,
+          false,
+          deleteFile ? 'permanentIfUnfinished' : undefined
+        );
         succeeded += 1;
       } catch (error) {
         failures.push(String(error));
@@ -72,6 +77,11 @@ export const DeleteConfirmationModal: React.FC = () => {
   const handleRemoveFromList = () => removeMany(false);
   const handleDeleteFile = () => removeMany(true);
   const itemCount = deleteModalState.downloadIds?.length ?? 0;
+  const selectedItems = (deleteModalState.downloadIds ?? [])
+    .map(id => downloads.find(download => download.id === id))
+    .filter(Boolean);
+  const hasCompletedSelection = selectedItems.some(item => item?.status === 'completed');
+  const hasUnfinishedSelection = selectedItems.some(item => item?.status !== 'completed');
 
   return (
     <div
@@ -101,6 +111,11 @@ export const DeleteConfirmationModal: React.FC = () => {
           {itemCount > 1
             ? t($ => $.dialogs.removeDownload.confirmationMultiple, { count: itemCount })
             : t($ => $.dialogs.removeDownload.confirmationSingle)}
+          {hasCompletedSelection && hasUnfinishedSelection && (
+            <div className="mt-3 text-xs text-amber-300" role="note">
+              {t($ => $.dialogs.removeDownload.mixedRemovalPolicy)}
+            </div>
+          )}
           {errorMessage && <div className="mt-3 text-xs text-red-400">{errorMessage}</div>}
         </div>
 

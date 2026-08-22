@@ -2589,6 +2589,22 @@ static MEDIA_METADATA_CACHE: OnceLock<tokio::sync::Mutex<HashMap<u64, (Instant, 
 static MEDIA_METADATA_LOCKS: OnceLock<
     tokio::sync::Mutex<HashMap<u64, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 > = OnceLock::new();
+static DOWNLOAD_TARGET_LOCKS: OnceLock<
+    tokio::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+> = OnceLock::new();
+
+async fn download_target_lock(path: &std::path::Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    let key = crate::platform::path_identity(path);
+    let locks = DOWNLOAD_TARGET_LOCKS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
+    let mut guard = locks.lock().await;
+    guard.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = guard.get(&key).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    guard.insert(key, std::sync::Arc::downgrade(&lock));
+    lock
+}
 
 #[allow(clippy::too_many_arguments)] // Hash every user-controlled yt-dlp input explicitly.
 fn media_metadata_cache_key(
@@ -3297,6 +3313,20 @@ fn destination_io_error_code(error: &std::io::Error) -> &'static str {
     }
 }
 
+fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        return metadata.file_type().is_symlink()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
 pub(crate) fn path_has_symlink_component(path: &std::path::Path) -> bool {
     use std::path::Component;
 
@@ -3309,7 +3339,7 @@ pub(crate) fn path_has_symlink_component(path: &std::path::Path) -> bool {
             Component::Normal(name) => {
                 current.push(name);
                 if std::fs::symlink_metadata(&current)
-                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                    .is_ok_and(|metadata| metadata_is_link_or_reparse(&metadata))
                 {
                     return true;
                 }
@@ -3331,7 +3361,7 @@ pub(crate) fn canonicalize_with_missing_components(
     loop {
         match std::fs::symlink_metadata(existing) {
             Ok(metadata) => {
-                if metadata.file_type().is_symlink() {
+                if metadata_is_link_or_reparse(&metadata) {
                     return None;
                 }
                 break;
@@ -4675,6 +4705,31 @@ fn resolve_bundled_binary_path(
     crate::engines::resolve_bundled_binary_path(app_handle, binary_name)
 }
 
+fn normalize_media_cookie_source(source: Option<&str>) -> Result<Option<String>, String> {
+    let Some(source) = source.map(str::trim).filter(|source| !source.is_empty()) else {
+        return Ok(None);
+    };
+    let source = source.to_ascii_lowercase();
+    if source == "none" {
+        return Ok(None);
+    }
+    if matches!(
+        source.as_str(),
+        "safari"
+            | "chrome"
+            | "chromium"
+            | "firefox"
+            | "edge"
+            | "brave"
+            | "opera"
+            | "vivaldi"
+            | "whale"
+    ) {
+        return Ok(Some(source));
+    }
+    Err("Unsupported media browser-cookie source".to_string())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn start_media_download_internal(
     app_handle: tauri::AppHandle,
@@ -4695,6 +4750,7 @@ pub(crate) async fn start_media_download_internal(
     max_tries: Option<i32>,
     cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<std::path::PathBuf, String> {
+    let cookie_source = normalize_media_cookie_source(cookie_source.as_deref())?;
     let safe_filename = crate::download_ownership::canonical_download_filename(&filename);
 
     let resolved_dest = resolve_path(&destination, &app_handle);
@@ -4769,7 +4825,7 @@ pub(crate) async fn start_media_download_internal(
         .max(0) as usize;
     let concurrent_fragments = normalize_media_connections(connections);
     let mut strike = 0_usize;
-    let mut effective_cookie_source = cookie_source.clone();
+    let mut effective_cookie_source = cookie_source;
     let mut browser_cookie_fallback_used = false;
 
     while strike <= max_retries {
@@ -5929,11 +5985,19 @@ async fn remove_download(
     id: String,
     delete_assets: bool,
     preserve_resumable: Option<bool>,
+    asset_removal_policy: Option<crate::ipc::DownloadAssetRemovalPolicy>,
     expected_lifecycle_generation: Option<String>,
 ) -> Result<(), String> {
     properties_window::ensure_main_window(&caller)?;
     log::info!("remove_download called for id: {}", id);
     let preserve_resumable = preserve_resumable.unwrap_or(false);
+    // The permanent policy is deliberately opt-in and is resolved against the
+    // durable row while the lifecycle guard is held. A missing or malformed
+    // row cannot safely be classified as unfinished, so refuse asset removal
+    // before stopping anything when this policy is requested.
+    let permanent_if_unfinished_requested = delete_assets
+        && !preserve_resumable
+        && asset_removal_policy == Some(crate::ipc::DownloadAssetRemovalPolicy::PermanentIfUnfinished);
     let expected_lifecycle_generation = expected_lifecycle_generation
         .map(|generation| {
             generation
@@ -5941,7 +6005,21 @@ async fn remove_download(
                 .map_err(|_| "Invalid expected download lifecycle generation".to_string())
         })
         .transpose()?;
-    let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    let mut control_guard = Some(state.queue_manager.acquire_aria2_control(&id).await);
+    let mut cleanup_control_guard: Option<queue::Aria2ControlGuard> = None;
+    // Classify the removal from the durable row only after taking the same
+    // lifecycle guard that protects stopping the native owner. This prevents
+    // a completed/unfinished decision from racing a terminal transition or a
+    // replacement lifecycle for the same download id.
+    let permanent_asset_removal = if permanent_if_unfinished_requested {
+        let persisted = load_persisted_download_item(
+            &app_handle.state::<crate::db::DbState>(),
+            &id,
+        )?;
+        !matches!(persisted.status, crate::ipc::DownloadStatus::Completed)
+    } else {
+        false
+    };
 
     let active_kind = state.queue_manager.active_kind(&id).await;
     let registered_lifecycle_generation = state
@@ -6049,9 +6127,9 @@ async fn remove_download(
         // Do not delete the guessed magnet path and ownership record until a
         // late GID has been removed; otherwise the daemon can finish creating
         // an output after cleanup and leave an untracked file behind.
-        drop(control_guard);
+        drop(control_guard.take());
         state.queue_manager.wait_for_aria2_dispatch(&id).await;
-        let _control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+        let reacquired_control_guard = state.queue_manager.acquire_aria2_control(&id).await;
         let current_generation = state
             .queue_manager
             .registered_lifecycle_generation(&id)
@@ -6120,16 +6198,23 @@ async fn remove_download(
         state.queue_manager.clear_aria2_retry_state(&id).await;
         state.queue_manager.forget_torrent_telemetry(&id).await;
         state.queue_manager.forget_aria2_gid(&id).await;
+        cleanup_control_guard = Some(reacquired_control_guard);
     }
+
+    // Keep lifecycle ownership fenced while the exact owned paths and the
+    // durable ownership record are inspected and cleaned. The no-GID branch
+    // already reacquired this guard after waiting for a late dispatch; the
+    // mapped-GID branch can reuse a fresh guard after the daemon stopped.
+    let _cleanup_control_guard = match cleanup_control_guard {
+        Some(guard) => guard,
+        None => {
+            drop(control_guard.take());
+            state.queue_manager.acquire_aria2_control(&id).await
+        }
+    };
 
     let owned_paths = crate::download_ownership::owned_paths_for_id(&app_handle, &id)?;
     let primary_path = crate::download_ownership::primary_path_for_id(&app_handle, &id)?;
-
-    use tauri::Emitter;
-    let _ = app_handle.emit(
-        "download-state",
-        crate::ipc::DownloadStateEvent::new(id.clone(), crate::ipc::DownloadStatus::Paused),
-    );
 
     let preserve_assets = preserve_resumable
         && (owned_paths.iter().any(|path| has_resumable_download_assets(path))
@@ -6137,23 +6222,91 @@ async fn remove_download(
                 .as_ref()
                 .is_some_and(|path| has_resumable_download_assets(path)));
 
+    if delete_assets && !preserve_assets {
+        if owned_paths.is_empty() && primary_path.is_none() {
+            return Err(
+                "Cannot remove download files because Firelink ownership is unavailable".to_string(),
+            );
+        }
+
+        // A legacy row can still claim a path even when the newer ownership
+        // registry has a record for this id. Revalidate every exact target
+        // immediately before cleanup so a stale or colliding registry entry
+        // cannot delete another download's payload.
+        let mut ownership_targets = owned_paths.clone();
+        if let Some(primary) = primary_path.as_ref() {
+            ownership_targets.push(primary.clone());
+        }
+        ownership_targets.sort_by_key(|path| crate::platform::path_identity(path));
+        ownership_targets.dedup_by(|left, right| crate::platform::paths_equal(left, right));
+        for target in ownership_targets {
+            if let Some(owner) = crate::download_ownership::owner_for_path(&app_handle, &target)? {
+                if owner != id {
+                    return Err(format!(
+                        "Cannot remove download files because '{}' is owned by another Firelink download",
+                        target.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    use tauri::Emitter;
+    let _ = app_handle.emit(
+        "download-state",
+        crate::ipc::DownloadStateEvent::new(id.clone(), crate::ipc::DownloadStatus::Paused),
+    );
+
+    // Asset cleanup and exact replacement share the same target namespace.
+    // Hold every affected target lock in a stable order until the ownership
+    // record is removed, so another download cannot claim a path between
+    // deleting its payload/sidecars and releasing Firelink ownership.
+    let mut cleanup_target_guards = Vec::new();
+    if delete_assets && !preserve_assets {
+        let mut cleanup_targets = owned_paths.clone();
+        if let Some(primary) = primary_path
+            .as_ref()
+            .filter(|primary| primary_path_needs_container_cleanup(primary, &owned_paths))
+        {
+            cleanup_targets.push(primary.clone());
+        }
+        cleanup_targets.sort_by_key(|path| crate::platform::path_identity(path));
+        cleanup_targets.dedup_by(|left, right| crate::platform::paths_equal(left, right));
+        for target in cleanup_targets {
+            cleanup_target_guards.push(download_target_lock(&target).await.lock_owned().await);
+        }
+    }
+
     let cleanup_result = async {
         if delete_assets && !preserve_assets {
             for path in &owned_paths {
-                remove_download_assets(path, &app_handle).await?;
+                if permanent_asset_removal {
+                    remove_download_assets_permanently(path, &app_handle).await?;
+                } else {
+                    remove_download_assets(path, &app_handle).await?;
+                }
             }
             if let Some(primary) = primary_path
                 .as_ref()
                 .filter(|primary| primary_path_needs_container_cleanup(primary, &owned_paths))
             {
-                remove_download_container_assets(primary, &app_handle).await?;
+                if permanent_asset_removal {
+                    remove_download_container_assets_permanently(primary, &app_handle).await?;
+                } else {
+                    remove_download_container_assets(primary, &app_handle).await?;
+                }
             }
         }
-        crate::torrent::remove_managed_torrent(&app_handle, &id).await;
+        if permanent_asset_removal {
+            remove_managed_torrent_permanently(&app_handle, &id).await?;
+        } else {
+            crate::torrent::remove_managed_torrent(&app_handle, &id).await;
+        }
         crate::download_ownership::remove(&app_handle, &id)?;
         Ok::<(), String>(())
     }
     .await;
+    drop(cleanup_target_guards);
 
     state.queue_manager.release_registered_id(&id).await;
     cleanup_result
@@ -6260,6 +6413,339 @@ async fn remove_download_sidecars<R: tauri::Runtime>(
         }
     }
     Ok(())
+}
+
+async fn remove_exact_file_permanently<R: tauri::Runtime>(
+    path: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let Some(expected_fingerprint) = exact_file_fingerprint_for_permanent_removal(path, app_handle).await? else {
+        return Ok(());
+    };
+
+    for attempt in 0..=5 {
+        match exact_file_fingerprint_for_permanent_removal(path, app_handle).await? {
+            Some(current) if current == expected_fingerprint => {}
+            Some(_) => {
+                return Err(format!(
+                    "refusing to permanently remove '{}' because it changed during cleanup",
+                    path.display()
+                ));
+            }
+            None => return Ok(()),
+        }
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if attempt == 5 => {
+                return Err(format!(
+                    "could not permanently remove '{}' after retries: {error}",
+                    path.display()
+                ));
+            }
+            Err(_) => {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn exact_file_fingerprint_for_permanent_removal<R: tauri::Runtime>(
+    path: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<Option<String>, String> {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("could not inspect '{}' before deletion: {error}", path.display())),
+    };
+    if metadata_is_link_or_reparse(&metadata) || path_has_symlink_component(path) {
+        return Err(format!(
+            "refusing to permanently remove symbolic-link asset '{}'",
+            path.display()
+        ));
+    }
+    if !metadata.is_file() {
+        return Err(format!(
+            "refusing to permanently remove non-file asset '{}'",
+            path.display()
+        ));
+    }
+    if !is_safe_path(path, app_handle) {
+        return Err(format!(
+            "download asset path '{}' is outside an allowed download location",
+            path.display()
+        ));
+    }
+    Ok(Some(target_fingerprint(&metadata)))
+}
+
+async fn validate_exact_file_for_permanent_removal<R: tauri::Runtime>(
+    path: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<bool, String> {
+    Ok(exact_file_fingerprint_for_permanent_removal(path, app_handle)
+        .await?
+        .is_some())
+}
+
+async fn remove_download_sidecars_permanently<R: tauri::Runtime>(
+    primary: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<(), String> {
+    validate_download_sidecars_permanently(primary, app_handle).await?;
+    for suffix in [".aria2", ".part", ".ytdl"] {
+        let mut candidate_os = primary.as_os_str().to_os_string();
+        candidate_os.push(suffix);
+        let candidate = std::path::PathBuf::from(candidate_os);
+        if validate_exact_file_for_permanent_removal(&candidate, app_handle).await? {
+            remove_exact_file_permanently(&candidate, app_handle).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn validate_download_sidecars_permanently<R: tauri::Runtime>(
+    primary: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<(), String> {
+    for suffix in [".aria2", ".part", ".ytdl"] {
+        let mut candidate_os = primary.as_os_str().to_os_string();
+        candidate_os.push(suffix);
+        let candidate = std::path::PathBuf::from(candidate_os);
+        let _ = validate_exact_file_for_permanent_removal(&candidate, app_handle).await?;
+    }
+    Ok(())
+}
+
+async fn collect_media_processing_artifacts_for_permanent_removal<R: tauri::Runtime>(
+    primary: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let Some(parent) = primary.parent() else {
+        return Ok(Vec::new());
+    };
+    if !is_safe_path(parent, app_handle) {
+        return Err("download media artifact directory is outside an allowed location".to_string());
+    }
+    let Some(base_name) = primary.file_name().and_then(|name| name.to_str()) else {
+        return Ok(Vec::new());
+    };
+    let base_stem = primary
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or(base_name);
+    let mut entries = match tokio::fs::read_dir(parent).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("could not inspect media artifacts: {error}")),
+    };
+    let mut artifacts = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| format!("could not inspect media artifacts: {error}"))?
+    {
+        let path = entry.path();
+        if crate::platform::paths_equal(&path, primary) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !is_media_artifact_name(name, base_name, base_stem) {
+            continue;
+        }
+        validate_exact_file_for_permanent_removal(&path, app_handle).await?;
+        artifacts.push(path);
+    }
+    Ok(artifacts)
+}
+
+async fn remove_download_assets_permanently<R: tauri::Runtime>(
+    primary: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let artifacts = collect_media_processing_artifacts_for_permanent_removal(primary, app_handle).await?;
+    // Validate every exact sidecar before deleting the primary payload. A
+    // symlink or special-file substitution must leave the row/ownership
+    // intact rather than producing a partially-cleaned download silently.
+    validate_download_sidecars_permanently(primary, app_handle).await?;
+    validate_exact_file_for_permanent_removal(primary, app_handle).await?;
+    remove_exact_file_permanently(primary, app_handle).await?;
+    remove_download_sidecars_permanently(primary, app_handle).await?;
+    for artifact in artifacts {
+        remove_exact_file_permanently(&artifact, app_handle).await?;
+    }
+    Ok(())
+}
+
+async fn remove_download_container_assets_permanently<R: tauri::Runtime>(
+    primary: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let metadata = match tokio::fs::symlink_metadata(primary).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // The output directory may already be gone while Aria2's exact
+            // sidecars remain. They are still safe to remove by name.
+            remove_download_sidecars_permanently(primary, app_handle).await?;
+            return Ok(());
+        }
+        Err(error) => return Err(format!("could not inspect Torrent output directory: {error}")),
+    };
+    if metadata_is_link_or_reparse(&metadata) || path_has_symlink_component(primary) {
+        return Err(format!(
+            "refusing to permanently remove symbolic-link Torrent directory '{}'",
+            primary.display()
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(format!(
+            "Torrent output container '{}' is not a directory",
+            primary.display()
+        ));
+    }
+    if !is_safe_path(primary, app_handle) {
+        return Err("Torrent output directory is outside an allowed download location".to_string());
+    }
+
+    // Validate sidecars before any exact entry is removed. The removal helper
+    // revalidates again under the lifecycle/target lock immediately before
+    // unlinking, so a later substitution still fails closed.
+    validate_download_sidecars_permanently(primary, app_handle).await?;
+
+    let mut entries = tokio::fs::read_dir(primary)
+        .await
+        .map_err(|error| format!("could not inspect Torrent output directory: {error}"))?;
+    let mut metadata_entries = Vec::new();
+    let mut has_unrelated_entries = false;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| format!("could not inspect Torrent output directory: {error}"))?
+    {
+        let path = entry.path();
+        let entry_metadata = tokio::fs::symlink_metadata(&path)
+            .await
+            .map_err(|error| format!("could not inspect Torrent output entry: {error}"))?;
+        if metadata_is_link_or_reparse(&entry_metadata) {
+            return Err(format!(
+                "refusing to remove Torrent output directory containing symbolic link '{}'",
+                path.display()
+            ));
+        }
+        if !is_os_directory_metadata(&entry.file_name()) {
+            has_unrelated_entries = true;
+            continue;
+        }
+        if !entry_metadata.is_file() {
+            return Err(format!(
+                "refusing to remove non-file OS metadata entry '{}'",
+                path.display()
+            ));
+        }
+        validate_exact_file_for_permanent_removal(&path, app_handle).await?;
+        metadata_entries.push(path);
+    }
+
+    remove_download_sidecars_permanently(primary, app_handle).await?;
+    for path in metadata_entries {
+        remove_exact_file_permanently(&path, app_handle).await?;
+    }
+    if has_unrelated_entries {
+        log::debug!(
+            "keeping Torrent output directory '{}': unrelated entries remain",
+            primary.display()
+        );
+        return Ok(());
+    }
+
+    for attempt in 0..=5 {
+        match tokio::fs::remove_dir(primary).await {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                // A user or another process may have added an unrelated file
+                // after inspection. Preserve it and leave the directory in
+                // place; owned files were already removed exactly.
+                log::debug!(
+                    "keeping Torrent output directory '{}': it became non-empty during cleanup",
+                    primary.display()
+                );
+                return Ok(());
+            }
+            Err(error) if attempt == 5 => {
+                return Err(format!(
+                    "could not permanently remove Torrent output directory '{}' after retries: {error}",
+                    primary.display()
+                ));
+            }
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
+        }
+    }
+    Ok(())
+}
+
+async fn remove_managed_torrent_permanently<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    id: &str,
+) -> Result<(), String> {
+    let path = crate::torrent::managed_torrent_path(app_handle, id)?;
+    let expected_fingerprint = match managed_torrent_metadata_fingerprint(&path, app_handle).await? {
+        Some(fingerprint) => fingerprint,
+        None => return Ok(()),
+    };
+
+    for attempt in 0..=5 {
+        let current_fingerprint = match managed_torrent_metadata_fingerprint(&path, app_handle).await? {
+            Some(fingerprint) => fingerprint,
+            None => return Ok(()),
+        };
+        if current_fingerprint != expected_fingerprint {
+            return Err("managed Torrent metadata changed during cleanup".to_string());
+        }
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if attempt == 5 => {
+                return Err(format!(
+                    "could not permanently remove managed Torrent metadata after retries: {error}"
+                ));
+            }
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
+        }
+    }
+    Ok(())
+}
+
+async fn managed_torrent_metadata_fingerprint<R: tauri::Runtime>(
+    path: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<Option<String>, String> {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("could not inspect managed Torrent metadata: {error}")),
+    };
+    let root = crate::torrent::managed_torrent_storage_root(app_handle)?;
+    if path_has_symlink_component(&root) || path_has_symlink_component(&path) {
+        return Err("refusing to permanently remove Torrent metadata through a symbolic link".to_string());
+    }
+    let canonical_root = std::fs::canonicalize(&root)
+        .map_err(|error| format!("could not validate managed Torrent metadata storage: {error}"))?;
+    let canonical_parent = path
+        .parent()
+        .and_then(|parent| std::fs::canonicalize(parent).ok())
+        .ok_or_else(|| "managed Torrent metadata storage is unavailable".to_string())?;
+    if !crate::platform::paths_equal(&canonical_root, &canonical_parent) {
+        return Err("managed Torrent metadata path is outside its app-owned storage".to_string());
+    }
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err("refusing to permanently remove non-regular managed Torrent metadata".to_string());
+    }
+    Ok(Some(target_fingerprint(&metadata)))
 }
 
 fn is_os_directory_metadata(name: &std::ffi::OsStr) -> bool {
@@ -7130,7 +7616,7 @@ struct ExpectedTorrentOutputPaths {
     unselected: Vec<std::path::PathBuf>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct DownloadOwnershipSnapshot {
     primary: Option<std::path::PathBuf>,
     owned: Vec<std::path::PathBuf>,
@@ -7168,6 +7654,19 @@ fn restore_download_ownership(
         &owned,
         &snapshot.removal,
     )
+}
+
+fn restore_download_replacement_ownership(
+    app_handle: &tauri::AppHandle,
+    id: &str,
+    previous: Option<DownloadOwnershipSnapshot>,
+) -> Result<(), String> {
+    match previous {
+        Some(snapshot) => restore_download_ownership(app_handle, id, snapshot),
+        // Journals created before the ownership snapshot was added can only
+        // be recovered safely by dropping the temporary ownership record.
+        None => crate::download_ownership::remove(app_handle, id),
+    }
 }
 
 fn expected_torrent_output_paths(
@@ -7279,6 +7778,8 @@ fn register_download_ownership(
     app_handle: &tauri::AppHandle,
     item: &queue::EnqueueItem,
 ) -> Result<(), String> {
+    let output_paths = enqueue_output_paths(app_handle, item)?;
+    ensure_enqueue_output_paths_unclaimed(app_handle, &item.id, &output_paths)?;
     if item.is_torrent.unwrap_or(false) {
         return register_torrent_output_ownership(
             app_handle,
@@ -7302,6 +7803,675 @@ fn register_download_ownership(
         vec![primary],
         Vec::new(),
     )
+}
+
+fn enqueue_output_paths(
+    app_handle: &tauri::AppHandle,
+    item: &queue::EnqueueItem,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    if item.is_torrent.unwrap_or(false) {
+        if let Some(paths) = expected_torrent_output_paths(
+            app_handle,
+            &item.id,
+            &item.destination,
+            &item.filename,
+            item.torrent_path.as_deref(),
+            item.torrent_file_indices.as_deref(),
+            item.torrent_remove_unselected_file.unwrap_or(false),
+        )? {
+            let mut output_paths = Vec::with_capacity(
+                1 + paths.selected.len() + paths.unselected.len(),
+            );
+            output_paths.push(paths.primary);
+            output_paths.extend(paths.selected);
+            output_paths.extend(paths.unselected);
+            return Ok(output_paths);
+        }
+    }
+
+    Ok(vec![crate::download_ownership::expected_primary_path(
+        app_handle,
+        &item.destination,
+        &item.filename,
+    )?])
+}
+
+fn enqueue_output_lock_path(
+    app_handle: &tauri::AppHandle,
+    item: &queue::EnqueueItem,
+) -> Result<std::path::PathBuf, String> {
+    enqueue_output_paths(app_handle, item)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Download enqueue produced no output path".to_string())
+}
+
+fn ensure_enqueue_output_paths_unclaimed(
+    app_handle: &tauri::AppHandle,
+    id: &str,
+    paths: &[std::path::PathBuf],
+) -> Result<(), String> {
+    let mut checked = Vec::new();
+    for path in paths {
+        if checked
+            .iter()
+            .any(|existing: &std::path::PathBuf| crate::platform::paths_equal(existing, path))
+        {
+            continue;
+        }
+        checked.push(path.clone());
+        if let Some(owner) = crate::download_ownership::owner_for_path(app_handle, path)? {
+            if owner != id {
+                return Err(format!(
+                    "Download destination is already owned by Firelink download {owner}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct DownloadReplacementJournal {
+    id: String,
+    target: std::path::PathBuf,
+    quarantine: std::path::PathBuf,
+    fingerprint: String,
+    phase: String,
+    #[serde(default)]
+    previous_ownership: Option<DownloadOwnershipSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct DownloadReplacementReservation {
+    journal_path: std::path::PathBuf,
+    target: std::path::PathBuf,
+    quarantine: std::path::PathBuf,
+    fingerprint: String,
+}
+
+fn safe_replacement_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+async fn write_download_replacement_journal(
+    path: &std::path::Path,
+    journal: &DownloadReplacementJournal,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(journal)
+        .map_err(|_| "Could not encode download replacement recovery".to_string())?;
+    crate::platform::atomic_write_replace(path, &bytes)
+        .await
+        .map_err(|_| "Could not commit download replacement recovery".to_string())
+}
+
+async fn mark_download_replacement_admitted(
+    reservation: &DownloadReplacementReservation,
+) -> Result<(), String> {
+    let bytes = tokio::fs::read(&reservation.journal_path)
+        .await
+        .map_err(|error| format!("Could not read download replacement recovery: {error}"))?;
+    let mut journal: DownloadReplacementJournal = serde_json::from_slice(&bytes)
+        .map_err(|_| "Could not decode download replacement recovery".to_string())?;
+    if journal.target != reservation.target
+        || journal.quarantine != reservation.quarantine
+        || journal.fingerprint != reservation.fingerprint
+    {
+        return Err("Download replacement recovery no longer matches its reservation".to_string());
+    }
+    journal.phase = "admitted".to_string();
+    write_download_replacement_journal(&reservation.journal_path, &journal).await
+}
+
+async fn restore_download_replacement(
+    reservation: &DownloadReplacementReservation,
+) -> Result<(), String> {
+    let quarantine_metadata = match tokio::fs::symlink_metadata(&reservation.quarantine).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(
+                "Cannot restore replacement because its quarantine is missing; recovery journal retained"
+                    .to_string(),
+            );
+        }
+        Err(error) => return Err(format!("Could not inspect replacement quarantine: {error}")),
+    };
+    if metadata_is_link_or_reparse(&quarantine_metadata) || !quarantine_metadata.is_file() {
+        return Err("Cannot restore replacement quarantine because it is not a regular file".to_string());
+    }
+    if target_fingerprint(&quarantine_metadata) != reservation.fingerprint {
+        return Err("Cannot restore replacement quarantine because its contents changed".to_string());
+    }
+    if tokio::fs::symlink_metadata(&reservation.target).await.is_ok() {
+        return Err(format!(
+            "Cannot restore replaced target '{}': the destination changed while admission was in progress",
+            reservation.target.display()
+        ));
+    }
+    restore_quarantine_file_without_replacing(reservation, "replaced target").await
+}
+
+async fn restore_staged_replacement_after_validation_failure(
+    reservation: &DownloadReplacementReservation,
+) -> Result<(), String> {
+    let quarantine_metadata = tokio::fs::symlink_metadata(&reservation.quarantine)
+        .await
+        .map_err(|error| format!("Could not inspect staged replacement file: {error}"))?;
+    if metadata_is_link_or_reparse(&quarantine_metadata) || !quarantine_metadata.is_file() {
+        return Err("Cannot restore staged replacement because it is not a regular file".to_string());
+    }
+    if tokio::fs::symlink_metadata(&reservation.target).await.is_ok() {
+        return Err(format!(
+            "Cannot restore staged replacement '{}': the destination changed while admission was in progress",
+            reservation.target.display()
+        ));
+    }
+    restore_quarantine_file_without_replacing(reservation, "staged replacement").await
+}
+
+async fn restore_quarantine_file_without_replacing(
+    reservation: &DownloadReplacementReservation,
+    description: &str,
+) -> Result<(), String> {
+    match tokio::fs::hard_link(&reservation.quarantine, &reservation.target).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(format!(
+                "Could not restore {description}: the destination changed while admission was in progress"
+            ));
+        }
+        Err(error) => {
+            return Err(format!("Could not restore {description}: {error}"));
+        }
+    }
+    tokio::fs::remove_file(&reservation.quarantine)
+        .await
+        .map_err(|error| format!("Could not clear {description} quarantine: {error}"))?;
+    tokio::fs::remove_file(&reservation.journal_path)
+        .await
+        .map_err(|error| format!("Could not clear replacement recovery: {error}"))
+}
+
+fn restore_quarantine_file_without_replacing_sync(
+    quarantine: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<(), String> {
+    if std::fs::symlink_metadata(target).is_ok() {
+        return Err("the destination changed while admission was in progress".to_string());
+    }
+    match std::fs::hard_link(quarantine, target) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err("the destination changed while admission was in progress".to_string());
+        }
+        Err(error) => return Err(format!("could not restore quarantined file: {error}")),
+    }
+    std::fs::remove_file(quarantine)
+        .map_err(|error| format!("could not clear quarantined file: {error}"))
+}
+
+async fn finalize_download_replacement(
+    reservation: &DownloadReplacementReservation,
+) {
+    let quarantine_metadata = match tokio::fs::symlink_metadata(&reservation.quarantine).await {
+        Ok(metadata) if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() => {
+            log::warn!(
+                "download replacement cleanup [{}]: retained recovery journal because quarantine is not a regular file",
+                reservation.target.display()
+            );
+            return;
+        }
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let _ = tokio::fs::remove_file(&reservation.journal_path).await;
+            return;
+        }
+        Err(error) => {
+            log::warn!(
+                "download replacement cleanup [{}]: retained recovery journal because quarantine could not be inspected: {}",
+                reservation.target.display(),
+                error
+            );
+            return;
+        }
+    };
+    if target_fingerprint(&quarantine_metadata) != reservation.fingerprint {
+        log::warn!(
+            "download replacement cleanup [{}]: retained recovery journal because quarantine changed",
+            reservation.target.display()
+        );
+        return;
+    }
+    match tokio::fs::remove_file(&reservation.quarantine).await {
+        Ok(()) => {
+            let _ = tokio::fs::remove_file(&reservation.journal_path).await;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let _ = tokio::fs::remove_file(&reservation.journal_path).await;
+        }
+        Err(error) => {
+            log::warn!(
+                "download replacement cleanup [{}]: retained recovery journal after quarantine removal failed: {}",
+                reservation.target.display(),
+                error
+            );
+        }
+    }
+}
+
+async fn prepare_download_replacement(
+    app_handle: &tauri::AppHandle,
+    state: &AppState,
+    item: &queue::EnqueueItem,
+    target: &std::path::Path,
+    lifecycle_generation: u64,
+    previous_ownership: &DownloadOwnershipSnapshot,
+) -> Result<Option<DownloadReplacementReservation>, String> {
+    let Some(expected_fingerprint) = item.replace_existing_fingerprint.as_deref() else {
+        return Ok(None);
+    };
+    if item.is_torrent.unwrap_or(false) {
+        return Err("Exact replacement is not supported for Torrent output directories".to_string());
+    }
+
+    let metadata = match std::fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Could not inspect replacement target: {error}")),
+    };
+    if metadata_is_link_or_reparse(&metadata) {
+        return Err("Cannot replace a symbolic-link download target".to_string());
+    }
+    if !metadata.is_file() {
+        return Err("Exact replacement requires a regular file target".to_string());
+    }
+    if !is_safe_path(target, app_handle) {
+        return Err("Download replacement target is outside an approved location".to_string());
+    }
+    if let Some(owner) = crate::download_ownership::owner_for_path(app_handle, target)? {
+        return Err(format!(
+            "Download target is already owned by Firelink download {owner}"
+        ));
+    }
+    let current_fingerprint = target_fingerprint(&metadata);
+    if current_fingerprint != expected_fingerprint {
+        return Err(
+            "The file changed after duplicate resolution. Reopen the conflict and choose Replace again."
+                .to_string(),
+        );
+    }
+
+    let parent = target
+        .parent()
+        .ok_or_else(|| "Download replacement target has no parent directory".to_string())?;
+    let transaction_id = uuid::Uuid::new_v4().simple().to_string();
+    let quarantine = parent.join(format!(
+        ".firelink-replaced-{}-{}.tmp",
+        safe_replacement_component(&item.id),
+        transaction_id
+    ));
+    if crate::path_has_symlink_component(&quarantine) {
+        return Err("Download replacement quarantine path contains a symbolic link".to_string());
+    }
+    let journal_dir = state.storage_layout.data_dir().join("download-replacements");
+    tokio::fs::create_dir_all(&journal_dir)
+        .await
+        .map_err(|error| format!("Could not prepare download replacement recovery: {error}"))?;
+    let journal_path = journal_dir.join(format!(
+        "{}-{}-{}.json",
+        safe_replacement_component(&item.id),
+        lifecycle_generation,
+        transaction_id
+    ));
+    let reservation = DownloadReplacementReservation {
+        journal_path: journal_path.clone(),
+        target: target.to_path_buf(),
+        quarantine: quarantine.clone(),
+        fingerprint: expected_fingerprint.to_string(),
+    };
+    let mut journal = DownloadReplacementJournal {
+        id: item.id.clone(),
+        target: target.to_path_buf(),
+        quarantine,
+        fingerprint: expected_fingerprint.to_string(),
+        phase: "prepared".to_string(),
+        previous_ownership: Some(previous_ownership.clone()),
+    };
+    write_download_replacement_journal(&journal_path, &journal).await?;
+
+    if let Err(error) = tokio::fs::rename(target, &reservation.quarantine).await {
+        let _ = tokio::fs::remove_file(&journal_path).await;
+        return Err(format!("Could not stage the existing file for replacement: {error}"));
+    }
+    let staged_metadata = match tokio::fs::symlink_metadata(&reservation.quarantine).await {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            if let Err(restore_error) = restore_download_replacement(&reservation).await {
+                log::warn!(
+                    "download replacement [{}]: could not restore the staged file after verification failed: {}",
+                    item.id,
+                    restore_error
+                );
+            }
+            return Err(format!("Could not verify staged replacement file: {error}"));
+        }
+    };
+    if metadata_is_link_or_reparse(&staged_metadata)
+        || !staged_metadata.is_file()
+        || target_fingerprint(&staged_metadata) != expected_fingerprint
+    {
+        let _ = restore_staged_replacement_after_validation_failure(&reservation).await;
+        return Err("The replacement target changed while it was being staged".to_string());
+    }
+    journal.phase = "quarantined".to_string();
+    if let Err(error) = write_download_replacement_journal(&journal_path, &journal).await {
+        let _ = restore_download_replacement(&reservation).await;
+        return Err(error);
+    }
+    Ok(Some(reservation))
+}
+
+fn validate_unmanaged_download_target<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    id: &str,
+    target: &std::path::Path,
+) -> Result<(), String> {
+    let metadata = match std::fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A legacy Firelink row can own a path even while its payload is
+            // absent. Do not let a new row reserve that same output merely
+            // because there is no current directory entry to inspect.
+            if let Some(owner) = crate::download_ownership::owner_for_path(app_handle, target)? {
+                if owner != id {
+                    return Err(format!(
+                        "Download destination is already owned by Firelink download {owner}"
+                    ));
+                }
+            }
+            return Ok(())
+        }
+        Err(error) => return Err(format!("Could not inspect download target: {error}")),
+    };
+    if metadata_is_link_or_reparse(&metadata) {
+        return Err("Download target is a symbolic link and cannot be replaced automatically".to_string());
+    }
+    if metadata.is_dir() {
+        return Err("Download target is a directory; choose a different filename".to_string());
+    }
+    if !metadata.is_file() {
+        return Err("Download target is a special file and cannot be replaced".to_string());
+    }
+    if !is_safe_path(target, app_handle) {
+        return Err("Download target is outside an approved location".to_string());
+    }
+    if let Some(owner) = crate::download_ownership::owner_for_path(app_handle, target)? {
+        if owner == id {
+            return Ok(());
+        }
+        return Err(format!(
+            "Download target is already owned by Firelink download {owner}"
+        ));
+    }
+    Err("Download target already exists; choose Replace or Rename".to_string())
+}
+
+fn recover_download_replacement_journals(
+    app_handle: &tauri::AppHandle,
+    storage_layout: &crate::storage::StorageLayout,
+) -> Result<(), String> {
+    let directory = storage_layout.data_dir().join("download-replacements");
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("could not inspect download replacement recovery: {error}")),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let journal: DownloadReplacementJournal = match std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        {
+            Some(journal) => journal,
+            None => {
+                log::warn!("leaving malformed download replacement journal for manual recovery");
+                continue;
+            }
+        };
+        if journal.id.is_empty()
+            || !matches!(journal.phase.as_str(), "prepared" | "quarantined" | "admitted")
+            || !is_safe_path(&journal.target, app_handle)
+            || journal
+                .quarantine
+                .parent()
+                .is_none_or(|parent| !is_safe_path(parent, app_handle))
+            || journal
+                .quarantine
+                .parent()
+                .zip(journal.target.parent())
+                .is_none_or(|(quarantine_parent, target_parent)| {
+                    !crate::platform::paths_equal(quarantine_parent, target_parent)
+                })
+            || journal
+                .quarantine
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_none_or(|name| {
+                    !name.starts_with(".firelink-replaced-") || !name.ends_with(".tmp")
+                })
+            || path_has_symlink_component(&journal.quarantine)
+        {
+            log::warn!("leaving unsafe download replacement journal for manual recovery");
+            continue;
+        }
+        let owner = crate::download_ownership::owner_for_path(app_handle, &journal.target)?;
+        let target_exists = match std::fs::symlink_metadata(&journal.target) {
+            Ok(metadata) if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() => {
+                log::warn!(
+                    "leaving download replacement journal [{}]: target is not a regular file",
+                    journal.id
+                );
+                continue;
+            }
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                log::warn!(
+                    "leaving download replacement journal [{}]: target could not be inspected: {}",
+                    journal.id,
+                    error
+                );
+                continue;
+            }
+        };
+        let quarantine_exists = match std::fs::symlink_metadata(&journal.quarantine) {
+            Ok(metadata)
+                if metadata_is_link_or_reparse(&metadata)
+                    || !metadata.is_file()
+                    || target_fingerprint(&metadata) != journal.fingerprint =>
+            {
+                log::warn!(
+                    "leaving download replacement journal [{}]: quarantine is not the original regular file",
+                    journal.id
+                );
+                continue;
+            }
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                log::warn!(
+                    "leaving download replacement journal [{}]: quarantine could not be inspected: {}",
+                    journal.id,
+                    error
+                );
+                continue;
+            }
+        };
+        if owner.as_deref() == Some(journal.id.as_str()) {
+            if journal.phase == "admitted" {
+                let quarantine_removed = if quarantine_exists {
+                    match std::fs::remove_file(&journal.quarantine) {
+                        Ok(()) => true,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                        Err(error) => {
+                            log::warn!(
+                                "download replacement recovery [{}] could not remove the admitted quarantine: {}",
+                                journal.id,
+                                error
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    true
+                };
+                if quarantine_removed {
+                    if let Err(error) = std::fs::remove_file(&path) {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            log::warn!(
+                                "download replacement recovery [{}] could not clear its journal: {}",
+                                journal.id,
+                                error
+                            );
+                        }
+                    }
+                }
+            } else if quarantine_exists {
+                if target_exists {
+                    // Before the durable admitted marker, a target at this
+                    // path is ambiguous: it may be a new Firelink output or
+                    // an unrelated file that appeared during the crash
+                    // window. Never discard the quarantined original or
+                    // adopt the replacement silently in that state.
+                    log::warn!(
+                        "leaving download replacement journal [{}]: target appeared before admission was durably recorded",
+                        journal.id
+                    );
+                    continue;
+                }
+                // Ownership is written before the queue commit so duplicate
+                // admission is fenced. If the process stopped in that
+                // window, restore both the original file and the ownership
+                // record that existed before replacement.
+                if let Err(error) = restore_quarantine_file_without_replacing_sync(
+                    &journal.quarantine,
+                    &journal.target,
+                ) {
+                    log::warn!(
+                        "download replacement recovery [{}] could not restore the pre-admission target: {}",
+                        journal.id,
+                        error
+                    );
+                } else if let Err(error) = restore_download_replacement_ownership(
+                    app_handle,
+                    &journal.id,
+                    journal.previous_ownership.clone(),
+                ) {
+                    log::warn!(
+                        "download replacement recovery [{}] restored the file but could not restore ownership: {}",
+                        journal.id,
+                        error
+                    );
+                } else if let Err(error) = std::fs::remove_file(&path) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        log::warn!(
+                            "download replacement recovery [{}] could not clear its journal: {}",
+                            journal.id,
+                            error
+                        );
+                    }
+                }
+            } else {
+                log::warn!(
+                    "leaving download replacement journal [{}]: ownership exists but quarantine is missing",
+                    journal.id
+                );
+            }
+        } else if owner.is_none() && !target_exists && quarantine_exists {
+            if let Err(error) = restore_quarantine_file_without_replacing_sync(
+                &journal.quarantine,
+                &journal.target,
+            ) {
+                log::warn!(
+                    "download replacement recovery [{}] could not restore the old target: {}",
+                    journal.id,
+                    error
+                );
+            } else if let Err(error) = restore_download_replacement_ownership(
+                app_handle,
+                &journal.id,
+                journal.previous_ownership.clone(),
+            ) {
+                log::warn!(
+                    "download replacement recovery [{}] restored the file but could not restore ownership: {}",
+                    journal.id,
+                    error
+                );
+            } else if let Err(error) = std::fs::remove_file(&path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!(
+                        "download replacement recovery [{}] could not clear its journal: {}",
+                        journal.id,
+                        error
+                    );
+                }
+            }
+        } else if owner.is_none() && journal.phase == "admitted" && target_exists {
+            if quarantine_exists {
+                match std::fs::remove_file(&journal.quarantine) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        log::warn!(
+                            "download replacement recovery [{}] could not remove the admitted quarantine: {}",
+                            journal.id,
+                            error
+                        );
+                        continue;
+                    }
+                }
+            }
+            if let Err(error) = std::fs::remove_file(&path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!(
+                        "download replacement recovery [{}] could not clear its journal: {}",
+                        journal.id,
+                        error
+                    );
+                }
+            }
+        } else if owner.is_none() && !quarantine_exists && !target_exists {
+            // Both sides are already absent. Keep the recovery operation
+            // idempotent and remove only its own journal.
+            if let Err(error) = std::fs::remove_file(&path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!(
+                        "download replacement recovery [{}] could not clear its journal: {}",
+                        journal.id,
+                        error
+                    );
+                }
+            }
+        } else {
+            log::warn!(
+                "leaving download replacement journal [{}]: target/quarantine ownership state is ambiguous",
+                journal.id
+            );
+        }
+    }
+    Ok(())
 }
 
 fn register_torrent_output_ownership(
@@ -7720,6 +8890,21 @@ async fn enqueue_download_locked(
     let id = item.id.clone();
     item.filename = crate::download_ownership::canonical_download_filename(&item.filename);
     let accepted_filename = item.filename.clone();
+    let target_path = if item.is_torrent.unwrap_or(false) {
+        None
+    } else {
+        Some(
+            crate::download_ownership::expected_primary_path(
+                app_handle,
+                &item.destination,
+                &item.filename,
+            )
+            .map_err(AppError::Internal)?,
+        )
+    };
+    let target_lock_path = enqueue_output_lock_path(app_handle, &item)
+        .map_err(AppError::Internal)?;
+    let _target_guard = Some(download_target_lock(&target_lock_path).await.lock_owned().await);
     let lifecycle_generation = enqueue_lifecycle_generation(&item).map_err(AppError::Internal)?;
     let previous_generation = state
         .queue_manager
@@ -7736,7 +8921,50 @@ async fn enqueue_download_locked(
             return Err(AppError::Internal(error));
         }
     };
+    let replacement = if let Some(target) = target_path.as_ref() {
+        let replacement = match prepare_download_replacement(
+            app_handle,
+            state,
+            &item,
+            target,
+            lifecycle_generation,
+            &previous_ownership,
+        )
+        .await
+        {
+            Ok(replacement) => replacement,
+            Err(error) => {
+                state
+                    .queue_manager
+                    .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
+                    .await;
+                return Err(AppError::Internal(error));
+            }
+        };
+        if replacement.is_none() {
+            item.replace_existing_fingerprint = None;
+            if let Err(error) = validate_unmanaged_download_target(app_handle, &item.id, target) {
+                state
+                    .queue_manager
+                    .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
+                    .await;
+                return Err(AppError::Internal(error));
+            }
+        }
+        replacement
+    } else {
+        None
+    };
     if let Err(error) = register_download_ownership(app_handle, &item) {
+        if let Some(reservation) = replacement.as_ref() {
+            if let Err(restore_error) = restore_download_replacement(reservation).await {
+                log::error!(
+                    "download replacement [{}]: failed to restore after ownership registration failed: {}",
+                    id,
+                    restore_error
+                );
+            }
+        }
         if let Err(restore_error) = restore_download_ownership(app_handle, &id, previous_ownership) {
             log::error!(
                 "download ownership [{}]: failed to restore the previous mapping after enqueue registration failed: {}",
@@ -7750,11 +8978,31 @@ async fn enqueue_download_locked(
             .await;
         return Err(AppError::Internal(error));
     }
-    if let Err(error) = state
+    let reservation_for_commit = replacement.clone();
+    let commit_result = state
         .queue_manager
-        .commit_reserved_enqueue(item.into_task(), lifecycle_generation)
-        .await
-    {
+        .commit_reserved_enqueue_with_finalizer(
+            item.into_task(),
+            lifecycle_generation,
+            previous_generation,
+            move || async move {
+                match reservation_for_commit.as_ref() {
+                    Some(reservation) => mark_download_replacement_admitted(reservation).await,
+                    None => Ok(()),
+                }
+            },
+        )
+        .await;
+    if let Err(error) = commit_result {
+        if let Some(reservation) = replacement.as_ref() {
+            if let Err(restore_error) = restore_download_replacement(reservation).await {
+                log::error!(
+                    "download replacement [{}]: failed to restore after enqueue commit failed: {}",
+                    id,
+                    restore_error
+                );
+            }
+        }
         if let Err(restore_error) = restore_download_ownership(app_handle, &id, previous_ownership) {
             log::error!(
                 "download ownership [{}]: failed to restore the previous mapping after enqueue commit failed: {}",
@@ -7767,6 +9015,9 @@ async fn enqueue_download_locked(
             .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
             .await;
         return Err(AppError::Internal(error));
+    }
+    if let Some(reservation) = replacement.as_ref() {
+        finalize_download_replacement(reservation).await;
     }
     Ok(crate::ipc::EnqueueAccepted {
         id,
@@ -7846,6 +9097,39 @@ async fn enqueue_many(
         }
         item.filename = crate::download_ownership::canonical_download_filename(&item.filename);
         let filename = item.filename.clone();
+        let target_path = if item.is_torrent.unwrap_or(false) {
+            None
+        } else {
+            match crate::download_ownership::expected_primary_path(
+                &app_handle,
+                &item.destination,
+                &item.filename,
+            ) {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    results.push(crate::ipc::EnqueueResult {
+                        id,
+                        success: false,
+                        filename: None,
+                        error: Some(error),
+                    });
+                    continue;
+                }
+            }
+        };
+        let target_lock_path = match enqueue_output_lock_path(&app_handle, &item) {
+            Ok(path) => path,
+            Err(error) => {
+                results.push(crate::ipc::EnqueueResult {
+                    id,
+                    success: false,
+                    filename: None,
+                    error: Some(error),
+                });
+                continue;
+            }
+        };
+        let _target_guard = download_target_lock(&target_lock_path).await.lock_owned().await;
         let lifecycle_generation = match enqueue_lifecycle_generation(&item) {
             Ok(generation) => generation,
             Err(error) => {
@@ -7890,7 +9174,62 @@ async fn enqueue_many(
                 continue;
             }
         };
+        let replacement = if let Some(target) = target_path.as_ref() {
+            match prepare_download_replacement(
+                &app_handle,
+                state.inner(),
+                &item,
+                target,
+                lifecycle_generation,
+                &previous_ownership,
+            )
+            .await
+            {
+                Ok(Some(replacement)) => Some(replacement),
+                Ok(None) => {
+                    item.replace_existing_fingerprint = None;
+                    if let Err(error) = validate_unmanaged_download_target(&app_handle, &id, target) {
+                        state
+                            .queue_manager
+                            .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
+                            .await;
+                        results.push(crate::ipc::EnqueueResult {
+                            id,
+                            success: false,
+                            filename: None,
+                            error: Some(error),
+                        });
+                        continue;
+                    }
+                    None
+                }
+                Err(error) => {
+                    state
+                        .queue_manager
+                        .rollback_enqueue_reservation(&id, lifecycle_generation, previous_generation)
+                        .await;
+                    results.push(crate::ipc::EnqueueResult {
+                        id,
+                        success: false,
+                        filename: None,
+                        error: Some(error),
+                    });
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
         if let Err(error) = register_download_ownership(&app_handle, &item) {
+            if let Some(replacement) = replacement.as_ref() {
+                if let Err(restore_error) = restore_download_replacement(replacement).await {
+                    log::error!(
+                        "download replacement [{}]: failed to restore after batch ownership registration failed: {}",
+                        id,
+                        restore_error
+                    );
+                }
+            }
             if let Err(restore_error) = restore_download_ownership(&app_handle, &id, previous_ownership) {
                 log::error!(
                     "download ownership [{}]: failed to restore the previous mapping after batch enqueue registration failed: {}",
@@ -7910,11 +9249,31 @@ async fn enqueue_many(
             });
             continue;
         }
-        if let Err(error) = state
+        let reservation_for_commit = replacement.clone();
+        let commit_result = state
             .queue_manager
-            .commit_reserved_enqueue(item.into_task(), lifecycle_generation)
-            .await
-        {
+            .commit_reserved_enqueue_with_finalizer(
+                item.into_task(),
+                lifecycle_generation,
+                previous_generation,
+                move || async move {
+                    match reservation_for_commit.as_ref() {
+                        Some(reservation) => mark_download_replacement_admitted(reservation).await,
+                        None => Ok(()),
+                    }
+                },
+            )
+            .await;
+        if let Err(error) = commit_result {
+            if let Some(replacement) = replacement.as_ref() {
+                if let Err(restore_error) = restore_download_replacement(replacement).await {
+                    log::error!(
+                        "download replacement [{}]: failed to restore after batch enqueue commit failed: {}",
+                        id,
+                        restore_error
+                    );
+                }
+            }
             if let Err(restore_error) = restore_download_ownership(&app_handle, &id, previous_ownership) {
                 log::error!(
                     "download ownership [{}]: failed to restore the previous mapping after batch enqueue commit failed: {}",
@@ -7933,6 +9292,9 @@ async fn enqueue_many(
                 error: Some(error),
             });
             continue;
+        }
+        if let Some(replacement) = replacement.as_ref() {
+            finalize_download_replacement(replacement).await;
         }
         results.push(crate::ipc::EnqueueResult {
             id,
@@ -7990,6 +9352,7 @@ async fn remove_from_queue(
     id: String,
 ) -> Result<bool, AppError> {
     properties_window::ensure_main_window(&caller).map_err(AppError::Internal)?;
+    let _control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     let removed = state.queue_manager.remove_from_pending(&id).await;
     if removed {
         let _ = crate::download_ownership::remove(&app_handle, &id);
@@ -8139,7 +9502,7 @@ fn torrent_file_selection_snapshot(
     }
 }
 
-fn load_persisted_torrent_item(
+fn load_persisted_download_item(
     database: &crate::db::DbState,
     id: &str,
 ) -> Result<crate::ipc::DownloadItem, String> {
@@ -8152,6 +9515,13 @@ fn load_persisted_torrent_item(
                 .filter(|item| item.id == id)
         })
         .ok_or_else(|| "download is not persisted".to_string())
+}
+
+fn load_persisted_torrent_item(
+    database: &crate::db::DbState,
+    id: &str,
+) -> Result<crate::ipc::DownloadItem, String> {
+    load_persisted_download_item(database, id)
 }
 
 fn persist_torrent_destination(
@@ -8547,7 +9917,7 @@ async fn export_torrent_metadata(
     }
     let metadata = std::fs::symlink_metadata(&destination);
     if let Ok(metadata) = metadata {
-        if metadata.file_type().is_symlink() {
+        if metadata_is_link_or_reparse(&metadata) {
             return Err("The export destination cannot be a symbolic link".to_string());
         }
         return Err("The export destination already exists".to_string());
@@ -9781,6 +11151,7 @@ async fn verify_torrent_data(
         torrent_verify_only: Some(true),
         torrent_verify_restore_status: Some(restore_status.clone()),
         lifecycle_generation: Some(verification_generation.to_string()),
+        replace_existing_fingerprint: None,
     };
 
     {
@@ -11337,16 +12708,95 @@ fn db_replace_queues(
     crate::db::replace_queues(&mut connection, &data)
 }
 
+fn target_fingerprint(metadata: &std::fs::Metadata) -> String {
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        format!("unix:{}:{}", metadata.dev(), metadata.ino())
+    };
+    #[cfg(windows)]
+    let identity = {
+        use std::os::windows::fs::MetadataExt;
+        format!(
+            "windows:{}:{}",
+            metadata.volume_serial_number().unwrap_or_default(),
+            metadata.file_index().unwrap_or_default()
+        )
+    };
+    #[cfg(not(any(unix, windows)))]
+    let identity = "portable".to_string();
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|value| format!("{}:{}", value.as_secs(), value.subsec_nanos()))
+        .unwrap_or_else(|| "unknown".to_string());
+    format!("{}:{}:{}", identity, metadata.len(), modified)
+}
+
+fn classify_download_target(metadata: &std::fs::Metadata) -> crate::ipc::DownloadTargetKind {
+    if metadata_is_link_or_reparse(metadata) {
+        crate::ipc::DownloadTargetKind::Symlink
+    } else if metadata.is_file() {
+        crate::ipc::DownloadTargetKind::RegularFile
+    } else if metadata.is_dir() {
+        crate::ipc::DownloadTargetKind::Directory
+    } else {
+        crate::ipc::DownloadTargetKind::Special
+    }
+}
+
 #[tauri::command]
-fn check_file_exists(caller: tauri::WebviewWindow, app_handle: tauri::AppHandle, path: String) -> bool {
-    if properties_window::ensure_main_window(&caller).is_err() {
-        return false;
+fn inspect_download_target(
+    caller: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+    path: String,
+) -> Result<crate::ipc::DownloadTargetInfo, String> {
+    properties_window::ensure_main_window(&caller)?;
+    let resolved = resolve_path(&path, &app_handle);
+    let metadata = match std::fs::symlink_metadata(&resolved) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = resolved.parent() {
+                if !is_safe_path(parent, &app_handle) {
+                    return Err("Download target is outside an approved location".to_string());
+                }
+            }
+            let owned_by = crate::download_ownership::owner_for_path(&app_handle, &resolved)?;
+            return Ok(crate::ipc::DownloadTargetInfo {
+                kind: crate::ipc::DownloadTargetKind::Missing,
+                fingerprint: None,
+                owned_by,
+            });
+        }
+        Err(error) => return Err(format!("Could not inspect download target: {error}")),
+    };
+
+    let kind = classify_download_target(&metadata);
+    if kind == crate::ipc::DownloadTargetKind::Symlink {
+        if resolved
+            .parent()
+            .is_none_or(|parent| !is_safe_path(parent, &app_handle))
+        {
+            return Err("Download target is outside an approved location".to_string());
+        }
+        return Ok(crate::ipc::DownloadTargetInfo {
+            kind: crate::ipc::DownloadTargetKind::Symlink,
+            fingerprint: None,
+            owned_by: None,
+        });
     }
-    let resolved_dest = resolve_path(&path, &app_handle);
-    if !is_safe_path(&resolved_dest, &app_handle) {
-        return false;
+    if !is_safe_path(&resolved, &app_handle) {
+        return Err("Download target is outside an approved location".to_string());
     }
-    resolved_dest.exists()
+
+    let owned_by = crate::download_ownership::owner_for_path(&app_handle, &resolved)?;
+    Ok(crate::ipc::DownloadTargetInfo {
+        kind,
+        fingerprint: (kind == crate::ipc::DownloadTargetKind::RegularFile)
+            .then(|| target_fingerprint(&metadata)),
+        owned_by,
+    })
 }
 
 fn collect_log_files(log_dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>, String> {
@@ -11809,6 +13259,7 @@ mod tests {
         aria2_active_connection_count, aria2_nonnegative_count,
         parse_media_playlist_metadata,
         normalize_media_connections,
+        normalize_media_cookie_source,
         validate_enqueue_url, validate_enqueue_uris, validate_keychain_grant_request_id,
         aria2_gid_not_found,
         aria2_download_state_progress, preflight_download_destination_access,
@@ -11816,6 +13267,9 @@ mod tests {
         retained_torrent_info_hash_from_persisted_record,
         merge_durable_torrent_telemetry, torrent_identity_magnet, torrent_move_path_pair,
         Aria2DaemonGuard, stale_lifecycle_cleanup_is_noop,
+        classify_download_target, download_target_lock,
+        remove_download_assets_permanently, remove_download_container_assets_permanently,
+        restore_download_replacement, target_fingerprint, DownloadReplacementReservation,
     };
     #[cfg(target_os = "macos")]
     use super::should_apply_dock_badge_update;
@@ -14031,6 +15485,293 @@ mod tests {
         assert!(!is_media_artifact_name("video.f1.backup", "video.mp4", "video"));
     }
 
+    #[test]
+    fn replacement_fingerprints_change_when_the_target_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("replace.bin");
+        std::fs::write(&target, b"old").unwrap();
+        let initial = target_fingerprint(&std::fs::symlink_metadata(&target).unwrap());
+        assert_eq!(
+            initial,
+            target_fingerprint(&std::fs::symlink_metadata(&target).unwrap())
+        );
+
+        std::fs::write(&target, b"new content").unwrap();
+        let changed = target_fingerprint(&std::fs::symlink_metadata(&target).unwrap());
+        assert_ne!(initial, changed);
+    }
+
+    #[test]
+    fn target_inspection_classifies_regular_directories_and_links_without_following_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let regular = directory.path().join("regular.bin");
+        let child_directory = directory.path().join("child");
+        std::fs::write(&regular, b"file").unwrap();
+        std::fs::create_dir(&child_directory).unwrap();
+
+        assert_eq!(
+            classify_download_target(&std::fs::symlink_metadata(&regular).unwrap()),
+            crate::ipc::DownloadTargetKind::RegularFile
+        );
+        assert_eq!(
+            classify_download_target(&std::fs::symlink_metadata(&child_directory).unwrap()),
+            crate::ipc::DownloadTargetKind::Directory
+        );
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&regular, directory.path().join("link")).unwrap();
+            assert_eq!(
+                classify_download_target(
+                    &std::fs::symlink_metadata(directory.path().join("link")).unwrap()
+                ),
+                crate::ipc::DownloadTargetKind::Symlink
+            );
+
+            let socket_path = directory.path().join("socket");
+            let _socket = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+            assert_eq!(
+                classify_download_target(&std::fs::symlink_metadata(socket_path).unwrap()),
+                crate::ipc::DownloadTargetKind::Special
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn replacement_target_lock_is_shared_by_concurrent_admissions() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("same-target.bin");
+        let first = download_target_lock(&target).await;
+        let second = download_target_lock(&target).await;
+
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        let guard = first.lock().await;
+        assert!(second.try_lock().is_err());
+        drop(guard);
+        assert!(second.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn replacement_rollback_restores_quarantine_and_clears_its_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.bin");
+        let quarantine = directory.path().join(".firelink-replaced-target.tmp");
+        let journal = directory.path().join("replacement.json");
+        std::fs::write(&quarantine, b"original").unwrap();
+        let fingerprint = target_fingerprint(&std::fs::symlink_metadata(&quarantine).unwrap());
+        std::fs::write(&journal, b"journal").unwrap();
+
+        restore_download_replacement(&DownloadReplacementReservation {
+            journal_path: journal.clone(),
+            target: target.clone(),
+            quarantine: quarantine.clone(),
+            fingerprint,
+        })
+        .await
+        .expect("a staged target should be restorable");
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+        assert!(!quarantine.exists());
+        assert!(!journal.exists());
+    }
+
+    #[tokio::test]
+    async fn replacement_rollback_never_overwrites_a_new_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.bin");
+        let quarantine = directory.path().join(".firelink-replaced-target.tmp");
+        let journal = directory.path().join("replacement.json");
+        std::fs::write(&target, b"new-admission").unwrap();
+        std::fs::write(&quarantine, b"old-file").unwrap();
+        let fingerprint = target_fingerprint(&std::fs::symlink_metadata(&quarantine).unwrap());
+        std::fs::write(&journal, b"journal").unwrap();
+
+        let error = restore_download_replacement(&DownloadReplacementReservation {
+            journal_path: journal.clone(),
+            target: target.clone(),
+            quarantine: quarantine.clone(),
+            fingerprint,
+        })
+        .await
+        .expect_err("rollback must stop when a new target already exists");
+
+        assert!(error.contains("destination changed"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"new-admission");
+        assert_eq!(std::fs::read(&quarantine).unwrap(), b"old-file");
+        assert!(journal.exists());
+    }
+
+    #[tokio::test]
+    async fn replacement_rollback_rejects_a_changed_quarantine() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.bin");
+        let quarantine = directory.path().join(".firelink-replaced-target.tmp");
+        let journal = directory.path().join("replacement.json");
+        std::fs::write(&quarantine, b"old-file").unwrap();
+        let fingerprint = target_fingerprint(&std::fs::symlink_metadata(&quarantine).unwrap());
+        std::fs::write(&quarantine, b"tampered-file").unwrap();
+        std::fs::write(&journal, b"journal").unwrap();
+
+        let error = restore_download_replacement(&DownloadReplacementReservation {
+            journal_path: journal.clone(),
+            target: target.clone(),
+            quarantine: quarantine.clone(),
+            fingerprint,
+        })
+        .await
+        .expect_err("rollback must reject a changed quarantine");
+
+        assert!(error.contains("contents changed"));
+        assert!(!target.exists());
+        assert!(quarantine.exists());
+        assert!(journal.exists());
+    }
+
+    #[tokio::test]
+    async fn replacement_rollback_retains_journal_when_quarantine_is_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.bin");
+        let quarantine = directory.path().join(".firelink-replaced-target.tmp");
+        let journal = directory.path().join("replacement.json");
+        std::fs::write(&journal, b"journal").unwrap();
+
+        let error = restore_download_replacement(&DownloadReplacementReservation {
+            journal_path: journal.clone(),
+            target,
+            quarantine,
+            fingerprint: String::new(),
+        })
+        .await
+        .expect_err("rollback must retain recovery evidence when quarantine is missing");
+
+        assert!(error.contains("quarantine is missing"));
+        assert!(journal.exists());
+    }
+
+    #[tokio::test]
+    async fn permanent_media_cleanup_removes_only_exact_payload_and_sidecars() {
+        use tauri::Manager;
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let storage_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let storage_layout = crate::storage::StorageLayout::resolve(
+            app.handle(),
+            crate::storage::StorageMode::Portable {
+                root: storage_root.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        app.manage(crate::db::init(&storage_layout).unwrap());
+        let download_root = app.path().download_dir().expect("download root");
+        let root_was_present = download_root.exists();
+        std::fs::create_dir_all(&download_root).unwrap();
+        let directory = tempfile::tempdir_in(&download_root).unwrap();
+        let primary = directory.path().join("video.mp4");
+        std::fs::write(&primary, b"payload").unwrap();
+        for suffix in [".aria2", ".part", ".ytdl"] {
+            let mut path = primary.as_os_str().to_os_string();
+            path.push(suffix);
+            std::fs::write(path, b"sidecar").unwrap();
+        }
+        let unrelated = directory.path().join("keep.me");
+        std::fs::write(&unrelated, b"unrelated").unwrap();
+
+        remove_download_assets_permanently(&primary, app.handle())
+            .await
+            .expect("unfinished media cleanup should remove exact assets");
+
+        assert!(!primary.exists());
+        assert!(!directory.path().join("video.mp4.aria2").exists());
+        assert!(!directory.path().join("video.mp4.part").exists());
+        assert!(!directory.path().join("video.mp4.ytdl").exists());
+        assert!(unrelated.exists());
+        drop(directory);
+        if !root_was_present {
+            let _ = std::fs::remove_dir(&download_root);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn permanent_cleanup_refuses_symlink_payloads() {
+        use std::os::unix::fs::symlink;
+        use tauri::Manager;
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let storage_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let storage_layout = crate::storage::StorageLayout::resolve(
+            app.handle(),
+            crate::storage::StorageMode::Portable {
+                root: storage_root.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        app.manage(crate::db::init(&storage_layout).unwrap());
+        let download_root = app.path().download_dir().expect("download root");
+        let root_was_present = download_root.exists();
+        std::fs::create_dir_all(&download_root).unwrap();
+        let directory = tempfile::tempdir_in(&download_root).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_payload = outside.path().join("payload");
+        let link = directory.path().join("video.mp4");
+        std::fs::write(&outside_payload, b"outside").unwrap();
+        symlink(&outside_payload, &link).unwrap();
+
+        let error = remove_download_assets_permanently(&link, app.handle())
+            .await
+            .expect_err("symbolic links must never be followed or removed");
+
+        assert!(error.contains("symbolic-link"));
+        assert!(link.exists());
+        assert_eq!(std::fs::read(&outside_payload).unwrap(), b"outside");
+        drop(directory);
+        if !root_was_present {
+            let _ = std::fs::remove_dir(&download_root);
+        }
+    }
+
+    #[tokio::test]
+    async fn permanent_torrent_container_cleanup_preserves_unrelated_files() {
+        use tauri::Manager;
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let storage_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let storage_layout = crate::storage::StorageLayout::resolve(
+            app.handle(),
+            crate::storage::StorageMode::Portable {
+                root: storage_root.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        app.manage(crate::db::init(&storage_layout).unwrap());
+        let download_root = app.path().download_dir().expect("download root");
+        let root_was_present = download_root.exists();
+        std::fs::create_dir_all(&download_root).unwrap();
+        let directory = tempfile::tempdir_in(&download_root).unwrap();
+        let container = directory.path().join("torrent-output");
+        std::fs::create_dir(&container).unwrap();
+        std::fs::write(container.join(".DS_Store"), b"metadata").unwrap();
+        let unrelated = container.join("unselected.bin");
+        std::fs::write(&unrelated, b"preserve").unwrap();
+
+        remove_download_container_assets_permanently(&container, app.handle())
+            .await
+            .expect("container cleanup should be conservative");
+
+        assert!(container.is_dir());
+        assert!(unrelated.exists());
+        drop(directory);
+        if !root_was_present {
+            let _ = std::fs::remove_dir(&download_root);
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn dock_badge_updates_reject_stale_sessions_and_generations() {
@@ -14554,6 +16295,18 @@ mod tests {
             "ERROR: Sign in to confirm you are not a bot",
             false
         ));
+    }
+
+    #[test]
+    fn media_cookie_source_accepts_only_configured_browsers() {
+        assert_eq!(normalize_media_cookie_source(None).unwrap(), None);
+        assert_eq!(normalize_media_cookie_source(Some(" NONE ")).unwrap(), None);
+        assert_eq!(
+            normalize_media_cookie_source(Some(" Chrome ")).unwrap(),
+            Some("chrome".to_string())
+        );
+        assert!(normalize_media_cookie_source(Some("profile=secret")).is_err());
+        assert!(normalize_media_cookie_source(Some("unknown-browser")).is_err());
     }
 
     #[test]
@@ -15465,12 +17218,23 @@ pub fn run() {
 
             let database = crate::db::init(&storage_layout)
                 .map_err(|error| format!("failed to initialize persistence: {error}"))?;
+            // Replacement recovery consults the persisted ownership registry.
+            // Register the database before running any recovery pass so a
+            // malformed or interrupted transaction cannot reach a missing
+            // Tauri state entry at startup.
+            app.manage(database);
             if let Err(error) = recover_torrent_move_journals(
                 app.handle(),
-                &database,
+                &*app.state::<crate::db::DbState>(),
                 &storage_layout,
             ) {
                 log::warn!("Torrent move recovery did not complete: {error}");
+            }
+            if let Err(error) = recover_download_replacement_journals(
+                app.handle(),
+                &storage_layout,
+            ) {
+                log::warn!("Download replacement recovery did not complete: {error}");
             }
             // Establish Firelink-owned Aria2 routing-table paths after the
             // existing data-root initializer has created the selected storage
@@ -15490,7 +17254,8 @@ pub fn run() {
             if let Err(error) = crate::torrent::remove_orphaned_probe_dirs(app.handle()) {
                 log::warn!("could not remove orphaned torrent probes: {error}");
             }
-            let retained_torrent_metadata = database
+            let retained_torrent_metadata = app
+                .state::<crate::db::DbState>()
                 .lock()
                 .and_then(|connection| crate::db::load_downloads(&connection))
                 .map(|records| {
@@ -15548,7 +17313,6 @@ pub fn run() {
                     .map_err(|_| "extension pairing token lock is unavailable".to_string())?;
                 *pairing_token = initial_pairing_token;
             }
-            app.manage(database);
             let persisted_settings = crate::settings::load_settings(app.handle()).ok();
             let logs_enabled = persisted_settings
                 .as_ref()
@@ -16921,7 +18685,7 @@ pub fn run() {
             get_keychain_grant_status, accept_keychain_grant, abandon_keychain_grant,
             authorize_keychain_access,
             acknowledge_pairing_token_change,
-            check_file_exists, toggle_tray_icon, set_extension_pairing_token,
+            inspect_download_target, toggle_tray_icon, set_extension_pairing_token,
             get_extension_server_port, set_extension_frontend_ready, ack_frontend_exit, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, get_torrent_availability, get_torrent_file_progress, get_torrent_piece_progress, get_torrent_file_selection, set_torrent_file_selection, get_torrent_details, get_torrent_magnet_link, export_torrent_metadata, move_torrent_data, cancel_torrent_move_data, verify_torrent_data, get_torrent_web_seeds, set_torrent_web_seeds, set_torrent_max_open_files, set_torrent_overall_upload_limit, set_global_speed_limit, remove_download, get_download_primary_path,
             detach_download_for_reconfigure,
             enqueue_download, enqueue_many, cancel_enqueue_generation, move_in_queue, move_many_in_queue, remove_from_queue, get_pending_order,

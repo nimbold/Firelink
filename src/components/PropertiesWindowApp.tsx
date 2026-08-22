@@ -1213,13 +1213,15 @@ export const PropertiesWindowApp = () => {
   );
   const progressPercent = allocationPending ? '—' : `${Math.round(progress * 100)}%`;
   const statusTone = allocationPending ? 'downloading' : propertiesStatusTone(snapshot.status);
-  const lifecycleLabel = lifecycleAction === 'pause'
-    ? t($ => $.downloads.actions.pause)
-    : lifecycleAction === 'resume'
-      ? t($ => $.downloads.actions.resume)
-      : lifecycleAction === 'retry'
-        ? t($ => $.downloads.actions.retry)
-        : t($ => $.downloads.actions.start);
+  const lifecycleLabel = snapshot.credentialsRequired === true
+    ? t($ => $.properties.retryWithoutCredentials)
+    : lifecycleAction === 'pause'
+      ? t($ => $.downloads.actions.pause)
+      : lifecycleAction === 'resume'
+        ? t($ => $.downloads.actions.resume)
+        : lifecycleAction === 'retry'
+          ? t($ => $.downloads.actions.retry)
+          : t($ => $.downloads.actions.start);
   const tabLabel = (tab: PropertiesTab) => {
     switch (tab) {
       case 'overview': return t($ => $.properties.tabs.overview);

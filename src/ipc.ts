@@ -17,6 +17,8 @@ import type { PairingTokenHydration } from './bindings/PairingTokenHydration';
 import type { KeychainGrantStatus } from './bindings/KeychainGrantStatus';
 import type { EnqueueItem } from './bindings/EnqueueItem';
 import type { EnqueueAccepted } from './bindings/EnqueueAccepted';
+import type { DownloadAssetRemovalPolicy } from './bindings/DownloadAssetRemovalPolicy';
+import type { DownloadTargetInfo } from './bindings/DownloadTargetInfo';
 import type { PlatformInfo } from './bindings/PlatformInfo';
 import type { QueueConcurrencyConfig } from './bindings/QueueConcurrencyConfig';
 import type { TorrentMetadata } from './bindings/TorrentMetadata';
@@ -76,6 +78,7 @@ type CommandMap = {
       deleteAssets: boolean;
       preserveResumable?: boolean;
       expectedLifecycleGeneration?: string;
+      assetRemovalPolicy?: DownloadAssetRemovalPolicy;
     };
     result: void;
   };
@@ -131,7 +134,7 @@ type CommandMap = {
     result: void;
   };
   delete_site_login: { args: { id: string }; result: void };
-  check_file_exists: { args: { path: string }; result: boolean };
+  inspect_download_target: { args: { path: string }; result: DownloadTargetInfo };
   toggle_tray_icon: { args: { show: boolean }; result: void };
   set_extension_pairing_token: { args: { token: string }; result: void };
   get_extension_server_port: { args: undefined; result: number | null };
