@@ -66,7 +66,28 @@ fn init_at_path_internal(
     fs::create_dir_all(app_data_dir)
         .map_err(|error| format!("failed to create app data directory: {error}"))?;
     let database_path = app_data_dir.join(DATABASE_NAME);
-    let existed = database_path.exists();
+    let existed = match fs::symlink_metadata(&database_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!(
+                "persistence database is a symbolic link: '{}'",
+                database_path.display()
+            ));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(format!(
+                "persistence database is not a regular file: '{}'",
+                database_path.display()
+            ));
+        }
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect persistence database '{}': {error}",
+                database_path.display()
+            ));
+        }
+    };
     let mut connection = Connection::open(&database_path)
         .map_err(|error| format!("failed to open database: {error}"))?;
 
@@ -289,6 +310,27 @@ fn import_legacy_data(
 }
 
 fn sanitize_legacy_source(path: &Path, remove_pairing_token: bool) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!(
+                "legacy persistence source is a symbolic link: '{}'",
+                path.display()
+            ));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(format!(
+                "legacy persistence source is not a regular file: '{}'",
+                path.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect legacy persistence source '{}': {error}",
+                path.display()
+            ));
+        }
+    }
     if is_database_path(path) {
         let mut connection = Connection::open(path).map_err(|error| {
             format!(
@@ -389,12 +431,27 @@ fn write_sanitized_legacy_store(
                 path.display()
             )
         })?;
+    temporary.as_file().sync_all().map_err(|error| {
+        format!(
+            "failed to synchronize temporary sanitized legacy store beside '{}': {error}",
+            path.display()
+        )
+    })?;
     temporary.persist(path).map_err(|error| {
         format!(
             "failed to replace legacy store '{}' without losing the original: {}",
             path.display(), error.error
         )
     })?;
+    #[cfg(unix)]
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            format!(
+                "failed to synchronize legacy store directory '{}': {error}",
+                parent.display()
+            )
+        })?;
     Ok(())
 }
 
@@ -591,6 +648,18 @@ fn query_string_column(connection: &Connection, query: &str) -> Result<Vec<Strin
 }
 
 fn backup_file(path: &Path, reason: &str) -> Result<PathBuf, String> {
+    let source_metadata = fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "failed to inspect persistence file '{}': {error}",
+            path.display()
+        )
+    })?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
+        return Err(format!(
+            "persistence backup source is not a regular file: '{}'",
+            path.display()
+        ));
+    }
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
     let file_name = path
         .file_name()
@@ -599,6 +668,7 @@ fn backup_file(path: &Path, reason: &str) -> Result<PathBuf, String> {
     let backup_prefix = format!("{file_name}.backup-{reason}-");
     if let Some(existing) = path.parent().and_then(|parent| {
         fs::read_dir(parent).ok()?.flatten().find_map(|entry| {
+            entry.file_type().ok().filter(|kind| kind.is_file())?;
             entry
                 .file_name()
                 .to_string_lossy()
@@ -608,17 +678,50 @@ fn backup_file(path: &Path, reason: &str) -> Result<PathBuf, String> {
     }) {
         return Ok(existing);
     }
-    let backup_path = path.with_file_name(format!("{file_name}.backup-{reason}-{timestamp}"));
-    if backup_path.exists() {
-        return Ok(backup_path);
+    let backup_path = path.with_file_name(format!(
+        "{file_name}.backup-{reason}-{timestamp}-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = (|| {
+        use std::io::{copy, BufReader};
+
+        let source = fs::File::open(path).map_err(|error| {
+            format!(
+                "failed to open persistence file '{}' for backup: {error}",
+                path.display()
+            )
+        })?;
+        let mut source = BufReader::new(source);
+        let destination = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup_path)
+            .map_err(|error| {
+                format!(
+                    "failed to create persistence backup '{}': {error}",
+                    backup_path.display()
+                )
+            })?;
+        let mut destination = destination;
+        copy(&mut source, &mut destination).map_err(|error| {
+            format!(
+                "failed to back up persistence file '{}' to '{}': {error}",
+                path.display(),
+                backup_path.display()
+            )
+        })?;
+        destination.sync_all().map_err(|error| {
+            format!(
+                "failed to synchronize persistence backup '{}': {error}",
+                backup_path.display()
+            )
+        })?;
+        Ok::<(), String>(())
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&backup_path);
+        return Err(error);
     }
-    fs::copy(path, &backup_path).map_err(|error| {
-        format!(
-            "failed to back up persistence file '{}' to '{}': {error}",
-            path.display(),
-            backup_path.display()
-        )
-    })?;
     Ok(backup_path)
 }
 
@@ -628,7 +731,10 @@ fn backup_database(connection: &Connection, path: &Path, reason: &str) -> Result
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("invalid database path '{}'", path.display()))?;
-    let backup_path = path.with_file_name(format!("{file_name}.backup-{reason}-{timestamp}"));
+    let backup_path = path.with_file_name(format!(
+        "{file_name}.backup-{reason}-{timestamp}-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
     connection
         .execute("VACUUM INTO ?1", params![backup_path.to_string_lossy()])
         .map_err(|error| {
@@ -2347,6 +2453,43 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("firelink.sqlite.backup-schema-v0-")
         }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_open_a_database_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let target = temp.path().join("outside.sqlite");
+        symlink(&target, temp.path().join(DATABASE_NAME)).unwrap();
+
+        let result = init_at_path(temp.path());
+        let error = result.err().expect("database symlink must fail closed");
+        assert!(error.contains("symbolic link"));
+        assert!(!target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignores_symlinked_legacy_backup_candidates() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join(LEGACY_STORE_NAME);
+        let outside = temp.path().join("outside-store.bin");
+        let linked_backup = temp
+            .path()
+            .join("store.bin.backup-legacy-import-attacker");
+        fs::write(&source, b"trusted-source").unwrap();
+        fs::write(&outside, b"outside-content").unwrap();
+        symlink(&outside, &linked_backup).unwrap();
+
+        let backup = backup_file(&source, "legacy-import").unwrap();
+        assert_ne!(backup, linked_backup);
+        assert!(fs::symlink_metadata(&backup).unwrap().is_file());
+        assert_eq!(fs::read(&backup).unwrap(), b"trusted-source");
+        assert_eq!(fs::read(&outside).unwrap(), b"outside-content");
     }
 
     #[test]

@@ -38,6 +38,26 @@ const ACTIVE_DOWNLOAD_STATUSES: ReadonlySet<DownloadStatus> = new Set([
   'moving',
 ]);
 
+const DOWNLOAD_STATUSES: ReadonlySet<string> = new Set([
+  'ready',
+  'staged',
+  'downloading',
+  'processing',
+  'seeding',
+  'waitingToSeed',
+  'paused',
+  'completed',
+  'failed',
+  'queued',
+  'retrying',
+  'verifying',
+  'moving',
+]);
+
+/** Runtime guard for values arriving from the untyped Tauri event channel. */
+export const isDownloadStatus = (status: unknown): status is DownloadStatus =>
+  typeof status === 'string' && DOWNLOAD_STATUSES.has(status);
+
 export const isActiveDownloadStatus = (status: DownloadStatus): boolean =>
   ACTIVE_DOWNLOAD_STATUSES.has(status);
 

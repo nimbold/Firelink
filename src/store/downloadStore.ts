@@ -1,9 +1,11 @@
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import type { DownloadStatus } from '../bindings/DownloadStatus';
+import type { DownloadStateEvent } from '../bindings/DownloadStateEvent';
+import type { DownloadErrorKind } from '../bindings/DownloadErrorKind';
 import { listenEvent as listen } from '../ipc';
 import type { DownloadItem } from '../bindings/DownloadItem';
 import type { DownloadProgressEvent } from '../bindings/DownloadProgressEvent';
-import { categoryForDownload } from '../utils/downloads';
+import { categoryForDownload, isDownloadStatus } from '../utils/downloads';
 import { useDownloadProgressStore } from './downloadProgressStore';
 
 import {
@@ -35,9 +37,53 @@ type ProgressFields = {
 const finiteNonNegative = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0;
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const isDownloadErrorKind = (value: unknown): value is DownloadErrorKind =>
+  value === 'nameResolution' || value === 'destinationAccess';
+
+const isLifecycleGeneration = (value: unknown): value is string =>
+  typeof value === 'string' && /^\d+$/.test(value);
+
+type SanitizedDownloadStateEvent = Omit<DownloadStateEvent, 'status'> & {
+  status: DownloadStatus;
+};
+
+const sanitizeStatePayload = (value: unknown): SanitizedDownloadStateEvent | null => {
+  if (!isRecord(value) || typeof value.id !== 'string' || !isDownloadStatus(value.status)) {
+    return null;
+  }
+
+  return {
+    id: value.id,
+    status: value.status,
+    error: typeof value.error === 'string' ? value.error : null,
+    ...(isDownloadErrorKind(value.errorKind) ? { errorKind: value.errorKind } : {}),
+    ...(typeof value.resolverFallback === 'boolean'
+      ? { resolverFallback: value.resolverFallback }
+      : {}),
+    ...(typeof value.fileName === 'string' ? { fileName: value.fileName } : {}),
+    ...(typeof value.destination === 'string' ? { destination: value.destination } : {}),
+    ...(finiteNonNegative(value.torrentSeedRemaining)
+      ? { torrentSeedRemaining: value.torrentSeedRemaining }
+      : {}),
+    ...(value.progress !== undefined ? { progress: value.progress as DownloadStateEvent['progress'] } : {})
+  };
+};
+
 const sanitizeProgressPayload = (
-  payload: DownloadProgressEvent,
+  value: unknown,
 ): DownloadProgressEvent | null => {
+  if (!isRecord(value)
+    || typeof value.id !== 'string'
+    || typeof value.speed !== 'string'
+    || typeof value.eta !== 'string'
+    || (value.size !== undefined && value.size !== null && typeof value.size !== 'string')
+    || typeof value.size_is_final !== 'boolean') {
+    return null;
+  }
+  const payload = { ...value, size: value.size ?? null } as unknown as DownloadProgressEvent;
   if (typeof payload.fraction !== 'number'
     || !Number.isFinite(payload.fraction)
     || payload.fraction < 0
@@ -64,6 +110,9 @@ const sanitizeProgressPayload = (
   if (sanitized.total_is_estimate !== undefined
     && typeof sanitized.total_is_estimate !== 'boolean') {
     delete sanitized.total_is_estimate;
+  }
+  if (sanitized.upload_speed !== undefined && typeof sanitized.upload_speed !== 'string') {
+    delete sanitized.upload_speed;
   }
   return sanitized;
 };
@@ -151,7 +200,8 @@ const disposeDownloadListeners = () => {
 const startDownloadListeners = async () => {
   const registrations = await Promise.allSettled([
     listen('download-progress', (event) => {
-      const payload = event.payload;
+      const payload = sanitizeProgressPayload(event.payload);
+      if (!payload) return;
       const mainStore = useDownloadStore.getState();
       const current = mainStore.downloads.find(d => d.id === payload.id);
       if (!current) {
@@ -167,10 +217,7 @@ const startDownloadListeners = async () => {
         useDownloadProgressStore.getState().clearDownloadProgress(payload.id);
         return;
       }
-      const sanitizedPayload = sanitizeProgressPayload(payload);
-      if (!sanitizedPayload) {
-        return;
-      }
+      const sanitizedPayload = payload;
       useDownloadProgressStore.getState().updateDownloadProgress(payload.id, sanitizedPayload);
       const shouldUpdateSize = Boolean(sanitizedPayload.size && (!current.isMedia || sanitizedPayload.size_is_final));
       const updates: Partial<DownloadItem> = {};
@@ -232,6 +279,12 @@ const startDownloadListeners = async () => {
     }),
     listen('download-allocation', (event) => {
       const payload = event.payload;
+      if (!isRecord(payload)
+        || typeof payload.id !== 'string'
+        || typeof payload.pending !== 'boolean'
+        || !isLifecycleGeneration(payload.lifecycleGeneration)) {
+        return;
+      }
       const mainStore = useDownloadStore.getState();
       const current = mainStore.downloads.find(download => download.id === payload.id);
       if (!current) {
@@ -258,14 +311,15 @@ const startDownloadListeners = async () => {
       );
     }),
     listen('download-state', async (event) => {
-      const payload = event.payload;
+      const payload = sanitizeStatePayload(event.payload);
+      if (!payload) return;
       const mainStore = useDownloadStore.getState();
       const current = mainStore.downloads.find(d => d.id === payload.id);
       if (!current) {
         useDownloadProgressStore.getState().resetDownloadProgress(payload.id);
         return;
       }
-      const status = payload.status as DownloadStatus;
+      const status = payload.status;
       // A move terminal event carries its authoritative destination. Older
       // lifecycle events do not, so they must not overwrite an active move or
       // clear its progress while the native relocation still owns the row.
@@ -462,6 +516,7 @@ const startDownloadListeners = async () => {
     }),
     listen('torrent-move-progress', (event) => {
       const payload = event.payload;
+      if (!isRecord(payload) || typeof payload.id !== 'string') return;
       const current = useDownloadStore.getState().downloads.find(d => d.id === payload.id);
       if (!current || current.status !== 'moving') {
         useDownloadProgressStore.getState().clearMoveProgress(payload.id);

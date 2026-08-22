@@ -461,6 +461,31 @@ async fn accepted_generation_cannot_be_replayed_after_registry_release() {
 }
 
 #[tokio::test]
+async fn generation_fenced_pending_removal_handles_a_registry_gap() {
+    let (mgr, _spawner) = make_manager(2);
+    mgr.push_with_generation(sample_task("pending-gap"), 7)
+        .await
+        .expect("the pending lifecycle should be accepted");
+    assert_eq!(
+        mgr.registered_lifecycle_generation("pending-gap").await,
+        Some(7)
+    );
+
+    // Model a delayed cleanup observing the pending task after its registry
+    // marker has already been released. Only the exact lifecycle may be
+    // removed; a newer generation must remain untouched.
+    mgr.release_registered_id("pending-gap").await;
+    assert!(!mgr
+        .remove_from_pending_for_generation("pending-gap", 8)
+        .await);
+    assert_eq!(mgr.pending_order(None).await, vec!["pending-gap".to_string()]);
+    assert!(mgr
+        .remove_from_pending_for_generation("pending-gap", 7)
+        .await);
+    assert!(mgr.pending_order(None).await.is_empty());
+}
+
+#[tokio::test]
 async fn release_permit_is_idempotent() {
     let (mgr, _spawner) = make_manager(2);
     let permit = mgr.acquire_permit().await;

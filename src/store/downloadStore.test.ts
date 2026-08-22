@@ -92,6 +92,38 @@ describe('useDownloadProgressStore', () => {
     release();
   });
 
+  it('ignores malformed state events instead of projecting an unknown status', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'malformed-state',
+        url: 'https://example.com/file',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-state']({ payload: {
+      id: 'malformed-state',
+      status: 'not-a-download-status',
+      error: { secret: 'must not enter the store' }
+    } });
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      id: 'malformed-state',
+      status: 'downloading'
+    });
+    expect(useDownloadStore.getState().downloads[0]).not.toHaveProperty('lastError');
+    release();
+  });
+
   it('removes a row from backend pending order when its lifecycle becomes active or retrying', async () => {
     const handlers: Record<string, (event: any) => void> = {};
     vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
@@ -167,6 +199,37 @@ describe('useDownloadProgressStore', () => {
     release();
   });
 
+  it('accepts a progress frame that omits the optional size value', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'omitted-size',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-progress']({ payload: {
+      id: 'omitted-size',
+      fraction: 0.25,
+      speed: '1 MB/s',
+      eta: '1s',
+      size_is_final: false
+    } });
+
+    expect(useDownloadProgressStore.getState().progressMap['omitted-size'])
+      .toMatchObject({ id: 'omitted-size', fraction: 0.25, size: null });
+    release();
+  });
+
   it('keeps the last valid live frame when a malformed fraction arrives', async () => {
     const handlers: Record<string, (event: any) => void> = {};
     vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
@@ -231,6 +294,13 @@ describe('useDownloadProgressStore', () => {
     });
 
     const release = await initDownloadListener();
+    handlers['download-allocation']({ payload: {
+      id: 'native-allocation',
+      pending: true,
+      lifecycleGeneration: 'not-a-generation'
+    } });
+    expect(useDownloadStore.getState().allocationPendingIds.has('native-allocation')).toBe(false);
+
     handlers['download-allocation']({ payload: {
       id: 'native-allocation',
       pending: true,

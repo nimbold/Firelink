@@ -256,9 +256,13 @@ const isCurrentDownloadLifecycle = (id: string, generation: bigint): boolean =>
   currentDownloadLifecycle(id) === generation &&
   useDownloadStore.getState().downloads.some(download => download.id === id);
 
-const removeStaleBackendDispatch = async (id: string): Promise<void> => {
+const removeStaleBackendDispatch = async (id: string, lifecycleGeneration: bigint): Promise<void> => {
   try {
-    await invoke('remove_download', { id, deleteAssets: false });
+    await invoke('remove_download', {
+      id,
+      deleteAssets: false,
+      expectedLifecycleGeneration: lifecycleGeneration.toString()
+    });
   } catch (error) {
     // The original remove request may already have won this race. Either way,
     // never allow a stale enqueue to make the deleted row live again.
@@ -452,7 +456,7 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
       const accepted = await invoke('enqueue_download', { item: enqueueItem });
       backendAccepted = true;
       if (!isCurrentDownloadLifecycle(id, lifecycleGeneration)) {
-        await removeStaleBackendDispatch(id);
+        await removeStaleBackendDispatch(id, lifecycleGeneration);
         return false;
       }
 
@@ -469,7 +473,7 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
       }
       const order = await invoke('get_pending_order', { queueId: item.queueId || MAIN_QUEUE_ID });
       if (!isCurrentDownloadLifecycle(id, lifecycleGeneration)) {
-        await removeStaleBackendDispatch(id);
+        await removeStaleBackendDispatch(id, lifecycleGeneration);
         return false;
       }
 
@@ -483,7 +487,7 @@ async function dispatchItemInternal(id: string, proxyOverride?: string | null): 
     } catch (e) {
       console.error(`Failed to dispatch ${id}:`, e);
       if (backendAccepted && lifecycleGeneration !== null) {
-        await removeStaleBackendDispatch(id);
+        await removeStaleBackendDispatch(id, lifecycleGeneration);
       }
       if (lifecycleGeneration !== null && isCurrentDownloadLifecycle(id, lifecycleGeneration)) {
         const proxyBlocked = isSystemProxyConfigurationError(e);
@@ -2940,11 +2944,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         return normalizePersistedDownloadProgress({ ...download, queueId });
       });
       
-      set(state => ({
+      set(() => ({
         queues,
-        downloads: downloads.length > 0
-          ? normalizeQueuePositions(downloads)
-          : state.downloads
+        downloads: normalizeQueuePositions(downloads)
       }));
 
       // A process can die after Aria2 has removed the unselected files but

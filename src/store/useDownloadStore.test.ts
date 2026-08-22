@@ -772,6 +772,28 @@ describe('useDownloadStore', () => {
     );
   });
 
+  it('replaces stale in-memory downloads when startup loads an empty persisted snapshot', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'stale-memory-row',
+        url: 'https://example.com/stale.bin',
+        fileName: 'stale.bin',
+        status: 'completed',
+        category: 'Other',
+        dateAdded: ''
+      }] as any[]
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'db_get_all_queues') return [];
+      if (cmd === 'db_get_all_downloads') return [];
+      return undefined;
+    });
+
+    await useDownloadStore.getState().initDB();
+
+    expect(useDownloadStore.getState().downloads).toEqual([]);
+  });
+
   it('remaps persisted downloads when queue records are malformed or missing', async () => {
     vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
       if (cmd === 'db_get_all_queues') {
@@ -1336,6 +1358,12 @@ describe('useDownloadStore', () => {
     expect(
       vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) => command === 'remove_download')
     ).toHaveLength(2);
+    expect(
+      vi.mocked(ipc.invokeCommand).mock.calls.some(([command, args]) =>
+        command === 'remove_download'
+        && (args as { expectedLifecycleGeneration?: string })?.expectedLifecycleGeneration === '0'
+      )
+    ).toBe(true);
   });
 
   it('does not expose allocation while admission is merely blocked', async () => {

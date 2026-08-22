@@ -5911,6 +5911,16 @@ async fn resume_download(
     }
 }
 
+fn stale_lifecycle_cleanup_is_noop(
+    expected_generation: Option<u64>,
+    current_generation: Option<u64>,
+) -> bool {
+    matches!(
+        (expected_generation, current_generation),
+        (Some(expected), Some(current)) if expected != current
+    )
+}
+
 #[tauri::command]
 async fn remove_download(
     caller: tauri::WebviewWindow,
@@ -5919,10 +5929,18 @@ async fn remove_download(
     id: String,
     delete_assets: bool,
     preserve_resumable: Option<bool>,
+    expected_lifecycle_generation: Option<String>,
 ) -> Result<(), String> {
     properties_window::ensure_main_window(&caller)?;
     log::info!("remove_download called for id: {}", id);
     let preserve_resumable = preserve_resumable.unwrap_or(false);
+    let expected_lifecycle_generation = expected_lifecycle_generation
+        .map(|generation| {
+            generation
+                .parse::<u64>()
+                .map_err(|_| "Invalid expected download lifecycle generation".to_string())
+        })
+        .transpose()?;
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
 
     let active_kind = state.queue_manager.active_kind(&id).await;
@@ -5930,8 +5948,28 @@ async fn remove_download(
         .queue_manager
         .registered_lifecycle_generation(&id)
         .await;
-    let media_lifecycle_generation = registered_lifecycle_generation.unwrap_or_default();
-    if let Some(generation) = registered_lifecycle_generation {
+    if stale_lifecycle_cleanup_is_noop(
+        expected_lifecycle_generation,
+        registered_lifecycle_generation,
+    ) {
+        // A renderer cleanup worker may be delayed until after the old native
+        // lifecycle has already completed and a newer generation has claimed
+        // the same download id. It must never remove that newer owner.
+        return Ok(());
+    }
+    if let Some(expected_generation) = expected_lifecycle_generation {
+        // Registration normally exists before a pending task is committed.
+        // If a delayed cleanup observes a transient registry/pending gap,
+        // remove only the exact expected task and do not perform a broad
+        // download removal against an unowned lifecycle.
+        state
+            .queue_manager
+            .remove_from_pending_for_generation(&id, expected_generation)
+            .await;
+        if registered_lifecycle_generation.is_none() {
+            return Ok(());
+        }
+    } else if let Some(generation) = registered_lifecycle_generation {
         state
             .queue_manager
             .remove_from_pending_for_generation(&id, generation)
@@ -5939,6 +5977,7 @@ async fn remove_download(
     } else {
         state.queue_manager.remove_from_pending(&id).await;
     }
+    let media_lifecycle_generation = registered_lifecycle_generation.unwrap_or_default();
 
     let gid = state.queue_manager.aria2_gid_for_download(&id);
     if let Some(gid) = gid.as_deref() {
@@ -11778,7 +11817,7 @@ mod tests {
         retained_torrent_id_from_persisted_record,
         retained_torrent_info_hash_from_persisted_record,
         merge_durable_torrent_telemetry, torrent_identity_magnet, torrent_move_path_pair,
-        Aria2DaemonGuard,
+        Aria2DaemonGuard, stale_lifecycle_cleanup_is_noop,
     };
     #[cfg(target_os = "macos")]
     use super::should_apply_dock_badge_update;
@@ -11801,6 +11840,14 @@ mod tests {
         ));
         assert!(!aria2_gid_not_found("error trying to connect: connection refused"));
         assert!(!aria2_gid_not_found("aria2 error code 3: Resource not found"));
+    }
+
+    #[test]
+    fn stale_lifecycle_cleanup_only_targets_the_expected_native_owner() {
+        assert!(!stale_lifecycle_cleanup_is_noop(Some(7), Some(7)));
+        assert!(stale_lifecycle_cleanup_is_noop(Some(7), Some(8)));
+        assert!(!stale_lifecycle_cleanup_is_noop(Some(7), None));
+        assert!(!stale_lifecycle_cleanup_is_noop(None, Some(8)));
     }
 
     #[test]

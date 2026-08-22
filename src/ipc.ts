@@ -70,7 +70,15 @@ type CommandMap = {
   open_downloaded_file: { args: { path: string }; result: void };
   pause_download: { args: { id: string }; result: void };
   resume_download: { args: { id: string; queueId: string }; result: boolean };
-  remove_download: { args: { id: string; deleteAssets: boolean; preserveResumable?: boolean }; result: void };
+  remove_download: {
+    args: {
+      id: string;
+      deleteAssets: boolean;
+      preserveResumable?: boolean;
+      expectedLifecycleGeneration?: string;
+    };
+    result: void;
+  };
   get_download_primary_path: { args: { id: string }; result: string | null };
   detach_download_for_reconfigure: { args: { id: string }; result: void };
   clear_torrent_removal_paths: { args: { id: string }; result: void };
