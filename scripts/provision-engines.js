@@ -1,18 +1,21 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { collectRegularFiles, sha256 } from './engine-payload-integrity.js';
 import { downloadEngineArchive } from './engine-download.js';
 import {
   promoteDirectory,
   recoverInterruptedPromotion,
+  removeOrphanedProvisioningDirectories,
   removePathWithRetry,
 } from './engine-payload-promotion.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
+const execFileAsync = promisify(execFile);
 const sourceLock = JSON.parse(
   fs.readFileSync(path.join(repoRoot, 'engine-sources.lock.json'), 'utf8')
 );
@@ -37,17 +40,34 @@ if (!targetSources) {
 }
 
 const destination = path.join(repoRoot, 'src-tauri', 'provisioned-engines', target);
-const destinationParent = path.dirname(destination);
-fs.mkdirSync(destinationParent, { recursive: true });
-recoverInterruptedPromotion(destination);
-// Keep staging on the destination filesystem so the final rename is atomic.
-const temporary = fs.mkdtempSync(path.join(destinationParent, `.firelink-engines-${target}-`));
-const payloadDestination = path.join(temporary, 'payload');
-fs.mkdirSync(payloadDestination, { recursive: true });
 const isWindows = target.includes('windows');
 const executableSuffix = isWindows ? '.exe' : '';
+const provisioningAbortController = new AbortController();
+const signalNames = process.platform === 'win32'
+  ? ['SIGINT', 'SIGTERM']
+  : ['SIGINT', 'SIGTERM', 'SIGHUP'];
+const signalHandlers = new Map();
+for (const signalName of signalNames) {
+  const handler = () => {
+    if (!provisioningAbortController.signal.aborted) {
+      provisioningAbortController.abort(new Error(`Engine provisioning interrupted by ${signalName}`));
+    }
+  };
+  signalHandlers.set(signalName, handler);
+  process.on(signalName, handler);
+}
+
+let temporary;
+let payloadDestination;
+
+function throwIfProvisioningAborted() {
+  if (provisioningAbortController.signal.aborted) {
+    throw provisioningAbortController.signal.reason;
+  }
+}
 
 async function download(name, source) {
+  throwIfProvisioningAborted();
   const sourcePath = new URL(source.url).pathname;
   const archive = path.join(
     temporary,
@@ -58,14 +78,23 @@ async function download(name, source) {
     url: source.url,
     archive,
     expectedSha256: source.sha256,
+    signal: provisioningAbortController.signal,
   });
+  throwIfProvisioningAborted();
   const extracted = path.join(temporary, `${name}-extracted`);
   fs.mkdirSync(extracted);
   if (archive.endsWith('.zip') && process.platform !== 'win32') {
-    execFileSync('unzip', ['-q', archive, '-d', extracted], { stdio: 'inherit' });
+    await execFileAsync('unzip', ['-q', archive, '-d', extracted], {
+      stdio: 'inherit',
+      signal: provisioningAbortController.signal,
+    });
   } else {
-    execFileSync('tar', ['-xf', archive, '-C', extracted], { stdio: 'inherit' });
+    await execFileAsync('tar', ['-xf', archive, '-C', extracted], {
+      stdio: 'inherit',
+      signal: provisioningAbortController.signal,
+    });
   }
+  throwIfProvisioningAborted();
   return extracted;
 }
 
@@ -123,6 +152,18 @@ function writePayloadManifest() {
 }
 
 try {
+  const destinationParent = path.dirname(destination);
+  fs.mkdirSync(destinationParent, { recursive: true });
+  recoverInterruptedPromotion(destination);
+  await removeOrphanedProvisioningDirectories(destinationParent, target);
+  throwIfProvisioningAborted();
+  // Keep staging on the destination filesystem so the final rename is atomic.
+  temporary = fs.mkdtempSync(
+    path.join(destinationParent, `.firelink-engines-${target}-${process.pid}-`)
+  );
+  payloadDestination = path.join(temporary, 'payload');
+  fs.mkdirSync(payloadDestination, { recursive: true });
+
   const ytdlp = await download('yt-dlp', targetSources['yt-dlp']);
   copyExecutable(
     findFile(ytdlp, isWindows ? ['yt-dlp.exe'] : ['yt-dlp_linux']),
@@ -143,8 +184,12 @@ try {
   copyExecutable(findFile(aria2, isWindows ? ['aria2c.exe'] : ['aria2c']), 'aria2c');
 
   writePayloadManifest();
+  throwIfProvisioningAborted();
   await promoteDirectory(payloadDestination, destination);
   console.log(`Provisioned locked engine payload at ${destination}`);
 } finally {
-  await removePathWithRetry(temporary);
+  if (temporary) await removePathWithRetry(temporary);
+  for (const [signalName, handler] of signalHandlers) {
+    process.removeListener(signalName, handler);
+  }
 }

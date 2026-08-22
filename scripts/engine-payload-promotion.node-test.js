@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   promoteDirectory,
   recoverInterruptedPromotion,
+  removeOrphanedProvisioningDirectories,
   removePathWithRetry,
 } from './engine-payload-promotion.js';
 
@@ -122,6 +123,27 @@ test('removes orphaned backups from dead provisioners after a successful publish
 
     assert.equal(fs.existsSync(orphanedBackup), false);
     assert.equal(fs.readFileSync(path.join(destination, 'engine'), 'utf8'), 'new');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('removes only provisioning staging owned by a dead PID', async () => {
+  const root = temporaryDirectory();
+  try {
+    const target = 'x86_64-unknown-linux-gnu';
+    const orphaned = path.join(root, `.firelink-engines-${target}-999999999-dead`);
+    const live = path.join(root, `.firelink-engines-${target}-${process.pid}-live`);
+    const legacy = path.join(root, `.firelink-engines-${target}-legacy`);
+    fs.mkdirSync(orphaned, { recursive: true });
+    fs.mkdirSync(live, { recursive: true });
+    fs.mkdirSync(legacy, { recursive: true });
+
+    await removeOrphanedProvisioningDirectories(root, target);
+
+    assert.equal(fs.existsSync(orphaned), false);
+    assert.equal(fs.existsSync(live), true);
+    assert.equal(fs.existsSync(legacy), true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

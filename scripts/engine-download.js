@@ -45,6 +45,40 @@ function createDownloadTimeout(idleTimeoutMs) {
   return { signal: controller.signal, refresh, dispose };
 }
 
+function abortReason(signal) {
+  if (signal?.reason instanceof Error) return signal.reason;
+  return new Error('Engine archive download aborted');
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw abortReason(signal);
+}
+
+function combineAbortSignals(signals) {
+  const activeSignals = signals.filter(Boolean);
+  const controller = new AbortController();
+  const listeners = [];
+  const abort = signal => {
+    if (!controller.signal.aborted) controller.abort(abortReason(signal));
+  };
+
+  for (const signal of activeSignals) {
+    const listener = () => abort(signal);
+    listeners.push([signal, listener]);
+    if (signal.aborted) abort(signal);
+    else signal.addEventListener('abort', listener, { once: true });
+  }
+
+  return {
+    signal: controller.signal,
+    dispose() {
+      for (const [signal, listener] of listeners) {
+        signal.removeEventListener('abort', listener);
+      }
+    },
+  };
+}
+
 function archiveSize(archive) {
   try {
     return fs.statSync(archive).size;
@@ -60,8 +94,26 @@ function checksumMismatchError(name, expected, actual) {
   return error;
 }
 
-function sleep(milliseconds) {
-  return new Promise(resolve => setTimeout(resolve, milliseconds));
+function sleep(milliseconds, signal) {
+  if (!signal) return new Promise(resolve => setTimeout(resolve, milliseconds));
+  return new Promise((resolve, reject) => {
+    let timer;
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+    };
+    const finish = () => {
+      cleanup();
+      resolve();
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(abortReason(signal));
+    };
+    timer = setTimeout(finish, milliseconds);
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
 }
 
 async function resetArchive(archive) {
@@ -92,20 +144,23 @@ export async function downloadEngineArchive({
   attempts = DEFAULT_ATTEMPTS,
   idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
   retryDelaysMs = DEFAULT_RETRY_DELAYS_MS,
+  signal,
 }) {
   let lastError;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    throwIfAborted(signal);
     const partialSize = archiveSize(archive);
     if (partialSize > 0 && sha256(archive) === expectedSha256) return archive;
     const downloadTimeout = createDownloadTimeout(idleTimeoutMs);
+    const requestSignal = combineAbortSignals([signal, downloadTimeout.signal]);
     let resetForRetry = false;
 
     try {
       const response = await fetch(url, {
         headers: partialSize > 0 ? { Range: `bytes=${partialSize}-` } : undefined,
         redirect: 'follow',
-        signal: downloadTimeout.signal,
+        signal: requestSignal.signal,
       });
 
       if (response.status === 416 && partialSize > 0) {
@@ -143,9 +198,10 @@ export async function downloadEngineArchive({
           },
         }),
         fs.createWriteStream(archive, { flags: append ? 'a' : 'w' }),
-        { signal: downloadTimeout.signal },
+        { signal: requestSignal.signal },
       );
 
+      throwIfAborted(signal);
       const finalSize = archiveSize(archive);
       const expectedFinalSize = contentRange?.total
         ?? (expectedResponseLength === undefined
@@ -163,6 +219,7 @@ export async function downloadEngineArchive({
       resetForRetry = true;
       throw checksumMismatchError(name, expectedSha256, actual);
     } catch (error) {
+      if (signal?.aborted) throw abortReason(signal);
       lastError = error;
       if (resetForRetry || error?.code === 'ARCHIVE_CHECKSUM_MISMATCH') {
         await resetArchive(archive);
@@ -175,8 +232,9 @@ export async function downloadEngineArchive({
           { cause: error },
         );
       }
-      await new Promise(resolve => setTimeout(resolve, retryDelaysMs[attempt - 1] ?? 0));
+      await sleep(retryDelaysMs[attempt - 1] ?? 0, signal);
     } finally {
+      requestSignal.dispose();
       downloadTimeout.dispose();
     }
   }

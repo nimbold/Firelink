@@ -180,3 +180,48 @@ test('restarts from zero after an unsatisfiable retained range', async () => {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('propagates external cancellation without retrying an in-flight archive', async () => {
+  const { directory, archive } = makeArchivePath();
+  const abortController = new AbortController();
+  let calls = 0;
+
+  try {
+    await withMockFetch(async (_url, options) => {
+      calls += 1;
+      assert.equal(options.signal.aborted, false);
+      setTimeout(() => {
+        abortController.abort(new Error('provisioning interrupted'));
+      }, 10);
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(Buffer.from('partial archive bytes'));
+        },
+      }), {
+        status: 200,
+        headers: { 'Content-Length': '100' },
+      });
+    }, async () => {
+      await assert.rejects(
+        downloadEngineArchive({
+          name: 'test',
+          url: 'https://example.test/engine.zip',
+          archive,
+          expectedSha256: digest(Buffer.from('never completed')),
+          attempts: 3,
+          retryDelaysMs: [500, 500],
+          signal: abortController.signal,
+        }),
+        error => {
+          assert.match(error.message, /provisioning interrupted/);
+          return true;
+        },
+      );
+    });
+
+    assert.equal(calls, 1);
+    assert.ok(fs.statSync(archive).size > 0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

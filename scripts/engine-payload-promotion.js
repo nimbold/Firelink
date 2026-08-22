@@ -50,6 +50,33 @@ async function removeOrphanedPreviousPayloads(destination) {
   }
 }
 
+function provisioningTemporaryPrefix(target) {
+  return `.firelink-engines-${target}-`;
+}
+
+function provisioningTemporaryOwner(target, candidate) {
+  const suffix = path.basename(candidate).slice(provisioningTemporaryPrefix(target).length);
+  const separator = suffix.indexOf('-');
+  const pid = separator >= 0 ? suffix.slice(0, separator) : suffix;
+  return /^\d+$/.test(pid) ? Number(pid) : null;
+}
+
+/**
+ * Removes only staging directories created by a provisioner whose PID is no
+ * longer alive. Legacy directories without an owner PID remain untouched so
+ * a concurrent or ambiguous provisioner can never lose its staging tree.
+ */
+export async function removeOrphanedProvisioningDirectories(destinationParent, target) {
+  const prefix = provisioningTemporaryPrefix(target);
+  for (const entry of fs.readdirSync(destinationParent, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith(prefix)) continue;
+    const candidate = path.join(destinationParent, entry.name);
+    const owner = provisioningTemporaryOwner(target, candidate);
+    if (owner === null || owner === process.pid || isProcessAlive(owner)) continue;
+    await removePathWithRetry(candidate);
+  }
+}
+
 /**
  * Restores the only previous payload left by a process that died after moving
  * the destination aside but before publishing its replacement. Multiple
