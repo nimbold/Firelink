@@ -33,7 +33,7 @@ pub fn file_identity(path: &Path) -> Option<String> {
             std::ptr::null(),
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-            0,
+            std::ptr::null_mut(),
         )
     };
     if handle == INVALID_HANDLE_VALUE {
