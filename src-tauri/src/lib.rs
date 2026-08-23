@@ -6478,7 +6478,7 @@ async fn exact_file_fingerprint_for_permanent_removal<R: tauri::Runtime>(
             path.display()
         ));
     }
-    Ok(Some(target_fingerprint(&metadata)))
+    Ok(Some(target_fingerprint(path, &metadata)))
 }
 
 async fn validate_exact_file_for_permanent_removal<R: tauri::Runtime>(
@@ -6745,7 +6745,7 @@ async fn managed_torrent_metadata_fingerprint<R: tauri::Runtime>(
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
         return Err("refusing to permanently remove non-regular managed Torrent metadata".to_string());
     }
-    Ok(Some(target_fingerprint(&metadata)))
+    Ok(Some(target_fingerprint(path, &metadata)))
 }
 
 fn is_os_directory_metadata(name: &std::ffi::OsStr) -> bool {
@@ -7948,7 +7948,7 @@ async fn restore_download_replacement(
     if metadata_is_link_or_reparse(&quarantine_metadata) || !quarantine_metadata.is_file() {
         return Err("Cannot restore replacement quarantine because it is not a regular file".to_string());
     }
-    if target_fingerprint(&quarantine_metadata) != reservation.fingerprint {
+    if target_fingerprint(&reservation.quarantine, &quarantine_metadata) != reservation.fingerprint {
         return Err("Cannot restore replacement quarantine because its contents changed".to_string());
     }
     if tokio::fs::symlink_metadata(&reservation.target).await.is_ok() {
@@ -8044,7 +8044,7 @@ async fn finalize_download_replacement(
             return;
         }
     };
-    if target_fingerprint(&quarantine_metadata) != reservation.fingerprint {
+    if target_fingerprint(&reservation.quarantine, &quarantine_metadata) != reservation.fingerprint {
         log::warn!(
             "download replacement cleanup [{}]: retained recovery journal because quarantine changed",
             reservation.target.display()
@@ -8102,7 +8102,7 @@ async fn prepare_download_replacement(
             "Download target is already owned by Firelink download {owner}"
         ));
     }
-    let current_fingerprint = target_fingerprint(&metadata);
+    let current_fingerprint = target_fingerprint(target, &metadata);
     if current_fingerprint != expected_fingerprint {
         return Err(
             "The file changed after duplicate resolution. Reopen the conflict and choose Replace again."
@@ -8167,7 +8167,7 @@ async fn prepare_download_replacement(
     };
     if metadata_is_link_or_reparse(&staged_metadata)
         || !staged_metadata.is_file()
-        || target_fingerprint(&staged_metadata) != expected_fingerprint
+        || target_fingerprint(&reservation.quarantine, &staged_metadata) != expected_fingerprint
     {
         let _ = restore_staged_replacement_after_validation_failure(&reservation).await;
         return Err("The replacement target changed while it was being staged".to_string());
@@ -8300,7 +8300,7 @@ fn recover_download_replacement_journals(
             Ok(metadata)
                 if metadata_is_link_or_reparse(&metadata)
                     || !metadata.is_file()
-                    || target_fingerprint(&metadata) != journal.fingerprint =>
+                    || target_fingerprint(&journal.quarantine, &metadata) != journal.fingerprint =>
             {
                 log::warn!(
                     "leaving download replacement journal [{}]: quarantine is not the original regular file",
@@ -12708,21 +12708,18 @@ fn db_replace_queues(
     crate::db::replace_queues(&mut connection, &data)
 }
 
-fn target_fingerprint(metadata: &std::fs::Metadata) -> String {
+fn target_fingerprint(path: &std::path::Path, metadata: &std::fs::Metadata) -> String {
+    #[cfg(not(target_os = "windows"))]
+    let _ = path;
     #[cfg(unix)]
     let identity = {
         use std::os::unix::fs::MetadataExt;
         format!("unix:{}:{}", metadata.dev(), metadata.ino())
     };
     #[cfg(windows)]
-    let identity = {
-        use std::os::windows::fs::MetadataExt;
-        format!(
-            "windows:{}:{}",
-            metadata.volume_serial_number().unwrap_or_default(),
-            metadata.file_index().unwrap_or_default()
-        )
-    };
+    let identity = crate::platform::file_identity(path)
+        .map(|identity| format!("windows:{identity}"))
+        .unwrap_or_else(|| format!("windows-path:{}", crate::platform::path_identity(path)));
     #[cfg(not(any(unix, windows)))]
     let identity = "portable".to_string();
     let modified = metadata
@@ -12794,7 +12791,7 @@ fn inspect_download_target(
     Ok(crate::ipc::DownloadTargetInfo {
         kind,
         fingerprint: (kind == crate::ipc::DownloadTargetKind::RegularFile)
-            .then(|| target_fingerprint(&metadata)),
+            .then(|| target_fingerprint(&resolved, &metadata)),
         owned_by,
     })
 }
@@ -15490,14 +15487,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let target = directory.path().join("replace.bin");
         std::fs::write(&target, b"old").unwrap();
-        let initial = target_fingerprint(&std::fs::symlink_metadata(&target).unwrap());
+        let initial = target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap());
         assert_eq!(
             initial,
-            target_fingerprint(&std::fs::symlink_metadata(&target).unwrap())
+            target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap())
         );
 
         std::fs::write(&target, b"new content").unwrap();
-        let changed = target_fingerprint(&std::fs::symlink_metadata(&target).unwrap());
+        let changed = target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap());
         assert_ne!(initial, changed);
     }
 
@@ -15558,7 +15555,8 @@ mod tests {
         let quarantine = directory.path().join(".firelink-replaced-target.tmp");
         let journal = directory.path().join("replacement.json");
         std::fs::write(&quarantine, b"original").unwrap();
-        let fingerprint = target_fingerprint(&std::fs::symlink_metadata(&quarantine).unwrap());
+        let fingerprint =
+            target_fingerprint(&quarantine, &std::fs::symlink_metadata(&quarantine).unwrap());
         std::fs::write(&journal, b"journal").unwrap();
 
         restore_download_replacement(&DownloadReplacementReservation {
@@ -15583,7 +15581,8 @@ mod tests {
         let journal = directory.path().join("replacement.json");
         std::fs::write(&target, b"new-admission").unwrap();
         std::fs::write(&quarantine, b"old-file").unwrap();
-        let fingerprint = target_fingerprint(&std::fs::symlink_metadata(&quarantine).unwrap());
+        let fingerprint =
+            target_fingerprint(&quarantine, &std::fs::symlink_metadata(&quarantine).unwrap());
         std::fs::write(&journal, b"journal").unwrap();
 
         let error = restore_download_replacement(&DownloadReplacementReservation {
@@ -15608,7 +15607,8 @@ mod tests {
         let quarantine = directory.path().join(".firelink-replaced-target.tmp");
         let journal = directory.path().join("replacement.json");
         std::fs::write(&quarantine, b"old-file").unwrap();
-        let fingerprint = target_fingerprint(&std::fs::symlink_metadata(&quarantine).unwrap());
+        let fingerprint =
+            target_fingerprint(&quarantine, &std::fs::symlink_metadata(&quarantine).unwrap());
         std::fs::write(&quarantine, b"tampered-file").unwrap();
         std::fs::write(&journal, b"journal").unwrap();
 
@@ -15648,6 +15648,28 @@ mod tests {
         assert!(journal.exists());
     }
 
+    fn configure_test_download_root<R: tauri::Runtime>(
+        app_handle: &tauri::AppHandle<R>,
+        root: &std::path::Path,
+    ) -> std::path::PathBuf {
+        use tauri::Manager;
+
+        std::fs::create_dir_all(root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let root_text = root.to_string_lossy().into_owned();
+        let settings = json!({
+            "state": {
+                "baseDownloadFolder": root_text,
+                "approvedDownloadRoots": [root.to_string_lossy().into_owned()]
+            },
+            "version": 3
+        });
+        let database = app_handle.state::<crate::db::DbState>();
+        let connection = database.lock().unwrap();
+        crate::db::save_settings(&connection, &settings.to_string()).unwrap();
+        root
+    }
+
     #[tokio::test]
     async fn permanent_media_cleanup_removes_only_exact_payload_and_sidecars() {
         use tauri::Manager;
@@ -15664,9 +15686,8 @@ mod tests {
         )
         .unwrap();
         app.manage(crate::db::init(&storage_layout).unwrap());
-        let download_root = app.path().download_dir().expect("download root");
-        let root_was_present = download_root.exists();
-        std::fs::create_dir_all(&download_root).unwrap();
+        let download_root =
+            configure_test_download_root(app.handle(), &storage_root.path().join("downloads"));
         let directory = tempfile::tempdir_in(&download_root).unwrap();
         let primary = directory.path().join("video.mp4");
         std::fs::write(&primary, b"payload").unwrap();
@@ -15688,9 +15709,6 @@ mod tests {
         assert!(!directory.path().join("video.mp4.ytdl").exists());
         assert!(unrelated.exists());
         drop(directory);
-        if !root_was_present {
-            let _ = std::fs::remove_dir(&download_root);
-        }
     }
 
     #[cfg(unix)]
@@ -15711,9 +15729,8 @@ mod tests {
         )
         .unwrap();
         app.manage(crate::db::init(&storage_layout).unwrap());
-        let download_root = app.path().download_dir().expect("download root");
-        let root_was_present = download_root.exists();
-        std::fs::create_dir_all(&download_root).unwrap();
+        let download_root =
+            configure_test_download_root(app.handle(), &storage_root.path().join("downloads"));
         let directory = tempfile::tempdir_in(&download_root).unwrap();
         let outside = tempfile::tempdir().unwrap();
         let outside_payload = outside.path().join("payload");
@@ -15729,9 +15746,6 @@ mod tests {
         assert!(link.exists());
         assert_eq!(std::fs::read(&outside_payload).unwrap(), b"outside");
         drop(directory);
-        if !root_was_present {
-            let _ = std::fs::remove_dir(&download_root);
-        }
     }
 
     #[tokio::test]
@@ -15750,9 +15764,8 @@ mod tests {
         )
         .unwrap();
         app.manage(crate::db::init(&storage_layout).unwrap());
-        let download_root = app.path().download_dir().expect("download root");
-        let root_was_present = download_root.exists();
-        std::fs::create_dir_all(&download_root).unwrap();
+        let download_root =
+            configure_test_download_root(app.handle(), &storage_root.path().join("downloads"));
         let directory = tempfile::tempdir_in(&download_root).unwrap();
         let container = directory.path().join("torrent-output");
         std::fs::create_dir(&container).unwrap();
@@ -15767,9 +15780,6 @@ mod tests {
         assert!(container.is_dir());
         assert!(unrelated.exists());
         drop(directory);
-        if !root_was_present {
-            let _ = std::fs::remove_dir(&download_root);
-        }
     }
 
     #[cfg(target_os = "macos")]

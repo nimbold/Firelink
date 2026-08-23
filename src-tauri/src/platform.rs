@@ -2,6 +2,58 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Return a stable filesystem identity for an existing Windows file without
+/// relying on unstable `std::fs::MetadataExt` APIs. The handle is opened with
+/// delete sharing so inspection does not unnecessarily block normal cleanup
+/// or replacement; callers still validate the path with `symlink_metadata`
+/// before using this identity.
+#[cfg(target_os = "windows")]
+pub fn file_identity(path: &Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+    };
+
+    let wide_path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // A zero desired-access mask requests metadata access only. Opening with
+    // all sharing flags avoids introducing a lock that changes the outcome of
+    // a subsequent exact replacement or cleanup operation.
+    let handle = unsafe {
+        CreateFileW(
+            wide_path.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            0,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+
+    let mut metadata = BY_HANDLE_FILE_INFORMATION::default();
+    let result = unsafe {
+        let succeeded = GetFileInformationByHandle(handle, &mut metadata) != 0;
+        let _ = CloseHandle(handle);
+        succeeded
+    };
+    result.then(|| {
+        format!(
+            "{}:{}:{}",
+            metadata.dwVolumeSerialNumber, metadata.nFileIndexHigh, metadata.nFileIndexLow
+        )
+    })
+}
+
 const ATOMIC_TEMP_PREFIX: &str = ".firelink-atomic-";
 
 /// Write bytes to a same-directory temporary file, synchronize them, and
