@@ -6026,6 +6026,12 @@ async fn remove_download(
         .queue_manager
         .registered_lifecycle_generation(&id)
         .await;
+    // A ready/staged row normally has no native owner yet.  Keep this
+    // admission fact so a missing ownership record can only be treated as a
+    // no-op cleanup for that exact pre-admission lifecycle; an admitted row
+    // must continue to fail closed if its ownership record is missing.
+    let native_lifecycle_was_admitted =
+        active_kind.is_some() || registered_lifecycle_generation.is_some();
     if stale_lifecycle_cleanup_is_noop(
         expected_lifecycle_generation,
         registered_lifecycle_generation,
@@ -6134,10 +6140,13 @@ async fn remove_download(
             .queue_manager
             .registered_lifecycle_generation(&id)
             .await;
+        let current_active_kind = state.queue_manager.active_kind(&id).await;
         let lifecycle_changed = registered_lifecycle_generation.is_some()
             && current_generation != registered_lifecycle_generation
             || registered_lifecycle_generation.is_none() && current_generation.is_some();
-        if lifecycle_changed {
+        let late_native_lifecycle = !native_lifecycle_was_admitted
+            && current_active_kind.is_some();
+        if lifecycle_changed || late_native_lifecycle {
             state
                 .queue_manager
                 .release_permit_for_generation(&id, media_lifecycle_generation)
@@ -6215,6 +6224,8 @@ async fn remove_download(
 
     let owned_paths = crate::download_ownership::owned_paths_for_id(&app_handle, &id)?;
     let primary_path = crate::download_ownership::primary_path_for_id(&app_handle, &id)?;
+    let torrent_removal_paths =
+        crate::download_ownership::torrent_removal_paths_for_id(&app_handle, &id)?;
 
     let preserve_assets = preserve_resumable
         && (owned_paths.iter().any(|path| has_resumable_download_assets(path))
@@ -6222,8 +6233,33 @@ async fn remove_download(
                 .as_ref()
                 .is_some_and(|path| has_resumable_download_assets(path)));
 
-    if delete_assets && !preserve_assets {
-        if owned_paths.is_empty() && primary_path.is_none() {
+    let requested_asset_cleanup = delete_assets && !preserve_assets;
+    let ownership_is_missing = owned_paths.is_empty() && primary_path.is_none();
+    let unowned_unadmitted_cleanup_is_noop = if requested_asset_cleanup
+        && ownership_is_missing
+        && torrent_removal_paths.is_empty()
+    {
+        let persisted = load_persisted_download_item(
+            &app_handle.state::<crate::db::DbState>(),
+            &id,
+        )?;
+        let expected_assets_present = expected_unadmitted_download_assets_present(
+            &app_handle,
+            &persisted,
+        )?;
+        should_skip_unowned_asset_cleanup(
+            persisted.status,
+            persisted.has_been_dispatched.unwrap_or(false),
+            native_lifecycle_was_admitted,
+            expected_assets_present,
+        )
+    } else {
+        false
+    };
+    let should_delete_assets = requested_asset_cleanup && !unowned_unadmitted_cleanup_is_noop;
+
+    if requested_asset_cleanup {
+        if ownership_is_missing && !unowned_unadmitted_cleanup_is_noop {
             return Err(
                 "Cannot remove download files because Firelink ownership is unavailable".to_string(),
             );
@@ -6262,7 +6298,7 @@ async fn remove_download(
     // record is removed, so another download cannot claim a path between
     // deleting its payload/sidecars and releasing Firelink ownership.
     let mut cleanup_target_guards = Vec::new();
-    if delete_assets && !preserve_assets {
+    if should_delete_assets {
         let mut cleanup_targets = owned_paths.clone();
         if let Some(primary) = primary_path
             .as_ref()
@@ -6278,7 +6314,7 @@ async fn remove_download(
     }
 
     let cleanup_result = async {
-        if delete_assets && !preserve_assets {
+        if should_delete_assets {
             for path in &owned_paths {
                 if permanent_asset_removal {
                     remove_download_assets_permanently(path, &app_handle).await?;
@@ -6329,6 +6365,120 @@ fn has_resumable_download_assets(primary: &std::path::Path) -> bool {
         candidate.push(suffix);
         std::path::PathBuf::from(candidate).exists()
     })
+}
+
+/// A ready/staged row can be removed before native admission has established
+/// an ownership record.  Treat Delete file as a no-op only when the row is
+/// still pre-admission and no exact output artifact can be found.  Never use
+/// this path for an admitted lifecycle: a missing ownership record there is
+/// an integrity failure and must remain fail-closed.
+fn should_skip_unowned_asset_cleanup(
+    status: crate::ipc::DownloadStatus,
+    has_been_dispatched: bool,
+    native_lifecycle_was_admitted: bool,
+    expected_assets_present: bool,
+) -> bool {
+    matches!(
+        status,
+        crate::ipc::DownloadStatus::Ready | crate::ipc::DownloadStatus::Staged
+    ) && !has_been_dispatched
+        && !native_lifecycle_was_admitted
+        && !expected_assets_present
+}
+
+fn expected_unadmitted_download_assets_present<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    persisted: &crate::ipc::DownloadItem,
+) -> Result<bool, String> {
+    let Some(destination) = persisted
+        .destination
+        .as_deref()
+        .map(str::trim)
+        .filter(|destination| !destination.is_empty())
+    else {
+        // Without a durable destination we cannot prove that no output
+        // exists, so preserve the ownership guard.
+        return Ok(true);
+    };
+
+    if persisted.is_torrent == Some(true) {
+        // A Torrent can produce multiple nested paths or resolve a magnet
+        // name only after admission.  Without Firelink ownership, the
+        // persisted display filename is not a safe inventory of its assets.
+        return Ok(true);
+    }
+
+    let primary = crate::download_ownership::expected_primary_path(
+        app_handle,
+        destination,
+        &persisted.file_name,
+    )?;
+    if download_asset_or_sidecar_exists(&primary)? {
+        return Ok(true);
+    }
+
+    if persisted.is_media == Some(true) {
+        let Some(base_name) = primary.file_name().and_then(|name| name.to_str()) else {
+            return Ok(true);
+        };
+        let base_stem = primary
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or(base_name);
+        let has_stable_output_name = persisted.media_format_selector.is_some()
+            || std::path::Path::new(base_name).extension().is_some();
+        if !has_stable_output_name {
+            // yt-dlp may choose a title/id/extension-derived name for this
+            // shape, so an absent guessed path is not proof of absence.
+            return Ok(true);
+        }
+
+        let Some(parent) = primary.parent() else {
+            return Ok(true);
+        };
+        let mut entries = match std::fs::read_dir(parent) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => return Err("Could not inspect expected download assets".to_string()),
+        };
+        while let Some(entry) = entries
+            .next()
+            .transpose()
+            .map_err(|_| "Could not inspect expected download assets".to_string())?
+        {
+            let path = entry.path();
+            if crate::platform::paths_equal(&path, &primary) {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !is_media_artifact_name(name, base_name, base_stem) {
+                continue;
+            }
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => return Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return Err("Could not inspect expected download assets".to_string()),
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn download_asset_or_sidecar_exists(primary: &std::path::Path) -> Result<bool, String> {
+    for suffix in ["", ".aria2", ".part", ".ytdl"] {
+        let mut candidate = primary.as_os_str().to_os_string();
+        candidate.push(suffix);
+        let candidate = std::path::PathBuf::from(candidate);
+        match std::fs::symlink_metadata(candidate) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("Could not inspect expected download assets".to_string()),
+        }
+    }
+    Ok(false)
 }
 
 fn primary_path_needs_container_cleanup(
@@ -13264,6 +13414,8 @@ mod tests {
         retained_torrent_info_hash_from_persisted_record,
         merge_durable_torrent_telemetry, torrent_identity_magnet, torrent_move_path_pair,
         Aria2DaemonGuard, stale_lifecycle_cleanup_is_noop,
+        should_skip_unowned_asset_cleanup, expected_unadmitted_download_assets_present,
+        download_asset_or_sidecar_exists,
         classify_download_target, download_target_lock,
         remove_download_assets_permanently, remove_download_container_assets_permanently,
         restore_download_replacement, target_fingerprint, DownloadReplacementReservation,
@@ -13297,6 +13449,157 @@ mod tests {
         assert!(stale_lifecycle_cleanup_is_noop(Some(7), Some(8)));
         assert!(!stale_lifecycle_cleanup_is_noop(Some(7), None));
         assert!(!stale_lifecycle_cleanup_is_noop(None, Some(8)));
+    }
+
+    #[test]
+    fn unowned_asset_cleanup_only_skips_a_missing_pre_admission_lifecycle() {
+        assert!(should_skip_unowned_asset_cleanup(
+            crate::ipc::DownloadStatus::Ready,
+            false,
+            false,
+            false
+        ));
+        assert!(should_skip_unowned_asset_cleanup(
+            crate::ipc::DownloadStatus::Staged,
+            false,
+            false,
+            false
+        ));
+        assert!(!should_skip_unowned_asset_cleanup(
+            crate::ipc::DownloadStatus::Staged,
+            true,
+            false,
+            false
+        ));
+        assert!(!should_skip_unowned_asset_cleanup(
+            crate::ipc::DownloadStatus::Staged,
+            false,
+            true,
+            false
+        ));
+        assert!(!should_skip_unowned_asset_cleanup(
+            crate::ipc::DownloadStatus::Staged,
+            false,
+            false,
+            true
+        ));
+        assert!(!should_skip_unowned_asset_cleanup(
+            crate::ipc::DownloadStatus::Completed,
+            false,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn unowned_asset_inspection_detects_primary_files_sidecars_and_missing_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let primary = directory.path().join("download.bin");
+
+        assert!(!download_asset_or_sidecar_exists(&primary).unwrap());
+
+        std::fs::write(&primary, b"payload").unwrap();
+        assert!(download_asset_or_sidecar_exists(&primary).unwrap());
+        std::fs::remove_file(&primary).unwrap();
+
+        std::fs::write(directory.path().join("download.bin.part"), b"partial").unwrap();
+        assert!(download_asset_or_sidecar_exists(&primary).unwrap());
+    }
+
+    #[test]
+    fn staged_unowned_asset_inspection_uses_the_exact_persisted_output_path() {
+        use tauri::Manager;
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let storage_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let storage_layout = crate::storage::StorageLayout::resolve(
+            app.handle(),
+            crate::storage::StorageMode::Portable {
+                root: storage_root.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        app.manage(crate::db::init(&storage_layout).unwrap());
+        let download_root =
+            configure_test_download_root(app.handle(), &storage_root.path().join("downloads"));
+        let item: crate::ipc::DownloadItem = serde_json::from_value(json!({
+            "id": "staged-no-assets",
+            "url": "https://example.com/file.bin",
+            "fileName": "file.bin",
+            "status": "staged",
+            "category": "Other",
+            "dateAdded": "",
+            "destination": download_root.to_string_lossy(),
+            "hasBeenDispatched": false
+        }))
+        .unwrap();
+
+        assert!(!expected_unadmitted_download_assets_present(app.handle(), &item).unwrap());
+        std::fs::write(download_root.join("file.bin.aria2"), b"partial").unwrap();
+        assert!(expected_unadmitted_download_assets_present(app.handle(), &item).unwrap());
+        std::fs::remove_file(download_root.join("file.bin.aria2")).unwrap();
+
+        let media_item: crate::ipc::DownloadItem = serde_json::from_value(json!({
+            "id": "staged-media",
+            "url": "https://example.com/video",
+            "fileName": "clip.mp4",
+            "status": "staged",
+            "category": "Movies",
+            "dateAdded": "",
+            "destination": download_root.to_string_lossy(),
+            "isMedia": true,
+            "hasBeenDispatched": false
+        }))
+        .unwrap();
+        assert!(!expected_unadmitted_download_assets_present(
+            app.handle(),
+            &media_item
+        )
+        .unwrap());
+        std::fs::write(download_root.join("clip.f137.mp4"), b"media-part").unwrap();
+        assert!(expected_unadmitted_download_assets_present(
+            app.handle(),
+            &media_item
+        )
+        .unwrap());
+
+        let dynamic_media_item: crate::ipc::DownloadItem = serde_json::from_value(json!({
+            "id": "staged-dynamic-media",
+            "url": "https://example.com/video",
+            "fileName": "clip",
+            "status": "staged",
+            "category": "Movies",
+            "dateAdded": "",
+            "destination": download_root.to_string_lossy(),
+            "isMedia": true,
+            "hasBeenDispatched": false
+        }))
+        .unwrap();
+        assert!(expected_unadmitted_download_assets_present(
+            app.handle(),
+            &dynamic_media_item
+        )
+        .unwrap());
+
+        let torrent_item: crate::ipc::DownloadItem = serde_json::from_value(json!({
+            "id": "staged-torrent",
+            "url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            "fileName": "torrent-name",
+            "status": "staged",
+            "category": "Torrents",
+            "dateAdded": "",
+            "destination": download_root.to_string_lossy(),
+            "isTorrent": true,
+            "hasBeenDispatched": false
+        }))
+        .unwrap();
+        assert!(expected_unadmitted_download_assets_present(
+            app.handle(),
+            &torrent_item
+        )
+        .unwrap());
     }
 
     #[test]
