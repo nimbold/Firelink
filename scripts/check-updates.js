@@ -58,12 +58,28 @@ function releaseAssetHashes(release) {
   );
 }
 
+function providerAssetHashes({ ytDlp, deno, aria2 }) {
+  return {
+    ...releaseAssetHashes(ytDlp),
+    ...releaseAssetHashes(deno),
+    ...releaseAssetHashes(aria2),
+  };
+}
+
+function npmExecutable(platform = process.platform) {
+  return platform === 'win32' ? 'npm.cmd' : 'npm';
+}
+
 function npmOutdated(cwd) {
   if (!fs.existsSync(path.join(cwd, 'package.json'))) {
     throw new Error(`npm workspace is missing package.json: ${cwd}`);
   }
   try {
-    execFileSync('npm', ['outdated', '--json'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    execFileSync(npmExecutable(), ['outdated', '--json'], {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     return {};
   } catch (error) {
     if (error.status !== 1) {
@@ -360,10 +376,7 @@ async function main() {
   const latestByTargetEngine = {};
   const latestUrlsByTargetEngine = {};
   const latestHashesByTargetEngine = {};
-  const latestHashesByUrl = {
-    ...releaseAssetHashes(ytDlp),
-    ...releaseAssetHashes(deno),
-  };
+  const latestHashesByUrl = providerAssetHashes({ ytDlp, deno, aria2 });
   if (btbnFfmpegN81Build?.version && btbnFfmpegN81Build.urls?.windows && btbnFfmpegN81Build.urls?.linux) {
     latestByTargetEngine['x86_64-pc-windows-msvc:ffmpeg'] = btbnFfmpegN81Build.version;
     latestByTargetEngine['x86_64-unknown-linux-gnu:ffmpeg'] = btbnFfmpegN81Build.version;
@@ -443,4 +456,4 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   });
 }
 
-export { checkRows, fetchJson, fetchText, fetchWithContext };
+export { checkRows, fetchJson, fetchText, fetchWithContext, npmExecutable, providerAssetHashes };

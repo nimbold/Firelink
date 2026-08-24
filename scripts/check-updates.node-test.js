@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { checkRows, fetchJson, fetchText } from './check-updates.js';
+import { checkRows, fetchJson, fetchText, npmExecutable, providerAssetHashes } from './check-updates.js';
 
 async function withMockFetch(mockFetch, callback) {
   const originalFetch = globalThis.fetch;
@@ -84,4 +84,36 @@ test('checkRows detects a provider hash change when version and URL are current'
   );
 
   assert.equal(outdated, 1);
+});
+
+test('checkRows detects an aria2 asset digest change when the provider supplies it', () => {
+  const url = 'https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip';
+  const digest = 'b'.repeat(64);
+  const hashes = providerAssetHashes({
+    aria2: { assets: [{ browser_download_url: url, digest: `sha256:${digest}` }] },
+  });
+
+  const outdated = checkRows(
+    [{
+      target: 'x86_64-pc-windows-msvc',
+      engine: 'aria2c',
+      version: '1.37.0',
+      url,
+      sha256: 'a'.repeat(64),
+    }],
+    { aria2c: '1.37.0' },
+    {},
+    {},
+    new Set(),
+    {},
+    hashes,
+  );
+
+  assert.equal(outdated, 1);
+});
+
+test('npm executable selection uses the Windows command shim when needed', () => {
+  assert.equal(npmExecutable('win32'), 'npm.cmd');
+  assert.equal(npmExecutable('darwin'), 'npm');
+  assert.equal(npmExecutable('linux'), 'npm');
 });
