@@ -12,6 +12,7 @@ import {
   mediaTypeForFormat,
   metadataSummaryMessage,
   isYouTubePlaylistUrl,
+  isMagnetUrl,
   isRemoteTorrentUrl,
   playlistFilePrefix,
   reconcileDownloadRows,
@@ -95,7 +96,7 @@ describe('add download metadata workflow', () => {
     expect(rows[0]).toMatchObject({
       isTorrent: true,
       isMedia: false,
-      status: 'loading'
+      status: 'fallback'
     });
     expect(rows[1]).toMatchObject({
       isTorrent: true,
@@ -105,6 +106,7 @@ describe('add download metadata workflow', () => {
     });
     expect(rows[0].torrentCacheId).toBe(`${rows[0].id}-1`);
     expect(rows[1].torrentCacheId).toBe(`${rows[1].id}-1`);
+    expect(isMagnetUrl(rows[0].sourceUrl)).toBe(true);
   });
 
   it('admits remote .torrent URLs through the Torrent metadata path', () => {
@@ -531,6 +533,21 @@ describe('add download metadata workflow', () => {
 
     expect(refreshed[0]).toBe(ready);
     expect(refreshed[1]).toMatchObject({ status: 'loading', generation: 5 });
+  });
+
+  it('refreshes an admitted magnet only when metadata is explicitly requested', () => {
+    const magnet = 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567';
+    const admitted = reconcileDownloadRows(magnet, [])[0];
+
+    expect(admitted.status).toBe('fallback');
+    expect(canSubmitMetadataRows([admitted])).toBe(true);
+
+    const refreshed = refreshFailedMetadataRows([admitted])[0];
+    expect(refreshed).toMatchObject({
+      status: 'loading',
+      generation: 2,
+      torrentCacheId: `${admitted.id}-2`,
+    });
   });
 
   it('ignores stale metadata results after generation changes', () => {

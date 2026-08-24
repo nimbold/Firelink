@@ -19,6 +19,7 @@ import {
   resolveDownloadSizeDisplay,
   resolveDownloadFraction
 } from '../utils/downloadProgress';
+import { isTorrentWaitingForPeers } from '../utils/torrentPresentation';
 import {
   COLUMN_ALIGNMENT_JUSTIFY,
   getDownloadActionPosition,
@@ -84,7 +85,16 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   const [isActionHovered, setIsActionHovered] = React.useState(false);
   const [isActionFocused, setIsActionFocused] = React.useState(false);
   const [actionPosition, setActionPosition] = React.useState<React.CSSProperties | undefined>();
-  const allocationVisible = isAllocationPhaseVisible(allocationPending, download.status);
+  const waitingForPeers = isTorrentWaitingForPeers({
+    isTorrent: download.isTorrent,
+    status: download.status,
+    downloadedBytes: liveProgress?.downloaded_bytes ?? download.downloadedBytes,
+    fraction: liveProgress?.fraction ?? download.fraction,
+    connectedPeers: liveProgress?.active_connections,
+    connectedSeeders: liveProgress?.num_seeders,
+  });
+  const allocationVisible = download.isTorrent !== true
+    && isAllocationPhaseVisible(allocationPending, download.status);
   const hasRowActions = download.status !== 'completed';
   const isBulkSelection = isSelected && selectedDownloadCount > 1;
   const pauseSelectionCount = isBulkSelection && selectedActionCounts.pause > 0
@@ -238,6 +248,8 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   })();
   const downloadStatusLabel = allocationVisible
     ? t($ => $.downloads.status.allocatingFiles)
+    : waitingForPeers
+    ? t($ => $.downloads.status.waitingForPeers)
     : t($ => $.downloads.status[download.status]);
   const visibleErrorStatusLabel = download.credentialsRequired === true
     ? t($ => $.properties.credentialsRequired)

@@ -47,6 +47,7 @@ import {
   playlistFilePrefix,
   reconcileDownloadRows,
   refreshFailedMetadataRows,
+  isMagnetUrl,
   selectExactMediaSelection,
   updateRowIfCurrent,
   type AddDownloadDraftRow,
@@ -1558,17 +1559,13 @@ export const AddDownloadsModal = () => {
                 targetId: id
               });
               cachedTorrentDraftIdsRef.current.delete(item.torrentCacheId || item.id);
-            } else {
+            } else if (!isMagnetUrl(item.sourceUrl)) {
               // Keep a safe fallback for rows restored from an older draft
               // shape that did not retain the preview cache identity.
-              const proxy = item.sourceUrl.trim().toLowerCase().startsWith('magnet:')
-                ? await getProxyArgs(useSettingsStore.getState())
-                : undefined;
               const torrentData = await invoke('inspect_torrent', {
                 source: item.sourceUrl,
                 id,
                 cache: true,
-                proxy: proxy ?? undefined,
                 headers: headersForRow(contextUrl) || undefined,
                 cookies: cookiesForRow(contextUrl, item.sourceUrl) || undefined,
                 cookieScopes: requestContextForUrl(contextUrl)?.cookieScopes || undefined,
@@ -1920,14 +1917,19 @@ export const AddDownloadsModal = () => {
        : `${(requiredBytes / 1024 / 1024 / 1024).toFixed(2)} GB`}`
     : 'Unknown';
   const canSubmit = canSubmitMetadataRows(parsedItems);
-  const failedMetadataCount = selectedItems.filter(item => item.status === 'metadata-error').length;
+  const failedMetadataCount = selectedItems.filter(item =>
+    item.status === 'metadata-error' || item.status === 'fallback'
+  ).length;
   const failedMediaMetadataCount = selectedItems.filter(
     item => item.status === 'metadata-error' && item.isMedia
   ).length;
   const blockedMetadataCount = selectedItems.filter(
     item => item.metadataBlockedReason === 'unsafe-url'
   ).length;
-  const fallbackMetadataCount = failedMetadataCount - failedMediaMetadataCount - blockedMetadataCount;
+  const fallbackMetadataCount = selectedItems.filter(item =>
+    (item.status === 'fallback' || (item.status === 'metadata-error' && !item.isMedia))
+    && item.metadataBlockedReason !== 'unsafe-url'
+  ).length;
   const readyMetadataCount = selectedItems.filter(item => item.status === 'ready').length;
   const hasCustomTorrentOptions = Boolean(
     torrentMaxPeers.trim()
@@ -2227,7 +2229,9 @@ export const AddDownloadsModal = () => {
                                   <RefreshCw size={12} className="animate-spin" /> {item.isPlaylist ? t($ => $.addDownloads.fetchingPlaylist) : t($ => $.addDownloads.fetching)}
                                 </div>
                               ) : (
-                                item.status === 'metadata-error'
+                                item.status === 'fallback'
+                                  ? t($ => $.addDownloads.fallback)
+                                  : item.status === 'metadata-error'
                                   ? item.metadataBlockedReason === 'unsafe-url' ? t($ => $.addDownloads.unsafeUrl) : item.isPlaylist ? t($ => $.addDownloads.playlistFailed) : item.isMedia ? t($ => $.addDownloads.metadataFailed) : t($ => $.addDownloads.fallback)
                                   : item.status === 'invalid'
                                     ? t($ => $.addDownloads.invalid)

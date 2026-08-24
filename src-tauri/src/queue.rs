@@ -2410,6 +2410,51 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .is_some_and(|payload| payload.is_torrent)
     }
 
+    /// Return only the bounded number of tracker endpoints associated with a
+    /// live Torrent. The endpoint values and managed metadata path never leave
+    /// this method; callers use the count for redacted diagnostics only.
+    pub async fn aria2_torrent_tracker_count(&self, id: &str) -> Option<usize> {
+        let payload = self.aria2_payloads.lock().await.get(id).cloned()?;
+        if !payload.is_torrent {
+            return None;
+        }
+
+        let mut count = payload
+            .torrent_trackers
+            .as_deref()
+            .map(|trackers| {
+                trackers
+                    .split(',')
+                    .filter(|tracker| !tracker.trim().is_empty())
+                    .take(256)
+                    .count()
+            });
+
+        if payload
+            .url
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("magnet:")
+        {
+            let magnet_count = crate::torrent::magnet_tracker_count(&payload.url).ok()?;
+            count = Some(count.unwrap_or_default().saturating_add(magnet_count));
+        }
+
+        if let Some(torrent_path) = payload.torrent_path.as_deref() {
+            let path = crate::torrent::validate_managed_torrent_path(
+                &self.app_handle,
+                id,
+                torrent_path,
+            )
+            .ok()?;
+            let bytes = crate::torrent::read_bounded_torrent_bytes(&path).await.ok()?;
+            let metadata = crate::torrent::torrent_details_from_bytes(&bytes).ok()?;
+            count = Some(count.unwrap_or_default().saturating_add(metadata.trackers.len()));
+        }
+
+        count.map(|value| value.min(256))
+    }
+
     pub async fn aria2_is_torrent_verification(&self, id: &str) -> bool {
         self.aria2_payloads
             .lock()
@@ -4046,14 +4091,10 @@ impl<R: tauri::Runtime> QueueManager<R> {
     }
 
     pub fn aria2_allocation_phase_eligible(payload: &SpawnPayload) -> bool {
-        if payload.is_media || payload.torrent_verify_only {
+        if payload.is_media || payload.is_torrent || payload.torrent_verify_only {
             return false;
         }
-        if !payload.is_torrent {
-            return true;
-        }
-        normalize_torrent_file_allocation(payload.torrent_file_allocation.as_deref())
-            .is_ok_and(|allocation| allocation != "none")
+        true
     }
 
     async fn begin_aria2_allocation(
@@ -8798,7 +8839,7 @@ mod tests {
                 ..SpawnPayload::default()
             }
         ));
-        assert!(QueueManager::<tauri::Wry>::aria2_allocation_phase_eligible(
+        assert!(!QueueManager::<tauri::Wry>::aria2_allocation_phase_eligible(
             &SpawnPayload {
                 is_torrent: true,
                 torrent_file_allocation: Some("prealloc".to_string()),

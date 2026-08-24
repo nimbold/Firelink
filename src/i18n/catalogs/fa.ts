@@ -91,6 +91,7 @@ const fa = {
       staged: 'در صف',
       queued: 'در صف',
       downloading: 'در حال دانلود',
+      waitingForPeers: 'در انتظار همتاها',
       processing: 'در حال پردازش',
       verifying: 'در حال بررسی صحت',
       seeding: 'در حال اشتراک‌گذاری',

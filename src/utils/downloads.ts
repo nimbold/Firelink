@@ -78,15 +78,18 @@ export const isAllocationPhaseVisible = (
 /**
  * Allocation is a transient admission phase. Normal downloads retain the
  * existing preallocation behavior; Torrent rows use Aria2's Torrent-specific
- * allocation setting and never show the hint for verification-only work.
+ * allocation setting without exposing the normal-download hint, including
+ * for verification-only work.
  */
 export const isAllocationPhaseEligible = (
   download: Pick<DownloadItem, 'isMedia' | 'isTorrent' | 'torrentFileAllocation' | 'torrentVerifyOnly'>,
 ): boolean => {
-  if (download.isMedia === true) return false;
-  if (download.isTorrent !== true) return true;
-  return download.torrentVerifyOnly !== true
-    && normalizeTorrentFileAllocation(download.torrentFileAllocation) !== 'none';
+  // Torrent rows retain their native file-allocation option, but Aria2's
+  // BitTorrent lifecycle must not be represented as Firelink's transient
+  // normal-download allocation phase. A zero-byte Torrent can be waiting for
+  // peers indefinitely, so the UI must not claim that files are being
+  // allocated until bytes appear.
+  return download.isMedia !== true && download.isTorrent !== true;
 };
 
 export const DOWNLOAD_CONNECTIONS_MIN = 1;

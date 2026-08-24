@@ -108,6 +108,13 @@ fn headless_queue_lifecycle_eligibility_and_retry_contracts_hold() {
             ..SpawnPayload::default()
         })
     );
+    assert!(
+        !QueueManager::<tauri::Wry>::aria2_allocation_phase_eligible(&SpawnPayload {
+            is_torrent: true,
+            torrent_file_allocation: Some("prealloc".to_string()),
+            ..SpawnPayload::default()
+        })
+    );
     assert_eq!(backoff_for(0), Duration::from_secs(2));
     assert_eq!(backoff_for(usize::MAX), Duration::from_secs(10));
     assert_eq!(

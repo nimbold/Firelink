@@ -54,6 +54,7 @@ import { shouldOfferPropertiesUrlExpansion, shouldResetPropertiesUrlExpansion } 
 import { getPropertiesTabIndex, getPropertiesTabs, PROPERTIES_TABS_OVERFLOW_BREAKPOINT, shouldUsePropertiesTabOverflow, type PropertiesTab } from '../utils/propertiesTabs';
 import { getPropertiesConnectionPresentation, getPropertiesProgress } from '../utils/propertiesPresentation';
 import { isTorrentLiveStatus } from '../utils/propertiesTorrentLifecycle';
+import { isTorrentWaitingForPeers } from '../utils/torrentPresentation';
 import { WindowControls } from './WindowControls';
 import {
   TORRENT_ENCRYPTION_POLICY_DISABLED,
@@ -1165,12 +1166,23 @@ export const PropertiesWindowApp = () => {
   });
   const isPromptFooter = footerActions.includes('keepEditing');
   const fileSelectionEditingEnabled = editingEnabled && isTorrentFileSelectionEditable(snapshot.status);
-  const allocationPending = isAllocationPhaseVisible(snapshot.allocationPending === true, snapshot.status);
+  const waitingForPeers = isTorrentWaitingForPeers({
+    isTorrent: snapshot.isTorrent,
+    status: snapshot.status,
+    downloadedBytes: snapshot.downloadedBytes,
+    fraction: snapshot.fraction,
+    connectedPeers: snapshot.torrentConnectedPeers,
+    connectedSeeders: snapshot.torrentConnectedSeeders,
+  });
+  const allocationPending = snapshot.isTorrent !== true
+    && isAllocationPhaseVisible(snapshot.allocationPending === true, snapshot.status);
   const total = snapshot.size || (snapshot.totalBytes === undefined
     ? t($ => $.addDownloads.unknownSize)
     : `${snapshot.totalIsEstimate ? '~' : ''}${formatDownloadBytes(snapshot.totalBytes)}`);
   const statusLabel = allocationPending
     ? t($ => $.downloads.status.allocatingFiles)
+    : waitingForPeers
+    ? t($ => $.downloads.status.waitingForPeers)
     : t($ => $.downloads.status[snapshot.status]);
   const connectionPresentation = getPropertiesConnectionPresentation(snapshot);
   const connectionHeaderLabel = connectionPresentation.labelKey === 'fragmentConcurrency'
@@ -1192,7 +1204,7 @@ export const PropertiesWindowApp = () => {
         snapshot.appearance.locale,
       );
       return <strong
-        className="properties-torrent-peer-count"
+        className="properties-metric-value properties-torrent-peer-count"
         aria-label={t($ => $.properties.torrentConnectedPeerMetric, {
           peers: peersValue,
           seeders: seedersValue,
@@ -1203,7 +1215,7 @@ export const PropertiesWindowApp = () => {
         <span className="properties-torrent-peer-count-connected">{seedersValue}</span>
       </strong>;
     })()
-    : <strong>{connectionPresentation.value}</strong>;
+    : <strong className="properties-metric-value">{connectionPresentation.value}</strong>;
   const peerDetailsNotice = peerDetailsUnavailable
     && (snapshot.torrentConnectedPeers ?? 0) > 0;
   const queuePlacement = formatPropertiesQueuePlacement(
@@ -1317,13 +1329,13 @@ export const PropertiesWindowApp = () => {
           <span className="properties-window-progress-percent">{progressPercent}</span>
         </div>
         <div className="properties-window-metrics" dir="ltr">
-          <div className="properties-metric-card"><Download size={14} /><div><span>{t($ => $.properties.size)}</span><strong>{formatDownloadBytes(snapshot.downloadedBytes ?? 0)} / {total}</strong></div></div>
-          <div className="properties-metric-card"><Gauge size={14} /><div><span>{t($ => $.properties.speed)}</span><strong>{allocationPending ? '—' : snapshot.speed || '—'}</strong></div></div>
-          <div className="properties-metric-card"><Timer size={14} /><div><span>{t($ => $.properties.eta)}</span><strong>{allocationPending ? '—' : snapshot.eta || '—'}</strong></div></div>
-          {connectionPresentation.showHeaderMetric && <div className="properties-metric-card"><Users size={14} /><div><span className={connectionPresentation.labelKey === 'torrentPeersSeeders' ? 'properties-metric-label--wide' : undefined}>{connectionHeaderLabel}</span>{connectionValue}</div></div>}
+          <div className="properties-metric-card"><Download size={14} /><div className="properties-metric-content"><span className="properties-metric-label">{t($ => $.properties.size)}</span><strong className="properties-metric-value">{formatDownloadBytes(snapshot.downloadedBytes ?? 0)} / {total}</strong></div></div>
+          <div className="properties-metric-card"><Gauge size={14} /><div className="properties-metric-content"><span className="properties-metric-label">{t($ => $.properties.speed)}</span><strong className="properties-metric-value">{allocationPending ? '—' : snapshot.speed || '—'}</strong></div></div>
+          <div className="properties-metric-card"><Timer size={14} /><div className="properties-metric-content"><span className="properties-metric-label">{t($ => $.properties.eta)}</span><strong className="properties-metric-value">{allocationPending ? '—' : snapshot.eta || '—'}</strong></div></div>
+          {connectionPresentation.showHeaderMetric && <div className="properties-metric-card"><Users size={14} /><div className="properties-metric-content"><span className={`properties-metric-label ${connectionPresentation.labelKey === 'torrentPeersSeeders' ? 'properties-metric-label--wide' : ''}`}>{connectionHeaderLabel}</span>{connectionValue}</div></div>}
           {isTorrent && <>
-            <div className="properties-metric-card"><Upload size={14} /><div><span>{t($ => $.properties.torrentUploaded)}</span><strong>{formatDownloadBytes(snapshot.torrentUploadedBytes ?? 0)}</strong></div></div>
-            <div className="properties-metric-card"><Activity size={14} /><div><span>{t($ => $.properties.torrentRatio)}</span><strong>{formatTorrentRatio(snapshot.torrentUploadedBytes ?? 0, snapshot.downloadedBytes ?? 0, 'en-US')}</strong></div></div>
+            <div className="properties-metric-card"><Upload size={14} /><div className="properties-metric-content"><span className="properties-metric-label">{t($ => $.properties.torrentUploaded)}</span><strong className="properties-metric-value">{formatDownloadBytes(snapshot.torrentUploadedBytes ?? 0)}</strong></div></div>
+            <div className="properties-metric-card"><Activity size={14} /><div className="properties-metric-content"><span className="properties-metric-label">{t($ => $.properties.torrentRatio)}</span><strong className="properties-metric-value">{formatTorrentRatio(snapshot.torrentUploadedBytes ?? 0, snapshot.downloadedBytes ?? 0, 'en-US')}</strong></div></div>
           </>}
         </div>
         <div className="properties-window-destination" title={snapshot.destination || undefined}><MapPin size={13} /><span>{snapshot.destination || '—'}</span></div>

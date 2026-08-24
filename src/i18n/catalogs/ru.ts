@@ -91,6 +91,7 @@ const ru = {
       staged: 'В очереди',
       queued: 'В очереди',
       downloading: 'Загрузка',
+      waitingForPeers: 'Ожидание пиров',
       processing: 'Обработка',
       verifying: 'Проверка',
       seeding: 'Раздача',

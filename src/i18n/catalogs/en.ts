@@ -91,6 +91,7 @@ const common = {
       staged: 'In queue',
       queued: 'Queued',
       downloading: 'Downloading',
+      waitingForPeers: 'Waiting for peers',
       processing: 'Processing',
       verifying: 'Verifying',
       seeding: 'Seeding',

@@ -697,6 +697,14 @@ fn normalized_magnet_trackers(parsed: &url::Url) -> Result<Vec<String>, String> 
     Ok(trackers)
 }
 
+/// Return the bounded tracker count from a Magnet without exposing the
+/// tracker values or the source URI to diagnostics.
+pub fn magnet_tracker_count(source: &str) -> Result<usize, String> {
+    let parsed = url::Url::parse(source.trim()).map_err(|_| "invalid magnet URI".to_string())?;
+    validate_magnet_authority(&parsed)?;
+    Ok(normalized_magnet_trackers(&parsed)?.len())
+}
+
 /// Return the Magnet URI form that Firelink may hand to Aria2. Direct source
 /// parameters can make Aria2 fetch arbitrary HTTP/FTP/SFTP resources during
 /// metadata resolution, so keep the peer/tracker identity parameters but
@@ -1394,6 +1402,7 @@ mod tests {
         let valid = "magnet:?xt=urn:btih:0123456789012345678901234567890123456789&tr=https%3A%2F%2Ftracker.example%2Fannounce";
         assert!(magnet_allows_cached_metadata(valid));
         assert!(sanitize_magnet_uri_for_aria2(valid).is_ok());
+        assert_eq!(magnet_tracker_count(valid).unwrap(), 1);
 
         for suffix in [
             "&tr=ftp%3A%2F%2Ftracker.example%2Fannounce",

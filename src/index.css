@@ -823,14 +823,16 @@ html[data-list-density="relaxed"] {
     color: hsl(var(--accent-color));
   }
 
-  .properties-metric-card > div {
+  .properties-metric-card > .properties-metric-content {
     display: grid;
     min-width: 0;
     gap: 2px;
+    grid-template-rows: minmax(1.25em, auto) auto;
   }
 
-  .properties-metric-card span {
+  .properties-metric-card > .properties-metric-content > .properties-metric-label {
     overflow: hidden;
+    min-height: 1.25em;
     color: hsl(var(--text-muted));
     font-size: 10px;
     font-weight: 650;
@@ -840,17 +842,17 @@ html[data-list-density="relaxed"] {
     white-space: nowrap;
   }
 
-  .properties-metric-card .properties-metric-label--wide {
+  .properties-metric-card > .properties-metric-content > .properties-metric-label--wide {
     overflow: visible;
     font-size: 9px;
     letter-spacing: 0.01em;
     line-height: 1.15;
-    min-height: 20px;
+    min-height: 2.3em;
     text-overflow: clip;
     white-space: normal;
   }
 
-  .properties-metric-card strong {
+  .properties-metric-card > .properties-metric-content > .properties-metric-value {
     overflow: hidden;
     color: hsl(var(--text-primary));
     font-size: 13px;
@@ -860,7 +862,7 @@ html[data-list-density="relaxed"] {
     white-space: nowrap;
   }
 
-  .properties-metric-card .properties-torrent-peer-count {
+  .properties-metric-card > .properties-metric-content > .properties-torrent-peer-count {
     display: inline-flex;
     overflow: visible;
     align-items: baseline;
@@ -868,8 +870,20 @@ html[data-list-density="relaxed"] {
     text-overflow: clip;
   }
 
-  .properties-metric-card .properties-torrent-peer-count-connected {
+  .properties-metric-card > .properties-metric-content > .properties-torrent-peer-count > .properties-torrent-peer-count-connected {
     color: hsl(var(--accent-color));
+    font: inherit;
+    letter-spacing: normal;
+    text-transform: none;
+    white-space: nowrap;
+  }
+
+  .properties-metric-card > .properties-metric-content > .properties-torrent-peer-count > span[aria-hidden="true"] {
+    color: inherit;
+    font: inherit;
+    letter-spacing: normal;
+    text-transform: none;
+    white-space: nowrap;
   }
 
   .properties-window-destination {

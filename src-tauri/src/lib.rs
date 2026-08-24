@@ -14709,6 +14709,37 @@ mod tests {
     }
 
     #[test]
+    fn torrent_zero_progress_does_not_trigger_connection_recovery() {
+        let start = Instant::now();
+        let mut observation = Aria2ConnectionObservation::default();
+
+        for offset in [0, 31, 62] {
+            assert_eq!(
+                observe_aria2_connections_with_epoch(
+                    &mut observation,
+                    Aria2ConnectionSample {
+                        gid: "torrent-gid",
+                        control_epoch: 4,
+                        status: "active",
+                        total: 2 * 1024 * 1024 * 1024,
+                        completed: 0,
+                        speed_bytes: 0.0,
+                        active_connections: 0,
+                        effective_connections: 1,
+                        speed_limited: false,
+                        is_torrent: true,
+                        now: start + Duration::from_secs(offset),
+                    },
+                ),
+                None,
+                "peer discovery must not recycle a Torrent GID after a zero-byte wait"
+            );
+        }
+        assert_eq!(observation.recovery_attempts, 0);
+        assert!(observation.no_progress_since.is_none());
+    }
+
+    #[test]
     fn aria2_recovery_uses_a_cooldown_instead_of_a_one_shot_latch() {
         let start = Instant::now();
         let mut observation = Aria2ConnectionObservation::default();
@@ -14798,6 +14829,7 @@ mod tests {
                     active_connections: 16,
                     effective_connections: 16,
                     speed_limited: false,
+                    is_torrent: false,
                     now: start + Duration::from_secs(offset),
                 },
             );
@@ -14814,6 +14846,7 @@ mod tests {
                 active_connections: 16,
                 effective_connections: 16,
                 speed_limited: false,
+                is_torrent: false,
                 now: start + Duration::from_secs(31),
             },
         );
@@ -14832,6 +14865,7 @@ mod tests {
                     active_connections: 1,
                     effective_connections: 16,
                     speed_limited: false,
+                    is_torrent: false,
                     now: start + Duration::from_secs(62),
                 },
             ),
@@ -14865,6 +14899,7 @@ mod tests {
                     active_connections: 16,
                     effective_connections: 16,
                     speed_limited: false,
+                    is_torrent: false,
                     now,
                 },
             ),
@@ -14887,6 +14922,7 @@ mod tests {
                 active_connections: 16,
                 effective_connections: 16,
                 speed_limited: false,
+                is_torrent: false,
                 now: now + Duration::from_secs(1),
             },
         );
@@ -17466,6 +17502,9 @@ struct Aria2ConnectionObservation {
     last_completed: u64,
     last_logged_active_connections: Option<i32>,
     last_connection_logged_at: Option<Instant>,
+    started_at: Option<Instant>,
+    torrent_tracker_count: Option<usize>,
+    torrent_tracker_count_loaded: bool,
     seeder: bool,
     verifying: bool,
 }
@@ -17480,6 +17519,7 @@ struct Aria2ConnectionSample<'a> {
     active_connections: i32,
     effective_connections: i32,
     speed_limited: bool,
+    is_torrent: bool,
     now: Instant,
 }
 
@@ -17542,6 +17582,7 @@ fn observe_aria2_connections(
             active_connections,
             effective_connections,
             speed_limited,
+            is_torrent: false,
             now,
         },
     )
@@ -17561,6 +17602,7 @@ fn observe_aria2_connections_with_epoch(
         active_connections,
         effective_connections,
         speed_limited,
+        is_torrent,
         now,
     } = sample;
     if observation.gid != gid || observation.control_epoch != control_epoch {
@@ -17576,6 +17618,26 @@ fn observe_aria2_connections_with_epoch(
             recovery_attempts: preserved_recovery_attempts,
             ..Default::default()
         };
+    }
+
+    // BitTorrent peer discovery is intentionally open-ended. A Torrent can
+    // remain active at zero bytes and zero connections while DHT, trackers,
+    // or PEX are still converging. Recreating its GID destroys that discovery
+    // lifecycle and was the source of the observed thirty-second restart
+    // loop. Missing-GID reconciliation remains owned by the poller and is
+    // therefore unaffected by this transfer-kind gate.
+    if is_torrent {
+        observation.started_at.get_or_insert(now);
+        observation.degraded_since = None;
+        observation.no_progress_since = None;
+        observation.last_active_connections = None;
+        observation.connection_decline_steps = 0;
+        observation.healthy_speed_samples = 0;
+        observation.healthy_samples_since_recovery = 0;
+        observation.recovery_attempts = 0;
+        observation.last_refreshed_at = None;
+        observation.last_completed = completed;
+        return None;
     }
 
     let remaining = total.saturating_sub(completed);
@@ -18173,6 +18235,7 @@ pub fn run() {
             };
             let torrent_startup_settings =
                 crate::settings::torrent_startup_settings(persisted_settings.as_ref());
+            let torrent_peer_discovery_for_poll = torrent_peer_discovery;
 
             let aria2_secret_clone = aria2_secret.clone();
             let app_handle_bg = app.handle().clone();
@@ -18591,6 +18654,7 @@ pub fn run() {
                         "numSeeders",
                         "seeder",
                         "connections",
+                        "errorCode",
                         "errorMessage",
                         "verifiedLength",
                         "verifyIntegrityPending"
@@ -18663,6 +18727,9 @@ pub fn run() {
                                         .unwrap_or(requested_connections)
                                         .max(1);
                                     let speed_limited = poll_mgr.aria2_speed_limited(&id).await;
+                                    let is_torrent = poll_mgr.aria2_is_torrent(&id).await;
+                                    let is_verification =
+                                        poll_mgr.aria2_is_torrent_verification(&id).await;
                                     let control_epoch = mapping.epoch;
                                     // The status snapshot and both connection
                                     // lookups await. A pause,
@@ -18677,10 +18744,33 @@ pub fn run() {
                                     {
                                         continue;
                                     }
+                                    let should_load_torrent_tracker_count = is_torrent
+                                        && observations
+                                            .get(&id)
+                                            .is_none_or(|observation| {
+                                                !observation.torrent_tracker_count_loaded
+                                            });
+                                    let torrent_tracker_count = if should_load_torrent_tracker_count {
+                                        Some(poll_mgr.aria2_torrent_tracker_count(&id).await)
+                                    } else {
+                                        None
+                                    };
+                                    if should_load_torrent_tracker_count
+                                        && (!poll_mgr.is_current_aria2_gid_mapping(gid, &mapping)
+                                            || !poll_mgr
+                                                .is_aria2_control_epoch_current(&id, control_epoch)
+                                                .await)
+                                    {
+                                        continue;
+                                    }
                                     seen_ids.insert(id.clone());
                                     seen_gids.insert(gid.to_string());
                                     let now = Instant::now();
                                     let observation = observations.entry(id.clone()).or_default();
+                                    if let Some(torrent_tracker_count) = torrent_tracker_count {
+                                        observation.torrent_tracker_count = torrent_tracker_count;
+                                        observation.torrent_tracker_count_loaded = true;
+                                    }
                                     let recovery_reason = observe_aria2_connections_with_epoch(
                                         observation,
                                         Aria2ConnectionSample {
@@ -18693,15 +18783,13 @@ pub fn run() {
                                             active_connections,
                                             effective_connections,
                                             speed_limited,
+                                            is_torrent,
                                             now,
                                         },
                                     );
                                     let entering_seeding = is_seeder && !observation.seeder;
                                     observation.seeder = is_seeder;
 
-                                    let is_torrent = poll_mgr.aria2_is_torrent(&id).await;
-                                    let is_verification =
-                                        poll_mgr.aria2_is_torrent_verification(&id).await;
                                     if !poll_mgr.is_current_aria2_gid_mapping(gid, &mapping)
                                         || !poll_mgr
                                             .is_aria2_control_epoch_current(&id, control_epoch)
@@ -18721,30 +18809,63 @@ pub fn run() {
                                     {
                                         continue;
                                     }
-                                    if !is_torrent
-                                        && (observation.last_logged_active_connections
-                                            != Some(active_connections)
-                                            || observation.last_connection_logged_at.is_none_or(
-                                                |logged_at| {
-                                                    now.duration_since(logged_at)
-                                                        >= ARIA2_CONNECTION_DIAGNOSTIC_INTERVAL
-                                                },
-                                            ))
+                                    if observation.last_logged_active_connections
+                                        != Some(active_connections)
+                                        || observation.last_connection_logged_at.is_none_or(
+                                            |logged_at| {
+                                                now.duration_since(logged_at)
+                                                    >= ARIA2_CONNECTION_DIAGNOSTIC_INTERVAL
+                                            },
+                                        )
                                     {
-                                        log::info!(
-                                            "aria2 progress [stage=connections id={} gid={} epoch={} retry_strike={} status={} active_connections={} requested_connections={} effective_connections={} completed_bytes={} total_bytes={} speed_bytes_per_second={}]",
-                                            id,
-                                            gid,
-                                            control_epoch,
-                                            retry_strike,
-                                            status,
-                                            active_connections,
-                                            requested_connections,
-                                            effective_connections,
-                                            completed,
-                                            total,
-                                            speed_bytes
-                                        );
+                                        if is_torrent {
+                                            let error_code = status_info
+                                                .get("errorCode")
+                                                .and_then(|value| value.as_str())
+                                                .filter(|value| !value.is_empty())
+                                                .unwrap_or("none");
+                                            let elapsed_ms = observation
+                                                .started_at
+                                                .map(|started_at| now.duration_since(started_at).as_millis())
+                                                .unwrap_or_default();
+                                            let seeders = num_seeders
+                                                .map(|value| value.to_string())
+                                                .unwrap_or_else(|| "unknown".to_string());
+                                            log::info!(
+                                                "aria2 Torrent diagnostics [id={} gid={} epoch={} status={} error_code={} active_connections={} seeders={} elapsed_ms={} tracker_count={} dht={} dht6={} pex={} lpd={}]",
+                                                id,
+                                                gid,
+                                                control_epoch,
+                                                status,
+                                                error_code,
+                                                active_connections,
+                                                seeders,
+                                                elapsed_ms,
+                                                observation
+                                                    .torrent_tracker_count
+                                                    .map(|count| count.to_string())
+                                                    .unwrap_or_else(|| "unknown".to_string()),
+                                                torrent_peer_discovery_for_poll.0,
+                                                torrent_peer_discovery_for_poll.1,
+                                                torrent_peer_discovery_for_poll.2,
+                                                torrent_peer_discovery_for_poll.3,
+                                            );
+                                        } else {
+                                            log::info!(
+                                                "aria2 progress [stage=connections id={} gid={} epoch={} retry_strike={} status={} active_connections={} requested_connections={} effective_connections={} completed_bytes={} total_bytes={} speed_bytes_per_second={}]",
+                                                id,
+                                                gid,
+                                                control_epoch,
+                                                retry_strike,
+                                                status,
+                                                active_connections,
+                                                requested_connections,
+                                                effective_connections,
+                                                completed,
+                                                total,
+                                                speed_bytes
+                                            );
+                                        }
                                         observation.last_logged_active_connections =
                                             Some(active_connections);
                                         observation.last_connection_logged_at = Some(now);

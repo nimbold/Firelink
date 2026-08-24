@@ -91,6 +91,7 @@ const zhCN = {
       staged: '在队列中',
       queued: '已排队',
       downloading: '下载中',
+      waitingForPeers: '等待节点',
       processing: '处理中',
       verifying: '校验中',
       seeding: '做种中',

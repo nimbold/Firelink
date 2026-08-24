@@ -206,9 +206,9 @@ describe('allocation phase visibility', () => {
     expect(isAllocationPhaseVisible(false, 'downloading')).toBe(false);
   });
 
-  it('uses Torrent allocation settings and excludes media and verify-only work', () => {
-    expect(isAllocationPhaseEligible({ isTorrent: true, torrentFileAllocation: undefined })).toBe(true);
-    expect(isAllocationPhaseEligible({ isTorrent: true, torrentFileAllocation: 'prealloc' })).toBe(true);
+  it('keeps native Torrent allocation settings out of the transient UI phase', () => {
+    expect(isAllocationPhaseEligible({ isTorrent: true, torrentFileAllocation: undefined })).toBe(false);
+    expect(isAllocationPhaseEligible({ isTorrent: true, torrentFileAllocation: 'prealloc' })).toBe(false);
     expect(isAllocationPhaseEligible({ isTorrent: true, torrentFileAllocation: 'none' })).toBe(false);
     expect(isAllocationPhaseEligible({ isTorrent: true, torrentVerifyOnly: true })).toBe(false);
     expect(isAllocationPhaseEligible({ isTorrent: true, isMedia: true })).toBe(false);

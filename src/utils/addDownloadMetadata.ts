@@ -9,7 +9,7 @@ import type { TorrentWebSeedDraft } from './downloads';
 import i18n from '../i18n';
 import { localePluralVariant } from '../i18n/locales';
 
-export type MetadataStatus = 'loading' | 'ready' | 'metadata-error' | 'invalid';
+export type MetadataStatus = 'loading' | 'ready' | 'fallback' | 'metadata-error' | 'invalid';
 
 export interface AddMediaFormat {
   name: string;
@@ -101,6 +101,14 @@ export const isRemoteTorrentUrl = (value: string): boolean => {
     const parsed = new URL(value);
     return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
       && parsed.pathname.toLowerCase().endsWith('.torrent');
+  } catch {
+    return false;
+  }
+};
+
+export const isMagnetUrl = (value: string): boolean => {
+  try {
+    return new URL(value).protocol === 'magnet:';
   } catch {
     return false;
   }
@@ -274,7 +282,7 @@ export const reconcileDownloadRows = (
           file: contextChanged || playlistContextChanged
             ? canonicalizeDownloadFileName(requestedFilename || fileNameFromUrl(input.sourceUrl))
             : preserved.file,
-          status: 'loading',
+          status: input.isTorrent && isMagnetUrl(input.sourceUrl) ? 'fallback' : 'loading',
           generation: nextGeneration,
           requestContextVersion,
           isMedia: preserved.isMedia || forcedMedia || Boolean(input.playlistSourceUrl),
@@ -321,7 +329,13 @@ export const reconcileDownloadRows = (
       sourceUrl: input.sourceUrl,
       downloadUrl: input.sourceUrl,
       file: fallback,
-      status: input.valid ? 'loading' : 'invalid',
+      // A magnet already contains the transfer identity. Metadata is useful
+      // for the preview, but it is not required to admit the transfer. Keep
+      // the optional probe behind Refresh Metadata so the Add window never
+      // blocks a valid magnet on the bounded native probe timeout.
+      status: input.valid
+        ? input.isTorrent && isMagnetUrl(input.sourceUrl) ? 'fallback' : 'loading'
+        : 'invalid',
       generation,
       requestContextVersion: input.requestContextVersion,
       isMedia: input.valid && (
@@ -389,22 +403,28 @@ export const updateRowIfCurrent = (
 
 export const refreshFailedMetadataRows = (
   rows: AddDownloadDraftRow[]
-): AddDownloadDraftRow[] => rows.map(row =>
-  row.status === 'metadata-error'
-    ? {
-        ...row,
-        status: 'loading',
-        generation: row.generation + 1,
-        metadataBlockedReason: undefined
-      }
-    : row
-);
+): AddDownloadDraftRow[] => rows.map(row => {
+  const refreshable = row.status === 'metadata-error'
+    || (row.status === 'fallback' && row.isTorrent === true && isMagnetUrl(row.sourceUrl));
+  if (!refreshable) return row;
+  const generation = row.generation + 1;
+  return {
+    ...row,
+    status: 'loading',
+    generation,
+    metadataBlockedReason: undefined,
+    ...(row.isTorrent === true && row.status === 'fallback'
+      ? { torrentCacheId: `${row.id}-${generation}` }
+      : {})
+  };
+});
 
 export const canSubmitMetadataRows = (rows: AddDownloadDraftRow[]): boolean => {
   const selectedRows = rows.filter(row => row.selected !== false);
   return selectedRows.length > 0
   && selectedRows.every(row =>
     row.status === 'ready'
+    || (row.isTorrent === true && row.status === 'fallback')
     || (!row.isMedia && row.status === 'metadata-error' && !row.metadataBlockedReason)
   );
 };
@@ -604,13 +624,13 @@ export const metadataSummaryState = (rows: AddDownloadDraftRow[]): MetadataSumma
   const loading = selectedRows.filter(row => row.status === 'loading').length;
   if (loading > 0) return { type: 'loading', count: loading };
 
-  const failed = selectedRows.filter(row => row.status === 'metadata-error').length;
+  const failed = selectedRows.filter(row => row.status === 'metadata-error' || row.status === 'fallback').length;
   const failedMedia = selectedRows.filter(row => row.status === 'metadata-error' && row.isMedia).length;
   const blocked = selectedRows.filter(row => row.metadataBlockedReason === 'unsafe-url').length;
   const ready = selectedRows.filter(row => row.status === 'ready').length;
   if (blocked > 0) return { type: 'unsafe', count: blocked };
   if (failedMedia > 0) return { type: 'media-error', count: failedMedia };
-  if (failed === selectedRows.length) return { type: 'all-error' };
+  if (failed === selectedRows.length && !selectedRows.some(row => row.status === 'fallback')) return { type: 'all-error' };
   if (failed > 0) return { type: 'fallback', ready, failed };
   return { type: 'ready', count: ready };
 };
@@ -654,7 +674,7 @@ export const metadataSummaryMessage = (rows: AddDownloadDraftRow[]): string => {
     );
   }
 
-  const failed = selectedRows.filter(row => row.status === 'metadata-error').length;
+  const failed = selectedRows.filter(row => row.status === 'metadata-error' || row.status === 'fallback').length;
   const failedMedia = selectedRows.filter(row => row.status === 'metadata-error' && row.isMedia).length;
   const blocked = selectedRows.filter(row => row.metadataBlockedReason === 'unsafe-url').length;
   const ready = selectedRows.filter(row => row.status === 'ready').length;
@@ -674,7 +694,7 @@ export const metadataSummaryMessage = (rows: AddDownloadDraftRow[]): string => {
       () => i18n.t($ => $.addDownloads.mediaMetadataUnavailableSummaryMany, { count: failedMedia })
     );
   }
-  if (failed === selectedRows.length) {
+  if (failed === selectedRows.length && !selectedRows.some(row => row.status === 'fallback')) {
     return i18n.t($ => $.addDownloads.metadataUnavailableFallback);
   }
   if (failed > 0) {

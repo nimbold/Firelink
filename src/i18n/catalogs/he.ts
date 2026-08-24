@@ -91,6 +91,7 @@ const he = {
       staged: 'בתור',
       queued: 'בתור',
       downloading: 'מוריד',
+      waitingForPeers: 'ממתין לעמיתים',
       processing: 'מעבד',
       verifying: 'מאמת',
       seeding: 'משתף',

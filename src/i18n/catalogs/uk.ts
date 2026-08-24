@@ -91,6 +91,7 @@ const uk = {
       staged: 'У черзі',
       queued: 'У черзі',
       downloading: 'Завантаження',
+      waitingForPeers: 'Очікування пірів',
       processing: 'Обробка',
       verifying: 'Перевірка',
       seeding: 'Роздача',
