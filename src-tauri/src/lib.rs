@@ -6346,6 +6346,7 @@ async fn remove_download(
                 remove_unowned_replacement_target(
                     &replacement.target,
                     &replacement.fingerprint,
+                    &replacement.download_id,
                     permanent_asset_removal,
                     &app_handle,
                 )
@@ -6407,6 +6408,7 @@ fn should_skip_unowned_asset_cleanup(
 
 #[derive(Debug, Clone)]
 struct UnownedReplacementTarget {
+    download_id: String,
     target: std::path::PathBuf,
     fingerprint: String,
 }
@@ -6416,6 +6418,7 @@ fn validate_unowned_replacement_target<R: tauri::Runtime>(
     target: &std::path::Path,
     expected_fingerprint: &str,
     metadata: &std::fs::Metadata,
+    allowed_legacy_owner_id: &str,
 ) -> Result<(), String> {
     if metadata_is_link_or_reparse(metadata) || path_has_symlink_component(target) {
         return Err(format!(
@@ -6436,9 +6439,16 @@ fn validate_unowned_replacement_target<R: tauri::Runtime>(
         ));
     }
     if let Some(owner) = crate::download_ownership::owner_for_path(app_handle, target)? {
-        return Err(format!(
-            "Cannot remove replacement target because it is owned by Firelink download {owner}"
-        ));
+        // owner_for_path also considers the persisted download row for
+        // compatibility with databases created before the native ownership
+        // registry. A staged replacement is expected to be its own legacy
+        // owner until native admission establishes the real ownership record;
+        // every other owner remains a hard conflict.
+        if owner != allowed_legacy_owner_id {
+            return Err(format!(
+                "Cannot remove replacement target because it is owned by Firelink download {owner}"
+            ));
+        }
     }
     if target_fingerprint(target, metadata) != expected_fingerprint {
         return Err(
@@ -6492,17 +6502,26 @@ fn inspect_unowned_replacement_target<R: tauri::Runtime>(
             // an ownership record for that exact path still blocks the
             // unowned replacement exception.
             if let Some(owner) = crate::download_ownership::owner_for_path(app_handle, &target)? {
-                return Err(format!(
-                    "Cannot remove replacement target because it is owned by Firelink download {owner}"
-                ));
+                if owner != persisted.id {
+                    return Err(format!(
+                        "Cannot remove replacement target because it is owned by Firelink download {owner}"
+                    ));
+                }
             }
             return Ok(None);
         }
         Err(error) => return Err(format!("Could not inspect replacement target: {error}")),
     };
 
-    validate_unowned_replacement_target(app_handle, &target, expected_fingerprint, &metadata)?;
+    validate_unowned_replacement_target(
+        app_handle,
+        &target,
+        expected_fingerprint,
+        &metadata,
+        &persisted.id,
+    )?;
     Ok(Some(UnownedReplacementTarget {
+        download_id: persisted.id.clone(),
         target,
         fingerprint: expected_fingerprint.to_string(),
     }))
@@ -6511,6 +6530,7 @@ fn inspect_unowned_replacement_target<R: tauri::Runtime>(
 async fn remove_unowned_replacement_target<R: tauri::Runtime>(
     target: &std::path::Path,
     expected_fingerprint: &str,
+    allowed_legacy_owner_id: &str,
     permanent: bool,
     app_handle: &tauri::AppHandle<R>,
 ) -> Result<(), String> {
@@ -6525,7 +6545,13 @@ async fn remove_unowned_replacement_target<R: tauri::Runtime>(
                 ));
             }
         };
-        validate_unowned_replacement_target(app_handle, target, expected_fingerprint, &metadata)?;
+        validate_unowned_replacement_target(
+            app_handle,
+            target,
+            expected_fingerprint,
+            &metadata,
+            allowed_legacy_owner_id,
+        )?;
 
         if permanent {
             match tokio::fs::remove_file(target).await {
@@ -6562,6 +6588,7 @@ async fn remove_unowned_replacement_target<R: tauri::Runtime>(
                         target,
                         expected_fingerprint,
                         &current_metadata,
+                        allowed_legacy_owner_id,
                     )?;
                     match std::fs::remove_file(target) {
                         Ok(()) => Ok(()),
@@ -13804,8 +13831,8 @@ mod tests {
         .unwrap());
     }
 
-    #[test]
-    fn unowned_replacement_authorization_requires_the_original_target() {
+    #[tokio::test]
+    async fn unowned_replacement_authorization_requires_the_original_target() {
         use tauri::Manager;
 
         let app = tauri::test::mock_builder()
@@ -13857,6 +13884,34 @@ mod tests {
         assert!(error.contains("owned by Firelink download other-owner"));
         crate::download_ownership::remove(app.handle(), "other-owner").unwrap();
 
+        // Persisted pre-admission rows are included by the legacy ownership
+        // fallback. That self-claim must not block cleanup of the row's own
+        // exact replacement target.
+        let database = app.handle().state::<crate::db::DbState>();
+        let mut connection = database.lock().unwrap();
+        crate::db::replace_downloads(
+            &mut connection,
+            &serde_json::to_string(&[item.clone()]).unwrap(),
+            false,
+        )
+        .unwrap();
+        drop(connection);
+        assert!(
+            inspect_unowned_replacement_target(app.handle(), &item, false)
+                .unwrap()
+                .is_some()
+        );
+        remove_unowned_replacement_target(
+            &target,
+            &fingerprint,
+            &item.id,
+            true,
+            app.handle(),
+        )
+        .await
+        .expect("a staged row may remove its own legacy replacement target");
+        assert!(!target.exists());
+
         std::fs::write(&target, b"changed target").unwrap();
         let error = inspect_unowned_replacement_target(app.handle(), &item, false)
             .expect_err("a changed target must not inherit replacement authorization");
@@ -13885,15 +13940,27 @@ mod tests {
         std::fs::write(&target, b"original").unwrap();
         let fingerprint = target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap());
 
-        remove_unowned_replacement_target(&target, &fingerprint, true, app.handle())
+        remove_unowned_replacement_target(
+            &target,
+            &fingerprint,
+            "staged-replacement",
+            true,
+            app.handle(),
+        )
             .await
             .expect("matching replacement target should be removable");
         assert!(!target.exists());
 
         std::fs::write(&target, b"new file").unwrap();
-        let error = remove_unowned_replacement_target(&target, &fingerprint, true, app.handle())
-            .await
-            .expect_err("a replacement target with a new fingerprint must be preserved");
+        let error = remove_unowned_replacement_target(
+            &target,
+            &fingerprint,
+            "staged-replacement",
+            true,
+            app.handle(),
+        )
+        .await
+        .expect_err("a replacement target with a new fingerprint must be preserved");
         assert!(error.contains("changed after duplicate resolution"));
         assert_eq!(std::fs::read(&target).unwrap(), b"new file");
     }
