@@ -362,7 +362,7 @@ const he = {
     torrentSeededDuration: 'משך שיתוף',
     torrentSeedTimeHint: 'משך הזמן שבו הטורנט ימשיך לשתף לאחר סיום ההורדה. השאר ריק כדי להשתמש בברירת המחדל.',
     torrentConnectedPeers: 'עמיתים',
-    torrentPeersSeeders: 'עמיתים מחוברים / משתפים מחוברים',
+    torrentPeersSeeders: 'עמיתים / משתפים',
     torrentConnectedPeerMetric: '{{peers}} עמיתים מחוברים / {{seeders}} משתפים מחוברים',
     torrentPeerDetailsUnavailable: 'דווחו {{connected}} עמיתים מחוברים, אך פרטי העמיתים עדיין אינם זמינים.',
     torrentPeerCountDifference: 'מחוברים: {{connectedPeers}} עמיתים / {{connectedSeeders}} משתפים. תגובת פרטי העמיתים מציגה {{listedPeers}} עמיתים / {{listedSeeders}} משתפים.',

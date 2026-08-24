@@ -362,7 +362,7 @@ const fa = {
     torrentSeededDuration: 'مدت سید',
     torrentSeedTimeHint: 'مدتی که تورنت پس از تکمیل دانلود به سید ادامه می‌دهد. برای استفاده از پیش‌فرض خالی بگذارید.',
     torrentConnectedPeers: 'همتاها',
-    torrentPeersSeeders: 'همتاهای متصل / سیدهای متصل',
+    torrentPeersSeeders: 'همتاها / سیدها',
     torrentConnectedPeerMetric: '{{peers}} همتای متصل / {{seeders}} سید متصل',
     torrentPeerDetailsUnavailable: '{{connected}} همتای متصل گزارش شده، اما جزئیات همتاها هنوز در دسترس نیست.',
     torrentPeerCountDifference: 'وضعیت اتصال: {{connectedPeers}} همتا / {{connectedSeeders}} سید. پاسخ جزئیات همتاها {{listedPeers}} همتا / {{listedSeeders}} سید را فهرست کرده است.',

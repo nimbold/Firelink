@@ -798,7 +798,7 @@ html[data-list-density="relaxed"] {
 
   .properties-window-metrics {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(145px, 100%), 1fr));
     gap: 7px;
     margin-top: 11px;
   }
@@ -840,16 +840,6 @@ html[data-list-density="relaxed"] {
     text-overflow: ellipsis;
     text-transform: uppercase;
     white-space: nowrap;
-  }
-
-  .properties-metric-card > .properties-metric-content > .properties-metric-label--wide {
-    overflow: visible;
-    font-size: 9px;
-    letter-spacing: 0.01em;
-    line-height: 1.15;
-    min-height: 2.3em;
-    text-overflow: clip;
-    white-space: normal;
   }
 
   .properties-metric-card > .properties-metric-content > .properties-metric-value {
@@ -1421,9 +1411,6 @@ html[data-list-density="relaxed"] {
       display: inline-block;
     }
 
-    .properties-window-metrics {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
   }
 
   @media (max-width: 620px) {

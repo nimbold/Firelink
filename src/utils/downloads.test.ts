@@ -3,6 +3,7 @@ import type { DownloadItem } from '../bindings/DownloadItem';
 import {
   downloadFileNamesMatch,
   downloadFileNameWithSuffix,
+  fileNameFromUrl,
   downloadMediaKindsMatch,
   MAX_DOWNLOAD_FILENAME_BYTES,
   canonicalizeDownloadFileName,
@@ -47,6 +48,20 @@ describe('download category detection', () => {
     expect(categoryForFileName('Example.mkv')).toBe('Movies');
     expect(categoryForDownload('Renamed', true, 'Other')).toBe('Other');
     expect(categoryForDownload('Renamed', true, 'Torrents')).toBe('Torrents');
+  });
+});
+
+describe('download names from URLs', () => {
+  it('uses a magnet display name before metadata is resolved', () => {
+    expect(fileNameFromUrl(
+      'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Pizza+House+Simulator+%28v1.0%29',
+    )).toBe('Pizza House Simulator (v1.0)');
+  });
+
+  it('keeps the generic fallback for unnamed magnets', () => {
+    expect(fileNameFromUrl(
+      'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567',
+    )).toBe('download');
   });
 });
 

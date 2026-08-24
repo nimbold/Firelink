@@ -61,6 +61,8 @@ export interface AddDownloadDraftRow {
   torrentCacheId?: string;
   torrentInfoHash?: string;
   torrentFiles?: TorrentFile[];
+  /** Best-effort metadata enrichment state for directly admitted magnets. */
+  torrentMetadataStatus?: 'loading' | 'ready' | 'error';
   selectedTorrentFileIndices?: number[];
   torrentSeedTime?: number;
   torrentSeedRatio?: number;
@@ -120,7 +122,8 @@ export const isMagnetTorrentRow = (
 
 export const isMetadataRefreshableRow = (row: AddDownloadDraftRow): boolean =>
   row.status !== 'loading'
-  && (row.status === 'metadata-error' || isMagnetTorrentRow(row));
+  && (row.status === 'metadata-error'
+    || (isMagnetTorrentRow(row) && row.torrentMetadataStatus !== 'loading'));
 
 type ParsedInput = {
   identity: string;
@@ -291,6 +294,7 @@ export const reconcileDownloadRows = (
             ? canonicalizeDownloadFileName(requestedFilename || fileNameFromUrl(input.sourceUrl))
             : preserved.file,
           status: input.isTorrent && isMagnetUrl(input.sourceUrl) ? 'ready' : 'loading',
+          torrentMetadataStatus: input.isTorrent && isMagnetUrl(input.sourceUrl) ? 'loading' : undefined,
           generation: nextGeneration,
           requestContextVersion,
           isMedia: preserved.isMedia || forcedMedia || Boolean(input.playlistSourceUrl),
@@ -332,6 +336,7 @@ export const reconcileDownloadRows = (
           downloadUrl: input.sourceUrl,
           status: 'ready',
           isTorrent: true,
+          torrentMetadataStatus: 'loading',
           torrentPath: undefined,
           torrentCacheId: undefined,
           torrentInfoHash: undefined,
@@ -359,8 +364,8 @@ export const reconcileDownloadRows = (
       file: fallback,
       // A magnet already contains the transfer identity. Metadata is useful
       // for the preview, but it is not required to admit the transfer. Keep
-      // the optional probe behind Refresh Metadata so the Add window never
-      // blocks a valid magnet on the bounded native probe timeout.
+      // the probe best-effort so the Add window never blocks a valid magnet
+      // on the bounded native probe timeout.
       status: input.valid
         ? input.isTorrent && isMagnetUrl(input.sourceUrl) ? 'ready' : 'loading'
         : 'invalid',
@@ -382,6 +387,9 @@ export const reconcileDownloadRows = (
       metadataBlockedReason: undefined,
       torrentCacheId: input.valid && (input.isTorrent || forceTorrentUrls.has(input.sourceUrl))
         ? `${id}-${generation}`
+        : undefined,
+      torrentMetadataStatus: input.valid && input.isTorrent && isMagnetUrl(input.sourceUrl)
+        ? 'loading'
         : undefined,
       selected: input.selected !== false
     };
@@ -446,6 +454,7 @@ export const refreshFailedMetadataRows = (
         torrentCacheId: `${row.id}-${generation}`,
         torrentInfoHash: undefined,
         torrentFiles: undefined,
+        torrentMetadataStatus: isMagnetTorrentRow(row) ? 'loading' : undefined,
         selectedTorrentFileIndices: undefined
       }
       : {})

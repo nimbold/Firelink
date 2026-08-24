@@ -362,7 +362,7 @@ const common = {
     torrentSeededDuration: 'Seeded',
     torrentSeedTimeHint: 'How long this Torrent may continue seeding after its files finish downloading. Leave blank to use the default.',
     torrentConnectedPeers: 'Peers',
-    torrentPeersSeeders: 'Connected peers / connected seeders',
+    torrentPeersSeeders: 'Peers/Seeds',
     torrentConnectedPeerMetric: '{{peers}} connected peers / {{seeders}} connected seeders',
     torrentPeerDetailsUnavailable: '{{connected}} connected peers reported, but peer details are not available yet.',
     torrentPeerCountDifference: 'Connected status: {{connectedPeers}} peers / {{connectedSeeders}} seeders. The peer-details response lists {{listedPeers}} peers / {{listedSeeders}} seeders.',

@@ -362,7 +362,7 @@ const uk = {
     torrentSeededDuration: 'Час роздачі',
     torrentSeedTimeHint: 'Як довго Torrent продовжує роздачу після завершення завантаження. Залиште порожнім для значення за замовчуванням.',
     torrentConnectedPeers: 'Піри',
-    torrentPeersSeeders: 'Підключені піри / підключені сіди',
+    torrentPeersSeeders: 'Піри / Сіди',
     torrentConnectedPeerMetric: '{{peers}} підключених пірів / {{seeders}} підключених сідів',
     torrentPeerDetailsUnavailable: 'Підключених пірів: {{connected}}, але відомості про них поки недоступні.',
     torrentPeerCountDifference: 'Підключено: {{connectedPeers}} пірів / {{connectedSeeders}} сідів. У відповіді з відомостями про піри зазначено: {{listedPeers}} пірів / {{listedSeeders}} сідів.',

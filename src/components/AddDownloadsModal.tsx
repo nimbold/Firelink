@@ -168,9 +168,11 @@ export const AddDownloadsModal = () => {
   const [urls, setUrls] = useState('');
   const [selectedItemIndex, setSelectedItemIndex] = useState<number | null>(null);
   const [parsedItems, setParsedItems] = useState<AddDownloadDraftRow[]>([]);
+  const [metadataSchedulerRevision, setMetadataSchedulerRevision] = useState(0);
   const parsedItemsRef = useRef<AddDownloadDraftRow[]>([]);
   const addModalOpenRef = useRef(isAddModalOpen);
   const metadataRequestsRef = useRef(new Set<string>());
+  const magnetMetadataRequestsRef = useRef(new Set<string>());
   const playlistRequestsRef = useRef(new Set<string>());
   const latestPlaylistRequestRef = useRef(new Map<string, string>());
   const cachedTorrentDraftIdsRef = useRef(new Set<string>());
@@ -361,7 +363,6 @@ export const AddDownloadsModal = () => {
       pendingLastUsedDownloadDirectoryRef.current = null;
       setUrls('');
       setPlaylistExpansions({});
-      playlistRequestsRef.current.clear();
       latestPlaylistRequestRef.current.clear();
       playlistMediaSelectionsRef.current.clear();
       setPlaylistMediaTypeSelections({});
@@ -391,8 +392,9 @@ export const AddDownloadsModal = () => {
     setUrls(initialUrls);
     setParsedItems([]);
     setPlaylistExpansions({});
-    metadataRequestsRef.current.clear();
-    playlistRequestsRef.current.clear();
+    // Keep active request ownership across rapid modal close/reopen cycles.
+    // The promises remove their own keys in finally; clearing these sets here
+    // would let stale native probes multiply beyond the concurrency bounds.
     latestPlaylistRequestRef.current.clear();
     playlistMediaSelectionsRef.current.clear();
     setPlaylistMediaTypeSelections({});
@@ -593,13 +595,28 @@ export const AddDownloadsModal = () => {
   ]);
 
   useEffect(() => {
+    if (!isAddModalOpen) return;
     const maxConcurrentMetadataRequests = 4;
+    // Magnet inspection is optional enrichment. Keep it in a separate lane
+    // so a stalled public magnet cannot consume all slots needed to validate
+    // required HTTP, media, or .torrent metadata in the same Add window.
+    const maxConcurrentMagnetMetadataRequests = 2;
     for (const row of parsedItems) {
-      if (row.status !== 'loading' || row.selected === false) continue;
+      const isDirectMagnetEnrichment = row.isTorrent === true
+        && isMagnetUrl(row.sourceUrl)
+        && !row.torrentPath
+        && row.torrentMetadataStatus !== 'ready'
+        && row.torrentMetadataStatus !== 'error';
+      if ((row.status !== 'loading' && !isDirectMagnetEnrichment) || row.selected === false) continue;
+      if (row.isPlaylist && playlistExpansions[row.sourceUrl]) continue;
       const requestKey = `${row.id}:${row.generation}`;
-      const requestSet = row.isPlaylist ? playlistRequestsRef.current : metadataRequestsRef.current;
+      const requestSet = isDirectMagnetEnrichment
+        ? magnetMetadataRequestsRef.current
+        : row.isPlaylist ? playlistRequestsRef.current : metadataRequestsRef.current;
       if (requestSet.has(requestKey)) continue;
-      if (metadataRequestsRef.current.size + playlistRequestsRef.current.size >= maxConcurrentMetadataRequests) {
+      if (isDirectMagnetEnrichment) {
+        if (magnetMetadataRequestsRef.current.size >= maxConcurrentMagnetMetadataRequests) continue;
+      } else if (metadataRequestsRef.current.size + playlistRequestsRef.current.size >= maxConcurrentMetadataRequests) {
         break;
       }
       requestSet.add(requestKey);
@@ -612,6 +629,7 @@ export const AddDownloadsModal = () => {
       }
 
       void (async () => {
+        let shouldWakeMetadataScheduler = true;
         try {
           const settingsStore = useSettingsStore.getState();
           const login = getSiteLogin(row.sourceUrl, settingsStore);
@@ -637,14 +655,22 @@ export const AddDownloadsModal = () => {
                 && currentRow.generation === row.generation
                 && (currentRow.torrentCacheId || `${currentRow.id}-${currentRow.generation}`) === torrentCacheId
               );
-            if (torrentData.torrentPath && isCurrentTorrentDraft) {
+            if (!isCurrentTorrentDraft) {
+              cachedTorrentDraftIdsRef.current.delete(torrentCacheId);
+              if (torrentData.torrentPath) {
+                void invoke('remove_torrent_metadata', { id: torrentCacheId }).catch(error => {
+                  console.warn('Failed to remove stale torrent metadata:', error);
+                });
+              }
+              return;
+            }
+            if (torrentData.torrentPath) {
               cachedTorrentDraftIdsRef.current.add(torrentCacheId);
-            } else if (torrentData.torrentPath) {
-              void invoke('remove_torrent_metadata', { id: torrentCacheId }).catch(error => {
-                console.warn('Failed to remove stale torrent metadata:', error);
-              });
+            } else {
+              cachedTorrentDraftIdsRef.current.delete(torrentCacheId);
             }
             const totalBytes = torrentData.totalBytes || undefined;
+            shouldWakeMetadataScheduler = false;
             setParsedItems(current => updateRowIfCurrent(
               current,
               row.id,
@@ -655,15 +681,16 @@ export const AddDownloadsModal = () => {
                 downloadUrl: !row.sourceUrl.trim().toLowerCase().startsWith('magnet:')
                   ? 'torrent:' + torrentData.infoHash
                   : row.sourceUrl,
-                file: canonicalizeDownloadFileName(torrentData.name),
                 size: totalBytes ? formatBytes(totalBytes) : undefined,
                 sizeBytes: totalBytes,
                 status: 'ready',
                 isTorrent: true,
+                torrentMetadataStatus: isMagnetUrl(row.sourceUrl) ? 'ready' : currentRow.torrentMetadataStatus,
                 torrentPath: torrentData.torrentPath,
                 torrentCacheId,
                 torrentInfoHash: torrentData.infoHash,
                 torrentFiles: torrentData.files,
+                file: canonicalizeDownloadFileName(torrentData.name?.trim() || currentRow.file),
                 selectedTorrentFileIndices: currentRow.selectedTorrentFileIndices
                   ?.filter(index => torrentData.files.some(file => file.index === index))
               })
@@ -672,6 +699,7 @@ export const AddDownloadsModal = () => {
           }
           const proxy = await getProxyArgs(settingsStore);
           if (login && !useAuth && !keychainAccessReady && !keychainPromptDismissed) {
+            shouldWakeMetadataScheduler = false;
             settingsStore.setShowKeychainModal(true);
             return;
           }
@@ -701,7 +729,10 @@ export const AddDownloadsModal = () => {
             };
 
             if (row.isPlaylist) {
-              if (playlistExpansions[row.sourceUrl]) return;
+              if (playlistExpansions[row.sourceUrl]) {
+                shouldWakeMetadataScheduler = false;
+                return;
+              }
               const playlistData = await fetchMediaPlaylistMetadataDeduped({
                 ...mediaMetadataArgs,
                 url: contextUrl
@@ -710,6 +741,7 @@ export const AddDownloadsModal = () => {
               if (!playlistData.entries.length) {
                 throw new Error(t($ => $.addDownloads.playlistNoEntries));
               }
+              shouldWakeMetadataScheduler = false;
               setPlaylistExpansions(current => ({
                 ...current,
                 [row.sourceUrl]: playlistData
@@ -758,6 +790,7 @@ export const AddDownloadsModal = () => {
                 ? requestedFormatIndex
                 : fallbackFormatIndex >= 0 ? fallbackFormatIndex : 0;
               const selectedFormat = mappedFormats[selectedFormatIndex];
+              shouldWakeMetadataScheduler = false;
               setParsedItems(current => updateRowIfCurrent(
                 current,
                 row.id,
@@ -806,6 +839,7 @@ export const AddDownloadsModal = () => {
             // its expiry. The metadata response remains useful for filename,
             // size, and resumability.
             const nextDownloadUrl = durableDownloadUrl(row.sourceUrl);
+            shouldWakeMetadataScheduler = false;
             setParsedItems(current => updateRowIfCurrent(
               current,
               row.id,
@@ -839,6 +873,7 @@ export const AddDownloadsModal = () => {
           ].some(prefix => errorMessage.startsWith(prefix))
             ? 'unsafe-url' as const
             : undefined;
+          shouldWakeMetadataScheduler = false;
           setParsedItems(current => updateRowIfCurrent(
             current,
             row.id,
@@ -849,7 +884,9 @@ export const AddDownloadsModal = () => {
               downloadUrl: currentRow.sourceUrl,
               size: undefined,
               sizeBytes: undefined,
-              status: 'metadata-error',
+              status: currentRow.isTorrent && isMagnetUrl(currentRow.sourceUrl)
+                ? 'ready'
+                : 'metadata-error',
               formats: undefined,
               selectedFormat: undefined,
               ...(currentRow.isTorrent
@@ -858,6 +895,7 @@ export const AddDownloadsModal = () => {
                   torrentCacheId: undefined,
                   torrentInfoHash: undefined,
                   torrentFiles: undefined,
+                  torrentMetadataStatus: isMagnetUrl(currentRow.sourceUrl) ? 'error' : undefined,
                   selectedTorrentFileIndices: undefined
                 }
                 : {}),
@@ -869,12 +907,17 @@ export const AddDownloadsModal = () => {
           ));
         } finally {
           requestSet.delete(requestKey);
+          if (shouldWakeMetadataScheduler) {
+            setMetadataSchedulerRevision(revision => revision + 1);
+          }
         }
       })();
     }
   }, [
+    isAddModalOpen,
     keychainAccessReady,
     keychainPromptDismissed,
+    metadataSchedulerRevision,
     parsedItems,
     pendingAddFilename,
     pendingAddMediaUrls,

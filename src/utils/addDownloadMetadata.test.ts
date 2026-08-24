@@ -97,7 +97,9 @@ describe('add download metadata workflow', () => {
     expect(rows[0]).toMatchObject({
       isTorrent: true,
       isMedia: false,
-      status: 'ready'
+      status: 'ready',
+      file: 'Example',
+      torrentMetadataStatus: 'loading'
     });
     expect(rows[1]).toMatchObject({
       isTorrent: true,
@@ -536,20 +538,22 @@ describe('add download metadata workflow', () => {
     expect(refreshed[1]).toMatchObject({ status: 'loading', generation: 5 });
   });
 
-  it('refreshes an admitted magnet only when metadata is explicitly requested', () => {
+  it('does not duplicate an in-flight magnet probe and refreshes it after failure', () => {
     const magnet = 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567';
     const admitted = reconcileDownloadRows(magnet, [])[0];
 
     expect(admitted.status).toBe('ready');
     expect(canSubmitMetadataRows([admitted])).toBe(true);
+    expect(isMetadataRefreshableRow(admitted)).toBe(false);
 
-    const refreshed = refreshFailedMetadataRows([admitted])[0];
+    const failed = { ...admitted, torrentMetadataStatus: 'error' as const };
+    const refreshed = refreshFailedMetadataRows([failed])[0];
     expect(refreshed).toMatchObject({
       status: 'loading',
       generation: 2,
       torrentCacheId: `${admitted.id}-2`,
     });
-    expect(isMetadataRefreshableRow(admitted)).toBe(true);
+    expect(isMetadataRefreshableRow(failed)).toBe(true);
     expect(isMetadataRefreshableRow({ ...admitted, status: 'loading' })).toBe(false);
     expect(isMetadataRefreshableRow(row())).toBe(false);
   });
@@ -589,7 +593,8 @@ describe('add download metadata workflow', () => {
     expect(refreshed).toMatchObject({
       status: 'loading',
       generation: 2,
-      torrentCacheId: 'row-1-2'
+      torrentCacheId: 'row-1-2',
+      torrentMetadataStatus: 'loading'
     });
     expect(refreshed.torrentPath).toBeUndefined();
     expect(refreshed.torrentInfoHash).toBeUndefined();
@@ -616,7 +621,8 @@ describe('add download metadata workflow', () => {
     expect(migrated).toMatchObject({
       status: 'ready',
       downloadUrl: magnet,
-      isTorrent: true
+      isTorrent: true,
+      torrentMetadataStatus: 'loading'
     });
     expect(migrated.torrentPath).toBeUndefined();
     expect(migrated.torrentCacheId).toBeUndefined();

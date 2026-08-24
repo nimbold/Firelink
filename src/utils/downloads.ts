@@ -492,6 +492,12 @@ export const categoryForDownload = (
 export const fileNameFromUrl = (rawUrl: string): string => {
   try {
     const url = new URL(rawUrl);
+    if (url.protocol === 'magnet:') {
+      const displayName = url.searchParams.get('dn')?.trim();
+      if (displayName) {
+        return displayName.replace(/[\/\\?%*:|"<>]/g, '-');
+      }
+    }
     const pathName = url.pathname.split('/').filter(Boolean).pop();
     if (pathName) {
       const decoded = decodeURIComponent(pathName).trim();

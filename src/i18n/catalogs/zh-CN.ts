@@ -362,7 +362,7 @@ const zhCN = {
     torrentSeededDuration: '做种时长',
     torrentSeedTimeHint: '文件下载完成后继续做种的时长。留空以使用默认值。',
     torrentConnectedPeers: '连接数',
-    torrentPeersSeeders: '已连接节点 / 已连接做种节点',
+    torrentPeersSeeders: '节点 / 做种',
     torrentConnectedPeerMetric: '{{peers}} 个已连接节点 / {{seeders}} 个已连接做种节点',
     torrentPeerDetailsUnavailable: '检测到 {{connected}} 个已连接节点，但其详细信息暂时不可用。',
     torrentPeerCountDifference: '连接状态：{{connectedPeers}} 个节点 / {{connectedSeeders}} 个做种节点。对等节点详情响应列出 {{listedPeers}} 个节点 / {{listedSeeders}} 个做种节点。',

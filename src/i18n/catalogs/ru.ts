@@ -362,7 +362,7 @@ const ru = {
     torrentSeededDuration: 'Время раздачи',
     torrentSeedTimeHint: 'Как долго Torrent продолжает раздачу после завершения загрузки. Оставьте пустым для значения по умолчанию.',
     torrentConnectedPeers: 'Пиры',
-    torrentPeersSeeders: 'Подключённые пиры / подключённые сиды',
+    torrentPeersSeeders: 'Пиры / Сиды',
     torrentConnectedPeerMetric: '{{peers}} подключённых пиров / {{seeders}} подключённых сидов',
     torrentPeerDetailsUnavailable: 'Подключённых пиров: {{connected}}, но сведения о них пока недоступны.',
     torrentPeerCountDifference: 'Подключено: {{connectedPeers}} пиров / {{connectedSeeders}} сидов. В ответе со сведениями о пирах указано: {{listedPeers}} пиров / {{listedSeeders}} сидов.',
