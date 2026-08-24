@@ -969,6 +969,12 @@ const common = {
       detectedSystemProxy: 'A system proxy was detected. Normal file downloads require an HTTP or HTTPS endpoint; media downloads can use SOCKS.',
       noSystemProxy: 'No usable system proxy was detected. Downloads will use no proxy.',
       systemProxyReadFailed: 'System proxy configuration could not be read. Choose No Proxy or try again when it is available.',
+      torrentTabs: {
+        discovery: 'Discovery',
+        connection: 'Connection',
+        limits: 'Limits',
+        advanced: 'Advanced',
+      },
       torrentPeerDiscovery: 'BitTorrent peer discovery',
       torrentDht: 'IPv4 DHT and UDP trackers',
       torrentDhtDescription: 'Find peers without relying only on trackers. Disabling this also disables UDP tracker support.',

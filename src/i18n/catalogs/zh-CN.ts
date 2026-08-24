@@ -969,6 +969,12 @@ const zhCN = {
       detectedSystemProxy: '检测到系统代理。普通文件下载需要 HTTP 或 HTTPS 端点；媒体下载可以使用 SOCKS。',
       noSystemProxy: '未检测到可用的系统代理。下载将不使用代理。',
       systemProxyReadFailed: '无法读取系统代理配置。请选择“无代理”，或者在其可用时重试。',
+      torrentTabs: {
+        discovery: '发现',
+        connection: '连接',
+        limits: '限制',
+        advanced: '高级',
+      },
       torrentPeerDiscovery: 'BitTorrent 对等节点发现',
       torrentDht: 'IPv4 DHT 与 UDP Tracker',
       torrentDhtDescription: '不只依赖 Tracker 查找节点。关闭后也会禁用 UDP Tracker 支持。',

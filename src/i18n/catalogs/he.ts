@@ -969,6 +969,12 @@ const he = {
       detectedSystemProxy: 'זוהה פרוקסי מערכת. הורדות קבצים רגילות דורשות נקודת קצה של HTTP או HTTPS; הורדות מדיה יכולות להשתמש ב-SOCKS.',
       noSystemProxy: 'לא זוהה פרוקסי מערכת שימושי. ההורדות לא ישתמשו בפרוקסי.',
       systemProxyReadFailed: 'לא ניתן לקרוא את תצורת פרוקסי המערכת. בחר "ללא פרוקסי" או נסה שוב כשהיא תהיה זמינה.',
+      torrentTabs: {
+        discovery: 'גילוי',
+        connection: 'חיבור',
+        limits: 'מגבלות',
+        advanced: 'מתקדם',
+      },
       torrentPeerDiscovery: 'גילוי עמיתים ב-BitTorrent',
       torrentDht: 'DHT של IPv4 ומעקבי UDP',
       torrentDhtDescription: 'מאתר עמיתים בלי להסתמך רק על מעקבים. השבתה מכבה גם תמיכה במעקבי UDP.',
