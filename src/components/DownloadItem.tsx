@@ -344,10 +344,10 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
           <div className="download-cell-content download-status-content">
             <div
               className="download-progress-track"
-              aria-label={allocationVisible ? downloadStatusLabel : undefined}
+              aria-label={allocationVisible || waitingForPeers ? downloadStatusLabel : undefined}
               aria-busy={allocationVisible ? true : undefined}
-              aria-valuetext={allocationVisible ? downloadStatusLabel : undefined}
-              role={allocationVisible ? 'progressbar' : undefined}
+              aria-valuetext={allocationVisible || waitingForPeers ? downloadStatusLabel : undefined}
+              role={allocationVisible || waitingForPeers ? 'progressbar' : undefined}
             >
               <div
                 className={`download-progress-fill ${
@@ -376,6 +376,8 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                   ? download.lastError
                   : (download.status === 'queued' || download.status === 'staged') && queueIndex !== -1
                   ? `${downloadStatusLabel} #${queueIndex + 1}`
+                  : waitingForPeers
+                  ? downloadStatusLabel
                   : download.status === 'downloading'
                   ? displayPercent
                   : download.status === 'processing'
@@ -407,6 +409,8 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                     {downloadStatusLabel} #{queueIndex + 1}
                   </span>
                 </>
+              ) : waitingForPeers ? (
+                <span className="truncate">{downloadStatusLabel}</span>
               ) : download.status === 'downloading' || download.status === 'verifying' || download.status === 'moving' ? (
                 displayPercent
               ) : download.status === 'seeding' ? (

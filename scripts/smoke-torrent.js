@@ -433,7 +433,10 @@ async function cleanupRuntime() {
 
 async function tellStatus(daemon, gid) {
   return rpc(daemon.rpcPort, daemon.secret, 'aria2.tellStatus', [gid, [
+    'gid',
     'status',
+    'belongsTo',
+    'followedBy',
     'errorCode',
     'errorMessage',
     'completedLength',
@@ -626,6 +629,7 @@ async function main() {
     const seedParent = path.join(tempRoot, 'seed');
     const seedRoot = path.join(seedParent, 'firelink-torrent-runtime');
     const probeDir = path.join(tempRoot, 'probe');
+    const directDir = path.join(tempRoot, 'direct-magnet');
     const finalDir = path.join(tempRoot, 'final');
     const integrityDir = path.join(tempRoot, 'integrity');
     const encryptionDir = path.join(tempRoot, 'encryption');
@@ -633,7 +637,7 @@ async function main() {
     const removeUnselectedDir = path.join(tempRoot, 'remove-unselected');
     const stallDir = path.join(tempRoot, 'stall');
     const dhtStateDir = path.join(tempRoot, 'aria2-state');
-    for (const directory of [seedRoot, probeDir, finalDir, integrityDir, encryptionDir, cancelDir, removeUnselectedDir, stallDir, dhtStateDir]) fs.mkdirSync(directory, { recursive: true });
+    for (const directory of [seedRoot, probeDir, directDir, finalDir, integrityDir, encryptionDir, cancelDir, removeUnselectedDir, stallDir, dhtStateDir]) fs.mkdirSync(directory, { recursive: true });
 
     const dhtPath = path.join(dhtStateDir, 'dht.dat');
     const dht6Path = path.join(dhtStateDir, 'dht6.dat');
@@ -706,6 +710,82 @@ async function main() {
       directory: probeDir,
       extraArgs: ['--seed-time=0'],
     });
+    const directGid = await rpc(client.rpcPort, client.secret, 'aria2.addUri', [[magnet], {
+      dir: directDir,
+      'bt-force-encryption': 'false',
+      'bt-require-crypto': 'false',
+      'bt-min-crypto-level': 'plain',
+      'seed-time': '0',
+      'file-allocation': 'prealloc',
+      'bt-metadata-only': 'false',
+      'bt-save-metadata': 'false',
+      'follow-torrent': 'false',
+      'async-dns': 'false',
+      'max-tries': '3',
+      'retry-wait': '2',
+      'connect-timeout': '20',
+      timeout: '60',
+      continue: 'true',
+      'always-resume': 'true',
+      'auto-file-renaming': 'false',
+      // Keep the parent/child handoff observable on fast local CI runners.
+      'max-download-limit': '32K',
+    }]);
+    let directLastParent;
+    let directLastChild;
+    const directHandoff = await waitFor(`normal magnet ${directGid} to expose its payload child`, async () => {
+      assertDaemonRunning(client);
+      const parent = await tellStatus(client, directGid);
+      directLastParent = parent;
+      if (parent.status === 'error' || parent.status === 'removed') {
+        throw new Error(`normal magnet parent ended ${parent.status}: ${parent.errorCode || ''} ${parent.errorMessage || ''}`);
+      }
+      const childGid = parent.followedBy?.find(gid => typeof gid === 'string' && gid.length > 0);
+      if (!childGid) return false;
+      const child = await tellStatus(client, childGid);
+      directLastChild = child;
+      if (child.belongsTo && child.belongsTo !== directGid) return false;
+      if (child.status === 'error' || child.status === 'removed') {
+        throw new Error(`normal magnet payload ended ${child.status}: ${child.errorCode || ''} ${child.errorMessage || ''}`);
+      }
+      return { parent, childGid, child };
+    }, 30000).catch(error => {
+      throw new Error(`${error.message}; last parent ${JSON.stringify(directLastParent)}; last child ${JSON.stringify(directLastChild)}`);
+    });
+    const directStatus = await waitForDataComplete(client, directHandoff.childGid, 30000);
+    const directOutput = path.join(directDir, torrent.name, 'selected.bin');
+    const directOptions = await rpc(client.rpcPort, client.secret, 'aria2.getOption', [directHandoff.childGid]);
+    assert(
+      Number(directStatus.completedLength) === Number(directStatus.totalLength)
+        && Number(directStatus.totalLength) > 0,
+      `normal magnet payload did not complete: ${JSON.stringify(directStatus)}`,
+    );
+    assert(fs.existsSync(directOutput), `normal magnet output is missing: ${directOutput}`);
+    assert(!fs.existsSync(path.join(directDir, 'download')), 'normal magnet created a metadata-sized download artifact');
+    const directBytes = fs.readFileSync(directOutput);
+    assert(directBytes.length === torrent.files[0].data.length && directBytes.equals(torrent.files[0].data), `normal magnet output content differs (${directBytes.length}/${torrent.files[0].data.length}, ${directBytes[0]}/${torrent.files[0].data[0]})`);
+    assert(directHandoff.parent.status === 'complete', `normal magnet parent did not complete metadata: ${JSON.stringify(directHandoff.parent)}`);
+    assert(directHandoff.parent.files?.some(file => String(file.path).startsWith('[METADATA]')), 'normal magnet parent did not expose a metadata file');
+    assert(directOptions['bt-metadata-only'] === 'false', 'normal magnet child did not retain payload mode');
+    assert(directOptions['async-dns'] === 'false', 'direct Torrent did not retain system DNS resolution');
+    await rpc(client.rpcPort, client.secret, 'aria2.removeDownloadResult', [directGid]);
+    try {
+      await rpc(client.rpcPort, client.secret, 'aria2.removeDownloadResult', [directHandoff.childGid]);
+    } catch {
+      // An active/seeding child must be force-removed below; completed
+      // children can be retired directly as a result record.
+    }
+    const childForceRemoved = await forceRemoveIfPresent(client, directHandoff.childGid);
+    try {
+      await rpc(client.rpcPort, client.secret, 'aria2.removeDownloadResult', [directHandoff.childGid]);
+    } catch {
+      // A force-removed active child may already be gone.
+    }
+    if (childForceRemoved) {
+      await waitForRemoved(client, directHandoff.childGid);
+    }
+    console.log(`[OK] normal magnet adopted payload child ${directHandoff.childGid} instead of completing metadata-only`);
+
     const probeGid = await rpc(client.rpcPort, client.secret, 'aria2.addUri', [[magnet], {
       dir: probeDir,
       'bt-metadata-only': 'true',

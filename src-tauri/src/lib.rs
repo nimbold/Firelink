@@ -5260,6 +5260,19 @@ async fn pause_download(
                             );
                         }
                         Ok((status, progress)) if status == "complete" => {
+                            if state
+                                .queue_manager
+                                .aria2_direct_magnet_needs_child_handoff(&id, gid)
+                                .await
+                            {
+                                state.queue_manager.emit_state(
+                                    id.clone(),
+                                    crate::ipc::DownloadStatus::Downloading,
+                                );
+                                return Err(format!(
+                                    "{pause_error}; Torrent metadata is complete but its payload is still being discovered"
+                                ));
+                            }
                             state.queue_manager.clear_aria2_allocation(&id).await;
                             state
                                 .queue_manager
@@ -5305,6 +5318,25 @@ async fn pause_download(
                 log::info!("aria2 pause [{}]: gid {} paused", id, gid);
             }
             "complete" => {
+                if state
+                    .queue_manager
+                    .aria2_direct_magnet_needs_child_handoff(&id, gid)
+                    .await
+                {
+                    state.queue_manager.emit_state(
+                        id.clone(),
+                        crate::ipc::DownloadStatus::Downloading,
+                    );
+                    log::info!(
+                        "aria2 pause [{}]: gid {} completed metadata; deferring pause until the payload child is mapped",
+                        id,
+                        gid
+                    );
+                    return Err(
+                        "Torrent metadata is complete but its payload is still being discovered"
+                            .to_string(),
+                    );
+                }
                 state.queue_manager.clear_aria2_allocation(&id).await;
                 // Aria2 can reach complete before its terminal event updates
                 // Firelink's row. Treat a pause request in that narrow window
@@ -5678,6 +5710,21 @@ async fn resume_download(
                             return;
                         }
                         Ok((status, progress)) if status == "complete" => {
+                            if queue_manager
+                                .aria2_direct_magnet_needs_child_handoff(&id_clone, &gid_clone)
+                                .await
+                            {
+                                queue_manager.emit_state(
+                                    id_clone.clone(),
+                                    crate::ipc::DownloadStatus::Downloading,
+                                );
+                                log::info!(
+                                    "aria2 resume [{}]: gid {} completed metadata after an ambiguous unpause; deferring until the payload child is mapped",
+                                    id_clone,
+                                    gid_clone
+                                );
+                                return;
+                            }
                             log::info!(
                                 "aria2 resume [{}]: {} but daemon reports gid {} complete; reconciling completion",
                                 id_clone,
@@ -5777,6 +5824,21 @@ async fn resume_download(
                 match status_after_unpause.as_str() {
                     "active" | "waiting" => {}
                     "complete" => {
+                        if queue_manager
+                            .aria2_direct_magnet_needs_child_handoff(&id_clone, &gid_clone)
+                            .await
+                        {
+                            queue_manager.emit_state(
+                                id_clone.clone(),
+                                crate::ipc::DownloadStatus::Downloading,
+                            );
+                            log::info!(
+                                "aria2 resume [{}]: gid {} completed metadata after unpause; deferring until the payload child is mapped",
+                                id_clone,
+                                gid_clone
+                            );
+                            return;
+                        }
                         queue_manager
                             .apply_completion_locked_with_progress(
                                 &id_clone,
@@ -5945,6 +6007,23 @@ async fn resume_download(
             Ok(true)
         }
         "complete" | "error" | "removed" => {
+            if status == "complete"
+                && state
+                    .queue_manager
+                    .aria2_direct_magnet_needs_child_handoff(&id, &gid)
+                    .await
+            {
+                state.queue_manager.emit_state(
+                    id.clone(),
+                    crate::ipc::DownloadStatus::Downloading,
+                );
+                log::info!(
+                    "aria2 resume [{}]: gid {} completed metadata; deferring re-enqueue until the payload child is mapped",
+                    id,
+                    gid
+                );
+                return Ok(true);
+            }
             drop(control_guard);
             state.queue_manager.next_aria2_control_epoch(&id).await;
             state.queue_manager.cancel_aria2_retries(&id).await;
@@ -7356,6 +7435,10 @@ const ARIA2_RECONCILIATION_STATUS_FIELDS: &[&str] = &[
     "completedLength",
     "totalLength",
     "uploadLength",
+    // Direct magnets complete a metadata parent before Aria2 exposes the
+    // payload child. QueueManager validates this relationship before
+    // accepting a terminal event.
+    "followedBy",
 ];
 
 fn aria2_reconciliation_status_params(gid: &str) -> serde_json::Value {
@@ -9030,6 +9113,15 @@ async fn resolve_magnet_metadata(
     options.insert("connect-timeout".to_string(), serde_json::json!("20"));
     options.insert("timeout".to_string(), serde_json::json!("60"));
     options.insert("auto-file-renaming".to_string(), serde_json::json!("false"));
+    if proxy_value
+        .as_deref()
+        .is_none_or(|proxy| proxy.trim().is_empty())
+    {
+        // Keep optional magnet metadata refreshes on the same system DNS
+        // route as direct Torrent transfers when a TUN client owns resolver
+        // interception. Explicit proxy routes retain their own DNS policy.
+        options.insert("async-dns".to_string(), serde_json::json!("false"));
+    }
     if let Some(proxy) = proxy_value.as_deref() {
         options.insert("all-proxy".to_string(), serde_json::json!(proxy));
     }
@@ -14173,6 +14265,9 @@ mod tests {
         assert!(fields
             .iter()
             .any(|field| field.as_str() == Some("uploadLength")));
+        assert!(fields
+            .iter()
+            .any(|field| field.as_str() == Some("followedBy")));
     }
 
     #[test]
@@ -18530,7 +18625,7 @@ pub fn run() {
                                                                     state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
                                                                     &state.aria2_secret,
                                                                     "aria2.tellStatus",
-                                                                    serde_json::json!([gid, ["status", "completedLength", "totalLength"]]),
+                                                                    serde_json::json!([gid, ["status", "completedLength", "totalLength", "followedBy"]]),
                                                                 )
                                                                 .await
                                                                 .ok()

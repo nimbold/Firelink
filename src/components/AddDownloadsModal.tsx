@@ -48,6 +48,7 @@ import {
   reconcileDownloadRows,
   refreshFailedMetadataRows,
   isMagnetUrl,
+  isMetadataRefreshableRow,
   selectExactMediaSelection,
   updateRowIfCurrent,
   type AddDownloadDraftRow,
@@ -851,6 +852,15 @@ export const AddDownloadsModal = () => {
               status: 'metadata-error',
               formats: undefined,
               selectedFormat: undefined,
+              ...(currentRow.isTorrent
+                ? {
+                  torrentPath: undefined,
+                  torrentCacheId: undefined,
+                  torrentInfoHash: undefined,
+                  torrentFiles: undefined,
+                  selectedTorrentFileIndices: undefined
+                }
+                : {}),
               metadataBlockedReason,
               playlistError: row.isPlaylist
                 ? errorMessage
@@ -1917,9 +1927,7 @@ export const AddDownloadsModal = () => {
        : `${(requiredBytes / 1024 / 1024 / 1024).toFixed(2)} GB`}`
     : 'Unknown';
   const canSubmit = canSubmitMetadataRows(parsedItems);
-  const failedMetadataCount = selectedItems.filter(item =>
-    item.status === 'metadata-error' || item.status === 'fallback'
-  ).length;
+  const metadataRefreshableCount = selectedItems.filter(isMetadataRefreshableRow).length;
   const failedMediaMetadataCount = selectedItems.filter(
     item => item.status === 'metadata-error' && item.isMedia
   ).length;
@@ -2158,8 +2166,8 @@ export const AddDownloadsModal = () => {
                   <div className="add-download-preview-actions flex items-center gap-1">
                     <button
                       type="button"
-                      onClick={() => setParsedItems(refreshFailedMetadataRows)}
-                      disabled={failedMetadataCount === 0}
+                      onClick={() => setParsedItems(rows => refreshFailedMetadataRows(rows, true))}
+                      disabled={metadataRefreshableCount === 0}
                       className="add-download-link-button flex items-center gap-1.5 text-[11px] font-medium"
                     >
                       <RefreshCw size={12} /> {t($ => $.addDownloads.refreshMetadata)}

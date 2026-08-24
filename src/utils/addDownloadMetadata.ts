@@ -114,6 +114,14 @@ export const isMagnetUrl = (value: string): boolean => {
   }
 };
 
+export const isMagnetTorrentRow = (
+  row: Pick<AddDownloadDraftRow, 'isTorrent' | 'sourceUrl'>
+): boolean => row.isTorrent === true && isMagnetUrl(row.sourceUrl);
+
+export const isMetadataRefreshableRow = (row: AddDownloadDraftRow): boolean =>
+  row.status !== 'loading'
+  && (row.status === 'metadata-error' || isMagnetTorrentRow(row));
+
 type ParsedInput = {
   identity: string;
   sourceUrl: string;
@@ -282,7 +290,7 @@ export const reconcileDownloadRows = (
           file: contextChanged || playlistContextChanged
             ? canonicalizeDownloadFileName(requestedFilename || fileNameFromUrl(input.sourceUrl))
             : preserved.file,
-          status: input.isTorrent && isMagnetUrl(input.sourceUrl) ? 'fallback' : 'loading',
+          status: input.isTorrent && isMagnetUrl(input.sourceUrl) ? 'ready' : 'loading',
           generation: nextGeneration,
           requestContextVersion,
           isMedia: preserved.isMedia || forcedMedia || Boolean(input.playlistSourceUrl),
@@ -311,6 +319,26 @@ export const reconcileDownloadRows = (
           selectedTorrentFileIndices: undefined
         };
       }
+      // Direct magnets are admission-ready even when their optional metadata
+      // preview was never requested. Migrate drafts created by the old
+      // fallback classification so the Add window cannot imply that the
+      // transfer itself is a fallback download.
+      if (preserved.status === 'fallback'
+        && input.valid
+        && input.isTorrent
+        && isMagnetUrl(input.sourceUrl)) {
+        return {
+          ...preserved,
+          downloadUrl: input.sourceUrl,
+          status: 'ready',
+          isTorrent: true,
+          torrentPath: undefined,
+          torrentCacheId: undefined,
+          torrentInfoHash: undefined,
+          torrentFiles: undefined,
+          selectedTorrentFileIndices: undefined
+        };
+      }
       return preserved;
     }
 
@@ -334,7 +362,7 @@ export const reconcileDownloadRows = (
       // the optional probe behind Refresh Metadata so the Add window never
       // blocks a valid magnet on the bounded native probe timeout.
       status: input.valid
-        ? input.isTorrent && isMagnetUrl(input.sourceUrl) ? 'fallback' : 'loading'
+        ? input.isTorrent && isMagnetUrl(input.sourceUrl) ? 'ready' : 'loading'
         : 'invalid',
       generation,
       requestContextVersion: input.requestContextVersion,
@@ -402,19 +430,24 @@ export const updateRowIfCurrent = (
 );
 
 export const refreshFailedMetadataRows = (
-  rows: AddDownloadDraftRow[]
+  rows: AddDownloadDraftRow[],
+  selectedOnly = false
 ): AddDownloadDraftRow[] => rows.map(row => {
-  const refreshable = row.status === 'metadata-error'
-    || (row.status === 'fallback' && row.isTorrent === true && isMagnetUrl(row.sourceUrl));
-  if (!refreshable) return row;
+  if ((selectedOnly && row.selected === false) || !isMetadataRefreshableRow(row)) return row;
   const generation = row.generation + 1;
   return {
     ...row,
     status: 'loading',
     generation,
     metadataBlockedReason: undefined,
-    ...(row.isTorrent === true && row.status === 'fallback'
-      ? { torrentCacheId: `${row.id}-${generation}` }
+    ...(row.isTorrent
+      ? {
+        torrentPath: undefined,
+        torrentCacheId: `${row.id}-${generation}`,
+        torrentInfoHash: undefined,
+        torrentFiles: undefined,
+        selectedTorrentFileIndices: undefined
+      }
       : {})
   };
 });

@@ -13,6 +13,7 @@ import {
   metadataSummaryMessage,
   isYouTubePlaylistUrl,
   isMagnetUrl,
+  isMetadataRefreshableRow,
   isRemoteTorrentUrl,
   playlistFilePrefix,
   reconcileDownloadRows,
@@ -96,7 +97,7 @@ describe('add download metadata workflow', () => {
     expect(rows[0]).toMatchObject({
       isTorrent: true,
       isMedia: false,
-      status: 'fallback'
+      status: 'ready'
     });
     expect(rows[1]).toMatchObject({
       isTorrent: true,
@@ -539,7 +540,7 @@ describe('add download metadata workflow', () => {
     const magnet = 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567';
     const admitted = reconcileDownloadRows(magnet, [])[0];
 
-    expect(admitted.status).toBe('fallback');
+    expect(admitted.status).toBe('ready');
     expect(canSubmitMetadataRows([admitted])).toBe(true);
 
     const refreshed = refreshFailedMetadataRows([admitted])[0];
@@ -548,6 +549,80 @@ describe('add download metadata workflow', () => {
       generation: 2,
       torrentCacheId: `${admitted.id}-2`,
     });
+    expect(isMetadataRefreshableRow(admitted)).toBe(true);
+    expect(isMetadataRefreshableRow({ ...admitted, status: 'loading' })).toBe(false);
+    expect(isMetadataRefreshableRow(row())).toBe(false);
+  });
+
+  it('refreshes only selected metadata rows when requested by the preview action', () => {
+    const selected = row({
+      id: 'selected-magnet',
+      sourceUrl: 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567',
+      isTorrent: true,
+      selected: true
+    });
+    const unselected = row({
+      id: 'unselected-magnet',
+      sourceUrl: 'magnet:?xt=urn:btih:abcdefabcdefabcdefabcdefabcdefabcdefabcd',
+      isTorrent: true,
+      selected: false
+    });
+
+    const refreshed = refreshFailedMetadataRows([selected, unselected], true);
+
+    expect(refreshed[0]).toMatchObject({ status: 'loading', generation: 2 });
+    expect(refreshed[1]).toBe(unselected);
+  });
+
+  it('invalidates stale torrent metadata before an optional refresh', () => {
+    const refreshed = refreshFailedMetadataRows([row({
+      isTorrent: true,
+      sourceUrl: 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567',
+      status: 'ready',
+      torrentPath: '/managed/old.torrent',
+      torrentCacheId: 'old-cache',
+      torrentInfoHash: 'old-hash',
+      torrentFiles: [{ index: 1, path: 'old.bin', length: 10 }],
+      selectedTorrentFileIndices: [1]
+    })])[0];
+
+    expect(refreshed).toMatchObject({
+      status: 'loading',
+      generation: 2,
+      torrentCacheId: 'row-1-2'
+    });
+    expect(refreshed.torrentPath).toBeUndefined();
+    expect(refreshed.torrentInfoHash).toBeUndefined();
+    expect(refreshed.torrentFiles).toBeUndefined();
+    expect(refreshed.selectedTorrentFileIndices).toBeUndefined();
+  });
+
+  it('migrates legacy magnet fallback rows to transfer-ready state', () => {
+    const magnet = 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567';
+    const legacy = row({
+      sourceUrl: magnet,
+      downloadUrl: 'torrent:stale-metadata-hash',
+      status: 'fallback',
+      isTorrent: true,
+      torrentPath: '/managed/stale.torrent',
+      torrentCacheId: 'legacy-cache',
+      torrentInfoHash: 'legacy-hash',
+      torrentFiles: [{ index: 1, path: 'stale.bin', length: 10 }],
+      selectedTorrentFileIndices: [1]
+    });
+
+    const migrated = reconcileDownloadRows(magnet, [legacy])[0];
+
+    expect(migrated).toMatchObject({
+      status: 'ready',
+      downloadUrl: magnet,
+      isTorrent: true
+    });
+    expect(migrated.torrentPath).toBeUndefined();
+    expect(migrated.torrentCacheId).toBeUndefined();
+    expect(migrated.torrentInfoHash).toBeUndefined();
+    expect(migrated.torrentFiles).toBeUndefined();
+    expect(migrated.selectedTorrentFileIndices).toBeUndefined();
   });
 
   it('ignores stale metadata results after generation changes', () => {

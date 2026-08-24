@@ -58,6 +58,8 @@ pub const DEFAULT_TORRENT_LISTEN_PORT_SPEC: &str = "6881-6999";
 pub const DEFAULT_ARIA2_DISK_CACHE: &str = "16M";
 pub const MAX_ARIA2_DISK_CACHE_MIB: u64 = 1024;
 pub const MAX_MINIMUM_NORMAL_DOWNLOAD_SPEED_KIB: u32 = 1_048_576;
+const MAX_ARIA2_MAGNET_FOLLOWED_GIDS: usize = 16;
+const ARIA2_MAGNET_CHILD_HANDOFF_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A per-download zero is different from an empty/global limit: Aria2 uses
 /// `0` to remove the item cap, which intentionally lets an item override the
@@ -738,6 +740,37 @@ pub struct Aria2GidMapping {
     pub epoch: u64,
 }
 
+#[derive(Debug, Clone)]
+struct Aria2MagnetHandoffState {
+    parent_gid: String,
+    epoch: u64,
+    started_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct Aria2MagnetChildHandoff {
+    gid: String,
+    status: String,
+    error: Option<String>,
+    pending: Option<PendingAria2Outcome>,
+}
+
+#[derive(Debug, Clone)]
+enum Aria2MagnetCompletionDisposition {
+    /// This GID is a normal Torrent GID, or a magnet whose final GID already
+    /// owns real files. The normal terminal path remains authoritative.
+    NotMetadataParent,
+    /// Aria2 has completed metadata acquisition but has not exposed the
+    /// payload child yet. Keep the permit and mapping alive for reconciliation.
+    Deferred,
+    /// The payload child was validated and atomically adopted by Firelink.
+    Adopted(Aria2MagnetChildHandoff),
+    /// Aria2 exposed a metadata parent but never exposed a valid payload child
+    /// before the bounded handoff deadline. Fail the download instead of
+    /// claiming that metadata bytes are the requested payload.
+    Failed(String),
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Aria2ConnectionOptions {
     epoch: u64,
@@ -884,6 +917,100 @@ impl PendingAria2Outcome {
             outcome,
             progress: None,
         }
+    }
+}
+
+fn aria2_magnet_parent_has_metadata_file(status: &serde_json::Value) -> bool {
+    status
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|files| {
+            files.iter().any(|file| {
+                file.get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|path| path.starts_with("[METADATA]"))
+            })
+        })
+}
+
+fn aria2_magnet_parent_has_payload_file(status: &serde_json::Value) -> bool {
+    status
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|files| {
+            files.iter().any(|file| {
+                file.get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|path| !path.is_empty() && !path.starts_with("[METADATA]"))
+            })
+        })
+}
+
+fn aria2_magnet_followed_gids(
+    status: &serde_json::Value,
+    parent_gid: &str,
+) -> Vec<String> {
+    status
+        .get("followedBy")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flat_map(|gids| gids.iter())
+        .filter_map(serde_json::Value::as_str)
+        .filter(|gid| {
+            !gid.is_empty()
+                && *gid != parent_gid
+                && gid.len() <= 64
+                && gid.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        .take(MAX_ARIA2_MAGNET_FOLLOWED_GIDS)
+        .map(str::to_string)
+        .collect()
+}
+
+fn aria2_magnet_status_error(status: &serde_json::Value) -> String {
+    let error_code = status
+        .get("errorCode")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty());
+    let error_message = status
+        .get("errorMessage")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("aria2 magnet payload child ended unexpectedly");
+    let message = match error_code {
+        Some(code) => format!("aria2 error code {code}: {error_message}"),
+        None => error_message.to_string(),
+    };
+    crate::redact_sensitive_text(&message)
+}
+
+fn is_direct_magnet_payload(payload: &SpawnPayload) -> bool {
+    payload.is_torrent
+        && !payload.torrent_verify_only
+        && payload.torrent_path.is_none()
+        && payload
+            .url
+            .trim_start()
+            .get(..7)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("magnet:"))
+}
+
+fn torrent_uses_direct_network(payload: &SpawnPayload) -> bool {
+    payload.is_torrent
+        && !payload.torrent_verify_only
+        && payload.proxy.as_deref().is_none_or(|proxy| {
+            let proxy = proxy.trim();
+            proxy.is_empty() || proxy.eq_ignore_ascii_case("none")
+        })
+}
+
+fn aria2_effective_resolver_mode(payload: &SpawnPayload) -> &'static str {
+    if payload.aria2_resolver_mode == Aria2ResolverMode::System
+        || torrent_uses_direct_network(payload)
+    {
+        "system"
+    } else {
+        "automatic"
     }
 }
 
@@ -1239,6 +1366,14 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
     /// Gids whose terminal events must be ignored after a lifecycle transition.
     /// This is bounded so a long-lived daemon cannot grow the set indefinitely.
     aria2_ignored_gids: Mutex<VecDeque<String>>,
+    /// Direct magnets have a short Aria2 metadata-parent handoff before the
+    /// payload child becomes visible. Keep that observation bounded and
+    /// lifecycle-scoped so a missing child cannot leak a permit forever.
+    aria2_magnet_handoffs: Mutex<HashMap<String, Aria2MagnetHandoffState>>,
+    /// Once a direct magnet's payload child is adopted, remember that child
+    /// identity so terminal reconciliation does not request the full Aria2
+    /// file list again for a potentially very large Torrent.
+    aria2_magnet_payload_gids: Mutex<HashMap<String, Aria2GidMapping>>,
     /// Wakes retry backoff workers when a pause/remove action cancels them.
     aria2_retry_cancel_notify: Notify,
 
@@ -1320,6 +1455,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
             aria2_retry_inflight: Mutex::new(HashMap::new()),
             aria2_retrying_gids: Mutex::new(HashSet::new()),
             aria2_ignored_gids: Mutex::new(VecDeque::new()),
+            aria2_magnet_handoffs: Mutex::new(HashMap::new()),
+            aria2_magnet_payload_gids: Mutex::new(HashMap::new()),
             aria2_retry_cancel_notify: Notify::new(),
             aria2_control_locks: Arc::new(StdMutex::new(HashMap::new())),
             aria2_gid_state: Mutex::new(()),
@@ -4071,7 +4208,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         self.semaphore.available_permits()
     }
 
-    fn emit_state(&self, id: impl Into<String>, status: DownloadStatus) {
+    pub(crate) fn emit_state(&self, id: impl Into<String>, status: DownloadStatus) {
         use tauri::Emitter;
         let _ = self
             .app_handle
@@ -4621,6 +4758,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// to reconcile against the correct event path. In particular, buffered
     /// errors must still pass through transient retry classification.
     pub async fn remember_gid(&self, id: String, gid: String) -> Option<PendingAria2Outcome> {
+        // A new GID starts a fresh Aria2 observation. In particular, a
+        // missing-GID recovery or retry must not inherit the handoff deadline
+        // of the retired magnet metadata parent.
+        self.clear_aria2_magnet_handoff(&id).await;
+        self.aria2_magnet_payload_gids.lock().await.remove(&id);
         let epoch = self.current_aria2_control_epoch(&id).await;
         let buffered_outcome = {
             let _gid_state = self.aria2_gid_state.lock().await;
@@ -4696,6 +4838,13 @@ impl<R: tauri::Runtime> QueueManager<R> {
         if let Some(options) = self.aria2_connection_options.lock().await.get_mut(id) {
             options.epoch = epoch;
         }
+        if self.aria2_gid_for_download(id).as_deref() == Some(gid) {
+            if let Some(payload_mapping) = self.aria2_magnet_payload_gids.lock().await.get_mut(id) {
+                if payload_mapping.id == id {
+                    payload_mapping.epoch = epoch;
+                }
+            }
+        }
         true
     }
 
@@ -4721,6 +4870,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         outcome: PendingOutcome,
         progress: Option<DownloadStateProgress>,
     ) {
+        self.clear_aria2_magnet_handoff(id).await;
         self.clear_aria2_allocation(id).await;
         if matches!(&outcome, PendingOutcome::Complete) {
             self.capture_torrent_verification_evidence(id).await;
@@ -4940,6 +5090,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
     }
 
     pub async fn clear_aria2_retry_state(&self, id: &str) {
+        self.clear_aria2_magnet_handoff(id).await;
+        self.aria2_magnet_payload_gids.lock().await.remove(id);
         self.aria2_payloads.lock().await.remove(id);
         self.aria2_retry_strikes.lock().await.remove(id);
         self.aria2_connection_options.lock().await.remove(id);
@@ -4963,6 +5115,295 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// payload is still needed for the same-GID resume path.
     pub async fn reset_aria2_retry_strikes(&self, id: &str) {
         self.aria2_retry_strikes.lock().await.remove(id);
+    }
+
+    async fn note_aria2_magnet_handoff(
+        &self,
+        id: &str,
+        parent_gid: &str,
+        epoch: u64,
+    ) -> bool {
+        let mut handoffs = self.aria2_magnet_handoffs.lock().await;
+        let state = handoffs
+            .entry(id.to_string())
+            .or_insert_with(|| Aria2MagnetHandoffState {
+                parent_gid: parent_gid.to_string(),
+                epoch,
+                started_at: Instant::now(),
+            });
+        if state.parent_gid != parent_gid || state.epoch != epoch {
+            *state = Aria2MagnetHandoffState {
+                parent_gid: parent_gid.to_string(),
+                epoch,
+                started_at: Instant::now(),
+            };
+        }
+        state.started_at.elapsed() >= ARIA2_MAGNET_CHILD_HANDOFF_TIMEOUT
+    }
+
+    async fn clear_aria2_magnet_handoff(&self, id: &str) {
+        self.aria2_magnet_handoffs.lock().await.remove(id);
+    }
+
+    async fn remove_aria2_magnet_parent_result(&self, gid: &str) {
+        let Some(state) = self.app_handle.try_state::<crate::AppState>() else {
+            return;
+        };
+        let port = state
+            .aria2_port
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let secret = state.aria2_secret.clone();
+        drop(state);
+        for attempt in 1..=3 {
+            match crate::rpc_call(
+                port,
+                &secret,
+                "aria2.removeDownloadResult",
+                serde_json::json!([gid]),
+            )
+            .await
+            {
+                Ok(result) if result.as_str() == Some(gid) => return,
+                Ok(result) => {
+                    log::debug!(
+                        "aria2 magnet handoff [stage=cleanup gid={} attempt={} result=unexpected_return value={}]",
+                        gid,
+                        attempt,
+                        crate::redact_sensitive_text(&result.to_string())
+                    );
+                    return;
+                }
+                Err(_error) if attempt < 3 => {
+                    tokio::time::sleep(Duration::from_millis(50 * attempt as u64)).await;
+                }
+                Err(error) => log::debug!(
+                    "aria2 magnet handoff [stage=cleanup gid={} attempts={} result=deferred error_class={} error_code={}]",
+                    gid,
+                    attempt,
+                    network_error_class(&error),
+                    diagnostic_error_code(&error)
+                ),
+            }
+        }
+    }
+
+    /// Aria2 represents a direct magnet as a short metadata parent lifecycle
+    /// followed by a real payload child GID. Firelink owns one download ID,
+    /// permit, and lifecycle epoch, so completion of the metadata parent must
+    /// be converted into an atomic mapping transfer before terminal handling.
+    async fn reconcile_aria2_magnet_parent_completion(
+        &self,
+        id: &str,
+        parent_gid: &str,
+        expected_mapping: &Aria2GidMapping,
+    ) -> Aria2MagnetCompletionDisposition {
+        let payload = self.aria2_payloads.lock().await.get(id).cloned();
+        let Some(_) = payload.filter(is_direct_magnet_payload) else {
+            return Aria2MagnetCompletionDisposition::NotMetadataParent;
+        };
+        if !self.is_current_aria2_gid_mapping(parent_gid, expected_mapping)
+            || !self
+                .is_aria2_control_epoch_current(id, expected_mapping.epoch)
+                .await
+        {
+            return Aria2MagnetCompletionDisposition::Deferred;
+        }
+
+        // A child adopted by this lifecycle is already known to be the real
+        // payload. Avoid asking Aria2 for its complete file list just to prove
+        // that a terminal child is not the short metadata parent.
+        let adopted_payload = self
+            .aria2_magnet_payload_gids
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|mapping| {
+                mapping == expected_mapping
+                    && self.aria2_gid_for_download(id).as_deref() == Some(parent_gid)
+            });
+        if adopted_payload {
+            return Aria2MagnetCompletionDisposition::NotMetadataParent;
+        }
+
+        let handoff_expired = self
+            .note_aria2_magnet_handoff(id, parent_gid, expected_mapping.epoch)
+            .await;
+        let Some(state) = self.app_handle.try_state::<crate::AppState>() else {
+            return Aria2MagnetCompletionDisposition::Deferred;
+        };
+        let port = state
+            .aria2_port
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let secret = state.aria2_secret.clone();
+        drop(state);
+
+        let parent_status = match crate::rpc_call(
+            port,
+            &secret,
+            "aria2.tellStatus",
+            serde_json::json!([parent_gid, ["status", "followedBy", "files", "errorCode", "errorMessage"]]),
+        )
+        .await
+        {
+            Ok(status) => status,
+            Err(error) => {
+                log::debug!(
+                    "aria2 magnet handoff [stage=parent_status id={} gid={} epoch={} result=unavailable error_class={} error_code={}]",
+                    id,
+                    parent_gid,
+                    expected_mapping.epoch,
+                    network_error_class(&error),
+                    diagnostic_error_code(&error)
+                );
+                return if handoff_expired {
+                    Aria2MagnetCompletionDisposition::Failed(
+                        "Aria2 completed magnet metadata but did not expose the payload download"
+                            .to_string(),
+                    )
+                } else {
+                    Aria2MagnetCompletionDisposition::Deferred
+                };
+            }
+        };
+        let parent_status_name = parent_status
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let parent_has_metadata = aria2_magnet_parent_has_metadata_file(&parent_status);
+        let parent_has_payload = aria2_magnet_parent_has_payload_file(&parent_status);
+        let child_gids = aria2_magnet_followed_gids(&parent_status, parent_gid);
+        let child_count = child_gids.len();
+
+        // Aria2 can expose more than one followed GID. Query the bounded set
+        // concurrently so a missing or slow child cannot hold the per-download
+        // control lock while every 3-second RPC timeout is consumed in series.
+        let child_statuses = futures_util::future::join_all(child_gids.into_iter().map(|child_gid| async {
+            let result = crate::rpc_call(
+                port,
+                &secret,
+                "aria2.tellStatus",
+                serde_json::json!([child_gid, [
+                    "status",
+                    "belongsTo",
+                    "errorCode",
+                    "errorMessage",
+                    "completedLength",
+                    "totalLength",
+                    "uploadLength",
+                    "seeder"
+                ]]),
+            )
+            .await;
+            match result {
+                Ok(status) => (child_gid, Some(status)),
+                Err(error) => {
+                    log::debug!(
+                        "aria2 magnet handoff [stage=child_status id={} parent_gid={} child_gid={} epoch={} result=unavailable error_class={} error_code={}]",
+                        id,
+                        parent_gid,
+                        child_gid,
+                        expected_mapping.epoch,
+                        network_error_class(&error),
+                        diagnostic_error_code(&error)
+                    );
+                    (child_gid, None)
+                }
+            }
+        })).await;
+
+        for (child_gid, child_status) in child_statuses {
+            let Some(child_status) = child_status else {
+                continue;
+            };
+            if child_status
+                .get("belongsTo")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|belongs_to| belongs_to != parent_gid)
+            {
+                continue;
+            }
+            let child_status_name = child_status
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if !matches!(
+                child_status_name,
+                "active" | "waiting" | "paused" | "complete" | "error" | "removed"
+            ) {
+                continue;
+            }
+
+            let pending_child = {
+                let _gid_state = self.aria2_gid_state.lock().await;
+                let current_mapping = self.aria2_gid_mapping(parent_gid);
+                if current_mapping.as_ref() != Some(expected_mapping) {
+                    return Aria2MagnetCompletionDisposition::Deferred;
+                }
+                let child_owned_by_other_download = self
+                    .aria2_gid_mapping(&child_gid)
+                    .is_some_and(|mapping| mapping.id != id);
+                if child_owned_by_other_download {
+                    continue;
+                }
+                {
+                    let mut gids = self.aria2_gids.write().unwrap();
+                    gids.remove(parent_gid);
+                    gids.insert(child_gid.clone(), expected_mapping.clone());
+                }
+                self.aria2_magnet_payload_gids
+                    .lock()
+                    .await
+                    .insert(id.to_string(), expected_mapping.clone());
+                self.unignore_aria2_gid_locked(&child_gid).await;
+                self.ignore_aria2_gid_locked(parent_gid).await;
+                self.pending_download_starts.lock().await.remove(&child_gid);
+                let mut buffered = self.pending_completion.lock().await;
+                buffered.remove(parent_gid);
+                buffered.remove(&child_gid).map(|(_buffered_id, outcome)| outcome)
+            };
+
+            self.clear_aria2_magnet_handoff(id).await;
+            log::info!(
+                "aria2 magnet handoff [stage=gid_transition id={} parent_gid={} child_gid={} epoch={} child_status={} action=adopted]",
+                id,
+                parent_gid,
+                child_gid,
+                expected_mapping.epoch,
+                child_status_name
+            );
+            return Aria2MagnetCompletionDisposition::Adopted(Aria2MagnetChildHandoff {
+                gid: child_gid,
+                status: child_status_name.to_string(),
+                error: matches!(child_status_name, "error" | "removed")
+                    .then(|| aria2_magnet_status_error(&child_status)),
+                pending: pending_child,
+            });
+        }
+
+        if matches!(parent_status_name, "error" | "removed") {
+            self.clear_aria2_magnet_handoff(id).await;
+            return Aria2MagnetCompletionDisposition::Failed(aria2_magnet_status_error(
+                &parent_status,
+            ));
+        }
+        if handoff_expired {
+            Aria2MagnetCompletionDisposition::Failed(
+                "Aria2 completed magnet metadata but did not expose the payload download"
+                    .to_string(),
+            )
+        } else {
+            log::debug!(
+                "aria2 magnet handoff [stage=child_wait id={} gid={} epoch={} status={} child_count={} parent_metadata={} parent_payload={} action=deferred]",
+                id,
+                parent_gid,
+                expected_mapping.epoch,
+                parent_status_name,
+                child_count,
+                parent_has_metadata,
+                parent_has_payload
+            );
+            Aria2MagnetCompletionDisposition::Deferred
+        }
     }
 
     async fn finish_aria2_retry(&self, id: &str, gid: &str, retry_epoch: u64) {
@@ -5225,6 +5666,41 @@ impl<R: tauri::Runtime> QueueManager<R> {
         self.aria2_gid_mapping(gid).as_ref() == Some(expected)
     }
 
+    /// A direct magnet's metadata parent is not a terminal payload GID. The
+    /// parent may report `complete` before Aria2 exposes the followed child,
+    /// so imperative pause/resume commands must defer to the same handoff
+    /// reconciler as WebSocket and poller events instead of completing or
+    /// re-enqueueing the metadata marker.
+    pub(crate) async fn aria2_direct_magnet_needs_child_handoff(
+        &self,
+        id: &str,
+        gid: &str,
+    ) -> bool {
+        let direct_magnet = self
+            .aria2_payloads
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(is_direct_magnet_payload);
+        if !direct_magnet {
+            return false;
+        }
+
+        let Some(mapping) = self.aria2_gid_mapping(gid) else {
+            return false;
+        };
+        if mapping.id != id || self.aria2_gid_for_download(id).as_deref() != Some(gid) {
+            return false;
+        }
+
+        !self
+            .aria2_magnet_payload_gids
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|payload_mapping| payload_mapping == &mapping)
+    }
+
     pub fn aria2_gid_mappings(&self) -> Vec<(String, String)> {
         self.aria2_gids
             .read()
@@ -5400,6 +5876,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// Remove every gid mapping for a download and discard buffered terminal
     /// events for those gids. Returns the most recently encountered gid.
     pub async fn forget_aria2_gid(&self, id: &str) -> Option<String> {
+        self.clear_aria2_magnet_handoff(id).await;
+        self.aria2_magnet_payload_gids.lock().await.remove(id);
         self.clear_aria2_allocation(id).await;
         let _gid_state = self.aria2_gid_state.lock().await;
         let removed = {
@@ -5592,10 +6070,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             mapping.epoch,
             strike,
             action,
-            match payload.aria2_resolver_mode {
-                Aria2ResolverMode::Automatic => "automatic",
-                Aria2ResolverMode::System => "system",
-            },
+            aria2_effective_resolver_mode(&payload),
             network_error_class(&error),
             error_code,
             requested_connections,
@@ -5875,6 +6350,77 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 .await
         {
             return;
+        }
+
+        if matches!(&outcome, PendingOutcome::Complete) {
+            match self
+                .reconcile_aria2_magnet_parent_completion(&mapping.id, gid, &mapping)
+                .await
+            {
+                Aria2MagnetCompletionDisposition::NotMetadataParent => {}
+                Aria2MagnetCompletionDisposition::Deferred => {
+                    // A metadata parent is not the user's payload. Keep the
+                    // current permit and mapping alive until the next
+                    // poll/reconnect observation exposes the child GID.
+                    self.emit_state(&mapping.id, DownloadStatus::Downloading);
+                    return;
+                }
+                Aria2MagnetCompletionDisposition::Failed(error) => {
+                    self.apply_completion_locked_with_progress(
+                        &mapping.id,
+                        PendingOutcome::Error(error),
+                        progress,
+                    )
+                    .await;
+                    return;
+                }
+                Aria2MagnetCompletionDisposition::Adopted(child) => {
+                    let id = mapping.id.clone();
+                    drop(_control_guard);
+                    // Parent-result cleanup is best effort and may consume
+                    // several bounded RPC attempts. Do it after releasing
+                    // the per-download control lock so a stale daemon result
+                    // cannot block pause, resume, or removal of the adopted
+                    // payload lifecycle.
+                    self.remove_aria2_magnet_parent_result(gid).await;
+                    if let Some(pending) = child.pending {
+                        Box::pin(self.handle_aria2_pending_event(&child.gid, pending)).await;
+                    } else {
+                        match child.status.as_str() {
+                            "complete" => {
+                                Box::pin(self.handle_aria2_event(&child.gid, PendingOutcome::Complete))
+                                    .await;
+                            }
+                            "error" | "removed" => {
+                                Box::pin(self.handle_aria2_event(
+                                    &child.gid,
+                                    PendingOutcome::Error(child.error.unwrap_or_else(|| {
+                                        "aria2 magnet payload child ended unexpectedly".to_string()
+                                    })),
+                                ))
+                                .await;
+                            }
+                            "paused" => {
+                                // The child may have been paused by Aria2
+                                // while the metadata-parent event was in
+                                // flight. Mirror the normal pause boundary so
+                                // this handoff cannot strand a queue permit.
+                                self.clear_aria2_allocation(&id).await;
+                                self.next_aria2_control_epoch(&id).await;
+                                self.cancel_aria2_retries(&id).await;
+                                self.release_seed_tracking(&id);
+                                self.release_permit(&id).await;
+                                self.emit_state(&id, DownloadStatus::Paused);
+                            }
+                            "active" | "waiting" => {
+                                self.emit_state(&id, DownloadStatus::Downloading)
+                            }
+                            _ => {}
+                        }
+                    }
+                    return;
+                }
+            }
         }
         self.apply_completion_locked_with_progress(&mapping.id, outcome, progress)
             .await;
@@ -7660,6 +8206,21 @@ fn apply_aria2_torrent_options(
         "bt-min-crypto-level".to_string(),
         serde_json::json!(min_crypto_level),
     );
+    // Keep metadata probing and generic .torrent following out of the normal
+    // transfer policy. A direct magnet still has an Aria2 metadata parent;
+    // QueueManager adopts its validated payload child explicitly.
+    options.insert("bt-metadata-only".to_string(), serde_json::json!("false"));
+    options.insert("bt-save-metadata".to_string(), serde_json::json!("false"));
+    options.insert("follow-torrent".to_string(), serde_json::json!("false"));
+    if torrent_uses_direct_network(payload) {
+        // Aria2's async resolver is independent of the system resolver. TUN
+        // clients commonly install DNS interception/routing at the system
+        // resolver boundary, so direct Torrent discovery must use the same
+        // resolver path as the working HTTP/media clients. Do not override an
+        // explicitly configured proxy route, where local DNS could leak or
+        // bypass the proxy's name-resolution policy.
+        options.insert("async-dns".to_string(), serde_json::json!("false"));
+    }
 
     let seed_time = payload
         .torrent_seed_time
@@ -8024,10 +8585,7 @@ impl SidecarSpawner for ProductionSpawner {
             requested_connections,
             transfer_connections,
             transfer_uris.len(),
-            match payload.aria2_resolver_mode {
-                Aria2ResolverMode::Automatic => "automatic",
-                Aria2ResolverMode::System => "system",
-            },
+            aria2_effective_resolver_mode(payload),
             proxy_route_for_log(payload.proxy.as_deref()),
             admission_started.elapsed().as_millis()
         );
@@ -9496,6 +10054,143 @@ mod tests {
         assert_eq!(
             options.get("bt-min-crypto-level"),
             Some(&serde_json::json!("plain"))
+        );
+    }
+
+    #[test]
+    fn direct_magnet_parent_detection_requires_a_metadata_file() {
+        let parent = serde_json::json!({
+            "status": "complete",
+            "followedBy": ["0123456789abcdef"],
+            "files": [{"path": "[METADATA]firelink-torrent-runtime"}],
+        });
+        assert!(aria2_magnet_parent_has_metadata_file(&parent));
+        assert!(!aria2_magnet_parent_has_payload_file(&parent));
+        assert_eq!(
+            aria2_magnet_followed_gids(&parent, "fedcba9876543210"),
+            vec!["0123456789abcdef".to_string()]
+        );
+
+        let malformed = serde_json::json!({
+            "followedBy": [
+                "not-a-gid",
+                "0123456789abcdef",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef1"
+            ],
+            "files": [{"path": "payload.bin"}],
+        });
+        assert!(!aria2_magnet_parent_has_metadata_file(&malformed));
+        assert!(aria2_magnet_parent_has_payload_file(&malformed));
+        assert_eq!(
+            aria2_magnet_followed_gids(&malformed, "parent"),
+            vec!["0123456789abcdef".to_string()]
+        );
+
+        let final_payload = serde_json::json!({
+            "status": "complete",
+            "files": [{"path": "/downloads/payload.bin"}],
+        });
+        assert!(aria2_magnet_parent_has_payload_file(&final_payload));
+    }
+
+    #[tokio::test]
+    async fn direct_magnet_control_status_cannot_treat_parent_as_payload() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
+        let id = "direct-magnet-control";
+        let gid = "0123456789abcdef";
+        let payload = SpawnPayload {
+            url: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+                .to_string(),
+            is_torrent: true,
+            ..Default::default()
+        };
+        assert!(is_direct_magnet_payload(&payload));
+        manager.aria2_payloads.lock().await.insert(
+            id.to_string(),
+            payload,
+        );
+        manager.remember_gid(id.to_string(), gid.to_string()).await;
+
+        assert_eq!(manager.aria2_gid_for_download(id).as_deref(), Some(gid));
+        assert!(
+            manager
+                .aria2_direct_magnet_needs_child_handoff(id, gid)
+                .await
+        );
+
+        manager
+            .aria2_magnet_payload_gids
+            .lock()
+            .await
+            .insert(
+                id.to_string(),
+                Aria2GidMapping {
+                    id: id.to_string(),
+                    epoch: 0,
+                },
+            );
+        assert!(!manager
+            .aria2_direct_magnet_needs_child_handoff(id, gid)
+            .await);
+    }
+
+    #[test]
+    fn normal_torrent_options_make_metadata_and_following_policy_explicit() {
+        let mut options = serde_json::Map::new();
+        apply_aria2_torrent_options(
+            &mut options,
+            &SpawnPayload {
+                is_torrent: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            options.get("bt-metadata-only"),
+            Some(&serde_json::json!("false"))
+        );
+        assert_eq!(
+            options.get("bt-save-metadata"),
+            Some(&serde_json::json!("false"))
+        );
+        assert_eq!(
+            options.get("follow-torrent"),
+            Some(&serde_json::json!("false"))
+        );
+        assert_eq!(
+            options.get("async-dns"),
+            Some(&serde_json::json!("false"))
+        );
+
+        let mut proxied_options = serde_json::Map::new();
+        apply_aria2_torrent_options(
+            &mut proxied_options,
+            &SpawnPayload {
+                is_torrent: true,
+                proxy: Some("http://127.0.0.1:8080".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!proxied_options.contains_key("async-dns"));
+        assert_eq!(
+            aria2_effective_resolver_mode(&SpawnPayload {
+                is_torrent: true,
+                ..Default::default()
+            }),
+            "system"
+        );
+        assert_eq!(
+            aria2_effective_resolver_mode(&SpawnPayload {
+                is_torrent: true,
+                proxy: Some("http://127.0.0.1:8080".to_string()),
+                ..Default::default()
+            }),
+            "automatic"
         );
     }
 
