@@ -455,9 +455,11 @@ const startDownloadListeners = async () => {
           current.isTorrent === true,
           current.category
         );
+        updates.replaceExistingFingerprint = undefined;
       }
       if (payload.destination && payload.destination !== current.destination) {
         updates.destination = payload.destination;
+        updates.replaceExistingFingerprint = undefined;
       }
       if (status !== 'downloading' && status !== 'verifying') {
         updates.speed = '-';

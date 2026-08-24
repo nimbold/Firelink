@@ -143,6 +143,28 @@ describe('useDownloadStore', () => {
     expect(fileName.endsWith('.mp4')).toBe(true);
   });
 
+  it('invalidates staged replacement authorization when its output identity changes', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'staged-replacement',
+        url: 'https://example.com/file.bin',
+        fileName: 'old.bin',
+        destination: '/tmp/downloads',
+        status: 'staged',
+        category: 'Other',
+        dateAdded: '',
+        replaceExistingFingerprint: 'original-target-fingerprint',
+      }] as any[],
+    });
+
+    await useDownloadStore.getState().applyProperties('staged-replacement', {
+      fileName: 'new.bin',
+      destination: '/tmp/other-downloads',
+    });
+
+    expect(useDownloadStore.getState().downloads[0].replaceExistingFingerprint).toBeUndefined();
+  });
+
   it('rejects queued identity edits before invalidating their dispatch', async () => {
     useDownloadStore.setState({
       downloads: [{

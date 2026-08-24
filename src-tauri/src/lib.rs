@@ -6235,33 +6235,40 @@ async fn remove_download(
 
     let requested_asset_cleanup = delete_assets && !preserve_assets;
     let ownership_is_missing = owned_paths.is_empty() && primary_path.is_none();
-    let unowned_unadmitted_cleanup_is_noop = if requested_asset_cleanup
-        && ownership_is_missing
-        && torrent_removal_paths.is_empty()
-    {
-        let persisted = load_persisted_download_item(
-            &app_handle.state::<crate::db::DbState>(),
-            &id,
-        )?;
-        let expected_assets_present = expected_unadmitted_download_assets_present(
-            &app_handle,
-            &persisted,
-        )?;
-        should_skip_unowned_asset_cleanup(
-            persisted.status,
-            persisted.has_been_dispatched.unwrap_or(false),
-            native_lifecycle_was_admitted,
-            expected_assets_present,
-        )
-    } else {
-        false
-    };
-    let should_delete_assets = requested_asset_cleanup && !unowned_unadmitted_cleanup_is_noop;
+    let (unowned_unadmitted_cleanup_is_noop, unowned_replacement_target) =
+        if requested_asset_cleanup && ownership_is_missing && torrent_removal_paths.is_empty() {
+            let persisted =
+                load_persisted_download_item(&app_handle.state::<crate::db::DbState>(), &id)?;
+            let replacement_target = inspect_unowned_replacement_target(
+                &app_handle,
+                &persisted,
+                native_lifecycle_was_admitted,
+            )?;
+            let expected_assets_present =
+                expected_unadmitted_download_assets_present(&app_handle, &persisted)?;
+            (
+                should_skip_unowned_asset_cleanup(
+                    persisted.status,
+                    persisted.has_been_dispatched.unwrap_or(false),
+                    native_lifecycle_was_admitted,
+                    expected_assets_present,
+                ),
+                replacement_target,
+            )
+        } else {
+            (false, None)
+        };
+    let should_delete_assets = requested_asset_cleanup
+        && (!unowned_unadmitted_cleanup_is_noop || unowned_replacement_target.is_some());
 
     if requested_asset_cleanup {
-        if ownership_is_missing && !unowned_unadmitted_cleanup_is_noop {
+        if ownership_is_missing
+            && !unowned_unadmitted_cleanup_is_noop
+            && unowned_replacement_target.is_none()
+        {
             return Err(
-                "Cannot remove download files because Firelink ownership is unavailable".to_string(),
+                "Cannot remove download files because Firelink ownership is unavailable"
+                    .to_string(),
             );
         }
 
@@ -6306,6 +6313,9 @@ async fn remove_download(
         {
             cleanup_targets.push(primary.clone());
         }
+        if let Some(replacement) = unowned_replacement_target.as_ref() {
+            cleanup_targets.push(replacement.target.clone());
+        }
         cleanup_targets.sort_by_key(|path| crate::platform::path_identity(path));
         cleanup_targets.dedup_by(|left, right| crate::platform::paths_equal(left, right));
         for target in cleanup_targets {
@@ -6331,6 +6341,15 @@ async fn remove_download(
                 } else {
                     remove_download_container_assets(primary, &app_handle).await?;
                 }
+            }
+            if let Some(replacement) = unowned_replacement_target.as_ref() {
+                remove_unowned_replacement_target(
+                    &replacement.target,
+                    &replacement.fingerprint,
+                    permanent_asset_removal,
+                    &app_handle,
+                )
+                .await?;
             }
         }
         if permanent_asset_removal {
@@ -6384,6 +6403,188 @@ fn should_skip_unowned_asset_cleanup(
     ) && !has_been_dispatched
         && !native_lifecycle_was_admitted
         && !expected_assets_present
+}
+
+#[derive(Debug, Clone)]
+struct UnownedReplacementTarget {
+    target: std::path::PathBuf,
+    fingerprint: String,
+}
+
+fn validate_unowned_replacement_target<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    target: &std::path::Path,
+    expected_fingerprint: &str,
+    metadata: &std::fs::Metadata,
+) -> Result<(), String> {
+    if metadata_is_link_or_reparse(metadata) || path_has_symlink_component(target) {
+        return Err(format!(
+            "Cannot remove replacement target '{}' because it is a symbolic link",
+            target.display()
+        ));
+    }
+    if !metadata.is_file() {
+        return Err(format!(
+            "Cannot remove replacement target '{}' because it is not a regular file",
+            target.display()
+        ));
+    }
+    if !is_safe_path(target, app_handle) {
+        return Err(format!(
+            "Download replacement target '{}' is outside an approved location",
+            target.display()
+        ));
+    }
+    if let Some(owner) = crate::download_ownership::owner_for_path(app_handle, target)? {
+        return Err(format!(
+            "Cannot remove replacement target because it is owned by Firelink download {owner}"
+        ));
+    }
+    if target_fingerprint(target, metadata) != expected_fingerprint {
+        return Err(
+            "The replacement target changed after duplicate resolution. Reopen the conflict and choose Replace again."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn inspect_unowned_replacement_target<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    persisted: &crate::ipc::DownloadItem,
+    native_lifecycle_was_admitted: bool,
+) -> Result<Option<UnownedReplacementTarget>, String> {
+    if native_lifecycle_was_admitted
+        || persisted.has_been_dispatched != Some(false)
+        || !matches!(
+            persisted.status,
+            crate::ipc::DownloadStatus::Ready | crate::ipc::DownloadStatus::Staged
+        )
+        || persisted.is_torrent == Some(true)
+    {
+        return Ok(None);
+    }
+
+    let Some(expected_fingerprint) = persisted
+        .replace_existing_fingerprint
+        .as_deref()
+        .filter(|fingerprint| !fingerprint.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(destination) = persisted
+        .destination
+        .as_deref()
+        .map(str::trim)
+        .filter(|destination| !destination.is_empty())
+    else {
+        return Ok(None);
+    };
+    let target = crate::download_ownership::expected_primary_path(
+        app_handle,
+        destination,
+        &persisted.file_name,
+    )?;
+    let metadata = match std::fs::symlink_metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A missing target is safe to treat as an idempotent cleanup, but
+            // an ownership record for that exact path still blocks the
+            // unowned replacement exception.
+            if let Some(owner) = crate::download_ownership::owner_for_path(app_handle, &target)? {
+                return Err(format!(
+                    "Cannot remove replacement target because it is owned by Firelink download {owner}"
+                ));
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(format!("Could not inspect replacement target: {error}")),
+    };
+
+    validate_unowned_replacement_target(app_handle, &target, expected_fingerprint, &metadata)?;
+    Ok(Some(UnownedReplacementTarget {
+        target,
+        fingerprint: expected_fingerprint.to_string(),
+    }))
+}
+
+async fn remove_unowned_replacement_target<R: tauri::Runtime>(
+    target: &std::path::Path,
+    expected_fingerprint: &str,
+    permanent: bool,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<(), String> {
+    for attempt in 0..=5 {
+        let metadata = match tokio::fs::symlink_metadata(target).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(format!(
+                    "Could not inspect replacement target '{}': {error}",
+                    target.display()
+                ));
+            }
+        };
+        validate_unowned_replacement_target(app_handle, target, expected_fingerprint, &metadata)?;
+
+        if permanent {
+            match tokio::fs::remove_file(target).await {
+                Ok(()) => return Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) if attempt == 5 => {
+                    return Err(format!(
+                        "Could not permanently remove replacement target '{}' after retries: {error}",
+                        target.display()
+                    ));
+                }
+                Err(_) => {}
+            }
+        } else {
+            let remove_result = match trash::delete(target) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    log::warn!(
+                        "failed to move authorized replacement target to Trash, attempting hard delete: {}",
+                        error
+                    );
+                    let current_metadata = match std::fs::symlink_metadata(target) {
+                        Ok(metadata) => metadata,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                        Err(error) => {
+                            return Err(format!(
+                                "Could not inspect replacement target '{}': {error}",
+                                target.display()
+                            ));
+                        }
+                    };
+                    validate_unowned_replacement_target(
+                        app_handle,
+                        target,
+                        expected_fingerprint,
+                        &current_metadata,
+                    )?;
+                    match std::fs::remove_file(target) {
+                        Ok(()) => Ok(()),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                        Err(error) => Err(error.to_string()),
+                    }
+                }
+            };
+            match remove_result {
+                Ok(()) => return Ok(()),
+                Err(error) if attempt == 5 => {
+                    return Err(format!(
+                        "Could not remove replacement target '{}' after retries: {error}",
+                        target.display()
+                    ));
+                }
+                Err(_) => {}
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Ok(())
 }
 
 fn expected_unadmitted_download_assets_present<R: tauri::Runtime>(
@@ -13416,7 +13617,8 @@ mod tests {
         Aria2DaemonGuard, stale_lifecycle_cleanup_is_noop,
         should_skip_unowned_asset_cleanup, expected_unadmitted_download_assets_present,
         download_asset_or_sidecar_exists,
-        classify_download_target, download_target_lock,
+        classify_download_target, download_target_lock, inspect_unowned_replacement_target,
+        remove_unowned_replacement_target,
         remove_download_assets_permanently, remove_download_container_assets_permanently,
         restore_download_replacement, target_fingerprint, DownloadReplacementReservation,
     };
@@ -13600,6 +13802,100 @@ mod tests {
             &torrent_item
         )
         .unwrap());
+    }
+
+    #[test]
+    fn unowned_replacement_authorization_requires_the_original_target() {
+        use tauri::Manager;
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let storage_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let storage_layout = crate::storage::StorageLayout::resolve(
+            app.handle(),
+            crate::storage::StorageMode::Portable {
+                root: storage_root.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        app.manage(crate::db::init(&storage_layout).unwrap());
+        let download_root =
+            configure_test_download_root(app.handle(), &storage_root.path().join("downloads"));
+        let target = download_root.join("replace.bin");
+        std::fs::write(&target, b"original").unwrap();
+        let fingerprint = target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap());
+        let item: crate::ipc::DownloadItem = serde_json::from_value(json!({
+            "id": "staged-replacement",
+            "url": "https://example.com/file.bin",
+            "fileName": "replace.bin",
+            "status": "staged",
+            "category": "Other",
+            "dateAdded": "",
+            "destination": download_root.to_string_lossy(),
+            "hasBeenDispatched": false,
+            "replaceExistingFingerprint": fingerprint
+        }))
+        .unwrap();
+
+        let authorized = inspect_unowned_replacement_target(app.handle(), &item, false)
+            .unwrap()
+            .expect("matching pre-admission replacement should be authorized");
+        assert_eq!(authorized.target, target);
+
+        let mut ambiguous_item = item.clone();
+        ambiguous_item.has_been_dispatched = None;
+        assert!(
+            inspect_unowned_replacement_target(app.handle(), &ambiguous_item, false)
+                .unwrap()
+                .is_none()
+        );
+
+        crate::download_ownership::set_primary_path(app.handle(), "other-owner", &target).unwrap();
+        let error = inspect_unowned_replacement_target(app.handle(), &item, false)
+            .expect_err("a Firelink-owned target must not use unowned replacement cleanup");
+        assert!(error.contains("owned by Firelink download other-owner"));
+        crate::download_ownership::remove(app.handle(), "other-owner").unwrap();
+
+        std::fs::write(&target, b"changed target").unwrap();
+        let error = inspect_unowned_replacement_target(app.handle(), &item, false)
+            .expect_err("a changed target must not inherit replacement authorization");
+        assert!(error.contains("changed after duplicate resolution"));
+    }
+
+    #[tokio::test]
+    async fn unowned_replacement_cleanup_removes_only_a_matching_primary_file() {
+        use tauri::Manager;
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let storage_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let storage_layout = crate::storage::StorageLayout::resolve(
+            app.handle(),
+            crate::storage::StorageMode::Portable {
+                root: storage_root.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        app.manage(crate::db::init(&storage_layout).unwrap());
+        let download_root =
+            configure_test_download_root(app.handle(), &storage_root.path().join("downloads"));
+        let target = download_root.join("replace.bin");
+        std::fs::write(&target, b"original").unwrap();
+        let fingerprint = target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap());
+
+        remove_unowned_replacement_target(&target, &fingerprint, true, app.handle())
+            .await
+            .expect("matching replacement target should be removable");
+        assert!(!target.exists());
+
+        std::fs::write(&target, b"new file").unwrap();
+        let error = remove_unowned_replacement_target(&target, &fingerprint, true, app.handle())
+            .await
+            .expect_err("a replacement target with a new fingerprint must be preserved");
+        assert!(error.contains("changed after duplicate resolution"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"new file");
     }
 
     #[test]

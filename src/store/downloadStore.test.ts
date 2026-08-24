@@ -408,6 +408,37 @@ describe('useDownloadProgressStore', () => {
     release();
   });
 
+  it('invalidates replacement authorization when a native state event changes identity', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'native-identity-change',
+        url: 'https://example.com/file.bin',
+        fileName: 'old.bin',
+        status: 'staged',
+        category: 'Other',
+        dateAdded: '',
+        replaceExistingFingerprint: 'original-target-fingerprint',
+      }],
+    });
+
+    const release = await initDownloadListener();
+    handlers['download-state']({ payload: {
+      id: 'native-identity-change',
+      status: 'ready',
+      error: null,
+      fileName: 'new.bin',
+    } });
+
+    expect(useDownloadStore.getState().downloads[0].fileName).toBe('new.bin');
+    expect(useDownloadStore.getState().downloads[0].replaceExistingFingerprint).toBeUndefined();
+    release();
+  });
+
   it('keeps Aria2 connection telemetry from the live progress event', async () => {
     const handlers: Record<string, (event: any) => void> = {};
     vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {

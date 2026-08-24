@@ -1245,6 +1245,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         : hasCredentialMaterial(
           Object.prototype.hasOwnProperty.call(updates, field) ? updates[field] : item[field]
         ));
+    const identityUpdated = updates.fileName !== undefined || updates.destination !== undefined;
     const normalizedUpdates = {
       ...(updates.fileName === undefined
         ? updates
@@ -1263,6 +1264,10 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             credentialsRequired: undefined,
           }
         : {}),
+      // A replacement fingerprint authorizes one exact destination identity.
+      // Editing either part of that identity invalidates the authorization so
+      // it cannot be replayed against a different path after persistence.
+      ...(identityUpdated ? { replaceExistingFingerprint: undefined } : {}),
     };
     const disablingTorrentRemoval = item.isTorrent === true
       && normalizedUpdates.torrentRemoveUnselectedFile === false
