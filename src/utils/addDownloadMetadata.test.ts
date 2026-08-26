@@ -13,6 +13,8 @@ import {
   metadataSummaryMessage,
   isYouTubePlaylistUrl,
   isMagnetUrl,
+  isAddDownloadMetadataLoading,
+  isAddDownloadMetadataError,
   isMetadataRefreshableRow,
   isRemoteTorrentUrl,
   playlistFilePrefix,
@@ -545,6 +547,7 @@ describe('add download metadata workflow', () => {
     expect(admitted.status).toBe('ready');
     expect(canSubmitMetadataRows([admitted])).toBe(true);
     expect(isMetadataRefreshableRow(admitted)).toBe(false);
+    expect(isMetadataRefreshableRow({ ...admitted, torrentMetadataStatus: 'ready' })).toBe(true);
 
     const failed = { ...admitted, torrentMetadataStatus: 'error' as const };
     const refreshed = refreshFailedMetadataRows([failed])[0];
@@ -556,6 +559,34 @@ describe('add download metadata workflow', () => {
     expect(isMetadataRefreshableRow(failed)).toBe(true);
     expect(isMetadataRefreshableRow({ ...admitted, status: 'loading' })).toBe(false);
     expect(isMetadataRefreshableRow(row())).toBe(false);
+  });
+
+  it('exposes optional magnet metadata as loading while keeping transfer readiness', () => {
+    const magnet = row({
+      sourceUrl: 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567',
+      isTorrent: true,
+      torrentMetadataStatus: 'loading'
+    });
+
+    expect(magnet.status).toBe('ready');
+    expect(isAddDownloadMetadataLoading(magnet)).toBe(true);
+    expect(isAddDownloadMetadataLoading({
+      ...magnet,
+      torrentMetadataStatus: 'ready'
+    })).toBe(false);
+    expect(isAddDownloadMetadataLoading({
+      ...magnet,
+      status: 'loading',
+      torrentMetadataStatus: undefined
+    })).toBe(true);
+    expect(isAddDownloadMetadataError({
+      ...magnet,
+      torrentMetadataStatus: 'error'
+    })).toBe(true);
+    expect(isAddDownloadMetadataError({
+      ...magnet,
+      torrentMetadataStatus: 'ready'
+    })).toBe(false);
   });
 
   it('refreshes only selected metadata rows when requested by the preview action', () => {

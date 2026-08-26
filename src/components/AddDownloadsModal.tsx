@@ -48,6 +48,8 @@ import {
   reconcileDownloadRows,
   refreshFailedMetadataRows,
   isMagnetUrl,
+  isAddDownloadMetadataLoading,
+  isAddDownloadMetadataError,
   isMetadataRefreshableRow,
   selectExactMediaSelection,
   updateRowIfCurrent,
@@ -2273,17 +2275,19 @@ export const AddDownloadsModal = () => {
                                 </span>
                               ) : null}
                             </div>
-                            <div className={`flex-1 font-mono ${item.status === 'loading' ? 'text-text-muted/50' : 'text-text-muted'}`}>{item.size || t($ => $.addDownloads.unknown)}</div>
-                            <div className={`flex-[1.5] font-medium ${item.status === 'metadata-error' || item.status === 'invalid' ? 'text-red-500' : item.status === 'loading' ? 'text-orange-400' : 'text-blue-500'}`}>
-                              {item.status === 'loading' ? (
+                            <div className={`flex-1 font-mono ${isAddDownloadMetadataLoading(item) ? 'text-text-muted/50' : 'text-text-muted'}`}>{item.size || t($ => $.addDownloads.unknown)}</div>
+                            <div className={`flex-[1.5] font-medium ${isAddDownloadMetadataError(item) || item.status === 'invalid' ? 'text-red-500' : isAddDownloadMetadataLoading(item) ? 'text-orange-400' : 'text-blue-500'}`}>
+                              {isAddDownloadMetadataLoading(item) ? (
                                 <div className="flex items-center gap-1.5">
                                   <RefreshCw size={12} className="animate-spin" /> {item.isPlaylist ? t($ => $.addDownloads.fetchingPlaylist) : t($ => $.addDownloads.fetching)}
                                 </div>
                               ) : (
                                 item.status === 'fallback'
                                   ? t($ => $.addDownloads.fallback)
-                                  : item.status === 'metadata-error'
-                                  ? item.metadataBlockedReason === 'unsafe-url' ? t($ => $.addDownloads.unsafeUrl) : item.isPlaylist ? t($ => $.addDownloads.playlistFailed) : item.isMedia ? t($ => $.addDownloads.metadataFailed) : t($ => $.addDownloads.fallback)
+                                  : isAddDownloadMetadataError(item)
+                                  ? item.status === 'metadata-error'
+                                    ? item.metadataBlockedReason === 'unsafe-url' ? t($ => $.addDownloads.unsafeUrl) : item.isPlaylist ? t($ => $.addDownloads.playlistFailed) : item.isMedia ? t($ => $.addDownloads.metadataFailed) : t($ => $.addDownloads.fallback)
+                                    : t($ => $.addDownloads.metadataFailed)
                                   : item.status === 'invalid'
                                     ? t($ => $.addDownloads.invalid)
                                     : t($ => $.addDownloads.ready)
@@ -2350,6 +2354,15 @@ export const AddDownloadsModal = () => {
                           </div>
                         );
                       })}
+                    </div>
+                  ) : isAddDownloadMetadataLoading(parsedItems[selectedItemIndex]) ? (
+                    <div className="flex items-center gap-2 text-xs text-orange-400" aria-live="polite">
+                      <RefreshCw size={14} className="animate-spin" />
+                      <span>{t($ => $.addDownloads.fetching)}</span>
+                    </div>
+                  ) : isAddDownloadMetadataError(parsedItems[selectedItemIndex]) ? (
+                    <div className="flex items-center gap-2 text-xs text-red-500" aria-live="polite">
+                      <span>{t($ => $.addDownloads.metadataFailed)}</span>
                     </div>
                   ) : (
                     <p className="text-xs text-text-muted">

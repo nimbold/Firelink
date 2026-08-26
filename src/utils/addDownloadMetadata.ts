@@ -120,6 +120,16 @@ export const isMagnetTorrentRow = (
   row: Pick<AddDownloadDraftRow, 'isTorrent' | 'sourceUrl'>
 ): boolean => row.isTorrent === true && isMagnetUrl(row.sourceUrl);
 
+export const isAddDownloadMetadataLoading = (
+  row: Pick<AddDownloadDraftRow, 'status' | 'isTorrent' | 'sourceUrl' | 'torrentMetadataStatus'>
+): boolean => row.status === 'loading'
+  || (isMagnetTorrentRow(row) && row.torrentMetadataStatus === 'loading');
+
+export const isAddDownloadMetadataError = (
+  row: Pick<AddDownloadDraftRow, 'status' | 'isTorrent' | 'sourceUrl' | 'torrentMetadataStatus'>
+): boolean => row.status === 'metadata-error'
+  || (isMagnetTorrentRow(row) && row.torrentMetadataStatus === 'error');
+
 export const isMetadataRefreshableRow = (row: AddDownloadDraftRow): boolean =>
   row.status !== 'loading'
   && (row.status === 'metadata-error'
