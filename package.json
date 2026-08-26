@@ -60,7 +60,7 @@
     "@tauri-apps/plugin-notification": "^2.3.3",
     "@tauri-apps/plugin-opener": "^2",
     "i18next": "^26.4.0",
-    "lucide-react": "^1.33.0",
+    "lucide-react": "^1.34.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-i18next": "^17.0.12",

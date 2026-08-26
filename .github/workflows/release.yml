@@ -140,11 +140,21 @@ jobs:
       - name: Verify macOS packaged engines and launch
         if: runner.os == 'macOS'
         run: |
-          APP="src-tauri/target/${{ matrix.target }}/release/bundle/macos/Firelink.app"
+          set -euo pipefail
           DMG="$(find src-tauri/target/${{ matrix.target }}/release/bundle/dmg -name '*.dmg' -print -quit)"
           test -n "$DMG"
+          npm run verify:macos-signing -- --dmg "$DMG"
+          MOUNT_POINT="$(mktemp -d "$RUNNER_TEMP/firelink-dmg-mount.XXXXXX")"
+          cleanup() {
+            hdiutil detach "$MOUNT_POINT" -quiet || hdiutil detach "$MOUNT_POINT" -force -quiet || true
+            rmdir "$MOUNT_POINT" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          hdiutil attach -nobrowse -readonly -mountpoint "$MOUNT_POINT" "$DMG" >/dev/null
+          APP_COUNT="$(find "$MOUNT_POINT" -maxdepth 1 -type d -name 'Firelink.app' | wc -l | tr -d ' ')"
+          test "$APP_COUNT" -eq 1
+          APP="$(find "$MOUNT_POINT" -maxdepth 1 -type d -name 'Firelink.app' -print -quit)"
           FIRELINK_MACOS_APP="$APP" node scripts/app-associations.node-test.js
-          npm run verify:macos-signing -- --app "$APP" --dmg "$DMG"
           node scripts/verify-binaries.js --search-root "$APP" --target ${{ matrix.target }}
           ARIA2="$(find "$APP" -type f -name 'aria2c-${{ matrix.target }}' -print -quit)"
           test -n "$ARIA2"

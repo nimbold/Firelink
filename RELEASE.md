@@ -50,10 +50,24 @@ cd ..
 npm run tauri build -- --target aarch64-apple-darwin --bundles dmg
 ```
 
-Verify packaged resources, then launch outside repository working directory:
+Verify the DMG and the app it contains, then launch outside the repository
+working directory. The DMG bundler removes the intermediate app directory, so
+the post-build checks must use the mounted release artifact:
 
 ```bash
-APP="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Firelink.app"
+DMG="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -name '*.dmg' -print -quit)"
+test -n "$DMG"
+npm run verify:macos-signing -- --dmg "$DMG"
+MOUNT_POINT="$(mktemp -d -t firelink-dmg)"
+cleanup() {
+  hdiutil detach "$MOUNT_POINT" -quiet || hdiutil detach "$MOUNT_POINT" -force -quiet || true
+  rmdir "$MOUNT_POINT" 2>/dev/null || true
+}
+trap cleanup EXIT
+hdiutil attach -nobrowse -readonly -mountpoint "$MOUNT_POINT" "$DMG" >/dev/null
+APP_COUNT="$(find "$MOUNT_POINT" -maxdepth 1 -type d -name 'Firelink.app' | wc -l | tr -d ' ')"
+test "$APP_COUNT" -eq 1
+APP="$(find "$MOUNT_POINT" -maxdepth 1 -type d -name 'Firelink.app' -print -quit)"
 node scripts/verify-binaries.js --search-root "$APP" --target aarch64-apple-darwin
 node scripts/smoke-packaged-app.js --executable "$APP/Contents/MacOS/firelink"
 ```
