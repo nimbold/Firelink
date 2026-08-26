@@ -6466,7 +6466,7 @@ fn has_resumable_download_assets(primary: &std::path::Path) -> bool {
     })
 }
 
-/// A ready/staged row can be removed before native admission has established
+/// A ready/staged/paused row can be removed before native admission has established
 /// an ownership record.  Treat Delete file as a no-op only when the row is
 /// still pre-admission and no exact output artifact can be found.  Never use
 /// this path for an admitted lifecycle: a missing ownership record there is
@@ -6479,7 +6479,13 @@ fn should_skip_unowned_asset_cleanup(
 ) -> bool {
     matches!(
         status,
-        crate::ipc::DownloadStatus::Ready | crate::ipc::DownloadStatus::Staged
+        crate::ipc::DownloadStatus::Ready
+            | crate::ipc::DownloadStatus::Staged
+            // pause_download can intentionally park a staged row without
+            // ever creating a native lifecycle. Treat that representation as
+            // pre-admission only when the durable dispatch marker is false;
+            // admitted paused Torrents still require ownership.
+            | crate::ipc::DownloadStatus::Paused
     ) && !has_been_dispatched
         && !native_lifecycle_was_admitted
         && !expected_assets_present
@@ -6709,10 +6715,7 @@ fn expected_unadmitted_download_assets_present<R: tauri::Runtime>(
     };
 
     if persisted.is_torrent == Some(true) {
-        // A Torrent can produce multiple nested paths or resolve a magnet
-        // name only after admission.  Without Firelink ownership, the
-        // persisted display filename is not a safe inventory of its assets.
-        return Ok(true);
+        return expected_unadmitted_torrent_assets_present(app_handle, persisted, destination);
     }
 
     let primary = crate::download_ownership::expected_primary_path(
@@ -6771,6 +6774,47 @@ fn expected_unadmitted_download_assets_present<R: tauri::Runtime>(
         }
     }
 
+    Ok(false)
+}
+
+fn expected_unadmitted_torrent_assets_present<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    persisted: &crate::ipc::DownloadItem,
+    destination: &str,
+) -> Result<bool, String> {
+    let Some(torrent_path) = persisted.torrent_path.as_deref() else {
+        // A ready/staged/paused magnet without cached metainfo has not crossed
+        // native admission, so this lifecycle cannot have created a Torrent
+        // payload. Do not guess from the display name and risk treating an
+        // unrelated file as this download's asset.
+        return Ok(false);
+    };
+
+    let Some(expected) = expected_torrent_output_paths(
+        app_handle,
+        &persisted.id,
+        destination,
+        &persisted.file_name,
+        Some(torrent_path),
+        persisted.torrent_file_indices.as_deref(),
+        persisted.torrent_remove_unselected_file.unwrap_or(false),
+    )?
+    else {
+        return Ok(false);
+    };
+
+    // Include the primary output as well as every exact selected/removal path.
+    // For a multi-file Torrent the primary is the output directory, which
+    // catches an unowned file inside it without recursively inspecting or
+    // deleting that directory.
+    let mut candidates = vec![expected.primary];
+    candidates.extend(expected.selected);
+    candidates.extend(expected.unselected);
+    for candidate in candidates {
+        if download_asset_or_sidecar_exists(&candidate)? {
+            return Ok(true);
+        }
+    }
     Ok(false)
 }
 
@@ -8130,8 +8174,8 @@ fn restore_download_replacement_ownership(
     }
 }
 
-fn expected_torrent_output_paths(
-    app_handle: &tauri::AppHandle,
+fn expected_torrent_output_paths<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
     id: &str,
     destination: &str,
     filename: &str,
@@ -13786,6 +13830,12 @@ mod tests {
             false,
             false
         ));
+        assert!(should_skip_unowned_asset_cleanup(
+            crate::ipc::DownloadStatus::Paused,
+            false,
+            false,
+            false
+        ));
         assert!(!should_skip_unowned_asset_cleanup(
             crate::ipc::DownloadStatus::Staged,
             true,
@@ -13827,8 +13877,8 @@ mod tests {
         assert!(download_asset_or_sidecar_exists(&primary).unwrap());
     }
 
-    #[test]
-    fn staged_unowned_asset_inspection_uses_the_exact_persisted_output_path() {
+    #[tokio::test]
+    async fn pre_admission_torrent_asset_inspection_uses_the_exact_persisted_output_path() {
         use tauri::Manager;
 
         let app = tauri::test::mock_builder()
@@ -13916,11 +13966,58 @@ mod tests {
             "hasBeenDispatched": false
         }))
         .unwrap();
-        assert!(expected_unadmitted_download_assets_present(
+        assert!(!expected_unadmitted_download_assets_present(
             app.handle(),
             &torrent_item
         )
         .unwrap());
+        std::fs::write(download_root.join("torrent-name"), b"unrelated").unwrap();
+        assert!(!expected_unadmitted_download_assets_present(
+            app.handle(),
+            &torrent_item
+        )
+        .unwrap());
+        std::fs::remove_file(download_root.join("torrent-name")).unwrap();
+
+        let cached_torrent_bytes = b"d4:infod6:lengthi5e4:name4:testee";
+        let cached_torrent_path = crate::torrent::cache_torrent_bytes(
+            app.handle(),
+            "staged-cached-torrent",
+            cached_torrent_bytes,
+        )
+        .await
+        .unwrap();
+        let cached_torrent_item: crate::ipc::DownloadItem = serde_json::from_value(json!({
+            "id": "staged-cached-torrent",
+            "url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            "fileName": "test",
+            "status": "staged",
+            "category": "Torrents",
+            "dateAdded": "",
+            "destination": download_root.to_string_lossy(),
+            "isTorrent": true,
+            "torrentPath": cached_torrent_path,
+            "hasBeenDispatched": false
+        }))
+        .unwrap();
+        assert!(!expected_unadmitted_download_assets_present(
+            app.handle(),
+            &cached_torrent_item
+        )
+        .unwrap());
+        std::fs::write(download_root.join("test.aria2"), b"partial").unwrap();
+        assert!(expected_unadmitted_download_assets_present(
+            app.handle(),
+            &cached_torrent_item
+        )
+        .unwrap());
+        std::fs::remove_file(download_root.join("test.aria2")).unwrap();
+        std::fs::write(&cached_torrent_path, b"malformed torrent metadata").unwrap();
+        assert!(expected_unadmitted_download_assets_present(
+            app.handle(),
+            &cached_torrent_item
+        )
+        .is_err());
     }
 
     #[tokio::test]
