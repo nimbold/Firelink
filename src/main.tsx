@@ -16,7 +16,22 @@ import { invokeCommand as invoke } from './ipc';
 
 const isPropertiesWindow = getCurrentWindow().label.startsWith('properties-');
 
-void initLogger();
+// WebView2 can overflow its native call stack when the renderer sends IPC
+// during document bootstrapping. Keep all renderer-to-native startup work
+// behind the document load boundary, not just the first logger query. This is
+// also needed for Zustand persistence, whose module initialization reads the
+// native database before React mounts.
+const documentLoaded = new Promise<void>((resolve) => {
+  if (document.readyState === 'complete') {
+    resolve();
+    return;
+  }
+  window.addEventListener('load', () => resolve(), { once: true });
+});
+
+void documentLoaded.then(() => {
+  void initLogger();
+});
 
 const serializeConsoleArguments = (values: unknown[]) => values.map(value => {
   if (value instanceof Error) return `${value.name}: ${value.message}\n${value.stack || ''}`;
@@ -36,11 +51,13 @@ const originalConsoleError = console.error.bind(console);
 const originalConsoleWarn = console.warn.bind(console);
 console.error = (...values: unknown[]) => {
   originalConsoleError(...values);
-  void logError(redactConsoleMessage(serializeConsoleArguments(values))).catch(() => undefined);
+  const message = redactConsoleMessage(serializeConsoleArguments(values));
+  void documentLoaded.then(() => logError(message)).catch(() => undefined);
 };
 console.warn = (...values: unknown[]) => {
   originalConsoleWarn(...values);
-  void logWarn(redactConsoleMessage(serializeConsoleArguments(values))).catch(() => undefined);
+  const message = redactConsoleMessage(serializeConsoleArguments(values));
+  void documentLoaded.then(() => logWarn(message)).catch(() => undefined);
 };
 
 const rootElement = document.getElementById("root");
@@ -75,19 +92,45 @@ const PropertiesStartupFailure = () => (
   </main>
 );
 
+const MainStartupFailure = () => (
+  <main className="flex h-screen min-h-0 flex-col items-center justify-center gap-4 bg-main-bg p-6 text-text-primary">
+    <p role="alert">Firelink could not be loaded.</p>
+    <button
+      type="button"
+      className="app-button app-button-primary px-3 text-xs"
+      onClick={() => {
+        void getCurrentWindow().close().catch(error => {
+          console.error('[MainStartupFailure] close failed', error);
+        });
+      }}
+    >
+      Close
+    </button>
+  </main>
+);
+
 const renderMainApp = async () => {
   if (!rootElement) return;
 
-  // Keep the child entrypoint isolated from the main application module. App
-  // imports the persistent Zustand stores, whose module initialization issues
-  // main-window-only IPC commands. Loading it in a Properties child creates a
-  // second persistence owner and can race the bridge handshake.
-  const RootComponent = (await import('./App')).default;
-  renderRoot(RootComponent);
+  await documentLoaded;
+
+  try {
+    // Keep the child entrypoint isolated from the main application module. App
+    // imports the persistent Zustand stores, whose module initialization issues
+    // main-window-only IPC commands. Loading it in a Properties child creates a
+    // second persistence owner and can race the bridge handshake.
+    const RootComponent = (await import('./App')).default;
+    renderRoot(RootComponent);
+  } catch (error) {
+    console.error('Failed to initialize Firelink:', error);
+    renderRoot(MainStartupFailure);
+  }
 };
 
 const renderPropertiesApp = async () => {
   if (!rootElement) return;
+
+  await documentLoaded;
 
   try {
     // Properties starts with the synchronous English catalog and changes locale

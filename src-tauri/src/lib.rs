@@ -19903,7 +19903,6 @@ pub fn run() {
                 mark_main_window_startup_complete(app_handle);
                 #[cfg(target_os = "windows")]
                 reveal_main_window(app_handle);
-                #[cfg(not(target_os = "windows"))]
                 restore_pending_main_window(app_handle);
             }
             #[cfg(target_os = "macos")]
