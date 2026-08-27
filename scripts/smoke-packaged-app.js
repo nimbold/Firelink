@@ -30,6 +30,7 @@ const child = spawn(executable, [], {
   env: {
     ...process.env,
     FIRELINK_SMOKE_TEST: '1',
+    FIRELINK_SKIP_STARTUP_REVEAL: '1',
     WEBKIT_DISABLE_COMPOSITING_MODE: '1',
     GDK_BACKEND: 'x11',
   },
