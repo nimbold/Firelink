@@ -3659,7 +3659,6 @@ pub struct AppState {
 #[derive(Default)]
 struct MainWindowRestoreState {
     requested: AtomicBool,
-    startup_complete: AtomicBool,
 }
 
 #[cfg(target_os = "macos")]
@@ -3956,25 +3955,6 @@ where
 }
 
 pub(crate) fn restore_main_window(app_handle: &tauri::AppHandle) {
-    let startup_complete = app_handle
-        .try_state::<MainWindowRestoreState>()
-        .is_none_or(|state| state.startup_complete.load(Ordering::Acquire));
-    if !startup_complete {
-        if let Some(state) = app_handle.try_state::<MainWindowRestoreState>() {
-            // The first window can be requested by a single-instance callback
-            // or an opened .torrent path while the native host is still being
-            // constructed. Do not touch the HWND until RunEvent::Ready.
-            state.requested.store(true, Ordering::Release);
-            // Ready may have won the transition between the first load and
-            // the request store. Re-check before returning so that request is
-            // serviced by this call instead of being left pending forever.
-            if !state.startup_complete.load(Ordering::Acquire) {
-                return;
-            }
-        } else {
-            return;
-        }
-    }
     let Some(window) = app_handle.get_webview_window("main") else {
         if let Some(state) = app_handle.try_state::<MainWindowRestoreState>() {
             state.requested.store(true, Ordering::Release);
@@ -3985,24 +3965,6 @@ pub(crate) fn restore_main_window(app_handle: &tauri::AppHandle) {
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
-}
-
-fn mark_main_window_startup_complete(app_handle: &tauri::AppHandle) {
-    if let Some(state) = app_handle.try_state::<MainWindowRestoreState>() {
-        state.startup_complete.store(true, Ordering::Release);
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn reveal_main_window(app_handle: &tauri::AppHandle) {
-    if let Some(window) = app_handle.get_webview_window("main") {
-        if let Err(error) = window.set_focusable(true) {
-            log::warn!("Could not make the main window focusable: {error}");
-        }
-        if let Err(error) = window.show() {
-            eprintln!("Failed to reveal the main window: {error}");
-        }
-    }
 }
 
 fn restore_pending_main_window(app_handle: &tauri::AppHandle) {
@@ -18523,44 +18485,6 @@ pub fn run() {
             // Build the window only after all command state is registered. This
             // prevents the frontend from racing startup and invoking IPC before
             // the database and portable storage layout are available.
-            let startup_size = persisted_settings
-                .as_ref()
-                .and_then(|settings| settings.main_window_size.as_ref())
-                .and_then(|size| crate::window_geometry::normalize_main_window_size(Some(size)))
-                .unwrap_or_else(crate::window_geometry::default_main_window_size);
-            let startup_size = app
-                .primary_monitor()
-                .ok()
-                .flatten()
-                .and_then(|monitor| {
-                    let scale_factor = monitor.scale_factor();
-                    if !scale_factor.is_finite() || scale_factor <= 0.0 {
-                        return None;
-                    }
-                    let work_area = monitor.work_area().size;
-                    let logical_width = (work_area.width as f64 / scale_factor).round() as u32;
-                    let logical_height = (work_area.height as f64 / scale_factor).round() as u32;
-                    Some(crate::window_geometry::clamp_main_window_size(
-                        startup_size.clone(),
-                        logical_width,
-                        logical_height,
-                    ))
-                })
-                .unwrap_or(startup_size);
-            main_window_builder = main_window_builder
-                .inner_size(startup_size.width as f64, startup_size.height as f64)
-                .prevent_overflow();
-            #[cfg(target_os = "windows")]
-            {
-                // Wry installs its parent WM_SETFOCUS handler while WebView2
-                // is still being initialized. Keep the host hidden and
-                // non-activatable until RunEvent::Ready so Windows cannot
-                // re-enter that handler during native construction.
-                main_window_builder = main_window_builder
-                    .visible(false)
-                    .focused(false)
-                    .focusable(false);
-            }
             main_window_builder
                 .build()
                 .map_err(|error| format!("failed to create main window: {error}"))?;
@@ -19896,13 +19820,6 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| match event {
-            tauri::RunEvent::Ready => {
-                mark_main_window_startup_complete(app_handle);
-                #[cfg(target_os = "windows")]
-                reveal_main_window(app_handle);
-                #[cfg(not(target_os = "windows"))]
-                restore_pending_main_window(app_handle);
-            }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Opened { urls } => {
                 let paths = collect_opened_torrent_paths(
