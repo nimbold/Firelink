@@ -18512,9 +18512,28 @@ pub fn run() {
             main_window_builder = main_window_builder
                 .inner_size(startup_size.width as f64, startup_size.height as f64)
                 .prevent_overflow();
-            main_window_builder
+            #[cfg(target_os = "windows")]
+            {
+                // WebView2 can return E_INVALIDARG from MoveFocus while the
+                // newly-created host window is not focusable yet. Wry
+                // propagates that error from WebviewWindowBuilder::build,
+                // which destroys the native window and makes a release build
+                // look like it started headlessly before exiting. Focus the
+                // window only after WebView2 has been created successfully.
+                main_window_builder = main_window_builder.focused(false);
+            }
+            let main_window = main_window_builder
                 .build()
                 .map_err(|error| format!("failed to create main window: {error}"))?;
+            #[cfg(target_os = "windows")]
+            if let Err(error) = main_window.set_focus() {
+                // The window is already usable if the OS declines this
+                // best-effort activation request. A later user interaction
+                // can focus it without risking startup failure.
+                log::warn!("could not focus the main window after startup: {error}");
+            }
+            #[cfg(not(target_os = "windows"))]
+            let _ = main_window;
             restore_pending_main_window(app.handle());
 
             #[cfg(any(target_os = "windows", target_os = "linux"))]
