@@ -3659,6 +3659,7 @@ pub struct AppState {
 #[derive(Default)]
 struct MainWindowRestoreState {
     requested: AtomicBool,
+    startup_complete: AtomicBool,
 }
 
 #[cfg(target_os = "macos")]
@@ -3954,7 +3955,26 @@ where
         .collect()
 }
 
-fn restore_main_window(app_handle: &tauri::AppHandle) {
+pub(crate) fn restore_main_window(app_handle: &tauri::AppHandle) {
+    let startup_complete = app_handle
+        .try_state::<MainWindowRestoreState>()
+        .is_none_or(|state| state.startup_complete.load(Ordering::Acquire));
+    if !startup_complete {
+        if let Some(state) = app_handle.try_state::<MainWindowRestoreState>() {
+            // The first window can be requested by a single-instance callback
+            // or an opened .torrent path while the native host is still being
+            // constructed. Do not touch the HWND until RunEvent::Ready.
+            state.requested.store(true, Ordering::Release);
+            // Ready may have won the transition between the first load and
+            // the request store. Re-check before returning so that request is
+            // serviced by this call instead of being left pending forever.
+            if !state.startup_complete.load(Ordering::Acquire) {
+                return;
+            }
+        } else {
+            return;
+        }
+    }
     let Some(window) = app_handle.get_webview_window("main") else {
         if let Some(state) = app_handle.try_state::<MainWindowRestoreState>() {
             state.requested.store(true, Ordering::Release);
@@ -3965,6 +3985,12 @@ fn restore_main_window(app_handle: &tauri::AppHandle) {
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
+}
+
+fn mark_main_window_startup_complete(app_handle: &tauri::AppHandle) {
+    if let Some(state) = app_handle.try_state::<MainWindowRestoreState>() {
+        state.startup_complete.store(true, Ordering::Release);
+    }
 }
 
 fn restore_pending_main_window(app_handle: &tauri::AppHandle) {
@@ -18514,15 +18540,11 @@ pub fn run() {
                 .prevent_overflow();
             #[cfg(target_os = "windows")]
             {
-                // WebView2 can return E_INVALIDARG from MoveFocus while the
-                // newly-created host window is not focusable yet. Wry
-                // propagates that error from WebviewWindowBuilder::build,
-                // which destroys the native window and makes a release build
-                // look like it started headlessly before exiting. Leave the
-                // window unfocused until Windows has completed native
-                // activation; a synchronous post-build focus request can
-                // re-enter the WebView2 focus callback on affected systems.
-                main_window_builder = main_window_builder.focused(false);
+                // Wry installs its parent WM_SETFOCUS handler while WebView2
+                // is still being initialized. Keep the host unfocused and
+                // hidden until RunEvent::Ready so Windows cannot re-enter that
+                // handler during native construction.
+                main_window_builder = main_window_builder.visible(false).focused(false);
             }
             main_window_builder
                 .build()
@@ -18534,13 +18556,6 @@ pub fn run() {
                 app.handle().clone(),
                 collect_opened_torrent_paths(std::env::args_os().skip(1)),
             );
-
-            #[cfg(target_os = "windows")]
-            if let Some(window) = app.get_webview_window("main") {
-                window
-                    .set_decorations(false)
-                    .map_err(|error| format!("failed to disable Windows native frame: {error}"))?;
-            }
 
             let deep_link_app = app.handle().clone();
             #[cfg(target_os = "linux")]
@@ -19866,6 +19881,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| match event {
+            tauri::RunEvent::Ready => {
+                mark_main_window_startup_complete(app_handle);
+                if let Some(state) = app_handle.try_state::<MainWindowRestoreState>() {
+                    state.requested.swap(false, Ordering::AcqRel);
+                }
+                restore_main_window(app_handle);
+            }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Opened { urls } => {
                 let paths = collect_opened_torrent_paths(
