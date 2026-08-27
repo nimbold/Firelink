@@ -18553,17 +18553,6 @@ pub fn run() {
             main_window_builder = main_window_builder
                 .inner_size(startup_size.width as f64, startup_size.height as f64)
                 .prevent_overflow();
-            #[cfg(target_os = "windows")]
-            {
-                // Wry installs its parent WM_SETFOCUS handler while WebView2
-                // is still being initialized. Keep the host hidden and
-                // non-activatable until RunEvent::Ready so Windows cannot
-                // re-enter that handler during native construction.
-                main_window_builder = main_window_builder
-                    .visible(false)
-                    .focused(false)
-                    .focusable(false);
-            }
             main_window_builder
                 .build()
                 .map_err(|error| format!("failed to create main window: {error}"))?;
@@ -19901,8 +19890,6 @@ pub fn run() {
         .run(|app_handle, event| match event {
             tauri::RunEvent::Ready => {
                 mark_main_window_startup_complete(app_handle);
-                #[cfg(target_os = "windows")]
-                reveal_main_window(app_handle);
                 #[cfg(not(target_os = "windows"))]
                 restore_pending_main_window(app_handle);
             }
