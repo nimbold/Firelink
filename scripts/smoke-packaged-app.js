@@ -23,16 +23,21 @@ const stabilityMsValue = Number.parseInt(argValue('--stability-ms') || '5000', 1
 const stabilityMs = Number.isFinite(stabilityMsValue) && stabilityMsValue >= 0
   ? Math.min(stabilityMsValue, MAX_STABILITY_MS)
   : 5000;
+const childEnv = {
+  ...process.env,
+  FIRELINK_SMOKE_TEST: '1',
+  FIRELINK_DISABLE_ARIA2_POLLER: '1',
+  WEBKIT_DISABLE_COMPOSITING_MODE: '1',
+  GDK_BACKEND: 'x11',
+};
+if (process.argv.includes('--disable-aria2-poller')) {
+  childEnv.FIRELINK_DISABLE_ARIA2_POLLER = '1';
+}
 const READY_PORT_TIMEOUT_MS = 500;
 const child = spawn(executable, [], {
   cwd: process.env.RUNNER_TEMP || process.env.TMPDIR || process.cwd(),
   detached: process.platform !== 'win32',
-  env: {
-    ...process.env,
-    FIRELINK_SMOKE_TEST: '1',
-    WEBKIT_DISABLE_COMPOSITING_MODE: '1',
-    GDK_BACKEND: 'x11',
-  },
+  env: childEnv,
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 

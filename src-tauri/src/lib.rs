@@ -19007,6 +19007,9 @@ pub fn run() {
             let poll_secret = aria2_secret.clone();
             let poll_mgr = Arc::clone(&queue_manager_poll);
             tauri::async_runtime::spawn(async move {
+                if std::env::var_os("FIRELINK_DISABLE_ARIA2_POLLER").is_some() {
+                    return;
+                }
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(1000));
                 let mut observations: HashMap<String, Aria2ConnectionObservation> = HashMap::new();
                 let mut missing_gid_recovery_at: HashMap<String, Instant> = HashMap::new();
