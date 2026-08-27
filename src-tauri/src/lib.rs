@@ -3328,6 +3328,21 @@ fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
 }
 
 pub(crate) fn path_has_symlink_component(path: &std::path::Path) -> bool {
+    path_has_component_matching(path, metadata_is_link_or_reparse)
+}
+
+/// Detect only symbolic-link components, without treating every Windows
+/// reparse point as a link. Trusted application-data directories may use
+/// junctions for Windows folder redirection; user-selected download and
+/// recovery paths continue to use the stricter helper above.
+pub(crate) fn path_has_symbolic_link_component(path: &std::path::Path) -> bool {
+    path_has_component_matching(path, |metadata| metadata.file_type().is_symlink())
+}
+
+fn path_has_component_matching(
+    path: &std::path::Path,
+    matches: impl Fn(&std::fs::Metadata) -> bool,
+) -> bool {
     use std::path::Component;
 
     let mut current = std::path::PathBuf::new();
@@ -3339,7 +3354,7 @@ pub(crate) fn path_has_symlink_component(path: &std::path::Path) -> bool {
             Component::Normal(name) => {
                 current.push(name);
                 if std::fs::symlink_metadata(&current)
-                    .is_ok_and(|metadata| metadata_is_link_or_reparse(&metadata))
+                    .is_ok_and(|metadata| matches(&metadata))
                 {
                     return true;
                 }

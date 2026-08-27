@@ -2523,6 +2523,57 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn migrates_v1_database_and_creates_backup() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(DATABASE_NAME);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE downloads (
+                    id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    queue_id TEXT,
+                    data TEXT NOT NULL
+                );
+                CREATE TABLE settings (id INTEGER PRIMARY KEY, data TEXT NOT NULL);
+                CREATE TABLE queues (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+                CREATE TABLE download_ownership (
+                    id TEXT PRIMARY KEY,
+                    primary_path TEXT NOT NULL
+                );
+                INSERT INTO download_ownership VALUES ('download-1', '/downloads/file.bin');
+                PRAGMA user_version = 1;
+                ",
+            )
+            .unwrap();
+        drop(connection);
+
+        let state = init_at_path(temp.path()).unwrap();
+        let connection = state.lock().unwrap();
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        assert!(table_exists(&connection, "download_owned_paths").unwrap());
+        assert!(table_exists(&connection, "download_removal_paths").unwrap());
+        assert_eq!(
+            load_ownership(&connection).unwrap(),
+            vec![(
+                "download-1".to_string(),
+                "/downloads/file.bin".to_string(),
+                vec!["/downloads/file.bin".to_string()]
+            )]
+        );
+        assert!(fs::read_dir(temp.path()).unwrap().flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("firelink.sqlite.backup-schema-v1-")
+        }));
+    }
+
     #[cfg(unix)]
     #[test]
     fn refuses_to_open_a_database_symlink() {

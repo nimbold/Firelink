@@ -251,7 +251,7 @@ fn aria2_server_stat_is_valid(contents: &str) -> bool {
 }
 
 fn canonicalize_storage_path(path: &Path) -> Result<PathBuf, String> {
-    if crate::path_has_symlink_component(path) {
+    if crate::path_has_symbolic_link_component(path) {
         return Err(format!(
             "storage path contains a symlinked component: '{}'",
             path.display()
@@ -454,5 +454,33 @@ mod tests {
         symlink(root_path.join("missing-target"), &redirected).unwrap();
 
         assert!(canonicalize_storage_path(Path::new(&redirected)).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn accepts_windows_junctions_for_redirected_storage_paths() {
+        use std::process::Command;
+
+        let parent = TempDir::new().unwrap();
+        let spaced_parent = parent.path().join("firelink test data");
+        fs::create_dir(&spaced_parent).unwrap();
+        let root = TempDir::new_in(&spaced_parent).unwrap();
+        let target = TempDir::new_in(&spaced_parent).unwrap();
+        let redirected = root.path().join("redirected");
+        let target_storage = target.path().join("firelink");
+        fs::create_dir(&target_storage).unwrap();
+
+        let status = Command::new("cmd")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&redirected)
+            .arg(target.path())
+            .status()
+            .expect("Windows junction creation command should start");
+        assert!(status.success(), "mklink /J failed with status {status}");
+
+        assert_eq!(
+            canonicalize_storage_path(&redirected.join("firelink")).unwrap(),
+            fs::canonicalize(target_storage).unwrap()
+        );
     }
 }
