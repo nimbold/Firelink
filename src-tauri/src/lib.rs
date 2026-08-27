@@ -3662,6 +3662,22 @@ struct MainWindowRestoreState {
     startup_complete: AtomicBool,
 }
 
+fn startup_trace(marker: &str) {
+    if std::env::var_os("FIRELINK_SMOKE_TEST").is_some() {
+        eprintln!("[firelink-startup] {marker}");
+    }
+}
+
+static STARTUP_WINDOW_EVENT_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn startup_trace_window_event(label: &str) {
+    let count = STARTUP_WINDOW_EVENT_COUNT.fetch_add(1, Ordering::Relaxed);
+    if count < 64 {
+        startup_trace(label);
+    }
+}
+
 #[cfg(target_os = "macos")]
 const MAIN_WINDOW_MINIMIZE_MENU_ID: &str = "main_window_minimize";
 
@@ -18259,10 +18275,12 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .manage(Aria2DaemonGuard::new())
         .setup(move |app| {
+            startup_trace("setup:begin");
             let storage_layout = crate::storage::StorageLayout::resolve(
                 app.handle(),
                 setup_storage_mode.clone(),
             )?;
+            startup_trace("setup:storage");
             let main_window_config = app
                 .config()
                 .app
@@ -18280,6 +18298,7 @@ pub fn run() {
                 main_window_builder =
                     main_window_builder.data_directory(storage_layout.webview_dir().to_path_buf());
             }
+            startup_trace("setup:window-builder");
 
             let mut sys = sysinfo::System::new_all();
             sys.refresh_all();
@@ -18293,6 +18312,7 @@ pub fn run() {
             log::info!("==========================");
             build_main_tray(app.handle())
                 .map_err(|error| format!("failed to create tray menu: {error}"))?;
+            startup_trace("setup:tray");
             #[cfg(target_os = "macos")]
             {
                 use tauri::menu::{MenuItem, WINDOW_SUBMENU_ID};
@@ -18345,6 +18365,7 @@ pub fn run() {
             // malformed or interrupted transaction cannot reach a missing
             // Tauri state entry at startup.
             app.manage(database);
+            startup_trace("setup:database");
             if let Err(error) = recover_torrent_move_journals(
                 app.handle(),
                 &*app.state::<crate::db::DbState>(),
@@ -18358,6 +18379,7 @@ pub fn run() {
             ) {
                 log::warn!("Download replacement recovery did not complete: {error}");
             }
+            startup_trace("setup:recovery");
             // Establish Firelink-owned Aria2 routing-table paths after the
             // existing data-root initializer has created the selected storage
             // directory, but before the daemon launcher is scheduled. A
@@ -18419,6 +18441,7 @@ pub fn run() {
                     log::warn!("could not identify retained torrent metadata: {error}");
                 }
             }
+            startup_trace("setup:torrent-cache");
             let initial_pairing_token = {
                 // Generate a temporary session token for the extension server on startup.
                 // The frontend will hydrate the real token via IPC once it mounts,
@@ -18515,10 +18538,12 @@ pub fn run() {
                 scheduler_settings: Arc::clone(&scheduler_settings),
                 queue_manager,
             });
+            startup_trace("setup:app-state");
 
             if let Err(error) = power_manager.activate() {
                 log::error!("power: failed to activate backend power management: {error}");
             }
+            startup_trace("setup:power");
 
             // Build the window only after all command state is registered. This
             // prevents the frontend from racing startup and invoking IPC before
@@ -18564,7 +18589,9 @@ pub fn run() {
             main_window_builder
                 .build()
                 .map_err(|error| format!("failed to create main window: {error}"))?;
+            startup_trace("setup:window-built");
             restore_pending_main_window(app.handle());
+            startup_trace("setup:pending-window-restored");
 
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             dispatch_opened_torrent_paths(
@@ -18585,7 +18612,9 @@ pub fn run() {
                 Ok(None) => {}
                 Err(error) => eprintln!("Failed to read startup deep link: {error}"),
             }
+            startup_trace("setup:deep-link");
             crate::scheduler::spawn_scheduler(app.handle().clone(), scheduler_settings);
+            startup_trace("setup:scheduler");
 
             let global_speed_limit = persisted_settings
                 .as_ref()
@@ -18628,10 +18657,12 @@ pub fn run() {
             let aria2_secret_clone = aria2_secret.clone();
             let app_handle_bg = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                startup_trace("aria2-task:begin");
 
                 let mut ws_port = 6800;
                 match resolve_bundled_binary_path(&app_handle_bg, "aria2c") {
                     Ok(binary_path) => {
+                        startup_trace("aria2-task:binary");
                         let mut success = false;
                         let mut attempted_rpc_port = false;
                         let mut startup_failure = None;
@@ -18725,6 +18756,7 @@ pub fn run() {
 
                             match cmd.spawn() {
                                 Ok(mut child) => {
+                                    startup_trace("aria2-task:spawned");
                                     // Give it a moment to fail if port is in use
                                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                                     if let Ok(Some(status)) = child.try_wait() {
@@ -18814,6 +18846,7 @@ pub fn run() {
                                                     attempt_port,
                                                     async_dns_supported
                                                 );
+                                                startup_trace("aria2-task:ready");
                                                 ready = true;
                                                 break;
                                             }
@@ -18866,8 +18899,10 @@ pub fn run() {
                         ws_retries = 0;
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    startup_trace("aria2-task:websocket-attempt");
                     let ws_url = format!("ws://127.0.0.1:{}/jsonrpc", ws_port);
                     if let Ok((ws_stream, _)) = tokio_tungstenite::connect_async(&ws_url).await {
+                        startup_trace("aria2-task:websocket-connected");
                         ws_retries = 0; // reset on success
                         if let Ok(mut startup_error) = app_handle_bg
                             .state::<Aria2DaemonGuard>()
@@ -18881,6 +18916,7 @@ pub fn run() {
                             }
                         }
                         reconcile_aria2_downloads(&app_handle_bg).await;
+                        startup_trace("aria2-task:reconciled");
                         use futures_util::StreamExt;
                         let (_, mut read) = ws_stream.split();
                         while let Some(msg) = read.next().await {
@@ -19007,6 +19043,7 @@ pub fn run() {
             let poll_secret = aria2_secret.clone();
             let poll_mgr = Arc::clone(&queue_manager_poll);
             tauri::async_runtime::spawn(async move {
+                startup_trace("poller:begin");
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(1000));
                 let mut observations: HashMap<String, Aria2ConnectionObservation> = HashMap::new();
                 let mut missing_gid_recovery_at: HashMap<String, Instant> = HashMap::new();
@@ -19018,6 +19055,7 @@ pub fn run() {
                 let mut relocation_checks = HashSet::new();
                 loop {
                     interval.tick().await;
+                    startup_trace("poller:tick");
                     // Terminal cleanup removes a download's GID mapping. Do
                     // not retain one observation per historical download for
                     // the lifetime of the poller.
@@ -19065,9 +19103,11 @@ pub fn run() {
                                     .unwrap_or_else(|| "none".to_string()),
                                 active_poll_started.elapsed().as_millis()
                             );
+                            startup_trace("poller:rpc-failed");
                             continue;
                         }
                     };
+                    startup_trace("poller:rpc-ok");
                     if let Some(active_arr) = active_list.as_array() {
                             let mut seen_ids = HashSet::new();
                             let mut seen_gids = HashSet::new();
@@ -19747,6 +19787,7 @@ pub fn run() {
 
             let ext_app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                startup_trace("extension-task:begin");
                 while let Err(error) = extension_server::start_server(
                     ext_app_handle.clone(),
                     server_pairing_token.clone(),
@@ -19759,6 +19800,7 @@ pub fn run() {
                     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 }
             });
+            startup_trace("setup:tasks-started");
             Ok(())
         })
         .plugin(
@@ -19805,6 +19847,9 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .on_window_event(|window, event| {
+            if window.label() == "main" {
+                startup_trace_window_event("window-event:main");
+            }
             if properties_window::is_properties_window_label(window.label()) {
                 let resize = match event {
                     tauri::WindowEvent::Resized(size) => {
@@ -19897,11 +19942,13 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| match event {
             tauri::RunEvent::Ready => {
+                startup_trace("run-event:ready-begin");
                 mark_main_window_startup_complete(app_handle);
                 #[cfg(target_os = "windows")]
                 reveal_main_window(app_handle);
                 #[cfg(not(target_os = "windows"))]
                 restore_pending_main_window(app_handle);
+                startup_trace("run-event:ready-end");
             }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Opened { urls } => {
