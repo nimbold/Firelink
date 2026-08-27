@@ -17,6 +17,12 @@ if (!executableArg) {
 const executable = path.resolve(executableArg);
 const assertNoVisibleChildWindows = process.argv.includes('--assert-no-visible-child-windows');
 const assertPortableData = process.argv.includes('--assert-portable-data');
+const MAX_STABILITY_MS = 60_000;
+const MAX_CONSECUTIVE_STABILITY_FAILURES = 3;
+const stabilityMsValue = Number.parseInt(argValue('--stability-ms') || '5000', 10);
+const stabilityMs = Number.isFinite(stabilityMsValue) && stabilityMsValue >= 0
+  ? Math.min(stabilityMsValue, MAX_STABILITY_MS)
+  : 5000;
 const READY_PORT_TIMEOUT_MS = 500;
 const child = spawn(executable, [], {
   cwd: process.env.RUNNER_TEMP || process.env.TMPDIR || process.cwd(),
@@ -80,6 +86,55 @@ async function findReadyPort() {
     if (readyPort === null) {
       await sleep(250);
     }
+  }
+}
+
+async function checkReadyPort() {
+  if (readyPort === null) return false;
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${readyPort}/ping`, {
+      signal: AbortSignal.timeout(READY_PORT_TIMEOUT_MS),
+    });
+    const matchesChild = response.headers.get('x-firelink-server') === '1'
+      && response.headers.get('x-firelink-smoke-process-id') === String(child.pid);
+    await response.body?.cancel();
+    return matchesChild;
+  } catch {
+    return false;
+  }
+}
+
+async function assertStableReady() {
+  const deadline = Date.now() + stabilityMs;
+  let consecutiveFailures = 0;
+  while (Date.now() < deadline) {
+    if (spawnError) {
+      throw new Error(`Packaged Firelink failed during stability check: ${spawnError.message}`);
+    }
+    if (childExit) {
+      throw new Error(
+        `Packaged Firelink exited during stability check with code ${childExit.code} signal ${childExit.signal}.`,
+      );
+    }
+    if (await checkReadyPort()) {
+      consecutiveFailures = 0;
+    } else {
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_STABILITY_FAILURES) {
+        throw new Error('Packaged Firelink stopped exposing its extension ping endpoint during stability check.');
+      }
+    }
+    await sleep(Math.min(250, Math.max(1, deadline - Date.now())));
+  }
+
+  if (childExit) {
+    throw new Error(
+      `Packaged Firelink exited during stability check with code ${childExit.code} signal ${childExit.signal}.`,
+    );
+  }
+  if (!await checkReadyPort() && !await checkReadyPort()) {
+    throw new Error('Packaged Firelink was not healthy at the end of its stability check.');
   }
 }
 
@@ -338,11 +393,9 @@ try {
     await assertPortableStorage();
   }
 
-  if (childExit) {
-    throw new Error(`Packaged Firelink exited after exposing extension ping endpoint with code ${childExit.code} signal ${childExit.signal}.`);
-  }
+  await assertStableReady();
 
-  console.log(`Packaged Firelink smoke passed on 127.0.0.1:${readyPort}`);
+  console.log(`Packaged Firelink smoke passed on 127.0.0.1:${readyPort} with ${stabilityMs}ms stability`);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
