@@ -3993,6 +3993,18 @@ fn mark_main_window_startup_complete(app_handle: &tauri::AppHandle) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn reveal_main_window(app_handle: &tauri::AppHandle) {
+    if let Some(window) = app_handle.get_webview_window("main") {
+        if let Err(error) = window.set_focusable(true) {
+            log::warn!("Could not make the main window focusable: {error}");
+        }
+        if let Err(error) = window.show() {
+            eprintln!("Failed to reveal the main window: {error}");
+        }
+    }
+}
+
 fn restore_pending_main_window(app_handle: &tauri::AppHandle) {
     if app_handle
         .try_state::<MainWindowRestoreState>()
@@ -18541,10 +18553,13 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             {
                 // Wry installs its parent WM_SETFOCUS handler while WebView2
-                // is still being initialized. Keep the host unfocused and
-                // hidden until RunEvent::Ready so Windows cannot re-enter that
-                // handler during native construction.
-                main_window_builder = main_window_builder.visible(false).focused(false);
+                // is still being initialized. Keep the host hidden and
+                // non-activatable until RunEvent::Ready so Windows cannot
+                // re-enter that handler during native construction.
+                main_window_builder = main_window_builder
+                    .visible(false)
+                    .focused(false)
+                    .focusable(false);
             }
             main_window_builder
                 .build()
@@ -19883,10 +19898,10 @@ pub fn run() {
         .run(|app_handle, event| match event {
             tauri::RunEvent::Ready => {
                 mark_main_window_startup_complete(app_handle);
-                if let Some(state) = app_handle.try_state::<MainWindowRestoreState>() {
-                    state.requested.swap(false, Ordering::AcqRel);
-                }
-                restore_main_window(app_handle);
+                #[cfg(target_os = "windows")]
+                reveal_main_window(app_handle);
+                #[cfg(not(target_os = "windows"))]
+                restore_pending_main_window(app_handle);
             }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Opened { urls } => {
