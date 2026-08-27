@@ -78,12 +78,11 @@ const PropertiesStartupFailure = () => (
 const renderMainApp = async () => {
   if (!rootElement) return;
 
-  // Keep the child entrypoint isolated from the main application module. App
-  // imports the persistent Zustand stores, whose module initialization issues
-  // main-window-only IPC commands. Loading it in a Properties child creates a
-  // second persistence owner and can race the bridge handshake.
-  const RootComponent = (await import('./App')).default;
-  renderRoot(RootComponent);
+  // Diagnostic control for Issue #37: keep the native shell and extension
+  // server alive without loading the application renderer or its startup
+  // effects. This branch is used only to separate renderer startup from the
+  // native delayed-crash path.
+  renderRoot(() => <div data-firelink-startup-control="renderer" />);
 };
 
 const renderPropertiesApp = async () => {
