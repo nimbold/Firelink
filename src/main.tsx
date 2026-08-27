@@ -1,6 +1,6 @@
-import { initLogger } from "./utils/logger";
+import { invoke } from "@tauri-apps/api/core";
 
-void initLogger();
+void invoke<number>("begin_dock_badge_session");
 
 const rootElement = document.getElementById("root");
 if (rootElement) {
