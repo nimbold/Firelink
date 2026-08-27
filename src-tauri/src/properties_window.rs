@@ -25,6 +25,7 @@ const PROPERTIES_SESSION_HISTORY_EXHAUSTED: &str =
 #[derive(Default)]
 pub struct PropertiesWindowRegistry {
     state: Mutex<RegistryState>,
+    window_creation: tokio::sync::Mutex<()>,
 }
 
 #[derive(Default)]
@@ -63,6 +64,10 @@ struct PropertiesWindowActionEvent {
 }
 
 impl PropertiesWindowRegistry {
+    async fn lock_window_creation(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.window_creation.lock().await
+    }
+
     pub(crate) fn remember_size(
         &self,
         window_label: &str,
@@ -394,13 +399,18 @@ fn validate_properties_request_id(request_id: u64) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn open_download_properties_window(
+pub async fn open_download_properties_window(
     app: tauri::AppHandle,
     caller: tauri::WebviewWindow,
     db: tauri::State<'_, crate::db::DbState>,
     registry: tauri::State<'_, PropertiesWindowRegistry>,
     id: String,
 ) -> Result<String, String> {
+    // WebviewWindowBuilder::build can deadlock on Windows when it runs in a
+    // synchronous command or event handler because WebView2 initialization
+    // needs the native event loop to keep pumping. This command is async so
+    // Tauri executes the blocking construction away from the renderer/native
+    // command callback that initiated it.
     if caller.label() != MAIN_WINDOW_LABEL {
         return Err("Only the main window can open Properties windows".to_string());
     }
@@ -409,6 +419,11 @@ pub fn open_download_properties_window(
         return Err("Download no longer exists".to_string());
     }
 
+    // Async command invocations can overlap before Tauri registers a newly
+    // created native window. Serialize the lookup/build/cleanup transaction
+    // so a duplicate request cannot remove the registry entry of the request
+    // that successfully created the window.
+    let _window_creation_guard = registry.lock_window_creation().await;
     let label = registry.allocate(&id)?;
     if let Some(window) = app.get_webview_window(&label) {
         // Visibility belongs to the native window owner, not to the renderer
@@ -445,10 +460,9 @@ pub fn open_download_properties_window(
     let builder = builder.decorations(false);
     let build_result = builder.build();
     if let Err(error) = build_result {
-        // Two rapid main-window requests can race between the native lookup
-        // above and builder creation. If the first request won, retain the
-        // registry entry and focus its window instead of treating the second
-        // request as a failed open.
+        // The native builder can report an error after registering a window.
+        // Prefer that registered native owner over discarding its registry
+        // entry and leaving the child inaccessible.
         if let Some(window) = app.get_webview_window(&label) {
             let _ = window.unminimize();
             let _ = window.show();
@@ -590,12 +604,13 @@ pub fn validate_properties_window_request(
 }
 
 #[tauri::command]
-pub fn close_download_properties_window(
+pub async fn close_download_properties_window(
     caller: tauri::WebviewWindow,
     app: tauri::AppHandle,
     registry: tauri::State<'_, PropertiesWindowRegistry>,
     id: String,
 ) -> Result<(), String> {
+    let _window_creation_guard = registry.lock_window_creation().await;
     let label = caller.label();
     let registered_id = if label == MAIN_WINDOW_LABEL {
         registry.window_for_download(&id)?.map(|_| id.clone())
@@ -621,7 +636,7 @@ pub fn close_download_properties_window(
 }
 
 #[tauri::command]
-pub fn properties_window_registry_remove_for_download(
+pub async fn properties_window_registry_remove_for_download(
     caller: tauri::WebviewWindow,
     app: tauri::AppHandle,
     registry: tauri::State<'_, PropertiesWindowRegistry>,
@@ -630,6 +645,7 @@ pub fn properties_window_registry_remove_for_download(
     if caller.label() != MAIN_WINDOW_LABEL {
         return Err("Only the main window can remove a Properties window".to_string());
     }
+    let _window_creation_guard = registry.lock_window_creation().await;
     if let Some(label) = registry.remove_download(&id)? {
         if let Some(window) = app.get_webview_window(&label) {
             // This command is used after the download has already been
@@ -670,6 +686,17 @@ mod tests {
         assert_eq!(registry.download_for_window(&first).unwrap(), None);
         assert!(!registry.is_ready(&first).unwrap());
         assert_ne!(registry.allocate("download-a").unwrap(), first);
+    }
+
+    #[tokio::test]
+    async fn window_creation_lock_is_exclusive() {
+        let registry = PropertiesWindowRegistry::default();
+        let guard = registry.lock_window_creation().await;
+
+        assert!(registry.window_creation.try_lock().is_err());
+
+        drop(guard);
+        assert!(registry.window_creation.try_lock().is_ok());
     }
 
     #[test]
