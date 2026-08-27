@@ -18854,6 +18854,9 @@ pub fn run() {
                     }
                 }
 
+                if std::env::var_os("FIRELINK_DISABLE_ARIA2_WEBSOCKET").is_some() {
+                    return;
+                }
                 let mut ws_retries = 0;
                 loop {
                     if ws_retries == 10 {
