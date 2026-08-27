@@ -10,13 +10,11 @@ import "./index.css";
 import { i18nReady } from "./i18n";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ToastProvider } from "./contexts/ToastContext";
-import { error as logError, warn as logWarn, initLogger } from "./utils/logger";
+import { error as logError, warn as logWarn } from "./utils/logger";
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invokeCommand as invoke } from './ipc';
 
 const isPropertiesWindow = getCurrentWindow().label.startsWith('properties-');
-
-void initLogger();
 
 const serializeConsoleArguments = (values: unknown[]) => values.map(value => {
   if (value instanceof Error) return `${value.name}: ${value.message}\n${value.stack || ''}`;
