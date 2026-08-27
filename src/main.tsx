@@ -22,11 +22,18 @@ const isPropertiesWindow = getCurrentWindow().label.startsWith('properties-');
 // also needed for Zustand persistence, whose module initialization reads the
 // native database before React mounts.
 const documentLoaded = new Promise<void>((resolve) => {
+  const releaseAfterNativeLoad = () => {
+    // The load event is dispatched from WebView2's navigation callback. Move
+    // renderer startup to the next task so its first IPC cannot re-enter that
+    // native callback stack.
+    window.setTimeout(resolve, 0);
+  };
+
   if (document.readyState === 'complete') {
-    resolve();
+    releaseAfterNativeLoad();
     return;
   }
-  window.addEventListener('load', () => resolve(), { once: true });
+  window.addEventListener('load', releaseAfterNativeLoad, { once: true });
 });
 
 void documentLoaded.then(() => {
