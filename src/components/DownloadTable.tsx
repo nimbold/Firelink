@@ -6,7 +6,7 @@ import { useToast } from '../contexts/ToastContext';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { SidebarFilter } from './Sidebar';
 import {
-  Play, Pause, Plus, FileText, Image as ImageIcon, Music, Film, Box, Archive, FileQuestion, Magnet,
+  Play, Pause, Plus, FileText, Image as ImageIcon, Music, Film, Box, Archive, FileQuestion,
   ArrowDownCircle, ArrowUp, ArrowDown, Command, ChevronUp, ChevronDown, MoreHorizontal,
   AlignLeft, AlignCenter, AlignRight, GripVertical
 } from 'lucide-react';
@@ -25,7 +25,6 @@ import {
 import { isActiveDownloadStatus, isTransferActiveStatus } from '../utils/downloads';
 import { summarizeDownloads, type DownloadSummary } from '../utils/downloadSummary';
 import { readClipboardDownloadUrls } from '../utils/clipboard';
-import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import { useTranslation } from 'react-i18next';
 import {
   sortDownloads,
@@ -53,11 +52,9 @@ import {
 import {
   moveSelectedBlockToIndex
 } from '../utils/queueOrdering';
-import { selectContextMenuTarget, updateDownloadSelection } from '../utils/downloadSelection';
-import { createColumnResizeSession } from '../utils/columnResize';
+import { updateDownloadSelection } from '../utils/downloadSelection';
 import { clampFloatingPosition } from '../utils/floatingPosition';
 import { FloatingQueueSubmenu } from './FloatingQueueSubmenu';
-import { openPropertiesWindow } from '../propertiesBridge';
 
 export interface DownloadTableStatusSummary {
   summary: DownloadSummary;
@@ -162,8 +159,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     moveManyInQueueToPosition,
     startAll,
     pauseAll,
-    startSelected,
-    allocationPendingIds
+    startSelected
   } = useDownloadStore();
   const progressMap = useDownloadProgressStore(state => state.progressMap);
   const { addToast } = useToast();
@@ -672,27 +668,33 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     const startX = event.clientX;
     const startWidth = columnWidthsRef.current[index];
 
-    const cleanup = createColumnResizeSession({
-      windowTarget: window,
-      documentTarget: document,
-      body: document.body,
-      pointerId: event.pointerId,
-      startX,
-      startWidth,
-      minWidth: COLUMN_MINIMUMS[index],
-      onWidth: nextWidth => {
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const nextWidth = Math.max(COLUMN_MINIMUMS[index], startWidth + moveEvent.clientX - startX);
       const nextWidths = columnWidthsRef.current.map((width, columnIndex) =>
         columnIndex === index ? nextWidth : width
       );
       columnWidthsRef.current = nextWidths;
       setColumnWidths(nextWidths);
-      },
-      onEnd: () => {
-        persistColumnWidths(columnWidthsRef.current);
-        resizeCleanupRef.current = null;
-      },
-    });
-    resizeCleanupRef.current = cleanup;
+    };
+
+    const handlePointerUp = () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
+      window.removeEventListener('blur', handlePointerUp);
+      document.removeEventListener('visibilitychange', handlePointerUp);
+      persistColumnWidths(columnWidthsRef.current);
+      document.body.classList.remove('is-column-resizing');
+      resizeCleanupRef.current = null;
+    };
+
+    resizeCleanupRef.current = handlePointerUp;
+    document.body.classList.add('is-column-resizing');
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerUp);
+    window.addEventListener('blur', handlePointerUp);
+    document.addEventListener('visibilitychange', handlePointerUp);
   };
 
   const clampMenuPosition = useCallback((x: number, y: number, menuWidth: number, menuHeight: number) => {
@@ -1330,9 +1332,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
         finishQueueDrag(true);
       }
     };
-    const lostPointerCapture = (event: Event) => {
-      if ((event as PointerEvent).pointerId === pointerId) finishQueueDrag(true);
-    };
+    const lostPointerCapture = () => finishQueueDrag(true);
     const cancel = () => finishQueueDrag(true);
     window.addEventListener('pointermove', pointerMove);
     window.addEventListener('pointerup', pointerUp);
@@ -1365,14 +1365,6 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   }, []);
 
   const getDownloadPath = useCallback(async (item: DownloadItem) => {
-    if (item.isTorrent) {
-      try {
-        const ownedPath = await invoke('get_download_primary_path', { id: item.id });
-        if (ownedPath) return ownedPath;
-      } catch (error) {
-        console.error("Failed to resolve torrent output path:", error);
-      }
-    }
     const fileName = item.fileName?.trim();
     if (!fileName) return null;
     const settings = useSettingsStore.getState();
@@ -1382,38 +1374,12 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   }, []);
 
   const openProperties = useCallback((id: string) => {
-    void openPropertiesWindow(id).catch(error => {
-      showInteractionError(t($ => $.downloadTable.interactionError, {
-        message: t($ => $.downloadTable.properties),
-        detail: error instanceof Error ? error.message : String(error)
-      }), error);
-    });
-  }, [showInteractionError, t]);
-
-  const revealDownloadFile = useCallback(async (item: DownloadItem) => {
-    const pathToReveal = await getDownloadPath(item);
-
-    if (!pathToReveal) {
-      openProperties(item.id);
-      return;
-    }
-
-    try {
-      await invoke('reveal_in_file_manager', { path: pathToReveal });
-    } catch (error) {
-      console.error("Failed to show in Finder:", error);
-      showInteractionError(t($ => $.downloadTable.revealFileFailed), error);
-    }
-  }, [getDownloadPath, openProperties, showInteractionError]);
+    useDownloadStore.getState().setSelectedPropertiesDownloadId(id);
+  }, []);
 
   const openDownloadFile = useCallback(async (item: DownloadItem) => {
     if (item.status !== 'completed') {
       openProperties(item.id);
-      return;
-    }
-
-    if (item.isTorrent) {
-      await revealDownloadFile(item);
       return;
     }
 
@@ -1429,7 +1395,23 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       console.error("Failed to open file:", error);
       showInteractionError(t($ => $.downloadTable.openFileFailed), error);
     }
-  }, [getDownloadPath, openProperties, revealDownloadFile, showInteractionError]);
+  }, [getDownloadPath, openProperties, showInteractionError]);
+
+  const revealDownloadFile = async (item: DownloadItem) => {
+    const pathToReveal = await getDownloadPath(item);
+
+    if (!pathToReveal) {
+      openProperties(item.id);
+      return;
+    }
+
+    try {
+      await invoke('reveal_in_file_manager', { path: pathToReveal });
+    } catch (error) {
+      console.error("Failed to show in Finder:", error);
+      showInteractionError(t($ => $.downloadTable.revealFileFailed), error);
+    }
+  };
 
   const handleDownloadDoubleClick = useCallback((item: DownloadItem) => {
     if (item.status === 'completed') {
@@ -1776,13 +1758,10 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   }, [clearQueueClickSuppression, handleDownloadDoubleClick]);
 
   const handleContextMenu = useCallback((menu: { x: number; y: number; id: string }) => {
-    const nextSelection = selectContextMenuTarget({
-      selectedIds: selectedIdsRef.current,
-      lastSelectedId: lastSelectedIdRef.current,
-      targetId: menu.id,
-    });
-    setSelectedIds(nextSelection.selectedIds);
-    setLastSelectedId(nextSelection.lastSelectedId);
+    if (!selectedIdsRef.current.has(menu.id)) {
+      setSelectedIds(new Set([menu.id]));
+      setLastSelectedId(menu.id);
+    }
     setColumnMenu(null);
     const position = clampMenuPosition(menu.x, menu.y, 200, 300);
     setContextMenuPosition(position);
@@ -1851,7 +1830,6 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       case 'Documents': return t($ => $.navigation.categories.documents);
       case 'Pictures': return t($ => $.navigation.categories.pictures);
       case 'Applications': return t($ => $.navigation.categories.applications);
-      case 'Torrents': return t($ => $.navigation.categories.torrents);
       case 'Other': return t($ => $.navigation.categories.other);
       default: return filter;
     }
@@ -1876,28 +1854,15 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
 
   const handleResume = useCallback(async (item: DownloadItem) => {
     try {
-      const current = useDownloadStore.getState().downloads.find(download => download.id === item.id);
-      if (!current) return;
-      let resumeWithoutCredentials = false;
-      if (current.credentialsRequired === true) {
-        resumeWithoutCredentials = window.confirm(t($ => $.properties.resumeWithoutCredentialsConfirm));
-        if (!resumeWithoutCredentials) return;
-      }
-      const resumed = await useDownloadStore.getState().resumeDownload(item.id, {
-        resumeWithoutCredentials
-      });
+      const resumed = await useDownloadStore.getState().resumeDownload(item.id);
       if (!resumed) {
-        const latest = useDownloadStore.getState().downloads.find(
-          download => download.id === item.id
-        );
-        const reason = latest?.lastError?.trim();
-        throw new Error(reason || t($ => $.downloadTable.backendRejectedStart));
+        throw new Error(t($ => $.downloadTable.backendRejectedStart));
       }
     } catch (error) {
       console.error("Failed to resume:", error);
         showInteractionError(t($ => $.downloadTable.resumeFailed, { fileName: item.fileName }), error);
     }
-  }, [showInteractionError, t]);
+  }, [showInteractionError]);
 
   const getCurrentSelectedDownloads = useCallback(() => {
     const selected = selectedIdsRef.current;
@@ -1929,42 +1894,13 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   const handleResumeSelected = useCallback(() => {
     const ids = Array.from(selectedIdsRef.current);
     if (ids.length === 0) return;
-    const selected = useDownloadStore.getState().downloads.filter(download => ids.includes(download.id));
-    const credentialMarkedIds = selected
-      .filter(download => download.credentialsRequired === true && canStartDownload(download.status))
-      .map(download => download.id);
-    if (credentialMarkedIds.length > 0
-      && !window.confirm(t($ => $.properties.resumeWithoutCredentialsConfirm))) {
-      // Continue ordinary selected resumes. Credential-marked rows remain
-      // fail-closed and can be handled individually after the user supplies
-      // credentials or confirms a credentialless retry.
-      const credentialMarkedIdSet = new Set(credentialMarkedIds);
-      const ordinaryIds = ids.filter(id => !credentialMarkedIdSet.has(id));
-      if (ordinaryIds.length === 0) return;
-      void startSelected(ordinaryIds).catch(error => {
-        showInteractionError(t($ => $.downloadTable.resumeFailed), error);
-      });
-      return;
-    }
-    void startSelected(ids, {
-      resumeWithoutCredentialsIds: credentialMarkedIds
-    }).catch(error => {
+    void startSelected(ids).catch(error => {
       showInteractionError(t($ => $.downloadTable.resumeFailed), error);
     });
   }, [showInteractionError, startSelected, t]);
 
   const handleStartAll = useCallback(() => {
-    const credentialMarkedIds = useDownloadStore.getState().downloads
-      .filter(download =>
-        download.credentialsRequired === true
-        && (download.status === 'queued' || canStartDownload(download.status))
-      )
-      .map(download => download.id);
-    const resumeWithoutCredentials = credentialMarkedIds.length > 0
-      && window.confirm(t($ => $.properties.resumeWithoutCredentialsConfirm));
-    void startAll({
-      resumeWithoutCredentialsIds: resumeWithoutCredentials ? credentialMarkedIds : []
-    }).catch(error => {
+    void startAll().catch(error => {
       showInteractionError(t($ => $.downloadTable.resumeFailed), error);
     });
   }, [showInteractionError, startAll, t]);
@@ -2052,7 +1988,6 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
       case 'Applications': return <Box size={16} className="text-indigo-400" />;
       case 'Pictures': return <ImageIcon size={16} className="text-purple-400" />;
       case 'Compressed': return <Archive size={16} className="text-amber-600" />;
-      case 'Torrents': return <Magnet size={16} className="text-violet-400" />;
       case 'Other': return <FileQuestion size={16} className="text-gray-400" />;
       default: return <FileQuestion size={16} className="text-gray-400" />;
     }
@@ -2314,7 +2249,6 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
                       <DownloadItemComponent
                         key={d.id}
                         download={d}
-                        allocationPending={allocationPendingIds.has(d.id)}
                         queueIndex={queuePositionsByDownloadId.get(d.id)?.index ?? -1}
                         columnOrder={orderedColumns}
                         columnAlignments={columnAlignments}
@@ -2604,23 +2538,6 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
               >
                 {t($ => $.downloadTable.copyAddress)}
               </button>
-
-              {contextItem.isTorrent && (
-                <button
-                  onClick={async () => {
-                    setContextMenu(null);
-                    try {
-                      const magnet = await invoke('get_torrent_magnet_link', { id: contextItem.id });
-                      await writeClipboardText(magnet);
-                    } catch (error) {
-                      showInteractionError(t($ => $.downloadTable.copyMagnetFailed), error);
-                    }
-                  }}
-                  className="w-full text-left px-3 py-2 hover:bg-item-hover transition-colors"
-                >
-                  {t($ => $.downloadTable.copyMagnet)}
-                </button>
-              )}
 
               {contextItem.status === 'completed' && (
                 <button

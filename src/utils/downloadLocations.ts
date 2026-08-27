@@ -19,7 +19,6 @@ export const DOWNLOAD_CATEGORIES: DownloadCategory[] = [
   'Documents',
   'Pictures',
   'Applications',
-  'Torrents',
   'Other'
 ];
 
@@ -30,7 +29,6 @@ export const DEFAULT_CATEGORY_SUBFOLDERS: Record<DownloadCategory, string> = {
   Documents: 'Documents',
   Pictures: 'Pictures',
   Applications: 'Applications',
-  Torrents: 'Torrents',
   Other: 'Other'
 };
 
@@ -247,7 +245,6 @@ export const normalizeDownloadLocationSettings = (
     Documents: 'Documents',
     Pictures: 'Images',
     Applications: 'Apps',
-    Torrents: 'Torrents',
     Other: 'Other'
   };
 
@@ -307,14 +304,7 @@ export const downloadLocationEquals = (
   os: string
 ): boolean => {
   const normalize = (value: string) => {
-    const slashPath = value.replace(/\\/g, '/');
-    // Collapse redundant separators without destroying a Windows UNC prefix.
-    // Destination strings can come from legacy settings as well as the folder
-    // picker, so lexical equality must not miss the same filesystem target.
-    const leadingSeparators = slashPath.match(/^\/+/);
-    const leadingCount = leadingSeparators ? leadingSeparators[0].length : 0;
-    const prefix = os === 'windows' && leadingCount >= 2 ? '//' : leadingCount > 0 ? '/' : '';
-    const normalized = `${prefix}${slashPath.slice(leadingCount).replace(/\/{2,}/g, '/')}`.replace(/\/+$/, '');
+    const normalized = value.replace(/\\/g, '/').replace(/\/+$/, '');
     return os === 'windows'
       ? normalized.toLocaleLowerCase()
       : normalized;

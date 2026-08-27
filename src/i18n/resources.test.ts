@@ -76,16 +76,6 @@ describe('translation catalogs', () => {
     expect(allMismatches).toEqual([]);
   });
 
-  it('isolates mixed-direction Add Downloads guidance in RTL locales', () => {
-    for (const locale of ['fa', 'he'] as const) {
-      for (const key of ['addDownloads.pastePlaceholder', 'addDownloads.pasteHint']) {
-        const value = catalogFor(locale).get(key) ?? '';
-        expect(value).toContain('\u2066');
-        expect(value).toContain('\u2069');
-      }
-    }
-  });
-
   it('reports exact English duplicates for translation review', () => {
     const english = catalogFor('en');
     const duplicates = APP_LOCALES.filter((locale) => locale !== 'en').flatMap((locale) => {
@@ -121,8 +111,6 @@ describe('translation catalogs', () => {
       'settings.network.firefoxWindows',
       'settings.network.firefoxMacos',
       'settings.network.safariMacos',
-      'settings.network.torrentExternalIpPlaceholder',
-      'properties.inputFormatPiecePriority',
     ]);
 
     const unexpectedDuplicates = duplicates

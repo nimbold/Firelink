@@ -6,8 +6,7 @@ use ts_rs::TS;
 use crate::ipc::DownloadCategory;
 
 #[tauri::command]
-pub async fn get_system_proxy(caller: tauri::WebviewWindow) -> Result<Option<String>, String> {
-    crate::properties_window::ensure_main_window(&caller)?;
+pub async fn get_system_proxy() -> Result<Option<String>, String> {
     match native_system_proxy() {
         Ok(Some(proxy)) => Ok(Some(proxy)),
         Ok(None) => Ok(proxy_from_environment()),
@@ -486,9 +485,7 @@ pub fn get_file_category(filename: String) -> DownloadCategory {
         "run", "sh", "bin", "jar",
     ];
 
-    if ext == "torrent" {
-        DownloadCategory::Torrents
-    } else if music_exts.contains(&ext.as_str()) {
+    if music_exts.contains(&ext.as_str()) {
         DownloadCategory::Musics
     } else if movie_exts.contains(&ext.as_str()) {
         DownloadCategory::Movies
@@ -542,10 +539,8 @@ struct GitHubRelease {
 
 #[tauri::command]
 pub async fn check_for_updates(
-    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
 ) -> Result<ReleaseCheckOutcome, String> {
-    crate::properties_window::ensure_main_window(&caller)?;
     let current_version = app_handle.package_info().version.to_string();
 
     crate::ensure_reqwest_crypto_provider();
@@ -611,12 +606,10 @@ fn cmp_versions(a: &str, b: &str) -> std::cmp::Ordering {
 
 #[tauri::command]
 pub async fn create_category_directories(
-    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     base_folder: String,
     subfolders: std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
-    crate::properties_window::ensure_main_window(&caller)?;
     let base = crate::resolve_path(&base_folder, &app_handle);
     let mut errors = Vec::new();
 
@@ -690,22 +683,4 @@ pub fn is_supported_media(url: String) -> bool {
         }
     }
     false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::get_file_category;
-    use crate::ipc::DownloadCategory;
-
-    #[test]
-    fn classifies_torrent_files_as_torrents() {
-        assert!(matches!(
-            get_file_category("Example.TORRENT".to_string()),
-            DownloadCategory::Torrents
-        ));
-        assert!(matches!(
-            get_file_category("Example.mkv".to_string()),
-            DownloadCategory::Movies
-        ));
-    }
 }

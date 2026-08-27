@@ -9,12 +9,11 @@ import {
 import { useSettingsStore } from '../store/useSettingsStore';
 import type { DownloadItem } from '../bindings/DownloadItem';
 import type { MediaPlaylistMetadata } from '../bindings/MediaPlaylistMetadata';
-import { FolderPlus, Save, Settings, Shield, RefreshCw, FileText, HardDrive, Database, Link, ArrowRight, Play, ChevronDown, ChevronRight, Video, Film, Music, Copy, type LucideIcon } from 'lucide-react';
+import { FolderPlus, Save, Settings, Shield, RefreshCw, FileText, HardDrive, Database, Link, ArrowRight, Play, ChevronDown, ChevronRight, Video, Film, Music, type LucideIcon } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
-import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import { invokeCommand as invoke } from '../ipc';
 import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResolutionModal';
-import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, headerNameHasCredentialMaterial, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, MAX_TORRENT_TRACKER_INTERVAL, MAX_TORRENT_TRACKER_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentWebSeedDrafts, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, serializeTorrentPreviewPriority, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type TorrentEncryptionPolicy, type TorrentFileAllocation } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch } from '../utils/downloads';
 import { fetchMediaMetadataDeduped, fetchMediaPlaylistMetadataDeduped } from '../utils/mediaMetadata';
 import {
   expandTilde,
@@ -47,18 +46,12 @@ import {
   playlistFilePrefix,
   reconcileDownloadRows,
   refreshFailedMetadataRows,
-  isMagnetUrl,
-  isAddDownloadMetadataLoading,
-  isAddDownloadMetadataError,
-  isMetadataRefreshableRow,
   selectExactMediaSelection,
   updateRowIfCurrent,
   type AddDownloadDraftRow,
   type MediaSelection
 } from '../utils/addDownloadMetadata';
 import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
-import { TorrentWebSeedEditor } from './TorrentWebSeedEditor';
-import { copyTorrentFilePath as writeTorrentFilePath } from '../utils/torrentFilePath';
 
 const formatBytes = (bytes: number) => {
   const k = 1024;
@@ -68,12 +61,10 @@ const formatBytes = (bytes: number) => {
 };
 
 const normalizeComparableUrl = (rawUrl: string) => {
-  const trimmed = rawUrl.trim();
-  if (trimmed.startsWith('/') || /^[a-z]:[\\/]/i.test(trimmed)) return trimmed;
   try {
-    return new URL(trimmed).href;
+    return new URL(rawUrl).href;
   } catch {
-    return trimmed;
+    return rawUrl.trim();
   }
 };
 
@@ -128,12 +119,12 @@ const extensionHeaders = (context: PendingAddRequestContext | undefined) => [
   context?.referer ? `Referer: ${context.referer.replace(/[\r\n]/g, '')}` : '',
   context?.media
     ? (context.headers || '')
-      .split(/\r?\n/)
-      .filter(line => {
-        const separator = line.indexOf(':');
-        return separator > 0 && !headerNameHasCredentialMaterial(line.slice(0, separator));
-      })
-      .join('\n')
+        .split(/\r?\n/)
+        .filter(line => {
+          const separator = line.indexOf(':');
+          return separator < 0 || line.slice(0, separator).trim().toLowerCase() !== 'cookie';
+        })
+        .join('\n')
     : context?.headers
 ].filter(Boolean).join('\n');
 
@@ -149,7 +140,6 @@ export const AddDownloadsModal = () => {
     pendingAddHeaders,
     pendingAddCookies,
     pendingAddMediaUrls,
-    pendingAddTorrentUrls,
     pendingAddBatchName,
     pendingAddRequestContexts,
     pendingAddRequestVersion,
@@ -170,58 +160,10 @@ export const AddDownloadsModal = () => {
   const [urls, setUrls] = useState('');
   const [selectedItemIndex, setSelectedItemIndex] = useState<number | null>(null);
   const [parsedItems, setParsedItems] = useState<AddDownloadDraftRow[]>([]);
-  const [metadataSchedulerRevision, setMetadataSchedulerRevision] = useState(0);
-  const parsedItemsRef = useRef<AddDownloadDraftRow[]>([]);
-  const addModalOpenRef = useRef(isAddModalOpen);
   const metadataRequestsRef = useRef(new Set<string>());
-  const magnetMetadataRequestsRef = useRef(new Set<string>());
   const playlistRequestsRef = useRef(new Set<string>());
   const latestPlaylistRequestRef = useRef(new Map<string, string>());
-  const cachedTorrentDraftIdsRef = useRef(new Set<string>());
   const [playlistExpansions, setPlaylistExpansions] = useState<Record<string, MediaPlaylistMetadata>>({});
-
-  parsedItemsRef.current = parsedItems;
-  addModalOpenRef.current = isAddModalOpen;
-
-  const cleanupDraftTorrentCache = useCallback((ids?: Iterable<string>) => {
-    const idsToRemove = ids
-      ? Array.from(ids)
-      : Array.from(cachedTorrentDraftIdsRef.current);
-    idsToRemove.forEach(id => cachedTorrentDraftIdsRef.current.delete(id));
-    idsToRemove.forEach(id => {
-      void invoke('remove_torrent_metadata', { id }).catch(error => {
-        console.warn('Failed to remove temporary torrent metadata:', error);
-      });
-    });
-  }, []);
-
-  const copyTorrentFilePath = useCallback(async (path: string) => {
-    try {
-      await writeTorrentFilePath(path, writeClipboardText);
-      addToast({ message: t($ => $.logs.copied), variant: 'success' });
-    } catch (error) {
-      console.warn('Failed to copy Torrent file path:', error);
-      addToast({ message: t($ => $.downloadTable.copyPathFailed), variant: 'error', isActionable: true });
-    }
-  }, [addToast, t]);
-
-  useEffect(() => {
-    if (!isAddModalOpen) cleanupDraftTorrentCache();
-  }, [cleanupDraftTorrentCache, isAddModalOpen]);
-
-  useEffect(() => {
-    const activeDraftIds = new Set<string>();
-    for (const row of parsedItems) {
-      if (!row.isTorrent) continue;
-      activeDraftIds.add(row.torrentCacheId || row.id);
-      activeDraftIds.add(`${row.id}-${row.generation}`);
-    }
-    const staleDraftIds = Array.from(cachedTorrentDraftIdsRef.current)
-      .filter(id => !activeDraftIds.has(id));
-    if (staleDraftIds.length > 0) cleanupDraftTorrentCache(staleDraftIds);
-  }, [cleanupDraftTorrentCache, parsedItems]);
-
-  useEffect(() => cleanupDraftTorrentCache, [cleanupDraftTorrentCache]);
 
   const [conflicts, setConflicts] = useState<DuplicateConflict[]>([]);
   const [showingDuplicates, setShowingDuplicates] = useState(false);
@@ -247,62 +189,12 @@ export const AddDownloadsModal = () => {
   const [connections, setConnections] = useState(perServerConnections);
   const [speedLimitEnabled, setSpeedLimitEnabled] = useState(false);
   const [speedLimit, setSpeedLimit] = useState('1024');
-  const [torrentSeedingEnabled, setTorrentSeedingEnabled] = useState(false);
-  const [torrentSeedTime, setTorrentSeedTime] = useState('60');
-  const [torrentSeedRatio, setTorrentSeedRatio] = useState('1.0');
-  const [torrentUploadLimitEnabled, setTorrentUploadLimitEnabled] = useState(false);
-  const [torrentUploadLimit, setTorrentUploadLimit] = useState('1024');
-  const [torrentMaxPeers, setTorrentMaxPeers] = useState('');
-  const [torrentPeerSpeedLimit, setTorrentPeerSpeedLimit] = useState('');
-  const [torrentCheckIntegrity, setTorrentCheckIntegrity] = useState(false);
-  const [torrentRemoveUnselectedFile, setTorrentRemoveUnselectedFile] = useState(false);
-  const [torrentEncryptionPolicy, setTorrentEncryptionPolicy] = useState<TorrentEncryptionPolicy>(TORRENT_ENCRYPTION_POLICY_DISABLED);
-  const [torrentTrackers, setTorrentTrackers] = useState('');
-  const [torrentExcludeTrackers, setTorrentExcludeTrackers] = useState('');
-  const [torrentTrackerConnectTimeout, setTorrentTrackerConnectTimeout] = useState('');
-  const [torrentTrackerTimeout, setTorrentTrackerTimeout] = useState('');
-  const [torrentTrackerInterval, setTorrentTrackerInterval] = useState('0');
-  const [torrentStopTimeout, setTorrentStopTimeout] = useState('0');
-  const [torrentFileAllocation, setTorrentFileAllocation] = useState<TorrentFileAllocation>('prealloc');
-  const [torrentPreviewHeadEnabled, setTorrentPreviewHeadEnabled] = useState(false);
-  const [torrentPreviewHeadSize, setTorrentPreviewHeadSize] = useState('1M');
-  const [torrentPreviewTailEnabled, setTorrentPreviewTailEnabled] = useState(false);
-  const [torrentPreviewTailSize, setTorrentPreviewTailSize] = useState('1M');
-  const torrentPreviewPriority = serializeTorrentPreviewPriority(
-    torrentPreviewHeadEnabled,
-    torrentPreviewHeadSize,
-    torrentPreviewTailEnabled,
-    torrentPreviewTailSize
-  );
   const [freeSpace, setFreeSpace] = useState('Unknown');
   const freeSpaceRequestRef = useRef(0);
-
-  const addTorrentFiles = async () => {
-    try {
-      const selected = await open({
-        multiple: true,
-        directory: false,
-        title: 'Choose torrent files',
-        filters: [{ name: 'Torrent', extensions: ['torrent'] }]
-      });
-      const paths = Array.isArray(selected)
-        ? selected
-        : selected
-          ? [selected]
-          : [];
-      if (paths.length === 0) return;
-      setUrls(current => [...current.split('\n').map(line => line.trim()).filter(Boolean), ...paths]
-        .filter((value, index, values) => values.indexOf(value) === index)
-        .join('\n'));
-    } catch (error) {
-      console.error('Failed to select torrent files:', error);
-    }
-  };
 
   const [useAuth, setUseAuth] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [sftpHostKeyMd, setSftpHostKeyMd] = useState('');
 
   const [advancedExpanded, setAdvancedExpanded] = useState(false);
   const [playlistQualityExpanded, setPlaylistQualityExpanded] = useState(true);
@@ -365,6 +257,7 @@ export const AddDownloadsModal = () => {
       pendingLastUsedDownloadDirectoryRef.current = null;
       setUrls('');
       setPlaylistExpansions({});
+      playlistRequestsRef.current.clear();
       latestPlaylistRequestRef.current.clear();
       playlistMediaSelectionsRef.current.clear();
       setPlaylistMediaTypeSelections({});
@@ -394,9 +287,8 @@ export const AddDownloadsModal = () => {
     setUrls(initialUrls);
     setParsedItems([]);
     setPlaylistExpansions({});
-    // Keep active request ownership across rapid modal close/reopen cycles.
-    // The promises remove their own keys in finally; clearing these sets here
-    // would let stale native probes multiply beyond the concurrency bounds.
+    metadataRequestsRef.current.clear();
+    playlistRequestsRef.current.clear();
     latestPlaylistRequestRef.current.clear();
     playlistMediaSelectionsRef.current.clear();
     setPlaylistMediaTypeSelections({});
@@ -408,29 +300,9 @@ export const AddDownloadsModal = () => {
     setFreeSpace('Unknown');
     setSpeedLimitEnabled(false);
     setSpeedLimit('1024');
-    setTorrentSeedingEnabled(false);
-    setTorrentSeedTime('60');
-    setTorrentSeedRatio('1.0');
-    setTorrentUploadLimitEnabled(false);
-    setTorrentUploadLimit('1024');
-    setTorrentMaxPeers('');
-    setTorrentPeerSpeedLimit('');
-    setTorrentCheckIntegrity(false);
-    setTorrentTrackers('');
-    setTorrentExcludeTrackers('');
-    setTorrentTrackerConnectTimeout('');
-    setTorrentTrackerTimeout('');
-    setTorrentTrackerInterval('0');
-    setTorrentStopTimeout('0');
-    setTorrentFileAllocation('prealloc');
-    setTorrentPreviewHeadEnabled(false);
-    setTorrentPreviewHeadSize('1M');
-    setTorrentPreviewTailEnabled(false);
-    setTorrentPreviewTailSize('1M');
     setUseAuth(false);
     setUsername('');
     setPassword('');
-    setSftpHostKeyMd('');
     setAdvancedExpanded(false);
     setChecksumEnabled(false);
     setChecksumAlgo('SHA-256');
@@ -553,8 +425,13 @@ export const AddDownloadsModal = () => {
       return Object.keys(retained).length === Object.keys(current).length ? current : retained;
     });
 
-    const forcedMediaUrls = new Set(pendingAddMediaUrls.map(normalizeComparableUrl));
-    const forcedTorrentUrls = new Set(pendingAddTorrentUrls.map(normalizeComparableUrl));
+    const forcedMediaUrls = new Set(pendingAddMediaUrls.map(url => {
+      try {
+        return new URL(url).href;
+      } catch {
+        return url;
+      }
+    }));
     const requestFilenames = Object.fromEntries(
       Object.entries(pendingAddRequestContexts)
         .filter(([, context]) => Boolean(context.filename))
@@ -582,43 +459,26 @@ export const AddDownloadsModal = () => {
         requestFilenames,
         requestContextVersions,
         playlistExpansions,
-        selectedBySourceUrl,
-        forcedTorrentUrls
+        selectedBySourceUrl
       );
     });
   }, [
     urls,
     pendingAddFilename,
     pendingAddMediaUrls,
-    pendingAddTorrentUrls,
     pendingAddRequestContexts,
     hasExtensionRequestContext,
     playlistExpansions
   ]);
 
   useEffect(() => {
-    if (!isAddModalOpen) return;
     const maxConcurrentMetadataRequests = 4;
-    // Magnet inspection is optional enrichment. Keep it in a separate lane
-    // so a stalled public magnet cannot consume all slots needed to validate
-    // required HTTP, media, or .torrent metadata in the same Add window.
-    const maxConcurrentMagnetMetadataRequests = 2;
     for (const row of parsedItems) {
-      const isDirectMagnetEnrichment = row.isTorrent === true
-        && isMagnetUrl(row.sourceUrl)
-        && !row.torrentPath
-        && row.torrentMetadataStatus !== 'ready'
-        && row.torrentMetadataStatus !== 'error';
-      if ((row.status !== 'loading' && !isDirectMagnetEnrichment) || row.selected === false) continue;
-      if (row.isPlaylist && playlistExpansions[row.sourceUrl]) continue;
+      if (row.status !== 'loading' || row.selected === false) continue;
       const requestKey = `${row.id}:${row.generation}`;
-      const requestSet = isDirectMagnetEnrichment
-        ? magnetMetadataRequestsRef.current
-        : row.isPlaylist ? playlistRequestsRef.current : metadataRequestsRef.current;
+      const requestSet = row.isPlaylist ? playlistRequestsRef.current : metadataRequestsRef.current;
       if (requestSet.has(requestKey)) continue;
-      if (isDirectMagnetEnrichment) {
-        if (magnetMetadataRequestsRef.current.size >= maxConcurrentMagnetMetadataRequests) continue;
-      } else if (metadataRequestsRef.current.size + playlistRequestsRef.current.size >= maxConcurrentMetadataRequests) {
+      if (metadataRequestsRef.current.size + playlistRequestsRef.current.size >= maxConcurrentMetadataRequests) {
         break;
       }
       requestSet.add(requestKey);
@@ -631,77 +491,13 @@ export const AddDownloadsModal = () => {
       }
 
       void (async () => {
-        let shouldWakeMetadataScheduler = true;
         try {
           const settingsStore = useSettingsStore.getState();
+          const proxy = await getProxyArgs(settingsStore);
           const login = getSiteLogin(row.sourceUrl, settingsStore);
           const contextUrl = requestContextUrlForRow(row);
           const requestContext = requestContextForUrl(contextUrl);
-          if (row.isTorrent) {
-            const torrentCacheId = row.torrentCacheId || `${row.id}-${row.generation}`;
-            const proxy = await getProxyArgs(settingsStore);
-            const torrentData = await invoke('inspect_torrent', {
-              source: row.sourceUrl,
-              id: torrentCacheId,
-              cache: true,
-              proxy: proxy ?? undefined,
-              headers: headersForRow(contextUrl) || undefined,
-              cookies: cookiesForRow(contextUrl, row.sourceUrl) || undefined,
-              cookieScopes: requestContext?.cookieScopes || undefined,
-              torrent: true
-            });
-            const isCurrentTorrentDraft = addModalOpenRef.current
-              && parsedItemsRef.current.some(currentRow =>
-                currentRow.id === row.id
-                && currentRow.sourceUrl === row.sourceUrl
-                && currentRow.generation === row.generation
-                && (currentRow.torrentCacheId || `${currentRow.id}-${currentRow.generation}`) === torrentCacheId
-              );
-            if (!isCurrentTorrentDraft) {
-              cachedTorrentDraftIdsRef.current.delete(torrentCacheId);
-              if (torrentData.torrentPath) {
-                void invoke('remove_torrent_metadata', { id: torrentCacheId }).catch(error => {
-                  console.warn('Failed to remove stale torrent metadata:', error);
-                });
-              }
-              return;
-            }
-            if (torrentData.torrentPath) {
-              cachedTorrentDraftIdsRef.current.add(torrentCacheId);
-            } else {
-              cachedTorrentDraftIdsRef.current.delete(torrentCacheId);
-            }
-            const totalBytes = torrentData.totalBytes || undefined;
-            shouldWakeMetadataScheduler = false;
-            setParsedItems(current => updateRowIfCurrent(
-              current,
-              row.id,
-              row.sourceUrl,
-              row.generation,
-              currentRow => ({
-                ...currentRow,
-                downloadUrl: !row.sourceUrl.trim().toLowerCase().startsWith('magnet:')
-                  ? 'torrent:' + torrentData.infoHash
-                  : row.sourceUrl,
-                size: totalBytes ? formatBytes(totalBytes) : undefined,
-                sizeBytes: totalBytes,
-                status: 'ready',
-                isTorrent: true,
-                torrentMetadataStatus: isMagnetUrl(row.sourceUrl) ? 'ready' : currentRow.torrentMetadataStatus,
-                torrentPath: torrentData.torrentPath,
-                torrentCacheId,
-                torrentInfoHash: torrentData.infoHash,
-                torrentFiles: torrentData.files,
-                file: canonicalizeDownloadFileName(torrentData.name?.trim() || currentRow.file),
-                selectedTorrentFileIndices: currentRow.selectedTorrentFileIndices
-                  ?.filter(index => torrentData.files.some(file => file.index === index))
-              })
-            ));
-            return;
-          }
-          const proxy = await getProxyArgs(settingsStore);
           if (login && !useAuth && !keychainAccessReady && !keychainPromptDismissed) {
-            shouldWakeMetadataScheduler = false;
             settingsStore.setShowKeychainModal(true);
             return;
           }
@@ -731,10 +527,7 @@ export const AddDownloadsModal = () => {
             };
 
             if (row.isPlaylist) {
-              if (playlistExpansions[row.sourceUrl]) {
-                shouldWakeMetadataScheduler = false;
-                return;
-              }
+              if (playlistExpansions[row.sourceUrl]) return;
               const playlistData = await fetchMediaPlaylistMetadataDeduped({
                 ...mediaMetadataArgs,
                 url: contextUrl
@@ -743,7 +536,6 @@ export const AddDownloadsModal = () => {
               if (!playlistData.entries.length) {
                 throw new Error(t($ => $.addDownloads.playlistNoEntries));
               }
-              shouldWakeMetadataScheduler = false;
               setPlaylistExpansions(current => ({
                 ...current,
                 [row.sourceUrl]: playlistData
@@ -792,7 +584,6 @@ export const AddDownloadsModal = () => {
                 ? requestedFormatIndex
                 : fallbackFormatIndex >= 0 ? fallbackFormatIndex : 0;
               const selectedFormat = mappedFormats[selectedFormatIndex];
-              shouldWakeMetadataScheduler = false;
               setParsedItems(current => updateRowIfCurrent(
                 current,
                 row.id,
@@ -841,7 +632,6 @@ export const AddDownloadsModal = () => {
             // its expiry. The metadata response remains useful for filename,
             // size, and resumability.
             const nextDownloadUrl = durableDownloadUrl(row.sourceUrl);
-            shouldWakeMetadataScheduler = false;
             setParsedItems(current => updateRowIfCurrent(
               current,
               row.id,
@@ -875,7 +665,6 @@ export const AddDownloadsModal = () => {
           ].some(prefix => errorMessage.startsWith(prefix))
             ? 'unsafe-url' as const
             : undefined;
-          shouldWakeMetadataScheduler = false;
           setParsedItems(current => updateRowIfCurrent(
             current,
             row.id,
@@ -886,21 +675,9 @@ export const AddDownloadsModal = () => {
               downloadUrl: currentRow.sourceUrl,
               size: undefined,
               sizeBytes: undefined,
-              status: currentRow.isTorrent && isMagnetUrl(currentRow.sourceUrl)
-                ? 'ready'
-                : 'metadata-error',
+              status: 'metadata-error',
               formats: undefined,
               selectedFormat: undefined,
-              ...(currentRow.isTorrent
-                ? {
-                  torrentPath: undefined,
-                  torrentCacheId: undefined,
-                  torrentInfoHash: undefined,
-                  torrentFiles: undefined,
-                  torrentMetadataStatus: isMagnetUrl(currentRow.sourceUrl) ? 'error' : undefined,
-                  selectedTorrentFileIndices: undefined
-                }
-                : {}),
               metadataBlockedReason,
               playlistError: row.isPlaylist
                 ? errorMessage
@@ -909,17 +686,12 @@ export const AddDownloadsModal = () => {
           ));
         } finally {
           requestSet.delete(requestKey);
-          if (shouldWakeMetadataScheduler) {
-            setMetadataSchedulerRevision(revision => revision + 1);
-          }
         }
       })();
     }
   }, [
-    isAddModalOpen,
     keychainAccessReady,
     keychainPromptDismissed,
-    metadataSchedulerRevision,
     parsedItems,
     pendingAddFilename,
     pendingAddMediaUrls,
@@ -956,7 +728,7 @@ export const AddDownloadsModal = () => {
     if (first.status !== 'ready' && first.status !== 'metadata-error') return;
     void resolveCategoryDestination(
       useSettingsStore.getState(),
-      categoryForFileName(first.file, first.isTorrent === true)
+      categoryForFileName(first.file)
     ).then(location => {
       if (requestId === locationResolutionRequestRef.current) {
         setSaveLocation(location);
@@ -1008,8 +780,8 @@ export const AddDownloadsModal = () => {
     }
   };
 
-  const categoryLocationForFile = (fileName: string, isTorrent = false) => {
-    const category = categoryForFileName(fileName, isTorrent);
+  const categoryLocationForFile = (fileName: string) => {
+    const category = categoryForFileName(fileName);
     return resolveCategoryDestination(useSettingsStore.getState(), category);
   };
 
@@ -1031,34 +803,15 @@ export const AddDownloadsModal = () => {
     fileName: string,
     finalLocation: string,
     useSharedDestination: boolean,
-    destinationOverride?: string,
-    isTorrent = false
+    destinationOverride?: string
   ): Promise<string> => {
     if (destinationOverride) return destinationOverride;
     const root = useSharedDestination
       ? finalLocation
-      : await categoryLocationForFile(fileName, isTorrent);
+      : await categoryLocationForFile(fileName);
     return saveInDedicatedFolder
       ? resolveSubfolderDestination(root, dedicatedFolderName)
       : root;
-  };
-
-  const revealTorrentAdvanced = (preferredIndex?: number) => {
-    setAdvancedExpanded(true);
-    setSelectedItemIndex(current => {
-      const preferredIsSelectedTorrent = preferredIndex !== undefined
-        && parsedItems[preferredIndex]?.selected !== false
-        && parsedItems[preferredIndex]?.isTorrent;
-      if (preferredIsSelectedTorrent) return preferredIndex;
-
-      const currentIsSelectedTorrent = current !== null
-        && parsedItems[current]?.selected !== false
-        && parsedItems[current]?.isTorrent;
-      if (currentIsSelectedTorrent) return current;
-
-      const firstSelectedTorrentIndex = parsedItems.findIndex(item => item.selected !== false && item.isTorrent);
-      return firstSelectedTorrentIndex >= 0 ? firstSelectedTorrentIndex : current;
-    });
   };
 
   const handleAction = async (action: AddDownloadAction) => {
@@ -1067,96 +820,6 @@ export const AddDownloadsModal = () => {
     }
     if (speedLimitEnabled && (!Number.isFinite(Number(speedLimit)) || Number(speedLimit) <= 0)) {
       addToast({ message: t($ => $.addDownloads.speedInvalid), variant: 'error', isActionable: true });
-      return;
-    }
-    const hasSelectedTorrent = parsedItems.some(item => item.selected !== false && item.isTorrent);
-    if (hasSelectedTorrent && torrentSeedingEnabled && (!Number.isFinite(Number(torrentSeedTime)) || Number(torrentSeedTime) <= 0)) {
-      addToast({ message: t($ => $.addDownloads.torrentSeedTimeInvalid), variant: 'error', isActionable: true });
-      return;
-    }
-    if (hasSelectedTorrent && torrentSeedingEnabled && (!Number.isFinite(Number(torrentSeedRatio)) || Number(torrentSeedRatio) < 0)) {
-      addToast({ message: t($ => $.addDownloads.torrentSeedRatioInvalid), variant: 'error', isActionable: true });
-      return;
-    }
-    if (hasSelectedTorrent && torrentUploadLimitEnabled && (!Number.isFinite(Number(torrentUploadLimit)) || Number(torrentUploadLimit) <= 0)) {
-      addToast({ message: t($ => $.addDownloads.torrentUploadLimitInvalid), variant: 'error', isActionable: true });
-      return;
-    }
-    if (
-      hasSelectedTorrent
-      && torrentMaxPeers.trim()
-      && (!Number.isInteger(Number(torrentMaxPeers)) || Number(torrentMaxPeers) < 0 || Number(torrentMaxPeers) > 1000)
-    ) {
-      revealTorrentAdvanced();
-      addToast({ message: t($ => $.addDownloads.torrentMaxPeersInvalid), variant: 'error', isActionable: true });
-      return;
-    }
-    if (hasSelectedTorrent && torrentPeerSpeedLimit.trim() && !normalizeSpeedLimitForBackend(torrentPeerSpeedLimit)) {
-      revealTorrentAdvanced();
-      addToast({ message: t($ => $.addDownloads.torrentPeerSpeedLimitInvalid), variant: 'error', isActionable: true });
-      return;
-    }
-    if (hasSelectedTorrent && !isValidTorrentTrackerList(torrentTrackers)) {
-      revealTorrentAdvanced();
-      addToast({ message: t($ => $.addDownloads.torrentTrackersInvalid), variant: 'error', isActionable: true });
-      return;
-    }
-    if (hasSelectedTorrent && !isValidTorrentExcludeTrackerList(torrentExcludeTrackers)) {
-      revealTorrentAdvanced();
-      addToast({ message: t($ => $.addDownloads.torrentExcludeTrackersInvalid), variant: 'error', isActionable: true });
-      return;
-    }
-    if (hasSelectedTorrent && torrentTrackerConnectTimeout.trim() && !normalizeTorrentTrackerTimeout(torrentTrackerConnectTimeout)) {
-      revealTorrentAdvanced();
-      addToast({ message: t($ => $.addDownloads.torrentTrackerTimeoutInvalid), variant: 'error', isActionable: true });
-      return;
-    }
-    if (hasSelectedTorrent && torrentTrackerTimeout.trim() && !normalizeTorrentTrackerTimeout(torrentTrackerTimeout)) {
-      revealTorrentAdvanced();
-      addToast({ message: t($ => $.addDownloads.torrentTrackerTimeoutInvalid), variant: 'error', isActionable: true });
-      return;
-    }
-    if (hasSelectedTorrent && torrentTrackerInterval.trim() && normalizeTorrentTrackerInterval(torrentTrackerInterval) === undefined) {
-      revealTorrentAdvanced();
-      addToast({ message: t($ => $.addDownloads.torrentTrackerIntervalInvalid), variant: 'error', isActionable: true });
-      return;
-    }
-    if (hasSelectedTorrent && (torrentPreviewHeadEnabled || torrentPreviewTailEnabled) && !torrentPreviewPriority) {
-      revealTorrentAdvanced();
-      addToast({ message: t($ => $.addDownloads.torrentPrioritizePieceInvalid), variant: 'error', isActionable: true });
-      return;
-    }
-    for (const [itemIndex, item] of parsedItems.entries()) {
-      if (item.selected === false || !item.isTorrent || !item.torrentFiles?.length) continue;
-      const rows = item.torrentWebSeedRows ?? [];
-      if (!normalizeTorrentWebSeedDrafts(rows, item.torrentFiles)) {
-        revealTorrentAdvanced(itemIndex);
-        addToast({ message: t($ => $.properties.torrentWebSeedsFailed), variant: 'error', isActionable: true });
-        return;
-      }
-    }
-    if (
-      hasSelectedTorrent
-      && torrentStopTimeout.trim()
-      && (!Number.isInteger(Number(torrentStopTimeout)) || Number(torrentStopTimeout) < 0 || Number(torrentStopTimeout) > MAX_TORRENT_STOP_TIMEOUT)
-    ) {
-      revealTorrentAdvanced();
-      addToast({ message: t($ => $.addDownloads.torrentStopTimeoutInvalid), variant: 'error', isActionable: true });
-      return;
-    }
-    const removableTorrentFileCount = parsedItems.reduce((total, item) => {
-      if (item.selected === false || !item.isTorrent || !item.torrentFiles?.length) return total;
-      const selected = item.selectedTorrentFileIndices;
-      if (!selected || selected.length === 0 || selected.length >= item.torrentFiles.length) return total;
-      return total + item.torrentFiles.length - selected.length;
-    }, 0);
-    if (
-      torrentRemoveUnselectedFile
-      && removableTorrentFileCount > 0
-      && !window.confirm(t($ => $.addDownloads.torrentRemoveUnselectedFileConfirm, {
-        count: removableTorrentFileCount
-      }))
-    ) {
       return;
     }
     if (saveInDedicatedFolder && !sanitizeBatchFolderName(dedicatedFolderName)) {
@@ -1182,9 +845,7 @@ export const AddDownloadsModal = () => {
           const suggestedLocation = await destinationForFile(
             item.file,
             finalLocation,
-            isSaveLocationManual,
-            undefined,
-            item.isTorrent === true
+            isSaveLocationManual
           );
           const selected = await open({
             directory: true,
@@ -1231,8 +892,7 @@ export const AddDownloadsModal = () => {
         finalFile,
         finalLocation,
         useSharedDestination,
-        destinationOverrides[i],
-        item.isTorrent === true
+        destinationOverrides[i]
       );
 
       const urlMatch = store.downloads.find(d =>
@@ -1337,44 +997,27 @@ export const AddDownloadsModal = () => {
           }
         }
 
-        let diskTargetKind: string | null = null;
-        let diskTargetFingerprint: string | undefined;
-        let diskTargetOwner: string | undefined;
+        let fileExistsOnDisk = false;
         try {
-          const targetInfo = await invoke('inspect_download_target', {
+          fileExistsOnDisk = await invoke('check_file_exists', {
             path: await resolveDownloadFilePath(itemLocation, finalFile)
           });
-          diskTargetKind = targetInfo.kind;
-          diskTargetFingerprint = targetInfo.fingerprint;
-          diskTargetOwner = targetInfo.ownedBy;
         } catch (e) {
           console.error("Failed to check if file exists on disk:", e);
         }
 
-        const fileExistsOnDisk = diskTargetKind !== null && diskTargetKind !== 'missing';
-        const hasFirelinkOwnedTarget = Boolean(diskTargetOwner);
-        const diskReplaceAllowed = diskTargetKind === 'regularFile'
-          && !diskTargetOwner
-          && Boolean(diskTargetFingerprint);
-        const canReplaceExistingDownload = existingDownload
-          ? !isTransferLocked(existingDownload.status)
-            && (!diskTargetOwner || diskTargetOwner === existingDownload.id)
-          : false;
-        if (existingDownload || fileExistsOnDisk || hasFirelinkOwnedTarget) {
+        if (existingDownload || fileExistsOnDisk) {
           newConflicts.push({
             id: i.toString(),
             fileName: finalFile,
             reason: {
               type: 'file',
-              msg: existingDownload || hasFirelinkOwnedTarget
+              msg: existingDownload
                 ? t($ => $.addDownloads.existingDownloadDestination)
                 : t($ => $.addDownloads.fileExistsOnDisk)
             },
             resolution: 'rename',
-            replaceAllowed: existingDownload ? canReplaceExistingDownload : diskReplaceAllowed,
-            ...(existingDownload ? {} : diskReplaceAllowed
-              ? { replaceFingerprint: diskTargetFingerprint }
-              : {}),
+            replaceAllowed: Boolean(existingDownload),
             existingDownloadId: existingDownload?.id
           });
         }
@@ -1405,11 +1048,7 @@ export const AddDownloadsModal = () => {
     action: AddDownloadAction,
     finalLocation: string,
     useSharedDestination: boolean,
-    resolutions?: {
-      id: string;
-      resolution: 'rename' | 'replace' | 'skip';
-      replaceFingerprint?: string;
-    }[],
+    resolutions?: { id: string, resolution: 'rename' | 'replace' | 'skip' }[],
     destinationOverrides: Record<number, string> = {}
   ) => {
       let itemsToAdd: Array<AddDownloadDraftRow | null> = parsedItems.map(item =>
@@ -1428,7 +1067,6 @@ export const AddDownloadsModal = () => {
              if (res.resolution === 'skip') {
                  itemsToAdd[idx] = null;
              } else if (res.resolution === 'rename') {
-                 itemsToAdd[idx] = { ...item, replaceExistingFingerprint: undefined };
                  let finalFile = item.isMedia
                    ? mediaFileNameForSelectedFormat(item.file, item)
                    : canonicalizeDownloadFileName(item.file);
@@ -1436,8 +1074,7 @@ export const AddDownloadsModal = () => {
           finalFile,
           finalLocation,
           useSharedDestination,
-          destinationOverrides[idx],
-          item.isTorrent === true
+          destinationOverrides[idx]
         );
                  
                  let count = 1;
@@ -1453,8 +1090,7 @@ export const AddDownloadsModal = () => {
                      candidateFile,
                      finalLocation,
                      useSharedDestination,
-                     destinationOverrides[candidateIndex],
-                     candidate.isTorrent === true
+                     destinationOverrides[candidateIndex]
                    );
                    batchTargets.push({ location: candidateLocation, fileName: candidateFile });
                  }
@@ -1482,10 +1118,9 @@ export const AddDownloadsModal = () => {
           }
                      let diskHas = false;
                      try {
-                       const targetInfo = await invoke('inspect_download_target', {
+                       diskHas = await invoke('check_file_exists', {
                          path: await resolveDownloadFilePath(itemLocation, newName)
                        });
-                       diskHas = targetInfo.kind !== 'missing';
                      } catch(e) {}
                      const batchHas = batchTargets.some(target => downloadLocationEquals(
                          target.location,
@@ -1501,7 +1136,7 @@ export const AddDownloadsModal = () => {
                    throw new Error(t($ => $.addDownloads.noAvailableName, { file: finalFile }));
                  }
                  
-                 itemsToAdd[idx] = { ...item, file: newName, replaceExistingFingerprint: undefined };
+                 itemsToAdd[idx] = { ...item, file: newName };
              } else if (res.resolution === 'replace') {
               if (!conflict?.replaceAllowed) {
                 const finalFile = item.isMedia
@@ -1516,8 +1151,7 @@ export const AddDownloadsModal = () => {
           finalFile,
           finalLocation,
           useSharedDestination,
-          destinationOverrides[idx],
-          item.isTorrent === true
+          destinationOverrides[idx]
         );
         const store = useDownloadStore.getState();
         let existingItem = conflict?.existingDownloadId
@@ -1548,28 +1182,17 @@ export const AddDownloadsModal = () => {
                  }
 
                  if (!existingItem) {
-                   if (!res.replaceFingerprint || conflict?.existingDownloadId) {
-                     throw new Error(t($ => $.addDownloads.cannotReplace, { file: finalFile }));
-                   }
-                   itemsToAdd[idx] = {
-                     ...item,
-                     replaceExistingFingerprint: res.replaceFingerprint
-                   };
-                   continue;
+                   throw new Error(t($ => $.addDownloads.cannotReplace, { file: finalFile }));
                  }
-                const incomingMediaFormat = mediaFormatSelectorForRow(item);
-                const mediaFormatChanged = item.isMedia
-                  && existingItem.mediaFormatSelector !== incomingMediaFormat;
-                const torrentReplacement = Boolean(item.isTorrent) || Boolean(existingItem.isTorrent);
-                if (existingItem.status === 'completed' || mediaFormatChanged || torrentReplacement) {
-                  // Completed replacements must remove the old file so the
-                  // new transfer cannot be treated as an already-complete
-                  // aria2 target. A torrent replacement also needs a fresh
-                  // identity because its cached metadata is keyed by the
-                  // new row ID and its output contract differs from a normal
-                  // file transfer. Unfinished ordinary rows use the in-place
-                  // path to preserve their resumable assets and progress.
-                  await store.removeDownload(existingItem.id, true, false);
+                 const incomingMediaFormat = mediaFormatSelectorForRow(item);
+                 const mediaFormatChanged = item.isMedia
+                   && existingItem.mediaFormatSelector !== incomingMediaFormat;
+                 if (existingItem.status === 'completed' || mediaFormatChanged) {
+                   // Completed replacements must remove the old file so the
+                   // new transfer cannot be treated as an already-complete
+                   // aria2 target. Unfinished rows use the in-place path to
+                   // preserve their resumable assets and progress.
+                   await store.removeDownload(existingItem.id, true, false);
                  } else {
                    const contextUrl = requestContextUrlForRow(item);
                    const replaced = await store.replaceDownload(existingItem.id, {
@@ -1582,8 +1205,7 @@ export const AddDownloadsModal = () => {
                      lastError: undefined
                    }, pendingAction);
                    if (!replaced) {
-                     const rejected = useDownloadStore.getState().downloads.find(download => download.id === existingItem.id);
-                     throw new Error(rejected?.lastError || t($ => $.addDownloads.backendRejectedStart));
+                     throw new Error(t($ => $.addDownloads.backendRejectedStart));
                    }
 
                    // The existing row was updated in place; do not create a
@@ -1601,124 +1223,51 @@ export const AddDownloadsModal = () => {
 
       for (const [itemIndex, item] of itemsToAdd.entries()) {
         if (!item) continue;
-        let allocatedId: string | null = null;
         try {
           const id = crypto.randomUUID();
-          allocatedId = id;
-          const contextUrl = requestContextUrlForRow(item);
-          let torrentPath = item.torrentPath;
-          if (item.isTorrent) {
-            if (item.torrentPath) {
-              torrentPath = await invoke('rekey_torrent_metadata', {
-                sourceId: item.torrentCacheId || item.id,
-                targetId: id
-              });
-              cachedTorrentDraftIdsRef.current.delete(item.torrentCacheId || item.id);
-            } else if (!isMagnetUrl(item.sourceUrl)) {
-              // Keep a safe fallback for rows restored from an older draft
-              // shape that did not retain the preview cache identity.
-              const torrentData = await invoke('inspect_torrent', {
-                source: item.sourceUrl,
-                id,
-                cache: true,
-                headers: headersForRow(contextUrl) || undefined,
-                cookies: cookiesForRow(contextUrl, item.sourceUrl) || undefined,
-                cookieScopes: requestContextForUrl(contextUrl)?.cookieScopes || undefined,
-                torrent: true
-              });
-              torrentPath = torrentData.torrentPath;
-            }
-          }
           let finalFile = item.isMedia
             ? mediaFileNameForSelectedFormat(item.file, item)
             : canonicalizeDownloadFileName(item.file);
           let formatSelector = mediaFormatSelectorForRow(item);
-        const category = categoryForFileName(finalFile, item.isTorrent === true);
+        const contextUrl = requestContextUrlForRow(item);
+
+        const category = categoryForFileName(finalFile);
         const added = await addDownload({
           id,
           url: item.downloadUrl,
           fileName: finalFile,
           category,
           dateAdded: new Date().toISOString(),
-          // HTTP connections and yt-dlp fragment concurrency are separate
-          // from BitTorrent peer limits. Torrent rows use bt-max-peers below
-          // and must not inherit the generic 1–16 HTTP setting.
-          connections: item.isTorrent ? undefined : Number(connections),
+          connections: Number(connections),
           speedLimit: speedLimitEnabled ? `${speedLimit}K` : undefined,
-          username: item.isTorrent ? undefined : useAuth ? username.trim() : undefined,
-          password: item.isTorrent ? undefined : useAuth ? password.trim() : undefined,
-          sftpHostKeyMd: !item.isTorrent && item.sourceUrl.trim().toLowerCase().startsWith('sftp:')
-            ? sftpHostKeyMd.trim() || undefined
-            : undefined,
-          headers: item.isTorrent ? undefined : headersForRow(contextUrl) || undefined,
+          username: useAuth ? username.trim() : undefined,
+          password: useAuth ? password.trim() : undefined,
+          headers: headersForRow(contextUrl) || undefined,
           checksum: checksumEnabled && checksumValue.trim()
             ? `${checksumAlgo}=${checksumValue.trim()}`
             : undefined,
-          cookies: item.isTorrent ? undefined : cookiesForRow(contextUrl, item.downloadUrl) || undefined,
+          cookies: cookiesForRow(contextUrl, item.downloadUrl) || undefined,
           mirrors: mirrors.trim() || undefined,
           destination: useSharedDestination || saveInDedicatedFolder || destinationOverrides[itemIndex]
             ? await destinationForFile(
                 finalFile,
                 finalLocation,
                 useSharedDestination,
-                destinationOverrides[itemIndex],
-                item.isTorrent === true
+                destinationOverrides[itemIndex]
               )
             : undefined,
           isMedia: item.isMedia,
           resumable: item.resumable,
           mediaFormatSelector: formatSelector,
           mediaQuality: mediaQualityForRow(item),
-          isTorrent: item.isTorrent,
-          torrentPath,
-          torrentInfoHash: item.torrentInfoHash,
-          torrentFileIndices: item.selectedTorrentFileIndices,
-          torrentSeedTime: item.isTorrent && torrentSeedingEnabled ? Number(torrentSeedTime) : undefined,
-          torrentSeedRatio: item.isTorrent && torrentSeedingEnabled ? Number(torrentSeedRatio) : undefined,
-          torrentUploadLimit: item.isTorrent && torrentUploadLimitEnabled ? `${torrentUploadLimit}K` : undefined,
-          torrentMaxPeers: item.isTorrent && torrentMaxPeers.trim() ? Number(torrentMaxPeers) : undefined,
-          torrentPeerSpeedLimit: item.isTorrent
-            ? normalizeSpeedLimitForBackend(torrentPeerSpeedLimit) || undefined
-            : undefined,
-          torrentCheckIntegrity: item.isTorrent ? torrentCheckIntegrity : undefined,
-          torrentRemoveUnselectedFile: item.isTorrent && torrentRemoveUnselectedFile && hasPartialTorrentSelection(item)
-            ? true
-            : undefined,
-          torrentEncryptionPolicy: item.isTorrent && torrentEncryptionPolicy !== TORRENT_ENCRYPTION_POLICY_DISABLED
-            ? torrentEncryptionPolicy
-            : undefined,
-          torrentTrackers: item.isTorrent ? torrentTrackers.trim() || undefined : undefined,
-          torrentExcludeTrackers: item.isTorrent ? torrentExcludeTrackers.trim() || undefined : undefined,
-          torrentTrackerConnectTimeout: item.isTorrent && torrentTrackerConnectTimeout.trim()
-            ? Number(torrentTrackerConnectTimeout)
-            : undefined,
-          torrentTrackerTimeout: item.isTorrent && torrentTrackerTimeout.trim()
-            ? Number(torrentTrackerTimeout)
-            : undefined,
-          torrentTrackerInterval: item.isTorrent && torrentTrackerInterval.trim()
-            ? Number(torrentTrackerInterval)
-            : undefined,
-          torrentStopTimeout: item.isTorrent && torrentStopTimeout.trim() ? Number(torrentStopTimeout) : undefined,
-          torrentPrioritizePiece: item.isTorrent ? torrentPreviewPriority || undefined : undefined,
-          torrentFileAllocation: item.isTorrent ? torrentFileAllocation : undefined,
-          torrentWebSeeds: item.isTorrent && item.torrentFiles
-            ? normalizeTorrentWebSeedDrafts(item.torrentWebSeedRows ?? [], item.torrentFiles) || undefined
-            : undefined,
           size: item.size || (item.sizeBytes ? formatBytes(item.sizeBytes) : undefined),
-          sizeBytes: item.sizeBytes,
-          replaceExistingFingerprint: item.replaceExistingFingerprint
+          sizeBytes: item.sizeBytes
         }, action);
         if (!added) {
-          const rejected = useDownloadStore.getState().downloads.find(download => download.id === id);
-          throw new Error(rejected?.lastError || t($ => $.addDownloads.backendRejectedStart));
+          throw new Error(t($ => $.addDownloads.backendRejectedStart));
         }
         addedCount += 1;
         } catch (e) {
-          if (item.isTorrent && allocatedId) {
-            await invoke('remove_torrent_metadata', { id: allocatedId }).catch(error => {
-              console.warn('Failed to remove cached torrent metadata after add failure:', error);
-            });
-          }
           console.error("Invalid URL or failed to add:", e);
           failures.push(`${item.file}: ${e instanceof Error ? e.message : String(e)}`);
         }
@@ -1820,34 +1369,8 @@ export const AddDownloadsModal = () => {
     ));
   };
 
-  const toggleTorrentFile = (index: number) => {
-    if (selectedItemIndex === null) return;
-    setParsedItems(items => items.map((item, itemIndex) => {
-      if (itemIndex !== selectedItemIndex || !item.torrentFiles?.length) return item;
-      const allIndices = item.torrentFiles.map(file => file.index);
-      const selectedIndices = item.selectedTorrentFileIndices ?? allIndices;
-      if (selectedIndices.length === 1 && selectedIndices[0] === index) return item;
-      const next = selectedIndices.includes(index)
-        ? selectedIndices.filter(value => value !== index)
-        : [...selectedIndices, index].sort((left, right) => left - right);
-      return {
-        ...item,
-        selectedTorrentFileIndices: next.length === allIndices.length ? undefined : next
-      };
-    }));
-  };
-
   const selectedItems = parsedItems.filter(item => item.selected !== false);
-  const hasPartialTorrentSelection = (item: AddDownloadDraftRow): boolean => {
-    if (!item.isTorrent || !item.torrentFiles?.length) return false;
-    const selected = item.selectedTorrentFileIndices;
-    return Boolean(selected && selected.length > 0 && selected.length < item.torrentFiles.length);
-  };
   const selectedItem = selectedItemIndex === null ? undefined : parsedItems[selectedItemIndex];
-  const selectedItemIsTorrent = selectedItem?.isTorrent === true;
-  const hasSftpRows = parsedItems.some(item => item.selected !== false
-    && !item.isTorrent
-    && item.sourceUrl.trim().toLowerCase().startsWith('sftp:'));
   const selectedPlaylistSourceUrl = selectedItem?.playlistSourceUrl;
   const selectedPlaylistRows = selectedPlaylistSourceUrl
     ? parsedItems.filter(item => item.playlistSourceUrl === selectedPlaylistSourceUrl && item.selected !== false)
@@ -1972,41 +1495,14 @@ export const AddDownloadsModal = () => {
        : `${(requiredBytes / 1024 / 1024 / 1024).toFixed(2)} GB`}`
     : 'Unknown';
   const canSubmit = canSubmitMetadataRows(parsedItems);
-  const metadataRefreshableCount = selectedItems.filter(isMetadataRefreshableRow).length;
+  const failedMetadataCount = selectedItems.filter(item => item.status === 'metadata-error').length;
   const failedMediaMetadataCount = selectedItems.filter(
     item => item.status === 'metadata-error' && item.isMedia
   ).length;
   const blockedMetadataCount = selectedItems.filter(
     item => item.metadataBlockedReason === 'unsafe-url'
   ).length;
-  const fallbackMetadataCount = selectedItems.filter(item =>
-    (item.status === 'fallback' || (item.status === 'metadata-error' && !item.isMedia))
-    && item.metadataBlockedReason !== 'unsafe-url'
-  ).length;
-  const readyMetadataCount = selectedItems.filter(item => item.status === 'ready').length;
-  const hasCustomTorrentOptions = Boolean(
-    torrentMaxPeers.trim()
-    || torrentPeerSpeedLimit.trim()
-    || torrentCheckIntegrity
-    || torrentRemoveUnselectedFile
-    || torrentEncryptionPolicy !== TORRENT_ENCRYPTION_POLICY_DISABLED
-    || torrentTrackers.trim()
-    || torrentExcludeTrackers.trim()
-    || torrentTrackerConnectTimeout.trim()
-    || torrentTrackerTimeout.trim()
-    || (torrentTrackerInterval.trim() && normalizeTorrentTrackerInterval(torrentTrackerInterval) !== 0)
-    || (torrentStopTimeout.trim() && Number(torrentStopTimeout) !== 0)
-    || torrentFileAllocation !== 'prealloc'
-    || torrentPreviewHeadEnabled
-    || torrentPreviewTailEnabled
-    || parsedItems.some(item => item.selected !== false && item.isTorrent && (item.torrentWebSeedRows?.length ?? 0) > 0)
-  );
-  const localizedSelectedSummary = t($ => $.addDownloads.selectedSummary, {
-    ready: readyMetadataCount,
-    fallback: fallbackMetadataCount,
-    mediaRetry: failedMediaMetadataCount,
-    blocked: blockedMetadataCount,
-  });
+  const fallbackMetadataCount = failedMetadataCount - failedMediaMetadataCount - blockedMetadataCount;
   const activePlaylistUrls = new Set(
     urls.split('\n').map(url => url.trim()).filter(Boolean).map(normalizeComparableUrl)
   );
@@ -2132,27 +1628,13 @@ export const AddDownloadsModal = () => {
                   </div>
                 </div>
                 <textarea
-                  id="add-download-links-input"
-                  aria-describedby="add-download-links-hint"
-                  className={`add-download-control add-download-links-input w-full h-24 p-3 text-[13px] resize-none ${
+                  className={`add-download-control add-download-links-input w-full h-32 p-3 text-[13px] resize-none ${
                     isRtl ? 'add-download-links-input--rtl' : ''
                   }`}
                   placeholder={t($ => $.addDownloads.pastePlaceholder)}
                   value={urls}
                   onChange={(e) => setUrls(e.target.value)}
                 />
-                <div className="add-download-url-meta px-1">
-                  <p id="add-download-links-hint" className="add-download-input-hint min-w-0 flex-1 text-[10px] leading-4 text-text-muted">
-                    {t($ => $.addDownloads.pasteHint)}
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => void addTorrentFiles()}
-                    className="add-download-link-button flex items-center gap-1.5 text-[11px] font-medium"
-                  >
-                    <FolderPlus size={12} /> {t($ => $.addDownloads.chooseTorrentFiles)}
-                  </button>
-                </div>
                 {playlistSummaries.map(([sourceUrl, playlist]) => {
                   const total = playlist.entry_count || playlist.entries.length;
                   return (
@@ -2167,32 +1649,32 @@ export const AddDownloadsModal = () => {
                     </p>
                   );
                 })}
-                <div
-                  className="add-download-selection-summary px-1"
-                  role="status"
-                  aria-live="polite"
-                  aria-atomic="true"
-                >
-                  <span className="sr-only">{localizedSelectedSummary}</span>
-                  <div className="add-download-selection-status" aria-hidden="true">
-                    <span className="add-download-status-chip" data-tone="ready">
-                      <strong>{readyMetadataCount}</strong>
-                      <span>{t($ => $.addDownloads.selectedSummaryReady)}</span>
-                    </span>
-                    <span className="add-download-status-chip" data-tone="fallback">
-                      <strong>{fallbackMetadataCount}</strong>
-                      <span>{t($ => $.addDownloads.selectedSummaryFallback)}</span>
-                    </span>
-                    <span className="add-download-status-chip" data-tone="media-retry">
-                      <strong>{failedMediaMetadataCount}</strong>
-                      <span>{t($ => $.addDownloads.selectedSummaryMediaRetry)}</span>
-                    </span>
-                    <span className="add-download-status-chip" data-tone="blocked">
-                      <strong>{blockedMetadataCount}</strong>
-                      <span>{t($ => $.addDownloads.selectedSummaryBlocked)}</span>
-                    </span>
+                <div className="flex justify-between items-center px-1">
+                  <span className="text-[11px] text-text-muted font-medium">
+                    {t($ => $.addDownloads.selectedSummary, {
+                      ready: selectedItems.filter(item => item.status === 'ready').length,
+                      fallback: fallbackMetadataCount,
+                      mediaRetry: failedMediaMetadataCount,
+                      blocked: blockedMetadataCount,
+                    })}
+                  </span>
+                    <button
+                      type="button"
+                      onClick={() => setParsedItems(refreshFailedMetadataRows)}
+                      disabled={failedMetadataCount === 0}
+                      className="add-download-link-button flex items-center gap-1.5 text-[11px] font-medium"
+                    >
+                      <RefreshCw size={12} /> {t($ => $.addDownloads.refreshMetadata)}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={toggleAllRows}
+                      disabled={parsedItems.length === 0}
+                      className="add-download-link-button ms-3 text-[11px] font-medium"
+                    >
+                      {allRowsSelected ? t($ => $.addDownloads.clearSelection) : t($ => $.addDownloads.selectAll)}
+                    </button>
                   </div>
-                </div>
               </div>
 
               <div className="grid grid-cols-4 gap-3">
@@ -2203,29 +1685,9 @@ export const AddDownloadsModal = () => {
               </div>
 
               <div className="flex flex-col gap-2 flex-1 min-h-0 min-w-0 overflow-hidden">
-                <div className="add-download-preview-heading flex flex-wrap items-center justify-between gap-2">
-                  <div className="add-download-section-title flex items-center gap-2">
-                    <ArrowRight size={16} className="text-blue-500" />
-                    {t($ => $.addDownloads.preview)}
-                  </div>
-                  <div className="add-download-preview-actions flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => setParsedItems(rows => refreshFailedMetadataRows(rows, true))}
-                      disabled={metadataRefreshableCount === 0}
-                      className="add-download-link-button flex items-center gap-1.5 text-[11px] font-medium"
-                    >
-                      <RefreshCw size={12} /> {t($ => $.addDownloads.refreshMetadata)}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={toggleAllRows}
-                      disabled={parsedItems.length === 0}
-                      className="add-download-link-button text-[11px] font-medium"
-                    >
-                      {allRowsSelected ? t($ => $.addDownloads.clearSelection) : t($ => $.addDownloads.selectAll)}
-                    </button>
-                  </div>
+                <div className="add-download-section-title flex items-center gap-2">
+                  <ArrowRight size={16} className="text-blue-500" />
+                  {t($ => $.addDownloads.preview)}
                 </div>
                 <div className="add-download-preview flex-1 min-h-0 min-w-0 overflow-hidden flex flex-col">
                   <div className="add-download-preview-header px-3 py-2 flex text-[11px] font-semibold text-text-muted uppercase tracking-wider">
@@ -2275,19 +1737,15 @@ export const AddDownloadsModal = () => {
                                 </span>
                               ) : null}
                             </div>
-                            <div className={`flex-1 font-mono ${isAddDownloadMetadataLoading(item) ? 'text-text-muted/50' : 'text-text-muted'}`}>{item.size || t($ => $.addDownloads.unknown)}</div>
-                            <div className={`flex-[1.5] font-medium ${isAddDownloadMetadataError(item) || item.status === 'invalid' ? 'text-red-500' : isAddDownloadMetadataLoading(item) ? 'text-orange-400' : 'text-blue-500'}`}>
-                              {isAddDownloadMetadataLoading(item) ? (
+                            <div className={`flex-1 font-mono ${item.status === 'loading' ? 'text-text-muted/50' : 'text-text-muted'}`}>{item.size || t($ => $.addDownloads.unknown)}</div>
+                            <div className={`flex-[1.5] font-medium ${item.status === 'metadata-error' || item.status === 'invalid' ? 'text-red-500' : item.status === 'loading' ? 'text-orange-400' : 'text-blue-500'}`}>
+                              {item.status === 'loading' ? (
                                 <div className="flex items-center gap-1.5">
                                   <RefreshCw size={12} className="animate-spin" /> {item.isPlaylist ? t($ => $.addDownloads.fetchingPlaylist) : t($ => $.addDownloads.fetching)}
                                 </div>
                               ) : (
-                                item.status === 'fallback'
-                                  ? t($ => $.addDownloads.fallback)
-                                  : isAddDownloadMetadataError(item)
-                                  ? item.status === 'metadata-error'
-                                    ? item.metadataBlockedReason === 'unsafe-url' ? t($ => $.addDownloads.unsafeUrl) : item.isPlaylist ? t($ => $.addDownloads.playlistFailed) : item.isMedia ? t($ => $.addDownloads.metadataFailed) : t($ => $.addDownloads.fallback)
-                                    : t($ => $.addDownloads.metadataFailed)
+                                item.status === 'metadata-error'
+                                  ? item.metadataBlockedReason === 'unsafe-url' ? t($ => $.addDownloads.unsafeUrl) : item.isPlaylist ? t($ => $.addDownloads.playlistFailed) : item.isMedia ? t($ => $.addDownloads.metadataFailed) : t($ => $.addDownloads.fallback)
                                   : item.status === 'invalid'
                                     ? t($ => $.addDownloads.invalid)
                                     : t($ => $.addDownloads.ready)
@@ -2307,447 +1765,6 @@ export const AddDownloadsModal = () => {
           {/* Right Column: Settings */}
           <div className="add-download-settings w-[45%] flex flex-col overflow-y-auto">
             <div className="p-6 space-y-5">
-
-              {selectedItemIndex !== null && parsedItems[selectedItemIndex]?.isTorrent && (
-                <section className="add-download-section relative overflow-hidden p-4">
-                  <div className="add-download-section-title flex items-center gap-2 mb-3">
-                    <FileText size={16} className="text-blue-500" /> {t($ => $.addDownloads.torrentFiles)}
-                  </div>
-                  {parsedItems[selectedItemIndex].torrentFiles?.length ? (
-                    <div
-                      className="flex flex-col gap-1 max-h-64 overflow-y-auto pe-1"
-                      role="group"
-                      aria-label={t($ => $.addDownloads.torrentFiles)}
-                    >
-                      {parsedItems[selectedItemIndex].torrentFiles!.map(file => {
-                        const selectedIndices = parsedItems[selectedItemIndex!].selectedTorrentFileIndices;
-                        const checked = !selectedIndices || selectedIndices.includes(file.index);
-                        return (
-                          <div
-                            key={file.index}
-                            className="flex min-w-0 items-center gap-2 rounded px-2 py-1.5 text-xs text-text-secondary hover:bg-surface-hover"
-                          >
-                            <label className="flex min-w-0 flex-1 items-center gap-2">
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={() => toggleTorrentFile(file.index)}
-                                aria-label={file.path}
-                                className="accent-blue-500"
-                              />
-                              <span className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap" dir="ltr" title={file.path}>{file.path}</span>
-                              <span className="font-mono text-text-muted shrink-0">{formatBytes(file.length)}</span>
-                            </label>
-                            <button
-                              type="button"
-                              className="app-icon-button shrink-0"
-                              aria-label={t($ => $.downloadTable.copyFilePath)}
-                              title={t($ => $.downloadTable.copyFilePath)}
-                              onClick={event => {
-                                event.preventDefault();
-                                event.stopPropagation();
-                                void copyTorrentFilePath(file.path);
-                              }}
-                            >
-                              <Copy size={13} aria-hidden="true" />
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : isAddDownloadMetadataLoading(parsedItems[selectedItemIndex]) ? (
-                    <div className="flex items-center gap-2 text-xs text-orange-400" aria-live="polite">
-                      <RefreshCw size={14} className="animate-spin" />
-                      <span>{t($ => $.addDownloads.fetching)}</span>
-                    </div>
-                  ) : isAddDownloadMetadataError(parsedItems[selectedItemIndex]) ? (
-                    <div className="flex items-center gap-2 text-xs text-red-500" aria-live="polite">
-                      <span>{t($ => $.addDownloads.metadataFailed)}</span>
-                    </div>
-                  ) : (
-                    <p className="text-xs text-text-muted">
-                      {t($ => $.addDownloads.torrentMetadataPending)}
-                    </p>
-                  )}
-                </section>
-              )}
-
-              {selectedItemIndex !== null && parsedItems[selectedItemIndex]?.isTorrent && (
-                <section className="add-download-section relative overflow-hidden p-4">
-                  <div className="add-download-section-title flex items-center gap-2 mb-3">
-                    <HardDrive size={16} className="text-blue-500" /> {t($ => $.addDownloads.torrentSeeding)}
-                  </div>
-                  <div className="space-y-3 text-xs">
-                    <label className="flex items-center gap-2 text-text-primary">
-                      <input
-                        type="checkbox"
-                        checked={torrentSeedingEnabled}
-                        onChange={event => setTorrentSeedingEnabled(event.target.checked)}
-                        className="accent-blue-500"
-                      />
-                      {t($ => $.addDownloads.seedAfterDownload)}
-                    </label>
-                    {torrentSeedingEnabled ? (
-                      <div className="grid grid-cols-[1fr_auto] gap-2 items-center">
-                        <label htmlFor="torrent-seed-time" className="text-text-muted">{t($ => $.addDownloads.seedTime)}</label>
-                        <div className="flex items-center gap-1.5">
-                          <input
-                            id="torrent-seed-time"
-                            type="number"
-                            min={1}
-                            step={1}
-                            value={torrentSeedTime}
-                            onChange={event => setTorrentSeedTime(event.target.value)}
-                            dir="ltr"
-                            className="app-control w-20 px-2 py-1 text-end font-mono"
-                          />
-                          <span className="text-text-muted">{t($ => $.addDownloads.minutes)}</span>
-                        </div>
-                        <label htmlFor="torrent-seed-ratio" className="text-text-muted">{t($ => $.addDownloads.seedRatio)}</label>
-                        <input
-                          id="torrent-seed-ratio"
-                          type="number"
-                          min={0}
-                          step={0.1}
-                          value={torrentSeedRatio}
-                          onChange={event => setTorrentSeedRatio(event.target.value)}
-                          dir="ltr"
-                          className="app-control w-20 px-2 py-1 text-end font-mono"
-                          aria-describedby="torrent-seed-ratio-hint"
-                        />
-                        <span id="torrent-seed-ratio-hint" className="col-span-2 text-[10px] text-text-muted">
-                          {t($ => $.addDownloads.seedRatioHint)}
-                        </span>
-                      </div>
-                    ) : null}
-                    <label className="flex items-center gap-2 text-text-primary">
-                      <input
-                        type="checkbox"
-                        checked={torrentUploadLimitEnabled}
-                        onChange={event => setTorrentUploadLimitEnabled(event.target.checked)}
-                        className="accent-blue-500"
-                      />
-                      {t($ => $.addDownloads.limitTorrentUpload)}
-                    </label>
-                    {torrentUploadLimitEnabled ? (
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="number"
-                          min={1}
-                          step={128}
-                          value={torrentUploadLimit}
-                          onChange={event => setTorrentUploadLimit(event.target.value)}
-                          dir="ltr"
-                          className="app-control w-24 px-2 py-1 text-end font-mono"
-                          aria-label={t($ => $.addDownloads.torrentUploadLimit)}
-                        />
-                        <span className="text-text-muted">KiB/s</span>
-                      </div>
-                    ) : null}
-                    <button
-                      type="button"
-                      onClick={() => setAdvancedExpanded(expanded => !expanded)}
-                      className="add-download-torrent-advanced-toggle flex w-full items-center justify-between gap-3 border-t border-border-modal/50 pt-3 text-start"
-                      aria-expanded={advancedExpanded}
-                      aria-controls="add-torrent-advanced-options add-transfer-advanced-options"
-                    >
-                      <span className="flex min-w-0 items-center gap-2">
-                        {advancedExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                        <span>{t($ => $.addDownloads.torrentAdvancedOptions)}</span>
-                      </span>
-                      {!advancedExpanded && hasCustomTorrentOptions && (
-                        <span className="shrink-0 text-[10px] font-medium text-blue-400">
-                          {t($ => $.addDownloads.torrentAdvancedOptionsCustom)}
-                        </span>
-                      )}
-                    </button>
-                    {advancedExpanded && (
-                      <div id="add-torrent-advanced-options" className="add-download-torrent-advanced-fields space-y-4">
-                        <div className="border-b border-border-modal/50 pb-3">
-                          <div className="add-download-advanced-group-title">{t($ => $.properties.torrentWebSeeds)}</div>
-                          <p className="mt-1 mb-3 text-[10px] text-text-muted">{t($ => $.properties.torrentWebSeedsHint)}</p>
-                          <TorrentWebSeedEditor
-                            files={parsedItems[selectedItemIndex!].torrentFiles ?? []}
-                            rows={parsedItems[selectedItemIndex!].torrentWebSeedRows ?? []}
-                            onChange={rows => setParsedItems(items => items.map((item, index) => index === selectedItemIndex
-                              ? { ...item, torrentWebSeedRows: rows }
-                              : item
-                            ))}
-                            idPrefix="add-torrent-web-seed"
-                          />
-                        </div>
-                    <label className="flex items-start gap-2 text-text-primary pt-2 border-t border-border-modal/50">
-                      <input
-                        type="checkbox"
-                        checked={torrentCheckIntegrity}
-                        onChange={event => setTorrentCheckIntegrity(event.target.checked)}
-                        className="accent-blue-500 mt-0.5"
-                      />
-                      <span>
-                        <span className="block">{t($ => $.addDownloads.torrentVerifyIntegrity)}</span>
-                        <span className="block text-[10px] text-text-muted">
-                          {t($ => $.addDownloads.torrentVerifyIntegrityHint)}
-                        </span>
-                      </span>
-                    </label>
-                    <div className="grid grid-cols-[1fr_auto] gap-2 items-center pt-2 border-t border-border-modal/50">
-                      <label htmlFor="torrent-file-allocation" className="text-text-muted">
-                        {t($ => $.properties.torrentFileAllocation)}
-                      </label>
-                      <select
-                        id="torrent-file-allocation"
-                        value={torrentFileAllocation}
-                        onChange={event => setTorrentFileAllocation(event.currentTarget.value as TorrentFileAllocation)}
-                        aria-describedby="torrent-file-allocation-hint"
-                        className="app-control max-w-56 px-2 py-1 text-xs"
-                      >
-                        <option value="prealloc">{t($ => $.properties.torrentFileAllocationPrealloc)}</option>
-                        <option value="none">{t($ => $.properties.torrentFileAllocationNone)}</option>
-                      </select>
-                      <p id="torrent-file-allocation-hint" className="col-span-2 text-[10px] text-text-muted">
-                        {t($ => $.properties.torrentFileAllocationHint)}
-                      </p>
-                    </div>
-                    <div className="space-y-2 pt-2 border-t border-border-modal/50">
-                      <span className="block text-text-muted">{t($ => $.properties.torrentPrioritizePiece)}</span>
-                      <label className="flex items-center gap-2 text-text-primary">
-                        <input
-                          type="checkbox"
-                          checked={torrentPreviewHeadEnabled}
-                          onChange={event => setTorrentPreviewHeadEnabled(event.target.checked)}
-                          className="accent-blue-500"
-                        />
-                        {t($ => $.properties.torrentPrioritizePieceHead)}
-                        <input
-                          type="text"
-                          value={torrentPreviewHeadSize}
-                          onChange={event => setTorrentPreviewHeadSize(event.currentTarget.value)}
-                          disabled={!torrentPreviewHeadEnabled}
-                          aria-label={t($ => $.properties.torrentPrioritizePieceSize)}
-                          className="app-control w-20 px-2 py-1 text-end font-mono disabled:opacity-50"
-                        />
-                      </label>
-                      <label className="flex items-center gap-2 text-text-primary">
-                        <input
-                          type="checkbox"
-                          checked={torrentPreviewTailEnabled}
-                          onChange={event => setTorrentPreviewTailEnabled(event.target.checked)}
-                          className="accent-blue-500"
-                        />
-                        {t($ => $.properties.torrentPrioritizePieceTail)}
-                        <input
-                          type="text"
-                          value={torrentPreviewTailSize}
-                          onChange={event => setTorrentPreviewTailSize(event.currentTarget.value)}
-                          disabled={!torrentPreviewTailEnabled}
-                          aria-label={t($ => $.properties.torrentPrioritizePieceSize)}
-                          className="app-control w-20 px-2 py-1 text-end font-mono disabled:opacity-50"
-                        />
-                      </label>
-                      <p id="torrent-prioritize-piece-hint" className="text-[10px] text-text-muted">
-                        {t($ => $.properties.torrentPrioritizePieceHint)}
-                      </p>
-                    </div>
-                    <div className="grid grid-cols-[1fr_auto] gap-2 items-center pt-2 border-t border-border-modal/50">
-                      <label htmlFor="torrent-encryption-policy" className="text-text-muted">
-                        {t($ => $.addDownloads.torrentEncryptionPolicy)}
-                      </label>
-                      <select
-                        id="torrent-encryption-policy"
-                        value={torrentEncryptionPolicy}
-                        onChange={event => setTorrentEncryptionPolicy(event.currentTarget.value as TorrentEncryptionPolicy)}
-                        aria-describedby="torrent-encryption-policy-hint"
-                        className="app-control max-w-56 px-2 py-1 text-xs"
-                      >
-                        <option value={TORRENT_ENCRYPTION_POLICY_DISABLED}>
-                          {t($ => $.addDownloads.torrentEncryptionDisabled)}
-                        </option>
-                        <option value={TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO}>
-                          {t($ => $.addDownloads.torrentEncryptionRequireCrypto)}
-                        </option>
-                        <option value={TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION}>
-                          {t($ => $.addDownloads.torrentEncryptionForceEncryption)}
-                        </option>
-                      </select>
-                      <p id="torrent-encryption-policy-hint" className="col-span-2 text-[10px] text-text-muted">
-                        {t($ => $.addDownloads.torrentEncryptionPolicyHint)}
-                      </p>
-                    </div>
-                    <label className="flex items-start gap-2 text-text-primary pt-2 border-t border-border-modal/50">
-                      <input
-                        type="checkbox"
-                        checked={torrentRemoveUnselectedFile}
-                        onChange={event => setTorrentRemoveUnselectedFile(event.target.checked)}
-                        disabled={parsedItems.every(item => !hasPartialTorrentSelection(item))}
-                        className="accent-red-500 mt-0.5 disabled:opacity-50"
-                      />
-                      <span>
-                        <span className="block">{t($ => $.addDownloads.torrentRemoveUnselectedFile)}</span>
-                        <span className="block text-[10px] text-text-muted">
-                          {t($ => $.addDownloads.torrentRemoveUnselectedFileHint)}
-                        </span>
-                      </span>
-                    </label>
-                    <div className="pt-2 border-t border-border-modal/50">
-                      <label htmlFor="torrent-trackers" className="block text-text-muted">
-                        {t($ => $.addDownloads.torrentTrackers)}
-                      </label>
-                      <textarea
-                        id="torrent-trackers"
-                        rows={3}
-                        value={torrentTrackers}
-                        onChange={event => setTorrentTrackers(event.currentTarget.value)}
-                        dir="ltr"
-                        placeholder="https://tracker.example/announce"
-                        aria-describedby="torrent-trackers-hint"
-                        className="app-control mt-1 min-h-20 w-full resize-y px-2.5 py-1.5 text-xs font-mono"
-                      />
-                      <p id="torrent-trackers-hint" className="mt-1 text-[10px] text-text-muted">
-                        {t($ => $.addDownloads.torrentTrackersHint)}
-                      </p>
-                    </div>
-                    <div className="pt-2 border-t border-border-modal/50">
-                      <label htmlFor="torrent-exclude-trackers" className="block text-text-muted">
-                        {t($ => $.addDownloads.torrentExcludeTrackers)}
-                      </label>
-                      <textarea
-                        id="torrent-exclude-trackers"
-                        rows={3}
-                        value={torrentExcludeTrackers}
-                        onChange={event => setTorrentExcludeTrackers(event.currentTarget.value)}
-                        dir="ltr"
-                        placeholder="https://tracker.example/announce or *"
-                        aria-describedby="torrent-exclude-trackers-hint"
-                        className="app-control mt-1 min-h-20 w-full resize-y px-2.5 py-1.5 text-xs font-mono"
-                      />
-                      <p id="torrent-exclude-trackers-hint" className="mt-1 text-[10px] text-text-muted">
-                        {t($ => $.addDownloads.torrentExcludeTrackersHint)}
-                      </p>
-                    </div>
-                    <div className="grid grid-cols-[1fr_auto] gap-2 items-center pt-2 border-t border-border-modal/50">
-                      <label htmlFor="torrent-tracker-connect-timeout" className="text-text-muted">
-                        {t($ => $.addDownloads.torrentTrackerConnectTimeout)}
-                      </label>
-                      <div className="flex items-center gap-1">
-                        <input
-                          id="torrent-tracker-connect-timeout"
-                          type="number"
-                          min={1}
-                          max={MAX_TORRENT_TRACKER_TIMEOUT}
-                          step={1}
-                          value={torrentTrackerConnectTimeout}
-                          onChange={event => setTorrentTrackerConnectTimeout(event.currentTarget.value)}
-                          placeholder="60"
-                          dir="ltr"
-                          className="app-control w-24 px-2 py-1 text-end font-mono"
-                          aria-describedby="torrent-tracker-timing-hint"
-                        />
-                        <span className="text-[10px] text-text-muted">{t($ => $.addDownloads.seconds)}</span>
-                      </div>
-                      <label htmlFor="torrent-tracker-timeout" className="text-text-muted">
-                        {t($ => $.addDownloads.torrentTrackerTimeout)}
-                      </label>
-                      <div className="flex items-center gap-1">
-                        <input
-                          id="torrent-tracker-timeout"
-                          type="number"
-                          min={1}
-                          max={MAX_TORRENT_TRACKER_TIMEOUT}
-                          step={1}
-                          value={torrentTrackerTimeout}
-                          onChange={event => setTorrentTrackerTimeout(event.currentTarget.value)}
-                          placeholder="60"
-                          dir="ltr"
-                          className="app-control w-24 px-2 py-1 text-end font-mono"
-                          aria-describedby="torrent-tracker-timing-hint"
-                        />
-                        <span className="text-[10px] text-text-muted">{t($ => $.addDownloads.seconds)}</span>
-                      </div>
-                      <label htmlFor="torrent-tracker-interval" className="text-text-muted">
-                        {t($ => $.addDownloads.torrentTrackerInterval)}
-                      </label>
-                      <div className="flex items-center gap-1">
-                        <input
-                          id="torrent-tracker-interval"
-                          type="number"
-                          min={0}
-                          max={MAX_TORRENT_TRACKER_INTERVAL}
-                          step={1}
-                          value={torrentTrackerInterval}
-                          onChange={event => setTorrentTrackerInterval(event.currentTarget.value)}
-                          dir="ltr"
-                          className="app-control w-24 px-2 py-1 text-end font-mono"
-                          aria-describedby="torrent-tracker-timing-hint"
-                        />
-                        <span className="text-[10px] text-text-muted">{t($ => $.addDownloads.seconds)}</span>
-                      </div>
-                      <p id="torrent-tracker-timing-hint" className="col-span-2 text-[10px] text-text-muted">
-                        {t($ => $.addDownloads.torrentTrackerTimingHint)}
-                      </p>
-                    </div>
-                    <div className="grid grid-cols-[1fr_auto] gap-2 items-center pt-2 border-t border-border-modal/50">
-                      <label htmlFor="torrent-max-peers" className="text-text-muted">
-                        {t($ => $.addDownloads.torrentMaxPeers)}
-                      </label>
-                      <input
-                        id="torrent-max-peers"
-                        type="number"
-                        min={0}
-                        max={1000}
-                        step={1}
-                        value={torrentMaxPeers}
-                        onChange={event => setTorrentMaxPeers(event.target.value)}
-                        placeholder="55"
-                        dir="ltr"
-                        className="app-control w-24 px-2 py-1 text-end font-mono"
-                        aria-describedby="torrent-peer-options-hint"
-                      />
-                      <label htmlFor="torrent-peer-speed-limit" className="text-text-muted">
-                        {t($ => $.addDownloads.torrentPeerSpeedLimit)}
-                      </label>
-                      <input
-                        id="torrent-peer-speed-limit"
-                        type="text"
-                        inputMode="decimal"
-                        value={torrentPeerSpeedLimit}
-                        onChange={event => setTorrentPeerSpeedLimit(event.target.value)}
-                        placeholder="50K"
-                        dir="ltr"
-                        className="app-control w-24 px-2 py-1 text-end font-mono"
-                        aria-describedby="torrent-peer-options-hint"
-                      />
-                      <p id="torrent-peer-options-hint" className="col-span-2 text-[10px] text-text-muted">
-                        {t($ => $.addDownloads.torrentPeerOptionsHint)}
-                      </p>
-                    </div>
-                    <div className="grid grid-cols-[1fr_auto] gap-2 items-center pt-2 border-t border-border-modal/50">
-                      <label htmlFor="torrent-stop-timeout" className="text-text-muted">
-                        {t($ => $.addDownloads.torrentStopTimeout)}
-                      </label>
-                      <div className="flex items-center gap-1">
-                        <input
-                          id="torrent-stop-timeout"
-                          type="number"
-                          min={0}
-                          max={MAX_TORRENT_STOP_TIMEOUT}
-                          step={1}
-                          value={torrentStopTimeout}
-                          onChange={event => setTorrentStopTimeout(event.currentTarget.value)}
-                          dir="ltr"
-                          className="app-control w-24 px-2 py-1 text-end font-mono"
-                          aria-describedby="torrent-stop-timeout-hint"
-                        />
-                        <span className="text-[10px] text-text-muted">{t($ => $.addDownloads.seconds)}</span>
-                      </div>
-                      <p id="torrent-stop-timeout-hint" className="col-span-2 text-[10px] text-text-muted">
-                        {t($ => $.addDownloads.torrentStopTimeoutHint)}
-                      </p>
-                    </div>
-                      </div>
-                    )}
-                  </div>
-                </section>
-              )}
 
               {/* Media Format (Dynamic) */}
               {selectedItemIndex !== null && parsedItems[selectedItemIndex]?.isMedia && (
@@ -3033,15 +2050,13 @@ export const AddDownloadsModal = () => {
                   <Settings size={16} className="text-blue-500" /> {t($ => $.addDownloads.transferSettings)}
                 </div>
                   <div className="flex flex-col gap-3">
-                    {!(selectedItemIndex !== null && parsedItems[selectedItemIndex]?.isTorrent) && (
-                      <div className="flex items-center justify-between">
-                        <label className="text-xs text-text-secondary font-medium">{t($ => $.addDownloads.connectionsPerFile)}</label>
-                        <div className="flex items-center gap-2">
-                          <input type="range" min="1" max="16" value={connections} onChange={e=>setConnections(Number(e.target.value))} className="add-download-range w-24 accent-blue-500 cursor-pointer" aria-label={t($ => $.addDownloads.connectionsPerFileAria)} />
-                          <span className="add-download-value text-xs text-text-primary font-mono w-6 text-center">{connections}</span>
-                        </div>
-                      </div>
-                    )}
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs text-text-secondary font-medium">{t($ => $.addDownloads.connectionsPerFile)}</label>
+                    <div className="flex items-center gap-2">
+                      <input type="range" min="1" max="16" value={connections} onChange={e=>setConnections(Number(e.target.value))} className="add-download-range w-24 accent-blue-500 cursor-pointer" aria-label={t($ => $.addDownloads.connectionsPerFileAria)} />
+                      <span className="add-download-value text-xs text-text-primary font-mono w-6 text-center">{connections}</span>
+                    </div>
+                  </div>
 
                   <div className="flex items-center justify-between">
                     <label className="flex items-center gap-2 text-xs text-text-secondary font-medium cursor-pointer">
@@ -3077,26 +2092,18 @@ export const AddDownloadsModal = () => {
               </section>
 
               {/* Advanced */}
-              {(!selectedItemIsTorrent || advancedExpanded) && (
-                <section className="add-download-section add-download-advanced">
-                  {selectedItemIsTorrent ? (
-                    <div className="add-download-section-title flex items-center gap-2 mb-3">
-                      <Settings size={16} className="text-blue-500" /> {t($ => $.addDownloads.advancedTransfer)}
-                    </div>
-                  ) : (
-                    <button
-                      onClick={() => setAdvancedExpanded(!advancedExpanded)}
-                      className="add-download-advanced-toggle flex items-center gap-2 text-sm font-semibold text-text-primary w-full"
-                      aria-expanded={advancedExpanded}
-                      aria-controls="add-transfer-advanced-options"
-                    >
-                      {advancedExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-                      {t($ => $.addDownloads.advancedTransfer)}
-                    </button>
-                  )}
+              <section className="add-download-section add-download-advanced">
+                <button
+                  onClick={() => setAdvancedExpanded(!advancedExpanded)}
+                  className="add-download-advanced-toggle flex items-center gap-2 text-sm font-semibold text-text-primary w-full"
+                  aria-expanded={advancedExpanded}
+                >
+                  {advancedExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                  {t($ => $.addDownloads.advancedTransfer)}
+                </button>
 
-                  {advancedExpanded && (
-                    <div id="add-transfer-advanced-options" className="add-download-advanced-fields mt-4 space-y-4">
+                {advancedExpanded && (
+                  <div className="add-download-advanced-fields mt-4 space-y-4">
                     <label className="flex items-center gap-2 text-xs text-text-secondary font-medium cursor-pointer">
                       <input type="checkbox" checked={checksumEnabled} onChange={e=>setChecksumEnabled(e.target.checked)} className="add-download-checkbox" />
                       {t($ => $.addDownloads.verifyChecksum)}
@@ -3108,23 +2115,6 @@ export const AddDownloadsModal = () => {
                           <option>MD5</option><option>SHA-1</option><option>SHA-256</option>
                         </select>
                         <input type="text" value={checksumValue} onChange={e=>setChecksumValue(e.target.value)} placeholder={t($ => $.addDownloads.expectedDigest)} className="add-download-control flex-1 px-3 py-1.5 text-xs font-mono" />
-                      </div>
-                    )}
-
-                    {hasSftpRows && (
-                      <div>
-                        <label className="block text-[10px] uppercase font-bold tracking-wider text-text-muted mb-1">
-                          {t($ => $.addDownloads.sftpHostKeyMd)}
-                        </label>
-                        <input
-                          type="text"
-                          value={sftpHostKeyMd}
-                          onChange={event => setSftpHostKeyMd(event.target.value)}
-                          placeholder={t($ => $.addDownloads.sftpHostKeyMdHint)}
-                          className="add-download-control w-full px-3 py-1.5 text-xs font-mono"
-                          autoComplete="off"
-                        />
-                        <p className="mt-1 text-[11px] text-text-muted">{t($ => $.addDownloads.sftpHostKeyMdDescription)}</p>
                       </div>
                     )}
 
@@ -3159,10 +2149,9 @@ export const AddDownloadsModal = () => {
                       <label className="block text-[10px] uppercase font-bold tracking-wider text-text-muted mb-1">{t($ => $.addDownloads.mirrors)}</label>
                       <textarea value={mirrors} onChange={e=>setMirrors(e.target.value)} className="add-download-control w-full h-12 px-3 py-1.5 text-xs font-mono resize-none" aria-label={t($ => $.addDownloads.mirrors)} />
                     </div>
-                    </div>
-                  )}
-                </section>
-              )}
+                  </div>
+                )}
+              </section>
 
             </div>
           </div>

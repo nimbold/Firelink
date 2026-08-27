@@ -3,15 +3,13 @@ import { info } from '../utils/logger';
 import { invokeCommand as invoke } from '../ipc';
 
 import type { DownloadItem } from '../bindings/DownloadItem';
-import type { DownloadErrorKind } from '../bindings/DownloadErrorKind';
 import type { DownloadStatus } from '../bindings/DownloadStatus';
-import type { DownloadAssetRemovalPolicy } from '../bindings/DownloadAssetRemovalPolicy';
 import type { ExtensionDownload } from '../bindings/ExtensionDownload';
 import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
 import type { Queue } from '../bindings/Queue';
 import { useSettingsStore } from './useSettingsStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
-import { canonicalizeDownloadFileName, categoryForDownload, categoryForFileName, hasCredentialBearingHeaders, headerNameHasCredentialMaterial, headersWithoutCredentialMaterial, isActiveDownloadStatus, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, isActiveDownloadStatus, isTransferActiveStatus, normalizeSpeedLimitForBackend, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
 import {
   resolveCategoryDestination
 } from '../utils/downloadLocations';
@@ -46,15 +44,6 @@ const downloadControlIntents = new Map<string, DownloadControlIntent>();
 export interface ResumeDownloadOptions {
   preserveQueuePosition?: boolean;
   forceRequeue?: boolean;
-  resumeWithoutCredentials?: boolean;
-}
-
-export interface StartSelectedOptions {
-  resumeWithoutCredentialsIds?: readonly string[];
-}
-
-export interface StartQueueOptions {
-  resumeWithoutCredentialsIds?: readonly string[];
 }
 
 // State events do not carry a lifecycle generation. Keep the intent that
@@ -125,57 +114,6 @@ const waitForPendingStartupResume = async (): Promise<void> => {
   if (pending) await pending.catch(() => undefined);
 };
 
-const credentialsRequiredMessage = (): string =>
-  i18n.t($ => $.properties.credentialsRequired);
-
-const hasCredentialMaterial = (value: string | null | undefined): boolean =>
-  typeof value === 'string' && value.trim().length > 0;
-
-const RECOVERABLE_MEDIA_COOKIE_SOURCES = new Set([
-  'safari',
-  'chrome',
-  'chromium',
-  'firefox',
-  'edge',
-  'brave',
-  'opera',
-  'vivaldi',
-  'whale'
-]);
-
-const hasConfiguredMediaCookieSource = (
-  item: Pick<DownloadItem, 'isMedia'>,
-  settings: Pick<ReturnType<typeof useSettingsStore.getState>, 'mediaCookieSource'>
-): boolean => item.isMedia === true
-  && typeof settings.mediaCookieSource === 'string'
-  && RECOVERABLE_MEDIA_COOKIE_SOURCES.has(settings.mediaCookieSource);
-
-const credentialsNeedRecovery = (
-  item: Pick<DownloadItem, 'isTorrent' | 'isMedia' | 'credentialsRequired' | 'password' | 'cookies' | 'headers'>,
-  settings: Pick<ReturnType<typeof useSettingsStore.getState>, 'mediaCookieSource'>,
-  keychainPassword?: string | null
-): boolean => item.isTorrent !== true
-  && item.credentialsRequired === true
-  && !hasCredentialMaterial(item.password)
-  && !hasCredentialMaterial(item.cookies)
-  && !hasCredentialBearingHeaders(item.headers)
-  && !hasCredentialMaterial(keychainPassword)
-  && !hasConfiguredMediaCookieSource(item, settings);
-
-const markCredentialsRequired = (id: string): void => {
-  useDownloadStore.getState().updateDownload(id, {
-    status: 'paused',
-    lastError: credentialsRequiredMessage(),
-  });
-  useDownloadStore.setState(state => ({
-    pendingOrder: state.pendingOrder.filter(value => value !== id),
-  }));
-};
-
-const clearCredentialsRequired = (id: string): void => {
-  useDownloadStore.getState().updateDownload(id, { credentialsRequired: false });
-};
-
 const currentQueueControlGeneration = (queueId: string): number =>
   queueControlGenerations.get(queueId) ?? 0;
 
@@ -187,10 +125,6 @@ const advanceQueueControlGeneration = (queueId: string): number => {
 
 const isCurrentQueueControlGeneration = (queueId: string, generation: number): boolean =>
   currentQueueControlGeneration(queueId) === generation;
-
-type DispatchOptions = {
-  withoutSavedCredentials?: boolean;
-};
 
 const comparableQueuePosition = (download: DownloadItem): number => {
   const position = download.queuePosition;
@@ -254,26 +188,14 @@ const advanceDownloadLifecycle = (id: string): bigint => {
 const currentDownloadLifecycle = (id: string): bigint =>
   downloadLifecycleGenerations.get(id) ?? 0n;
 
-export const currentDownloadLifecycleGeneration = (id: string): string =>
-  currentDownloadLifecycle(id).toString();
-
 type DispatchInvalidation = {
   generation: bigint;
   pendingDispatch?: Promise<boolean>;
 };
 
-const invalidateDispatch = async (
-  id: string,
-  resetRetainedProgress = false,
-): Promise<DispatchInvalidation> => {
+const invalidateDispatch = async (id: string): Promise<DispatchInvalidation> => {
   const generation = currentDownloadLifecycle(id);
   const nextGeneration = advanceDownloadLifecycle(id);
-  // A new lifecycle cannot inherit the previous native allocation phase. The
-  // backend will emit a fresh marker for the new generation after admission.
-  useDownloadStore.getState().clearAllocationPending(id);
-  if (resetRetainedProgress) {
-    useDownloadProgressStore.getState().resetDownloadProgress(id);
-  }
   try {
     await invoke('cancel_enqueue_generation', { id, generation: generation.toString() });
   } catch (error) {
@@ -282,11 +204,8 @@ const invalidateDispatch = async (
   return { generation: nextGeneration, pendingDispatch: backendDispatchPromises.get(id) };
 };
 
-const invalidateAndWaitForDispatch = async (
-  id: string,
-  resetRetainedProgress = false,
-): Promise<boolean> => {
-  const { pendingDispatch } = await invalidateDispatch(id, resetRetainedProgress);
+const invalidateAndWaitForDispatch = async (id: string): Promise<boolean> => {
+  const { pendingDispatch } = await invalidateDispatch(id);
   if (!pendingDispatch) return false;
   await pendingDispatch;
   return true;
@@ -296,13 +215,9 @@ const isCurrentDownloadLifecycle = (id: string, generation: bigint): boolean =>
   currentDownloadLifecycle(id) === generation &&
   useDownloadStore.getState().downloads.some(download => download.id === id);
 
-const removeStaleBackendDispatch = async (id: string, lifecycleGeneration: bigint): Promise<void> => {
+const removeStaleBackendDispatch = async (id: string): Promise<void> => {
   try {
-    await invoke('remove_download', {
-      id,
-      deleteAssets: false,
-      expectedLifecycleGeneration: lifecycleGeneration.toString()
-    });
+    await invoke('remove_download', { id, deleteAssets: false });
   } catch (error) {
     // The original remove request may already have won this race. Either way,
     // never allow a stale enqueue to make the deleted row live again.
@@ -323,25 +238,21 @@ export class SystemProxyResolutionError extends Error {
 const isSystemProxyConfigurationError = (error: unknown): boolean =>
   error instanceof SystemProxyResolutionError;
 
-const DESTINATION_ACCESS_ERROR_MARKER = 'destination access retryable:';
-
-const isRetryableDestinationAccessError = (error: unknown): boolean =>
-  errorMessage(error).toLowerCase().includes(DESTINATION_ACCESS_ERROR_MARKER);
-
-const destinationAccessErrorMessage = (message: string): string => {
-  const markerIndex = message.toLowerCase().indexOf(DESTINATION_ACCESS_ERROR_MARKER);
-  if (markerIndex === -1) return message;
-  const detail = message.slice(markerIndex + DESTINATION_ACCESS_ERROR_MARKER.length).trim();
-  return detail || message;
-};
-
 const stripSensitiveMediaHeaders = (value: string | null | undefined): string =>
   (value || '')
     .split(/\r?\n/)
     .filter(line => {
       const separator = line.indexOf(':');
-      if (separator <= 0) return false;
-      return !headerNameHasCredentialMaterial(line.slice(0, separator));
+      if (separator < 0) return true;
+      const name = line.slice(0, separator).trim().toLowerCase();
+      return ![
+        'authorization',
+        'cookie',
+        'cookie2',
+        'proxy-authorization',
+        'set-cookie',
+        'set-cookie2'
+      ].includes(name);
     })
     .join('\n')
     .trim();
@@ -370,18 +281,13 @@ const speedLimitForDispatch = (
   return normalizeSpeedLimitForBackend(globalSpeedLimit);
 };
 
-async function dispatchItemInternal(
-  id: string,
-  proxyOverride?: string | null,
-  options: DispatchOptions = {}
-): Promise<boolean> {
+async function dispatchItemInternal(id: string, proxyOverride?: string | null): Promise<boolean> {
   await waitForPendingStartupResume();
   if (backendDispatchPromises.has(id)) return backendDispatchPromises.get(id)!;
 
   const promise = (async () => {
     let lifecycleGeneration: bigint | null = null;
     let backendAccepted = false;
-    const withoutSavedCredentials = options.withoutSavedCredentials === true;
     try {
       const state = useDownloadStore.getState();
       const item = state.downloads.find(d => d.id === id);
@@ -395,9 +301,7 @@ async function dispatchItemInternal(
         await resolveCategoryDestination(settings, item.category);
       if (!isCurrentDownloadLifecycle(id, lifecycleGeneration)) return false;
 
-      const login = withoutSavedCredentials || item.isTorrent === true
-        ? null
-        : getSiteLogin(item.url, settings);
+      const login = getSiteLogin(item.url, settings);
       if (login && !item.password && !settings.keychainAccessReady && !settings.keychainPromptDismissed) {
         settings.setShowKeychainModal(true);
         return false;
@@ -412,13 +316,6 @@ async function dispatchItemInternal(
       }
       if (!isCurrentDownloadLifecycle(id, lifecycleGeneration)) return false;
 
-      if (!withoutSavedCredentials && credentialsNeedRecovery(item, settings, keychainPassword)) {
-        markCredentialsRequired(id);
-        await commitDownloadState();
-        return false;
-      }
-      if (item.credentialsRequired === true) clearCredentialsRequired(id);
-
       const proxy = proxyOverride === undefined
         ? await getProxyArgs(settings)
         : proxyOverride;
@@ -430,78 +327,30 @@ async function dispatchItemInternal(
         url: item.url,
         destination,
         filename: item.fileName,
-        connections: item.isTorrent === true
-          ? null
-          : resolveDownloadConnections(item.connections, settings.perServerConnections),
+        connections: resolveDownloadConnections(item.connections, settings.perServerConnections),
         speed_limit: speedLimitForDispatch(item.speedLimit, settings.globalSpeedLimit, item.isMedia),
-        username: withoutSavedCredentials || item.isTorrent === true
-          ? null
-          : item.username || (login ? login.username : null),
-        password: withoutSavedCredentials || item.isTorrent === true
-          ? null
-          : item.password || keychainPassword,
-        sftp_host_key_md: item.isTorrent === true ? undefined : item.sftpHostKeyMd || undefined,
-        headers: item.isTorrent === true ? null : item.headers || null,
+        username: item.username || (login ? login.username : null),
+        password: item.password || keychainPassword,
+        headers: item.headers || null,
         checksum: item.checksum || null,
-        cookies: withoutSavedCredentials || item.isTorrent === true
-          ? null
-          : item.cookies || null,
+        cookies: item.cookies || null,
         mirrors: item.mirrors || null,
         user_agent: settings.customUserAgent.trim() || null,
         max_tries: settings.maxAutomaticRetries,
-        minimum_normal_download_speed_kib: settings.minimumNormalDownloadSpeedKiB,
-        retry_not_found_errors: settings.retryNotFoundErrors,
-        adaptive_mirror_selection: settings.adaptiveMirrorSelection,
         proxy,
         format_selector: item.mediaFormatSelector || null,
-        cookie_source: item.isMedia === true && hasConfiguredMediaCookieSource(item, settings)
-          ? settings.mediaCookieSource
-          : null,
+        cookie_source: settings.mediaCookieSource !== 'none' ? settings.mediaCookieSource : null,
         is_media: item.isMedia || false,
-        is_torrent: item.isTorrent || false,
-        torrent_path: item.torrentPath || undefined,
-        torrent_file_indices: item.torrentFileIndices || undefined,
-        torrent_info_hash: item.torrentInfoHash || undefined,
-        torrent_seed_time: item.torrentSeedTime,
-        torrent_seed_ratio: item.torrentSeedRatio,
-        torrent_seed_remaining: item.torrentSeedRemaining,
-        torrent_web_seeds: item.torrentWebSeeds,
-        torrent_upload_limit: item.torrentUploadLimit || undefined,
-        torrent_max_peers: item.torrentMaxPeers,
-        torrent_peer_speed_limit: item.torrentPeerSpeedLimit || undefined,
-        torrent_check_integrity: item.torrentCheckIntegrity || item.torrentRelocationCheckPending,
-        torrent_trackers: item.torrentTrackers || undefined,
-        torrent_exclude_trackers: item.torrentExcludeTrackers || undefined,
-        torrent_tracker_connect_timeout: item.torrentTrackerConnectTimeout,
-        torrent_tracker_timeout: item.torrentTrackerTimeout,
-        torrent_tracker_interval: item.torrentTrackerInterval,
-        torrent_stop_timeout: item.torrentStopTimeout,
-        torrent_prioritize_piece: item.torrentPrioritizePiece || undefined,
-        torrent_remove_unselected_file: item.torrentRemoveUnselectedFile,
-        torrent_encryption_policy: item.torrentEncryptionPolicy || undefined,
-        torrent_file_allocation: item.torrentFileAllocation || undefined,
-        torrent_verify_only: item.torrentVerifyOnly,
-        torrent_verify_restore_status: item.torrentVerifyRestoreStatus,
-        replace_existing_fingerprint: item.replaceExistingFingerprint || undefined,
         lifecycle_generation: lifecycleGeneration.toString(),
       };
 
       useDownloadStore.getState().updateDownload(id, {
         lastTry: new Date().toISOString()
       });
-      await commitDownloadState();
-      const admittedItem = useDownloadStore.getState().downloads.find(download => download.id === id);
-      if (
-        !admittedItem ||
-        !isCurrentDownloadLifecycle(id, lifecycleGeneration) ||
-        !['ready', 'staged', 'failed', 'queued'].includes(admittedItem.status)
-      ) {
-        return false;
-      }
       const accepted = await invoke('enqueue_download', { item: enqueueItem });
       backendAccepted = true;
       if (!isCurrentDownloadLifecycle(id, lifecycleGeneration)) {
-        await removeStaleBackendDispatch(id, lifecycleGeneration);
+        await removeStaleBackendDispatch(id);
         return false;
       }
 
@@ -509,51 +358,29 @@ async function dispatchItemInternal(
       if (acceptedFilename !== item.fileName) {
         useDownloadStore.getState().updateDownload(id, {
           fileName: acceptedFilename,
-          category: categoryForDownload(
-            acceptedFilename,
-            item.isTorrent === true,
-            item.category
-          )
+          category: categoryForFileName(acceptedFilename)
         });
       }
       const order = await invoke('get_pending_order', { queueId: item.queueId || MAIN_QUEUE_ID });
       if (!isCurrentDownloadLifecycle(id, lifecycleGeneration)) {
-        await removeStaleBackendDispatch(id, lifecycleGeneration);
+        await removeStaleBackendDispatch(id);
         return false;
       }
 
       useDownloadStore.getState().setPendingOrder(order);
       useDownloadStore.getState().registerBackendIds([id]);
-      useDownloadStore.getState().updateDownload(id, {
-        lastError: undefined,
-        lastErrorKind: undefined,
-        replaceExistingFingerprint: undefined
-      });
+      useDownloadStore.getState().updateDownload(id, { lastError: undefined });
       return true;
     } catch (e) {
       console.error(`Failed to dispatch ${id}:`, e);
       if (backendAccepted && lifecycleGeneration !== null) {
-        await removeStaleBackendDispatch(id, lifecycleGeneration);
+        await removeStaleBackendDispatch(id);
       }
       if (lifecycleGeneration !== null && isCurrentDownloadLifecycle(id, lifecycleGeneration)) {
         const proxyBlocked = isSystemProxyConfigurationError(e);
-        const destinationAccessBlocked = isRetryableDestinationAccessError(e);
-        const message = errorMessage(e);
-        if (destinationAccessBlocked) {
-          useDownloadStore.getState().clearAllocationPending(id);
-          useDownloadStore.setState(state => ({
-            pendingOrder: state.pendingOrder.filter(value => value !== id)
-          }));
-        }
         useDownloadStore.getState().updateDownload(id, {
-          status: proxyBlocked ? 'queued' : destinationAccessBlocked ? 'ready' : 'failed',
-          hasBeenDispatched: false,
-          lastErrorKind: destinationAccessBlocked
-            ? ('destinationAccess' as DownloadErrorKind)
-            : undefined,
-          lastError: destinationAccessBlocked
-            ? destinationAccessErrorMessage(message)
-            : message
+          status: proxyBlocked ? 'queued' : 'failed',
+          lastError: errorMessage(e)
         });
       }
       return false;
@@ -778,199 +605,10 @@ export const hasStaleTemporaryMediaEstimate = (
   return hasImpossibleNumericEstimate || hasImpossibleVisibleEstimate;
 };
 
-export const normalizePersistedDownloadProgress = (download: DownloadItem): DownloadItem => {
-  const rawSeedRemaining = download.torrentSeedRemaining as unknown;
-  const normalizedConnections = download.isTorrent === true ? undefined : download.connections;
-  const normalizedSeedRemaining = typeof rawSeedRemaining === 'number' &&
-    Number.isFinite(rawSeedRemaining) &&
-    rawSeedRemaining >= 0
-    ? rawSeedRemaining
-    : undefined;
-  const rawUploadedBytes = download.torrentUploadedBytes as unknown;
-  const normalizedUploadedBytes = typeof rawUploadedBytes === 'number'
-    && Number.isSafeInteger(rawUploadedBytes)
-    && rawUploadedBytes >= 0
-    ? rawUploadedBytes
-    : rawUploadedBytes === undefined ? undefined : 0;
-  const rawSeededSeconds = download.torrentSeededSeconds as unknown;
-  const normalizedSeededSeconds = typeof rawSeededSeconds === 'number'
-    && Number.isSafeInteger(rawSeededSeconds)
-    && rawSeededSeconds >= 0
-    ? rawSeededSeconds
-    : rawSeededSeconds === undefined ? undefined : 0;
-  const rawMaxPeers = download.torrentMaxPeers as unknown;
-  const normalizedMaxPeers = typeof rawMaxPeers === 'number' &&
-    Number.isInteger(rawMaxPeers) &&
-    rawMaxPeers >= 0 &&
-    rawMaxPeers <= 1000
-    ? rawMaxPeers
-    : undefined;
-  const rawWebSeeds = download.torrentWebSeeds as unknown;
-  const normalizedWebSeeds = Array.isArray(rawWebSeeds)
-    ? rawWebSeeds.filter((seed): seed is { fileIndex: number; uri: string } =>
-      !!seed && typeof seed === 'object' &&
-      typeof (seed as { fileIndex?: unknown }).fileIndex === 'number' &&
-      Number.isInteger((seed as { fileIndex: number }).fileIndex) &&
-      (seed as { fileIndex: number }).fileIndex >= 1 &&
-      typeof (seed as { uri?: unknown }).uri === 'string' &&
-      (seed as { uri: string }).uri.length <= 2048
-    ).slice(0, 256)
-    : undefined;
-  const rawNativeWebSeeds = download.torrentWebSeedsNative as unknown;
-  const normalizedNativeWebSeeds = Array.isArray(rawNativeWebSeeds)
-    ? rawNativeWebSeeds.filter((seed): seed is { fileIndex: number; uri: string } =>
-      !!seed && typeof seed === 'object' &&
-      typeof (seed as { fileIndex?: unknown }).fileIndex === 'number' &&
-      Number.isInteger((seed as { fileIndex: number }).fileIndex) &&
-      (seed as { fileIndex: number }).fileIndex >= 1 &&
-      typeof (seed as { uri?: unknown }).uri === 'string' &&
-      (seed as { uri: string }).uri.length <= 2048
-    ).slice(0, 256)
-    : undefined;
-  const rawPeerSpeedLimit = download.torrentPeerSpeedLimit as unknown;
-  const normalizedPeerSpeedLimit = typeof rawPeerSpeedLimit === 'string'
-    ? normalizeSpeedLimitForBackend(rawPeerSpeedLimit) || undefined
-    : undefined;
-  const rawCheckIntegrity = download.torrentCheckIntegrity as unknown;
-  const normalizedCheckIntegrity = typeof rawCheckIntegrity === 'boolean'
-    ? rawCheckIntegrity
-    : undefined;
-  const rawTrackers = download.torrentTrackers as unknown;
-  const normalizedTrackers = typeof rawTrackers === 'string' && rawTrackers.trim() && isValidTorrentTrackerList(rawTrackers)
-    ? rawTrackers.trim()
-    : undefined;
-  const rawExcludeTrackers = download.torrentExcludeTrackers as unknown;
-  const normalizedExcludeTrackers = typeof rawExcludeTrackers === 'string' && rawExcludeTrackers.trim() && isValidTorrentExcludeTrackerList(rawExcludeTrackers)
-    ? rawExcludeTrackers.trim()
-    : undefined;
-  const rawTrackerConnectTimeout = download.torrentTrackerConnectTimeout as unknown;
-  const normalizedTrackerConnectTimeout = normalizeTorrentTrackerTimeout(rawTrackerConnectTimeout);
-  const rawTrackerTimeout = download.torrentTrackerTimeout as unknown;
-  const normalizedTrackerTimeout = normalizeTorrentTrackerTimeout(rawTrackerTimeout);
-  const rawTrackerInterval = download.torrentTrackerInterval as unknown;
-  const normalizedTrackerInterval = normalizeTorrentTrackerInterval(rawTrackerInterval);
-  const rawStopTimeout = download.torrentStopTimeout as unknown;
-  const normalizedStopTimeout = typeof rawStopTimeout === 'number' &&
-    Number.isInteger(rawStopTimeout) &&
-    rawStopTimeout >= 0 &&
-    rawStopTimeout <= MAX_TORRENT_STOP_TIMEOUT
-    ? rawStopTimeout
-    : undefined;
-  const rawPrioritizePiece = download.torrentPrioritizePiece as unknown;
-  const normalizedPrioritizePiece = typeof rawPrioritizePiece === 'string'
-    ? normalizeTorrentPrioritizePiece(rawPrioritizePiece) || undefined
-    : undefined;
-  const rawRemoveUnselectedFile = download.torrentRemoveUnselectedFile as unknown;
-  const normalizedRemoveUnselectedFile = typeof rawRemoveUnselectedFile === 'boolean'
-    ? rawRemoveUnselectedFile
-    : undefined;
-  const rawEncryptionPolicy = download.torrentEncryptionPolicy as unknown;
-  const normalizedEncryptionPolicy = normalizeTorrentEncryptionPolicy(rawEncryptionPolicy);
-  const rawFileAllocation = download.torrentFileAllocation as unknown;
-  const normalizedFileAllocation = normalizeTorrentFileAllocation(rawFileAllocation);
-  const rawVerifyOnly = download.torrentVerifyOnly as unknown;
-  const normalizedVerifyOnly = rawVerifyOnly === true ? true : undefined;
-  const rawRelocationCheckPending = download.torrentRelocationCheckPending as unknown;
-  const normalizedRelocationCheckPending = rawRelocationCheckPending === true ? true : undefined;
-  const rawMoveDestination = download.torrentMoveDestination as unknown;
-  const normalizedMoveDestination = typeof rawMoveDestination === 'string'
-    && rawMoveDestination.trim()
-    ? rawMoveDestination
-    : undefined;
-  const rawMoveRestoreStatus = download.torrentMoveRestoreStatus as unknown;
-  const normalizedMoveRestoreStatus: DownloadStatus | undefined = download.status === 'moving' && (
-    rawMoveRestoreStatus === 'paused'
-    || rawMoveRestoreStatus === 'completed'
-    || rawMoveRestoreStatus === 'failed'
-  )
-    ? rawMoveRestoreStatus as DownloadStatus
-    : undefined;
-  const recoveredMoveStatus = download.status === 'moving'
-    ? normalizedMoveRestoreStatus || 'failed'
-    : download.status;
-  const rawVerifyRestoreStatus = download.torrentVerifyRestoreStatus as unknown;
-  const normalizedVerifyRestoreStatus = normalizedVerifyOnly === true
-    && typeof rawVerifyRestoreStatus === 'string'
-    && ['paused', 'failed', 'completed'].includes(rawVerifyRestoreStatus)
-    ? rawVerifyRestoreStatus
-    : undefined;
-  const torrentCredentialStateChanged = download.isTorrent === true && (
-    download.username !== undefined
-    || download.password !== undefined
-    || download.headers !== undefined
-    || download.cookies !== undefined
-    || download.credentialsRequired !== undefined
-  );
-  const normalizedOptions = rawSeedRemaining !== normalizedSeedRemaining ||
-    download.connections !== normalizedConnections ||
-    rawUploadedBytes !== normalizedUploadedBytes ||
-    rawSeededSeconds !== normalizedSeededSeconds ||
-    rawWebSeeds !== normalizedWebSeeds ||
-    rawNativeWebSeeds !== normalizedNativeWebSeeds ||
-    rawMaxPeers !== normalizedMaxPeers ||
-    rawPeerSpeedLimit !== normalizedPeerSpeedLimit ||
-    rawCheckIntegrity !== normalizedCheckIntegrity ||
-    rawTrackers !== normalizedTrackers ||
-    rawExcludeTrackers !== normalizedExcludeTrackers ||
-    rawTrackerConnectTimeout !== normalizedTrackerConnectTimeout ||
-    rawTrackerTimeout !== normalizedTrackerTimeout ||
-    rawTrackerInterval !== normalizedTrackerInterval ||
-    rawStopTimeout !== normalizedStopTimeout ||
-    rawPrioritizePiece !== normalizedPrioritizePiece ||
-    rawRemoveUnselectedFile !== normalizedRemoveUnselectedFile ||
-    rawEncryptionPolicy !== normalizedEncryptionPolicy ||
-    rawFileAllocation !== normalizedFileAllocation ||
-    rawVerifyOnly !== normalizedVerifyOnly ||
-    rawRelocationCheckPending !== normalizedRelocationCheckPending ||
-    rawMoveDestination !== normalizedMoveDestination ||
-    rawMoveRestoreStatus !== normalizedMoveRestoreStatus ||
-    recoveredMoveStatus !== download.status ||
-    rawVerifyRestoreStatus !== normalizedVerifyRestoreStatus ||
-    torrentCredentialStateChanged
-      ? {
-        ...download,
-        connections: normalizedConnections,
-        status: recoveredMoveStatus,
-        torrentSeedRemaining: normalizedSeedRemaining,
-        torrentUploadedBytes: normalizedUploadedBytes,
-        torrentSeededSeconds: normalizedSeededSeconds,
-        torrentWebSeeds: normalizedWebSeeds,
-        torrentWebSeedsNative: normalizedNativeWebSeeds,
-        torrentMaxPeers: normalizedMaxPeers,
-        torrentPeerSpeedLimit: normalizedPeerSpeedLimit,
-        torrentCheckIntegrity: normalizedCheckIntegrity,
-        torrentTrackers: normalizedTrackers,
-        torrentExcludeTrackers: normalizedExcludeTrackers,
-        torrentTrackerConnectTimeout: normalizedTrackerConnectTimeout,
-        torrentTrackerTimeout: normalizedTrackerTimeout,
-        torrentTrackerInterval: normalizedTrackerInterval,
-        torrentStopTimeout: normalizedStopTimeout,
-        torrentPrioritizePiece: normalizedPrioritizePiece,
-        torrentRemoveUnselectedFile: normalizedRemoveUnselectedFile,
-        torrentEncryptionPolicy: normalizedEncryptionPolicy,
-        torrentFileAllocation: normalizedFileAllocation,
-        torrentVerifyOnly: normalizedVerifyOnly,
-        torrentRelocationCheckPending: normalizedRelocationCheckPending,
-        torrentMoveDestination: normalizedMoveDestination,
-        torrentMoveRestoreStatus: normalizedMoveRestoreStatus,
-        torrentVerifyRestoreStatus: normalizedVerifyRestoreStatus,
-        ...(download.isTorrent === true
-          ? {
-              username: undefined,
-              password: undefined,
-              headers: undefined,
-              cookies: undefined,
-              credentialsRequired: undefined,
-            }
-          : {})
-      }
-    : recoveredMoveStatus !== download.status
-      ? { ...download, status: recoveredMoveStatus, torrentMoveRestoreStatus: normalizedMoveRestoreStatus }
-      : download;
-
-  return hasStaleTemporaryMediaEstimate(normalizedOptions)
+export const normalizePersistedDownloadProgress = (download: DownloadItem): DownloadItem =>
+  hasStaleTemporaryMediaEstimate(download)
     ? {
-        ...normalizedOptions,
+        ...download,
         // The old lifecycle could persist yt-dlp's temporary HLS estimate as
         // both the numeric denominator and the visible size. Neither value is
         // recoverable after the fact, so remove the false claim on startup.
@@ -978,8 +616,7 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
         totalBytes: undefined,
         totalIsEstimate: undefined
       }
-    : normalizedOptions;
-};
+    : download;
 
 export type { DownloadStatus };
 export const MAIN_QUEUE_ID = '00000000-0000-0000-0000-000000000001';
@@ -1088,7 +725,6 @@ export type PendingAddRequestContext = {
   cookies: string;
   cookieScopes?: ExtensionCookieScope[];
   media: boolean;
-  torrent?: boolean;
 };
 
 export type DeleteModalState = {
@@ -1102,11 +738,8 @@ interface DownloadState {
   pendingOrder: string[];
   setPendingOrder: (order: string[]) => void;
   backendRegisteredIds: Set<string>;
-  allocationPendingIds: Set<string>;
   registerBackendIds: (ids: string[]) => void;
   unregisterBackendIds: (ids: string[]) => void;
-  setAllocationPending: (id: string, pending: boolean, lifecycleGeneration: string) => void;
-  clearAllocationPending: (id: string) => void;
   applyProperties: (id: string, updates: Partial<DownloadItem>) => Promise<void>;
   moveInQueue: (ids: string | string[], direction: 'up' | 'down') => Promise<void>;
   moveManyInQueueToPosition: (
@@ -1124,7 +757,6 @@ interface DownloadState {
   pendingAddHeaders: string;
   pendingAddCookies: string;
   pendingAddMediaUrls: string[];
-  pendingAddTorrentUrls: string[];
   pendingAddBatch: boolean;
   pendingAddBatchName: string;
   pendingAddRequestContexts: Record<string, PendingAddRequestContext>;
@@ -1140,8 +772,7 @@ interface DownloadState {
     media?: boolean,
     cookieScopes?: ExtensionCookieScope[] | null,
     batch?: boolean,
-    batchName?: string | null,
-    torrent?: boolean
+    batchName?: string | null
   ) => void;
   handleExtensionDownload: (request: ExtensionDownloadRequest) => Promise<void>;
   deleteModalState: DeleteModalState;
@@ -1151,28 +782,17 @@ interface DownloadState {
   addDownload: (item: DownloadDraft, action: AddDownloadAction) => Promise<boolean>;
   replaceDownload: (id: string, updates: Partial<DownloadItem>, action: AddDownloadAction) => Promise<boolean>;
   updateDownload: (id: string, updates: Partial<DownloadItem>) => void;
-  removeDownload: (
-    id: string,
-    deleteFile?: boolean,
-    preserveResumable?: boolean,
-    assetRemovalPolicy?: DownloadAssetRemovalPolicy
-  ) => Promise<void>;
+  removeDownload: (id: string, deleteFile?: boolean, preserveResumable?: boolean) => Promise<void>;
   pauseDownload: (id: string) => Promise<void>;
   redownload: (id: string) => Promise<void>;
   resumeDownload: (id: string, options?: ResumeDownloadOptions) => Promise<boolean>;
-  startSelected: (ids: string[], options?: StartSelectedOptions) => Promise<number>;
-  startQueue: (queueId: string, options?: StartQueueOptions) => Promise<string[]>;
+  startSelected: (ids: string[]) => Promise<number>;
+  startQueue: (queueId: string) => Promise<string[]>;
   pauseQueue: (queueId: string) => Promise<number>;
-  startAll: (options?: StartQueueOptions) => Promise<number>;
+  startAll: () => Promise<number>;
   pauseAll: () => Promise<number>;
   assignToQueue: (ids: string[], queueId: string) => Promise<void>;
   setDownloadSpeedLimit: (id: string, limit: string | null) => Promise<void>;
-  setTorrentUploadLimit: (id: string, limit: string | null) => Promise<void>;
-  setTorrentPeerOptions: (
-    id: string,
-    maxPeers: string | null,
-    peerSpeedLimit: string | null
-  ) => Promise<void>;
   setQueueConcurrency: (id: string, maxConcurrent: number | null) => Promise<void>;
   addQueue: (name: string) => boolean;
   renameQueue: (id: string, name: string) => boolean;
@@ -1185,109 +805,20 @@ interface DownloadState {
 export const useDownloadStore = create<DownloadState>((set, get) => {
   const applyPropertiesInternal = async (id: string, updates: Partial<DownloadItem>): Promise<void> => {
     await waitForPendingStartupResume();
-    const initialItem = get().downloads.find(download => download.id === id);
-    if (!initialItem) return;
-    // Reject immutable identity edits before invalidating a live queued
-    // dispatch. Validation after invalidation would cancel a legitimate
-    // enqueue even though no mutation was accepted.
-    if ((updates.fileName !== undefined || updates.destination !== undefined)
-      && (initialItem.isTorrent === true || !['ready', 'staged'].includes(initialItem.status))) {
-      throw new Error(i18n.t($ => $.properties.identityReadOnly));
-    }
     const wasDispatching = await invalidateAndWaitForDispatch(id);
     const state = get();
     const item = state.downloads.find(d => d.id === id);
     if (!item) return;
-    const previousItem = item;
-    const previousPendingOrder = [...state.pendingOrder];
-    const wasBackendRegistered = state.backendRegisteredIds.has(id);
-    const commitProperties = async (): Promise<void> => {
-      try {
-        await commitDownloadState();
-      } catch (error) {
-        // A queued item may already have been detached before persistence
-        // failed. Restore both projections, then rebuild the backend lifecycle
-        // when the previous row owned one; restoring only the React object
-        // would leave a visible queued row that can never dispatch.
-        set(current => ({
-          downloads: current.downloads.map(download => download.id === id ? previousItem : download),
-          pendingOrder: previousPendingOrder,
-          backendRegisteredIds: new Set(
-            [...current.backendRegisteredIds].filter(registeredId => registeredId !== id)
-          ),
-        }));
-        if ((wasBackendRegistered || wasDispatching) && previousItem.status === 'queued') {
-          const restored = await dispatchItemInternal(id);
-          if (!restored) {
-            set(current => ({
-              downloads: current.downloads.map(download =>
-                download.id === id
-                  ? { ...previousItem, status: 'failed' as const, hasBeenDispatched: false, lastError: errorMessage(error) }
-                  : download
-              ),
-              pendingOrder: current.pendingOrder.filter(value => value !== id),
-              backendRegisteredIds: new Set(
-                [...current.backendRegisteredIds].filter(registeredId => registeredId !== id)
-              ),
-            }));
-          }
-        }
-        throw error;
-      }
-    };
-    const credentialsUpdated = (['password', 'cookies', 'headers'] as const)
-      .some(field => Object.prototype.hasOwnProperty.call(updates, field));
-    const nextCredentialMaterial = (['password', 'cookies', 'headers'] as const)
-      .some(field => field === 'headers'
-        ? hasCredentialBearingHeaders(
-          Object.prototype.hasOwnProperty.call(updates, field) ? updates[field] : item[field]
-        )
-        : hasCredentialMaterial(
-          Object.prototype.hasOwnProperty.call(updates, field) ? updates[field] : item[field]
-        ));
-    const identityUpdated = updates.fileName !== undefined || updates.destination !== undefined;
-    const normalizedUpdates = {
-      ...(updates.fileName === undefined
-        ? updates
-        : { ...updates, fileName: canonicalizeDownloadFileName(updates.fileName) }),
-      ...(credentialsUpdated && nextCredentialMaterial
-        ? { credentialsRequired: false }
-        : credentialsUpdated && item.credentialsRequired === true
-          ? { credentialsRequired: true }
-          : {}),
-      ...(item.isTorrent === true
-        ? {
-            username: undefined,
-            password: undefined,
-            headers: undefined,
-            cookies: undefined,
-            credentialsRequired: undefined,
-          }
-        : {}),
-      // A replacement fingerprint authorizes one exact destination identity.
-      // Editing either part of that identity invalidates the authorization so
-      // it cannot be replayed against a different path after persistence.
-      ...(identityUpdated ? { replaceExistingFingerprint: undefined } : {}),
-    };
-    const disablingTorrentRemoval = item.isTorrent === true
-      && normalizedUpdates.torrentRemoveUnselectedFile === false
-      && item.torrentRemoveUnselectedFile !== false;
+    const normalizedUpdates = updates.fileName === undefined
+      ? updates
+      : { ...updates, fileName: canonicalizeDownloadFileName(updates.fileName) };
 
-    if ((normalizedUpdates.fileName !== undefined || normalizedUpdates.destination !== undefined)
-      && (item.isTorrent === true || !['ready', 'staged'].includes(item.status))) {
-      throw new Error(i18n.t($ => $.properties.identityReadOnly));
-    }
-
-    if (item.status === 'downloading' || item.status === 'processing' || item.status === 'verifying' || item.status === 'seeding' || item.status === 'retrying') {
+    if (item.status === 'downloading' || item.status === 'processing' || item.status === 'retrying') {
       throw new Error(i18n.t($ => $.downloadTable.transferActive));
     }
 
     if (item.status === 'ready' || item.status === 'staged' || item.status === 'completed' || item.status === 'failed') {
-      if (disablingTorrentRemoval) {
-        await invoke('clear_torrent_removal_paths', { id });
-      }
       state.updateDownload(id, normalizedUpdates);
-      await commitProperties();
       return;
     }
 
@@ -1300,11 +831,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         state.unregisterBackendIds([id]);
         set(current => ({ pendingOrder: current.pendingOrder.filter(value => value !== id) }));
       }
-      if (disablingTorrentRemoval) {
-        await invoke('clear_torrent_removal_paths', { id });
-      }
       state.updateDownload(id, normalizedUpdates);
-      await commitProperties();
       if (isRegistered || wasDispatching) {
         const dispatched = await dispatchItemInternal(id);
         if (dispatched) {
@@ -1314,23 +841,16 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         }
       }
     } else if (item.status === 'paused') {
-      // The frontend deliberately removes paused rows from
-      // backendRegisteredIds, but the backend keeps a paused Aria2 GID and
-      // its old payload alive for an in-place resume. Any property change,
-      // especially Torrent selection/output changes, must retire that
-      // lifecycle or resume will silently use stale daemon options.
-      try {
-        await invoke('detach_download_for_reconfigure', { id });
-      } catch (e) {
-        console.error("Failed to detach for reconfigure:", e);
-        throw e; // Preserve old properties if detach fails
-      }
-      if (isRegistered) state.unregisterBackendIds([id]);
-      if (disablingTorrentRemoval) {
-        await invoke('clear_torrent_removal_paths', { id });
+      if (isRegistered) {
+        try {
+          await invoke('detach_download_for_reconfigure', { id });
+        } catch (e) {
+          console.error("Failed to detach for reconfigure:", e);
+          throw e; // Preserve old properties if detach fails
+        }
+        state.unregisterBackendIds([id]);
       }
       state.updateDownload(id, normalizedUpdates);
-      await commitProperties();
     }
   };
 
@@ -1342,72 +862,17 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     let targetItem = get().downloads.find(d => d.id === id);
     if (!targetItem) return false;
 
-    const requestedResumeWithoutCredentials = options.resumeWithoutCredentials === true;
-    const resumeWithoutCredentials = requestedResumeWithoutCredentials
-      && targetItem.credentialsRequired === true;
-    const forceRequeue = options.forceRequeue === true || resumeWithoutCredentials;
-    const preserveQueuePosition = options.preserveQueuePosition === true || resumeWithoutCredentials;
-
-    if (resumeWithoutCredentials) {
-      // An explicit credentialless retry must not reuse secrets retained by
-      // the in-memory row or by a paused daemon lifecycle. Requeueing below
-      // creates a fresh backend lifecycle with the redacted payload.
-      get().updateDownload(id, {
-        username: undefined,
-        password: undefined,
-        cookies: undefined,
-        headers: headersWithoutCredentialMaterial(targetItem.headers),
-      });
-      targetItem = get().downloads.find(download => download.id === id);
-      if (!targetItem) return false;
-    }
-
-    const settings = useSettingsStore.getState();
-    if (credentialsNeedRecovery(targetItem, settings)) {
-      if (!resumeWithoutCredentials) {
-        const login = getSiteLogin(targetItem.url, settings);
-        let keychainPassword: string | null = null;
-        if (login && settings.keychainAccessReady) {
-          try {
-            keychainPassword = await invoke('get_keychain_password', { id: login.id });
-          } catch (error) {
-            console.warn('Could not fetch keychain password for resume:', error);
-          }
-        }
-        if (credentialsNeedRecovery(targetItem, settings, keychainPassword)) {
-          if (login && !settings.keychainAccessReady && !settings.keychainPromptDismissed) {
-            settings.setShowKeychainModal(true);
-          }
-          markCredentialsRequired(id);
-          await commitDownloadState();
-          return false;
-        }
-        // A normal resume has now proved that a configured credential source
-        // is available. Clear the durable marker before accepting the
-        // existing lifecycle. Explicit credentialless retries defer this
-        // until fresh admission succeeds so a detach/enqueue failure leaves
-        // the recovery action available.
-        clearCredentialsRequired(id);
-      }
-    } else if (targetItem.isTorrent === true && targetItem.credentialsRequired === true) {
-      clearCredentialsRequired(id);
-    }
-
     setDownloadControlIntent(id, 'resume');
     let previousStatus = targetItem.status;
     try {
-      if (forceRequeue) {
+      if (options.forceRequeue) {
         // Fence any older enqueue before replacing a paused backend lifecycle.
         // Otherwise a late addUri result can win the race and make this
         // selection start outside the requested order.
-        const { pendingDispatch } = await invalidateDispatch(id, true);
+        const { pendingDispatch } = await invalidateDispatch(id);
         if (pendingDispatch) await pendingDispatch;
         targetItem = get().downloads.find(download => download.id === id);
-        if (
-          !targetItem
-          || (!canStartDownload(targetItem.status)
-            && !(resumeWithoutCredentials && targetItem.status === 'queued'))
-        ) {
+        if (!targetItem || !canStartDownload(targetItem.status)) {
           clearDownloadControlIntent(id, 'resume');
           return false;
         }
@@ -1417,15 +882,15 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       const currentTargetItem = targetItem;
 
       if (
-        forceRequeue &&
-        get().backendRegisteredIds.has(id) &&
-        (currentTargetItem.status === 'paused' || resumeWithoutCredentials)
+        options.forceRequeue &&
+        currentTargetItem.status === 'paused' &&
+        get().backendRegisteredIds.has(id)
       ) {
         await invoke('detach_download_for_reconfigure', { id });
         get().unregisterBackendIds([id]);
       }
 
-      if (forceRequeue) {
+      if (options.forceRequeue) {
         set(state => ({
           pendingOrder: state.pendingOrder.filter(value => value !== id)
         }));
@@ -1433,26 +898,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
 
       if (currentTargetItem.status === 'ready' || currentTargetItem.status === 'staged') {
         get().updateDownload(id, { status: 'queued', hasBeenDispatched: true });
-        try {
-          await commitDownloadState();
-        } catch (error) {
-          get().updateDownload(id, {
-            status: currentTargetItem.status,
-            lastError: errorMessage(error)
-          });
-          clearDownloadControlIntent(id, 'resume');
-          return false;
-        }
-        const queuedItem = get().downloads.find(download => download.id === id);
-        if (!queuedItem || queuedItem.status !== 'queued') {
-          clearDownloadControlIntent(id, 'resume');
-          return false;
-        }
-        if (await dispatchItemInternal(
-          id,
-          undefined,
-          resumeWithoutCredentials ? { withoutSavedCredentials: true } : undefined
-        )) {
+        if (await dispatchItemInternal(id)) {
           return true;
         }
         get().updateDownload(id, { status: currentTargetItem.status });
@@ -1465,7 +911,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         (d.queueId || MAIN_QUEUE_ID) === (currentTargetItem.queueId || MAIN_QUEUE_ID)
       );
       const maxPos = queueItems.reduce((max, d) => Math.max(max, d.queuePosition ?? 0), -1);
-      const queuePosition = preserveQueuePosition
+      const queuePosition = options.preserveQueuePosition
         ? currentTargetItem.queuePosition
         : maxPos + 1;
 
@@ -1477,24 +923,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         lastTry: new Date().toISOString()
       });
 
-      try {
-        await commitDownloadState();
-      } catch (error) {
-        get().updateDownload(id, {
-          status: prevStatus,
-          lastError: errorMessage(error)
-        });
-        clearDownloadControlIntent(id, 'resume');
-        return false;
-      }
-
-      const queuedItem = get().downloads.find(download => download.id === id);
-      if (!queuedItem || queuedItem.status !== 'queued') {
-        clearDownloadControlIntent(id, 'resume');
-        return false;
-      }
-
-      const resumedExisting = forceRequeue
+      const resumedExisting = options.forceRequeue
         ? false
         : await invoke('resume_download', {
             id,
@@ -1507,12 +936,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         // A terminal aria2 gid is intentionally re-enqueued as a new
         // lifecycle. Advance and cancel the old generation before dispatching
         // so QueueManager does not reject the legitimate user retry as stale.
-        await invalidateAndWaitForDispatch(id, true);
-        dispatchSucceeded = await dispatchItemInternal(
-          id,
-          undefined,
-          resumeWithoutCredentials ? { withoutSavedCredentials: true } : undefined
-        );
+        await invalidateAndWaitForDispatch(id);
+        dispatchSucceeded = await dispatchItemInternal(id);
       }
 
       if (dispatchSucceeded) {
@@ -1737,7 +1162,6 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     }
   },
   backendRegisteredIds: new Set(),
-  allocationPendingIds: new Set(),
   registerBackendIds: (ids) => set((state) => {
     const nextSet = new Set(state.backendRegisteredIds);
     for (const id of ids) nextSet.add(id);
@@ -1748,22 +1172,6 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     for (const id of ids) nextSet.delete(id);
     return { backendRegisteredIds: nextSet };
   }),
-  setAllocationPending: (id, pending, lifecycleGeneration) => set((state) => {
-    // Native allocation events can arrive while persisted rows are still
-    // hydrating. Validate against the frontend lifecycle counter even when no
-    // row exists yet, then retain the marker until that row is projected.
-    if (lifecycleGeneration !== currentDownloadLifecycleGeneration(id)) return state;
-    const nextSet = new Set(state.allocationPendingIds);
-    if (pending) nextSet.add(id);
-    else nextSet.delete(id);
-    return { allocationPendingIds: nextSet };
-  }),
-  clearAllocationPending: (id) => set((state) => {
-    if (!state.allocationPendingIds.has(id)) return state;
-    const nextSet = new Set(state.allocationPendingIds);
-    nextSet.delete(id);
-    return { allocationPendingIds: nextSet };
-  }),
   isAddModalOpen: false,
   pendingAddUrls: '',
   pendingAddReferer: '',
@@ -1771,7 +1179,6 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
   pendingAddHeaders: '',
   pendingAddCookies: '',
   pendingAddMediaUrls: [],
-  pendingAddTorrentUrls: [],
   pendingAddBatch: false,
   pendingAddBatchName: '',
   pendingAddRequestContexts: {},
@@ -1793,7 +1200,6 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     pendingAddHeaders: '',
     pendingAddCookies: '',
     pendingAddMediaUrls: [],
-    pendingAddTorrentUrls: [],
     pendingAddBatch: false,
     pendingAddBatchName: '',
     pendingAddRequestContexts: {},
@@ -1810,8 +1216,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     media = false,
     cookieScopes,
     batch = false,
-    batchName,
-    torrent = false
+    batchName
   ) => set((state) => {
     const isAppending = state.isAddModalOpen && Boolean(state.pendingAddUrls);
     const existingUrls = isAppending ? state.pendingAddUrls : '';
@@ -1857,15 +1262,11 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         headers: cleanHeaders,
         cookies: cleanCookies,
         ...(cleanCookieScopes?.length ? { cookieScopes: cleanCookieScopes } : {}),
-        media,
-        ...(torrent ? { torrent: true } : {})
+        media
       };
     }
     const pendingAddMediaUrls = Object.entries(pendingAddRequestContexts)
       .filter(([, context]) => context.media)
-      .map(([url]) => url);
-    const pendingAddTorrentUrls = Object.entries(pendingAddRequestContexts)
-      .filter(([, context]) => context.torrent)
       .map(([url]) => url);
     return {
       isAddModalOpen: true,
@@ -1875,7 +1276,6 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       pendingAddHeaders: cleanHeaders,
       pendingAddCookies: cleanCookies,
       pendingAddMediaUrls,
-      pendingAddTorrentUrls,
       pendingAddBatch: nextBatch,
       pendingAddBatchName: nextBatchName,
       pendingAddRequestContexts,
@@ -1889,8 +1289,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     // Explicit media authentication belongs to yt-dlp's configured browser
     // cookie source. Keep this frontend guard for events from older desktop or
     // extension builds; ordinary captured downloads retain their cookies.
-    const cookies = request.media === true || urls.length > 1 ? null : request.cookies;
-    const headers = request.media === true || urls.length > 1
+    const cookies = request.media === true ? null : request.cookies;
+    const headers = request.media === true
       ? stripSensitiveMediaHeaders(request.headers) || null
       : request.headers;
 
@@ -1903,31 +1303,15 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       request.media === true,
       request.media === true ? undefined : request.cookie_scopes,
       request.batch === true && urls.length >= 2,
-      request.batch_name,
-      request.torrent === true
+      request.batch_name
     );
   },
   setSelectedPropertiesDownloadId: (id) => set({ selectedPropertiesDownloadId: id }),
   addDownload: async (item, action) => {
-    if (action.type === 'add-to-queue' && !get().queues.some(queue => queue.id === action.queueId)) {
-      // The Add window can outlive a queue deletion in another view. Never
-      // persist an orphaned staged row under a queue ID that no longer exists.
-      throw new Error('Queue no longer exists.');
-    }
     const settings = useSettingsStore.getState();
     const normalizedItem = {
       ...item,
-      ...(item.isTorrent === true
-        ? {
-            username: undefined,
-            password: undefined,
-            headers: undefined,
-            cookies: undefined,
-            credentialsRequired: undefined,
-          }
-        : {}),
-      fileName: canonicalizeDownloadFileName(item.fileName),
-      category: categoryForFileName(item.fileName, item.isTorrent === true)
+      fileName: canonicalizeDownloadFileName(item.fileName)
     };
     const destPath = await effectiveDestinationForItem(normalizedItem, settings);
     const queueId = action.type === 'add-to-queue' ? action.queueId : MAIN_QUEUE_ID;
@@ -1943,9 +1327,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       totalIsEstimate: normalizedItem.totalIsEstimate ?? (
         normalizedItem.isMedia === true && normalizedItem.size?.trim().startsWith('~')
       ),
-      connections: normalizedItem.isTorrent === true
-        ? undefined
-        : resolveDownloadConnections(normalizedItem.connections, settings.perServerConnections),
+      connections: resolveDownloadConnections(normalizedItem.connections, settings.perServerConnections),
       destination: destPath,
       status: action.type === 'add-to-queue' ? 'staged' : 'ready',
       queueId,
@@ -1953,23 +1335,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       hasBeenDispatched: false
     };
     advanceDownloadLifecycle(item.id);
-    get().clearAllocationPending(item.id);
-    useDownloadProgressStore.getState().resetDownloadProgress(item.id);
     set((state) => ({
       downloads: reorderQueueWithPausedAtEnd([...state.downloads, ownedItem], queueId)
     }));
-
-    try {
-      // Admission must not reach Aria2 or yt-dlp before the row and its queue
-      // position are committed. If the process dies after this point, startup
-      // recovery still has an authoritative row to resume.
-      await commitDownloadState();
-    } catch (error) {
-      const message = errorMessage(error);
-      console.error(`Failed to persist download ${item.id} before admission:`, error);
-      get().updateDownload(item.id, { status: 'failed', lastError: message });
-      return false;
-    }
 
     if (action.type === 'add-to-queue') {
       info(`Download ${item.id} added to queue ${action.queueId}`);
@@ -2032,13 +1400,6 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
           : downloads,
         ...(updates.status === 'paused'
           ? { pendingOrder: state.pendingOrder.filter(value => value !== id) }
-          : {}),
-        ...(updates.status && ['completed', 'failed', 'paused'].includes(updates.status)
-          ? {
-              allocationPendingIds: new Set(
-                [...state.allocationPendingIds].filter(pendingId => pendingId !== id)
-              )
-            }
           : {})
       };
     });
@@ -2046,14 +1407,14 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     if (updates.status && ['completed', 'failed', 'paused'].includes(updates.status)) {
       info(`Download ${id} status changed to ${updates.status}`);
       syncSystemIntegrations();
-    } else if (updates.status === 'downloading' || updates.status === 'seeding') {
-      info(`Download ${id} status changed to ${updates.status}`);
+    } else if (updates.status === 'downloading') {
+      info(`Download ${id} status changed to downloading`);
       syncSystemIntegrations();
     }
   },
-  removeDownload: (id, deleteFile = false, preserveResumable = false, assetRemovalPolicy) => runDownloadLifecycleOperation(
+  removeDownload: (id, deleteFile = false, preserveResumable = false) => runDownloadLifecycleOperation(
     id,
-    `remove:${deleteFile}:${preserveResumable}:${assetRemovalPolicy ?? 'default'}`,
+    `remove:${deleteFile}:${preserveResumable}`,
     async () => {
     await waitForPendingStartupResume();
     clearDownloadControlIntent(id);
@@ -2061,21 +1422,13 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     if (pendingDispatch) {
       await pendingDispatch;
     }
-    // The native command classifies PermanentIfUnfinished from the durable
-    // row. Flush the current UI snapshot only after invalidating and joining
-    // any pending dispatch, so a status transition from that dispatch cannot
-    // leave SQLite behind the state used for native removal.
-    if (deleteFile && !preserveResumable && assetRemovalPolicy === 'permanentIfUnfinished') {
-      await flushDownloadPersistence();
-    }
     const item = get().downloads.find(d => d.id === id);
 
     if (item) {
       await invoke('remove_download', {
         id,
         deleteAssets: deleteFile,
-        preserveResumable,
-        ...(assetRemovalPolicy ? { assetRemovalPolicy } : {})
+        preserveResumable
       });
     }
 
@@ -2084,31 +1437,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       pendingOrder: state.pendingOrder.filter(x => x !== id),
       backendRegisteredIds: new Set(
         Array.from(state.backendRegisteredIds).filter(registeredId => registeredId !== id)
-      ),
-      allocationPendingIds: new Set(
-        Array.from(state.allocationPendingIds).filter(pendingId => pendingId !== id)
       )
     }));
-    try {
-      await commitDownloadState();
-    } catch (error) {
-      const message = errorMessage(error);
-      console.error(`Failed to persist removal of ${id}:`, error);
-      if (item) {
-        set(state => state.downloads.some(download => download.id === id)
-          ? {}
-          : {
-              downloads: [...state.downloads, {
-                ...item,
-                status: 'failed' as const,
-                lastError: message,
-                hasBeenDispatched: false
-              }]
-            });
-      }
-      throw error;
-    }
-    useDownloadProgressStore.getState().resetDownloadProgress(id);
+    useDownloadProgressStore.getState().clearDownloadProgress(id);
     info(`Download ${id} removed`);
     syncSystemIntegrations();
     },
@@ -2131,7 +1462,6 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       const current = get().downloads.find(download => download.id === id);
       if (current && current.status !== 'completed' && current.status !== 'failed') {
         get().updateDownload(id, { status: 'paused', speed: '-', eta: '-' });
-        await commitDownloadState();
       }
     } finally {
       clearDownloadControlIntent(id, 'pause');
@@ -2177,9 +1507,6 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       hasBeenDispatched: false,
       dateAdded: new Date().toISOString()
     });
-    useDownloadProgressStore.getState().resetDownloadProgress(id);
-
-    await commitDownloadState();
 
     if (!await dispatchItemInternal(id)) {
       console.error("Failed to enqueue redownload");
@@ -2197,10 +1524,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     true,
     preemptDispatch
   ),
-  startSelected: (ids, options = {}) => {
+  startSelected: (ids) => {
     const orderedIds = [...new Set(ids)];
     if (orderedIds.length === 0) return Promise.resolve(0);
-    const resumeWithoutCredentialsIds = new Set(options.resumeWithoutCredentialsIds ?? []);
 
     return runDownloadLifecycleOperations(orderedIds, 'start-selected', async () => {
       await waitForPendingStartupResume();
@@ -2244,8 +1570,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         }
         const resumed = await resumeDownloadInternal(id, {
           preserveQueuePosition: true,
-          forceRequeue: true,
-          resumeWithoutCredentials: resumeWithoutCredentialsIds.has(id)
+          forceRequeue: true
         });
         if (resumed && !isCurrentQueueControlGeneration(queueId, generation)) {
           // A queue pause can win while this item's requeue is in flight. The
@@ -2289,8 +1614,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       return startedCount;
     });
   },
-  startQueue: (queueId, options = {}) => {
-    const resumeWithoutCredentialsIds = new Set(options.resumeWithoutCredentialsIds ?? []);
+  startQueue: (queueId) => {
     const requestedGeneration = currentQueueControlGeneration(queueId);
     const previousOperation = queueStartPromises.get(queueId) ?? Promise.resolve([]);
     const operation = previousOperation.catch(() => []).then(async () => {
@@ -2304,52 +1628,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
 
       if (runnable.length === 0 || !isCurrentQueueControlGeneration(queueId, requestedGeneration)) return [];
 
-      const settings = useSettingsStore.getState();
-      let credentialStateChanged = false;
-      const credentialBlockedIds = new Set<string>();
-      for (const item of runnable) {
-        if (!isCurrentQueueControlGeneration(queueId, requestedGeneration)) return [];
-        const currentItem = get().downloads.find(download => download.id === item.id);
-        if (
-          !currentItem
-          || (currentItem.queueId || MAIN_QUEUE_ID) !== queueId
-          || (currentItem.status !== 'queued' && !canStartDownload(currentItem.status))
-          || resumeWithoutCredentialsIds.has(item.id)
-        ) continue;
-        const login = currentItem.isTorrent === true ? null : getSiteLogin(currentItem.url, settings);
-        let keychainPassword: string | null = null;
-        if (login && !currentItem.password && settings.keychainAccessReady) {
-          try {
-            keychainPassword = await invoke('get_keychain_password', { id: login.id });
-          } catch (error) {
-            console.warn('Could not fetch keychain password for queue start:', error);
-          }
-        }
-        if (!isCurrentQueueControlGeneration(queueId, requestedGeneration)) return [];
-        const latestItem = get().downloads.find(download => download.id === item.id);
-        if (
-          !latestItem
-          || (latestItem.queueId || MAIN_QUEUE_ID) !== queueId
-          || (latestItem.status !== 'queued' && !canStartDownload(latestItem.status))
-        ) continue;
-        if (credentialsNeedRecovery(latestItem, settings, keychainPassword)) {
-          markCredentialsRequired(latestItem.id);
-          credentialBlockedIds.add(latestItem.id);
-          credentialStateChanged = true;
-        } else if (latestItem.credentialsRequired === true) {
-          // A row can retain the durable marker after a configured browser
-          // source or keychain credential becomes available again. Clear the
-          // marker before accepting an already-queued backend lifecycle so the
-          // UI does not keep advertising a credentialless retry indefinitely.
-          clearCredentialsRequired(latestItem.id);
-          credentialStateChanged = true;
-        }
-      }
-      if (credentialStateChanged) await commitDownloadState();
-      const runnableForStart = runnable.filter(item => !credentialBlockedIds.has(item.id));
-      if (runnableForStart.length === 0) return [];
-
-      const needsNewDispatch = runnableForStart.some(item => {
+      const needsNewDispatch = runnable.some(item => {
         const currentItem = get().downloads.find(download => download.id === item.id);
         if (!currentItem) return false;
         // Paused rows must go through resumeDownload. This includes rows that
@@ -2374,7 +1653,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         } catch (error) {
           const message = errorMessage(error);
           console.error(`Could not safely resolve the proxy for queue ${queueId}:`, error);
-          const runnableIds = new Set(runnableForStart.map(item => item.id));
+          const runnableIds = new Set(runnable.map(item => item.id));
           set(state => ({
             downloads: state.downloads.map(item =>
               runnableIds.has(item.id) && item.status !== 'completed'
@@ -2387,7 +1666,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       }
 
       const acceptedIds: string[] = [];
-      for (const item of runnableForStart) {
+      for (const item of runnable) {
         if (!isCurrentQueueControlGeneration(queueId, requestedGeneration)) break;
 
         const currentItem = get().downloads.find(download => download.id === item.id);
@@ -2395,38 +1674,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         const backendRegistered = get().backendRegisteredIds.has(item.id);
         const backendPending = get().pendingOrder.includes(item.id);
 
-        // An explicit recovery approval always replaces the old lifecycle,
-        // even if a stale renderer projection still says that the row is
-        // queued and pending. This is the admission point that makes the
-        // user confirmation meaningful across restart and replayed events.
-        if (currentItem.credentialsRequired === true
-          && resumeWithoutCredentialsIds.has(item.id)) {
-          const resumed = await resumeDownloadInternal(item.id, {
-            preserveQueuePosition: true,
-            forceRequeue: true,
-            resumeWithoutCredentials: true
-          });
-          if (!resumed) continue;
-          if (!isCurrentQueueControlGeneration(queueId, requestedGeneration)) {
-            const afterResume = get().downloads.find(download => download.id === item.id);
-            if (
-              backendDispatchPromises.has(item.id) ||
-              get().backendRegisteredIds.has(item.id) ||
-              (afterResume && canPauseDownload(afterResume.status))
-            ) {
-              await get().pauseDownload(item.id);
-            }
-            continue;
-          }
-          acceptedIds.push(item.id);
-          continue;
-        }
-
         if (currentItem.status === 'paused') {
-          const resumed = await get().resumeDownload(item.id, {
-            preserveQueuePosition: true,
-            resumeWithoutCredentials: resumeWithoutCredentialsIds.has(item.id)
-          });
+          const resumed = await get().resumeDownload(item.id, { preserveQueuePosition: true });
           if (!resumed) continue;
           if (!isCurrentQueueControlGeneration(queueId, requestedGeneration)) {
             const afterResume = get().downloads.find(download => download.id === item.id);
@@ -2444,10 +1693,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         }
 
         if (currentItem.status === 'queued' && backendRegistered && !backendPending) {
-          if (await get().resumeDownload(item.id, {
-            preserveQueuePosition: true,
-            resumeWithoutCredentials: resumeWithoutCredentialsIds.has(item.id)
-          })) {
+          if (await get().resumeDownload(item.id, { preserveQueuePosition: true })) {
             acceptedIds.push(item.id);
           }
           continue;
@@ -2460,8 +1706,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
           !currentItem.hasBeenDispatched ||
           !backendRegistered
         ) {
-          const started = await dispatchItem(item.id, queueProxy);
-          if (started) {
+          if (await dispatchItem(item.id, queueProxy)) {
             if (!isCurrentQueueControlGeneration(queueId, requestedGeneration)) {
               const afterDispatch = get().downloads.find(download => download.id === item.id);
               if (
@@ -2522,7 +1767,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     syncSystemIntegrations();
     return pausedCount;
   },
-  startAll: async (options = {}) => {
+  startAll: async () => {
     set(state => ({
       downloads: state.downloads.map(item =>
         item.queueId ? item : { ...item, queueId: MAIN_QUEUE_ID }
@@ -2533,7 +1778,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         .filter(item => item.status === 'queued' || canStartDownload(item.status))
         .map(item => item.queueId || MAIN_QUEUE_ID)
     );
-    const results = await Promise.all(Array.from(queueIds, queueId => get().startQueue(queueId, options)));
+    const results = await Promise.all(Array.from(queueIds, queueId => get().startQueue(queueId)));
     return results.reduce((total, ids) => total + ids.length, 0);
   },
   pauseAll: async () => {
@@ -2599,7 +1844,6 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         );
         return { downloads: reorderQueueWithPausedAtEnd(downloads, queueId) };
       });
-      await commitDownloadState();
     });
   },
   setDownloadSpeedLimit: (id, limit) => runDownloadLifecycleOperation(
@@ -2630,83 +1874,6 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       });
       if (get().downloads.some(download => download.id === id)) {
         get().updateDownload(id, { speedLimit: normalizedLimit ?? undefined });
-      }
-    },
-    true,
-    preemptDispatch
-  ),
-  setTorrentUploadLimit: (id, limit) => runDownloadLifecycleOperation(
-    id,
-    'torrent-upload-limit',
-    async () => {
-      await waitForPendingStartupResume();
-      const item = get().downloads.find(download => download.id === id);
-      if (!item) throw new Error('Download no longer exists.');
-      if (!item.isTorrent) {
-        throw new Error('Live upload control is available only for Torrent downloads.');
-      }
-      if (!['downloading', 'seeding', 'retrying'].includes(item.status)) {
-        throw new Error('Live upload control requires an active Torrent.');
-      }
-
-      const trimmed = limit?.trim() || '';
-      const normalizedLimit = trimmed
-        ? normalizeSpeedLimitForBackend(trimmed)
-        : null;
-      if (trimmed && normalizedLimit === null) {
-        throw new Error('Enter a valid Torrent upload limit.');
-      }
-
-      await invoke('set_torrent_upload_limit', {
-        id,
-        limit: normalizedLimit
-      });
-      if (get().downloads.some(download => download.id === id)) {
-        get().updateDownload(id, { torrentUploadLimit: normalizedLimit ?? undefined });
-      }
-    },
-    true,
-    preemptDispatch
-  ),
-  setTorrentPeerOptions: (id, maxPeers, peerSpeedLimit) => runDownloadLifecycleOperation(
-    id,
-    'torrent-peer-options',
-    async () => {
-      await waitForPendingStartupResume();
-      const item = get().downloads.find(download => download.id === id);
-      if (!item) throw new Error('Download no longer exists.');
-      if (!item.isTorrent) {
-        throw new Error('Live peer control is available only for Torrent downloads.');
-      }
-      if (!['downloading', 'seeding', 'retrying'].includes(item.status)) {
-        throw new Error('Live peer control requires an active Torrent.');
-      }
-
-      const trimmedMaxPeers = maxPeers?.trim() || '';
-      const parsedMaxPeers = trimmedMaxPeers ? Number(trimmedMaxPeers) : null;
-      if (
-        parsedMaxPeers !== null
-        && (!Number.isInteger(parsedMaxPeers) || parsedMaxPeers < 0 || parsedMaxPeers > 1000)
-      ) {
-        throw new Error('Torrent maximum peers must be an integer between 0 and 1000.');
-      }
-      const normalizedPeerSpeedLimit = peerSpeedLimit?.trim()
-        ? normalizeSpeedLimitForBackend(peerSpeedLimit)
-        : null;
-      if (peerSpeedLimit?.trim() && normalizedPeerSpeedLimit === null) {
-        throw new Error('Enter a valid Torrent peer speed limit.');
-      }
-
-      await invoke('set_torrent_peer_options', {
-        id,
-        max_peers: parsedMaxPeers,
-        peer_speed_limit: normalizedPeerSpeedLimit
-      });
-      if (get().downloads.some(download => download.id === id)) {
-        get().updateDownload(id, {
-          torrentMaxPeers: parsedMaxPeers === null ? undefined : parsedMaxPeers,
-          torrentPeerSpeedLimit: normalizedPeerSpeedLimit ?? undefined
-        });
       }
     },
     true,
@@ -2809,30 +1976,11 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         selectedQueueIds
       });
     }
-    await commitDownloadState();
   },
   resumePendingDownloads: () => {
     if (pendingStartupResume) return pendingStartupResume;
 
     const operation = (async () => {
-      // WaitingToSeed is a paused Aria2 GID owned by the previous process;
-      // that GID cannot survive an app restart. Reconstruct the row as a
-      // queued Torrent using its persisted remaining seed budget, then let
-      // the normal backend admission path assign a fresh lifecycle/GID.
-      const waitingToSeedIds = get().downloads
-        .filter(download => download.status === 'waitingToSeed')
-        .map(download => download.id);
-      if (waitingToSeedIds.length > 0) {
-        set(state => ({
-          downloads: state.downloads.map(download => waitingToSeedIds.includes(download.id)
-            ? { ...download, status: 'queued' }
-            : download)
-        }));
-      }
-      // Startup converts interrupted active lifecycles into queued rows before
-      // rebuilding backend ownership. Commit that recovery state first so a
-      // crash during enqueue_many cannot lose the restartable row.
-      await commitDownloadState();
       const active = get().downloads
         .filter(d => d.status === 'queued')
         .sort((a, b) => (a.queuePosition ?? 0) - (b.queuePosition ?? 0));
@@ -2840,44 +1988,6 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
 
       try {
         const settings = useSettingsStore.getState();
-        const preparedCandidates: Array<{
-          id: string;
-          lifecycleGeneration: bigint;
-          login: ReturnType<typeof getSiteLogin>;
-          keychainPassword: string | null;
-        }> = [];
-
-        // Credential admission must happen before any global prerequisite
-        // such as proxy resolution. Otherwise a proxy failure can leave a
-        // credential-marked row queued and make every subsequent startup
-        // silently retry the same unavailable lifecycle.
-        for (const pendingItem of active) {
-          const item = get().downloads.find(download => download.id === pendingItem.id);
-          if (!item || item.status !== 'queued' || get().backendRegisteredIds.has(item.id)) continue;
-          const lifecycleGeneration = currentDownloadLifecycle(item.id);
-
-          const login = item.isTorrent === true ? null : getSiteLogin(item.url, settings);
-          let keychainPassword: string | null = null;
-          if (login && !item.password && settings.keychainAccessReady) {
-            try {
-              keychainPassword = await invoke('get_keychain_password', { id: login.id });
-            } catch (e) {
-              console.warn("Could not fetch keychain password for login:", e);
-            }
-          }
-          if (currentDownloadLifecycle(item.id) !== lifecycleGeneration) continue;
-          const latestItem = get().downloads.find(download => download.id === item.id);
-          if (!latestItem || latestItem.status !== 'queued' || get().backendRegisteredIds.has(item.id)) continue;
-          if (credentialsNeedRecovery(latestItem, settings, keychainPassword)) {
-            markCredentialsRequired(latestItem.id);
-            continue;
-          }
-          if (latestItem.credentialsRequired === true) clearCredentialsRequired(latestItem.id);
-          preparedCandidates.push({ id: latestItem.id, lifecycleGeneration, login, keychainPassword });
-        }
-        await commitDownloadState();
-        if (preparedCandidates.length === 0) return;
-
         let proxy: string | null;
         try {
           proxy = await getProxyArgs(settings);
@@ -2892,93 +2002,50 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
                 : item
             )
           }));
-          await commitDownloadState();
           return;
         }
-        const preparedById = new Map(preparedCandidates.map(candidate => [candidate.id, candidate]));
         const itemsToEnqueue = [];
         for (const pendingItem of active) {
           const item = get().downloads.find(download => download.id === pendingItem.id);
-          const prepared = preparedById.get(pendingItem.id);
-          if (
-            !item
-            || !prepared
-            || item.status !== 'queued'
-            || get().backendRegisteredIds.has(item.id)
-            || currentDownloadLifecycle(item.id) !== prepared.lifecycleGeneration
-          ) continue;
-          if (credentialsNeedRecovery(item, settings, prepared.keychainPassword)) {
-            markCredentialsRequired(item.id);
-            continue;
+          if (!item || item.status !== 'queued' || get().backendRegisteredIds.has(item.id)) continue;
+
+          const login = getSiteLogin(item.url, settings);
+          let keychainPassword = null;
+          if (login && !item.password && settings.keychainAccessReady) {
+            try {
+              keychainPassword = await invoke('get_keychain_password', { id: login.id });
+            } catch (e) {
+              console.warn("Could not fetch keychain password for login:", e);
+            }
           }
-          if (item.credentialsRequired === true) clearCredentialsRequired(item.id);
           const destPath = item.destination ||
             await resolveCategoryDestination(settings, item.category);
-          if (
-            currentDownloadLifecycle(item.id) !== prepared.lifecycleGeneration
-            || !get().downloads.some(download => download.id === item.id && download.status === 'queued')
-          ) continue;
           itemsToEnqueue.push({
             id: item.id,
             queue_id: item.queueId || MAIN_QUEUE_ID,
             url: item.url,
             destination: destPath,
             filename: item.fileName,
-            connections: item.isTorrent === true
-              ? null
-              : resolveDownloadConnections(item.connections, settings.perServerConnections),
+            connections: resolveDownloadConnections(item.connections, settings.perServerConnections),
             speed_limit: speedLimitForDispatch(item.speedLimit, settings.globalSpeedLimit, item.isMedia),
-            username: item.isTorrent === true ? null : item.username || (prepared.login ? prepared.login.username : null),
-            password: item.isTorrent === true ? null : item.password || prepared.keychainPassword,
-            sftp_host_key_md: item.isTorrent === true ? undefined : item.sftpHostKeyMd || undefined,
-            headers: item.isTorrent === true ? null : item.headers || null,
+            username: item.username || (login ? login.username : null),
+            password: item.password || keychainPassword,
+            headers: item.headers || null,
             checksum: item.checksum || null,
-            cookies: item.isTorrent === true ? null : item.cookies || null,
+            cookies: item.cookies || null,
             mirrors: item.mirrors || null,
             user_agent: settings.customUserAgent.trim() || null,
             max_tries: settings.maxAutomaticRetries,
-            minimum_normal_download_speed_kib: settings.minimumNormalDownloadSpeedKiB,
-            retry_not_found_errors: settings.retryNotFoundErrors,
-            adaptive_mirror_selection: settings.adaptiveMirrorSelection,
             proxy,
             format_selector: item.mediaFormatSelector || null,
-            cookie_source: item.isMedia === true && hasConfiguredMediaCookieSource(item, settings)
-              ? settings.mediaCookieSource
-              : null,
+            cookie_source: settings.mediaCookieSource !== 'none' ? settings.mediaCookieSource : null,
             is_media: item.isMedia || false,
-            is_torrent: item.isTorrent || false,
-            torrent_path: item.torrentPath || undefined,
-            torrent_file_indices: item.torrentFileIndices || undefined,
-            torrent_info_hash: item.torrentInfoHash || undefined,
-            torrent_seed_time: item.torrentSeedTime,
-            torrent_seed_ratio: item.torrentSeedRatio,
-            torrent_seed_remaining: item.torrentSeedRemaining,
-            torrent_web_seeds: item.torrentWebSeeds,
-            torrent_upload_limit: item.torrentUploadLimit || undefined,
-            torrent_max_peers: item.torrentMaxPeers,
-            torrent_peer_speed_limit: item.torrentPeerSpeedLimit || undefined,
-            torrent_check_integrity: item.torrentCheckIntegrity || item.torrentRelocationCheckPending,
-            torrent_trackers: item.torrentTrackers || undefined,
-            torrent_exclude_trackers: item.torrentExcludeTrackers || undefined,
-            torrent_tracker_connect_timeout: item.torrentTrackerConnectTimeout,
-            torrent_tracker_timeout: item.torrentTrackerTimeout,
-            torrent_tracker_interval: item.torrentTrackerInterval,
-            torrent_stop_timeout: item.torrentStopTimeout,
-            torrent_prioritize_piece: item.torrentPrioritizePiece || undefined,
-            torrent_remove_unselected_file: item.torrentRemoveUnselectedFile,
-            torrent_encryption_policy: item.torrentEncryptionPolicy || undefined,
-            torrent_file_allocation: item.torrentFileAllocation || undefined,
-            torrent_verify_only: item.torrentVerifyOnly,
-            torrent_verify_restore_status: item.torrentVerifyRestoreStatus,
-            replace_existing_fingerprint: item.replaceExistingFingerprint || undefined,
-            lifecycle_generation: prepared.lifecycleGeneration.toString(),
+            lifecycle_generation: currentDownloadLifecycle(item.id).toString(),
           });
         }
 
-        await commitDownloadState();
-
         const currentItems = new Map(get().downloads.map(item => [item.id, item]));
-        let dispatchableItems = itemsToEnqueue.filter(item => {
+        const dispatchableItems = itemsToEnqueue.filter(item => {
           const current = currentItems.get(item.id);
           return current &&
             current.status === 'queued' &&
@@ -2986,40 +2053,14 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             !backendDispatchPromises.has(item.id) &&
             currentDownloadLifecycle(item.id).toString() === item.lifecycle_generation;
         });
-        if (dispatchableItems.length === 0) {
-          await commitDownloadState();
-          return;
-        }
-
-        await commitDownloadState();
-        const latestItems = new Map(get().downloads.map(item => [item.id, item]));
-        dispatchableItems = dispatchableItems.filter(item => {
-          const current = latestItems.get(item.id);
-          return current &&
-            current.status === 'queued' &&
-            !get().backendRegisteredIds.has(item.id) &&
-            !backendDispatchPromises.has(item.id) &&
-            currentDownloadLifecycle(item.id).toString() === item.lifecycle_generation;
-        });
         if (dispatchableItems.length === 0) return;
+
         const results = await invoke('enqueue_many', { items: dispatchableItems });
         const registeredIds = results.filter(result => result.success).map(result => result.id);
-        const failedResults = new Map(
+        const failedErrors = new Map(
           results
             .filter(result => !result.success)
-            .map(result => {
-              const message = result.error || 'Backend rejected the queued download.';
-              const destinationAccess = isRetryableDestinationAccessError(message);
-              return [result.id, {
-                message: destinationAccess
-                  ? destinationAccessErrorMessage(message)
-                  : message,
-                status: destinationAccess ? 'ready' as const : 'failed' as const,
-                errorKind: destinationAccess
-                  ? ('destinationAccess' as DownloadErrorKind)
-                  : undefined
-              }];
-            })
+            .map(result => [result.id, result.error || 'Backend rejected the queued download.'])
         );
         const acceptedFilenames = new Map(
           results
@@ -3052,15 +2093,12 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
               ...state.backendRegisteredIds,
               ...liveAcceptedIds
             ]),
-            pendingOrder: state.pendingOrder.filter(id => !failedResults.has(id)),
             downloads: state.downloads.map(download =>
-              failedResults.has(download.id)
+              failedErrors.has(download.id)
                 ? {
                     ...download,
-                    status: failedResults.get(download.id)!.status,
-                    hasBeenDispatched: false,
-                    lastError: failedResults.get(download.id)!.message,
-                    lastErrorKind: failedResults.get(download.id)!.errorKind
+                    status: 'failed' as const,
+                    lastError: failedErrors.get(download.id)
                   }
                 : liveAcceptedIds.has(download.id)
                   ? {
@@ -3068,16 +2106,11 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
                       ...(acceptedFilenames.has(download.id)
                         ? {
                             fileName: acceptedFilenames.get(download.id),
-                            category: categoryForDownload(
-                              acceptedFilenames.get(download.id)!,
-                              download.isTorrent === true,
-                              download.category
-                            )
+                            category: categoryForFileName(acceptedFilenames.get(download.id)!)
                           }
                         : {}),
                       hasBeenDispatched: true,
-                      lastError: undefined,
-                      replaceExistingFingerprint: undefined
+                      lastError: undefined
                     }
                   : download
             )
@@ -3131,38 +2164,21 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       const normalizedQueueState = normalizePersistedQueueState(persistedQueues);
       const queues = normalizedQueueState.queues;
       const knownQueueIds = new Set(queues.map(queue => queue.id));
-      const downloads = (await invoke('db_get_all_downloads')).flatMap(value => {
-        try {
-          const parsed: unknown = JSON.parse(value);
-          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-            throw new Error('persisted download is not an object');
-          }
-          return [parsed as DownloadItem];
-        } catch {
-          console.warn('Skipping malformed persisted download record during startup');
-          return [];
-        }
-      }).map(download => {
+      const downloads = (await invoke('db_get_all_downloads')).map(
+        value => JSON.parse(value) as DownloadItem
+      ).map(download => {
         const persistedQueueId = download.queueId || MAIN_QUEUE_ID;
         const queueId = normalizedQueueState.queueIdRemap.get(persistedQueueId)
           || (knownQueueIds.has(persistedQueueId) ? persistedQueueId : MAIN_QUEUE_ID);
         return normalizePersistedDownloadProgress({ ...download, queueId });
       });
       
-      set(() => ({
+      set(state => ({
         queues,
-        downloads: normalizeQueuePositions(downloads)
+        downloads: downloads.length > 0
+          ? normalizeQueuePositions(downloads)
+          : state.downloads
       }));
-
-      // A process can die after Aria2 has removed the unselected files but
-      // before the terminal event clears Firelink's reservation. Reclaim
-      // only the conservative terminal cases in the backend before queued
-      // downloads are allowed to claim paths on startup.
-      try {
-        await invoke('reconcile_torrent_removal_reservations');
-      } catch (error) {
-        console.warn('Could not reconcile Torrent removal reservations during startup:', error);
-      }
 
       // The backend dispatcher is live before the frontend finishes startup.
       // Synchronize the normalized queue policy before any saved download is
@@ -3186,165 +2202,65 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
   };
 });
 
-type PersistenceSnapshot = {
-  key: string;
-  downloadsData: string;
-  queuesData: string;
-  revision: number;
-};
+let lastSavedDownloads = '';
+let isSavingDownloads = false;
+let nextDownloadsData: string | null = null;
 
-type PersistenceWaiter = {
-  revision: number;
-  resolve: () => void;
-  reject: (error: unknown) => void;
-};
-
-let persistenceRevision = 0;
-let committedPersistenceRevision = 0;
-let lastRequestedPersistenceKey: string | null = null;
-let lastCommittedPersistenceKey: string | null = null;
-let nextPersistenceSnapshot: PersistenceSnapshot | null = null;
-let persistenceSaveInFlight = false;
-let persistenceWaiters: PersistenceWaiter[] = [];
-let downloadPersistenceReady = false;
-
-const persistenceSnapshotForState = (state: Pick<DownloadState, 'downloads' | 'queues'>): Omit<PersistenceSnapshot, 'revision'> => {
-  // Strip secret fields (password/cookies/headers) and volatile progress
-  // before writing to disk. Secrets remain on the in-memory item for the
-  // active session only.
-  const downloadsData = JSON.stringify(state.downloads.map(redactDownloadForPersistence));
-  const queuesData = JSON.stringify(state.queues);
-  return {
-    key: JSON.stringify([downloadsData, queuesData]),
-    downloadsData,
-    queuesData
-  };
-};
-
-const waitForPersistenceRevision = (revision: number): Promise<void> => {
-  if (revision <= committedPersistenceRevision) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    persistenceWaiters.push({ revision, resolve, reject });
-  });
-};
-
-const settlePersistenceWaiters = (revision: number, error?: unknown): void => {
-  const remaining: PersistenceWaiter[] = [];
-  for (const waiter of persistenceWaiters) {
-    if (waiter.revision > revision) {
-      remaining.push(waiter);
-      continue;
+async function processDownloadsSave() {
+  if (isSavingDownloads || !nextDownloadsData) return;
+  isSavingDownloads = true;
+  while (nextDownloadsData) {
+    const data = nextDownloadsData;
+    nextDownloadsData = null;
+    try {
+      await invoke('db_replace_downloads', { data });
+    } catch (error) {
+      console.error('Failed to persist downloads:', error);
     }
-    if (error === undefined) waiter.resolve();
-    else waiter.reject(error);
   }
-  persistenceWaiters = remaining;
-};
-
-const queuePersistenceSnapshot = (snapshot: Omit<PersistenceSnapshot, 'revision'>): Promise<void> => {
-  const hasUncommittedPersistence = persistenceSaveInFlight || nextPersistenceSnapshot !== null;
-  if (snapshot.key === lastCommittedPersistenceKey && !hasUncommittedPersistence) {
-    return Promise.resolve();
-  }
-
-  const existingRevision = snapshot.key === lastRequestedPersistenceKey
-    ? persistenceRevision
-    : null;
-  if (existingRevision !== null) return waitForPersistenceRevision(existingRevision);
-
-  const revision = ++persistenceRevision;
-  lastRequestedPersistenceKey = snapshot.key;
-  nextPersistenceSnapshot = { ...snapshot, revision };
-  const completion = waitForPersistenceRevision(revision);
-  void processPersistenceSave();
-  return completion;
-};
-
-async function processPersistenceSave(): Promise<void> {
-  if (persistenceSaveInFlight) return;
-  persistenceSaveInFlight = true;
-  try {
-    while (nextPersistenceSnapshot) {
-      const snapshot = nextPersistenceSnapshot;
-      nextPersistenceSnapshot = null;
-      try {
-        await invoke('db_commit_download_state', {
-          downloadsData: snapshot.downloadsData,
-          queuesData: snapshot.queuesData
-        });
-        lastCommittedPersistenceKey = snapshot.key;
-        committedPersistenceRevision = snapshot.revision;
-        settlePersistenceWaiters(snapshot.revision);
-      } catch (error) {
-        if (lastRequestedPersistenceKey === snapshot.key) {
-          lastRequestedPersistenceKey = null;
-        }
-        settlePersistenceWaiters(snapshot.revision, error);
-        console.error('Failed to persist download state:', error);
-      }
-    }
-  } finally {
-    persistenceSaveInFlight = false;
-    if (nextPersistenceSnapshot) void processPersistenceSave();
-  }
+  isSavingDownloads = false;
 }
 
-export const commitDownloadState = async (): Promise<void> => {
-  if (!downloadPersistenceReady) return;
-  while (true) {
-    const snapshot = persistenceSnapshotForState(useDownloadStore.getState());
-    await queuePersistenceSnapshot(snapshot);
-    const current = persistenceSnapshotForState(useDownloadStore.getState());
-    if (
-      current.key === snapshot.key &&
-      current.key === lastCommittedPersistenceKey &&
-      !persistenceSaveInFlight &&
-      nextPersistenceSnapshot === null
-    ) {
-      return;
+let lastSavedQueues = '';
+let isSavingQueues = false;
+let nextQueuesData: string | null = null;
+
+async function processQueuesSave() {
+  if (isSavingQueues || !nextQueuesData) return;
+  isSavingQueues = true;
+  while (nextQueuesData) {
+    const data = nextQueuesData;
+    nextQueuesData = null;
+    try {
+      await invoke('db_replace_queues', { data });
+    } catch (error) {
+      console.error('Failed to persist queues:', error);
     }
   }
-};
+  isSavingQueues = false;
+}
 
-export const flushDownloadPersistence = async (): Promise<void> => {
-  if (!downloadPersistenceReady) return;
-  while (true) {
-    const snapshot = persistenceSnapshotForState(useDownloadStore.getState());
-    await queuePersistenceSnapshot(snapshot);
-    const current = persistenceSnapshotForState(useDownloadStore.getState());
-    if (
-      current.key === snapshot.key &&
-      current.key === lastCommittedPersistenceKey &&
-      !persistenceSaveInFlight &&
-      nextPersistenceSnapshot === null
-    ) {
-      return;
+useDownloadStore.subscribe((state, prevState) => {
+  if (state.queues !== prevState.queues) {
+    const data = JSON.stringify(state.queues);
+    if (data !== lastSavedQueues) {
+      lastSavedQueues = data;
+      nextQueuesData = data;
+      processQueuesSave();
     }
   }
-};
 
-let downloadPersistenceUnsubscribe: (() => void) | null = null;
-
-/**
- * Persistence is a main-webview service. Properties windows import the
- * download types and bridge helpers but must never install this subscription
- * or write whole-store snapshots from a child webview.
- */
-export const initializeDownloadPersistence = (windowLabel: string): (() => void) => {
-  if (windowLabel !== 'main' || downloadPersistenceUnsubscribe) return () => undefined;
-
-  downloadPersistenceUnsubscribe = useDownloadStore.subscribe((state, prevState) => {
-    if (state.queues !== prevState.queues || state.downloads !== prevState.downloads) {
-      void queuePersistenceSnapshot(persistenceSnapshotForState(state)).catch(error => {
-        console.error('Failed to persist download state:', error);
-      });
+  if (state.downloads !== prevState.downloads) {
+    // Strip secret fields (password/cookies/headers) and volatile progress
+    // before writing to disk. Secrets remain on the in-memory item for the
+    // active session only.
+    const staticDownloads = state.downloads.map(redactDownloadForPersistence);
+    
+    const currentSerialized = JSON.stringify(staticDownloads);
+    if (currentSerialized !== lastSavedDownloads) {
+      lastSavedDownloads = currentSerialized;
+      nextDownloadsData = currentSerialized;
+      processDownloadsSave();
     }
-  });
-  downloadPersistenceReady = true;
-
-  return () => {
-    downloadPersistenceUnsubscribe?.();
-    downloadPersistenceUnsubscribe = null;
-    downloadPersistenceReady = false;
-  };
-};
+  }
+});

@@ -4,7 +4,6 @@ const STARTABLE_STATUSES: ReadonlySet<DownloadStatus> = new Set([
   'ready',
   'staged',
   'paused',
-  'waitingToSeed',
   'failed',
 ]);
 
@@ -12,10 +11,7 @@ const PAUSABLE_STATUSES: ReadonlySet<DownloadStatus> = new Set([
   'staged',
   'queued',
   'downloading',
-  'seeding',
-  'waitingToSeed',
   'processing',
-  'verifying',
   'retrying',
 ]);
 
@@ -45,9 +41,7 @@ export const countDownloadActions = (
   downloads: ReadonlyArray<{ status: DownloadStatus }>
 ): DownloadActionCounts => downloads.reduce<DownloadActionCounts>((counts, download) => {
   if (canPauseDownload(download.status)) counts.pause += 1;
-  if (canStartDownload(download.status)) {
-    counts.resume += 1;
-  }
+  if (canStartDownload(download.status)) counts.resume += 1;
   return counts;
 }, { pause: 0, resume: 0 });
 
@@ -69,7 +63,7 @@ export const startActionLabel = (status: DownloadStatus): 'Start' | 'Resume' =>
   status === 'ready' || status === 'staged' || status === 'failed' ? 'Start' : 'Resume';
 
 export const isTransferLocked = (status: DownloadStatus): boolean =>
-  status === 'downloading' || status === 'processing' || status === 'verifying' || status === 'seeding' || status === 'waitingToSeed' || status === 'retrying' || status === 'moving';
+  status === 'downloading' || status === 'processing' || status === 'retrying';
 
 export const isIdentityLocked = (status: DownloadStatus): boolean =>
   isTransferLocked(status) || status === 'completed';

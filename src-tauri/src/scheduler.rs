@@ -16,14 +16,13 @@ fn stop_is_due(
     stop_minute: Option<u32>,
     current_minute: u32,
     last_start_key: &str,
-    triggered_start_key: &str,
     start_key: &str,
     last_stop_key: &str,
     stop_key: &str,
 ) -> bool {
     stop_time_enabled
         && stop_minute.is_some_and(|stop| current_minute >= stop)
-        && (last_start_key == start_key || triggered_start_key == start_key)
+        && last_start_key == start_key
         && last_stop_key != stop_key
 }
 
@@ -34,7 +33,6 @@ struct OvernightStopCheck<'a> {
     current_minute: u32,
     previous_day_allowed: bool,
     last_start_key: &'a str,
-    triggered_start_key: &'a str,
     previous_start_key: &'a str,
     last_stop_key: &'a str,
     stop_key: &'a str,
@@ -48,7 +46,6 @@ fn overnight_stop_is_due(check: OvernightStopCheck<'_>) -> bool {
         current_minute,
         previous_day_allowed,
         last_start_key,
-        triggered_start_key,
         previous_start_key,
         last_stop_key,
         stop_key,
@@ -58,29 +55,8 @@ fn overnight_stop_is_due(check: OvernightStopCheck<'_>) -> bool {
         && start_minute.zip(stop_minute).is_some_and(|(start, stop)| {
             stop < start && current_minute >= stop && current_minute < start
         })
-        && (last_start_key == previous_start_key || triggered_start_key == previous_start_key)
+        && last_start_key == previous_start_key
         && last_stop_key != stop_key
-}
-
-fn persist_scheduler_start_trigger(
-    app_handle: &tauri::AppHandle,
-    settings_cache: &Arc<RwLock<Option<crate::ipc::PersistedSettings>>>,
-    key: &str,
-) {
-    if let Err(error) = crate::settings::update_settings_state(app_handle, |state| {
-        state.insert(
-            "schedulerTriggeredStartKey".to_string(),
-            serde_json::json!(key),
-        );
-    }) {
-        log::warn!("Failed to persist scheduler start trigger: {error}");
-    }
-
-    if let Ok(mut settings) = settings_cache.write() {
-        if let Some(settings) = settings.as_mut() {
-            settings.scheduler_triggered_start_key = Some(key.to_string());
-        }
-    }
 }
 
 pub fn spawn_scheduler(
@@ -90,11 +66,6 @@ pub fn spawn_scheduler(
     tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         let mut last_emit: HashMap<&'static str, std::time::Instant> = HashMap::new();
-        // Renderer acknowledgement remains the durable completion record, but
-        // a native dispatch marker also survives a closed/unmounted webview so
-        // an overnight stop does not become permanently ineligible. The
-        // process-local start key also covers the same-loop event/stop check.
-        let mut triggered_start_key = String::new();
         loop {
             interval.tick().await;
 
@@ -103,21 +74,11 @@ pub fn spawn_scheduler(
                     (
                         settings.scheduler.clone(),
                         settings.scheduler_last_start_key.clone(),
-                        settings
-                            .scheduler_triggered_start_key
-                            .clone()
-                            .unwrap_or_default(),
                         settings.scheduler_last_stop_key.clone(),
                     )
                 })
             });
-            if let Some((
-                scheduler,
-                scheduler_last_start_key,
-                persisted_triggered_start_key,
-                scheduler_last_stop_key,
-            )) = settings
-            {
+            if let Some((scheduler, scheduler_last_start_key, scheduler_last_stop_key)) = settings {
                 if !scheduler.enabled {
                     continue;
                 }
@@ -147,29 +108,13 @@ pub fn spawn_scheduler(
                         .get("start")
                         .is_none_or(|instant| instant.elapsed() >= Duration::from_secs(5))
                 {
-                    if persisted_triggered_start_key != start_key
-                        && triggered_start_key != start_key
-                    {
-                        // Record the dispatch intent before emitting so a
-                        // crash between the native event and renderer ack
-                        // still makes an overnight stop eligible. Start
-                        // events remain retryable until the renderer acks
-                        // them, which covers startup/listener races.
-                        persist_scheduler_start_trigger(
-                            &app_handle,
-                            &settings_cache,
-                            &start_key,
-                        );
-                    }
-                    if app_handle.emit(
+                    let _ = app_handle.emit(
                         "schedule-trigger",
                         serde_json::json!({
                             "action": "start",
                             "key": start_key
                         }),
-                    ).is_ok() {
-                        triggered_start_key = start_key.clone();
-                    }
+                    );
                     last_emit.insert("start", std::time::Instant::now());
                 }
 
@@ -180,13 +125,6 @@ pub fn spawn_scheduler(
                         stop_minute,
                         current_minute,
                         &scheduler_last_start_key,
-                        if triggered_start_key == start_key {
-                            start_key.as_str()
-                        } else if persisted_triggered_start_key == start_key {
-                            start_key.as_str()
-                        } else {
-                            ""
-                        },
                         &start_key,
                         &scheduler_last_stop_key,
                         &stop_key,
@@ -208,13 +146,6 @@ pub fn spawn_scheduler(
                     current_minute,
                     previous_day_allowed,
                     last_start_key: &scheduler_last_start_key,
-                    triggered_start_key: if triggered_start_key == previous_start_key {
-                        previous_start_key.as_str()
-                    } else if persisted_triggered_start_key == previous_start_key {
-                        previous_start_key.as_str()
-                    } else {
-                        ""
-                    },
                     previous_start_key: &previous_start_key,
                     last_stop_key: &scheduler_last_stop_key,
                     stop_key: &stop_key,
@@ -264,7 +195,6 @@ mod tests {
             Some(480),
             600,
             "",
-            "",
             "2026-06-22-start",
             "",
             "2026-06-22-stop",
@@ -274,41 +204,10 @@ mod tests {
             Some(480),
             600,
             "2026-06-22-start",
-            "",
             "2026-06-22-start",
             "",
             "2026-06-22-stop",
         ));
-    }
-
-    #[test]
-    fn stop_accepts_process_local_start_when_renderer_ack_is_missing() {
-        assert!(stop_is_due(
-            true,
-            Some(480),
-            600,
-            "",
-            "2026-06-22-start",
-            "2026-06-22-start",
-            "",
-            "2026-06-22-stop",
-        ));
-    }
-
-    #[test]
-    fn overnight_stop_accepts_persisted_start_trigger_when_app_restarts() {
-        assert!(overnight_stop_is_due(OvernightStopCheck {
-            stop_time_enabled: true,
-            start_minute: Some(1320),
-            stop_minute: Some(360),
-            current_minute: 420,
-            previous_day_allowed: true,
-            last_start_key: "",
-            triggered_start_key: "2026-06-22-start",
-            previous_start_key: "2026-06-22-start",
-            last_stop_key: "",
-            stop_key: "2026-06-23-stop",
-        }));
     }
 
     #[test]
@@ -320,7 +219,6 @@ mod tests {
             current_minute: 420,
             previous_day_allowed: true,
             last_start_key: "2026-06-22-start",
-            triggered_start_key: "",
             previous_start_key: "2026-06-22-start",
             last_stop_key: "",
             stop_key: "2026-06-23-stop",
@@ -332,7 +230,6 @@ mod tests {
             current_minute: 1380,
             previous_day_allowed: true,
             last_start_key: "2026-06-22-start",
-            triggered_start_key: "",
             previous_start_key: "2026-06-22-start",
             last_stop_key: "",
             stop_key: "2026-06-22-stop",
@@ -344,7 +241,6 @@ mod tests {
             current_minute: 420,
             previous_day_allowed: false,
             last_start_key: "2026-06-22-start",
-            triggered_start_key: "",
             previous_start_key: "2026-06-22-start",
             last_stop_key: "",
             stop_key: "2026-06-23-stop",

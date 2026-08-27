@@ -1,13 +1,13 @@
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::Value;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 const DATABASE_NAME: &str = "firelink.sqlite";
 const LEGACY_STORE_NAME: &str = "store.bin";
 const LEGACY_BUNDLE_IDENTIFIER: &str = "com.nima.tauri-app";
-const CURRENT_SCHEMA_VERSION: i64 = 3;
+const CURRENT_SCHEMA_VERSION: i64 = 1;
 pub(crate) const TOKEN_CHANGED_NOTICE: &str = "pairing-token-changed";
 pub const PAIRING_TOKEN_KEYCHAIN_ID: &str = "extension-pairing-token";
 // Development builds are a different executable identity from the packaged
@@ -66,28 +66,7 @@ fn init_at_path_internal(
     fs::create_dir_all(app_data_dir)
         .map_err(|error| format!("failed to create app data directory: {error}"))?;
     let database_path = app_data_dir.join(DATABASE_NAME);
-    let existed = match fs::symlink_metadata(&database_path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(format!(
-                "persistence database is a symbolic link: '{}'",
-                database_path.display()
-            ));
-        }
-        Ok(metadata) if !metadata.is_file() => {
-            return Err(format!(
-                "persistence database is not a regular file: '{}'",
-                database_path.display()
-            ));
-        }
-        Ok(_) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => {
-            return Err(format!(
-                "failed to inspect persistence database '{}': {error}",
-                database_path.display()
-            ));
-        }
-    };
+    let existed = database_path.exists();
     let mut connection = Connection::open(&database_path)
         .map_err(|error| format!("failed to open database: {error}"))?;
 
@@ -148,10 +127,6 @@ fn migrate_schema(connection: &mut Connection, from_version: i64) -> Result<(), 
                     id TEXT PRIMARY KEY,
                     primary_path TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS download_owned_paths (
-                    id TEXT PRIMARY KEY,
-                    paths TEXT NOT NULL
-                );
                 CREATE TABLE IF NOT EXISTS migration_events (
                     key TEXT PRIMARY KEY,
                     consumed INTEGER NOT NULL DEFAULT 0
@@ -199,32 +174,6 @@ fn migrate_schema(connection: &mut Connection, from_version: i64) -> Result<(), 
                 )
                 .map_err(|error| format!("failed to create downloads table: {error}"))?;
         }
-    }
-
-    if from_version < 2 {
-        transaction
-            .execute_batch(
-                "
-                CREATE TABLE IF NOT EXISTS download_owned_paths (
-                    id TEXT PRIMARY KEY,
-                    paths TEXT NOT NULL
-                );
-                ",
-            )
-            .map_err(|error| format!("failed to migrate download ownership paths: {error}"))?;
-    }
-
-    if from_version < 3 {
-        transaction
-            .execute_batch(
-                "
-                CREATE TABLE IF NOT EXISTS download_removal_paths (
-                    id TEXT PRIMARY KEY,
-                    paths TEXT NOT NULL
-                );
-                ",
-            )
-            .map_err(|error| format!("failed to migrate torrent removal paths: {error}"))?;
     }
 
     transaction
@@ -310,27 +259,6 @@ fn import_legacy_data(
 }
 
 fn sanitize_legacy_source(path: &Path, remove_pairing_token: bool) -> Result<(), String> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(format!(
-                "legacy persistence source is a symbolic link: '{}'",
-                path.display()
-            ));
-        }
-        Ok(metadata) if !metadata.is_file() => {
-            return Err(format!(
-                "legacy persistence source is not a regular file: '{}'",
-                path.display()
-            ));
-        }
-        Ok(_) => {}
-        Err(error) => {
-            return Err(format!(
-                "failed to inspect legacy persistence source '{}': {error}",
-                path.display()
-            ));
-        }
-    }
     if is_database_path(path) {
         let mut connection = Connection::open(path).map_err(|error| {
             format!(
@@ -431,27 +359,12 @@ fn write_sanitized_legacy_store(
                 path.display()
             )
         })?;
-    temporary.as_file().sync_all().map_err(|error| {
-        format!(
-            "failed to synchronize temporary sanitized legacy store beside '{}': {error}",
-            path.display()
-        )
-    })?;
     temporary.persist(path).map_err(|error| {
         format!(
             "failed to replace legacy store '{}' without losing the original: {}",
             path.display(), error.error
         )
     })?;
-    #[cfg(unix)]
-    fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| {
-            format!(
-                "failed to synchronize legacy store directory '{}': {error}",
-                parent.display()
-            )
-        })?;
     Ok(())
 }
 
@@ -648,18 +561,6 @@ fn query_string_column(connection: &Connection, query: &str) -> Result<Vec<Strin
 }
 
 fn backup_file(path: &Path, reason: &str) -> Result<PathBuf, String> {
-    let source_metadata = fs::symlink_metadata(path).map_err(|error| {
-        format!(
-            "failed to inspect persistence file '{}': {error}",
-            path.display()
-        )
-    })?;
-    if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
-        return Err(format!(
-            "persistence backup source is not a regular file: '{}'",
-            path.display()
-        ));
-    }
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
     let file_name = path
         .file_name()
@@ -668,7 +569,6 @@ fn backup_file(path: &Path, reason: &str) -> Result<PathBuf, String> {
     let backup_prefix = format!("{file_name}.backup-{reason}-");
     if let Some(existing) = path.parent().and_then(|parent| {
         fs::read_dir(parent).ok()?.flatten().find_map(|entry| {
-            entry.file_type().ok().filter(|kind| kind.is_file())?;
             entry
                 .file_name()
                 .to_string_lossy()
@@ -678,50 +578,17 @@ fn backup_file(path: &Path, reason: &str) -> Result<PathBuf, String> {
     }) {
         return Ok(existing);
     }
-    let backup_path = path.with_file_name(format!(
-        "{file_name}.backup-{reason}-{timestamp}-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
-    let result = (|| {
-        use std::io::{copy, BufReader};
-
-        let source = fs::File::open(path).map_err(|error| {
-            format!(
-                "failed to open persistence file '{}' for backup: {error}",
-                path.display()
-            )
-        })?;
-        let mut source = BufReader::new(source);
-        let destination = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&backup_path)
-            .map_err(|error| {
-                format!(
-                    "failed to create persistence backup '{}': {error}",
-                    backup_path.display()
-                )
-            })?;
-        let mut destination = destination;
-        copy(&mut source, &mut destination).map_err(|error| {
-            format!(
-                "failed to back up persistence file '{}' to '{}': {error}",
-                path.display(),
-                backup_path.display()
-            )
-        })?;
-        destination.sync_all().map_err(|error| {
-            format!(
-                "failed to synchronize persistence backup '{}': {error}",
-                backup_path.display()
-            )
-        })?;
-        Ok::<(), String>(())
-    })();
-    if let Err(error) = result {
-        let _ = fs::remove_file(&backup_path);
-        return Err(error);
+    let backup_path = path.with_file_name(format!("{file_name}.backup-{reason}-{timestamp}"));
+    if backup_path.exists() {
+        return Ok(backup_path);
     }
+    fs::copy(path, &backup_path).map_err(|error| {
+        format!(
+            "failed to back up persistence file '{}' to '{}': {error}",
+            path.display(),
+            backup_path.display()
+        )
+    })?;
     Ok(backup_path)
 }
 
@@ -731,10 +598,7 @@ fn backup_database(connection: &Connection, path: &Path, reason: &str) -> Result
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("invalid database path '{}'", path.display()))?;
-    let backup_path = path.with_file_name(format!(
-        "{file_name}.backup-{reason}-{timestamp}-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let backup_path = path.with_file_name(format!("{file_name}.backup-{reason}-{timestamp}"));
     connection
         .execute("VACUUM INTO ?1", params![backup_path.to_string_lossy()])
         .map_err(|error| {
@@ -1023,7 +887,18 @@ pub fn replace_downloads(
     data: &str,
     portable: bool,
 ) -> Result<(), String> {
-    let strings = prepare_download_strings(data, portable)?;
+    let values: Vec<Value> = serde_json::from_str(data)
+        .map_err(|error| format!("failed to decode downloads: {error}"))?;
+    let strings = values
+        .into_iter()
+        .map(|mut value| {
+            if portable {
+                remove_persisted_transfer_secrets(&mut value);
+            }
+            serde_json::to_string(&value)
+                .map_err(|error| format!("failed to encode download: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let transaction = connection
         .transaction()
         .map_err(|error| format!("failed to begin download save: {error}"))?;
@@ -1033,121 +908,7 @@ pub fn replace_downloads(
         .map_err(|error| format!("failed to commit download save: {error}"))
 }
 
-pub fn replace_downloads_and_queues(
-    connection: &mut Connection,
-    downloads_data: &str,
-    queues_data: &str,
-    portable: bool,
-) -> Result<(), String> {
-    let downloads = prepare_download_strings(downloads_data, portable)?;
-    let queues = prepare_queue_strings(queues_data)?;
-    let transaction = connection
-        .transaction()
-        .map_err(|error| format!("failed to begin download state save: {error}"))?;
-    replace_downloads_tx(&transaction, &downloads)?;
-    replace_queues_tx(&transaction, &queues)?;
-    transaction
-        .commit()
-        .map_err(|error| format!("failed to commit download state save: {error}"))
-}
-
-/// Mutate exactly one persisted download inside a database transaction.
-///
-/// Native lifecycle code must not rebuild the renderer-owned download array:
-/// doing so can overwrite a newer renderer snapshot, and encoding the loaded
-/// JSON strings as an array produces double-encoded records. Validate the
-/// complete persisted set before changing the target, then update only that
-/// row while keeping the indexed columns in sync with its JSON document.
-pub fn mutate_download<R, F>(
-    connection: &mut Connection,
-    id: &str,
-    portable: bool,
-    mutate: F,
-) -> Result<R, String>
-where
-    F: FnOnce(&mut serde_json::Map<String, Value>) -> Result<R, String>,
-{
-    let transaction = connection
-        .transaction()
-        .map_err(|error| format!("failed to begin download mutation: {error}"))?;
-    let records = {
-        let mut statement = transaction
-            .prepare("SELECT id, data FROM downloads ORDER BY rowid")
-            .map_err(|error| format!("failed to prepare download mutation: {error}"))?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|error| format!("failed to read downloads for mutation: {error}"))?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("failed to read download for mutation: {error}"))?
-    };
-
-    let mut target = None;
-    for (stored_id, data) in records {
-        let value: Value = serde_json::from_str(&data)
-            .map_err(|error| format!("persisted download '{stored_id}' is malformed: {error}"))?;
-        let document_id = required_string(&value, "id")?;
-        required_string(&value, "status")?;
-        if document_id != stored_id {
-            return Err(format!(
-                "persisted download '{stored_id}' has mismatched document id"
-            ));
-        }
-        if stored_id == id {
-            target = Some(value);
-        }
-    }
-
-    let mut value = target.ok_or_else(|| "download is no longer persisted".to_string())?;
-    let original_value = value.clone();
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| "persisted download is not an object".to_string())?;
-    let result = mutate(object)?;
-    if object.get("id").and_then(Value::as_str) != Some(id) {
-        return Err("persisted download mutation cannot change its id".to_string());
-    }
-    remove_live_download_metadata(&mut value);
-    if portable {
-        remove_persisted_transfer_secrets(&mut value);
-    }
-    if value == original_value {
-        return Ok(result);
-    }
-    let document_id = required_string(&value, "id")?;
-    let status = required_string(&value, "status")?;
-    let queue_id = value.get("queueId").and_then(Value::as_str);
-    let data = serde_json::to_string(&value)
-        .map_err(|error| format!("failed to encode persisted download: {error}"))?;
-    let changed = transaction
-        .execute(
-            "UPDATE downloads
-             SET status = ?1, queue_id = ?2, data = ?3
-             WHERE id = ?4",
-            params![status, queue_id, data, document_id],
-        )
-        .map_err(|error| format!("failed to mutate download '{id}': {error}"))?;
-    if changed != 1 {
-        return Err("download is no longer persisted".to_string());
-    }
-    transaction
-        .commit()
-        .map_err(|error| format!("failed to commit download mutation: {error}"))?;
-    Ok(result)
-}
-
-fn remove_live_download_metadata(value: &mut Value) {
-    if let Some(object) = value.as_object_mut() {
-        // Error classifications and resolver phase are process-local
-        // presentation metadata; never retain them in the persisted contract.
-        object.remove("lastErrorKind");
-        object.remove("lastResolverFallback");
-    }
-}
-
 fn remove_persisted_transfer_secrets(value: &mut Value) {
-    remove_live_download_metadata(value);
     let Some(object) = value.as_object_mut() else {
         return;
     };
@@ -1155,16 +916,11 @@ fn remove_persisted_transfer_secrets(value: &mut Value) {
     // These values are accepted from users, browser extensions, or URLs and
     // may contain credentials or bearer tokens. Portable queues keep their
     // useful metadata, but never persist these values beside the executable.
-    // Safe, stable browser context is sanitized in place so a normal captured
-    // download does not become unresumable merely because it has a Referer or
-    // User-Agent. Unknown and credential-bearing headers still fail closed.
-    let is_torrent = object.get("isTorrent").and_then(Value::as_bool) == Some(true);
-    let mut removed_transfer_context = sanitize_portable_request_headers(object);
-    for key in ["password", "cookies", "mirrors", "proxy"] {
+    let mut removed_transfer_context = false;
+    for key in ["password", "cookies", "headers", "mirrors", "proxy"] {
         if object
             .get(key)
             .is_some_and(|value| !value.is_null() && !value_is_empty(value))
-            && !(is_torrent && matches!(key, "password" | "cookies"))
         {
             removed_transfer_context = true;
         }
@@ -1178,49 +934,22 @@ fn remove_persisted_transfer_secrets(value: &mut Value) {
         );
     }
 
-    sanitize_portable_torrent_trackers(object);
-    sanitize_portable_torrent_exclude_trackers(object);
-
     if let Some(url) = object.get("url").and_then(Value::as_str) {
         if let Ok(mut parsed) = url::Url::parse(url) {
             let had_userinfo = !parsed.username().is_empty() || parsed.password().is_some();
-            if parsed.scheme() == "magnet" {
-                let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-                let mut retained_info_hash = false;
-                let mut removed_query_context = false;
-                for (key, value) in parsed.query_pairs() {
-                    if key == "xt" || key == "dn" {
-                        retained_info_hash |= key == "xt";
-                        serializer.append_pair(&key, &value);
-                    } else {
-                        removed_query_context = true;
-                    }
-                }
-                let removed_fragment = parsed.fragment().is_some();
-                let safe_query = serializer.finish();
+            let had_query_or_fragment = parsed.query().is_some() || parsed.fragment().is_some();
+            if had_userinfo || had_query_or_fragment {
                 let _ = parsed.set_username("");
                 let _ = parsed.set_password(None);
-                parsed.set_query((!safe_query.is_empty()).then_some(safe_query.as_str()));
+                parsed.set_query(None);
                 parsed.set_fragment(None);
                 object.insert("url".to_string(), Value::String(parsed.to_string()));
-                if had_userinfo || removed_query_context || removed_fragment || !retained_info_hash {
-                    mark_portable_download_unresumable(object);
-                }
-            } else {
-                let had_query_or_fragment = parsed.query().is_some() || parsed.fragment().is_some();
-                if had_userinfo || had_query_or_fragment {
-                    let _ = parsed.set_username("");
-                    let _ = parsed.set_password(None);
-                    parsed.set_query(None);
-                    parsed.set_fragment(None);
-                    object.insert("url".to_string(), Value::String(parsed.to_string()));
 
-                    // A queued transfer whose URL depended on query/fragment
-                    // credentials must not silently auto-resume with a truncated
-                    // URL after a portable restart.
-                    if had_userinfo || had_query_or_fragment {
-                        mark_portable_download_unresumable(object);
-                    }
+                // A queued transfer whose URL depended on query/fragment
+                // credentials must not silently auto-resume with a truncated
+                // URL after a portable restart.
+                if had_userinfo || had_query_or_fragment {
+                    mark_portable_download_unresumable(object);
                 }
             }
         } else {
@@ -1236,266 +965,6 @@ fn remove_persisted_transfer_secrets(value: &mut Value) {
     if removed_transfer_context {
         mark_portable_download_unresumable(object);
     }
-}
-
-const PORTABLE_NON_CREDENTIAL_REQUEST_HEADERS: &[&str] = &[
-    "accept",
-    "accept-charset",
-    "accept-encoding",
-    "accept-language",
-    "cache-control",
-    "connection",
-    "dnt",
-    "host",
-    "if-match",
-    "if-modified-since",
-    "if-none-match",
-    "if-range",
-    "if-unmodified-since",
-    "origin",
-    "pragma",
-    "priority",
-    "range",
-    "referer",
-    "sec-ch-ua",
-    "sec-ch-ua-mobile",
-    "sec-ch-ua-platform",
-    "sec-fetch-dest",
-    "sec-fetch-mode",
-    "sec-fetch-site",
-    "sec-fetch-user",
-    "sec-gpc",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-    "user-agent",
-    "via",
-    "warning",
-];
-
-const PORTABLE_PERSISTABLE_REQUEST_HEADERS: &[&str] = &[
-    "accept",
-    "accept-charset",
-    "accept-encoding",
-    "accept-language",
-    "cache-control",
-    "dnt",
-    "origin",
-    "pragma",
-    "priority",
-    "referer",
-    "sec-ch-ua",
-    "sec-ch-ua-mobile",
-    "sec-ch-ua-platform",
-    "sec-fetch-dest",
-    "sec-fetch-mode",
-    "sec-fetch-site",
-    "sec-fetch-user",
-    "sec-gpc",
-    "user-agent",
-];
-
-fn portable_header_is_known_non_credential(name: &str) -> bool {
-    PORTABLE_NON_CREDENTIAL_REQUEST_HEADERS
-        .iter()
-        .any(|candidate| *candidate == name)
-}
-
-fn portable_header_is_persistable(name: &str) -> bool {
-    PORTABLE_PERSISTABLE_REQUEST_HEADERS
-        .iter()
-        .any(|candidate| *candidate == name)
-}
-
-fn sanitize_portable_request_header_value(name: &str, value: &str) -> Option<String> {
-    if value.chars().any(char::is_control) {
-        return None;
-    }
-
-    match name {
-        "referer" => {
-            let mut parsed = url::Url::parse(value).ok()?;
-            if !matches!(parsed.scheme(), "http" | "https") {
-                return None;
-            }
-            let _ = parsed.set_username("");
-            let _ = parsed.set_password(None);
-            parsed.set_query(None);
-            parsed.set_fragment(None);
-            Some(parsed.to_string())
-        }
-        "origin" => {
-            let parsed = url::Url::parse(value).ok()?;
-            matches!(parsed.scheme(), "http" | "https")
-                .then(|| parsed.origin().ascii_serialization())
-        }
-        _ => Some(value.to_string()),
-    }
-}
-
-fn portable_request_header_requires_recovery(name: &str, value: &str) -> bool {
-    if value.trim().is_empty() {
-        return false;
-    }
-    if value.chars().any(char::is_control) {
-        return true;
-    }
-
-    if name == "referer" || name == "origin" {
-        let Ok(parsed) = url::Url::parse(value) else {
-            return true;
-        };
-        if !matches!(parsed.scheme(), "http" | "https") {
-            return true;
-        }
-        if !parsed.username().is_empty()
-            || parsed.password().is_some()
-            || parsed.query().is_some()
-            || parsed.fragment().is_some()
-        {
-            return true;
-        }
-        return name == "origin" && !parsed.path().is_empty() && parsed.path() != "/";
-    }
-
-    false
-}
-
-/// Remove unsafe request headers from portable persistence while retaining
-/// sanitized, stable browser context. The boolean reports whether the input
-/// contained credential-bearing, unknown, or malformed header context that
-/// makes automatic restart unsafe. Torrent browser context is metadata-only:
-/// it is removed without making a cached-metadata Torrent unresumable.
-fn sanitize_portable_request_headers(object: &mut serde_json::Map<String, Value>) -> bool {
-    let Some(raw_value) = object.get("headers").cloned() else {
-        return false;
-    };
-    if raw_value.is_null() || value_is_empty(&raw_value) {
-        object.remove("headers");
-        return false;
-    }
-
-    let Some(raw_headers) = raw_value.as_str() else {
-        object.remove("headers");
-        return true;
-    };
-
-    if object.get("isTorrent").and_then(Value::as_bool) == Some(true) {
-        object.remove("headers");
-        return false;
-    }
-
-    let mut retained = Vec::new();
-    let mut removed_context = false;
-    for line in raw_headers.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Some((raw_name, raw_value)) = trimmed.split_once(':') else {
-            removed_context = true;
-            continue;
-        };
-        let name = raw_name.trim().to_ascii_lowercase();
-        if !portable_header_is_known_non_credential(&name) {
-            removed_context = true;
-            continue;
-        }
-        if portable_request_header_requires_recovery(&name, raw_value.trim()) {
-            removed_context = true;
-        }
-        let Some(sanitized_value) = sanitize_portable_request_header_value(&name, raw_value.trim())
-        else {
-            continue;
-        };
-        if portable_header_is_persistable(&name) {
-            retained.push(format!("{}: {sanitized_value}", raw_name.trim()));
-        }
-    }
-
-    if retained.is_empty() {
-        object.remove("headers");
-    } else {
-        object.insert("headers".to_string(), Value::String(retained.join("\n")));
-    }
-    removed_context
-}
-
-fn sanitize_portable_torrent_tracker_field(
-    object: &mut serde_json::Map<String, Value>,
-    key: &str,
-    normalize: fn(Option<&str>) -> Result<Option<String>, String>,
-) {
-    let Some(raw_value) = object.get(key).cloned() else {
-        return;
-    };
-    let Some(raw) = raw_value.as_str().map(str::to_string) else {
-        object.remove(key);
-        mark_portable_download_unresumable(object);
-        return;
-    };
-    let raw = raw.trim();
-    if raw.is_empty() {
-        object.remove(key);
-        return;
-    }
-    let Some(normalized) = normalize(Some(raw)).ok().flatten() else {
-        object.remove(key);
-        mark_portable_download_unresumable(object);
-        return;
-    };
-
-    let mut sanitized = Vec::new();
-    let mut removed_context = false;
-    for token in normalized.split(',') {
-        if token == "*" {
-            sanitized.push(token.to_string());
-            continue;
-        }
-        let Ok(mut parsed) = url::Url::parse(token) else {
-            object.remove(key);
-            mark_portable_download_unresumable(object);
-            return;
-        };
-        let had_context = !parsed.username().is_empty()
-            || parsed.password().is_some()
-            || parsed.query().is_some()
-            || parsed.fragment().is_some();
-        if had_context {
-            let _ = parsed.set_username("");
-            let _ = parsed.set_password(None);
-            parsed.set_query(None);
-            parsed.set_fragment(None);
-            removed_context = true;
-        }
-        sanitized.push(parsed.to_string());
-    }
-
-    if sanitized.is_empty() {
-        object.remove(key);
-    } else {
-        object.insert(key.to_string(), Value::String(sanitized.join(",")));
-    }
-    if removed_context {
-        mark_portable_download_unresumable(object);
-    }
-}
-
-fn sanitize_portable_torrent_trackers(object: &mut serde_json::Map<String, Value>) {
-    sanitize_portable_torrent_tracker_field(
-        object,
-        "torrentTrackers",
-        crate::queue::normalize_torrent_trackers,
-    );
-}
-
-fn sanitize_portable_torrent_exclude_trackers(object: &mut serde_json::Map<String, Value>) {
-    sanitize_portable_torrent_tracker_field(
-        object,
-        "torrentExcludeTrackers",
-        crate::queue::normalize_torrent_exclude_trackers,
-    );
 }
 
 fn value_is_empty(value: &Value) -> bool {
@@ -1605,7 +1074,14 @@ pub fn load_queues(connection: &Connection) -> Result<Vec<String>, String> {
 }
 
 pub fn replace_queues(connection: &mut Connection, data: &str) -> Result<(), String> {
-    let strings = prepare_queue_strings(data)?;
+    let values: Vec<Value> =
+        serde_json::from_str(data).map_err(|error| format!("failed to decode queues: {error}"))?;
+    let strings = values
+        .iter()
+        .map(|value| {
+            serde_json::to_string(value).map_err(|error| format!("failed to encode queue: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let transaction = connection
         .transaction()
         .map_err(|error| format!("failed to begin queue save: {error}"))?;
@@ -1613,33 +1089,6 @@ pub fn replace_queues(connection: &mut Connection, data: &str) -> Result<(), Str
     transaction
         .commit()
         .map_err(|error| format!("failed to commit queue save: {error}"))
-}
-
-fn prepare_download_strings(data: &str, portable: bool) -> Result<Vec<String>, String> {
-    let values: Vec<Value> = serde_json::from_str(data)
-        .map_err(|error| format!("failed to decode downloads: {error}"))?;
-    values
-        .into_iter()
-        .map(|mut value| {
-            remove_live_download_metadata(&mut value);
-            if portable {
-                remove_persisted_transfer_secrets(&mut value);
-            }
-            serde_json::to_string(&value)
-                .map_err(|error| format!("failed to encode download: {error}"))
-        })
-        .collect()
-}
-
-fn prepare_queue_strings(data: &str) -> Result<Vec<String>, String> {
-    let values: Vec<Value> =
-        serde_json::from_str(data).map_err(|error| format!("failed to decode queues: {error}"))?;
-    values
-        .iter()
-        .map(|value| {
-            serde_json::to_string(value).map_err(|error| format!("failed to encode queue: {error}"))
-        })
-        .collect()
 }
 
 fn replace_queues_tx(transaction: &Transaction<'_>, queues: &[String]) -> Result<(), String> {
@@ -1668,328 +1117,47 @@ fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("persisted item is missing '{key}'"))
 }
 
-pub fn load_ownership(connection: &Connection) -> Result<Vec<(String, String, Vec<String>)>, String> {
+pub fn load_ownership(connection: &Connection) -> Result<Vec<(String, String)>, String> {
     let mut statement = connection
-        .prepare(
-            "SELECT ownership.id, ownership.primary_path, paths.paths
-             FROM download_ownership AS ownership
-             LEFT JOIN download_owned_paths AS paths ON paths.id = ownership.id",
-        )
+        .prepare("SELECT id, primary_path FROM download_ownership")
         .map_err(|error| format!("failed to prepare ownership query: {error}"))?;
     let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        })
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
         .map_err(|error| format!("failed to query ownership data: {error}"))?;
-    let mut ownership = Vec::new();
-    for row in rows {
-        let (id, primary_path, encoded_paths) =
-            row.map_err(|error| format!("failed to read ownership data: {error}"))?;
-        let owned_paths = match encoded_paths {
-            Some(encoded) => {
-                let paths = serde_json::from_str::<Vec<String>>(&encoded).map_err(|error| {
-                    format!("failed to decode owned paths for download '{id}': {error}")
-                })?;
-                if paths.is_empty() {
-                    vec![primary_path.clone()]
-                } else {
-                    paths
-                }
-            }
-            None => vec![primary_path.clone()],
-        };
-        ownership.push((id, primary_path, owned_paths));
-    }
-    Ok(ownership)
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to read ownership data: {error}"))
 }
 
-pub fn set_ownership_paths(
-    connection: &Connection,
-    id: &str,
-    primary_path: &str,
-    paths: &[String],
-) -> Result<(), String> {
-    // The path collision check and both ownership writes must be one SQLite
-    // transaction. Otherwise two concurrent admissions can both observe an
-    // empty registry and claim the same output before either insert becomes
-    // visible to the other.
-    let transaction = connection
-        .unchecked_transaction()
-        .map_err(|error| format!("failed to begin download ownership transaction: {error}"))?;
-    set_ownership_paths_checked(&transaction, id, primary_path, paths, &[])?;
-    transaction
-        .commit()
-        .map_err(|error| format!("failed to commit download ownership transaction: {error}"))
-}
-
-fn set_ownership_paths_checked(
-    connection: &Connection,
-    id: &str,
-    primary_path: &str,
-    paths: &[String],
-    removal_paths: &[String],
-) -> Result<(), String> {
-    let mut statement = connection
-        .prepare(
-            "SELECT ownership.id, ownership.primary_path, paths.paths, removal.paths
-             FROM download_ownership AS ownership
-             LEFT JOIN download_owned_paths AS paths ON paths.id = ownership.id
-             LEFT JOIN download_removal_paths AS removal ON removal.id = ownership.id
-             WHERE ownership.id <> ?1",
+pub fn set_ownership(connection: &Connection, id: &str, path: &str) -> Result<(), String> {
+    let existing_owner = connection
+        .query_row(
+            "SELECT id FROM download_ownership
+             WHERE primary_path = ?1 AND id <> ?2
+             LIMIT 1",
+            params![path, id],
+            |row| row.get::<_, String>(0),
         )
-        .map_err(|error| format!("failed to prepare download ownership check: {error}"))?;
-    let existing = statement
-        .query_map(params![id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        })
-        .map_err(|error| format!("failed to check download ownership paths: {error}"))?;
-    for row in existing {
-        let (existing_id, existing_primary, encoded_owned, encoded_removal) =
-            row.map_err(|error| format!("failed to read download ownership paths: {error}"))?;
-        let owned = match encoded_owned {
-            Some(encoded) => {
-                let paths = serde_json::from_str::<Vec<String>>(&encoded).map_err(|error| {
-                    format!("failed to decode owned paths for download '{existing_id}': {error}")
-                })?;
-                if paths.is_empty() {
-                    vec![existing_primary.clone()]
-                } else {
-                    paths
-                }
-            }
-            None => vec![existing_primary.clone()],
-        };
-        let removal = match encoded_removal {
-            Some(encoded) => serde_json::from_str::<Vec<String>>(&encoded).map_err(|error| {
-                format!(
-                    "failed to decode removal paths for download '{existing_id}': {error}"
-                )
-            })?,
-            None => Vec::new(),
-        };
-        let new_paths = std::iter::once(primary_path)
-            .chain(paths.iter().map(String::as_str))
-            .chain(removal_paths.iter().map(String::as_str));
-        let existing_paths = std::iter::once(existing_primary.as_str())
-            .chain(owned.iter().map(String::as_str))
-            .chain(removal.iter().map(String::as_str));
-        if new_paths.clone().any(|new_path| {
-            existing_paths
-                .clone()
-                .any(|existing_path| crate::platform::paths_equal(Path::new(new_path), Path::new(existing_path)))
-        }) {
-            return Err("Download destination is already owned by another Firelink download".to_string());
-        }
+        .optional()
+        .map_err(|error| format!("failed to check download ownership path: {error}"))?;
+    if existing_owner.is_some() {
+        return Err("Download destination is already owned by another Firelink download".to_string());
     }
 
     connection
         .execute(
             "INSERT INTO download_ownership (id, primary_path) VALUES (?1, ?2)
              ON CONFLICT(id) DO UPDATE SET primary_path = excluded.primary_path",
-            params![id, primary_path],
+            params![id, path],
         )
         .map_err(|error| format!("failed to save ownership data: {error}"))?;
-    let encoded_paths = serde_json::to_string(paths)
-        .map_err(|error| format!("failed to encode download ownership paths: {error}"))?;
-    connection
-        .execute(
-            "INSERT INTO download_owned_paths (id, paths) VALUES (?1, ?2)
-             ON CONFLICT(id) DO UPDATE SET paths = excluded.paths",
-            params![id, encoded_paths],
-        )
-        .map_err(|error| format!("failed to save download ownership path list: {error}"))?;
     Ok(())
-}
-
-pub fn set_ownership_and_removal_paths(
-    connection: &Connection,
-    id: &str,
-    primary_path: &str,
-    paths: &[String],
-    removal_paths: &[String],
-) -> Result<(), String> {
-    // Ownership and the planned deletion reservation are one safety
-    // boundary.  Do not leave a partially-written reservation behind if the
-    // second table write fails or the process crashes between writes.
-    let transaction = connection
-        .unchecked_transaction()
-        .map_err(|error| format!("failed to begin torrent ownership transaction: {error}"))?;
-    set_ownership_paths_checked(&transaction, id, primary_path, paths, removal_paths)?;
-    if removal_paths.is_empty() {
-        transaction
-            .execute(
-                "DELETE FROM download_removal_paths WHERE id = ?1",
-                params![id],
-            )
-            .map_err(|error| format!("failed to clear torrent removal paths: {error}"))?;
-    } else {
-        let encoded_paths = serde_json::to_string(removal_paths)
-            .map_err(|error| format!("failed to encode torrent removal paths: {error}"))?;
-        transaction
-            .execute(
-                "INSERT INTO download_removal_paths (id, paths) VALUES (?1, ?2)
-                 ON CONFLICT(id) DO UPDATE SET paths = excluded.paths",
-                params![id, encoded_paths],
-            )
-            .map_err(|error| format!("failed to save torrent removal paths: {error}"))?;
-    }
-    transaction
-        .commit()
-        .map_err(|error| format!("failed to commit torrent ownership transaction: {error}"))
-}
-
-/// Reclaim reservations left behind by a process crash after a terminal
-/// Torrent outcome.  Active, queued, and paused records remain reserved: a
-/// future lifecycle may still ask Aria2 to remove those paths.  A terminal
-/// record is reclaimed only after every reserved path is absent, proving that
-/// Aria2's unselected-file cleanup was observed.  Failed records are treated
-/// conservatively as well because Aria2 may leave unselected files behind on
-/// an error.
-pub fn reconcile_torrent_removal_paths_after_restart(
-    connection: &Connection,
-) -> Result<usize, String> {
-    let mut statement = connection
-        .prepare(
-            "SELECT removal.id, removal.paths, downloads.status
-             FROM download_removal_paths AS removal
-             LEFT JOIN downloads ON downloads.id = removal.id",
-        )
-        .map_err(|error| format!("failed to prepare torrent removal recovery query: {error}"))?;
-    let rows = statement
-        .query_map([], |row| {
-            let id: String = row.get(0)?;
-            let paths: String = row.get(1)?;
-            let status: Option<String> = row.get(2)?;
-            Ok((id, paths, status))
-        })
-        .map_err(|error| format!("failed to query torrent removal recovery data: {error}"))?;
-
-    let mut reclaim = Vec::new();
-    for row in rows {
-        let (id, encoded_paths, status) =
-            row.map_err(|error| format!("failed to read torrent removal recovery data: {error}"))?;
-        let paths = match serde_json::from_str::<Vec<String>>(&encoded_paths) {
-            Ok(paths)
-                if !paths.is_empty()
-                    && paths.iter().all(|path| {
-                        let path = Path::new(path);
-                        path.is_absolute()
-                            && !path.components().any(|component| {
-                                matches!(component, Component::CurDir | Component::ParentDir)
-                            })
-                    }) =>
-            {
-                paths
-            }
-            // Malformed or empty reservations are retained for conservative
-            // manual recovery rather than being silently discarded.
-            _ => continue,
-        };
-        let Some(status) = status else {
-            continue;
-        };
-        let should_reclaim = match status.as_str() {
-            "failed" | "completed" => paths
-                .iter()
-                .all(|path| torrent_removal_path_is_absent(Path::new(path))),
-            _ => false,
-        };
-        if should_reclaim {
-            reclaim.push(id);
-        }
-    }
-
-    let mut reclaimed = 0;
-    for id in reclaim {
-        reclaimed += connection
-            .execute(
-                "DELETE FROM download_removal_paths WHERE id = ?1",
-                params![id],
-            )
-            .map_err(|error| format!("failed to reclaim torrent removal paths: {error}"))?;
-    }
-    Ok(reclaimed)
-}
-
-fn torrent_removal_path_is_absent(path: &Path) -> bool {
-    matches!(
-        fs::symlink_metadata(path),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound
-    )
 }
 
 pub fn remove_ownership(connection: &Connection, id: &str) -> Result<(), String> {
     connection
-        .execute("DELETE FROM download_removal_paths WHERE id = ?1", params![id])
-        .map_err(|error| format!("failed to delete torrent removal paths: {error}"))?;
-    connection
-        .execute("DELETE FROM download_owned_paths WHERE id = ?1", params![id])
-        .map_err(|error| format!("failed to delete download ownership paths: {error}"))?;
-    connection
         .execute("DELETE FROM download_ownership WHERE id = ?1", params![id])
         .map_err(|error| format!("failed to delete ownership data: {error}"))?;
     Ok(())
-}
-
-pub fn remove_torrent_removal_paths(connection: &Connection, id: &str) -> Result<(), String> {
-    connection
-        .execute("DELETE FROM download_removal_paths WHERE id = ?1", params![id])
-        .map_err(|error| format!("failed to clear torrent removal paths: {error}"))?;
-    Ok(())
-}
-
-pub fn load_torrent_removal_paths(
-    connection: &Connection,
-    id: &str,
-) -> Result<Vec<String>, String> {
-    connection
-        .query_row(
-            "SELECT paths FROM download_removal_paths WHERE id = ?1",
-            params![id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|error| format!("failed to read torrent removal paths: {error}"))?
-        .map(|value| {
-            serde_json::from_str::<Vec<String>>(&value)
-                .map_err(|error| format!("failed to decode torrent removal paths: {error}"))
-        })
-        .transpose()
-        .map(|paths| paths.unwrap_or_default())
-}
-
-pub fn load_all_torrent_removal_paths(
-    connection: &Connection,
-) -> Result<Vec<(String, Vec<String>)>, String> {
-    let mut statement = connection
-        .prepare("SELECT id, paths FROM download_removal_paths")
-        .map_err(|error| format!("failed to prepare torrent removal ownership query: {error}"))?;
-    let rows = statement
-        .query_map([], |row| {
-            let id: String = row.get(0)?;
-            let encoded: String = row.get(1)?;
-            Ok((id, encoded))
-        })
-        .map_err(|error| format!("failed to query torrent removal ownership: {error}"))?;
-
-    rows.map(|row| {
-        let (id, encoded) = row
-            .map_err(|error| format!("failed to read torrent removal ownership: {error}"))?;
-        let paths = serde_json::from_str::<Vec<String>>(&encoded).map_err(|error| {
-            format!("failed to decode torrent removal paths for download '{id}': {error}")
-        })?;
-        Ok((id, paths))
-    })
-    .collect()
 }
 
 pub fn has_user_data(connection: &Connection) -> Result<bool, String> {
@@ -2524,94 +1692,6 @@ mod tests {
     }
 
     #[test]
-    fn migrates_v1_database_and_creates_backup() {
-        let temp = TempDir::new().unwrap();
-        let path = temp.path().join(DATABASE_NAME);
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "
-                CREATE TABLE downloads (
-                    id TEXT PRIMARY KEY,
-                    status TEXT NOT NULL,
-                    queue_id TEXT,
-                    data TEXT NOT NULL
-                );
-                CREATE TABLE settings (id INTEGER PRIMARY KEY, data TEXT NOT NULL);
-                CREATE TABLE queues (id TEXT PRIMARY KEY, data TEXT NOT NULL);
-                CREATE TABLE download_ownership (
-                    id TEXT PRIMARY KEY,
-                    primary_path TEXT NOT NULL
-                );
-                INSERT INTO download_ownership VALUES ('download-1', '/downloads/file.bin');
-                PRAGMA user_version = 1;
-                ",
-            )
-            .unwrap();
-        drop(connection);
-
-        let state = init_at_path(temp.path()).unwrap();
-        let connection = state.lock().unwrap();
-        let version: i64 = connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, CURRENT_SCHEMA_VERSION);
-        assert!(table_exists(&connection, "download_owned_paths").unwrap());
-        assert!(table_exists(&connection, "download_removal_paths").unwrap());
-        assert_eq!(
-            load_ownership(&connection).unwrap(),
-            vec![(
-                "download-1".to_string(),
-                "/downloads/file.bin".to_string(),
-                vec!["/downloads/file.bin".to_string()]
-            )]
-        );
-        assert!(fs::read_dir(temp.path()).unwrap().flatten().any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("firelink.sqlite.backup-schema-v1-")
-        }));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn refuses_to_open_a_database_symlink() {
-        use std::os::unix::fs::symlink;
-
-        let temp = TempDir::new().unwrap();
-        let target = temp.path().join("outside.sqlite");
-        symlink(&target, temp.path().join(DATABASE_NAME)).unwrap();
-
-        let result = init_at_path(temp.path());
-        let error = result.err().expect("database symlink must fail closed");
-        assert!(error.contains("symbolic link"));
-        assert!(!target.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn ignores_symlinked_legacy_backup_candidates() {
-        use std::os::unix::fs::symlink;
-
-        let temp = TempDir::new().unwrap();
-        let source = temp.path().join(LEGACY_STORE_NAME);
-        let outside = temp.path().join("outside-store.bin");
-        let linked_backup = temp
-            .path()
-            .join("store.bin.backup-legacy-import-attacker");
-        fs::write(&source, b"trusted-source").unwrap();
-        fs::write(&outside, b"outside-content").unwrap();
-        symlink(&outside, &linked_backup).unwrap();
-
-        let backup = backup_file(&source, "legacy-import").unwrap();
-        assert_ne!(backup, linked_backup);
-        assert!(fs::symlink_metadata(&backup).unwrap().is_file());
-        assert_eq!(fs::read(&backup).unwrap(), b"trusted-source");
-        assert_eq!(fs::read(&outside).unwrap(), b"outside-content");
-    }
-
-    #[test]
     fn portable_migration_does_not_create_raw_schema_backup() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join(DATABASE_NAME);
@@ -2814,9 +1894,7 @@ mod tests {
             "cookies": "session=secret",
             "headers": "Authorization: Bearer secret",
             "mirrors": "https://user:secret@example.com/mirror",
-            "proxy": "http://user:secret@example.com:8080",
-            "torrentTrackers": "https://tracker.example/announce?passkey=secret",
-            "torrentExcludeTrackers": "https://tracker.example/exclude?passkey=secret"
+            "proxy": "http://user:secret@example.com:8080"
         }])
         .to_string();
 
@@ -2830,417 +1908,6 @@ mod tests {
         for key in ["password", "cookies", "headers", "mirrors", "proxy"] {
             assert!(saved.get(key).is_none(), "portable data retained {key}");
         }
-        assert_eq!(saved["torrentTrackers"], "https://tracker.example/announce");
-        assert_eq!(saved["torrentExcludeTrackers"], "https://tracker.example/exclude");
-    }
-
-    #[test]
-    fn portable_download_persistence_keeps_sanitized_safe_browser_context() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let mut connection = state.lock().unwrap();
-        let data = json!([{
-            "id": "download-safe-headers",
-            "status": "queued",
-            "queueId": "main",
-            "url": "https://example.com/file",
-            "headers": "Referer: https://example.com/page\nUser-Agent: Firelink-Test"
-        }])
-        .to_string();
-
-        replace_downloads(&mut connection, &data, true).unwrap();
-
-        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
-        assert_eq!(saved["status"], "queued");
-        assert_ne!(saved.get("resumable"), Some(&Value::Bool(false)));
-        assert_eq!(
-            saved["headers"],
-            "Referer: https://example.com/page\nUser-Agent: Firelink-Test"
-        );
-    }
-
-    #[test]
-    fn portable_download_persistence_rejects_sensitive_referer_context() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let mut connection = state.lock().unwrap();
-        let data = json!([{
-            "id": "download-sensitive-referer",
-            "status": "queued",
-            "queueId": "main",
-            "url": "https://example.com/file",
-            "headers": "Referer: https://example.com/page?token=secret#fragment"
-        }])
-        .to_string();
-
-        replace_downloads(&mut connection, &data, true).unwrap();
-
-        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
-        assert_eq!(saved["status"], "failed");
-        assert_eq!(saved["resumable"], false);
-        assert_eq!(saved["headers"], "Referer: https://example.com/page");
-        assert!(!saved.to_string().contains("secret"));
-    }
-
-    #[test]
-    fn portable_download_persistence_rejects_unknown_header_context() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let mut connection = state.lock().unwrap();
-        let data = json!([{
-            "id": "download-unknown-header",
-            "status": "queued",
-            "queueId": "main",
-            "url": "https://example.com/file",
-            "headers": "X-Request-Signature:"
-        }])
-        .to_string();
-
-        replace_downloads(&mut connection, &data, true).unwrap();
-
-        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
-        assert_eq!(saved["status"], "failed");
-        assert_eq!(saved["resumable"], false);
-        assert!(saved.get("headers").is_none());
-    }
-
-    #[test]
-    fn portable_torrent_persistence_strips_metadata_credentials_without_blocking_restart() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let mut connection = state.lock().unwrap();
-        let data = json!([{
-            "id": "torrent-browser-context",
-            "status": "queued",
-            "queueId": "main",
-            "isTorrent": true,
-            "url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
-            "password": "metadata-only-secret",
-            "cookies": "session=metadata-only",
-            "headers": "User-Agent: Browser"
-        }])
-        .to_string();
-
-        replace_downloads(&mut connection, &data, true).unwrap();
-
-        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
-        assert_eq!(saved["status"], "queued");
-        assert_ne!(saved.get("resumable"), Some(&Value::Bool(false)));
-        assert!(saved.get("password").is_none());
-        assert!(saved.get("cookies").is_none());
-        assert!(saved.get("headers").is_none());
-        assert!(!saved.to_string().contains("metadata-only-secret"));
-    }
-
-    #[test]
-    fn download_state_commit_is_atomic_across_downloads_and_queues() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let mut connection = state.lock().unwrap();
-        replace_downloads(
-            &mut connection,
-            &json!([{
-                "id": "old-download",
-                "status": "paused",
-                "queueId": "old-queue"
-            }])
-            .to_string(),
-            false,
-        )
-        .unwrap();
-        replace_queues(
-            &mut connection,
-            &json!([{
-                "id": "old-queue",
-                "name": "Old Queue",
-                "isMain": true
-            }])
-            .to_string(),
-        )
-        .unwrap();
-
-        let result = replace_downloads_and_queues(
-            &mut connection,
-            &json!([{
-                "id": "new-download",
-                "status": "queued",
-                "queueId": "new-queue"
-            }])
-            .to_string(),
-            &json!([{
-                "name": "missing-id"
-            }])
-            .to_string(),
-            false,
-        );
-        assert!(result.is_err());
-        assert!(load_downloads(&connection).unwrap()[0].contains("old-download"));
-        assert!(load_queues(&connection).unwrap()[0].contains("old-queue"));
-
-        replace_downloads_and_queues(
-            &mut connection,
-            &json!([{
-                "id": "new-download",
-                "status": "queued",
-                "queueId": "new-queue"
-            }])
-            .to_string(),
-            &json!([{
-                "id": "new-queue",
-                "name": "New Queue",
-                "isMain": true
-            }])
-            .to_string(),
-            false,
-        )
-        .unwrap();
-        assert!(load_downloads(&connection).unwrap()[0].contains("new-download"));
-        assert!(load_queues(&connection).unwrap()[0].contains("new-queue"));
-    }
-
-    #[test]
-    fn native_download_mutation_keeps_object_records_and_unrelated_rows_unchanged() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let mut connection = state.lock().unwrap();
-        replace_downloads(
-            &mut connection,
-            &json!([
-                {
-                    "id": "torrent-1",
-                    "status": "paused",
-                    "queueId": "main",
-                    "torrentUploadedBytes": 1
-                },
-                {
-                    "id": "unrelated",
-                    "status": "queued",
-                    "queueId": "secondary",
-                    "customMarker": {"revision": 7}
-                }
-            ])
-            .to_string(),
-            false,
-        )
-        .unwrap();
-        let unrelated_before = load_downloads(&connection).unwrap()[1].clone();
-
-        mutate_download(&mut connection, "torrent-1", false, |object| {
-            object.insert("torrentUploadedBytes".to_string(), json!(99));
-            Ok(())
-        })
-        .unwrap();
-
-        let saved = load_downloads(&connection).unwrap();
-        assert_eq!(saved[1], unrelated_before);
-        for record in &saved {
-            let value: Value = serde_json::from_str(record).unwrap();
-            assert!(value.is_object());
-            assert!(required_string(&value, "id").is_ok());
-            assert!(required_string(&value, "status").is_ok());
-        }
-        let target: Value = serde_json::from_str(&saved[0]).unwrap();
-        assert_eq!(target["torrentUploadedBytes"], 99);
-
-        let changes_before = connection.total_changes();
-        mutate_download(&mut connection, "torrent-1", false, |object| {
-            object.insert("torrentUploadedBytes".to_string(), json!(99));
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(connection.total_changes(), changes_before);
-    }
-
-    #[test]
-    fn native_download_mutation_rolls_back_on_malformed_unrelated_row() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let mut connection = state.lock().unwrap();
-        replace_downloads(
-            &mut connection,
-            &json!([{
-                "id": "torrent-1",
-                "status": "paused",
-                "torrentUploadedBytes": 1
-            }])
-            .to_string(),
-            false,
-        )
-        .unwrap();
-        connection
-            .execute(
-                "INSERT INTO downloads (id, status, data) VALUES (?1, ?2, ?3)",
-                params!["broken", "queued", "\"double-encoded\""],
-            )
-            .unwrap();
-        let target_before = load_downloads(&connection).unwrap()[0].clone();
-
-        let error = mutate_download(&mut connection, "torrent-1", false, |object| {
-            object.insert("torrentUploadedBytes".to_string(), json!(99));
-            Ok(())
-        })
-        .unwrap_err();
-
-        assert!(error.contains("persisted item is missing 'id'"));
-        assert_eq!(load_downloads(&connection).unwrap()[0], target_before);
-    }
-
-    #[test]
-    fn native_download_mutation_rolls_back_closure_errors_and_rejects_missing_targets() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let mut connection = state.lock().unwrap();
-        replace_downloads(
-            &mut connection,
-            &json!([{"id": "torrent-1", "status": "paused"}]).to_string(),
-            false,
-        )
-        .unwrap();
-        let before = load_downloads(&connection).unwrap()[0].clone();
-
-        let error = mutate_download(&mut connection, "torrent-1", false, |object| {
-            object.insert("status".to_string(), json!("queued"));
-            Err::<(), _>("mutation rejected".to_string())
-        })
-        .unwrap_err();
-        assert_eq!(error, "mutation rejected");
-        assert_eq!(load_downloads(&connection).unwrap()[0], before);
-
-        let missing = mutate_download(&mut connection, "missing", false, |_| Ok(()))
-            .unwrap_err();
-        assert_eq!(missing, "download is no longer persisted");
-    }
-
-    #[test]
-    fn native_download_mutation_applies_portable_redaction_at_commit() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let mut connection = state.lock().unwrap();
-        replace_downloads(
-            &mut connection,
-            &json!([{
-                "id": "torrent-1",
-                "status": "paused",
-                "url": "https://example.test/file",
-                "password": "secret",
-                "lastErrorKind": "nameResolution"
-            }])
-            .to_string(),
-            false,
-        )
-        .unwrap();
-
-        mutate_download(&mut connection, "torrent-1", true, |object| {
-            object.insert("torrentUploadedBytes".to_string(), json!(9));
-            Ok(())
-        })
-        .unwrap();
-
-        let saved: Value =
-            serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
-        assert_eq!(saved["torrentUploadedBytes"], 9);
-        assert!(saved.get("password").is_none());
-        assert_eq!(saved["status"], "failed");
-        assert_eq!(saved["resumable"], false);
-        assert!(saved.get("lastErrorKind").is_none());
-    }
-
-    #[test]
-    fn native_download_mutation_drops_live_error_metadata_in_standard_mode() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let mut connection = state.lock().unwrap();
-        replace_downloads(
-            &mut connection,
-            &json!([{
-                "id": "download-live-metadata",
-                "status": "paused"
-            }])
-            .to_string(),
-            false,
-        )
-        .unwrap();
-
-        mutate_download(&mut connection, "download-live-metadata", false, |object| {
-            object.insert("status".to_string(), json!("queued"));
-            object.insert("lastErrorKind".to_string(), json!("nameResolution"));
-            object.insert("lastResolverFallback".to_string(), json!(true));
-            Ok(())
-        })
-        .unwrap();
-
-        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
-        assert!(saved.get("lastErrorKind").is_none());
-        assert!(saved.get("lastResolverFallback").is_none());
-    }
-
-    #[test]
-    fn portable_download_persistence_drops_malformed_tracker_fields() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let mut connection = state.lock().unwrap();
-        let data = json!([{
-            "id": "download-malformed-trackers",
-            "status": "queued",
-            "queueId": "main",
-            "url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
-            "torrentTrackers": { "token": "secret" },
-            "torrentExcludeTrackers": { "token": "secret" }
-        }])
-        .to_string();
-
-        replace_downloads(&mut connection, &data, true).unwrap();
-
-        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
-        assert!(saved.get("torrentTrackers").is_none());
-        assert!(saved.get("torrentExcludeTrackers").is_none());
-        assert_eq!(saved["status"], "failed");
-        assert_eq!(saved["resumable"], false);
-        assert!(!saved.to_string().contains("secret"));
-    }
-
-    #[test]
-    fn portable_download_persistence_keeps_wildcard_tracker_exclusion() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let mut connection = state.lock().unwrap();
-        let data = json!([{
-            "id": "download-wildcard-exclusion",
-            "status": "queued",
-            "queueId": "main",
-            "url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
-            "torrentExcludeTrackers": "*"
-        }])
-        .to_string();
-
-        replace_downloads(&mut connection, &data, true).unwrap();
-
-        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
-        assert_eq!(saved["torrentExcludeTrackers"], "*");
-    }
-
-    #[test]
-    fn portable_download_persistence_drops_invalid_tracker_urls() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let mut connection = state.lock().unwrap();
-        let data = json!([{
-            "id": "download-invalid-trackers",
-            "status": "queued",
-            "queueId": "main",
-            "url": "https://example.com/file.bin",
-            "torrentTrackers": "ftp://tracker.example/announce",
-            "torrentExcludeTrackers": "ftp://tracker.example/announce"
-        }])
-        .to_string();
-
-        replace_downloads(&mut connection, &data, true).unwrap();
-
-        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
-        assert!(saved.get("torrentTrackers").is_none());
-        assert!(saved.get("torrentExcludeTrackers").is_none());
-        assert_eq!(saved["status"], "failed");
-        assert_eq!(saved["resumable"], false);
     }
 
     #[test]
@@ -3268,29 +1935,6 @@ mod tests {
             "Portable mode removed credentials or transfer settings from this persisted download; add it again to resume."
         );
         assert!(saved.get("headers").is_none());
-    }
-
-    #[test]
-    fn portable_magnet_persistence_keeps_identity_but_does_not_resume_after_tracker_removal() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let mut connection = state.lock().unwrap();
-        let data = json!([{
-            "id": "magnet-download",
-            "status": "queued",
-            "queueId": "main",
-            "url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Example%20Torrent&tr=https%3A%2F%2Ftracker.invalid%2Fsecret"
-        }])
-        .to_string();
-
-        replace_downloads(&mut connection, &data, true).unwrap();
-
-        let saved: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
-        assert_eq!(saved["url"], "magnet:?xt=urn%3Abtih%3A0123456789abcdef0123456789abcdef01234567&dn=Example+Torrent");
-        assert_eq!(saved["status"], "failed");
-        assert_eq!(saved["resumable"], false);
-        assert!(!saved.to_string().contains("tracker.invalid"));
-        assert!(!saved.to_string().contains("secret"));
     }
 
     #[test]
@@ -3498,360 +2142,15 @@ mod tests {
         let state = init_at_path(temp.path()).unwrap();
         let connection = state.lock().unwrap();
 
-        set_ownership_paths(
-            &connection,
-            "first",
-            "/downloads/file.bin",
-            &["/downloads/file.bin".to_string()],
-        )
-        .unwrap();
-        let error = set_ownership_paths(
-            &connection,
-            "second",
-            "/downloads/file.bin",
-            &["/downloads/file.bin".to_string()],
-        )
+        set_ownership(&connection, "first", "/downloads/file.bin").unwrap();
+        let error = set_ownership(&connection, "second", "/downloads/file.bin")
             .expect_err("a primary path must have one live owner");
 
         assert!(error.contains("already owned"));
-        assert_eq!(
-            load_ownership(&connection).unwrap(),
-            vec![(
-                "first".to_string(),
-                "/downloads/file.bin".to_string(),
-                vec!["/downloads/file.bin".to_string()]
-            )]
-        );
-        set_ownership_paths(
-            &connection,
-            "first",
-            "/downloads/renamed.bin",
-            &["/downloads/renamed.bin".to_string()],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn rejects_overlap_with_any_owned_torrent_path() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let connection = state.lock().unwrap();
-
-        set_ownership_paths(
-            &connection,
-            "first",
-            "/downloads/root",
-            &[
-                "/downloads/root/a.bin".to_string(),
-                "/downloads/root/b.bin".to_string(),
-            ],
-        )
-        .unwrap();
-        let error = set_ownership_paths(
-            &connection,
-            "second",
-            "/downloads/root",
-            &["/downloads/root/c.bin".to_string()],
-        )
-        .expect_err("a torrent root must not be reused");
-        assert!(error.contains("already owned"));
-    }
-
-    #[test]
-    fn removal_reservations_block_later_download_ownership_claims() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let connection = state.lock().unwrap();
-
-        set_ownership_and_removal_paths(
-            &connection,
-            "torrent",
-            "/downloads/selected.bin",
-            &["/downloads/selected.bin".to_string()],
-            &["/downloads/unselected.bin".to_string()],
-        )
-        .unwrap();
-        let error = set_ownership_paths(
-            &connection,
-            "later",
-            "/downloads/unselected.bin",
-            &["/downloads/unselected.bin".to_string()],
-        )
-        .expect_err("a planned Torrent deletion must reserve its path");
-
-        assert!(error.contains("already owned"));
-        remove_torrent_removal_paths(&connection, "torrent").unwrap();
-        set_ownership_paths(
-            &connection,
-            "later",
-            "/downloads/unselected.bin",
-            &["/downloads/unselected.bin".to_string()],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn malformed_owned_path_json_fails_closed_for_loading_and_new_claims() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let connection = state.lock().unwrap();
-        connection
-            .execute(
-                "INSERT INTO download_ownership (id, primary_path) VALUES (?1, ?2)",
-                params!["broken-owned", "/downloads/broken.bin"],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO download_owned_paths (id, paths) VALUES (?1, ?2)",
-                params!["broken-owned", "{not-json"],
-            )
-            .unwrap();
-
-        let error =
-            load_ownership(&connection).expect_err("malformed owned paths must not be ignored");
-        assert!(error.contains("broken-owned"));
-
-        let error = set_ownership_paths(
-            &connection,
-            "later",
-            "/downloads/later.bin",
-            &["/downloads/later.bin".to_string()],
-        )
-        .expect_err("new ownership claims must fail closed");
-        assert!(error.contains("broken-owned"));
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM download_ownership WHERE id = 'later'",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            0
-        );
-    }
-
-    #[test]
-    fn malformed_removal_path_json_fails_closed_for_loading_and_new_claims() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let connection = state.lock().unwrap();
-        connection
-            .execute(
-                "INSERT INTO download_ownership (id, primary_path) VALUES (?1, ?2)",
-                params!["broken-removal", "/downloads/broken.bin"],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO download_removal_paths (id, paths) VALUES (?1, ?2)",
-                params!["broken-removal", "{not-json"],
-            )
-            .unwrap();
-
-        let error = load_all_torrent_removal_paths(&connection)
-            .expect_err("malformed removal paths must not be ignored");
-        assert!(error.contains("broken-removal"));
-
-        let error = set_ownership_paths(
-            &connection,
-            "later",
-            "/downloads/later.bin",
-            &["/downloads/later.bin".to_string()],
-        )
-        .expect_err("new ownership claims must fail closed");
-        assert!(error.contains("broken-removal"));
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM download_ownership WHERE id = 'later'",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            0
-        );
-    }
-
-    #[test]
-    fn torrent_ownership_and_removal_reservation_commit_atomically() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let connection = state.lock().unwrap();
-        connection
-            .execute_batch(
-                "CREATE TRIGGER reject_torrent_removal
-                 BEFORE INSERT ON download_removal_paths
-                 BEGIN SELECT RAISE(ABORT, 'test rejection'); END;",
-            )
-            .unwrap();
-
-        let error = set_ownership_and_removal_paths(
-            &connection,
-            "torrent",
-            "/downloads/selected.bin",
-            &["/downloads/selected.bin".to_string()],
-            &["/downloads/unselected.bin".to_string()],
-        )
-        .expect_err("the injected reservation failure must abort the transaction");
-
-        assert!(error.contains("test rejection"));
-        assert!(load_ownership(&connection).unwrap().is_empty());
-        assert!(load_torrent_removal_paths(&connection, "torrent")
-            .unwrap()
-            .is_empty());
-    }
-
-    #[test]
-    fn restart_reclaims_only_observed_terminal_torrent_reservations() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let connection = state.lock().unwrap();
-        let completed_missing = temp.path().join("completed-missing.bin");
-        let completed_present = temp.path().join("completed-present.bin");
-        let failed_present = temp.path().join("failed-present.bin");
-        let queued_missing = temp.path().join("queued-missing.bin");
-        fs::write(&completed_present, b"old").unwrap();
-        fs::write(&failed_present, b"old").unwrap();
-
-        for (id, status, path) in [
-            ("completed-missing", "completed", &completed_missing),
-            ("completed-present", "completed", &completed_present),
-            ("failed-present", "failed", &failed_present),
-            ("queued-missing", "queued", &queued_missing),
-        ] {
-            let selected_path = temp.path().join(format!("{id}-selected.bin"));
-            set_ownership_and_removal_paths(
-                &connection,
-                id,
-                &selected_path.to_string_lossy(),
-                &[selected_path.to_string_lossy().to_string()],
-                &[path.to_string_lossy().to_string()],
-            )
-            .unwrap();
-            let record = json!({
-                "id": id,
-                "status": status,
-                "isTorrent": true,
-                "torrentRemoveUnselectedFile": true
-            })
-            .to_string();
-            connection
-                .execute(
-                    "INSERT INTO downloads (id, status, queue_id, data) VALUES (?1, ?2, ?3, ?4)",
-                    params![id, status, "main", record],
-                )
-                .unwrap();
-        }
-
-        assert_eq!(
-            reconcile_torrent_removal_paths_after_restart(&connection).unwrap(),
-            1
-        );
-        assert!(load_torrent_removal_paths(&connection, "completed-missing")
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            load_torrent_removal_paths(&connection, "failed-present").unwrap(),
-            vec![failed_present.to_string_lossy().to_string()]
-        );
-        assert_eq!(
-            load_torrent_removal_paths(&connection, "completed-present")
-                .unwrap(),
-            vec![completed_present.to_string_lossy().to_string()]
-        );
-        assert_eq!(
-            load_torrent_removal_paths(&connection, "queued-missing")
-                .unwrap(),
-            vec![queued_missing.to_string_lossy().to_string()]
-        );
-
-        set_ownership_paths(
-            &connection,
-            "replacement",
-            &completed_missing.to_string_lossy(),
-            &[completed_missing.to_string_lossy().to_string()],
-        )
-        .unwrap();
-
-        let error = set_ownership_paths(
-            &connection,
-            "failed-replacement",
-            &failed_present.to_string_lossy(),
-            &[failed_present.to_string_lossy().to_string()],
-        )
-        .expect_err("an unobserved failed Torrent cleanup must keep its path reserved");
-        assert!(error.contains("already owned"));
-    }
-
-    #[test]
-    fn restart_keeps_orphaned_torrent_removal_reservations_conservative() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let connection = state.lock().unwrap();
-        let reserved = temp.path().join("orphaned-unselected.bin");
-        set_ownership_and_removal_paths(
-            &connection,
-            "orphaned",
-            &temp.path().join("orphaned-selected.bin").to_string_lossy(),
-            &[temp
-                .path()
-                .join("orphaned-selected.bin")
-                .to_string_lossy()
-                .to_string()],
-            &[reserved.to_string_lossy().to_string()],
-        )
-        .unwrap();
-
-        assert_eq!(
-            reconcile_torrent_removal_paths_after_restart(&connection).unwrap(),
-            0
-        );
-        assert_eq!(
-            load_torrent_removal_paths(&connection, "orphaned").unwrap(),
-            vec![reserved.to_string_lossy().to_string()]
-        );
-    }
-
-    #[test]
-    fn restart_keeps_malformed_torrent_removal_reservations_conservative() {
-        let temp = TempDir::new().unwrap();
-        let state = init_at_path(temp.path()).unwrap();
-        let connection = state.lock().unwrap();
-        for (id, encoded_paths) in [
-            ("empty", "[]"),
-            ("relative", r#"["relative-file.bin"]"#),
-            ("empty-path", r#"[""]"#),
-        ] {
-            connection
-                .execute(
-                    "INSERT INTO download_removal_paths (id, paths) VALUES (?1, ?2)",
-                    params![id, encoded_paths],
-                )
-                .unwrap();
-            connection
-                .execute(
-                    "INSERT INTO downloads (id, status, queue_id, data) VALUES
-                     (?1, 'completed', 'main', '{}')",
-                    params![id],
-                )
-                .unwrap();
-        }
-
-        assert_eq!(
-            reconcile_torrent_removal_paths_after_restart(&connection).unwrap(),
-            0
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM download_removal_paths",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            3
-        );
+        assert_eq!(load_ownership(&connection).unwrap(), vec![(
+            "first".to_string(),
+            "/downloads/file.bin".to_string()
+        )]);
+        set_ownership(&connection, "first", "/downloads/renamed.bin").unwrap();
     }
 }

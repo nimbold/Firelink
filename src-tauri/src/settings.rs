@@ -7,118 +7,6 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use tauri::{AppHandle, Manager};
 
-#[derive(Clone, Debug, Default)]
-pub struct TorrentStartupSettings {
-    pub listen_port: String,
-    pub dht_listen_port: String,
-    pub external_ip: String,
-    pub dht_entry_point: String,
-    pub dht_entry_point6: String,
-    pub dht_listen_addr6: String,
-    pub lpd_interface: String,
-    pub peer_id_prefix: String,
-    pub peer_agent: String,
-    pub dht_message_timeout: u32,
-    pub ipv6_enabled: bool,
-    pub bind_address: String,
-    pub disk_cache: String,
-}
-
-fn normalize_torrent_startup_value(
-    field: &str,
-    value: &str,
-    normalize: impl Fn(Option<&str>) -> Result<Option<String>, String>,
-) -> String {
-    match normalize(Some(value)) {
-        Ok(Some(value)) => value,
-        Ok(None) => String::new(),
-        Err(error) => {
-            log::error!("invalid persisted {field}; using Aria2 default: {error}");
-            String::new()
-        }
-    }
-}
-
-pub fn torrent_startup_settings(settings: Option<&PersistedSettings>) -> TorrentStartupSettings {
-    let Some(settings) = settings else {
-        return TorrentStartupSettings::default();
-    };
-    let bind_address = normalize_torrent_startup_value(
-        "Torrent bind address",
-        &settings.torrent_bind_address,
-        crate::queue::normalize_torrent_bind_address,
-    );
-    let bind_address = if !settings.torrent_ipv6_enabled
-        && bind_address
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|address| address.is_ipv6())
-    {
-        log::error!("IPv6 Torrent bind address ignored while IPv6 transport is disabled");
-        String::new()
-    } else {
-        bind_address
-    };
-
-    TorrentStartupSettings {
-        listen_port: normalize_torrent_startup_value(
-            "TCP listen ports",
-            &settings.torrent_listen_port,
-            |value| crate::queue::normalize_torrent_port_spec(value, "TCP listen ports"),
-        ),
-        dht_listen_port: normalize_torrent_startup_value(
-            "UDP listen ports",
-            &settings.torrent_dht_listen_port,
-            |value| crate::queue::normalize_torrent_port_spec(value, "UDP listen ports"),
-        ),
-        external_ip: normalize_torrent_startup_value(
-            "Torrent external IP",
-            &settings.torrent_external_ip,
-            crate::queue::normalize_torrent_external_ip,
-        ),
-        dht_entry_point: normalize_torrent_startup_value(
-            "IPv4 DHT entry point",
-            &settings.torrent_dht_entry_point,
-            |value| crate::queue::normalize_torrent_dht_entry_point(value, false),
-        ),
-        dht_entry_point6: normalize_torrent_startup_value(
-            "IPv6 DHT entry point",
-            &settings.torrent_dht_entry_point6,
-            |value| crate::queue::normalize_torrent_dht_entry_point(value, true),
-        ),
-        dht_listen_addr6: normalize_torrent_startup_value(
-            "IPv6 DHT listen address",
-            &settings.torrent_dht_listen_addr6,
-            crate::queue::normalize_torrent_dht_listen_addr6,
-        ),
-        lpd_interface: normalize_torrent_startup_value(
-            "Torrent LPD interface",
-            &settings.torrent_lpd_interface,
-            crate::queue::normalize_torrent_lpd_interface,
-        ),
-        peer_id_prefix: normalize_torrent_startup_value(
-            "Torrent peer ID prefix",
-            &settings.torrent_peer_id_prefix,
-            crate::queue::normalize_torrent_peer_id_prefix,
-        ),
-        peer_agent: normalize_torrent_startup_value(
-            "Torrent peer agent",
-            &settings.torrent_peer_agent,
-            crate::queue::normalize_torrent_peer_agent,
-        ),
-        dht_message_timeout: crate::queue::normalize_torrent_dht_message_timeout(
-            settings.torrent_dht_message_timeout,
-        )
-        .unwrap_or(crate::queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT),
-        ipv6_enabled: settings.torrent_ipv6_enabled,
-        bind_address,
-        disk_cache: crate::queue::normalize_aria2_disk_cache(Some(&settings.aria2_disk_cache))
-            .unwrap_or_else(|error| {
-                log::error!("invalid persisted Aria2 disk cache; using default: {error}");
-                crate::queue::DEFAULT_ARIA2_DISK_CACHE.to_string()
-            }),
-    }
-}
-
 pub fn load_settings<R: tauri::Runtime>(
     app_handle: &AppHandle<R>,
 ) -> Result<PersistedSettings, String> {
@@ -142,139 +30,6 @@ pub fn decode_stored_settings(stored: &Value) -> Result<PersistedSettings, Strin
         .map_err(|error| format!("invalid persisted settings: {error}"))?;
     validate_settings(&mut settings);
     Ok(settings)
-}
-
-fn canonicalize_torrent_network_value(
-    state: &mut Map<String, Value>,
-    key: &str,
-    normalize: impl Fn(Option<&str>) -> Result<Option<String>, String>,
-) {
-    let Some(value) = state.get(key).and_then(Value::as_str) else {
-        return;
-    };
-    let normalized = normalize(Some(value)).ok().flatten().unwrap_or_default();
-    state.insert(key.to_string(), Value::String(normalized));
-}
-
-pub fn canonicalize_torrent_network_settings(stored: &str) -> Result<String, String> {
-    let mut document = decode_document(&Value::String(stored.to_string()))?;
-    let state = settings_state_mut(&mut document)?;
-    canonicalize_torrent_network_value(state, "torrentListenPort", |value| {
-        crate::queue::normalize_torrent_port_spec(value, "TCP listen ports")
-    });
-    canonicalize_torrent_network_value(state, "torrentDhtListenPort", |value| {
-        crate::queue::normalize_torrent_port_spec(value, "UDP listen ports")
-    });
-    canonicalize_torrent_network_value(state, "torrentExternalIp", crate::queue::normalize_torrent_external_ip);
-    canonicalize_torrent_network_value(state, "torrentDhtEntryPoint", |value| {
-        crate::queue::normalize_torrent_dht_entry_point(value, false)
-    });
-    canonicalize_torrent_network_value(state, "torrentDhtEntryPoint6", |value| {
-        crate::queue::normalize_torrent_dht_entry_point(value, true)
-    });
-    canonicalize_torrent_network_value(state, "torrentDhtListenAddr6", crate::queue::normalize_torrent_dht_listen_addr6);
-    canonicalize_torrent_network_value(state, "torrentLpdInterface", crate::queue::normalize_torrent_lpd_interface);
-    canonicalize_torrent_network_value(state, "torrentPeerIdPrefix", crate::queue::normalize_torrent_peer_id_prefix);
-    canonicalize_torrent_network_value(state, "torrentPeerAgent", crate::queue::normalize_torrent_peer_agent);
-    canonicalize_torrent_network_value(state, "torrentBindAddress", crate::queue::normalize_torrent_bind_address);
-    let disk_cache = state
-        .get("aria2DiskCache")
-        .and_then(Value::as_str)
-        .and_then(|value| crate::queue::normalize_aria2_disk_cache(Some(value)).ok())
-        .unwrap_or_else(|| crate::queue::DEFAULT_ARIA2_DISK_CACHE.to_string());
-    state.insert("aria2DiskCache".to_string(), Value::String(disk_cache));
-    let dht_message_timeout = state
-        .get("torrentDhtMessageTimeout")
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .and_then(|value| crate::queue::normalize_torrent_dht_message_timeout(value).ok())
-        .unwrap_or(crate::queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT);
-    state.insert(
-        "torrentDhtMessageTimeout".to_string(),
-        Value::Number(serde_json::Number::from(dht_message_timeout)),
-    );
-    let max_concurrent_seeds = state
-        .get("torrentMaxConcurrentSeeds")
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .and_then(|value| crate::queue::normalize_torrent_max_concurrent_seeds(value).ok())
-        .unwrap_or(crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS);
-    state.insert(
-        "torrentMaxConcurrentSeeds".to_string(),
-        Value::Number(serde_json::Number::from(max_concurrent_seeds)),
-    );
-    if !state
-        .get("torrentSeparateSeedSlots")
-        .is_some_and(Value::is_boolean)
-    {
-        state.insert("torrentSeparateSeedSlots".to_string(), Value::Bool(false));
-    }
-    if !state
-        .get("torrentIpv6Enabled")
-        .is_some_and(Value::is_boolean)
-    {
-        state.insert("torrentIpv6Enabled".to_string(), Value::Bool(true));
-    }
-    if state
-        .get("torrentIpv6Enabled")
-        .and_then(Value::as_bool)
-        == Some(false)
-        && state
-            .get("torrentBindAddress")
-            .and_then(Value::as_str)
-            .and_then(|value| value.parse::<std::net::IpAddr>().ok())
-            .is_some_and(|address| address.is_ipv6())
-    {
-        return Err(
-            "IPv6 Torrent bind address requires IPv6 transport to remain enabled".to_string(),
-        );
-    }
-    // Renderer snapshots are also a persistence boundary. Remove malformed
-    // scalar values before the document is written so a recoverable default
-    // is not hidden behind a hostile value that will fail on the next save or
-    // restart. Keep the network canonicalization above first so invalid text
-    // fields retain their established empty-string representation.
-    let state_value = if document.get("state").is_some() {
-        document
-            .get_mut("state")
-            .ok_or_else(|| "persisted settings state is missing".to_string())?
-    } else {
-        &mut document
-    };
-    sanitize_persisted_setting_values(state_value);
-    serde_json::to_string(&document)
-        .map_err(|error| format!("failed to encode canonical settings: {error}"))
-}
-
-/// Normalize one text setting before the frontend commits it to durable state.
-/// Keep this on the native boundary so interactive validation and persisted
-/// settings use exactly the same Aria2-compatible rules.
-pub fn canonicalize_torrent_network_setting(field: &str, value: &str) -> Result<String, String> {
-    let normalized = match field {
-        "torrentListenPort" => {
-            crate::queue::normalize_torrent_port_spec(Some(value), "TCP listen ports")?
-        }
-        "torrentDhtListenPort" => {
-            crate::queue::normalize_torrent_port_spec(Some(value), "UDP listen ports")?
-        }
-        "torrentExternalIp" => crate::queue::normalize_torrent_external_ip(Some(value))?,
-        "torrentDhtEntryPoint" => {
-            crate::queue::normalize_torrent_dht_entry_point(Some(value), false)?
-        }
-        "torrentDhtEntryPoint6" => {
-            crate::queue::normalize_torrent_dht_entry_point(Some(value), true)?
-        }
-        "torrentDhtListenAddr6" => {
-            crate::queue::normalize_torrent_dht_listen_addr6(Some(value))?
-        }
-        "torrentLpdInterface" => crate::queue::normalize_torrent_lpd_interface(Some(value))?,
-        "torrentPeerIdPrefix" => crate::queue::normalize_torrent_peer_id_prefix(Some(value))?,
-        "torrentPeerAgent" => crate::queue::normalize_torrent_peer_agent(Some(value))?,
-        "torrentBindAddress" => crate::queue::normalize_torrent_bind_address(Some(value))?,
-        "aria2DiskCache" => return crate::queue::normalize_aria2_disk_cache(Some(value)),
-        _ => return Err("unknown Torrent network setting".to_string()),
-    };
-    Ok(normalized.unwrap_or_default())
 }
 
 pub fn update_settings_state(
@@ -315,11 +70,7 @@ pub fn preserve_scheduler_runtime_keys(
     };
     let mut incoming_document = decode_document(&Value::String(incoming.to_string()))?;
     let incoming_state = settings_state_mut(&mut incoming_document)?;
-    for key in [
-        "schedulerLastStartKey",
-        "schedulerTriggeredStartKey",
-        "schedulerLastStopKey",
-    ] {
+    for key in ["schedulerLastStartKey", "schedulerLastStopKey"] {
         if let Some(value) = existing_state.get(key) {
             incoming_state.insert(key.to_string(), value.clone());
         }
@@ -434,101 +185,9 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
         return;
     };
 
-    let main_window_size = state
-        .get("mainWindowSize")
-        .cloned()
-        .and_then(|value| serde_json::from_value::<crate::ipc::MainWindowSize>(value).ok())
-        .and_then(|size| crate::window_geometry::normalize_main_window_size(Some(&size)));
-    match main_window_size {
-        Some(size) => {
-            state.insert(
-                "mainWindowSize".to_string(),
-                serde_json::to_value(size).expect("main window size is serializable"),
-            );
-        }
-        None => {
-            state.remove("mainWindowSize");
-        }
-    }
-
     sanitize_integer_setting(state, "maxConcurrentDownloads", |value| value.as_u64().is_some());
     sanitize_integer_setting(state, "perServerConnections", |value| value.as_i64().is_some());
     sanitize_integer_setting(state, "maxAutomaticRetries", |value| value.as_i64().is_some());
-    sanitize_integer_setting(state, "proxyPort", |value| {
-        value
-            .as_u64()
-            .is_some_and(|value| (1..=u16::MAX as u64).contains(&value))
-    });
-    sanitize_integer_setting(state, "torrentMaxOpenFiles", |value| {
-        value
-            .as_u64()
-            .is_some_and(|value| {
-                (crate::queue::MIN_TORRENT_MAX_OPEN_FILES as u64..=
-                    crate::queue::MAX_TORRENT_MAX_OPEN_FILES as u64)
-                    .contains(&value)
-            })
-    });
-    sanitize_integer_setting(state, "torrentDhtMessageTimeout", |value| {
-        value.as_u64().and_then(|value| u32::try_from(value).ok()).is_some_and(|value| {
-            (crate::queue::MIN_TORRENT_DHT_MESSAGE_TIMEOUT
-                ..=crate::queue::MAX_TORRENT_DHT_MESSAGE_TIMEOUT)
-                .contains(&value)
-        })
-    });
-    sanitize_integer_setting(state, "torrentMaxConcurrentSeeds", |value| {
-        value.as_u64().and_then(|value| u32::try_from(value).ok()).is_some_and(|value| {
-            (crate::queue::MIN_TORRENT_MAX_CONCURRENT_SEEDS
-                ..=crate::queue::MAX_TORRENT_MAX_CONCURRENT_SEEDS)
-                .contains(&value)
-        })
-    });
-    for key in [
-        "isSidebarVisible",
-        "torrentEnableDht",
-        "torrentEnableDht6",
-        "torrentEnablePex",
-        "torrentEnableLpd",
-        "torrentSeparateSeedSlots",
-        "torrentIpv6Enabled",
-    ] {
-        sanitize_boolean_setting(state, key);
-    }
-    for key in ["proxyHost", "customUserAgent"] {
-        sanitize_string_setting(state, key);
-    }
-    sanitize_torrent_network_string(state, "torrentListenPort", |value| {
-        crate::queue::normalize_torrent_port_spec(Some(value), "TCP listen ports").is_ok()
-    });
-    sanitize_torrent_network_string(state, "torrentDhtListenPort", |value| {
-        crate::queue::normalize_torrent_port_spec(Some(value), "UDP listen ports").is_ok()
-    });
-    sanitize_torrent_network_string(state, "torrentExternalIp", |value| {
-        crate::queue::normalize_torrent_external_ip(Some(value)).is_ok()
-    });
-    sanitize_torrent_network_string(state, "torrentDhtEntryPoint", |value| {
-        crate::queue::normalize_torrent_dht_entry_point(Some(value), false).is_ok()
-    });
-    sanitize_torrent_network_string(state, "torrentDhtEntryPoint6", |value| {
-        crate::queue::normalize_torrent_dht_entry_point(Some(value), true).is_ok()
-    });
-    sanitize_torrent_network_string(state, "torrentDhtListenAddr6", |value| {
-        crate::queue::normalize_torrent_dht_listen_addr6(Some(value)).is_ok()
-    });
-    sanitize_torrent_network_string(state, "torrentLpdInterface", |value| {
-        crate::queue::normalize_torrent_lpd_interface(Some(value)).is_ok()
-    });
-    sanitize_torrent_network_string(state, "torrentPeerIdPrefix", |value| {
-        crate::queue::normalize_torrent_peer_id_prefix(Some(value)).is_ok()
-    });
-    sanitize_torrent_network_string(state, "torrentPeerAgent", |value| {
-        crate::queue::normalize_torrent_peer_agent(Some(value)).is_ok()
-    });
-    sanitize_torrent_network_string(state, "torrentBindAddress", |value| {
-        crate::queue::normalize_torrent_bind_address(Some(value)).is_ok()
-    });
-    sanitize_torrent_network_string(state, "aria2DiskCache", |value| {
-        crate::queue::normalize_aria2_disk_cache(Some(value)).is_ok()
-    });
     sanitize_allowed_string(
         state,
         "theme",
@@ -614,32 +273,6 @@ fn sanitize_integer_setting(
     }
 }
 
-fn sanitize_boolean_setting(state: &mut serde_json::Map<String, Value>, key: &str) {
-    if state.get(key).is_some_and(|value| !value.is_boolean()) {
-        state.remove(key);
-    }
-}
-
-fn sanitize_string_setting(state: &mut serde_json::Map<String, Value>, key: &str) {
-    if state.get(key).is_some_and(|value| !value.is_string()) {
-        state.remove(key);
-    }
-}
-
-fn sanitize_torrent_network_string(
-    state: &mut serde_json::Map<String, Value>,
-    key: &str,
-    is_valid: impl Fn(&str) -> bool,
-) {
-    if state
-        .get(key)
-        .and_then(Value::as_str)
-        .is_some_and(|value| !is_valid(value))
-    {
-        state.remove(key);
-    }
-}
-
 fn sanitize_allowed_string(
     state: &mut serde_json::Map<String, Value>,
     key: &str,
@@ -655,113 +288,12 @@ fn sanitize_allowed_string(
 }
 
 fn validate_settings(settings: &mut PersistedSettings) {
-    settings.main_window_size = crate::window_geometry::normalize_main_window_size(
-        settings.main_window_size.as_ref(),
-    );
     if settings.max_concurrent_downloads == 0 {
         settings.max_concurrent_downloads = default_settings().max_concurrent_downloads;
     }
     settings.max_concurrent_downloads = settings.max_concurrent_downloads.min(12);
     settings.per_server_connections = settings.per_server_connections.clamp(1, 16);
     settings.max_automatic_retries = settings.max_automatic_retries.clamp(0, 10);
-    settings.minimum_normal_download_speed_ki_b =
-        crate::queue::normalize_minimum_normal_download_speed_kib(
-            settings.minimum_normal_download_speed_ki_b,
-        )
-        .unwrap_or_default();
-    settings.global_speed_limit = crate::normalize_speed_limit_for_aria2(&settings.global_speed_limit)
-        .unwrap_or_default();
-    settings.torrent_overall_upload_limit = crate::normalize_speed_limit_for_aria2(
-        &settings.torrent_overall_upload_limit,
-    )
-    .unwrap_or_default();
-    settings.torrent_max_open_files = crate::queue::normalize_torrent_max_open_files(
-        settings.torrent_max_open_files,
-    )
-    .unwrap_or(crate::queue::DEFAULT_TORRENT_MAX_OPEN_FILES);
-    settings.torrent_dht_message_timeout = crate::queue::normalize_torrent_dht_message_timeout(
-        settings.torrent_dht_message_timeout,
-    )
-    .unwrap_or(crate::queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT);
-    settings.torrent_max_concurrent_seeds = crate::queue::normalize_torrent_max_concurrent_seeds(
-        settings.torrent_max_concurrent_seeds,
-    )
-        .unwrap_or(crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS);
-    settings.torrent_bind_address = crate::queue::normalize_torrent_bind_address(
-        Some(&settings.torrent_bind_address),
-    )
-    .ok()
-    .flatten()
-    .unwrap_or_default();
-    if !settings.torrent_ipv6_enabled
-        && settings
-            .torrent_bind_address
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|address| address.is_ipv6())
-    {
-        log::warn!("clearing IPv6 Torrent bind address while IPv6 transport is disabled");
-        settings.torrent_bind_address.clear();
-    }
-    settings.aria2_disk_cache = crate::queue::normalize_aria2_disk_cache(Some(&settings.aria2_disk_cache))
-        .unwrap_or_else(|_| crate::queue::DEFAULT_ARIA2_DISK_CACHE.to_string());
-    settings.torrent_listen_port = crate::queue::normalize_torrent_port_spec(
-        Some(&settings.torrent_listen_port),
-        "TCP listen ports",
-    )
-    .ok()
-    .flatten()
-    .unwrap_or_default();
-    settings.torrent_dht_listen_port = crate::queue::normalize_torrent_port_spec(
-        Some(&settings.torrent_dht_listen_port),
-        "UDP listen ports",
-    )
-    .ok()
-    .flatten()
-    .unwrap_or_default();
-    settings.torrent_external_ip = crate::queue::normalize_torrent_external_ip(
-        Some(&settings.torrent_external_ip),
-    )
-    .ok()
-    .flatten()
-    .unwrap_or_default();
-    settings.torrent_dht_entry_point = crate::queue::normalize_torrent_dht_entry_point(
-        Some(&settings.torrent_dht_entry_point),
-        false,
-    )
-    .ok()
-    .flatten()
-    .unwrap_or_default();
-    settings.torrent_dht_entry_point6 = crate::queue::normalize_torrent_dht_entry_point(
-        Some(&settings.torrent_dht_entry_point6),
-        true,
-    )
-    .ok()
-    .flatten()
-    .unwrap_or_default();
-    settings.torrent_dht_listen_addr6 = crate::queue::normalize_torrent_dht_listen_addr6(
-        Some(&settings.torrent_dht_listen_addr6),
-    )
-    .ok()
-    .flatten()
-    .unwrap_or_default();
-    settings.torrent_lpd_interface = crate::queue::normalize_torrent_lpd_interface(
-        Some(&settings.torrent_lpd_interface),
-    )
-    .ok()
-    .flatten()
-    .unwrap_or_default();
-    settings.torrent_peer_id_prefix = crate::queue::normalize_torrent_peer_id_prefix(
-        Some(&settings.torrent_peer_id_prefix),
-    )
-    .ok()
-    .flatten()
-    .unwrap_or_default();
-    settings.torrent_peer_agent = crate::queue::normalize_torrent_peer_agent(
-        Some(&settings.torrent_peer_agent),
-    )
-    .ok()
-    .flatten()
-    .unwrap_or_default();
     if !matches!(
         settings.last_custom_speed_limit_unit.as_str(),
         "KB/s" | "MB/s"
@@ -778,7 +310,6 @@ fn default_category_subfolders() -> HashMap<String, String> {
         ("Documents", "Documents"),
         ("Pictures", "Pictures"),
         ("Applications", "Applications"),
-        ("Torrents", "Torrents"),
         ("Other", "Other"),
     ]
     .into_iter()
@@ -848,7 +379,6 @@ fn migrate_location_settings(state: &mut Value) -> Result<(), String> {
             ("Documents", "Documents"),
             ("Pictures", "Images"),
             ("Applications", "Apps"),
-            ("Torrents", "Torrents"),
             ("Other", "Other"),
         ];
         for (category, alias) in aliases {
@@ -919,12 +449,9 @@ fn default_settings() -> PersistedSettings {
         approved_download_roots: Vec::new(),
         max_concurrent_downloads: 3,
         global_speed_limit: String::new(),
-        torrent_overall_upload_limit: String::new(),
         speed_limit_preset_values: vec![1.0, 5.0, 10.0],
         logs_enabled: false,
         is_sidebar_visible: true,
-        is_folders_collapsed: false,
-        main_window_size: None,
         sidebar_position: "auto".to_string(),
         active_settings_tab: SettingsTab::Downloads,
         scheduler: SchedulerSettings {
@@ -940,15 +467,11 @@ fn default_settings() -> PersistedSettings {
         scheduler_running: false,
         scheduler_active_download_ids: Vec::new(),
         scheduler_last_start_key: String::new(),
-        scheduler_triggered_start_key: None,
         scheduler_last_stop_key: String::new(),
         last_custom_speed_limit_ki_b: 1024,
         last_custom_speed_limit_unit: "MB/s".to_string(),
         per_server_connections: 16,
         max_automatic_retries: 3,
-        minimum_normal_download_speed_ki_b: 0,
-        retry_not_found_errors: false,
-        adaptive_mirror_selection: true,
         show_notifications: true,
         play_completion_sound: false,
         auto_add_clipboard_links: false,
@@ -959,26 +482,6 @@ fn default_settings() -> PersistedSettings {
         proxy_mode: ProxyMode::None,
         proxy_host: String::new(),
         proxy_port: 8080,
-        torrent_enable_dht: true,
-        torrent_enable_dht6: false,
-        torrent_enable_pex: true,
-        torrent_enable_lpd: false,
-        torrent_max_open_files: crate::queue::DEFAULT_TORRENT_MAX_OPEN_FILES,
-        torrent_dht_message_timeout: crate::queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT,
-        torrent_separate_seed_slots: false,
-        torrent_max_concurrent_seeds: crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS,
-        torrent_ipv6_enabled: true,
-        torrent_listen_port: String::new(),
-        torrent_dht_listen_port: String::new(),
-        torrent_external_ip: String::new(),
-        torrent_dht_entry_point: String::new(),
-        torrent_dht_entry_point6: String::new(),
-        torrent_dht_listen_addr6: String::new(),
-        torrent_lpd_interface: String::new(),
-        torrent_peer_id_prefix: String::new(),
-        torrent_peer_agent: String::new(),
-        torrent_bind_address: String::new(),
-        aria2_disk_cache: crate::queue::DEFAULT_ARIA2_DISK_CACHE.to_string(),
         custom_user_agent: String::new(),
         ask_where_to_save_each_file: false,
         remember_last_used_download_directory: false,
@@ -995,10 +498,8 @@ fn default_settings() -> PersistedSettings {
 mod tests {
     use crate::ipc::{FontFamily, WindowControlStyle};
     use super::{
-        canonicalize_torrent_network_setting, canonicalize_torrent_network_settings,
-        decode_stored_settings, default_settings,
-        preserve_portable_pairing_token, preserve_scheduler_runtime_keys,
-        torrent_startup_settings,
+        decode_stored_settings, default_settings, preserve_portable_pairing_token,
+        preserve_scheduler_runtime_keys,
     };
     use serde_json::{json, Value};
 
@@ -1007,7 +508,6 @@ mod tests {
         let existing = json!({
             "state": {
                 "schedulerLastStartKey": "2026-06-22-start",
-                "schedulerTriggeredStartKey": "2026-06-22-start",
                 "schedulerLastStopKey": "2026-06-22-stop"
             },
             "version": 3
@@ -1016,7 +516,6 @@ mod tests {
         let incoming = json!({
             "state": {
                 "schedulerLastStartKey": "",
-                "schedulerTriggeredStartKey": "",
                 "schedulerLastStopKey": "",
                 "theme": "system"
             },
@@ -1027,10 +526,6 @@ mod tests {
         let merged = preserve_scheduler_runtime_keys(Some(&existing), &incoming).unwrap();
         let merged: Value = serde_json::from_str(&merged).unwrap();
         assert_eq!(merged["state"]["schedulerLastStartKey"], "2026-06-22-start");
-        assert_eq!(
-            merged["state"]["schedulerTriggeredStartKey"],
-            "2026-06-22-start"
-        );
         assert_eq!(merged["state"]["schedulerLastStopKey"], "2026-06-22-stop");
     }
 
@@ -1040,7 +535,6 @@ mod tests {
             "state": {
                 "maxConcurrentDownloads": 7,
                 "globalSpeedLimit": "2M",
-                "torrentOverallUploadLimit": "1.5M",
                 "sidebarPosition": "right",
                 "scheduler": {
                     "enabled": true,
@@ -1059,7 +553,6 @@ mod tests {
 
         assert_eq!(settings.max_concurrent_downloads, 7);
         assert_eq!(settings.global_speed_limit, "2M");
-        assert_eq!(settings.torrent_overall_upload_limit, "1.5M");
         assert_eq!(settings.sidebar_position, "right");
         assert_eq!(settings.speed_limit_preset_values, vec![1.0, 5.0, 10.0]);
         assert!(!settings.logs_enabled);
@@ -1085,7 +578,6 @@ mod tests {
 
         assert_eq!(settings.max_concurrent_downloads, 5);
         assert_eq!(settings.global_speed_limit, "512K");
-        assert!(settings.torrent_overall_upload_limit.is_empty());
         assert_eq!(settings.last_custom_speed_limit_unit, "MB/s");
         assert_eq!(settings.speed_limit_preset_values, vec![1.0, 5.0, 10.0]);
         assert!(!settings.logs_enabled);
@@ -1108,33 +600,6 @@ mod tests {
         assert!(settings.logs_enabled);
         assert!(!settings.scheduler.enabled);
         assert!(settings.global_speed_limit.is_empty());
-        assert!(settings.torrent_overall_upload_limit.is_empty());
-    }
-
-    #[test]
-    fn normalizes_invalid_torrent_overall_upload_limit_to_unlimited() {
-        let stored = json!({
-            "state": {
-                "torrentOverallUploadLimit": "not-a-rate"
-            }
-        });
-
-        let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
-
-        assert!(settings.torrent_overall_upload_limit.is_empty());
-    }
-
-    #[test]
-    fn normalizes_invalid_global_speed_limit_to_unlimited() {
-        let stored = json!({
-            "state": {
-                "globalSpeedLimit": "not-a-rate"
-            }
-        });
-
-        let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
-
-        assert!(settings.global_speed_limit.is_empty());
     }
 
     #[test]
@@ -1154,7 +619,6 @@ mod tests {
 
         assert_eq!(settings.base_download_folder, "/Users/test/Downloads");
         assert_eq!(settings.category_subfolders["Movies"], "Movies");
-        assert_eq!(settings.category_subfolders["Torrents"], "Torrents");
         assert!(!settings.category_directory_overrides.contains_key("Movies"));
         assert_eq!(
             settings.category_directory_overrides["Documents"],
@@ -1286,8 +750,7 @@ mod tests {
             "state": {
                 "maxConcurrentDownloads": 99,
                 "perServerConnections": -4,
-                "maxAutomaticRetries": 99,
-                "minimumNormalDownloadSpeedKiB": 2000000
+                "maxAutomaticRetries": 99
             },
             "version": 3
         });
@@ -1297,17 +760,6 @@ mod tests {
         assert_eq!(settings.max_concurrent_downloads, 12);
         assert_eq!(settings.per_server_connections, 1);
         assert_eq!(settings.max_automatic_retries, 10);
-        assert_eq!(settings.minimum_normal_download_speed_ki_b, 0);
-    }
-
-    #[test]
-    fn normal_reliability_defaults_are_migration_safe() {
-        let stored = json!({ "state": {}, "version": 5 });
-        let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
-
-        assert_eq!(settings.minimum_normal_download_speed_ki_b, 0);
-        assert!(!settings.retry_not_found_errors);
-        assert!(settings.adaptive_mirror_selection);
     }
 
     #[test]
@@ -1318,20 +770,6 @@ mod tests {
                 "maxConcurrentDownloads": "not-a-number",
                 "perServerConnections": 5,
                 "showNotifications": "yes",
-                "torrentEnableDht": "yes",
-                "torrentEnableDht6": 1,
-                "torrentEnablePex": null,
-                "torrentEnableLpd": [],
-                "torrentMaxOpenFiles": 0,
-                "torrentListenPort": "7000-6999",
-                "torrentDhtListenPort": "6881,\n",
-                "torrentExternalIp": "not-an-ip",
-                "torrentDhtEntryPoint": "bootstrap.example",
-                "torrentDhtEntryPoint6": "2001:db8::1:6881",
-                "torrentDhtListenAddr6": "127.0.0.1",
-                "torrentLpdInterface": "en0\n--bad",
-                "torrentPeerIdPrefix": "123456789012345678901",
-                "torrentPeerAgent": "agent\nname",
                 "theme": "not-a-theme",
                 "calendarPreference": "lunar",
                 "siteLogins": [{"id": "valid", "urlPattern": "example.com", "username": "user"}, {"id": 3}]
@@ -1345,27 +783,6 @@ mod tests {
         assert_eq!(settings.max_concurrent_downloads, 3);
         assert_eq!(settings.per_server_connections, 5);
         assert!(settings.show_notifications);
-        assert!(settings.torrent_enable_dht);
-        assert!(!settings.torrent_enable_dht6);
-        assert!(settings.torrent_enable_pex);
-        assert!(!settings.torrent_enable_lpd);
-        assert_eq!(
-            settings.torrent_max_open_files,
-            crate::queue::DEFAULT_TORRENT_MAX_OPEN_FILES
-        );
-        assert_eq!(
-            settings.torrent_dht_message_timeout,
-            crate::queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT
-        );
-        assert!(settings.torrent_listen_port.is_empty());
-        assert!(settings.torrent_dht_listen_port.is_empty());
-        assert!(settings.torrent_external_ip.is_empty());
-        assert!(settings.torrent_dht_entry_point.is_empty());
-        assert!(settings.torrent_dht_entry_point6.is_empty());
-        assert!(settings.torrent_dht_listen_addr6.is_empty());
-        assert!(settings.torrent_lpd_interface.is_empty());
-        assert!(settings.torrent_peer_id_prefix.is_empty());
-        assert!(settings.torrent_peer_agent.is_empty());
         assert!(matches!(settings.theme, crate::ipc::Theme::System));
         assert!(matches!(
             settings.calendar_preference,
@@ -1376,209 +793,14 @@ mod tests {
     }
 
     #[test]
-    fn malformed_proxy_and_user_agent_values_fall_back_to_safe_defaults() {
-        let stored = json!({
-            "state": {
-                "proxyMode": "custom",
-                "proxyHost": 123,
-                "proxyPort": 70000,
-                "customUserAgent": ["not-a-string"],
-                "isSidebarVisible": "yes"
-            }
-        });
-
-        let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
-
-        assert!(matches!(settings.proxy_mode, crate::ipc::ProxyMode::Custom));
-        assert!(settings.proxy_host.is_empty());
-        assert_eq!(settings.proxy_port, 8080);
-        assert!(settings.custom_user_agent.is_empty());
-        assert!(settings.is_sidebar_visible);
-    }
-
-    #[test]
-    fn preserves_valid_torrent_network_settings() {
-        let stored = json!({
-            "state": {
-                "torrentListenPort": " 6881-6999 ",
-                "torrentDhtListenPort": "6881",
-                "torrentExternalIp": "203.0.113.7",
-                "torrentDhtEntryPoint": "Bootstrap.Example:6881",
-                "torrentDhtEntryPoint6": "[2001:db8::1]:6881",
-                "torrentDhtListenAddr6": "2001:db8::2",
-                "torrentLpdInterface": "en0",
-                "torrentPeerIdPrefix": "-FL-1-3-1-",
-                "torrentPeerAgent": "Firelink/1.3.1"
-            }
-        });
-
-        let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
-
-        assert_eq!(settings.torrent_listen_port, "6881-6999");
-        assert_eq!(settings.torrent_dht_listen_port, "6881");
-        assert_eq!(settings.torrent_external_ip, "203.0.113.7");
-        assert_eq!(settings.torrent_dht_entry_point, "bootstrap.example:6881");
-        assert_eq!(settings.torrent_dht_entry_point6, "[2001:db8::1]:6881");
-        assert_eq!(settings.torrent_dht_listen_addr6, "2001:db8::2");
-        assert_eq!(settings.torrent_lpd_interface, "en0");
-        assert_eq!(settings.torrent_peer_id_prefix, "-FL-1-3-1-");
-        assert_eq!(settings.torrent_peer_agent, "Firelink/1.3.1");
-    }
-
-    #[test]
-    fn canonicalizes_torrent_network_settings_for_frontend_hydration() {
-        let stored = json!({
-            "state": {
-                "torrentListenPort": " 6881-6999 ",
-                "torrentExternalIp": "not-an-ip",
-                "torrentPeerIdPrefix": "123456789012345678901",
-                "torrentPeerAgent": " Firelink/1.3.1 ",
-                "torrentDhtMessageTimeout": 601,
-                "torrentMaxConcurrentSeeds": 65,
-                "torrentSeparateSeedSlots": "yes",
-                "proxyPort": 70000,
-                "proxyHost": 123,
-                "customUserAgent": ["not-a-string"]
-            },
-            "version": 6
-        });
-
-        let canonical = canonicalize_torrent_network_settings(&stored.to_string()).unwrap();
-        let canonical: Value = serde_json::from_str(&canonical).unwrap();
-        assert_eq!(canonical["state"]["torrentListenPort"], "6881-6999");
-        assert_eq!(canonical["state"]["torrentExternalIp"], "");
-        assert_eq!(canonical["state"]["torrentPeerIdPrefix"], "");
-        assert_eq!(canonical["state"]["torrentPeerAgent"], "Firelink/1.3.1");
-        assert_eq!(
-            canonical["state"]["torrentDhtMessageTimeout"],
-            crate::queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT
-        );
-        assert_eq!(
-            canonical["state"]["torrentMaxConcurrentSeeds"],
-            crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS
-        );
-        assert_eq!(canonical["state"]["torrentSeparateSeedSlots"], false);
-        assert!(canonical["state"].get("proxyPort").is_none());
-        assert!(canonical["state"].get("proxyHost").is_none());
-        assert!(canonical["state"].get("customUserAgent").is_none());
-    }
-
-    #[test]
-    fn canonicalizes_individual_torrent_network_inputs_with_shared_rules() {
-        assert_eq!(
-            canonicalize_torrent_network_setting("torrentListenPort", " 6881-6999 ").unwrap(),
-            "6881-6999"
-        );
-        assert_eq!(
-            canonicalize_torrent_network_setting("torrentDhtEntryPoint6", "[2001:db8::1]:6881")
-                .unwrap(),
-            "[2001:db8::1]:6881"
-        );
-        assert_eq!(
-            canonicalize_torrent_network_setting("aria2DiskCache", " 256m ").unwrap(),
-            "256M"
-        );
-        assert_eq!(
-            canonicalize_torrent_network_setting("torrentBindAddress", " ").unwrap(),
-            ""
-        );
-        assert!(canonicalize_torrent_network_setting("torrentListenPort", "61").is_err());
-        assert!(canonicalize_torrent_network_setting("unknown", "value").is_err());
-    }
-
-    #[test]
-    fn rejects_ipv6_bind_address_when_transport_is_disabled() {
-        let stored = json!({
-            "state": {
-                "torrentIpv6Enabled": false,
-                "torrentBindAddress": "2001:db8::10"
-            }
-        });
-
-        let error = canonicalize_torrent_network_settings(&stored.to_string())
-            .expect_err("IPv6 bind must not be accepted with IPv6 transport disabled");
-        assert!(error.contains("IPv6 Torrent bind address"));
-    }
-
-    #[test]
-    fn startup_settings_revalidate_values_at_the_aria2_boundary() {
-        let stored = json!({
-            "state": {
-                "torrentListenPort": "not-a-port",
-                "torrentPeerIdPrefix": "123456789012345678901",
-                "torrentPeerAgent": "Firelink/1.3.1"
-            }
-        });
-        let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
-        let startup = torrent_startup_settings(Some(&settings));
-        assert!(startup.listen_port.is_empty());
-        assert!(startup.peer_id_prefix.is_empty());
-        assert_eq!(startup.peer_agent, "Firelink/1.3.1");
-        assert_eq!(
-            startup.dht_message_timeout,
-            crate::queue::DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT
-        );
-    }
-
-    #[test]
     fn opt_in_defaults_match_the_frontend_defaults() {
         assert!(!default_settings().play_completion_sound);
         assert!(!default_settings().auto_add_clipboard_links);
-        assert!(!default_settings().torrent_separate_seed_slots);
-        assert_eq!(
-            default_settings().torrent_max_concurrent_seeds,
-            crate::queue::DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS
-        );
     }
 
     #[test]
     fn does_not_remember_last_used_download_directory_by_default() {
         assert!(!default_settings().remember_last_used_download_directory);
-    }
-
-    #[test]
-    fn legacy_settings_without_geometry_use_no_persisted_size() {
-        let settings = decode_stored_settings(&Value::String(
-            json!({ "state": { "theme": "system" }, "version": 0 }).to_string(),
-        ))
-        .unwrap();
-
-        assert!(settings.main_window_size.is_none());
-    }
-
-    #[test]
-    fn valid_main_window_geometry_round_trips() {
-        let settings = decode_stored_settings(&Value::String(
-            json!({
-                "state": { "mainWindowSize": { "width": 1440, "height": 900 } },
-                "version": 6
-            })
-            .to_string(),
-        ))
-        .unwrap();
-
-        assert_eq!(
-            settings
-                .main_window_size
-                .as_ref()
-                .map(|size| (size.width, size.height)),
-            Some((1440, 900))
-        );
-    }
-
-    #[test]
-    fn malformed_and_out_of_range_geometry_is_dropped() {
-        for geometry in [
-            json!({ "width": "1440", "height": 900 }),
-            json!({ "width": 959, "height": 900 }),
-            json!({ "width": 1440, "height": 16_385 }),
-        ] {
-            let settings = decode_stored_settings(&Value::String(
-                json!({ "state": { "mainWindowSize": geometry }, "version": 6 }).to_string(),
-            ))
-            .unwrap();
-            assert!(settings.main_window_size.is_none());
-        }
     }
 
     #[test]

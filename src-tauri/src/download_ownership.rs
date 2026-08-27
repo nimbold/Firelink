@@ -7,7 +7,6 @@ use tauri::Manager;
 struct DownloadOwnershipRecord {
     id: String,
     primary_path: String,
-    owned_paths: Vec<String>,
 }
 
 pub fn canonical_download_filename(filename: &str) -> String {
@@ -91,8 +90,8 @@ fn truncate_utf8_to_bytes(value: &str, max_bytes: usize) -> String {
     value[..end].to_string()
 }
 
-pub fn expected_primary_path<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
+pub fn expected_primary_path(
+    app_handle: &tauri::AppHandle,
     destination: &str,
     filename: &str,
 ) -> Result<PathBuf, String> {
@@ -110,138 +109,21 @@ pub fn expected_primary_path<R: tauri::Runtime>(
         .ok_or_else(|| "Download path could not be canonicalized".to_string())
 }
 
-pub fn set_primary_path<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
+pub fn register_expected(
+    app_handle: &tauri::AppHandle,
+    id: &str,
+    destination: &str,
+    filename: &str,
+) -> Result<(), String> {
+    let path = expected_primary_path(app_handle, destination, filename)?;
+    set_primary_path(app_handle, id, &path)
+}
+
+pub fn set_primary_path(
+    app_handle: &tauri::AppHandle,
     id: &str,
     path: &Path,
 ) -> Result<(), String> {
-    set_owned_paths(app_handle, id, &[path.to_path_buf()])
-}
-
-pub fn set_owned_paths<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    id: &str,
-    paths: &[PathBuf],
-) -> Result<(), String> {
-    let primary = paths
-        .first()
-        .ok_or_else(|| "Download ownership requires at least one path".to_string())?;
-    set_owned_paths_with_primary(app_handle, id, primary, paths)
-}
-
-pub fn set_owned_paths_with_primary<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    id: &str,
-    primary: &Path,
-    paths: &[PathBuf],
-) -> Result<(), String> {
-    if paths.is_empty() {
-        return Err("Download ownership requires at least one path".to_string());
-    }
-
-    let canonical_primary = canonical_owned_path(app_handle, primary)?;
-    let mut canonical_paths = Vec::with_capacity(paths.len());
-    for path in paths {
-        if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
-            return Err("Download ownership file path is a directory".to_string());
-        }
-        let canonical_path = canonical_owned_path(app_handle, path)?;
-        if !canonical_paths
-            .iter()
-            .any(|existing: &PathBuf| crate::platform::paths_equal(existing, &canonical_path))
-        {
-            canonical_paths.push(canonical_path);
-        }
-    }
-
-    let path_strings = canonical_paths
-        .iter()
-        .map(|path| path.to_string_lossy().to_string())
-        .collect::<Vec<_>>();
-    let database = app_handle.state::<crate::db::DbState>();
-    let connection = database.lock()?;
-    crate::db::set_ownership_paths(
-        &connection,
-        id,
-        &canonical_primary.to_string_lossy(),
-        &path_strings,
-    )
-}
-
-pub fn set_owned_paths_with_primary_and_removal<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    id: &str,
-    primary: &Path,
-    paths: &[PathBuf],
-    removal_paths: &[PathBuf],
-) -> Result<(), String> {
-    if paths.is_empty() {
-        return Err("Download ownership requires at least one path".to_string());
-    }
-
-    let canonical_primary = canonical_owned_path(app_handle, primary)?;
-    let canonical_paths = canonical_file_paths(app_handle, paths)?;
-    let canonical_removal_paths = canonical_file_paths(app_handle, removal_paths)?;
-    let mut current_paths = owned_paths_for_id(app_handle, id)?;
-    if let Some(primary) = primary_path_for_id(app_handle, id)? {
-        current_paths.push(primary);
-    }
-    let known_paths = known_primary_paths(app_handle)?;
-    if canonical_removal_paths.iter().any(|candidate| {
-        known_paths.iter().any(|known| {
-            crate::platform::paths_equal(candidate, known)
-                && !current_paths
-                    .iter()
-                    .any(|current| crate::platform::paths_equal(candidate, current))
-        })
-    }) {
-        return Err(
-            "Torrent removal would delete a file owned by another Firelink download".to_string(),
-        );
-    }
-    let path_strings = canonical_paths
-        .iter()
-        .map(|path| path.to_string_lossy().to_string())
-        .collect::<Vec<_>>();
-    let removal_strings = canonical_removal_paths
-        .iter()
-        .map(|path| path.to_string_lossy().to_string())
-        .collect::<Vec<_>>();
-    let database = app_handle.state::<crate::db::DbState>();
-    let connection = database.lock()?;
-    crate::db::set_ownership_and_removal_paths(
-        &connection,
-        id,
-        &canonical_primary.to_string_lossy(),
-        &path_strings,
-        &removal_strings,
-    )
-}
-
-fn canonical_file_paths<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    paths: &[PathBuf],
-) -> Result<Vec<PathBuf>, String> {
-    let mut canonical_paths = Vec::with_capacity(paths.len());
-    for path in paths {
-        if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
-            return Err("Download ownership file path is a directory".to_string());
-        }
-        let canonical_path = canonical_owned_path(app_handle, path)?;
-        if !canonical_paths
-            .iter()
-            .any(|existing: &PathBuf| crate::platform::paths_equal(existing, &canonical_path))
-        {
-            canonical_paths.push(canonical_path);
-        }
-    }
-    Ok(canonical_paths)
-}
-
-fn canonical_owned_path<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    path: &Path,
-) -> Result<PathBuf, String> {
     if !path.is_absolute() {
         return Err("Download ownership path must be absolute".to_string());
     }
@@ -258,59 +140,16 @@ fn canonical_owned_path<R: tauri::Runtime>(
     }
     let canonical_path = crate::canonicalize_with_missing_components(path)
         .ok_or_else(|| "Download ownership path could not be canonicalized".to_string())?;
-    if !crate::is_safe_path(&canonical_path, app_handle) {
-        return Err("Download ownership path is outside an allowed download location".to_string());
-    }
-    Ok(canonical_path)
+
+    let database = app_handle.state::<crate::db::DbState>();
+    let connection = database.lock()?;
+    crate::db::set_ownership(&connection, id, &canonical_path.to_string_lossy())
 }
 
-pub fn remove<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    id: &str,
-) -> Result<(), String> {
+pub fn remove(app_handle: &tauri::AppHandle, id: &str) -> Result<(), String> {
     let database = app_handle.state::<crate::db::DbState>();
     let connection = database.lock()?;
     crate::db::remove_ownership(&connection, id)
-}
-
-pub fn clear_torrent_removal_paths<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    id: &str,
-) -> Result<(), String> {
-    let database = app_handle.state::<crate::db::DbState>();
-    let connection = database.lock()?;
-    crate::db::remove_torrent_removal_paths(&connection, id)
-}
-
-/// Clear a Torrent removal reservation only after every reserved path is
-/// absent.  The reservation protects paths that Aria2 may still remove after
-/// a terminal event has been observed; callers must not release it merely
-/// because the daemon reported completion or failure.
-pub fn clear_torrent_removal_paths_if_absent<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    id: &str,
-) -> Result<bool, String> {
-    let paths = torrent_removal_paths_for_id(app_handle, id)?;
-    if paths.iter().any(|path| {
-        !matches!(
-            std::fs::symlink_metadata(path),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound
-        )
-    }) {
-        return Ok(false);
-    }
-    clear_torrent_removal_paths(app_handle, id)?;
-    Ok(true)
-}
-
-pub fn torrent_removal_paths_for_id<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    id: &str,
-) -> Result<Vec<PathBuf>, String> {
-    let database = app_handle.state::<crate::db::DbState>();
-    let connection = database.lock()?;
-    crate::db::load_torrent_removal_paths(&connection, id)
-        .map(|paths| paths.into_iter().map(PathBuf::from).collect())
 }
 
 pub fn primary_path_for_id<R: tauri::Runtime>(
@@ -323,114 +162,21 @@ pub fn primary_path_for_id<R: tauri::Runtime>(
         .map(|record| PathBuf::from(record.primary_path)))
 }
 
-pub fn owned_paths_for_id<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    id: &str,
-) -> Result<Vec<PathBuf>, String> {
-    Ok(load_records(app_handle)?
-        .into_iter()
-        .find(|record| record.id == id)
-        .map(|record| record.owned_paths.into_iter().map(PathBuf::from).collect())
-        .unwrap_or_default())
-}
-
-pub fn known_primary_paths<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-) -> Result<Vec<PathBuf>, String> {
+pub fn known_primary_paths(app_handle: &tauri::AppHandle) -> Result<Vec<PathBuf>, String> {
     let mut paths: Vec<PathBuf> = load_records(app_handle)?
         .into_iter()
-        .flat_map(|record| {
-            std::iter::once(PathBuf::from(record.primary_path)).chain(
-                record.owned_paths.into_iter().map(PathBuf::from),
-            )
-        })
+        .map(|record| PathBuf::from(record.primary_path))
         .collect();
 
-    let database = app_handle.state::<crate::db::DbState>();
-    let connection = database.lock()?;
-    for (_, removal_paths) in crate::db::load_all_torrent_removal_paths(&connection)? {
-        for path in removal_paths.into_iter().map(PathBuf::from) {
-            if !paths
-                .iter()
-                .any(|existing| crate::platform::paths_equal(existing, &path))
-            {
-                paths.push(path);
-            }
-        }
-    }
-    drop(connection);
-
-    // Compatibility for downloads created before the backend-owned registry
-    // existed. Import only the exact persisted queue paths.
-    for (_, path) in legacy_download_queue_path_records(app_handle)? {
-        if !paths
-            .iter()
-            .any(|existing| crate::platform::paths_equal(existing, &path))
-        {
+    // One-time compatibility for downloads created before the backend-owned
+    // registry existed. This imports the exact persisted queue path only.
+    for path in legacy_download_queue_paths(app_handle)? {
+        if !paths.iter().any(|existing| existing == &path) {
             paths.push(path);
         }
     }
 
     Ok(paths)
-}
-
-/// Return the Firelink download that owns an exact output path, if any.
-///
-/// This is intentionally based on the persisted ownership registry rather
-/// than on the visible download list. The renderer can be stale while a
-/// queued/native lifecycle is being admitted, so duplicate replacement must
-/// make this decision at the native boundary.
-pub fn owner_for_path<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    path: &Path,
-) -> Result<Option<String>, String> {
-    let canonical = crate::canonicalize_with_missing_components(path)
-        .ok_or_else(|| "Download target could not be canonicalized".to_string())?;
-    let mut owners = Vec::new();
-    for record in load_records(app_handle)? {
-        let primary = PathBuf::from(&record.primary_path);
-        if crate::platform::paths_equal(&primary, &canonical)
-            || record
-                .owned_paths
-                .iter()
-                .map(PathBuf::from)
-                .any(|owned| crate::platform::paths_equal(&owned, &canonical))
-        {
-            owners.push(record.id);
-        }
-    }
-
-    let database = app_handle.state::<crate::db::DbState>();
-    let connection = database.lock()?;
-    for (id, removal_paths) in crate::db::load_all_torrent_removal_paths(&connection)? {
-        if removal_paths
-            .into_iter()
-            .map(PathBuf::from)
-            .any(|removal| crate::platform::paths_equal(&removal, &canonical))
-            && !owners.contains(&id)
-        {
-            owners.push(id);
-        }
-    }
-    drop(connection);
-
-    // Older rows may predate the ownership registry. They still represent
-    // Firelink-owned targets and must not be downgraded to unmanaged disk
-    // files merely because their migration record is absent.
-    for (id, legacy_path) in legacy_download_queue_path_records(app_handle)? {
-        if crate::platform::paths_equal(&legacy_path, &canonical) && !owners.contains(&id) {
-            owners.push(id);
-        }
-    }
-
-    match owners.len() {
-        0 => Ok(None),
-        1 => Ok(owners.pop()),
-        _ => Err(format!(
-            "Download target is claimed by multiple Firelink downloads: {}",
-            owners.join(", ")
-        )),
-    }
 }
 
 fn load_records<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<Vec<DownloadOwnershipRecord>, String> {
@@ -439,18 +185,12 @@ fn load_records<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<V
     crate::db::load_ownership(&connection).map(|records| {
         records
             .into_iter()
-            .map(|(id, primary_path, owned_paths)| DownloadOwnershipRecord {
-                id,
-                primary_path,
-                owned_paths,
-            })
+            .map(|(id, primary_path)| DownloadOwnershipRecord { id, primary_path })
             .collect()
     })
 }
 
-fn legacy_download_queue_path_records<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-) -> Result<Vec<(String, PathBuf)>, String> {
+fn legacy_download_queue_paths(app_handle: &tauri::AppHandle) -> Result<Vec<PathBuf>, String> {
     let settings = crate::settings::load_settings(app_handle).ok();
 
     let downloads = {
@@ -459,7 +199,7 @@ fn legacy_download_queue_path_records<R: tauri::Runtime>(
         parse_legacy_download_items(crate::db::load_downloads(&connection)?)
     };
 
-    let mut paths: Vec<(String, PathBuf)> = Vec::new();
+    let mut paths = Vec::new();
     for download in downloads {
         let category = format!("{:?}", download.category);
         let mut destinations = Vec::new();
@@ -518,10 +258,8 @@ fn legacy_download_queue_path_records<R: tauri::Runtime>(
 
         for destination in destinations {
             if let Ok(path) = expected_primary_path(app_handle, &destination, &download.file_name) {
-                if !paths.iter().any(|(id, existing)| {
-                    id == &download.id && crate::platform::paths_equal(existing, &path)
-                }) {
-                    paths.push((download.id.clone(), path));
+                if !paths.iter().any(|existing| existing == &path) {
+                    paths.push(path);
                 }
             }
         }

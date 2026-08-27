@@ -2,17 +2,16 @@ import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Inbox, Zap, CheckCircle2, CircleDashed,
-  Film, Music, FileText, Box, Image as ImageIcon, Archive, FileQuestion, Magnet,
+  Film, Music, FileText, Box, Image as ImageIcon, Archive, FileQuestion,
   List, CalendarClock, Gauge, Bug, Settings, Plus, Play, Pause, Edit2, Trash2, PanelLeft,
   ChevronDown,
   type LucideIcon
 } from 'lucide-react';
-import { useDownloadStore, DownloadCategory, Queue, MAIN_QUEUE_ID } from '../store/useDownloadStore';
+import { useDownloadStore, DownloadCategory, Queue } from '../store/useDownloadStore';
 import { ActiveView, useSettingsStore } from '../store/useSettingsStore';
 import { WindowDragRegion } from './WindowDragRegion';
 import { useToast } from '../contexts/ToastContext';
 import { isTransferActiveStatus } from '../utils/downloads';
-import { canStartDownload } from '../utils/downloadActions';
 import { clampFloatingPosition } from '../utils/floatingPosition';
 import { useTranslation } from 'react-i18next';
 
@@ -20,20 +19,13 @@ export type SidebarFilter = 'all' | 'active' | 'completed' | 'unfinished' | Down
 
 interface SidebarProps {
   selectedFilter: SidebarFilter;
-  onToggleSidebar?: () => void;
   onSelectFilter: (filter: SidebarFilter) => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = (props) => {
-  const { selectedFilter, onToggleSidebar, onSelectFilter } = props;
+  const { selectedFilter, onSelectFilter } = props;
   const { downloads, queues, addQueue, renameQueue, removeQueue, startQueue, pauseQueue, setQueueConcurrency } = useDownloadStore();
-  const {
-    activeView,
-    setActiveView,
-    toggleSidebar,
-    isFoldersCollapsed: foldersCollapsed,
-    toggleFoldersCollapsed
-  } = useSettingsStore();
+  const { activeView, setActiveView, toggleSidebar } = useSettingsStore();
   const { addToast } = useToast();
   const { t, i18n } = useTranslation();
 
@@ -44,9 +36,11 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
   const [contextMenuPosition, setContextMenuPosition] = useState<{ x: number; y: number } | null>(null);
+  const [foldersCollapsed, setFoldersCollapsed] = useState(() =>
+    window.localStorage.getItem('firelink-folders-collapsed') === 'true'
+  );
   const foldersToggleRef = useRef<HTMLButtonElement>(null);
   const foldersListRef = useRef<HTMLDivElement>(null);
-  const contextMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const addInputRef = useRef<HTMLInputElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -100,21 +94,6 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
   }, [contextMenu, queues, i18n.language]);
 
   useEffect(() => {
-    if (!contextMenu) {
-      const trigger = contextMenuTriggerRef.current;
-      if (trigger?.isConnected && document.activeElement === document.body) {
-        trigger.focus({ preventScroll: true });
-      }
-      return;
-    }
-
-    const frame = window.requestAnimationFrame(() => {
-      contextMenuRef.current?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [contextMenu]);
-
-  useEffect(() => {
     const handleCloseMenu = () => setContextMenu(null);
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setContextMenu(null);
@@ -136,6 +115,10 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
   }, [renamingQueueId]);
 
   useEffect(() => {
+    window.localStorage.setItem('firelink-folders-collapsed', String(foldersCollapsed));
+  }, [foldersCollapsed]);
+
+  useEffect(() => {
     if (foldersCollapsed && foldersListRef.current?.contains(document.activeElement)) {
       foldersToggleRef.current?.focus();
     }
@@ -145,7 +128,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
     if (foldersListRef.current?.contains(document.activeElement)) {
       foldersToggleRef.current?.focus();
     }
-    toggleFoldersCollapsed();
+    setFoldersCollapsed(collapsed => !collapsed);
   };
 
   useEffect(() => {
@@ -214,24 +197,11 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
     );
   };
 
-  const openQueueContextMenu = (id: string, x: number, y: number, trigger?: HTMLButtonElement) => {
-    if (trigger) contextMenuTriggerRef.current = trigger;
+  const handleQueueContextMenu = (e: React.MouseEvent, id: string) => {
+    e.preventDefault();
+    e.stopPropagation();
     setContextMenuPosition(null);
-    setContextMenu({ x, y, id });
-  };
-
-  const handleQueueContextMenu = (e: React.MouseEvent<HTMLButtonElement>, id: string) => {
-    e.preventDefault();
-    e.stopPropagation();
-    openQueueContextMenu(id, e.clientX, e.clientY, e.currentTarget);
-  };
-
-  const handleQueueKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>, id: string) => {
-    if (e.key !== 'ContextMenu' && !(e.key === 'F10' && e.shiftKey)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const rect = e.currentTarget.getBoundingClientRect();
-    openQueueContextMenu(id, rect.left, rect.bottom, e.currentTarget);
+    setContextMenu({ x: e.clientX, y: e.clientY, id });
   };
 
   const handleAddQueueSubmit = (trigger: 'submit' | 'blur' = 'submit') => {
@@ -351,8 +321,6 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
         data-active={isSelected}
         data-sidebar-queue-id={queue.id}
         onContextMenu={e => handleQueueContextMenu(e, queue.id)}
-        onKeyDown={e => handleQueueKeyDown(e, queue.id)}
-        aria-keyshortcuts="Shift+F10"
         onClick={() => onSelectFilter(filterId)}
         className="sidebar-nav-item group flex w-full items-center text-[13px] text-start cursor-default font-medium"
       >
@@ -389,7 +357,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
 
         <button
           type="button"
-          onClick={onToggleSidebar ?? toggleSidebar}
+          onClick={toggleSidebar}
           className="sidebar-toggle-button"
           title={t($ => $.actions.hideSidebar)}
         >
@@ -435,7 +403,6 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
               <NavItem icon={FileText} label={t($ => $.navigation.categories.documents)} filter="Documents" />
               <NavItem icon={ImageIcon} label={t($ => $.navigation.categories.pictures)} filter="Pictures" />
               <NavItem icon={Box} label={t($ => $.navigation.categories.applications)} filter="Applications" />
-              <NavItem icon={Magnet} label={t($ => $.navigation.categories.torrents)} filter="Torrents" />
               <NavItem icon={FileQuestion} label={t($ => $.navigation.categories.other)} filter="Other" />
             </div>
           </div>
@@ -512,7 +479,6 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
       {contextMenu && createPortal(
         <div
           role="menu"
-          id="sidebar-queue-context-menu"
           ref={contextMenuRef}
           className="fixed z-[70] w-48 py-1 rounded-xl shadow-lg border border-border-modal bg-bg-context-menu backdrop-blur-xl animate-fade-in text-[13px] text-text-primary overflow-hidden"
           style={{
@@ -525,19 +491,8 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             className="w-full text-start px-3 py-1.5 flex items-center hover:bg-item-hover"
             onClick={() => {
               const queueId = contextMenu.id;
-              const credentialMarkedIds = downloads
-                .filter(download =>
-                  (download.queueId || MAIN_QUEUE_ID) === queueId
-                  && download.credentialsRequired === true
-                  && (download.status === 'queued' || canStartDownload(download.status))
-                )
-                .map(download => download.id);
-              const resumeWithoutCredentials = credentialMarkedIds.length > 0
-                && window.confirm(t($ => $.properties.resumeWithoutCredentialsConfirm));
               setContextMenu(null);
-              void startQueue(queueId, {
-                resumeWithoutCredentialsIds: resumeWithoutCredentials ? credentialMarkedIds : []
-              }).catch(error => {
+              void startQueue(queueId).catch(error => {
                 addToast({
                   message: t($ => $.sidebar.startQueueFailed, { detail: String(error) }),
                   variant: 'error',

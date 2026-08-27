@@ -29,12 +29,6 @@ describe('download locations', () => {
     expect(downloadLocationEquals('/home/Test', 'Movie.MP4', '/home/test', 'movie.mp4', 'linux')).toBe(false);
   });
 
-  it('matches destinations with redundant separators without changing platform case rules', () => {
-    expect(downloadLocationEquals('/Users/test//Downloads/', 'file.zip', '/Users/test/Downloads', 'file.zip', 'macos')).toBe(true);
-    expect(downloadLocationEquals('//Users/test/Downloads', 'file.zip', '/Users/test/Downloads', 'file.zip', 'macos')).toBe(true);
-    expect(downloadLocationEquals('\\\\server\\share\\downloads', 'file.zip', '//server//share/downloads/', 'file.zip', 'windows')).toBe(true);
-  });
-
   it('uses a remembered Add-window directory only when the setting is enabled', () => {
     expect(resolveInitialAddWindowLocation(
       'D:\\Downloads',
@@ -134,24 +128,6 @@ describe('download locations', () => {
 
     automatic.categoryDirectoryOverrides.Movies = '/Volumes/Media';
     expect(await resolveCategoryDestination(automatic, 'Movies')).toBe('/Volumes/Media');
-  });
-
-  it('defaults Torrent downloads to the Torrents folder and respects overrides', async () => {
-    const settings = normalizeDownloadLocationSettings({
-      baseDownloadFolder: '/Users/test/Downloads'
-    });
-
-    expect(settings.categorySubfolders.Torrents).toBe('Torrents');
-    expect(await resolveCategoryDestination(settings, 'Torrents'))
-      .toBe('/Users/test/Downloads/Torrents');
-
-    settings.categoryDirectoryOverrides.Torrents = '/Volumes/Archive/Torrents';
-    expect(await resolveCategoryDestination(settings, 'Torrents'))
-      .toBe('/Volumes/Archive/Torrents');
-
-    settings.categorySubfoldersEnabled = false;
-    expect(await resolveCategoryDestination(settings, 'Torrents'))
-      .toBe('/Users/test/Downloads');
   });
 
   it('defaults category subfolders on and sends every category to the base folder when disabled', async () => {

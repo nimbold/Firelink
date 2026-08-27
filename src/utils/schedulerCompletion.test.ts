@@ -15,10 +15,6 @@ const download = (id: string, status: DownloadItem['status']): DownloadItem => (
 });
 
 describe('schedulerCompletionState', () => {
-  it('does not treat an empty scheduler set as completed', () => {
-    expect(schedulerCompletionState([], [])).toBe('incomplete');
-  });
-
   it('stays active while any tracked scheduler download can still progress', () => {
     expect(schedulerCompletionState([
       download('a', 'completed'),

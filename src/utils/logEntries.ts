@@ -37,36 +37,25 @@ export const redactLogText = (message: string, homePath = ''): string => {
   }
 
   redacted = redacted.replace(
-    /([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s?"'<>},\]]+)\?[^\s"'<>},\]]+/g,
-    '$1?[redacted]'
-  );
-  redacted = redacted.replace(
-    /([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s?#]+)#\S+/g,
-    '$1#[redacted]'
+    /(["'])(authorization|proxy-authorization|cookie|set-cookie|password|token|secret|credential|pairing[-_ ]?token|api[-_ ]?key)(["'])(\s*[:=]\s*)["'][^"\r\n,;]*["']/gi,
+    '$1$2$3$4[redacted]'
   );
   redacted = redacted.replace(
     /([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^@\s/?#]+@/g,
     '$1[redacted]@'
   );
   redacted = redacted.replace(
-    /([A-Za-z0-9_-]*(?:authorization|proxy-authorization|cookie2|cookie|set-cookie2|set-cookie|password|passwd|auth|token|secret|credential|key|pairing[-_ ]?token|api[-_ ]?key|access[-_ ]?token|auth[-_ ]?token|signature|session)[A-Za-z0-9_-]*)\s*[:=]\s*[^\r\n]*?(;?)(?=\s+(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|[A-Za-z0-9_-]*(?:authorization|proxy-authorization|cookie2|cookie|set-cookie2|set-cookie|password|passwd|auth|token|secret|credential|key|pairing[-_ ]?token|api[-_ ]?key|access[-_ ]?token|auth[-_ ]?token|signature|session)\s*[:=])|$)/gi,
-    '$1: [redacted]$2'
+    /([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s?]+)\?[^\s]+/g,
+    '$1?[redacted]'
   );
   redacted = redacted.replace(
-    /(["'])(authorization|proxy-authorization|cookie2|cookie|set-cookie2|set-cookie|password|passwd|auth|token|secret|credential|key|pairing[-_ ]?token|api[-_ ]?key|access[-_ ]?token|auth[-_ ]?token|signature|session)(["'])(\s*[:=]\s*)["'][^"\r\n,;]*["']/gi,
-    '$1$2$3$4[redacted]'
+    /([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s?#]+)#\S+/g,
+    '$1#[redacted]'
   );
   return redacted.replace(
-    /(authorization|proxy-authorization|cookie2|cookie|set-cookie2|set-cookie|password|passwd|auth|token|secret|credential|key|pairing[-_ ]?token|api[-_ ]?key|access[-_ ]?token|auth[-_ ]?token|signature|session)(\s*)([:=])(\s*)([^\r\n,;]+)/gi,
+    /(authorization|proxy-authorization|cookie|set-cookie|password|token|secret|credential|pairing[-_ ]?token|api[-_ ]?key)(\s*)([:=])(\s*)([^\r\n,;]+)/gi,
     '$1$2$3$4[redacted]'
   );
-};
-
-const mergeKey = (entry: LogEntry): string => {
-  const message = entry.message
-    .replace(/^\[\d{4}-\d{2}-\d{2}\]\[\d{2}:\d{2}:\d{2}\]\[[A-Z]+\](?:\[[^\]]+\])?\s*/, '')
-    .replace(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*\[[A-Z]+\]\s*/, '');
-  return `${entry.level}:${message}`;
 };
 
 export const liveLogEntry = (
@@ -124,7 +113,7 @@ export const mergeLogSnapshotAndLiveEntries = (
     const snapshotStart = snapshot.length - candidate;
     let matches = true;
     for (let index = 0; index < candidate; index += 1) {
-      if (mergeKey(snapshot[snapshotStart + index]) !== mergeKey(liveEntries[index])) {
+      if (snapshot[snapshotStart + index].message !== liveEntries[index].message) {
         matches = false;
         break;
       }

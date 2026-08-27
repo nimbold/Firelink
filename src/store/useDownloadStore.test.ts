@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { commitDownloadState, dispatchItem, flushDownloadPersistence, getProxyArgs, getSiteLogin, hasStaleTemporaryMediaEstimate, initializeDownloadPersistence, MAIN_QUEUE_ID, normalizeCustomProxy, normalizePersistedDownloadProgress, normalizePersistedQueueState, normalizePersistedQueues, useDownloadStore } from './useDownloadStore';
+import { dispatchItem, getProxyArgs, getSiteLogin, hasStaleTemporaryMediaEstimate, normalizeCustomProxy, normalizePersistedDownloadProgress, normalizePersistedQueueState, normalizePersistedQueues, useDownloadStore } from './useDownloadStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
 import { useSettingsStore } from './useSettingsStore';
 import * as ipc from '../ipc';
@@ -36,9 +36,6 @@ vi.mock('./useSettingsStore', () => ({
       perServerConnections: 16,
       customUserAgent: '',
       maxAutomaticRetries: 3,
-      minimumNormalDownloadSpeedKiB: 0,
-      retryNotFoundErrors: false,
-      adaptiveMirrorSelection: true,
       mediaCookieSource: 'none',
       baseDownloadFolder: '~/Downloads',
       categorySubfoldersEnabled: true,
@@ -71,9 +68,6 @@ describe('useDownloadStore', () => {
       perServerConnections: 16,
       customUserAgent: '',
       maxAutomaticRetries: 3,
-      minimumNormalDownloadSpeedKiB: 0,
-      retryNotFoundErrors: false,
-      adaptiveMirrorSelection: true,
       mediaCookieSource: 'none',
       baseDownloadFolder: '~/Downloads',
       categorySubfoldersEnabled: true,
@@ -94,7 +88,6 @@ describe('useDownloadStore', () => {
     useDownloadStore.setState({
       downloads: [],
       backendRegisteredIds: new Set(),
-      allocationPendingIds: new Set(),
       pendingOrder: [],
       isAddModalOpen: false,
       pendingAddUrls: '',
@@ -107,9 +100,8 @@ describe('useDownloadStore', () => {
       pendingAddBatchName: '',
       pendingAddRequestContexts: {},
       pendingAddRequestVersion: 0,
-      queues: [{ id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true }],
     });
-    useDownloadProgressStore.setState({ progressMap: {}, retainedProgressMap: {}, moveProgressMap: {} });
+    useDownloadProgressStore.setState({ progressMap: {} });
   });
 
   it('invalidates in-flight Add-modal handoffs when the modal is toggled', () => {
@@ -141,133 +133,6 @@ describe('useDownloadStore', () => {
     const fileName = useDownloadStore.getState().downloads[0].fileName;
     expect(new TextEncoder().encode(fileName).length).toBeLessThanOrEqual(MAX_DOWNLOAD_FILENAME_BYTES);
     expect(fileName.endsWith('.mp4')).toBe(true);
-  });
-
-  it('invalidates staged replacement authorization when its output identity changes', async () => {
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'staged-replacement',
-        url: 'https://example.com/file.bin',
-        fileName: 'old.bin',
-        destination: '/tmp/downloads',
-        status: 'staged',
-        category: 'Other',
-        dateAdded: '',
-        replaceExistingFingerprint: 'original-target-fingerprint',
-      }] as any[],
-    });
-
-    await useDownloadStore.getState().applyProperties('staged-replacement', {
-      fileName: 'new.bin',
-      destination: '/tmp/other-downloads',
-    });
-
-    expect(useDownloadStore.getState().downloads[0].replaceExistingFingerprint).toBeUndefined();
-  });
-
-  it('rejects queued identity edits before invalidating their dispatch', async () => {
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'queued-identity',
-        url: 'https://example.com/file',
-        fileName: 'file.bin',
-        destination: '/tmp',
-        status: 'queued',
-        category: 'Other',
-        dateAdded: '',
-      }] as any[],
-    });
-
-    await expect(useDownloadStore.getState().applyProperties('queued-identity', {
-      fileName: 'renamed.bin',
-    })).rejects.toThrow('read-only');
-    expect(ipc.invokeCommand).not.toHaveBeenCalledWith(
-      'cancel_enqueue_generation',
-      expect.anything(),
-    );
-  });
-
-  it('keeps the credential-required marker when the last secret is cleared', async () => {
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'credential-marker',
-        url: 'https://secure.example.com/file.bin',
-        fileName: 'file.bin',
-        status: 'failed',
-        category: 'Other',
-        dateAdded: '',
-        credentialsRequired: true
-      }] as any[]
-    });
-
-    await useDownloadStore.getState().applyProperties('credential-marker', {
-      password: ''
-    });
-    expect(useDownloadStore.getState().downloads[0].credentialsRequired).toBe(true);
-
-    await useDownloadStore.getState().applyProperties('credential-marker', {
-      password: 'secret'
-    });
-    expect(useDownloadStore.getState().downloads[0].credentialsRequired).toBe(false);
-  });
-
-  it('clears a persisted Torrent removal reservation when a paused item disables cleanup', async () => {
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'paused-torrent-removal',
-        url: 'magnet:?xt=urn:btih:abc',
-        fileName: 'torrent',
-        status: 'paused',
-        category: 'Other',
-        dateAdded: '',
-        isTorrent: true,
-        torrentFileIndices: [0],
-        torrentRemoveUnselectedFile: true
-      }] as any[],
-      backendRegisteredIds: new Set(['paused-torrent-removal'])
-    });
-    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
-
-    await useDownloadStore.getState().applyProperties('paused-torrent-removal', {
-      torrentRemoveUnselectedFile: false
-    });
-
-    expect(ipc.invokeCommand).toHaveBeenCalledWith(
-      'detach_download_for_reconfigure',
-      { id: 'paused-torrent-removal' }
-    );
-    expect(ipc.invokeCommand).toHaveBeenCalledWith(
-      'clear_torrent_removal_paths',
-      { id: 'paused-torrent-removal' }
-    );
-    expect(useDownloadStore.getState().downloads[0].torrentRemoveUnselectedFile).toBe(false);
-  });
-
-  it('detaches a paused backend lifecycle even when the frontend registration set is stale', async () => {
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'paused-stale-registration',
-        url: 'magnet:?xt=urn:btih:abc',
-        fileName: 'torrent',
-        status: 'paused',
-        category: 'Other',
-        dateAdded: '',
-        isTorrent: true,
-        torrentFileIndices: [1]
-      }] as any[],
-      backendRegisteredIds: new Set()
-    });
-    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
-
-    await useDownloadStore.getState().applyProperties('paused-stale-registration', {
-      torrentFileIndices: [2]
-    });
-
-    expect(ipc.invokeCommand).toHaveBeenCalledWith(
-      'detach_download_for_reconfigure',
-      { id: 'paused-stale-registration' }
-    );
-    expect(useDownloadStore.getState().downloads[0].torrentFileIndices).toEqual([2]);
   });
 
   it('replaces stale media intent when an appended handoff reuses a URL', () => {
@@ -531,156 +396,6 @@ describe('useDownloadStore', () => {
     expect(useDownloadStore.getState().downloads[0].speedLimit).toBeUndefined();
   });
 
-  it('updates an active Torrent upload limit while seeding and clears it', async () => {
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'live-torrent-upload',
-        status: 'seeding',
-        isMedia: false,
-        isTorrent: true,
-        torrentUploadLimit: '512K'
-      }] as any[]
-    });
-    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
-
-    await useDownloadStore.getState().setTorrentUploadLimit('live-torrent-upload', '2M');
-
-    expect(ipc.invokeCommand).toHaveBeenCalledWith('set_torrent_upload_limit', {
-      id: 'live-torrent-upload',
-      limit: '2M'
-    });
-    expect(useDownloadStore.getState().downloads[0].torrentUploadLimit).toBe('2M');
-
-    await useDownloadStore.getState().setTorrentUploadLimit('live-torrent-upload', null);
-    const uploadLimitCalls = vi.mocked(ipc.invokeCommand).mock.calls
-      .filter(([command]) => command === 'set_torrent_upload_limit');
-    expect(uploadLimitCalls[uploadLimitCalls.length - 1]).toEqual(['set_torrent_upload_limit', {
-      id: 'live-torrent-upload',
-      limit: null
-    }]);
-    expect(useDownloadStore.getState().downloads[0].torrentUploadLimit).toBeUndefined();
-  });
-
-  it('rejects live Torrent upload control for ordinary or inactive downloads', async () => {
-    useDownloadStore.setState({
-      downloads: [
-        { id: 'ordinary-upload', status: 'downloading', isMedia: false, isTorrent: false },
-        { id: 'paused-upload', status: 'paused', isMedia: false, isTorrent: true }
-      ] as any[]
-    });
-
-    await expect(useDownloadStore.getState().setTorrentUploadLimit('ordinary-upload', '2M'))
-      .rejects.toThrow('only for Torrent');
-    await expect(useDownloadStore.getState().setTorrentUploadLimit('paused-upload', '2M'))
-      .rejects.toThrow('active Torrent');
-    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('set_torrent_upload_limit', expect.anything());
-  });
-
-  it('keeps the prior Torrent upload limit when the backend rejects the update', async () => {
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'live-torrent-upload-failure',
-        status: 'downloading',
-        isMedia: false,
-        isTorrent: true,
-        torrentUploadLimit: '512K'
-      }] as any[]
-    });
-    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
-      if (command === 'set_torrent_upload_limit') throw new Error('aria2 unavailable');
-      return undefined;
-    });
-
-    await expect(useDownloadStore.getState().setTorrentUploadLimit('live-torrent-upload-failure', '2M'))
-      .rejects.toThrow('aria2 unavailable');
-    expect(useDownloadStore.getState().downloads[0].torrentUploadLimit).toBe('512K');
-  });
-
-  it('updates active Torrent peer options and clears them to Aria2 defaults', async () => {
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'live-torrent-peers',
-        status: 'seeding',
-        isMedia: false,
-        isTorrent: true,
-        torrentMaxPeers: 120,
-        torrentPeerSpeedLimit: '512K'
-      }] as any[]
-    });
-    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
-
-    await useDownloadStore.getState().setTorrentPeerOptions('live-torrent-peers', '240', '2M');
-
-    expect(ipc.invokeCommand).toHaveBeenCalledWith('set_torrent_peer_options', {
-      id: 'live-torrent-peers',
-      max_peers: 240,
-      peer_speed_limit: '2M'
-    });
-    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
-      torrentMaxPeers: 240,
-      torrentPeerSpeedLimit: '2M'
-    });
-
-    await useDownloadStore.getState().setTorrentPeerOptions('live-torrent-peers', null, null);
-    const peerOptionCalls = vi.mocked(ipc.invokeCommand).mock.calls
-      .filter(([command]) => command === 'set_torrent_peer_options');
-    expect(peerOptionCalls[peerOptionCalls.length - 1]).toEqual(['set_torrent_peer_options', {
-      id: 'live-torrent-peers',
-      max_peers: null,
-      peer_speed_limit: null
-    }]);
-    expect(useDownloadStore.getState().downloads[0].torrentMaxPeers).toBeUndefined();
-    expect(useDownloadStore.getState().downloads[0].torrentPeerSpeedLimit).toBeUndefined();
-  });
-
-  it('rejects invalid or inactive live Torrent peer options', async () => {
-    useDownloadStore.setState({
-      downloads: [
-        { id: 'ordinary-peers', status: 'downloading', isMedia: false, isTorrent: false },
-        { id: 'paused-peers', status: 'paused', isMedia: false, isTorrent: true }
-      ] as any[]
-    });
-
-    await expect(useDownloadStore.getState().setTorrentPeerOptions('ordinary-peers', '100', '2M'))
-      .rejects.toThrow('only for Torrent');
-    await expect(useDownloadStore.getState().setTorrentPeerOptions('paused-peers', '100', '2M'))
-      .rejects.toThrow('active Torrent');
-    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('set_torrent_peer_options', expect.anything());
-
-    useDownloadStore.setState({
-      downloads: [{ id: 'invalid-peers', status: 'downloading', isMedia: false, isTorrent: true }] as any[]
-    });
-    await expect(useDownloadStore.getState().setTorrentPeerOptions('invalid-peers', '1001', '2M'))
-      .rejects.toThrow('between 0 and 1000');
-    await expect(useDownloadStore.getState().setTorrentPeerOptions('invalid-peers', '100', 'not-a-rate'))
-      .rejects.toThrow('valid Torrent peer speed');
-    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('set_torrent_peer_options', expect.anything());
-  });
-
-  it('keeps prior Torrent peer options when the backend rejects the update', async () => {
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'live-torrent-peers-failure',
-        status: 'downloading',
-        isMedia: false,
-        isTorrent: true,
-        torrentMaxPeers: 120,
-        torrentPeerSpeedLimit: '512K'
-      }] as any[]
-    });
-    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
-      if (command === 'set_torrent_peer_options') throw new Error('aria2 unavailable');
-      return undefined;
-    });
-
-    await expect(useDownloadStore.getState().setTorrentPeerOptions('live-torrent-peers-failure', '240', '2M'))
-      .rejects.toThrow('aria2 unavailable');
-    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
-      torrentMaxPeers: 120,
-      torrentPeerSpeedLimit: '512K'
-    });
-  });
-
   it('rejects live speed changes for media and inactive downloads', async () => {
     useDownloadStore.setState({
       downloads: [
@@ -794,28 +509,6 @@ describe('useDownloadStore', () => {
     );
   });
 
-  it('replaces stale in-memory downloads when startup loads an empty persisted snapshot', async () => {
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'stale-memory-row',
-        url: 'https://example.com/stale.bin',
-        fileName: 'stale.bin',
-        status: 'completed',
-        category: 'Other',
-        dateAdded: ''
-      }] as any[]
-    });
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
-      if (cmd === 'db_get_all_queues') return [];
-      if (cmd === 'db_get_all_downloads') return [];
-      return undefined;
-    });
-
-    await useDownloadStore.getState().initDB();
-
-    expect(useDownloadStore.getState().downloads).toEqual([]);
-  });
-
   it('remaps persisted downloads when queue records are malformed or missing', async () => {
     vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
       if (cmd === 'db_get_all_queues') {
@@ -850,33 +543,6 @@ describe('useDownloadStore', () => {
 
     expect(useDownloadStore.getState().downloads.map(download => download.queueId))
       .toEqual(['00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001']);
-  });
-
-  it('skips malformed persisted download records without blocking startup', async () => {
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
-      if (cmd === 'db_get_all_queues') return [];
-      if (cmd === 'db_get_all_downloads') {
-        return [
-          '{not-json',
-          JSON.stringify(null),
-          JSON.stringify([]),
-          JSON.stringify({
-            id: 'valid-after-corruption',
-            url: 'https://example.com/valid.bin',
-            fileName: 'valid.bin',
-            status: 'ready',
-            category: 'Other',
-            dateAdded: ''
-          })
-        ];
-      }
-      return undefined;
-    });
-
-    await useDownloadStore.getState().initDB();
-
-    expect(useDownloadStore.getState().downloads.map(download => download.id))
-      .toEqual(['valid-after-corruption']);
   });
 
   it('moves persisted paused rows behind runnable rows and assigns contiguous positions', async () => {
@@ -999,120 +665,6 @@ describe('useDownloadStore', () => {
     })).toBe(true);
   });
 
-  it('clears malformed persisted Torrent peer options', () => {
-    const normalized = normalizePersistedDownloadProgress({
-      id: 'malformed-torrent-options',
-      url: 'magnet:?xt=urn:btih:bad',
-      fileName: 'payload',
-      status: 'queued',
-      category: 'Other',
-      dateAdded: '',
-      isTorrent: true,
-      connections: 16,
-      torrentMaxPeers: 'not-a-number' as unknown as number,
-      torrentPeerSpeedLimit: 0 as unknown as string,
-      torrentCheckIntegrity: 'yes' as unknown as boolean,
-      torrentTrackers: 123 as unknown as string,
-      torrentExcludeTrackers: 123 as unknown as string,
-      torrentTrackerConnectTimeout: 0,
-      torrentTrackerTimeout: 604801,
-      torrentTrackerInterval: -1,
-      torrentStopTimeout: 604801,
-      torrentPrioritizePiece: 'head=1G',
-      torrentRemoveUnselectedFile: 'yes' as unknown as boolean,
-      torrentEncryptionPolicy: 'arc4'
-    });
-
-    expect(normalized.torrentMaxPeers).toBeUndefined();
-    expect(normalized.connections).toBeUndefined();
-    expect(normalized.torrentPeerSpeedLimit).toBeUndefined();
-    expect(normalized.torrentCheckIntegrity).toBeUndefined();
-    expect(normalized.torrentTrackers).toBeUndefined();
-    expect(normalized.torrentExcludeTrackers).toBeUndefined();
-    expect(normalized.torrentTrackerConnectTimeout).toBeUndefined();
-    expect(normalized.torrentTrackerTimeout).toBeUndefined();
-    expect(normalized.torrentTrackerInterval).toBeUndefined();
-    expect(normalized.torrentStopTimeout).toBeUndefined();
-    expect(normalized.torrentPrioritizePiece).toBeUndefined();
-    expect(normalized.torrentRemoveUnselectedFile).toBeUndefined();
-    expect(normalized.torrentEncryptionPolicy).toBeUndefined();
-  });
-
-  it('drops zero-based persisted Torrent web-seed indices', () => {
-    const normalized = normalizePersistedDownloadProgress({
-      id: 'torrent-web-seed-indexes',
-      url: 'magnet:?xt=urn:btih:bad',
-      fileName: 'payload',
-      status: 'queued',
-      category: 'Other',
-      dateAdded: '',
-      isTorrent: true,
-      torrentWebSeeds: [
-        { fileIndex: 0, uri: 'https://mirror.example/zero' },
-        { fileIndex: 1, uri: 'https://mirror.example/one' },
-      ],
-      torrentWebSeedsNative: [
-        { fileIndex: 0, uri: 'https://mirror.example/native-zero' },
-        { fileIndex: 1, uri: 'https://mirror.example/native-one' },
-      ],
-    });
-
-    expect(normalized.torrentWebSeeds).toEqual([
-      { fileIndex: 1, uri: 'https://mirror.example/one' },
-    ]);
-    expect(normalized.torrentWebSeedsNative).toEqual([
-      { fileIndex: 1, uri: 'https://mirror.example/native-one' },
-    ]);
-  });
-
-  it('migrates legacy Torrent credential context before restart resume', () => {
-    const normalized = normalizePersistedDownloadProgress({
-      id: 'legacy-torrent-credentials',
-      url: 'torrent:0123456789abcdef0123456789abcdef01234567',
-      fileName: 'payload',
-      status: 'paused',
-      category: 'Other',
-      dateAdded: '',
-      isTorrent: true,
-      torrentPath: '/managed/legacy-torrent.torrent',
-      torrentInfoHash: '0123456789abcdef0123456789abcdef01234567',
-      username: 'browser-user',
-      password: 'secret',
-      headers: 'User-Agent: browser',
-      cookies: 'session=metadata-only',
-      credentialsRequired: true,
-    });
-
-    expect(normalized).toMatchObject({
-      isTorrent: true,
-      torrentPath: '/managed/legacy-torrent.torrent',
-      torrentInfoHash: '0123456789abcdef0123456789abcdef01234567',
-    });
-    expect(normalized.username).toBeUndefined();
-    expect(normalized.password).toBeUndefined();
-    expect(normalized.headers).toBeUndefined();
-    expect(normalized.cookies).toBeUndefined();
-    expect(normalized.credentialsRequired).toBeUndefined();
-  });
-
-  it('recovers an interrupted Torrent move without discarding the native destination marker', () => {
-    const normalized = normalizePersistedDownloadProgress({
-      id: 'interrupted-torrent-move',
-      url: 'magnet:?xt=urn:btih:bad',
-      fileName: 'payload',
-      status: 'moving',
-      category: 'Other',
-      dateAdded: '',
-      destination: '/downloads/new',
-      torrentMoveDestination: '/downloads/new',
-      torrentMoveRestoreStatus: 'paused'
-    });
-
-    expect(normalized.status).toBe('paused');
-    expect(normalized.torrentMoveDestination).toBe('/downloads/new');
-    expect(normalized.torrentMoveRestoreStatus).toBe('paused');
-  });
-
   it('normalizes proxy settings for download dispatch', async () => {
     expect(normalizeCustomProxy('127.0.0.1', 8080)).toBe('http://127.0.0.1:8080');
     expect(normalizeCustomProxy('http://proxy.local:9000', 8080)).toBe('http://proxy.local:9000');
@@ -1183,35 +735,6 @@ describe('useDownloadStore', () => {
       lastError: 'System proxy configuration could not be read: system settings unavailable. Choose No Proxy or try again.'
     });
     expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
-  });
-
-  it('keeps destination permission failures retryable before backend admission', async () => {
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
-      if (command === 'enqueue_download') {
-        throw new Error('Internal error: destination access retryable: Firelink could not write to the selected folder; grant access and retry');
-      }
-      return undefined;
-    });
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'destination-permission',
-        url: 'https://example.com/file.bin',
-        fileName: 'file.bin',
-        destination: '/tmp',
-        status: 'ready',
-        category: 'Other',
-        dateAdded: ''
-      }] as any[],
-      backendRegisteredIds: new Set()
-    });
-
-    await expect(dispatchItem('destination-permission')).resolves.toBe(false);
-
-    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
-      status: 'ready',
-      lastError: 'Firelink could not write to the selected folder; grant access and retry',
-      lastErrorKind: 'destinationAccess'
-    });
   });
 
   it('matches site logins by host, wildcard host, path, and full URL patterns', () => {
@@ -1307,38 +830,6 @@ describe('useDownloadStore', () => {
     });
   });
 
-  it('dispatches normal reliability and adaptive mirror settings to the native queue', async () => {
-    vi.mocked(useSettingsStore.getState).mockReturnValue({
-      ...useSettingsStore.getState(),
-      minimumNormalDownloadSpeedKiB: 64,
-      retryNotFoundErrors: true,
-      adaptiveMirrorSelection: false,
-    } as ReturnType<typeof useSettingsStore.getState>);
-    useDownloadStore.setState({
-      downloads: [
-        { id: 'reliable', url: 'https://example.test/file', fileName: 'file.bin', destination: '/tmp', status: 'queued', category: 'Other', dateAdded: '', queueId: 'MAIN', hasBeenDispatched: false },
-      ] as any[],
-    });
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
-      if (command === 'enqueue_download') return { id: 'reliable', filename: 'file.bin' } as never;
-      if (command === 'get_pending_order') return ['reliable'] as never;
-      return undefined;
-    });
-
-    await useDownloadStore.getState().startQueue('MAIN');
-
-    expect(ipc.invokeCommand).toHaveBeenCalledWith(
-      'enqueue_download',
-      expect.objectContaining({
-        item: expect.objectContaining({
-          minimum_normal_download_speed_kib: 64,
-          retry_not_found_errors: true,
-          adaptive_mirror_selection: false,
-        })
-      })
-    );
-  });
-
   it('does not resurrect a row removed while its backend enqueue is in flight', async () => {
     useDownloadStore.setState({
       downloads: [
@@ -1380,133 +871,12 @@ describe('useDownloadStore', () => {
     expect(
       vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) => command === 'remove_download')
     ).toHaveLength(2);
-    expect(
-      vi.mocked(ipc.invokeCommand).mock.calls.some(([command, args]) =>
-        command === 'remove_download'
-        && (args as { expectedLifecycleGeneration?: string })?.expectedLifecycleGeneration === '0'
-      )
-    ).toBe(true);
   });
 
-  it('does not expose allocation while admission is merely blocked', async () => {
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'allocation-phase',
-        url: 'https://example.test/file.bin',
-        fileName: 'file.bin',
-        destination: '/tmp',
-        status: 'queued',
-        category: 'Other',
-        dateAdded: '',
-        queueId: 'MAIN',
-      }] as any[],
-      backendRegisteredIds: new Set(),
-      allocationPendingIds: new Set(),
-    });
-
-    let resolveEnqueue!: (value: { id: string; filename: string }) => void;
-    const enqueue = new Promise<{ id: string; filename: string }>(resolve => {
-      resolveEnqueue = resolve;
-    });
-    vi.mocked(ipc.invokeCommand).mockImplementation((command: string) => {
-      if (command === 'enqueue_download') return enqueue as never;
-      if (command === 'get_pending_order') return Promise.resolve(['allocation-phase']) as never;
-      return Promise.resolve(undefined) as never;
-    });
-
-    const dispatch = dispatchItem('allocation-phase');
-    await vi.waitFor(() => {
-      expect(ipc.invokeCommand).toHaveBeenCalledWith(
-        'enqueue_download',
-        expect.objectContaining({ item: expect.objectContaining({ id: 'allocation-phase' }) })
-      );
-    });
-    expect(useDownloadStore.getState().allocationPendingIds.has('allocation-phase')).toBe(false);
-
-    resolveEnqueue({ id: 'allocation-phase', filename: 'file.bin' });
-    await expect(dispatch).resolves.toBe(true);
-    expect(useDownloadStore.getState().allocationPendingIds.has('allocation-phase')).toBe(false);
-  });
-
-  it('does not expose Torrent allocation while admission is merely blocked and strips metadata credentials', async () => {
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'torrent-allocation-phase',
-        url: 'torrent:0123456789abcdef0123456789abcdef01234567',
-        fileName: 'payload',
-        destination: '/tmp',
-        status: 'queued',
-        category: 'Other',
-        dateAdded: '',
-        queueId: 'MAIN',
-        isTorrent: true,
-        torrentFileAllocation: 'prealloc',
-        username: 'browser-user',
-        password: 'secret',
-        headers: 'User-Agent: browser',
-        cookies: 'session=metadata-only',
-      }] as any[],
-      backendRegisteredIds: new Set(),
-      allocationPendingIds: new Set(),
-    });
-
-    let resolveEnqueue!: (value: { id: string; filename: string }) => void;
-    const enqueue = new Promise<{ id: string; filename: string }>(resolve => {
-      resolveEnqueue = resolve;
-    });
-    vi.mocked(ipc.invokeCommand).mockImplementation((command: string, args?: unknown) => {
-      if (command === 'enqueue_download') {
-        expect((args as { item: { username: string | null; password: string | null; headers: string | null; cookies: string | null } }).item)
-          .toMatchObject({ username: null, password: null, headers: null, cookies: null });
-        return enqueue as never;
-      }
-      if (command === 'get_pending_order') return Promise.resolve(['torrent-allocation-phase']) as never;
-      return Promise.resolve(undefined) as never;
-    });
-
-    const dispatch = dispatchItem('torrent-allocation-phase');
-    await vi.waitFor(() => {
-      expect(ipc.invokeCommand).toHaveBeenCalledWith(
-        'enqueue_download',
-        expect.objectContaining({ item: expect.objectContaining({ id: 'torrent-allocation-phase' }) })
-      );
-    });
-    expect(useDownloadStore.getState().allocationPendingIds.has('torrent-allocation-phase')).toBe(false);
-
-    resolveEnqueue({ id: 'torrent-allocation-phase', filename: 'payload' });
-    await expect(dispatch).resolves.toBe(true);
-    expect(useDownloadStore.getState().allocationPendingIds.has('torrent-allocation-phase')).toBe(false);
-  });
-
-  it('clears allocation state when a terminal status wins the race', () => {
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'allocation-terminal',
-        url: 'https://example.test/file.bin',
-        fileName: 'file.bin',
-        status: 'downloading',
-        category: 'Other',
-        dateAdded: '',
-      }] as any[],
-      allocationPendingIds: new Set(['allocation-terminal']),
-    });
-
-    useDownloadStore.getState().updateDownload('allocation-terminal', {
-      status: 'failed',
-      lastError: 'disk full',
-    });
-
-    expect(useDownloadStore.getState().allocationPendingIds.has('allocation-terminal')).toBe(false);
-    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
-      status: 'failed',
-      lastError: 'disk full',
-    });
-  });
-
-  it('re-enqueues queued transfer edits only after an obsolete dispatch is removed', async () => {
+  it('re-enqueues the edited values only after an obsolete queued dispatch is removed', async () => {
     useDownloadStore.setState({
       downloads: [
-        { id: 'edited', url: 'http://test', fileName: 'old.bin', destination: '/tmp', status: 'queued', category: 'Other', dateAdded: '', queueId: 'MAIN', hasBeenDispatched: false, speedLimit: '128K' },
+        { id: 'edited', url: 'http://test', fileName: 'old.bin', destination: '/tmp', status: 'queued', category: 'Other', dateAdded: '', queueId: 'MAIN', hasBeenDispatched: false },
       ] as any[],
     });
 
@@ -1520,7 +890,7 @@ describe('useDownloadStore', () => {
         enqueueCount += 1;
         return (enqueueCount === 1
           ? firstEnqueue
-          : Promise.resolve({ id: 'edited', filename: 'old.bin' })) as never;
+          : Promise.resolve({ id: 'edited', filename: 'new.bin' })) as never;
       }
       if (command === 'get_pending_order') return Promise.resolve(['edited']) as never;
       return Promise.resolve(undefined) as never;
@@ -1528,7 +898,7 @@ describe('useDownloadStore', () => {
 
     const start = useDownloadStore.getState().startQueue('MAIN');
     await vi.waitFor(() => expect(enqueueCount).toBe(1));
-    const update = useDownloadStore.getState().applyProperties('edited', { speedLimit: '512K' });
+    const update = useDownloadStore.getState().applyProperties('edited', { fileName: 'new.bin' });
     resolveFirstEnqueue({ id: 'edited', filename: 'old.bin' });
 
     await expect(update).resolves.toBeUndefined();
@@ -1539,8 +909,7 @@ describe('useDownloadStore', () => {
       { queueId: 'MAIN' }
     );
     expect(useDownloadStore.getState().downloads[0]).toMatchObject({
-      fileName: 'old.bin',
-      speedLimit: '512K',
+      fileName: 'new.bin',
       hasBeenDispatched: true,
     });
   });
@@ -1760,68 +1129,6 @@ describe('useDownloadStore', () => {
     expect(enqueueIds).toEqual(['selected-undispatched-a', 'selected-undispatched-b']);
   });
 
-  it('limits credentialless selected resume to the explicitly approved rows', async () => {
-    useDownloadStore.setState({
-      downloads: [
-        {
-          id: 'selected-with-credentials',
-          url: 'http://with-credentials',
-          fileName: 'with-credentials',
-          destination: '/tmp',
-          status: 'paused',
-          category: 'Other',
-          dateAdded: '',
-          queueId: 'selection-credential-scope',
-          queuePosition: 0,
-          password: 'secret',
-        },
-        {
-          id: 'selected-without-credentials',
-          url: 'http://without-credentials',
-          fileName: 'without-credentials',
-          destination: '/tmp',
-          status: 'paused',
-          category: 'Other',
-          dateAdded: '',
-          queueId: 'selection-credential-scope',
-          queuePosition: 1,
-          credentialsRequired: true,
-        },
-      ] as any[],
-    });
-
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
-      if (command === 'enqueue_download') {
-        const item = (args as { item: { id: string; password: string | null } }).item;
-        return { id: item.id, filename: item.id };
-      }
-      if (command === 'get_pending_order') return [
-        'selected-with-credentials',
-        'selected-without-credentials',
-      ];
-      if (command === 'move_many_in_queue') return [
-        'selected-with-credentials',
-        'selected-without-credentials',
-      ];
-      return undefined;
-    });
-
-    await expect(useDownloadStore.getState().startSelected([
-      'selected-with-credentials',
-      'selected-without-credentials',
-    ], {
-      resumeWithoutCredentialsIds: ['selected-without-credentials'],
-    })).resolves.toBe(2);
-
-    const enqueues = vi.mocked(ipc.invokeCommand).mock.calls
-      .filter(([command]) => command === 'enqueue_download')
-      .map(([, args]) => (args as { item: { id: string; password: string | null } }).item);
-    expect(enqueues).toEqual([
-      expect.objectContaining({ id: 'selected-with-credentials', password: 'secret' }),
-      expect.objectContaining({ id: 'selected-without-credentials', password: null }),
-    ]);
-  });
-
   it('pauses queued items through the global pause action', async () => {
     useDownloadStore.setState({
       downloads: [
@@ -1930,12 +1237,6 @@ describe('useDownloadStore', () => {
 
 
   it('adds to the selected queue without dispatching', async () => {
-    useDownloadStore.setState({
-      queues: [
-        { id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true },
-        { id: 'queue-b', name: 'Downloads', isMain: false }
-      ]
-    });
     await useDownloadStore.getState().addDownload({
       id: 'queue-1',
       url: 'https://example.com/queue.bin',
@@ -1951,386 +1252,7 @@ describe('useDownloadStore', () => {
     expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
   });
 
-  it('rejects Add-to-Queue admission when the selected queue was deleted', async () => {
-    useDownloadStore.setState({
-      queues: [{ id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true }]
-    });
-
-    await expect(useDownloadStore.getState().addDownload({
-      id: 'orphaned-queue-row',
-      url: 'https://example.com/orphaned.bin',
-      fileName: 'orphaned.bin',
-      category: 'Other',
-      dateAdded: ''
-    }, { type: 'add-to-queue', queueId: 'deleted-queue' })).rejects.toThrow('Queue no longer exists.');
-
-    expect(useDownloadStore.getState().downloads).toEqual([]);
-    expect(vi.mocked(ipc.invokeCommand)).not.toHaveBeenCalledWith('db_commit_download_state', expect.anything());
-  });
-
-  it('waits for durable admission before dispatching a start-now download', async () => {
-    const disposePersistence = initializeDownloadPersistence('main');
-    const events: string[] = [];
-    let releaseCommit!: () => void;
-    let signalCommitStarted!: () => void;
-    const commitStarted = new Promise<void>(resolve => {
-      signalCommitStarted = resolve;
-    });
-    const commitGate = new Promise<void>(resolve => {
-      releaseCommit = resolve;
-    });
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
-      if (command === 'db_commit_download_state') {
-        events.push('commit-start');
-        signalCommitStarted();
-        await commitGate;
-        events.push('commit-complete');
-        return undefined;
-      }
-      if (command === 'enqueue_download') {
-        events.push('enqueue');
-        return { id: 'durable-admission', filename: 'file.bin' };
-      }
-      if (command === 'get_pending_order') return [];
-      return undefined;
-    });
-
-    try {
-      const adding = useDownloadStore.getState().addDownload({
-        id: 'durable-admission',
-        url: 'https://example.com/file.bin',
-        fileName: 'file.bin',
-        category: 'Other',
-        dateAdded: ''
-      }, { type: 'start-now' });
-
-      await commitStarted;
-      expect(events).toEqual(['commit-start']);
-      expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
-
-      releaseCommit();
-      await expect(adding).resolves.toBe(true);
-      const enqueueIndex = events.indexOf('enqueue');
-      expect(enqueueIndex).toBeGreaterThan(0);
-      expect(events.slice(0, enqueueIndex).filter(event => event === 'commit-start').length)
-        .toBe(events.slice(0, enqueueIndex).filter(event => event === 'commit-complete').length);
-    } finally {
-      disposePersistence();
-    }
-  });
-
-  it('does not dispatch when durable admission fails', async () => {
-    const disposePersistence = initializeDownloadPersistence('main');
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
-      if (command === 'db_commit_download_state') {
-        throw new Error('database unavailable');
-      }
-      if (command === 'enqueue_download') {
-        throw new Error('enqueue must not run');
-      }
-      return undefined;
-    });
-
-    try {
-      await expect(useDownloadStore.getState().addDownload({
-        id: 'durable-admission-failure',
-        url: 'https://example.com/file.bin',
-        fileName: 'file.bin',
-        category: 'Other',
-        dateAdded: ''
-      }, { type: 'start-now' })).resolves.toBe(false);
-      expect(useDownloadStore.getState().downloads[0]).toMatchObject({
-        id: 'durable-admission-failure',
-        status: 'failed',
-        lastError: 'database unavailable'
-      });
-      expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
-    } finally {
-      disposePersistence();
-    }
-  });
-
-  it('does not enqueue after a lifecycle is invalidated during durable admission', async () => {
-    const disposePersistence = initializeDownloadPersistence('main');
-    let releaseCommit!: () => void;
-    let signalCommitStarted!: () => void;
-    const commitStarted = new Promise<void>(resolve => {
-      signalCommitStarted = resolve;
-    });
-    const commitGate = new Promise<void>(resolve => {
-      releaseCommit = resolve;
-    });
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
-      if (command === 'db_commit_download_state') {
-        signalCommitStarted();
-        await commitGate;
-        return undefined;
-      }
-      if (command === 'enqueue_download') {
-        throw new Error('stale dispatch must not enqueue');
-      }
-      return undefined;
-    });
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'admission-lifecycle-race',
-        url: 'https://example.com/file.bin',
-        fileName: 'file.bin',
-        destination: '/tmp',
-        status: 'queued',
-        category: 'Other',
-        dateAdded: ''
-      }] as any[]
-    });
-
-    try {
-      const dispatching = dispatchItem('admission-lifecycle-race');
-      await commitStarted;
-      const pausing = useDownloadStore.getState().pauseDownload('admission-lifecycle-race');
-      releaseCommit();
-
-      await expect(dispatching).resolves.toBe(false);
-      await expect(pausing).resolves.toBeUndefined();
-      expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
-      expect(useDownloadStore.getState().downloads[0].status).toBe('paused');
-    } finally {
-      disposePersistence();
-    }
-  });
-
-  it('waits for the latest full snapshot when state changes during a durable commit', async () => {
-    const disposePersistence = initializeDownloadPersistence('main');
-    const persistedIds: string[] = [];
-    let releaseFirstCommit!: () => void;
-    let signalFirstCommit!: () => void;
-    const firstCommitStarted = new Promise<void>(resolve => {
-      signalFirstCommit = resolve;
-    });
-    const firstCommitGate = new Promise<void>(resolve => {
-      releaseFirstCommit = resolve;
-    });
-    let commitCount = 0;
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: any) => {
-      if (command === 'db_commit_download_state') {
-        persistedIds.push((JSON.parse(args.downloadsData) as Array<{ id: string }>)[0]?.id || 'empty');
-        commitCount += 1;
-        if (commitCount === 1) {
-          signalFirstCommit();
-          await firstCommitGate;
-        }
-        return undefined;
-      }
-      return undefined;
-    });
-    const first = {
-      id: 'commit-first',
-      url: 'https://example.com/first',
-      fileName: 'first.bin',
-      status: 'ready' as const,
-      category: 'Other' as const,
-      dateAdded: ''
-    };
-    const second = { ...first, id: 'commit-second', fileName: 'second.bin' };
-
-    try {
-      useDownloadStore.setState({ downloads: [first] as any[] });
-      await firstCommitStarted;
-      const committing = commitDownloadState();
-      useDownloadStore.setState({ downloads: [second] as any[] });
-      releaseFirstCommit();
-
-      await committing;
-      expect(persistedIds).toEqual(['commit-first', 'commit-second']);
-    } finally {
-      disposePersistence();
-    }
-  });
-
-  it('does not leave an older in-flight snapshot after state returns to the committed value', async () => {
-    const disposePersistence = initializeDownloadPersistence('main');
-    const persistedIds: string[] = [];
-    let releaseFirstCommit!: () => void;
-    let signalFirstCommit!: () => void;
-    const firstCommitStarted = new Promise<void>(resolve => {
-      signalFirstCommit = resolve;
-    });
-    const firstCommitGate = new Promise<void>(resolve => {
-      releaseFirstCommit = resolve;
-    });
-    let commitCount = 0;
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: any) => {
-      if (command === 'db_commit_download_state') {
-        const records = JSON.parse(args.downloadsData) as Array<{ id: string }>;
-        persistedIds.push(records[0]?.id || 'empty');
-        commitCount += 1;
-        if (commitCount === 1) {
-          signalFirstCommit();
-          await firstCommitGate;
-        }
-        return undefined;
-      }
-      return undefined;
-    });
-
-    try {
-      const first = {
-        id: 'snapshot-a',
-        url: 'https://example.com/a',
-        fileName: 'a.bin',
-        status: 'ready' as const,
-        category: 'Other' as const,
-        dateAdded: ''
-      };
-      const second = { ...first, id: 'snapshot-b', fileName: 'b.bin' };
-      useDownloadStore.setState({ downloads: [first] as any[] });
-      await firstCommitStarted;
-      useDownloadStore.setState({ downloads: [second] as any[] });
-      useDownloadStore.setState({ downloads: [first] as any[] });
-
-      releaseFirstCommit();
-      await flushDownloadPersistence();
-
-      expect(persistedIds).toEqual(['snapshot-a', 'snapshot-a']);
-    } finally {
-      disposePersistence();
-    }
-  });
-
-  it('waits for in-flight persistence before flushing the current state', async () => {
-    const id = 'flush-current-state';
-    const completed = {
-      id,
-      url: 'https://example.com/file',
-      fileName: 'file',
-      status: 'completed' as const,
-      category: 'Other' as const,
-      dateAdded: ''
-    };
-    useDownloadStore.setState({ downloads: [completed] as any[] });
-    const disposePersistence = initializeDownloadPersistence('main');
-    const events: string[] = [];
-    let releaseDownloadingCommit!: () => void;
-    let signalDownloadingCommitStarted!: () => void;
-    const downloadingCommitStarted = new Promise<void>(resolve => {
-      signalDownloadingCommitStarted = resolve;
-    });
-    const downloadingCommitGate = new Promise<void>(resolve => {
-      releaseDownloadingCommit = resolve;
-    });
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: any) => {
-      if (command === 'db_commit_download_state') {
-        const status = (JSON.parse(args.downloadsData) as Array<{ status: string }>)[0]?.status ?? 'empty';
-        events.push(`commit:${status}`);
-        if (status === 'downloading') {
-          signalDownloadingCommitStarted();
-          await downloadingCommitGate;
-        }
-        return undefined;
-      }
-      return undefined;
-    });
-
-    try {
-      await flushDownloadPersistence();
-      events.length = 0;
-      useDownloadStore.getState().updateDownload(id, { status: 'downloading' });
-      await downloadingCommitStarted;
-      useDownloadStore.getState().updateDownload(id, { status: 'completed' });
-
-      let flushResolved = false;
-      const flushing = flushDownloadPersistence().then(() => {
-        flushResolved = true;
-      });
-      await Promise.resolve();
-      await Promise.resolve();
-      expect(flushResolved).toBe(false);
-
-      releaseDownloadingCommit();
-      await flushing;
-      expect(events).toEqual(['commit:downloading', 'commit:completed']);
-    } finally {
-      releaseDownloadingCommit();
-      disposePersistence();
-    }
-  });
-
-  it('waits for durable queued state before resuming an existing lifecycle', async () => {
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'durable-resume',
-        url: 'https://example.com/resume.bin',
-        fileName: 'resume.bin',
-        status: 'paused',
-        category: 'Other',
-        dateAdded: '',
-        queueId: 'main'
-      }] as any[]
-    });
-    const disposePersistence = initializeDownloadPersistence('main');
-    let releaseCommit!: () => void;
-    let signalCommitStarted!: () => void;
-    const commitStarted = new Promise<void>(resolve => {
-      signalCommitStarted = resolve;
-    });
-    const commitGate = new Promise<void>(resolve => {
-      releaseCommit = resolve;
-    });
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
-      if (command === 'db_commit_download_state') {
-        signalCommitStarted();
-        await commitGate;
-        return undefined;
-      }
-      if (command === 'resume_download') return true;
-      return undefined;
-    });
-
-    try {
-      const resuming = useDownloadStore.getState().resumeDownload('durable-resume');
-      await commitStarted;
-      expect(ipc.invokeCommand).not.toHaveBeenCalledWith('resume_download', expect.anything());
-
-      releaseCommit();
-      await expect(resuming).resolves.toBe(true);
-      expect(ipc.invokeCommand).toHaveBeenCalledWith('resume_download', {
-        id: 'durable-resume',
-        queueId: 'main'
-      });
-    } finally {
-      disposePersistence();
-    }
-  });
-
-  it('normalizes new Torrent rows before resolving their default destination', async () => {
-    useDownloadStore.setState({
-      queues: [
-        { id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true },
-        { id: 'queue-torrents', name: 'Torrents', isMain: false }
-      ]
-    });
-    await useDownloadStore.getState().addDownload({
-      id: 'torrent-default',
-      url: 'magnet:?xt=urn:btih:default',
-      fileName: 'metadata',
-      category: 'Other',
-      dateAdded: '',
-      isTorrent: true
-    }, { type: 'add-to-queue', queueId: 'queue-torrents' });
-
-    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
-      category: 'Torrents',
-      destination: '/Users/test/Downloads/Torrents',
-      status: 'staged'
-    });
-  });
-
   it('inserts a newly staged queue item before paused rows', async () => {
-    useDownloadStore.setState({
-      queues: [
-        { id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true },
-        { id: 'queue-b', name: 'Downloads', isMain: false }
-      ]
-    });
     useDownloadStore.setState({
       downloads: [{
         id: 'already-paused',
@@ -2360,12 +1282,6 @@ describe('useDownloadStore', () => {
   });
 
   it('carries a media format estimate into numeric progress state', async () => {
-    useDownloadStore.setState({
-      queues: [
-        { id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true },
-        { id: 'queue-b', name: 'Downloads', isMain: false }
-      ]
-    });
     await useDownloadStore.getState().addDownload({
       id: 'media-estimate',
       url: 'https://youtube.com/watch?v=estimate',
@@ -2395,19 +1311,7 @@ describe('useDownloadStore', () => {
       url: 'https://example.com/start.bin',
       fileName: 'start.bin',
       category: 'Other',
-      dateAdded: '',
-      isTorrent: true,
-      torrentCheckIntegrity: true,
-      torrentTrackers: 'https://tracker.example/announce',
-      torrentExcludeTrackers: '*',
-      torrentTrackerConnectTimeout: 11,
-      torrentTrackerTimeout: 22,
-      torrentTrackerInterval: 33,
-      torrentStopTimeout: 300,
-      torrentPrioritizePiece: 'head=1M,tail=1M',
-      torrentEncryptionPolicy: 'force-encryption',
-      torrentFileIndices: [1],
-      torrentRemoveUnselectedFile: true
+      dateAdded: ''
     }, { type: 'start-now' });
 
     const item = useDownloadStore.getState().downloads[0];
@@ -2416,20 +1320,7 @@ describe('useDownloadStore', () => {
     expect(ipc.invokeCommand).toHaveBeenCalledWith(
       'enqueue_download',
       expect.objectContaining({
-        item: expect.objectContaining({
-          id: 'start-1',
-          torrent_check_integrity: true,
-          torrent_trackers: 'https://tracker.example/announce',
-          torrent_exclude_trackers: '*',
-          torrent_tracker_connect_timeout: 11,
-          torrent_tracker_timeout: 22,
-          torrent_tracker_interval: 33,
-          torrent_stop_timeout: 300,
-          torrent_prioritize_piece: 'head=1M,tail=1M',
-          torrent_encryption_policy: 'force-encryption',
-          torrent_file_indices: [1],
-          torrent_remove_unselected_file: true
-        })
+        item: expect.objectContaining({ id: 'start-1' })
       })
     );
   });
@@ -2608,383 +1499,6 @@ describe('useDownloadStore', () => {
     expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
   });
 
-  it('does not resume a paused backend lifecycle without restored credentials', async () => {
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'credential-resume-gated',
-        url: 'https://secure.example.com/file.bin',
-        fileName: 'file.bin',
-        status: 'paused',
-        category: 'Other',
-        dateAdded: '',
-        username: 'alice',
-        headers: 'Referer: https://example.com/page',
-        credentialsRequired: true
-      }] as any[],
-      backendRegisteredIds: new Set(['credential-resume-gated'])
-    });
-
-    await expect(useDownloadStore.getState().resumeDownload('credential-resume-gated'))
-      .resolves.toBe(false);
-
-    expect(ipc.invokeCommand).not.toHaveBeenCalledWith(
-      'resume_download',
-      expect.anything()
-    );
-    expect(useDownloadStore.getState().downloads[0].status).toBe('paused');
-  });
-
-  it('explicitly requeues a credential-marked download without saved credentials', async () => {
-    vi.mocked(useSettingsStore.getState).mockReturnValue({
-      ...useSettingsStore.getState(),
-      siteLogins: [{
-        id: 'example-login',
-        urlPattern: 'example.com',
-        username: 'alice',
-      }],
-      keychainAccessReady: true,
-    } as unknown as ReturnType<typeof useSettingsStore.getState>);
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'credentialless-resume',
-        url: 'https://example.com/file.bin',
-        fileName: 'file.bin',
-        destination: '/tmp',
-        status: 'paused',
-        category: 'Other',
-        dateAdded: '',
-        credentialsRequired: true,
-        hasBeenDispatched: true,
-        headers: 'Referer: https://example.com/page?session=secret#part\nAuthorization: Bearer secret\nUser-Agent: Browser',
-      }] as any[],
-      backendRegisteredIds: new Set(['credentialless-resume'])
-    });
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
-      if (command === 'get_pending_order') return ['credentialless-resume'];
-      if (command === 'enqueue_download') return { id: 'credentialless-resume', filename: 'file.bin' };
-      return undefined;
-    });
-
-    await expect(useDownloadStore.getState().resumeDownload('credentialless-resume', {
-      resumeWithoutCredentials: true
-    })).resolves.toBe(true);
-
-    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('resume_download', expect.anything());
-    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('get_keychain_password', expect.anything());
-    expect(ipc.invokeCommand).toHaveBeenCalledWith(
-      'enqueue_download',
-      expect.objectContaining({
-        item: expect.objectContaining({
-          username: null,
-          password: null,
-          cookies: null,
-          headers: 'Referer: https://example.com/page\nUser-Agent: Browser',
-        })
-      })
-    );
-    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
-      credentialsRequired: false,
-      status: 'queued',
-    });
-  });
-
-  it('replaces a stale registered queued lifecycle during credentialless retry', async () => {
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'credentialless-queued-lifecycle',
-        url: 'https://example.com/file.bin',
-        fileName: 'file.bin',
-        destination: '/tmp',
-        status: 'queued',
-        category: 'Other',
-        dateAdded: '',
-        credentialsRequired: true,
-        headers: 'Authorization: Bearer secret\nUser-Agent: Browser',
-      }] as any[],
-      backendRegisteredIds: new Set(['credentialless-queued-lifecycle'])
-    });
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
-      if (command === 'enqueue_download') {
-        return { id: 'credentialless-queued-lifecycle', filename: 'file.bin' };
-      }
-      if (command === 'get_pending_order') return [];
-      return undefined;
-    });
-
-    await expect(useDownloadStore.getState().resumeDownload('credentialless-queued-lifecycle', {
-      resumeWithoutCredentials: true
-    })).resolves.toBe(true);
-
-    expect(ipc.invokeCommand).toHaveBeenCalledWith(
-      'detach_download_for_reconfigure',
-      { id: 'credentialless-queued-lifecycle' }
-    );
-    expect(ipc.invokeCommand).toHaveBeenCalledWith(
-      'enqueue_download',
-      expect.objectContaining({
-        item: expect.objectContaining({
-          password: null,
-          cookies: null,
-          headers: 'User-Agent: Browser',
-        })
-      })
-    );
-  });
-
-  it('keeps credential recovery available when credentialless detach fails', async () => {
-    useDownloadStore.setState({
-      downloads: [{
-        id: 'credentialless-detach-failure',
-        url: 'https://example.com/file.bin',
-        fileName: 'file.bin',
-        destination: '/tmp',
-        status: 'paused',
-        category: 'Other',
-        dateAdded: '',
-        credentialsRequired: true,
-        username: 'alice',
-        password: 'secret',
-        headers: 'Authorization: Bearer secret\nUser-Agent: Browser',
-      }] as any[],
-      backendRegisteredIds: new Set(['credentialless-detach-failure'])
-    });
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
-      if (command === 'detach_download_for_reconfigure') {
-        throw new Error('detach unavailable');
-      }
-      return undefined;
-    });
-
-    await expect(useDownloadStore.getState().resumeDownload('credentialless-detach-failure', {
-      resumeWithoutCredentials: true
-    })).resolves.toBe(false);
-
-    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
-      status: 'paused',
-      credentialsRequired: true,
-      username: undefined,
-      password: undefined,
-      headers: 'User-Agent: Browser',
-    });
-  });
-
-  it('uses the configured media browser-cookie source during startup recovery', async () => {
-    const disposePersistence = initializeDownloadPersistence('main');
-    const id = 'startup-media-browser-cookies';
-    vi.mocked(useSettingsStore.getState).mockReturnValue({
-      ...useSettingsStore.getState(),
-      mediaCookieSource: 'chrome'
-    } as unknown as ReturnType<typeof useSettingsStore.getState>);
-    useDownloadStore.setState({
-      downloads: [{
-        id,
-        url: 'https://www.youtube.com/watch?v=browser-cookie-source',
-        fileName: 'video.mp4',
-        destination: '/tmp',
-        status: 'queued',
-        category: 'Movies',
-        dateAdded: '',
-        isMedia: true,
-        credentialsRequired: true,
-        hasBeenDispatched: true,
-        queueId: MAIN_QUEUE_ID,
-      }] as any[],
-      pendingOrder: [id],
-    });
-    let enqueuedItems: Array<Record<string, unknown>> = [];
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
-      if (command === 'enqueue_many') {
-        enqueuedItems = (args as { items: Array<Record<string, unknown>> }).items;
-        return [{ id, success: true, filename: 'video.mp4' }];
-      }
-      if (command === 'get_pending_order') return [id];
-      return undefined;
-    });
-
-    try {
-      await useDownloadStore.getState().resumePendingDownloads();
-
-      expect(enqueuedItems).toHaveLength(1);
-      expect(enqueuedItems[0]).toMatchObject({
-        id,
-        is_media: true,
-        cookie_source: 'chrome',
-      });
-      expect(useDownloadStore.getState().downloads[0].credentialsRequired).toBe(false);
-    } finally {
-      disposePersistence();
-    }
-  });
-
-  it('durably pauses startup media rows when no recoverable credential source exists', async () => {
-    const disposePersistence = initializeDownloadPersistence('main');
-    const id = 'startup-media-credential-block';
-    const persistedSnapshots: Array<Array<{ id: string; status: string }>> = [];
-    vi.mocked(useSettingsStore.getState).mockReturnValue({
-      ...useSettingsStore.getState(),
-      mediaCookieSource: 'none',
-      proxyMode: 'system'
-    } as unknown as ReturnType<typeof useSettingsStore.getState>);
-    useDownloadStore.setState({
-      downloads: [{
-        id,
-        url: 'https://www.youtube.com/watch?v=missing-cookie-source',
-        fileName: 'video.mp4',
-        destination: '/tmp',
-        status: 'queued',
-        category: 'Movies',
-        dateAdded: '',
-        isMedia: true,
-        credentialsRequired: true,
-        hasBeenDispatched: true,
-        queueId: MAIN_QUEUE_ID,
-      }] as any[],
-      pendingOrder: [id],
-    });
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
-      if (command === 'get_system_proxy') throw new Error('proxy unavailable');
-      if (command === 'db_commit_download_state') {
-        const downloads = JSON.parse((args as { downloadsData: string }).downloadsData) as Array<{
-          id: string;
-          status: string;
-        }>;
-        persistedSnapshots.push(downloads);
-        return undefined;
-      }
-      return undefined;
-    });
-
-    try {
-      await useDownloadStore.getState().resumePendingDownloads();
-      await flushDownloadPersistence();
-
-      expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_many', expect.anything());
-      expect(ipc.invokeCommand).not.toHaveBeenCalledWith('get_system_proxy', expect.anything());
-      expect(useDownloadStore.getState().downloads[0]).toMatchObject({
-        id,
-        status: 'paused',
-        credentialsRequired: true,
-      });
-      expect(useDownloadStore.getState().pendingOrder).not.toContain(id);
-      expect(persistedSnapshots.some(snapshot => snapshot.some(item =>
-        item.id === id && item.status === 'paused'
-      ))).toBe(true);
-    } finally {
-      disposePersistence();
-    }
-  });
-
-  it('treats an invalid media-cookie source as unavailable during recovery', async () => {
-    vi.mocked(useSettingsStore.getState).mockReturnValue({
-      ...useSettingsStore.getState(),
-      mediaCookieSource: undefined
-    } as unknown as ReturnType<typeof useSettingsStore.getState>);
-    const id = 'invalid-media-cookie-source';
-    useDownloadStore.setState({
-      downloads: [{
-        id,
-        url: 'https://www.youtube.com/watch?v=invalid-cookie-source',
-        fileName: 'video.mp4',
-        status: 'paused',
-        category: 'Movies',
-        dateAdded: '',
-        isMedia: true,
-        credentialsRequired: true,
-        hasBeenDispatched: true,
-      }] as any[],
-      backendRegisteredIds: new Set([id])
-    });
-
-    await expect(useDownloadStore.getState().resumeDownload(id)).resolves.toBe(false);
-
-    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('resume_download', expect.anything());
-    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
-    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
-      status: 'paused',
-      credentialsRequired: true
-    });
-  });
-
-  it('applies one explicit credentialless approval to queue and global starts', async () => {
-    const ids = ['queue-recovery-approved', 'global-recovery-approved'];
-    useDownloadStore.setState({
-      downloads: ids.map((id, index) => ({
-        id,
-        url: `https://www.youtube.com/watch?v=${id}`,
-        fileName: `${id}.mp4`,
-        destination: '/tmp',
-        status: 'paused',
-        category: 'Movies',
-        dateAdded: '',
-        isMedia: true,
-        credentialsRequired: true,
-        hasBeenDispatched: true,
-        queueId: `recovery-queue-${index}`,
-      })) as any[],
-      queues: [
-        { id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true },
-        { id: 'recovery-queue-0', name: 'Queue recovery', isMain: false },
-        { id: 'recovery-queue-1', name: 'Global recovery', isMain: false },
-      ],
-    });
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
-      if (command === 'enqueue_download') {
-        const item = (args as { item: { id: string; password: string | null; cookies: string | null; headers: string | null } }).item;
-        return { id: item.id, filename: item.id };
-      }
-      if (command === 'get_pending_order') return [];
-      return undefined;
-    });
-
-    await expect(useDownloadStore.getState().startQueue('recovery-queue-0', {
-      resumeWithoutCredentialsIds: [ids[0]]
-    })).resolves.toEqual([ids[0]]);
-    useDownloadStore.getState().updateDownload(ids[0], { status: 'completed' });
-    await expect(useDownloadStore.getState().startAll({
-      resumeWithoutCredentialsIds: [ids[1]]
-    })).resolves.toBe(1);
-
-    const enqueuedItems = vi.mocked(ipc.invokeCommand).mock.calls
-      .filter(([command]) => command === 'enqueue_download')
-      .map(([, args]) => (args as { item: Record<string, unknown> }).item);
-    expect(enqueuedItems).toHaveLength(2);
-    expect(enqueuedItems).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: ids[0], password: null, cookies: null, headers: null }),
-      expect.objectContaining({ id: ids[1], password: null, cookies: null, headers: null }),
-    ]));
-    expect(useDownloadStore.getState().downloads.every(item => item.credentialsRequired === false)).toBe(true);
-  });
-
-  it('does not let a media browser-cookie setting bypass normal-download credential recovery', async () => {
-    vi.mocked(useSettingsStore.getState).mockReturnValue({
-      ...useSettingsStore.getState(),
-      mediaCookieSource: 'chrome'
-    } as unknown as ReturnType<typeof useSettingsStore.getState>);
-    const id = 'normal-download-credential-isolation';
-    useDownloadStore.setState({
-      downloads: [{
-        id,
-        url: 'https://example.com/private.bin',
-        fileName: 'private.bin',
-        status: 'paused',
-        category: 'Other',
-        dateAdded: '',
-        credentialsRequired: true,
-        hasBeenDispatched: true,
-        queueId: MAIN_QUEUE_ID,
-      }] as any[],
-      backendRegisteredIds: new Set([id]),
-    });
-
-    await expect(useDownloadStore.getState().resumeDownload(id)).resolves.toBe(false);
-    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('resume_download', expect.anything());
-    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
-    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
-      status: 'paused',
-      credentialsRequired: true,
-    });
-  });
-
   it('preserves backend rejection reasons while auto-resuming saved queued items', async () => {
     vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
       if (cmd === 'db_get_all_queues') return [];
@@ -3018,100 +1532,6 @@ describe('useDownloadStore', () => {
       status: 'failed',
       lastError: 'aria2 addUri failed: connection refused'
     });
-  });
-
-  it('keeps startup destination permission failures retryable without backend registration', async () => {
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
-      if (cmd === 'db_get_all_queues') return [];
-      if (cmd === 'db_get_all_downloads') {
-        return [JSON.stringify({
-          id: 'startup-destination-access',
-          url: 'https://example.com/file.bin',
-          fileName: 'file.bin',
-          destination: '/protected',
-          status: 'queued',
-          category: 'Other',
-          dateAdded: '',
-          queueId: '00000000-0000-0000-0000-000000000001',
-          hasBeenDispatched: true
-        })];
-      }
-      if (cmd === 'enqueue_many') {
-        return [{
-          id: 'startup-destination-access',
-          success: false,
-          error: 'destination access retryable: grant Firelink access to the selected folder and retry'
-        }];
-      }
-      if (cmd === 'get_pending_order') return [];
-      return undefined;
-    });
-
-    await useDownloadStore.getState().initDB();
-    await useDownloadStore.getState().resumePendingDownloads();
-
-    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
-      status: 'ready',
-      hasBeenDispatched: false,
-      lastErrorKind: 'destinationAccess',
-      lastError: 'grant Firelink access to the selected folder and retry'
-    });
-    expect(useDownloadStore.getState().backendRegisteredIds.has('startup-destination-access')).toBe(false);
-  });
-
-  it('does not show allocation for a startup Torrent batch while it is merely queued', async () => {
-    let releaseEnqueue!: (value: Array<{ id: string; success: boolean; filename: string }>) => void;
-    const enqueue = new Promise<Array<{ id: string; success: boolean; filename: string }>>(resolve => {
-      releaseEnqueue = resolve;
-    });
-    vi.mocked(ipc.invokeCommand).mockImplementation((cmd: string) => {
-      if (cmd === 'db_get_all_queues') return Promise.resolve([]) as never;
-      if (cmd === 'db_get_all_downloads') {
-        return Promise.resolve([JSON.stringify({
-          id: 'startup-torrent-allocation',
-          url: 'torrent:0123456789abcdef0123456789abcdef01234567',
-          fileName: 'payload',
-          status: 'queued',
-          category: 'Other',
-          dateAdded: '',
-          queueId: '00000000-0000-0000-0000-000000000001',
-          hasBeenDispatched: true,
-          isTorrent: true,
-          torrentFileAllocation: 'prealloc',
-          username: 'browser-user',
-          password: 'secret',
-          headers: 'User-Agent: browser',
-          cookies: 'session=metadata-only',
-          credentialsRequired: true,
-        })]) as never;
-      }
-      if (cmd === 'enqueue_many') return enqueue as never;
-      if (cmd === 'get_pending_order') return Promise.resolve([]) as never;
-      return Promise.resolve(undefined) as never;
-    });
-
-    await useDownloadStore.getState().initDB();
-    const resume = useDownloadStore.getState().resumePendingDownloads();
-
-    await vi.waitFor(() => {
-      expect(useDownloadStore.getState().allocationPendingIds.has('startup-torrent-allocation')).toBe(false);
-      expect(ipc.invokeCommand).toHaveBeenCalledWith(
-        'enqueue_many',
-        expect.objectContaining({
-          items: [expect.objectContaining({
-            username: null,
-            password: null,
-            headers: null,
-            cookies: null,
-          })]
-        })
-      );
-    });
-
-    releaseEnqueue([{ id: 'startup-torrent-allocation', success: true, filename: 'payload' }]);
-    await resume;
-    expect(useDownloadStore.getState().allocationPendingIds.has('startup-torrent-allocation')).toBe(false);
-    expect(useDownloadStore.getState().downloads[0].credentialsRequired).toBeUndefined();
   });
 
   it('keeps all startup items retryable when system proxy resolution fails', async () => {
@@ -3908,161 +2328,6 @@ describe('useDownloadStore', () => {
     });
   });
 
-  it('passes permanent-if-unfinished only for the user Delete File action', async () => {
-    useDownloadStore.setState({
-      downloads: [
-        { id: 'unfinished-delete', url: 'https://example.com/file', fileName: 'file', status: 'paused', category: 'Other', dateAdded: '' }
-      ] as any[]
-    });
-    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
-
-    await useDownloadStore.getState().removeDownload(
-      'unfinished-delete',
-      true,
-      false,
-      'permanentIfUnfinished'
-    );
-
-    expect(ipc.invokeCommand).toHaveBeenCalledWith('remove_download', {
-      id: 'unfinished-delete',
-      deleteAssets: true,
-      preserveResumable: false,
-      assetRemovalPolicy: 'permanentIfUnfinished'
-    });
-  });
-
-  it('flushes the current Delete File status before invoking native removal', async () => {
-    const disposePersistence = initializeDownloadPersistence('main');
-    const events: string[] = [];
-    let releaseCommit!: () => void;
-    let signalCommitStarted!: () => void;
-    const commitStarted = new Promise<void>(resolve => {
-      signalCommitStarted = resolve;
-    });
-    const commitGate = new Promise<void>(resolve => {
-      releaseCommit = resolve;
-    });
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: any) => {
-      if (command === 'db_commit_download_state') {
-        const status = (JSON.parse(args.downloadsData) as Array<{ status: string }>)[0]?.status ?? 'empty';
-        events.push(`commit:${status}`);
-        signalCommitStarted();
-        await commitGate;
-        return undefined;
-      }
-      if (command === 'remove_download') {
-        events.push('remove');
-      }
-      return undefined;
-    });
-    useDownloadStore.setState({
-      downloads: [
-        { id: 'completed-delete', url: 'https://example.com/file', fileName: 'file', status: 'completed', category: 'Other', dateAdded: '' }
-      ] as any[]
-    });
-
-    try {
-      await commitStarted;
-      const removing = useDownloadStore.getState().removeDownload(
-        'completed-delete',
-        true,
-        false,
-        'permanentIfUnfinished'
-      );
-
-      await Promise.resolve();
-      expect(events).toEqual(['commit:completed']);
-
-      releaseCommit();
-      await removing;
-      expect(events).toEqual(['commit:completed', 'remove', 'commit:empty']);
-    } finally {
-      releaseCommit();
-      disposePersistence();
-    }
-  });
-
-  it('waits for an in-flight dispatch before flushing Delete File status', async () => {
-    useDownloadStore.setState({
-      downloads: [
-        {
-          id: 'dispatch-delete-race',
-          url: 'https://example.com/file',
-          fileName: 'file',
-          destination: '/tmp',
-          status: 'ready',
-          category: 'Other',
-          dateAdded: ''
-        }
-      ] as any[]
-    });
-    const disposePersistence = initializeDownloadPersistence('main');
-    const events: string[] = [];
-    let releaseEnqueue!: () => void;
-    let signalEnqueueStarted!: () => void;
-    let releaseCompletedCommit!: () => void;
-    let signalCompletedCommitStarted!: () => void;
-    const enqueueStarted = new Promise<void>(resolve => {
-      signalEnqueueStarted = resolve;
-    });
-    const enqueueGate = new Promise<void>(resolve => {
-      releaseEnqueue = resolve;
-    });
-    const completedCommitStarted = new Promise<void>(resolve => {
-      signalCompletedCommitStarted = resolve;
-    });
-    const completedCommitGate = new Promise<void>(resolve => {
-      releaseCompletedCommit = resolve;
-    });
-
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: any) => {
-      if (command === 'db_commit_download_state') {
-        const status = (JSON.parse(args.downloadsData) as Array<{ status: string }>)[0]?.status ?? 'empty';
-        events.push(`commit:${status}`);
-        if (status === 'completed') {
-          signalCompletedCommitStarted();
-          await completedCommitGate;
-        }
-        return undefined;
-      }
-      if (command === 'enqueue_download') {
-        signalEnqueueStarted();
-        await enqueueGate;
-        useDownloadStore.getState().updateDownload('dispatch-delete-race', { status: 'completed' });
-        return { id: 'dispatch-delete-race', filename: 'file' };
-      }
-      if (command === 'remove_download') {
-        events.push(args.deleteAssets ? 'remove-user' : 'remove-stale');
-      }
-      if (command === 'get_pending_order') return [];
-      return undefined;
-    });
-
-    try {
-      const dispatching = dispatchItem('dispatch-delete-race');
-      await enqueueStarted;
-      const removing = useDownloadStore.getState().removeDownload(
-        'dispatch-delete-race',
-        true,
-        false,
-        'permanentIfUnfinished'
-      );
-
-      releaseEnqueue();
-      await completedCommitStarted;
-      await expect(dispatching).resolves.toBe(false);
-      expect(events).not.toContain('remove-user');
-
-      releaseCompletedCommit();
-      await removing;
-      expect(events.indexOf('commit:completed')).toBeLessThan(events.indexOf('remove-user'));
-    } finally {
-      releaseEnqueue();
-      releaseCompletedCommit();
-      disposePersistence();
-    }
-  });
-
   it('starts staged queue items in their persisted queue order', async () => {
     useDownloadStore.setState({
       downloads: [
@@ -4100,7 +2365,6 @@ describe('useDownloadStore', () => {
         { url: 'https://accounts.google.com/', cookies: 'SID=account-session' }
       ],
       media: false,
-      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -4139,7 +2403,6 @@ describe('useDownloadStore', () => {
 	   cookies: null,
       cookie_scopes: null,
       media: false,
-      torrent: false,
       batch: false,
       batch_name: null
 	  });
@@ -4163,7 +2426,6 @@ describe('useDownloadStore', () => {
 	   cookies: 'session=secret',
       cookie_scopes: null,
       media: false,
-      torrent: false,
       batch: false,
       batch_name: null
 	  });
@@ -4185,10 +2447,9 @@ describe('useDownloadStore', () => {
       silent: false,
       filename: null,
       headers: null,
-      cookies: 'shared=session',
+      cookies: null,
       cookie_scopes: null,
       media: false,
-      torrent: false,
       batch: true,
       batch_name: 'Example Gallery'
     });
@@ -4201,7 +2462,6 @@ describe('useDownloadStore', () => {
       'https://example.com/one.zip\nhttps://example.com/two.zip'
     );
     expect(useDownloadStore.getState().pendingAddBatch).toBe(false);
-    expect(useDownloadStore.getState().pendingAddCookies).toBe('');
   });
 
   it('keeps each extension handoff context attached to its own URL while the Add Modal is open', async () => {
@@ -4214,7 +2474,6 @@ describe('useDownloadStore', () => {
       cookies: 'first=session',
       cookie_scopes: null,
       media: false,
-      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -4227,7 +2486,6 @@ describe('useDownloadStore', () => {
       cookies: 'second=session',
       cookie_scopes: null,
       media: false,
-      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -4263,11 +2521,10 @@ describe('useDownloadStore', () => {
       referer: 'https://adult.example/watch/123',
       silent: false,
       filename: null,
-      headers: `Cookie: stale=${'x'.repeat(64 * 1024)}\nCookie2: stale=1\nAuthorization: Bearer stale\nProxy-Authorization: Basic stale\nSet-Cookie: stale=1\nSet-Cookie2: stale=1\nX-Api-Key: stale\nX-Auth-Token: stale\nX-Request-Signature: stale\nX-Session: stale\nUser-Agent: Firefox Test`,
+      headers: `Cookie: stale=${'x'.repeat(64 * 1024)}\nCookie2: stale=1\nAuthorization: Bearer stale\nProxy-Authorization: Basic stale\nSet-Cookie: stale=1\nSet-Cookie2: stale=1\nUser-Agent: Firefox Test`,
       cookies: `oversized=${'x'.repeat(64 * 1024)}`,
       cookie_scopes: null,
       media: true,
-      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -4290,7 +2547,6 @@ describe('useDownloadStore', () => {
       cookies: 'session=secret',
       cookie_scopes: null,
       media: false,
-      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -4310,7 +2566,6 @@ describe('useDownloadStore', () => {
         { url: 'https://media.example/', cookies: 'session=secret' }
       ],
       media: true,
-      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -4330,7 +2585,6 @@ describe('useDownloadStore', () => {
       cookies: 'session=secret',
       cookie_scopes: null,
       media: false,
-      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -4343,7 +2597,6 @@ describe('useDownloadStore', () => {
       cookies: null,
       cookie_scopes: null,
       media: false,
-      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -4374,7 +2627,6 @@ describe('useDownloadStore', () => {
       cookies: 'session=secret',
       cookie_scopes: null,
       media: true,
-      torrent: false,
       batch: false,
       batch_name: null
     });
@@ -4397,7 +2649,6 @@ describe('useDownloadStore', () => {
       cookies: null,
       cookie_scopes: null,
       media: false,
-      torrent: false,
       batch: false,
       batch_name: null
     });

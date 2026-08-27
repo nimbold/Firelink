@@ -46,25 +46,6 @@ describe('log entry streaming', () => {
     expect(liveLogEntry(3, 'Authorization: Bearer secret').message).not.toContain('secret');
   });
 
-  it('redacts custom session and signature headers from live output', () => {
-    const redacted = redactLogText('X-Request-Signature: signature-secret X-Session: session-secret');
-
-    expect(redacted).not.toContain('signature-secret');
-    expect(redacted).not.toContain('session-secret');
-  });
-
-  it('redacts legacy cookie headers and compound custom values', () => {
-    const redacted = redactLogText('Set-Cookie2: legacy-cookie X-Session: id=session-secret; key=compound-secret');
-
-    expect(redacted).not.toContain('legacy-cookie');
-    expect(redacted).not.toContain('session-secret');
-    expect(redacted).not.toContain('compound-secret');
-
-    const equalsRedacted = redactLogText('Cookie2=a=1; user_id=secret; state=xyz');
-    expect(equalsRedacted).not.toContain('user_id=secret');
-    expect(equalsRedacted).not.toContain('state=xyz');
-  });
-
   it('redacts persisted content and quoted credential fields', () => {
     const persisted = persistedLogEntry('{"api_key":"json-secret","path":"/Users/nima/file"}', '/Users/nima');
 
@@ -78,19 +59,6 @@ describe('log entry streaming', () => {
       [entry('one'), entry('repeat'), entry('three')],
       [entry('three'), entry('repeat'), entry('four')]
     ).map(item => item.message)).toEqual(['one', 'repeat', 'three', 'repeat', 'four']);
-  });
-
-  it('deduplicates a persisted line and its differently formatted live event', () => {
-    const snapshot = [persistedLogEntry('[2026-07-10][18:00:00][INFO][firelink] repeat')];
-    const live = [liveLogEntry(3, 'repeat', new Date('2026-07-10T14:30:00Z'))];
-
-    expect(mergeLogSnapshotAndLiveEntries(snapshot, live)).toEqual(snapshot);
-  });
-
-  it('preserves compact JSON delimiters while redacting URL queries', () => {
-    const redacted = redactLogText('{"url":"https://example.com/file?token=secret","next":1}');
-
-    expect(redacted).toBe('{"url":"https://example.com/file?[redacted]","next":1}');
   });
 
   it('bounds burst updates to the newest entries', () => {

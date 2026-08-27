@@ -40,8 +40,6 @@ tauri-plugin-clipboard-manager = "2.3.2"
 sysinfo = "0.39.3"
 hmac = "0.13"
 sha2 = "0.11"
-sha1 = "0.10"
-base64 = "0.22"
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
 tempfile = "3"
@@ -65,11 +63,9 @@ keyring-core = "1.0.0"
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.1", features = ["keychain"] }
 objc = "0.2.7"
-unicode-normalization = "0.1.25"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store = "1.1.0"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus-secret-service-keyring-store = { version = "1.0.0", features = ["crypto-rust"] }

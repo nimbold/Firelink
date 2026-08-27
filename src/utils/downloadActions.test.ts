@@ -20,7 +20,7 @@ describe('download action policy', () => {
       expect(canStartDownload(status)).toBe(true);
       expect(canPauseDownload(status)).toBe(false);
     }
-    for (const status of ['staged', 'queued', 'downloading', 'seeding', 'processing', 'verifying', 'retrying'] as const) {
+    for (const status of ['staged', 'queued', 'downloading', 'processing', 'retrying'] as const) {
       expect(canPauseDownload(status)).toBe(true);
     }
     for (const status of ['queued', 'downloading', 'processing', 'retrying'] as const) {
@@ -33,15 +33,12 @@ describe('download action policy', () => {
     expect(canRedownload('failed')).toBe(true);
     expect(canRedownload('paused')).toBe(true);
     expect(canRedownload('downloading')).toBe(false);
-    expect(canRedownload('seeding')).toBe(false);
   });
 
   it('only exposes pause or resume for the details-view toggle', () => {
     expect(getPauseResumeAction('queued')).toBe('pause');
     expect(getPauseResumeAction('downloading')).toBe('pause');
     expect(getPauseResumeAction('processing')).toBe('pause');
-    expect(getPauseResumeAction('verifying')).toBe('pause');
-    expect(getPauseResumeAction('seeding')).toBe('pause');
     expect(getPauseResumeAction('retrying')).toBe('pause');
     expect(getPauseResumeAction('paused')).toBe('resume');
 
@@ -56,7 +53,6 @@ describe('download action policy', () => {
     expect(startActionLabel('failed')).toBe('Start');
     expect(startActionLabel('paused')).toBe('Resume');
     expect(isTransferLocked('processing')).toBe(true);
-    expect(isTransferLocked('seeding')).toBe(true);
     expect(isIdentityLocked('completed')).toBe(true);
     expect(isTransferLocked('completed')).toBe(false);
   });

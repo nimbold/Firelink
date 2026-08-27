@@ -4,12 +4,10 @@ import {
   isMediaUrl
 } from './downloads';
 import type { MediaPlaylistMetadata } from '../bindings/MediaPlaylistMetadata';
-import type { TorrentFile } from '../bindings/TorrentFile';
-import type { TorrentWebSeedDraft } from './downloads';
 import i18n from '../i18n';
 import { localePluralVariant } from '../i18n/locales';
 
-export type MetadataStatus = 'loading' | 'ready' | 'fallback' | 'metadata-error' | 'invalid';
+export type MetadataStatus = 'loading' | 'ready' | 'metadata-error' | 'invalid';
 
 export interface AddMediaFormat {
   name: string;
@@ -54,25 +52,6 @@ export interface AddDownloadDraftRow {
   playlistError?: string;
   metadataBlockedReason?: 'unsafe-url';
   selected?: boolean;
-  /** Opaque native fingerprint captured for an exact unmanaged-file replace. */
-  replaceExistingFingerprint?: string;
-  isTorrent?: boolean;
-  torrentPath?: string;
-  torrentCacheId?: string;
-  torrentInfoHash?: string;
-  torrentFiles?: TorrentFile[];
-  /** Best-effort metadata enrichment state for directly admitted magnets. */
-  torrentMetadataStatus?: 'loading' | 'ready' | 'error';
-  selectedTorrentFileIndices?: number[];
-  torrentSeedTime?: number;
-  torrentSeedRatio?: number;
-  torrentUploadLimit?: string;
-  torrentMaxPeers?: number;
-  torrentPeerSpeedLimit?: string;
-  torrentCheckIntegrity?: boolean;
-  torrentTrackers?: string;
-  torrentExcludeTrackers?: string;
-  torrentWebSeedRows?: TorrentWebSeedDraft[];
 }
 
 /**
@@ -82,64 +61,12 @@ export interface AddDownloadDraftRow {
  */
 export const durableDownloadUrl = (sourceUrl: string): string => sourceUrl.trim();
 
-const ALLOWED_SCHEMES = new Set(['http:', 'https:', 'ftp:', 'sftp:', 'magnet:']);
-
-const isLocalTorrentPath = (value: string): boolean => {
-  try {
-    const parsed = new URL(value);
-    if (parsed.protocol === 'file:') {
-      return parsed.pathname.toLowerCase().endsWith('.torrent');
-    }
-  } catch {
-    // A native Windows path is not a URL, even though URL parsing may treat
-    // its drive letter as a scheme.
-  }
-  return value.toLowerCase().endsWith('.torrent')
-    && (value.startsWith('/') || /^[a-z]:[\\/]/i.test(value));
-};
-
-export const isRemoteTorrentUrl = (value: string): boolean => {
-  try {
-    const parsed = new URL(value);
-    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
-      && parsed.pathname.toLowerCase().endsWith('.torrent');
-  } catch {
-    return false;
-  }
-};
-
-export const isMagnetUrl = (value: string): boolean => {
-  try {
-    return new URL(value).protocol === 'magnet:';
-  } catch {
-    return false;
-  }
-};
-
-export const isMagnetTorrentRow = (
-  row: Pick<AddDownloadDraftRow, 'isTorrent' | 'sourceUrl'>
-): boolean => row.isTorrent === true && isMagnetUrl(row.sourceUrl);
-
-export const isAddDownloadMetadataLoading = (
-  row: Pick<AddDownloadDraftRow, 'status' | 'isTorrent' | 'sourceUrl' | 'torrentMetadataStatus'>
-): boolean => row.status === 'loading'
-  || (isMagnetTorrentRow(row) && row.torrentMetadataStatus === 'loading');
-
-export const isAddDownloadMetadataError = (
-  row: Pick<AddDownloadDraftRow, 'status' | 'isTorrent' | 'sourceUrl' | 'torrentMetadataStatus'>
-): boolean => row.status === 'metadata-error'
-  || (isMagnetTorrentRow(row) && row.torrentMetadataStatus === 'error');
-
-export const isMetadataRefreshableRow = (row: AddDownloadDraftRow): boolean =>
-  row.status !== 'loading'
-  && (row.status === 'metadata-error'
-    || (isMagnetTorrentRow(row) && row.torrentMetadataStatus !== 'loading'));
+const ALLOWED_SCHEMES = new Set(['http:', 'https:', 'ftp:', 'sftp:']);
 
 type ParsedInput = {
   identity: string;
   sourceUrl: string;
   valid: boolean;
-  isTorrent?: boolean;
   isPlaylist?: boolean;
   playlistSourceUrl?: string;
   playlistTitle?: string;
@@ -188,18 +115,10 @@ const parseInputLines = (
 
     let sourceUrl = line;
     let valid = false;
-    let isTorrent = false;
-    if (isLocalTorrentPath(line)) {
-      valid = true;
-      isTorrent = true;
-    }
     try {
-      if (!isTorrent) {
-        const url = new URL(line);
-        valid = ALLOWED_SCHEMES.has(url.protocol);
-        isTorrent = valid && (url.protocol === 'magnet:' || isRemoteTorrentUrl(sourceUrl));
-        if (valid) sourceUrl = url.href;
-      }
+      const url = new URL(line);
+      valid = ALLOWED_SCHEMES.has(url.protocol);
+      if (valid) sourceUrl = url.href;
     } catch {
       valid = false;
     }
@@ -247,7 +166,6 @@ const parseInputLines = (
       identity,
       sourceUrl,
       valid,
-      isTorrent,
       isPlaylist: valid && isYouTubePlaylistUrl(sourceUrl),
       requestContextVersion: valid ? requestContextVersions[sourceUrl] : undefined,
       selected: selectedBySourceUrl[sourceUrl] !== false
@@ -266,8 +184,7 @@ export const reconcileDownloadRows = (
   requestFilenames: Readonly<Record<string, string>> = {},
   requestContextVersions: Readonly<Record<string, number>> = {},
   playlistExpansions: PlaylistExpansions = {},
-  selectedBySourceUrl: Readonly<Record<string, boolean>> = {},
-  forceTorrentUrls: ReadonlySet<string> = new Set()
+  selectedBySourceUrl: Readonly<Record<string, boolean>> = {}
 ): AddDownloadDraftRow[] => {
   const inputs = parseInputLines(
     rawText,
@@ -281,7 +198,6 @@ export const reconcileDownloadRows = (
     const preserved = existing.get(input.sourceUrl);
     if (preserved) {
       const forcedMedia = input.valid && forceMediaUrls.has(input.sourceUrl);
-      const forcedTorrent = input.valid && forceTorrentUrls.has(input.sourceUrl);
       const requestContextVersion = input.requestContextVersion;
       const contextChanged = requestContextVersion !== undefined
         && requestContextVersion !== preserved.requestContextVersion;
@@ -290,11 +206,7 @@ export const reconcileDownloadRows = (
         || preserved.playlistIndex !== input.playlistIndex
         || preserved.playlistCount !== input.playlistCount
         || preserved.playlistEntryTitle !== input.playlistEntryTitle;
-      if ((forcedMedia && !preserved.isMedia)
-        || (forcedTorrent && !preserved.isTorrent)
-        || contextChanged
-        || playlistContextChanged) {
-        const nextGeneration = preserved.generation + 1;
+      if ((forcedMedia && !preserved.isMedia) || contextChanged || playlistContextChanged) {
         const requestedFilename = input.playlistSourceUrl
           ? `${playlistFilePrefix(input.playlistIndex, input.playlistCount)}${input.playlistEntryTitle || 'video'}`
           : requestFilenames[input.sourceUrl];
@@ -303,12 +215,10 @@ export const reconcileDownloadRows = (
           file: contextChanged || playlistContextChanged
             ? canonicalizeDownloadFileName(requestedFilename || fileNameFromUrl(input.sourceUrl))
             : preserved.file,
-          status: input.isTorrent && isMagnetUrl(input.sourceUrl) ? 'ready' : 'loading',
-          torrentMetadataStatus: input.isTorrent && isMagnetUrl(input.sourceUrl) ? 'loading' : undefined,
-          generation: nextGeneration,
+          status: 'loading',
+          generation: preserved.generation + 1,
           requestContextVersion,
           isMedia: preserved.isMedia || forcedMedia || Boolean(input.playlistSourceUrl),
-          isTorrent: input.isTorrent || forcedTorrent,
           size: undefined,
           sizeBytes: undefined,
           resumable: undefined,
@@ -325,33 +235,7 @@ export const reconcileDownloadRows = (
           playlistCount: input.playlistCount,
           playlistEntryTitle: input.playlistEntryTitle,
           playlistError: undefined,
-          metadataBlockedReason: undefined,
-          torrentPath: undefined,
-          torrentCacheId: input.isTorrent || forcedTorrent ? `${preserved.id}-${nextGeneration}` : undefined,
-          torrentInfoHash: undefined,
-          torrentFiles: undefined,
-          selectedTorrentFileIndices: undefined
-        };
-      }
-      // Direct magnets are admission-ready even when their optional metadata
-      // preview was never requested. Migrate drafts created by the old
-      // fallback classification so the Add window cannot imply that the
-      // transfer itself is a fallback download.
-      if (preserved.status === 'fallback'
-        && input.valid
-        && input.isTorrent
-        && isMagnetUrl(input.sourceUrl)) {
-        return {
-          ...preserved,
-          downloadUrl: input.sourceUrl,
-          status: 'ready',
-          isTorrent: true,
-          torrentMetadataStatus: 'loading',
-          torrentPath: undefined,
-          torrentCacheId: undefined,
-          torrentInfoHash: undefined,
-          torrentFiles: undefined,
-          selectedTorrentFileIndices: undefined
+          metadataBlockedReason: undefined
         };
       }
       return preserved;
@@ -365,21 +249,13 @@ export const reconcileDownloadRows = (
       requestedFilename || fileNameFromUrl(input.sourceUrl)
     );
 
-    const id = createId();
-    const generation = input.valid ? 1 : 0;
     return {
-      id,
+      id: createId(),
       sourceUrl: input.sourceUrl,
       downloadUrl: input.sourceUrl,
       file: fallback,
-      // A magnet already contains the transfer identity. Metadata is useful
-      // for the preview, but it is not required to admit the transfer. Keep
-      // the probe best-effort so the Add window never blocks a valid magnet
-      // on the bounded native probe timeout.
-      status: input.valid
-        ? input.isTorrent && isMagnetUrl(input.sourceUrl) ? 'ready' : 'loading'
-        : 'invalid',
-      generation,
+      status: input.valid ? 'loading' : 'invalid',
+      generation: input.valid ? 1 : 0,
       requestContextVersion: input.requestContextVersion,
       isMedia: input.valid && (
         Boolean(input.isPlaylist)
@@ -387,7 +263,6 @@ export const reconcileDownloadRows = (
         || forceMediaUrls.has(input.sourceUrl)
         || isMediaUrl(input.sourceUrl)
       ),
-      isTorrent: input.valid && (Boolean(input.isTorrent) || forceTorrentUrls.has(input.sourceUrl)),
       isPlaylist: input.isPlaylist,
       playlistSourceUrl: input.playlistSourceUrl,
       playlistTitle: input.playlistTitle,
@@ -395,12 +270,6 @@ export const reconcileDownloadRows = (
       playlistCount: input.playlistCount,
       playlistEntryTitle: input.playlistEntryTitle,
       metadataBlockedReason: undefined,
-      torrentCacheId: input.valid && (input.isTorrent || forceTorrentUrls.has(input.sourceUrl))
-        ? `${id}-${generation}`
-        : undefined,
-      torrentMetadataStatus: input.valid && input.isTorrent && isMagnetUrl(input.sourceUrl)
-        ? 'loading'
-        : undefined,
       selected: input.selected !== false
     };
   });
@@ -448,35 +317,23 @@ export const updateRowIfCurrent = (
 );
 
 export const refreshFailedMetadataRows = (
-  rows: AddDownloadDraftRow[],
-  selectedOnly = false
-): AddDownloadDraftRow[] => rows.map(row => {
-  if ((selectedOnly && row.selected === false) || !isMetadataRefreshableRow(row)) return row;
-  const generation = row.generation + 1;
-  return {
-    ...row,
-    status: 'loading',
-    generation,
-    metadataBlockedReason: undefined,
-    ...(row.isTorrent
-      ? {
-        torrentPath: undefined,
-        torrentCacheId: `${row.id}-${generation}`,
-        torrentInfoHash: undefined,
-        torrentFiles: undefined,
-        torrentMetadataStatus: isMagnetTorrentRow(row) ? 'loading' : undefined,
-        selectedTorrentFileIndices: undefined
+  rows: AddDownloadDraftRow[]
+): AddDownloadDraftRow[] => rows.map(row =>
+  row.status === 'metadata-error'
+    ? {
+        ...row,
+        status: 'loading',
+        generation: row.generation + 1,
+        metadataBlockedReason: undefined
       }
-      : {})
-  };
-});
+    : row
+);
 
 export const canSubmitMetadataRows = (rows: AddDownloadDraftRow[]): boolean => {
   const selectedRows = rows.filter(row => row.selected !== false);
   return selectedRows.length > 0
   && selectedRows.every(row =>
     row.status === 'ready'
-    || (row.isTorrent === true && row.status === 'fallback')
     || (!row.isMedia && row.status === 'metadata-error' && !row.metadataBlockedReason)
   );
 };
@@ -676,13 +533,13 @@ export const metadataSummaryState = (rows: AddDownloadDraftRow[]): MetadataSumma
   const loading = selectedRows.filter(row => row.status === 'loading').length;
   if (loading > 0) return { type: 'loading', count: loading };
 
-  const failed = selectedRows.filter(row => row.status === 'metadata-error' || row.status === 'fallback').length;
+  const failed = selectedRows.filter(row => row.status === 'metadata-error').length;
   const failedMedia = selectedRows.filter(row => row.status === 'metadata-error' && row.isMedia).length;
   const blocked = selectedRows.filter(row => row.metadataBlockedReason === 'unsafe-url').length;
   const ready = selectedRows.filter(row => row.status === 'ready').length;
   if (blocked > 0) return { type: 'unsafe', count: blocked };
   if (failedMedia > 0) return { type: 'media-error', count: failedMedia };
-  if (failed === selectedRows.length && !selectedRows.some(row => row.status === 'fallback')) return { type: 'all-error' };
+  if (failed === selectedRows.length) return { type: 'all-error' };
   if (failed > 0) return { type: 'fallback', ready, failed };
   return { type: 'ready', count: ready };
 };
@@ -726,7 +583,7 @@ export const metadataSummaryMessage = (rows: AddDownloadDraftRow[]): string => {
     );
   }
 
-  const failed = selectedRows.filter(row => row.status === 'metadata-error' || row.status === 'fallback').length;
+  const failed = selectedRows.filter(row => row.status === 'metadata-error').length;
   const failedMedia = selectedRows.filter(row => row.status === 'metadata-error' && row.isMedia).length;
   const blocked = selectedRows.filter(row => row.metadataBlockedReason === 'unsafe-url').length;
   const ready = selectedRows.filter(row => row.status === 'ready').length;
@@ -746,7 +603,7 @@ export const metadataSummaryMessage = (rows: AddDownloadDraftRow[]): string => {
       () => i18n.t($ => $.addDownloads.mediaMetadataUnavailableSummaryMany, { count: failedMedia })
     );
   }
-  if (failed === selectedRows.length && !selectedRows.some(row => row.status === 'fallback')) {
+  if (failed === selectedRows.length) {
     return i18n.t($ => $.addDownloads.metadataUnavailableFallback);
   }
   if (failed > 0) {

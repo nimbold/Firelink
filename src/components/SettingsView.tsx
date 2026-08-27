@@ -34,24 +34,8 @@ import {
 import { usePlatformInfo } from '../utils/platform';
 import { isTrustedFirelinkReleaseUrl } from '../utils/releaseUrls';
 import { normalizeCustomProxy } from '../store/useDownloadStore';
-import { shouldApplyTorrentNetworkInputResult } from '../utils/torrentNetworkInput';
-import {
-  DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT,
-  MAX_TORRENT_DHT_MESSAGE_TIMEOUT,
-  MIN_TORRENT_DHT_MESSAGE_TIMEOUT,
-  DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS,
-  MAX_TORRENT_MAX_CONCURRENT_SEEDS,
-  MIN_TORRENT_MAX_CONCURRENT_SEEDS,
-  MAX_TORRENT_MAX_OPEN_FILES,
-  MIN_TORRENT_MAX_OPEN_FILES,
-  normalizeSpeedLimitForBackend,
-  normalizeTorrentDhtMessageTimeout,
-  normalizeTorrentMaxConcurrentSeeds,
-  normalizeTorrentMaxOpenFiles
-} from '../utils/downloads';
 import { useTranslation } from 'react-i18next';
 import { localeDirection, resolveAppLocale } from '../i18n';
-import { createEngineStatusRequestTracker } from '../utils/engineStatusRequests';
 
 const settingsTabs: { type: SettingsTab; icon: typeof Download }[] = [
   { type: 'downloads', icon: Download },
@@ -101,129 +85,8 @@ type ManualUpdateStatus =
 
 type SystemProxyStatus = 'idle' | 'checking' | 'detected' | 'none' | 'error';
 
-type TorrentNetworkTextField =
-  | 'torrentListenPort'
-  | 'torrentDhtListenPort'
-  | 'torrentExternalIp'
-  | 'torrentDhtEntryPoint'
-  | 'torrentDhtEntryPoint6'
-  | 'torrentDhtListenAddr6'
-  | 'torrentLpdInterface'
-  | 'torrentPeerIdPrefix'
-  | 'torrentPeerAgent'
-  | 'torrentBindAddress'
-  | 'aria2DiskCache';
-
-const TorrentNetworkTextInput = ({
-  field,
-  value,
-  label,
-  description,
-  placeholder,
-  onCommit,
-  onError,
-  maxLength,
-  className = 'app-control settings-network-input'
-}: {
-  field: TorrentNetworkTextField;
-  value: string;
-  label: string;
-  description: string;
-  placeholder?: string;
-  onCommit: (value: string) => boolean | void;
-  onError: (error: unknown) => void;
-  maxLength?: number;
-  className?: string;
-}) => {
-  const [draft, setDraft] = useState(value);
-  const commitId = useRef(0);
-  const editId = useRef(0);
-
-  useEffect(() => {
-    editId.current += 1;
-    setDraft(value);
-  }, [value]);
-
-  const commit = async () => {
-    const requestId = ++commitId.current;
-    const editRequestId = editId.current;
-    try {
-      const normalized = await invoke('canonicalize_torrent_network_setting', {
-        field,
-        value: draft
-      });
-      if (!shouldApplyTorrentNetworkInputResult(
-        requestId,
-        commitId.current,
-        editRequestId,
-        editId.current
-      )) return;
-      if (onCommit(normalized) === false) {
-        setDraft(value);
-        onError(new Error('This Torrent network value conflicts with another setting.'));
-        return;
-      }
-      setDraft(normalized);
-    } catch (error) {
-      if (!shouldApplyTorrentNetworkInputResult(
-        requestId,
-        commitId.current,
-        editRequestId,
-        editId.current
-      )) return;
-      setDraft(value);
-      onError(error);
-    }
-  };
-
-  return (
-    <div className="mac-settings-row settings-network-row">
-      <div className="settings-row-label">
-        <span>{label}</span>
-        <small>{description}</small>
-      </div>
-      <input
-        type="text"
-        dir="ltr"
-        value={draft}
-        onChange={(event) => {
-          editId.current += 1;
-          setDraft(event.target.value);
-        }}
-        onBlur={() => { void commit(); }}
-        placeholder={placeholder}
-        maxLength={maxLength}
-        className={className}
-        aria-label={label}
-      />
-    </div>
-  );
-};
-
-export type NetworkSettingsSection = 'general' | 'discovery' | 'connection' | 'limits' | 'advanced';
-
-const networkSettingsSections: NetworkSettingsSection[] = [
-  'general',
-  'discovery',
-  'connection',
-  'limits',
-  'advanced',
-];
-
-const networkSettingsSectionFromStorage = (): NetworkSettingsSection => {
-  try {
-    const stored = window.localStorage.getItem('firelink-network-settings-section');
-    return networkSettingsSections.includes(stored as NetworkSettingsSection)
-      ? stored as NetworkSettingsSection
-      : 'general';
-  } catch {
-    return 'general';
-  }
-};
-
 const engineStatusCache = new Map<string, EngineStatusItem>();
 const engineStatusInFlight = new Map<string, Promise<EngineStatusItem>>();
-const engineStatusRequests = createEngineStatusRequestTracker();
 
 const upsertEngineStatus = (items: EngineStatusItem[], item: EngineStatusItem) => {
   const next = items.filter(existing => existing.kind !== item.kind);
@@ -311,13 +174,10 @@ const runEngineStatusCheck = (check: EngineCheck, force: boolean) => {
   }
 
   if (force) engineStatusCache.delete(check.kind);
-  const requestId = engineStatusRequests.begin(check.kind);
 
   const promise = invoke(check.command)
     .then(item => {
-      if (item.ready && engineStatusRequests.isCurrent(check.kind, requestId)) {
-        engineStatusCache.set(item.kind, item);
-      }
+      if (item.ready) engineStatusCache.set(item.kind, item);
       return item;
     })
     .catch(error => buildEngineStatusError(check, error))
@@ -414,7 +274,6 @@ export default function SettingsView() {
   const { i18n, t } = useTranslation();
   const settings = useSettingsStore();
   const activeTab = settings.activeSettingsTab;
-  const [networkSection, setNetworkSection] = useState<NetworkSettingsSection>(networkSettingsSectionFromStorage);
   const isRtl = localeDirection(resolveAppLocale(i18n.language)) === 'rtl';
   const isSidebarOnRight = settings.sidebarPosition === 'right'
     || (settings.sidebarPosition === 'auto' && isRtl);
@@ -444,14 +303,6 @@ export default function SettingsView() {
   const userAgentMenuRef = useRef<HTMLDivElement>(null);
   const [isUserAgentMenuOpen, setIsUserAgentMenuOpen] = useState(false);
 
-  useEffect(() => {
-    try {
-      window.localStorage.setItem('firelink-network-settings-section', networkSection);
-    } catch {
-      // Restricted WebViews may not expose local storage.
-    }
-  }, [networkSection]);
-
   // Local state for engine status
 const [engineStatus, setEngineStatus] = useState<EngineStatusItem[] | null>(null);
 const [expandedEngine, setExpandedEngine] = useState<string | null>(null);
@@ -467,20 +318,6 @@ const engineRunId = useRef(0);
     () => String(settings.maxConcurrentDownloads)
   );
   const [proxyPortInput, setProxyPortInput] = useState(() => String(settings.proxyPort));
-  const [torrentMaxOpenFilesInput, setTorrentMaxOpenFilesInput] = useState(
-    () => String(settings.torrentMaxOpenFiles)
-  );
-  const [torrentDhtMessageTimeoutInput, setTorrentDhtMessageTimeoutInput] = useState(
-    () => String(settings.torrentDhtMessageTimeout)
-  );
-  const [torrentMaxConcurrentSeedsInput, setTorrentMaxConcurrentSeedsInput] = useState(
-    () => String(settings.torrentMaxConcurrentSeeds)
-  );
-  const [torrentOverallUploadLimitInput, setTorrentOverallUploadLimitInput] = useState(
-    () => settings.torrentOverallUploadLimit
-  );
-  const torrentMaxOpenFilesCommitRef = useRef(0);
-  const torrentOverallUploadLimitCommitRef = useRef(0);
 
   useEffect(() => {
     setPerServerConnectionsInput(String(settings.perServerConnections));
@@ -493,22 +330,6 @@ const engineRunId = useRef(0);
   useEffect(() => {
     setProxyPortInput(String(settings.proxyPort));
   }, [settings.proxyPort]);
-
-  useEffect(() => {
-    setTorrentMaxOpenFilesInput(String(settings.torrentMaxOpenFiles));
-  }, [settings.torrentMaxOpenFiles]);
-
-  useEffect(() => {
-    setTorrentDhtMessageTimeoutInput(String(settings.torrentDhtMessageTimeout));
-  }, [settings.torrentDhtMessageTimeout]);
-
-  useEffect(() => {
-    setTorrentMaxConcurrentSeedsInput(String(settings.torrentMaxConcurrentSeeds));
-  }, [settings.torrentMaxConcurrentSeeds]);
-
-  useEffect(() => {
-    setTorrentOverallUploadLimitInput(settings.torrentOverallUploadLimit);
-  }, [settings.torrentOverallUploadLimit]);
 
   // Local state for adding site login
   const [loginPattern, setLoginPattern] = useState('');
@@ -525,71 +346,6 @@ const engineRunId = useRef(0);
 
   // Toast notifications
   const { addToast } = useToast();
-  const showTorrentNetworkInputError = (error: unknown) => {
-    addToast({
-      message: t($ => $.settings.network.torrentNetworkInputInvalid, {
-        detail: error instanceof Error ? error.message : String(error)
-      }),
-      variant: 'error',
-      isActionable: true
-    });
-  };
-  const commitTorrentMaxOpenFiles = (raw: string) => {
-    const next = normalizeTorrentMaxOpenFiles(raw) ?? settings.torrentMaxOpenFiles;
-    const requestId = ++torrentMaxOpenFilesCommitRef.current;
-    setTorrentMaxOpenFilesInput(String(next));
-    void settings.setTorrentMaxOpenFiles(next).catch(error => {
-      if (requestId !== torrentMaxOpenFilesCommitRef.current) return;
-      setTorrentMaxOpenFilesInput(String(settings.torrentMaxOpenFiles));
-      addToast({
-        message: t($ => $.settings.network.torrentMaxOpenFilesUpdateFailed, {
-          detail: error instanceof Error ? error.message : String(error)
-        }),
-        variant: 'error',
-        isActionable: true
-      });
-    });
-  };
-  const commitTorrentDhtMessageTimeout = (raw: string) => {
-    const next = normalizeTorrentDhtMessageTimeout(raw)
-      ?? settings.torrentDhtMessageTimeout
-      ?? DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT;
-    setTorrentDhtMessageTimeoutInput(String(next));
-    settings.setTorrentDhtMessageTimeout(next);
-  };
-  const commitTorrentMaxConcurrentSeeds = (raw: string) => {
-    const next = normalizeTorrentMaxConcurrentSeeds(raw)
-      ?? settings.torrentMaxConcurrentSeeds
-      ?? DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS;
-    setTorrentMaxConcurrentSeedsInput(String(next));
-    settings.setTorrentMaxConcurrentSeeds(next);
-  };
-  const commitTorrentOverallUploadLimit = (raw: string) => {
-    const trimmed = raw.trim();
-    const normalized = trimmed ? (normalizeSpeedLimitForBackend(trimmed) ?? '') : '';
-    if (trimmed && !normalized) {
-      setTorrentOverallUploadLimitInput(settings.torrentOverallUploadLimit);
-      addToast({
-        message: t($ => $.settings.network.torrentOverallUploadLimitInvalid),
-        variant: 'error',
-        isActionable: true
-      });
-      return;
-    }
-    const requestId = ++torrentOverallUploadLimitCommitRef.current;
-    setTorrentOverallUploadLimitInput(normalized);
-    void settings.setTorrentOverallUploadLimit(normalized).catch(error => {
-      if (requestId !== torrentOverallUploadLimitCommitRef.current) return;
-      setTorrentOverallUploadLimitInput(settings.torrentOverallUploadLimit);
-      addToast({
-        message: t($ => $.settings.network.torrentOverallUploadLimitUpdateFailed, {
-          detail: error instanceof Error ? error.message : String(error)
-        }),
-        variant: 'error',
-        isActionable: true
-      });
-    });
-  };
   const [isCheckingForUpdates, setIsCheckingForUpdates] = useState(false);
   const [manualUpdateStatus, setManualUpdateStatus] = useState<ManualUpdateStatus>({ type: 'idle' });
 
@@ -927,7 +683,6 @@ runEngineChecks(false);
       case 'Documents': return t($ => $.navigation.categories.documents);
       case 'Pictures': return t($ => $.navigation.categories.pictures);
       case 'Applications': return t($ => $.navigation.categories.applications);
-      case 'Torrents': return t($ => $.navigation.categories.torrents);
       default: return t($ => $.navigation.categories.other);
     }
   };
@@ -1003,7 +758,7 @@ runEngineChecks(false);
           <div className="settings-content-shell w-full">
             <div key={activeTab} className="settings-page-transition">
             <h1 className="settings-title text-text-primary">{activeTabLabel}</h1>
-            <div className={`settings-content ${activeTab === 'network' ? 'settings-content--network' : 'max-w-[720px]'}`}>
+            <div className="settings-content max-w-[720px]">
 
           {/* Downloads Pane */}
           {activeTab === 'downloads' && (
@@ -1078,43 +833,6 @@ runEngineChecks(false);
                     className="app-control w-24 text-center"
                   />
                 </div>
-                <div className="mac-settings-row">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.downloads.minimumNormalDownloadSpeed)}</span>
-                    <small>{t($ => $.settings.downloads.minimumNormalDownloadSpeedDescription)}</small>
-                  </div>
-                  <input
-                    type="number" min="0" max="1048576"
-                    value={settings.minimumNormalDownloadSpeedKiB}
-                    onChange={(event) => settings.setMinimumNormalDownloadSpeedKiB(Number(event.target.value))}
-                    className="app-control w-24 text-center"
-                    aria-label={t($ => $.settings.downloads.minimumNormalDownloadSpeed)}
-                  />
-                </div>
-                <label className="mac-settings-row cursor-default">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.downloads.retryNotFoundErrors)}</span>
-                    <small>{t($ => $.settings.downloads.retryNotFoundErrorsDescription)}</small>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={settings.retryNotFoundErrors}
-                    onChange={(event) => settings.setRetryNotFoundErrors(event.target.checked)}
-                    className="mac-switch"
-                  />
-                </label>
-                <label className="mac-settings-row cursor-default">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.downloads.adaptiveMirrorSelection)}</span>
-                    <small>{t($ => $.settings.downloads.adaptiveMirrorSelectionDescription)}</small>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={settings.adaptiveMirrorSelection}
-                    onChange={(event) => settings.setAdaptiveMirrorSelection(event.target.checked)}
-                    className="mac-switch"
-                  />
-                </label>
               </div>
 
               <div className="mac-settings-group">
@@ -1351,51 +1069,8 @@ runEngineChecks(false);
 
           {/* Network Pane */}
           {activeTab === 'network' && (
-            <div className="settings-pane settings-network-pane">
-              <nav className="network-settings-tabs" role="tablist" aria-label={t($ => $.settings.tabs.network)}>
-                {networkSettingsSections.map(section => {
-                  const label = section === 'general'
-                    ? t($ => $.settings.network.proxy)
-                    : section === 'discovery'
-                      ? t($ => $.settings.network.torrentTabs.discovery)
-                      : section === 'connection'
-                        ? t($ => $.settings.network.torrentTabs.connection)
-                        : section === 'limits'
-                          ? t($ => $.settings.network.torrentTabs.limits)
-                          : t($ => $.settings.network.torrentTabs.advanced);
-                  return (
-                    <button
-                      key={section}
-                      type="button"
-                      role="tab"
-                      aria-selected={networkSection === section}
-                      aria-controls={`network-settings-panel-${section}`}
-                      tabIndex={networkSection === section ? 0 : -1}
-                      className="network-settings-tab"
-                      onClick={() => setNetworkSection(section)}
-                      onKeyDown={event => {
-                        const index = networkSettingsSections.indexOf(section);
-                        const nextIndex = (event.key === (isRtl ? 'ArrowLeft' : 'ArrowRight'))
-                          ? (index + 1) % networkSettingsSections.length
-                          : event.key === (isRtl ? 'ArrowRight' : 'ArrowLeft')
-                            ? (index - 1 + networkSettingsSections.length) % networkSettingsSections.length
-                            : event.key === 'Home' ? 0 : event.key === 'End' ? networkSettingsSections.length - 1 : -1;
-                        if (nextIndex < 0) return;
-                        event.preventDefault();
-                        const next = networkSettingsSections[nextIndex];
-                        setNetworkSection(next);
-                        window.setTimeout(() => document.getElementById(`network-settings-tab-${next}`)?.focus(), 0);
-                      }}
-                      id={`network-settings-tab-${section}`}
-                    >
-                      {label}
-                    </button>
-                  );
-                })}
-              </nav>
-
-              <div id="network-settings-panel-general" className="settings-network-panel" role="tabpanel" aria-labelledby="network-settings-tab-general" hidden={networkSection !== 'general'} tabIndex={0}>
-              <h2 className="settings-section-title settings-network-section-title">{t($ => $.settings.network.proxy)}</h2>
+            <div className="settings-pane max-w-[720px]">
+              <h2 className="settings-section-title">{t($ => $.settings.network.proxy)}</h2>
               <div className="mac-settings-group">
                 <div className="mac-settings-row settings-network-row settings-choice-row">
                   <div className="settings-row-label">
@@ -1481,290 +1156,8 @@ runEngineChecks(false);
                   </p>
                 )}
               </div>
-              </div>
 
-              <div id="network-settings-panel-discovery" className="settings-network-panel" role="tabpanel" aria-labelledby="network-settings-tab-discovery" hidden={networkSection !== 'discovery'} tabIndex={0}>
-              <h2 className="settings-section-title settings-network-section-title">{t($ => $.settings.network.torrentPeerDiscovery)}</h2>
-              <div className="mac-settings-group">
-                <label className="mac-settings-row settings-network-row cursor-default">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.network.torrentDht)}</span>
-                    <small>{t($ => $.settings.network.torrentDhtDescription)}</small>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={settings.torrentEnableDht}
-                    onChange={(event) => settings.setTorrentEnableDht(event.target.checked)}
-                    className="mac-switch"
-                  />
-                </label>
-                <label className="mac-settings-row settings-network-row cursor-default">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.network.torrentDht6)}</span>
-                    <small>{t($ => $.settings.network.torrentDht6Description)}</small>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={settings.torrentEnableDht6}
-                    onChange={(event) => settings.setTorrentEnableDht6(event.target.checked)}
-                    disabled={!settings.torrentIpv6Enabled}
-                    className="mac-switch disabled:opacity-50"
-                  />
-                </label>
-                <label className="mac-settings-row settings-network-row cursor-default">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.network.torrentIpv6Enabled)}</span>
-                    <small>{t($ => $.settings.network.torrentIpv6EnabledDescription)}</small>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={settings.torrentIpv6Enabled}
-                    onChange={(event) => settings.setTorrentIpv6Enabled(event.target.checked)}
-                    className="mac-switch"
-                  />
-                </label>
-                <label className="mac-settings-row settings-network-row cursor-default">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.network.torrentPex)}</span>
-                    <small>{t($ => $.settings.network.torrentPexDescription)}</small>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={settings.torrentEnablePex}
-                    onChange={(event) => settings.setTorrentEnablePex(event.target.checked)}
-                    className="mac-switch"
-                  />
-                </label>
-                <label className="mac-settings-row settings-network-row cursor-default">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.network.torrentLpd)}</span>
-                    <small>{t($ => $.settings.network.torrentLpdDescription)}</small>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={settings.torrentEnableLpd}
-                    onChange={(event) => settings.setTorrentEnableLpd(event.target.checked)}
-                    className="mac-switch"
-                  />
-                </label>
-                <p className="settings-group-footer settings-network-note">
-                  <Info size={14} aria-hidden="true" />
-                  <span>{t($ => $.settings.network.torrentPeerDiscoveryRestartNote)}</span>
-                </p>
-              </div>
-              </div>
-
-              <div id="network-settings-panel-connection" className="settings-network-panel" role="tabpanel" aria-labelledby="network-settings-tab-connection" hidden={networkSection !== 'connection'} tabIndex={0}>
-              <h2 className="settings-section-title settings-network-section-title">{t($ => $.settings.network.torrentNetwork)}</h2>
-              <div className="mac-settings-group">
-                <TorrentNetworkTextInput
-                  field="torrentListenPort"
-                  value={settings.torrentListenPort}
-                  label={t($ => $.settings.network.torrentListenPort)}
-                  description={t($ => $.settings.network.torrentListenPortDescription)}
-                  placeholder="6881-6999"
-                  onCommit={settings.setTorrentListenPort}
-                  onError={showTorrentNetworkInputError}
-                  className="app-control settings-port-input text-center"
-                />
-                <TorrentNetworkTextInput
-                  field="torrentBindAddress"
-                  value={settings.torrentBindAddress}
-                  label={t($ => $.settings.network.torrentBindAddress)}
-                  description={t($ => $.settings.network.torrentBindAddressDescription)}
-                  placeholder="192.0.2.10 or 2001:db8::10"
-                  onCommit={settings.setTorrentBindAddress}
-                  onError={showTorrentNetworkInputError}
-                />
-                <TorrentNetworkTextInput
-                  field="torrentDhtListenPort"
-                  value={settings.torrentDhtListenPort}
-                  label={t($ => $.settings.network.torrentDhtListenPort)}
-                  description={t($ => $.settings.network.torrentDhtListenPortDescription)}
-                  placeholder="6881-6999"
-                  onCommit={settings.setTorrentDhtListenPort}
-                  onError={showTorrentNetworkInputError}
-                  className="app-control settings-port-input text-center"
-                />
-                <TorrentNetworkTextInput
-                  field="torrentExternalIp"
-                  value={settings.torrentExternalIp}
-                  label={t($ => $.settings.network.torrentExternalIp)}
-                  description={t($ => $.settings.network.torrentExternalIpDescription)}
-                  placeholder={t($ => $.settings.network.torrentExternalIpPlaceholder)}
-                  onCommit={settings.setTorrentExternalIp}
-                  onError={showTorrentNetworkInputError}
-                />
-                <TorrentNetworkTextInput
-                  field="torrentDhtEntryPoint"
-                  value={settings.torrentDhtEntryPoint}
-                  label={t($ => $.settings.network.torrentDhtEntryPoint)}
-                  description={t($ => $.settings.network.torrentDhtEntryPointDescription)}
-                  placeholder="router.example:6881"
-                  onCommit={settings.setTorrentDhtEntryPoint}
-                  onError={showTorrentNetworkInputError}
-                />
-                <TorrentNetworkTextInput
-                  field="torrentDhtEntryPoint6"
-                  value={settings.torrentDhtEntryPoint6}
-                  label={t($ => $.settings.network.torrentDhtEntryPoint6)}
-                  description={t($ => $.settings.network.torrentDhtEntryPoint6Description)}
-                  placeholder="[2001:db8::1]:6881"
-                  onCommit={settings.setTorrentDhtEntryPoint6}
-                  onError={showTorrentNetworkInputError}
-                />
-                <TorrentNetworkTextInput
-                  field="torrentDhtListenAddr6"
-                  value={settings.torrentDhtListenAddr6}
-                  label={t($ => $.settings.network.torrentDhtListenAddr6)}
-                  description={t($ => $.settings.network.torrentDhtListenAddr6Description)}
-                  placeholder="2001:db8::2"
-                  onCommit={settings.setTorrentDhtListenAddr6}
-                  onError={showTorrentNetworkInputError}
-                />
-                <TorrentNetworkTextInput
-                  field="torrentLpdInterface"
-                  value={settings.torrentLpdInterface}
-                  label={t($ => $.settings.network.torrentLpdInterface)}
-                  description={t($ => $.settings.network.torrentLpdInterfaceDescription)}
-                  placeholder="en0"
-                  onCommit={settings.setTorrentLpdInterface}
-                  onError={showTorrentNetworkInputError}
-                />
-                <TorrentNetworkTextInput
-                  field="torrentPeerIdPrefix"
-                  value={settings.torrentPeerIdPrefix}
-                  label={t($ => $.settings.network.torrentPeerIdPrefix)}
-                  description={t($ => $.settings.network.torrentPeerIdPrefixDescription)}
-                  placeholder="-FL-1-4-0-"
-                  maxLength={20}
-                  onCommit={settings.setTorrentPeerIdPrefix}
-                  onError={showTorrentNetworkInputError}
-                />
-                <TorrentNetworkTextInput
-                  field="torrentPeerAgent"
-                  value={settings.torrentPeerAgent}
-                  label={t($ => $.settings.network.torrentPeerAgent)}
-                  description={t($ => $.settings.network.torrentPeerAgentDescription)}
-                  placeholder="Firelink/1.4.0"
-                  maxLength={128}
-                  onCommit={settings.setTorrentPeerAgent}
-                  onError={showTorrentNetworkInputError}
-                />
-                <div className="mac-settings-row settings-network-row">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.network.torrentSeparateSeedSlots)}</span>
-                    <small>{t($ => $.settings.network.torrentSeparateSeedSlotsDescription)}</small>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={settings.torrentSeparateSeedSlots}
-                    onChange={(event) => settings.setTorrentSeparateSeedSlots(event.target.checked)}
-                    className="mac-switch"
-                    aria-label={t($ => $.settings.network.torrentSeparateSeedSlots)}
-                  />
-                </div>
-                <div className="mac-settings-row settings-network-row">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.network.torrentMaxConcurrentSeeds)}</span>
-                    <small>{t($ => $.settings.network.torrentMaxConcurrentSeedsDescription)}</small>
-                  </div>
-                  <input
-                    type="number"
-                    min={MIN_TORRENT_MAX_CONCURRENT_SEEDS}
-                    max={MAX_TORRENT_MAX_CONCURRENT_SEEDS}
-                    step={1}
-                    value={torrentMaxConcurrentSeedsInput}
-                    onChange={(event) => setTorrentMaxConcurrentSeedsInput(event.target.value)}
-                    onBlur={(event) => commitTorrentMaxConcurrentSeeds(event.target.value)}
-                    className="app-control settings-port-input text-center"
-                    aria-label={t($ => $.settings.network.torrentMaxConcurrentSeeds)}
-                  />
-                </div>
-                <p className="settings-group-footer settings-network-note">
-                  <Info size={14} aria-hidden="true" />
-                  <span>{t($ => $.settings.network.torrentNetworkRestartNote)}</span>
-                </p>
-              </div>
-              </div>
-
-              <div id="network-settings-panel-limits" className="settings-network-panel" role="tabpanel" aria-labelledby="network-settings-tab-limits" hidden={networkSection !== 'limits'} tabIndex={0}>
-              <h2 className="settings-section-title settings-network-section-title">{t($ => $.settings.network.torrentResourceLimits)}</h2>
-              <div className="mac-settings-group">
-                <div className="mac-settings-row settings-network-row">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.network.torrentMaxOpenFiles)}</span>
-                    <small>{t($ => $.settings.network.torrentMaxOpenFilesDescription)}</small>
-                  </div>
-                  <input
-                    type="number"
-                    min={MIN_TORRENT_MAX_OPEN_FILES}
-                    max={MAX_TORRENT_MAX_OPEN_FILES}
-                    step={1}
-                    value={torrentMaxOpenFilesInput}
-                    onChange={(event) => setTorrentMaxOpenFilesInput(event.target.value)}
-                    onBlur={(event) => commitTorrentMaxOpenFiles(event.target.value)}
-                    className="app-control settings-port-input text-center"
-                    aria-label={t($ => $.settings.network.torrentMaxOpenFiles)}
-                  />
-                </div>
-                <TorrentNetworkTextInput
-                  field="aria2DiskCache"
-                  value={settings.aria2DiskCache}
-                  label={t($ => $.settings.network.aria2DiskCache)}
-                  description={t($ => $.settings.network.aria2DiskCacheDescription)}
-                  placeholder="16M"
-                  onCommit={settings.setAria2DiskCache}
-                  onError={showTorrentNetworkInputError}
-                  className="app-control settings-network-input text-center"
-                />
-                <div className="mac-settings-row settings-network-row">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.network.torrentOverallUploadLimit)}</span>
-                    <small>{t($ => $.settings.network.torrentOverallUploadLimitDescription)}</small>
-                  </div>
-                  <input
-                    type="text"
-                    value={torrentOverallUploadLimitInput}
-                    onChange={(event) => setTorrentOverallUploadLimitInput(event.target.value)}
-                    onBlur={(event) => commitTorrentOverallUploadLimit(event.target.value)}
-                    placeholder="1M"
-                    className="app-control settings-network-input text-center"
-                    aria-label={t($ => $.settings.network.torrentOverallUploadLimit)}
-                  />
-                </div>
-              </div>
-              </div>
-
-              <div id="network-settings-panel-advanced" className="settings-network-panel" role="tabpanel" aria-labelledby="network-settings-tab-advanced" hidden={networkSection !== 'advanced'} tabIndex={0}>
-              <h2 className="settings-section-title settings-network-section-title">{t($ => $.settings.network.torrentAdvanced)}</h2>
-              <div className="mac-settings-group">
-                <div className="mac-settings-row settings-network-row">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.network.torrentDhtMessageTimeout)}</span>
-                    <small>{t($ => $.settings.network.torrentDhtMessageTimeoutDescription)}</small>
-                  </div>
-                  <input
-                    type="number"
-                    min={MIN_TORRENT_DHT_MESSAGE_TIMEOUT}
-                    max={MAX_TORRENT_DHT_MESSAGE_TIMEOUT}
-                    step={1}
-                    value={torrentDhtMessageTimeoutInput}
-                    onChange={(event) => setTorrentDhtMessageTimeoutInput(event.target.value)}
-                    onBlur={(event) => commitTorrentDhtMessageTimeout(event.target.value)}
-                    className="app-control settings-port-input text-center"
-                    aria-label={t($ => $.settings.network.torrentDhtMessageTimeout)}
-                  />
-                </div>
-                <p className="settings-group-footer settings-network-note">
-                  <Info size={14} aria-hidden="true" />
-                  <span>{t($ => $.settings.network.torrentNetworkRestartNote)}</span>
-                </p>
-              </div>
-              </div>
-
-              <section id="network-settings-group-general-identity" className="settings-network-panel" role="region" aria-label={t($ => $.settings.network.identity)} hidden={networkSection !== 'general'}>
-              <h2 className="settings-section-title settings-network-section-title">{t($ => $.settings.network.identity)}</h2>
+              <h2 className="settings-section-title">{t($ => $.settings.network.identity)}</h2>
               <div className="mac-settings-group settings-popup-group">
                 <div className="mac-settings-row settings-network-row">
                   <div className="settings-row-label">
@@ -1827,7 +1220,6 @@ runEngineChecks(false);
                 </div>
                 <p className="settings-group-footer">{t($ => $.settings.network.userAgentOverrides)}</p>
               </div>
-              </section>
             </div>
           )}
 

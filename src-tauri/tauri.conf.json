@@ -16,7 +16,7 @@
         "create": false,
         "title": "Firelink",
         "width": 1280,
-        "height": 800,
+        "height": 760,
         "minWidth": 960,
         "minHeight": 640,
         "transparent": false
@@ -38,26 +38,12 @@
     "resources": {
       "engine-dist/": "engine-dist/",
       "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
-    },
-    "fileAssociations": [
-      {
-        "ext": ["torrent"],
-        "mimeType": "application/x-bittorrent",
-        "name": "BitTorrent file",
-        "description": "BitTorrent metadata file",
-        "role": "Viewer",
-        "rank": "Alternate",
-        "exportedType": {
-          "identifier": "org.bittorrent.torrent",
-          "conformsTo": ["public.data", "public.item"]
-        }
-      }
-    ]
+    }
   },
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["firelink", "magnet"]
+        "schemes": ["firelink"]
       }
     }
   }

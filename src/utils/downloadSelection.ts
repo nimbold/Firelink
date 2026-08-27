@@ -3,17 +3,6 @@ export interface DownloadSelectionResult {
   lastSelectedId: string | null;
 }
 
-export const selectContextMenuTarget = ({
-  selectedIds,
-  lastSelectedId,
-  targetId,
-}: Pick<DownloadSelectionResult, 'selectedIds' | 'lastSelectedId'> & { targetId: string }): DownloadSelectionResult => {
-  if (selectedIds.has(targetId)) {
-    return { selectedIds: new Set(selectedIds), lastSelectedId };
-  }
-  return { selectedIds: new Set([targetId]), lastSelectedId: targetId };
-};
-
 interface DownloadSelectionOptions {
   orderedIds: readonly string[];
   selectedIds: ReadonlySet<string>;

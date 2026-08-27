@@ -20,16 +20,7 @@ import {
   DEFAULT_CATEGORY_SUBFOLDERS,
   normalizeDownloadLocationSettings
 } from '../utils/downloadLocations';
-import {
-  DEFAULT_TORRENT_MAX_OPEN_FILES,
-  MAX_TORRENT_MAX_OPEN_FILES,
-  MIN_TORRENT_MAX_OPEN_FILES,
-  DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT,
-  DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS,
-  normalizeSpeedLimitForBackend,
-  normalizeTorrentDhtMessageTimeout,
-  normalizeTorrentMaxOpenFiles
-} from '../utils/downloads';
+import { normalizeSpeedLimitForBackend } from '../utils/downloads';
 import i18n from '../i18n';
 import { isAppLocalePreference, type AppLocalePreference } from '../i18n/locales';
 import {
@@ -37,31 +28,13 @@ import {
   isCalendarPreference,
   type CalendarPreference
 } from '../utils/dateTime';
-import type { MainWindowSize } from '../bindings/MainWindowSize';
-import { normalizeMainWindowSize } from '../utils/mainWindowState';
 
 let settingsQueue: Promise<void> = Promise.resolve();
-let torrentMaxOpenFilesQueue: Promise<void> = Promise.resolve();
-let torrentOverallUploadLimitQueue: Promise<void> = Promise.resolve();
 let pairingTokenHydrationRequest: Promise<PairingTokenHydration> | null = null;
-let shouldPersistLegacyFoldersFallback = false;
 const settingsPersistenceErrorListeners = new Set<() => void>();
 let settingsPersistenceFailed = false;
 const DEFAULT_SCHEDULER_QUEUE_ID = '00000000-0000-0000-0000-000000000001';
-const LEGACY_FOLDERS_COLLAPSED_KEY = 'firelink-folders-collapsed';
 export const DEFAULT_SPEED_LIMIT_PRESET_VALUES = [1, 5, 10];
-
-const readLegacyFoldersCollapsed = (): boolean | undefined => {
-  if (typeof window === 'undefined') return undefined;
-  try {
-    const value = window.localStorage.getItem(LEGACY_FOLDERS_COLLAPSED_KEY);
-    return value === null ? undefined : value === 'true';
-  } catch {
-    return undefined;
-  }
-};
-
-const initialFoldersCollapsed = readLegacyFoldersCollapsed() ?? false;
 
 export const subscribeToSettingsPersistenceErrors = (listener: () => void): (() => void) => {
   settingsPersistenceErrorListeners.add(listener);
@@ -88,8 +61,6 @@ const requestPairingTokenHydration = (): Promise<PairingTokenHydration> => {
 export const runSettingsPersistenceTransaction = <T>(
   operation: () => Promise<T>
 ): Promise<T> => enqueueSettingsTask(operation);
-
-export const waitForSettingsPersistence = (): Promise<void> => settingsQueue;
 
 const notifySettingsPersistenceError = () => {
   if (settingsPersistenceFailed) return;
@@ -161,21 +132,6 @@ const sanitizeSiteLogins = (value: unknown): SiteLogin[] => {
 
 const persistedBoolean = (value: unknown, fallback: boolean) =>
   typeof value === 'boolean' ? value : fallback;
-
-const persistedString = (value: unknown, fallback: string): string =>
-  typeof value === 'string' ? value : fallback;
-
-const persistedFiniteInteger = (
-  value: unknown,
-  minimum: number,
-  maximum: number,
-  fallback: number
-): number => {
-  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value)) {
-    return fallback;
-  }
-  return value >= minimum && value <= maximum ? value : fallback;
-};
 
 const tauriStorage: StateStorage = {
   getItem: async (name: string): Promise<string | null> => {
@@ -249,13 +205,10 @@ export interface SettingsState {
   approvedDownloadRoots: string[];
   maxConcurrentDownloads: number;
   globalSpeedLimit: string;
-  torrentOverallUploadLimit: string;
   speedLimitPresetValues: number[];
   logsEnabled: boolean;
   isSidebarVisible: boolean;
-  isFoldersCollapsed: boolean;
   sidebarPosition: SidebarPosition;
-  mainWindowSize: MainWindowSize | null;
   activeView: ActiveView;
   activeSettingsTab: SettingsTab;
   scheduler: SchedulerSettings;
@@ -269,9 +222,6 @@ export interface SettingsState {
   // Replicated SwiftUI App Settings
   perServerConnections: number;
   maxAutomaticRetries: number;
-  minimumNormalDownloadSpeedKiB: number;
-  retryNotFoundErrors: boolean;
-  adaptiveMirrorSelection: boolean;
   showNotifications: boolean;
   playCompletionSound: boolean;
   autoAddClipboardLinks: boolean;
@@ -284,26 +234,6 @@ export interface SettingsState {
   proxyMode: ProxyMode;
   proxyHost: string;
   proxyPort: number;
-  torrentEnableDht: boolean;
-  torrentEnableDht6: boolean;
-  torrentEnablePex: boolean;
-  torrentEnableLpd: boolean;
-  torrentMaxOpenFiles: number;
-  torrentDhtMessageTimeout: number;
-  torrentSeparateSeedSlots: boolean;
-  torrentMaxConcurrentSeeds: number;
-  torrentIpv6Enabled: boolean;
-  torrentListenPort: string;
-  torrentDhtListenPort: string;
-  torrentExternalIp: string;
-  torrentDhtEntryPoint: string;
-  torrentDhtEntryPoint6: string;
-  torrentDhtListenAddr6: string;
-  torrentLpdInterface: string;
-  torrentPeerIdPrefix: string;
-  torrentPeerAgent: string;
-  torrentBindAddress: string;
-  aria2DiskCache: string;
   customUserAgent: string;
   askWhereToSaveEachFile: boolean;
   preventsSleepWhileDownloading: boolean;
@@ -328,13 +258,9 @@ export interface SettingsState {
   approveDownloadRoot: (path: string) => Promise<string>;
   setMaxConcurrentDownloads: (count: number) => void;
   setGlobalSpeedLimit: (limit: string) => Promise<void>;
-  setTorrentOverallUploadLimit: (limit: string) => Promise<void>;
   setSpeedLimitPresetValues: (values: number[]) => void;
   setLogsEnabled: (enabled: boolean) => void;
   setSidebarPosition: (position: SidebarPosition) => void;
-  setFoldersCollapsed: (collapsed: boolean) => void;
-  toggleFoldersCollapsed: () => void;
-  setMainWindowSize: (size: MainWindowSize) => void;
   setActiveView: (view: ActiveView) => void;
   setActiveSettingsTab: (tab: SettingsTab) => void;
   setScheduler: (settings: SchedulerSettings) => void;
@@ -348,9 +274,6 @@ export interface SettingsState {
 
   setPerServerConnections: (count: number) => void;
   setMaxAutomaticRetries: (count: number) => void;
-  setMinimumNormalDownloadSpeedKiB: (speed: number) => void;
-  setRetryNotFoundErrors: (enabled: boolean) => void;
-  setAdaptiveMirrorSelection: (enabled: boolean) => void;
   setShowNotifications: (show: boolean) => void;
   setPlayCompletionSound: (play: boolean) => void;
   setAutoAddClipboardLinks: (enabled: boolean) => void;
@@ -361,26 +284,6 @@ export interface SettingsState {
   setProxyMode: (mode: ProxyMode) => void;
   setProxyHost: (host: string) => void;
   setProxyPort: (port: number) => void;
-  setTorrentEnableDht: (enabled: boolean) => void;
-  setTorrentEnableDht6: (enabled: boolean) => void;
-  setTorrentEnablePex: (enabled: boolean) => void;
-  setTorrentEnableLpd: (enabled: boolean) => void;
-  setTorrentMaxOpenFiles: (value: number) => Promise<void>;
-  setTorrentDhtMessageTimeout: (value: number) => void;
-  setTorrentSeparateSeedSlots: (enabled: boolean) => void;
-  setTorrentMaxConcurrentSeeds: (value: number) => void;
-  setTorrentIpv6Enabled: (enabled: boolean) => void;
-  setTorrentListenPort: (value: string) => void;
-  setTorrentDhtListenPort: (value: string) => void;
-  setTorrentExternalIp: (value: string) => void;
-  setTorrentDhtEntryPoint: (value: string) => void;
-  setTorrentDhtEntryPoint6: (value: string) => void;
-  setTorrentDhtListenAddr6: (value: string) => void;
-  setTorrentLpdInterface: (value: string) => void;
-  setTorrentPeerIdPrefix: (value: string) => void;
-  setTorrentPeerAgent: (value: string) => void;
-  setTorrentBindAddress: (value: string) => boolean;
-  setAria2DiskCache: (value: string) => void;
   setCustomUserAgent: (userAgent: string) => void;
   setAskWhereToSaveEachFile: (ask: boolean) => void;
   setPreventsSleepWhileDownloading: (prevent: boolean) => void;
@@ -420,14 +323,11 @@ export const useSettingsStore = create<SettingsState>()(
       approvedDownloadRoots: [],
       maxConcurrentDownloads: 3,
       globalSpeedLimit: '',
-      torrentOverallUploadLimit: '',
       speedLimitPresetValues: DEFAULT_SPEED_LIMIT_PRESET_VALUES,
       logsEnabled: false,
       activeView: 'downloads',
       activeSettingsTab: 'downloads',
       isSidebarVisible: true,
-      isFoldersCollapsed: initialFoldersCollapsed,
-      mainWindowSize: null,
       sidebarPosition: 'auto',
       scheduler: {
         enabled: false,
@@ -449,9 +349,6 @@ export const useSettingsStore = create<SettingsState>()(
       // Replicated SwiftUI defaults
       perServerConnections: 16,
       maxAutomaticRetries: 3,
-      minimumNormalDownloadSpeedKiB: 0,
-      retryNotFoundErrors: false,
-      adaptiveMirrorSelection: true,
       showNotifications: true,
       playCompletionSound: false,
       autoAddClipboardLinks: false,
@@ -463,26 +360,6 @@ export const useSettingsStore = create<SettingsState>()(
       proxyMode: 'none',
       proxyHost: '',
       proxyPort: 8080,
-      torrentEnableDht: true,
-      torrentEnableDht6: false,
-      torrentEnablePex: true,
-      torrentEnableLpd: false,
-      torrentMaxOpenFiles: DEFAULT_TORRENT_MAX_OPEN_FILES,
-      torrentDhtMessageTimeout: DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT,
-      torrentSeparateSeedSlots: false,
-      torrentMaxConcurrentSeeds: DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS,
-      torrentIpv6Enabled: true,
-      torrentListenPort: '',
-      torrentDhtListenPort: '',
-      torrentExternalIp: '',
-      torrentDhtEntryPoint: '',
-      torrentDhtEntryPoint6: '',
-      torrentDhtListenAddr6: '',
-      torrentLpdInterface: '',
-      torrentPeerIdPrefix: '',
-      torrentPeerAgent: '',
-      torrentBindAddress: '',
-      aria2DiskCache: '16M',
       customUserAgent: '',
       askWhereToSaveEachFile: false,
       preventsSleepWhileDownloading: true,
@@ -532,42 +409,15 @@ export const useSettingsStore = create<SettingsState>()(
         });
       },
       setGlobalSpeedLimit: async (limit) => {
-        const normalized = normalizeSpeedLimitForBackend(limit);
-        if (limit.trim() && !normalized) {
-          return Promise.reject(new Error('Global speed limit is invalid'));
-        }
         await invoke('set_global_speed_limit', {
-          limit: normalized
+          limit: normalizeSpeedLimitForBackend(limit)
         });
         info('Settings updated: globalSpeedLimit');
-        set({ globalSpeedLimit: normalized ?? '' });
-      },
-      setTorrentOverallUploadLimit: (limit) => {
-        const normalizedLimit = normalizeSpeedLimitForBackend(limit);
-        if (limit.trim() && !normalizedLimit) {
-          return Promise.reject(new Error('Torrent overall upload limit is invalid'));
-        }
-        const normalized = normalizedLimit ?? '';
-        const apply = async () => {
-          await invoke('set_torrent_overall_upload_limit', {
-            limit: normalized || null
-          });
-          info('Settings updated: torrentOverallUploadLimit');
-          set({ torrentOverallUploadLimit: normalized });
-        };
-        const result = torrentOverallUploadLimitQueue.then(apply, apply);
-        torrentOverallUploadLimitQueue = result.then(() => undefined, () => undefined);
-        return result;
+        set({ globalSpeedLimit: limit });
       },
       setSpeedLimitPresetValues: (speedLimitPresetValues) => set({ speedLimitPresetValues }),
       setLogsEnabled: (logsEnabled) => set({ logsEnabled }),
       setSidebarPosition: (sidebarPosition) => set({ sidebarPosition }),
-      setFoldersCollapsed: (isFoldersCollapsed) => set({ isFoldersCollapsed }),
-      toggleFoldersCollapsed: () => set(state => ({ isFoldersCollapsed: !state.isFoldersCollapsed })),
-      setMainWindowSize: (size) => {
-        const normalized = normalizeMainWindowSize(size);
-        if (normalized) set({ mainWindowSize: normalized });
-      },
       setActiveView: (view) => set({ activeView: view }),
       setActiveSettingsTab: (activeSettingsTab) => set({ activeSettingsTab }),
       setScheduler: (scheduler) => set({ scheduler }),
@@ -585,16 +435,6 @@ export const useSettingsStore = create<SettingsState>()(
       setMaxAutomaticRetries: (maxAutomaticRetries) => set({
         maxAutomaticRetries: clampSettingInteger(maxAutomaticRetries, 0, 10, 3)
       }),
-      setMinimumNormalDownloadSpeedKiB: (minimumNormalDownloadSpeedKiB) => set({
-        minimumNormalDownloadSpeedKiB: clampSettingInteger(
-          minimumNormalDownloadSpeedKiB,
-          0,
-          1_048_576,
-          0
-        )
-      }),
-      setRetryNotFoundErrors: (retryNotFoundErrors) => set({ retryNotFoundErrors }),
-      setAdaptiveMirrorSelection: (adaptiveMirrorSelection) => set({ adaptiveMirrorSelection }),
       setShowNotifications: (showNotifications) => set({ showNotifications }),
       setPlayCompletionSound: (playCompletionSound) => set({ playCompletionSound }),
       setAutoAddClipboardLinks: (autoAddClipboardLinks) => set({ autoAddClipboardLinks }),
@@ -614,69 +454,6 @@ export const useSettingsStore = create<SettingsState>()(
           ? Math.min(65535, Math.max(1, Math.trunc(proxyPort)))
           : 8080
       }),
-      setTorrentEnableDht: (torrentEnableDht) => set({ torrentEnableDht }),
-      setTorrentEnableDht6: (torrentEnableDht6) => set({ torrentEnableDht6 }),
-      setTorrentEnablePex: (torrentEnablePex) => set({ torrentEnablePex }),
-      setTorrentEnableLpd: (torrentEnableLpd) => set({ torrentEnableLpd }),
-      setTorrentListenPort: (torrentListenPort) => set({ torrentListenPort }),
-      setTorrentDhtListenPort: (torrentDhtListenPort) => set({ torrentDhtListenPort }),
-      setTorrentExternalIp: (torrentExternalIp) => set({ torrentExternalIp }),
-      setTorrentDhtEntryPoint: (torrentDhtEntryPoint) => set({ torrentDhtEntryPoint }),
-      setTorrentDhtEntryPoint6: (torrentDhtEntryPoint6) => set({ torrentDhtEntryPoint6 }),
-      setTorrentDhtListenAddr6: (torrentDhtListenAddr6) => set({ torrentDhtListenAddr6 }),
-      setTorrentLpdInterface: (torrentLpdInterface) => set({ torrentLpdInterface }),
-      setTorrentPeerIdPrefix: (torrentPeerIdPrefix) => set({ torrentPeerIdPrefix }),
-      setTorrentPeerAgent: (torrentPeerAgent) => set({ torrentPeerAgent }),
-      setTorrentBindAddress: (torrentBindAddress) => {
-        let accepted = true;
-        set(state => {
-          if (!state.torrentIpv6Enabled && torrentBindAddress.includes(':')) {
-            accepted = false;
-            return state;
-          }
-          return { torrentBindAddress };
-        });
-        return accepted;
-      },
-      setAria2DiskCache: (aria2DiskCache) => set({ aria2DiskCache }),
-      setTorrentMaxOpenFiles: (value) => {
-        const normalized = normalizeTorrentMaxOpenFiles(value);
-        if (normalized === undefined) {
-          return Promise.reject(new Error(
-            `Torrent maximum open files must be between ${MIN_TORRENT_MAX_OPEN_FILES} and ${MAX_TORRENT_MAX_OPEN_FILES}`
-          ));
-        }
-        const apply = async () => {
-          await invoke('set_torrent_max_open_files', { max_open_files: normalized });
-          info('Settings updated: torrentMaxOpenFiles');
-          set({ torrentMaxOpenFiles: normalized });
-        };
-        const result = torrentMaxOpenFilesQueue.then(apply, apply);
-        torrentMaxOpenFilesQueue = result.then(() => undefined, () => undefined);
-        return result;
-      },
-      setTorrentDhtMessageTimeout: (value) => {
-        const normalized = normalizeTorrentDhtMessageTimeout(value);
-        set({
-          torrentDhtMessageTimeout: normalized
-            ?? DEFAULT_TORRENT_DHT_MESSAGE_TIMEOUT
-        });
-      },
-      setTorrentSeparateSeedSlots: (torrentSeparateSeedSlots) => set({ torrentSeparateSeedSlots }),
-      setTorrentMaxConcurrentSeeds: (value) => set({
-        torrentMaxConcurrentSeeds: Number.isInteger(value) && value >= 1 && value <= 64
-          ? value
-          : DEFAULT_TORRENT_MAX_CONCURRENT_SEEDS
-      }),
-      setTorrentIpv6Enabled: (torrentIpv6Enabled) => set(state => ({
-        torrentIpv6Enabled,
-        // An IPv6 bind address is invalid once IPv6 transport is disabled.
-        // Clear it as part of the same state transition so the next durable
-        // settings save cannot fail on a cross-field contradiction.
-        ...(torrentIpv6Enabled || !state.torrentBindAddress.includes(':')
-          ? {}
-          : { torrentBindAddress: '' })
-      })),
       setCustomUserAgent: (customUserAgent) => set({ customUserAgent }),
       setAskWhereToSaveEachFile: (askWhereToSaveEachFile) => set({ askWhereToSaveEachFile }),
       setPreventsSleepWhileDownloading: (preventsSleepWhileDownloading) => {
@@ -819,15 +596,6 @@ export const useSettingsStore = create<SettingsState>()(
           logsEnabled: persisted.logsEnabled === true
         } as SettingsState;
       },
-      onRehydrateStorage: () => (state, error) => {
-        if (error || !state) {
-          shouldPersistLegacyFoldersFallback = false;
-          return;
-        }
-        if (!shouldPersistLegacyFoldersFallback) return;
-        shouldPersistLegacyFoldersFallback = false;
-        state.setFoldersCollapsed(state.isFoldersCollapsed);
-      },
       partialize: (state): PersistedSettingsSnapshot => ({
         theme: state.theme,
         fontFamily: state.fontFamily,
@@ -842,12 +610,9 @@ export const useSettingsStore = create<SettingsState>()(
         approvedDownloadRoots: state.approvedDownloadRoots,
         maxConcurrentDownloads: state.maxConcurrentDownloads,
         globalSpeedLimit: state.globalSpeedLimit,
-        torrentOverallUploadLimit: state.torrentOverallUploadLimit,
         speedLimitPresetValues: state.speedLimitPresetValues,
         logsEnabled: state.logsEnabled,
         isSidebarVisible: state.isSidebarVisible,
-        isFoldersCollapsed: state.isFoldersCollapsed,
-        mainWindowSize: state.mainWindowSize ?? undefined,
         sidebarPosition: state.sidebarPosition,
         activeSettingsTab: state.activeSettingsTab,
         scheduler: state.scheduler,
@@ -860,9 +625,6 @@ export const useSettingsStore = create<SettingsState>()(
         
         perServerConnections: state.perServerConnections,
         maxAutomaticRetries: state.maxAutomaticRetries,
-        minimumNormalDownloadSpeedKiB: state.minimumNormalDownloadSpeedKiB,
-        retryNotFoundErrors: state.retryNotFoundErrors,
-        adaptiveMirrorSelection: state.adaptiveMirrorSelection,
         showNotifications: state.showNotifications,
         playCompletionSound: state.playCompletionSound,
         autoAddClipboardLinks: state.autoAddClipboardLinks,
@@ -873,26 +635,6 @@ export const useSettingsStore = create<SettingsState>()(
         proxyMode: state.proxyMode,
         proxyHost: state.proxyHost,
         proxyPort: state.proxyPort,
-        torrentEnableDht: state.torrentEnableDht,
-        torrentEnableDht6: state.torrentEnableDht6,
-        torrentEnablePex: state.torrentEnablePex,
-        torrentEnableLpd: state.torrentEnableLpd,
-        torrentMaxOpenFiles: state.torrentMaxOpenFiles,
-        torrentDhtMessageTimeout: state.torrentDhtMessageTimeout,
-        torrentSeparateSeedSlots: state.torrentSeparateSeedSlots,
-        torrentMaxConcurrentSeeds: state.torrentMaxConcurrentSeeds,
-        torrentIpv6Enabled: state.torrentIpv6Enabled,
-        torrentListenPort: state.torrentListenPort,
-        torrentDhtListenPort: state.torrentDhtListenPort,
-        torrentExternalIp: state.torrentExternalIp,
-        torrentDhtEntryPoint: state.torrentDhtEntryPoint,
-        torrentDhtEntryPoint6: state.torrentDhtEntryPoint6,
-        torrentDhtListenAddr6: state.torrentDhtListenAddr6,
-        torrentLpdInterface: state.torrentLpdInterface,
-        torrentPeerIdPrefix: state.torrentPeerIdPrefix,
-        torrentPeerAgent: state.torrentPeerAgent,
-        torrentBindAddress: state.torrentBindAddress,
-        aria2DiskCache: state.aria2DiskCache,
         customUserAgent: state.customUserAgent,
         askWhereToSaveEachFile: state.askWhereToSaveEachFile,
         preventsSleepWhileDownloading: state.preventsSleepWhileDownloading,
@@ -908,13 +650,6 @@ export const useSettingsStore = create<SettingsState>()(
         const persisted = persistedState && typeof persistedState === 'object'
           ? persistedState as Partial<SettingsState>
           : {};
-        shouldPersistLegacyFoldersFallback = false;
-        const legacyFoldersCollapsed = readLegacyFoldersCollapsed();
-        if (typeof persisted.isFoldersCollapsed !== 'boolean' && legacyFoldersCollapsed !== undefined) {
-          shouldPersistLegacyFoldersFallback = true;
-        }
-        const foldersCollapsedFallback = legacyFoldersCollapsed
-          ?? currentState.isFoldersCollapsed;
         const locations = normalizeDownloadLocationSettings(persisted);
         return ({
           ...currentState,
@@ -939,84 +674,18 @@ export const useSettingsStore = create<SettingsState>()(
           language: isAppLocalePreference(persisted.language)
             ? persisted.language
             : currentState.language,
-          isFoldersCollapsed: persistedBoolean(
-            persisted.isFoldersCollapsed,
-            foldersCollapsedFallback
-          ),
-          isSidebarVisible: persistedBoolean(
-            persisted.isSidebarVisible,
-            currentState.isSidebarVisible
-          ),
-          mainWindowSize: normalizeMainWindowSize(persisted.mainWindowSize)
-            ?? currentState.mainWindowSize,
           appFontSize: isAllowedSetting(APP_FONT_SIZE_VALUES, persisted.appFontSize)
             ? persisted.appFontSize
             : currentState.appFontSize,
           listRowDensity: isAllowedSetting(LIST_ROW_DENSITY_VALUES, persisted.listRowDensity)
             ? persisted.listRowDensity
             : currentState.listRowDensity,
-          torrentEnableDht: persistedBoolean(persisted.torrentEnableDht, currentState.torrentEnableDht),
-          torrentEnableDht6: persistedBoolean(persisted.torrentEnableDht6, currentState.torrentEnableDht6),
-          torrentEnablePex: persistedBoolean(persisted.torrentEnablePex, currentState.torrentEnablePex),
-          torrentEnableLpd: persistedBoolean(persisted.torrentEnableLpd, currentState.torrentEnableLpd),
-          torrentMaxOpenFiles: normalizeTorrentMaxOpenFiles(persisted.torrentMaxOpenFiles)
-            ?? currentState.torrentMaxOpenFiles,
-          torrentDhtMessageTimeout: normalizeTorrentDhtMessageTimeout(persisted.torrentDhtMessageTimeout)
-            ?? currentState.torrentDhtMessageTimeout,
-          torrentSeparateSeedSlots: persistedBoolean(
-            persisted.torrentSeparateSeedSlots,
-            currentState.torrentSeparateSeedSlots
-          ),
-          torrentMaxConcurrentSeeds: typeof persisted.torrentMaxConcurrentSeeds === 'number'
-            && Number.isInteger(persisted.torrentMaxConcurrentSeeds)
-            && persisted.torrentMaxConcurrentSeeds >= 1
-            && persisted.torrentMaxConcurrentSeeds <= 64
-            ? persisted.torrentMaxConcurrentSeeds
-            : currentState.torrentMaxConcurrentSeeds,
-          torrentIpv6Enabled: persistedBoolean(
-            persisted.torrentIpv6Enabled,
-            currentState.torrentIpv6Enabled
-          ),
-          torrentListenPort: typeof persisted.torrentListenPort === 'string'
-            ? persisted.torrentListenPort
-            : currentState.torrentListenPort,
-          torrentDhtListenPort: typeof persisted.torrentDhtListenPort === 'string'
-            ? persisted.torrentDhtListenPort
-            : currentState.torrentDhtListenPort,
-          torrentExternalIp: typeof persisted.torrentExternalIp === 'string'
-            ? persisted.torrentExternalIp
-            : currentState.torrentExternalIp,
-          torrentDhtEntryPoint: typeof persisted.torrentDhtEntryPoint === 'string'
-            ? persisted.torrentDhtEntryPoint
-            : currentState.torrentDhtEntryPoint,
-          torrentDhtEntryPoint6: typeof persisted.torrentDhtEntryPoint6 === 'string'
-            ? persisted.torrentDhtEntryPoint6
-            : currentState.torrentDhtEntryPoint6,
-          torrentDhtListenAddr6: typeof persisted.torrentDhtListenAddr6 === 'string'
-            ? persisted.torrentDhtListenAddr6
-            : currentState.torrentDhtListenAddr6,
-          torrentLpdInterface: typeof persisted.torrentLpdInterface === 'string'
-            ? persisted.torrentLpdInterface
-            : currentState.torrentLpdInterface,
-          torrentPeerIdPrefix: typeof persisted.torrentPeerIdPrefix === 'string'
-            ? persisted.torrentPeerIdPrefix
-            : currentState.torrentPeerIdPrefix,
-          torrentPeerAgent: typeof persisted.torrentPeerAgent === 'string'
-            ? persisted.torrentPeerAgent
-            : currentState.torrentPeerAgent,
-          torrentBindAddress: typeof persisted.torrentBindAddress === 'string'
-            ? persisted.torrentBindAddress
-            : currentState.torrentBindAddress,
-          aria2DiskCache: persistedString(persisted.aria2DiskCache, currentState.aria2DiskCache),
-          customUserAgent: persistedString(persisted.customUserAgent, currentState.customUserAgent),
           sidebarPosition: isAllowedSetting(SIDEBAR_POSITION_VALUES, persisted.sidebarPosition)
             ? persisted.sidebarPosition
             : currentState.sidebarPosition,
           proxyMode: isAllowedSetting(PROXY_MODE_VALUES, persisted.proxyMode)
             ? persisted.proxyMode
             : currentState.proxyMode,
-          proxyHost: persistedString(persisted.proxyHost, currentState.proxyHost),
-          proxyPort: persistedFiniteInteger(persisted.proxyPort, 1, 65_535, currentState.proxyPort),
           mediaCookieSource: isAllowedSetting(MEDIA_COOKIE_SOURCE_VALUES, persisted.mediaCookieSource)
             ? persisted.mediaCookieSource
             : 'none',
@@ -1065,12 +734,6 @@ export const useSettingsStore = create<SettingsState>()(
             12,
             currentState.maxConcurrentDownloads
           ),
-          torrentOverallUploadLimit: typeof persisted.torrentOverallUploadLimit === 'string'
-            ? normalizeSpeedLimitForBackend(persisted.torrentOverallUploadLimit) ?? ''
-            : currentState.torrentOverallUploadLimit,
-          globalSpeedLimit: typeof persisted.globalSpeedLimit === 'string'
-            ? normalizeSpeedLimitForBackend(persisted.globalSpeedLimit) ?? ''
-            : currentState.globalSpeedLimit,
           perServerConnections: clampSettingInteger(
             persisted.perServerConnections,
             1,
@@ -1083,38 +746,16 @@ export const useSettingsStore = create<SettingsState>()(
             10,
             currentState.maxAutomaticRetries
           ),
-          minimumNormalDownloadSpeedKiB: clampSettingInteger(
-            persisted.minimumNormalDownloadSpeedKiB,
-            0,
-            1_048_576,
-            currentState.minimumNormalDownloadSpeedKiB
-          ),
-          retryNotFoundErrors: persistedBoolean(
-            persisted.retryNotFoundErrors,
-            currentState.retryNotFoundErrors
-          ),
-          adaptiveMirrorSelection: persistedBoolean(
-            persisted.adaptiveMirrorSelection,
-            currentState.adaptiveMirrorSelection
-          ),
           speedLimitPresetValues: Array.isArray(persisted.speedLimitPresetValues)
-            ? persisted.speedLimitPresetValues.filter(
-              (value): value is number => typeof value === 'number' && Number.isFinite(value)
-            )
+            ? persisted.speedLimitPresetValues
             : currentState.speedLimitPresetValues,
-          lastCustomSpeedLimitKiB: persistedFiniteInteger(
-            persisted.lastCustomSpeedLimitKiB,
-            1,
-            10_485_760,
-            currentState.lastCustomSpeedLimitKiB
-          ),
           lastCustomSpeedLimitUnit: persisted.lastCustomSpeedLimitUnit === 'KB/s'
             || persisted.lastCustomSpeedLimitUnit === 'MB/s'
             ? persisted.lastCustomSpeedLimitUnit
             : currentState.lastCustomSpeedLimitUnit,
           logsEnabled: persisted.logsEnabled === true,
           approvedDownloadRoots: Array.isArray(persisted.approvedDownloadRoots)
-            ? persisted.approvedDownloadRoots.filter((root): root is string => typeof root === 'string')
+            ? persisted.approvedDownloadRoots
             : currentState.approvedDownloadRoots,
         scheduler: {
           ...currentState.scheduler,

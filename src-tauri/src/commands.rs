@@ -4,12 +4,10 @@ use tauri_plugin_opener::OpenerExt;
 
 #[tauri::command]
 pub async fn reveal_in_file_manager(
-    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     path: String,
 ) -> Result<(), String> {
-    crate::properties_window::ensure_main_window(&caller)?;
-    let primary = authorize_reveal_path(&app_handle, &path)?;
+    let primary = authorize_download_path(&app_handle, &path)?;
     let path = existing_download_asset(&primary).ok_or_else(|| {
         format!(
             "Downloaded file or partial file is missing: {}",
@@ -31,11 +29,9 @@ pub async fn reveal_in_file_manager(
 
 #[tauri::command]
 pub async fn open_downloaded_file(
-    caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     path: String,
 ) -> Result<(), String> {
-    crate::properties_window::ensure_main_window(&caller)?;
     let path = authorize_download_path(&app_handle, &path)?;
     if !path.exists() {
         return Err(format!("Downloaded file is missing: {}", path.display()));
@@ -60,37 +56,18 @@ fn authorize_download_path(
     authorize_exact_path(Path::new(requested), &known_download_paths(app_handle)?)
 }
 
-fn authorize_reveal_path(
-    app_handle: &tauri::AppHandle,
-    requested: &str,
-) -> Result<PathBuf, String> {
-    authorize_exact_path_with_directory(
-        Path::new(requested),
-        &known_download_paths(app_handle)?,
-        true,
-    )
-}
-
 fn known_download_paths(app_handle: &tauri::AppHandle) -> Result<Vec<PathBuf>, String> {
     crate::download_ownership::known_primary_paths(app_handle)
 }
 
 fn authorize_exact_path(requested: &Path, allowed_paths: &[PathBuf]) -> Result<PathBuf, String> {
-    authorize_exact_path_with_directory(requested, allowed_paths, false)
-}
-
-fn authorize_exact_path_with_directory(
-    requested: &Path,
-    allowed_paths: &[PathBuf],
-    allow_directory: bool,
-) -> Result<PathBuf, String> {
     if crate::path_has_symlink_component(requested) {
         return Err("Download path may not contain symlink components".to_string());
     }
 
     let requested = canonicalize_with_missing_leaf(requested)?;
     if let Ok(metadata) = std::fs::metadata(&requested) {
-        if !metadata.is_file() && !(allow_directory && metadata.is_dir()) {
+        if !metadata.is_file() {
             return Err("Download path is not a file".to_string());
         }
     }
@@ -163,9 +140,8 @@ fn existing_download_asset(primary: &Path) -> Option<PathBuf> {
     ]
     .into_iter()
     .find(|candidate| {
-        std::fs::symlink_metadata(candidate).is_ok_and(|metadata| {
-            (metadata.is_file() || metadata.is_dir()) && !metadata.file_type().is_symlink()
-        })
+        std::fs::symlink_metadata(candidate)
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
     })
 }
 

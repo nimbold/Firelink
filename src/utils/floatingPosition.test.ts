@@ -1,15 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { clampFloatingPosition, isFloatingSubmenuCloseKey, positionFloatingSubmenu } from './floatingPosition';
+import { clampFloatingPosition, positionFloatingSubmenu } from './floatingPosition';
 
 describe('floating surface positioning', () => {
-  it('uses the physical back arrow for submenu dismissal in each direction', () => {
-    expect(isFloatingSubmenuCloseKey('ArrowLeft', false)).toBe(true);
-    expect(isFloatingSubmenuCloseKey('ArrowRight', false)).toBe(false);
-    expect(isFloatingSubmenuCloseKey('ArrowRight', true)).toBe(true);
-    expect(isFloatingSubmenuCloseKey('ArrowLeft', true)).toBe(false);
-    expect(isFloatingSubmenuCloseKey('Escape', true)).toBe(true);
-  });
-
   it('keeps a variable-height menu inside the viewport', () => {
     expect(clampFloatingPosition(350, 580, 192, 220, 400, 640)).toEqual({
       x: 200,

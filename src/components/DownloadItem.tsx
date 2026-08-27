@@ -1,6 +1,6 @@
 import React from 'react';
 import { useDownloadProgressStore } from '../store/downloadProgressStore';
-import { Play, Pause, MoreVertical, Clock, RefreshCw } from 'lucide-react';
+import { Play, Pause, MoreVertical, Clock } from 'lucide-react';
 import type { DownloadItem as DownloadItemType } from '../bindings/DownloadItem';
 import {
   canPauseDownload,
@@ -10,16 +10,12 @@ import {
 } from '../utils/downloadActions';
 import { useTranslation } from 'react-i18next';
 import { useSettingsStore } from '../store/useSettingsStore';
-import { isAllocationPhaseVisible } from '../utils/downloads';
 import { formatDateTime } from '../utils/dateTime';
 import {
   downloadProgressColorClass,
-  formatTorrentDuration,
   formatDownloadTotal,
-  resolveDownloadSizeDisplay,
-  resolveDownloadFraction
+  resolveDownloadSizeDisplay
 } from '../utils/downloadProgress';
-import { isTorrentWaitingForPeers } from '../utils/torrentPresentation';
 import {
   COLUMN_ALIGNMENT_JUSTIFY,
   getDownloadActionPosition,
@@ -30,7 +26,6 @@ import {
 
 interface DownloadItemProps {
   download: DownloadItemType;
-  allocationPending: boolean;
   queueIndex: number;
   columnOrder: DownloadTableColumnKey[];
   columnAlignments: Record<DownloadTableColumnKey, DownloadColumnAlignment>;
@@ -54,7 +49,6 @@ interface DownloadItemProps {
 
 export const DownloadItem = React.memo<DownloadItemProps>(({
   download,
-  allocationPending,
   queueIndex,
   columnOrder,
   columnAlignments,
@@ -78,23 +72,12 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   const { t, i18n } = useTranslation();
   const calendarPreference = useSettingsStore(state => state.calendarPreference);
   const liveProgress = useDownloadProgressStore(state => state.progressMap[download.id]);
-  const moveProgress = useDownloadProgressStore(state => state.moveProgressMap[download.id]);
   const rowRef = React.useRef<HTMLDivElement>(null);
   const [isRowHovered, setIsRowHovered] = React.useState(false);
   const [isRowKeyboardFocused, setIsRowKeyboardFocused] = React.useState(false);
   const [isActionHovered, setIsActionHovered] = React.useState(false);
   const [isActionFocused, setIsActionFocused] = React.useState(false);
   const [actionPosition, setActionPosition] = React.useState<React.CSSProperties | undefined>();
-  const waitingForPeers = isTorrentWaitingForPeers({
-    isTorrent: download.isTorrent,
-    status: download.status,
-    downloadedBytes: liveProgress?.downloaded_bytes ?? download.downloadedBytes,
-    fraction: liveProgress?.fraction ?? download.fraction,
-    connectedPeers: liveProgress?.active_connections,
-    connectedSeeders: liveProgress?.num_seeders,
-  });
-  const allocationVisible = download.isTorrent !== true
-    && isAllocationPhaseVisible(allocationPending, download.status);
   const hasRowActions = download.status !== 'completed';
   const isBulkSelection = isSelected && selectedDownloadCount > 1;
   const pauseSelectionCount = isBulkSelection && selectedActionCounts.pause > 0
@@ -195,41 +178,16 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     };
   }, [isActionVisible, updateActionPosition]);
 
-  const progressFraction = download.status === 'moving'
-    ? moveProgress ?? download.fraction
-    : download.status === 'downloading' || download.status === 'verifying' || download.status === 'seeding'
-    ? liveProgress?.fraction ?? download.fraction
-    : download.fraction;
-  const displayFraction = download.status === 'moving' && moveProgress !== undefined
-    ? Math.max(0, Math.min(1, moveProgress))
-    : download.status === 'moving'
-    ? resolveDownloadFraction({ fraction: progressFraction, status: download.status })
-    : resolveDownloadFraction({
-      fraction: progressFraction,
-      downloadedBytes: liveProgress?.downloaded_bytes ?? download.downloadedBytes,
-      totalBytes: liveProgress?.total_bytes ?? download.totalBytes,
-      totalIsEstimate: liveProgress?.total_is_estimate ?? download.totalIsEstimate,
-      isMedia: download.isMedia,
-      size: download.size,
-      status: download.status,
-    });
+  const displayFraction = download.status === 'downloading'
+    ? liveProgress?.fraction ?? download.fraction ?? 0
+    : download.fraction ?? 0;
   const displayPercent = `${(displayFraction * 100).toFixed(0)}%`;
-  const displaySpeed = allocationVisible
-    ? '-'
-    : download.status === 'seeding'
-    ? liveProgress?.upload_speed ?? '-'
-    : download.status === 'downloading' || download.status === 'verifying'
+  const displaySpeed = download.status === 'downloading'
     ? liveProgress?.speed ?? download.speed
     : download.status === 'processing'
       ? t($ => $.downloads.values.processing)
       : '-';
-  const displayEta = allocationVisible
-    ? '-'
-    : download.status === 'seeding'
-    ? typeof download.torrentSeedRemaining === 'number' && Number.isFinite(download.torrentSeedRemaining) && download.torrentSeedRemaining > 0
-      ? formatTorrentDuration(download.torrentSeedRemaining * 60, i18n.language)
-      : '-'
-    : download.status === 'downloading' || download.status === 'verifying'
+  const displayEta = download.status === 'downloading'
     ? liveProgress?.eta ?? download.eta
     : download.status === 'processing'
       ? t($ => $.downloads.values.muxing)
@@ -246,20 +204,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     const value = download.status === 'completed' ? formatDownloadTotal(sizeDisplay) : sizeDisplay.fallback;
     return value === 'Unknown' ? t($ => $.addDownloads.unknown) : value;
   })();
-  const downloadStatusLabel = allocationVisible
-    ? t($ => $.downloads.status.allocatingFiles)
-    : waitingForPeers
-    ? t($ => $.downloads.status.waitingForPeers)
-    : t($ => $.downloads.status[download.status]);
-  const visibleErrorStatusLabel = download.credentialsRequired === true
-    ? t($ => $.properties.credentialsRequired)
-    : download.lastErrorKind === 'nameResolution'
-    ? download.status === 'retrying' && download.lastResolverFallback === true
-      ? t($ => $.downloads.errors.nameResolutionRetrying)
-      : download.status === 'failed'
-        ? t($ => $.downloads.errors.nameResolutionFailed)
-        : downloadStatusLabel
-    : downloadStatusLabel;
+  const downloadStatusLabel = t($ => $.downloads.status[download.status]);
   const downloadedSizeLabel = sizeDisplay.totalIsEstimate
     ? t($ => $.downloads.size.downloadedOfApproximate, {
       downloaded: sizeDisplay.downloaded ?? '',
@@ -294,11 +239,6 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
           {mediaQualityLabel ? (
             <span className="download-quality-chip shrink-0" title={t($ => $.addDownloads.quality)}>
               {mediaQualityLabel}
-            </span>
-          ) : null}
-          {download.isTorrent ? (
-            <span className="download-quality-chip shrink-0" title={t($ => $.addDownloads.torrent)}>
-              {t($ => $.addDownloads.torrent)}
             </span>
           ) : null}
         </div>
@@ -342,42 +282,23 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
           </div>
         ) : (
           <div className="download-cell-content download-status-content">
-            <div
-              className="download-progress-track"
-              aria-label={allocationVisible || waitingForPeers ? downloadStatusLabel : undefined}
-              aria-busy={allocationVisible ? true : undefined}
-              aria-valuetext={allocationVisible || waitingForPeers ? downloadStatusLabel : undefined}
-              role={allocationVisible || waitingForPeers ? 'progressbar' : undefined}
-            >
+            <div className="download-progress-track">
               <div
                 className={`download-progress-fill ${
-                  allocationVisible ? 'allocating' :
                   download.status === 'paused' ? 'paused' :
-                  download.status === 'seeding' ? 'seeding' :
                   download.status === 'processing' ? 'processing' :
-                  download.status === 'verifying' ? 'processing' :
-                  download.status === 'moving' ? 'processing' :
                   download.status === 'queued' || download.status === 'staged' ? 'queued' :
                   download.status === 'retrying' ? 'retrying' : ''
                 }`}
-                style={{ width: allocationVisible ? undefined : `${displayFraction * 100}%` }}
+                style={{ width: `${displayFraction * 100}%` }}
               />
             </div>
             <span
               title={
-                allocationVisible
-                  ? downloadStatusLabel
-                  : download.lastError && (
-                  download.status === 'failed'
-                  || download.status === 'retrying'
-                  || download.lastErrorKind === 'destinationAccess'
-                  || download.credentialsRequired === true
-                )
+                download.lastError && (download.status === 'failed' || download.status === 'retrying')
                   ? download.lastError
                   : (download.status === 'queued' || download.status === 'staged') && queueIndex !== -1
                   ? `${downloadStatusLabel} #${queueIndex + 1}`
-                  : waitingForPeers
-                  ? downloadStatusLabel
                   : download.status === 'downloading'
                   ? displayPercent
                   : download.status === 'processing'
@@ -385,40 +306,27 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                   : downloadStatusLabel
               }
               className={`download-status flex items-center gap-1.5 ${
-                allocationVisible ? 'download-status-downloading' :
                 download.status === 'paused' ? 'download-status-paused' :
-                download.status === 'seeding' ? 'download-status-seeding' :
                 download.status === 'failed' ? 'download-status-failed' :
-                  download.status === 'processing' ? 'download-status-processing' :
-                download.status === 'verifying' ? 'download-status-processing' :
-                download.status === 'moving' ? 'download-status-processing' :
+                download.status === 'processing' ? 'download-status-processing' :
                 download.status === 'downloading' ? 'download-status-downloading' :
                 download.status === 'queued' || download.status === 'staged' ? 'download-status-queued' :
                 download.status === 'retrying' ? 'download-status-retrying' : ''
               }`}
             >
-              {allocationVisible ? (
-                <>
-                  <RefreshCw size={12} className="animate-spin motion-reduce:animate-none shrink-0" aria-hidden="true" />
-                  <span className="truncate">{downloadStatusLabel}</span>
-                </>
-              ) : (download.status === 'queued' || download.status === 'staged') && queueIndex !== -1 ? (
+              {(download.status === 'queued' || download.status === 'staged') && queueIndex !== -1 ? (
                 <>
                   <Clock size={12} className={download.status === 'queued' ? 'animate-pulse motion-reduce:animate-none shrink-0' : 'shrink-0'} />
                   <span className="truncate">
                     {downloadStatusLabel} #{queueIndex + 1}
                   </span>
                 </>
-              ) : waitingForPeers ? (
-                <span className="truncate">{downloadStatusLabel}</span>
-              ) : download.status === 'downloading' || download.status === 'verifying' || download.status === 'moving' ? (
-                displayPercent
-              ) : download.status === 'seeding' ? (
+              ) : download.status === 'downloading' ? (
                 displayPercent
               ) : download.status === 'processing' ? (
                 downloadStatusLabel
               ) : (
-                visibleErrorStatusLabel
+                downloadStatusLabel
               )}
             </span>
           </div>
@@ -487,14 +395,10 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
         onClick={() => isBulkSelection ? handleResumeSelected() : handleResume(download)}
         className="app-icon-button main-control-button"
         title={resumeSelectionCount === null
-          ? download.credentialsRequired === true
-            ? t($ => $.properties.retryWithoutCredentials)
-            : download.status === 'paused' ? t($ => $.downloads.actions.resume) : t($ => $.downloads.actions.start)
+          ? download.status === 'paused' ? t($ => $.downloads.actions.resume) : t($ => $.downloads.actions.start)
           : `${t($ => $.downloadTable.startResume)} (${selectedCountLabel(resumeSelectionCount)})`}
         aria-label={resumeSelectionCount === null
-          ? download.credentialsRequired === true
-            ? t($ => $.properties.retryWithoutCredentials)
-            : download.status === 'paused' ? t($ => $.downloads.actions.resume) : t($ => $.downloads.actions.start)
+          ? download.status === 'paused' ? t($ => $.downloads.actions.resume) : t($ => $.downloads.actions.start)
           : `${t($ => $.downloadTable.startResume)} (${selectedCountLabel(resumeSelectionCount)})`}
       >
         <Play size={14} fill="currentColor" />

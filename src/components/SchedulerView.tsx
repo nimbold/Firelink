@@ -12,12 +12,6 @@ import { useToast } from '../contexts/ToastContext';
 import { usePlatformInfo } from '../utils/platform';
 import { useTranslation } from 'react-i18next';
 import { formatDateTime } from '../utils/dateTime';
-import {
-  beginSchedulerControl,
-  consumeSchedulerHandoffIds,
-  handoffSupersededSchedulerIds,
-  isSchedulerControlCurrent
-} from '../utils/schedulerControl';
 
 const days = [
   { value: 0, key: 'su' },
@@ -36,8 +30,7 @@ const postActions: { value: PostQueueAction; icon: typeof Moon }[] = [
   { value: 'shutdown', icon: Power },
 ];
 
-const minuteOfDay = (value: string): number | null => {
-  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) return null;
+const minuteOfDay = (value: string) => {
   const [hour, minute] = value.split(':').map(Number);
   return hour * 60 + minute;
 };
@@ -45,10 +38,7 @@ const minuteOfDay = (value: string): number | null => {
 function nextScheduledRun(settings: SchedulerSettings): Date | 'disabled' | 'none' {
   if (!settings.enabled) return 'disabled';
 
-  const startMinute = minuteOfDay(settings.startTime);
-  if (startMinute === null) return 'none';
-  const hour = Math.floor(startMinute / 60);
-  const minute = startMinute % 60;
+  const [hour, minute] = settings.startTime.split(':').map(Number);
   const now = new Date();
 
   for (let offset = 0; offset < 8; offset += 1) {
@@ -146,13 +136,7 @@ export default function SchedulerView() {
       addToast({ message: t($ => $.scheduler.validationQueue), variant: 'error', isActionable: true });
       return;
     }
-    const startMinute = minuteOfDay(draft.startTime);
-    const stopMinute = minuteOfDay(draft.stopTime);
-    if (draft.enabled && (startMinute === null || (draft.stopTimeEnabled && stopMinute === null))) {
-      addToast({ message: t($ => $.scheduler.validationTime), variant: 'error', isActionable: true });
-      return;
-    }
-    if (draft.enabled && draft.stopTimeEnabled && stopMinute === startMinute) {
+    if (draft.enabled && draft.stopTimeEnabled && minuteOfDay(draft.stopTime) === minuteOfDay(draft.startTime)) {
       addToast({ message: t($ => $.scheduler.validationStopTime), variant: 'error', isActionable: true });
       return;
     }
@@ -167,29 +151,15 @@ export default function SchedulerView() {
   };
 
   const runNow = async () => {
-    const generation = beginSchedulerControl(effectiveSelectedQueueIds);
     const previouslyTrackedIds = new Set(useSettingsStore.getState().schedulerActiveDownloadIds);
     const results = await Promise.all(
       effectiveSelectedQueueIds.map(queueId => useDownloadStore.getState().startQueue(queueId))
     );
     const acceptedIds = results.flat();
-    if (!isSchedulerControlCurrent(generation)) {
-      const handoffIds = handoffSupersededSchedulerIds(
-        acceptedIds,
-        id => useDownloadStore.getState().downloads.find(download => download.id === id)?.queueId || MAIN_QUEUE_ID
-      );
-      await Promise.allSettled(
-        acceptedIds
-          .filter(id => !handoffIds.has(id))
-          .map(id => useDownloadStore.getState().pauseDownload(id))
-      );
-      return;
-    }
     const selectedQueueSet = new Set(effectiveSelectedQueueIds);
-    const handoffIds = consumeSchedulerHandoffIds(generation);
     const trackedIds = useDownloadStore.getState().downloads
       .filter(download =>
-        (previouslyTrackedIds.has(download.id) || handoffIds.has(download.id)) &&
+        previouslyTrackedIds.has(download.id) &&
         selectedQueueSet.has(download.queueId || MAIN_QUEUE_ID) &&
         isActiveDownloadStatus(download.status)
       )
@@ -210,24 +180,10 @@ export default function SchedulerView() {
   };
 
   const pauseNow = async () => {
-    const generation = beginSchedulerControl();
-    const savedQueueIds = savedSettings.selectedQueueIds
-      .filter(queueId => availableQueueIds.has(queueId));
-    const savedQueueSet = new Set(savedQueueIds);
-    const trackedIdsOutsideSavedQueues = useSettingsStore.getState().schedulerActiveDownloadIds
-      .filter(id => {
-        const queueId = useDownloadStore.getState().downloads.find(download => download.id === id)?.queueId || MAIN_QUEUE_ID;
-        return !savedQueueSet.has(queueId);
-      });
     const counts = await Promise.all(
-      savedQueueIds.map(queueId => useDownloadStore.getState().pauseQueue(queueId))
+      effectiveSelectedQueueIds.map(queueId => useDownloadStore.getState().pauseQueue(queueId))
     );
-    const directPauseResults = await Promise.allSettled(
-      trackedIdsOutsideSavedQueues.map(id => useDownloadStore.getState().pauseDownload(id))
-    );
-    if (!isSchedulerControlCurrent(generation)) return;
-    const count = counts.reduce((total, queueCount) => total + queueCount, 0)
-      + directPauseResults.filter(result => result.status === 'fulfilled').length;
+    const count = counts.reduce((total, queueCount) => total + queueCount, 0);
     useSettingsStore.getState().setSchedulerRunning(false);
     useSettingsStore.getState().setSchedulerActiveDownloadIds([]);
     addToast({
