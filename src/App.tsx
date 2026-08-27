@@ -20,7 +20,6 @@ import {
 } from "./store/useSettingsStore";
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { WindowControls } from "./components/WindowControls";
-import { PropertiesWindowBridgeHost } from "./components/PropertiesWindowBridgeHost";
 import { useToast } from "./contexts/ToastContext";
 import { setLogStreamActive } from './utils/logger';
 import { updateDockBadge } from './utils/dockBadge';
@@ -1287,7 +1286,6 @@ function App() {
       
       {isAddModalOpen && <AddDownloadsModal />}
 
-      <PropertiesWindowBridgeHost />
       {isDeleteModalOpen && (
         <Suspense fallback={null}>
           <DeleteConfirmationModal />
