@@ -18561,9 +18561,11 @@ pub fn run() {
                     .focused(false)
                     .focusable(false);
             }
-            main_window_builder
-                .build()
-                .map_err(|error| format!("failed to create main window: {error}"))?;
+            if std::env::var_os("FIRELINK_SKIP_MAIN_WINDOW").is_none() {
+                main_window_builder
+                    .build()
+                    .map_err(|error| format!("failed to create main window: {error}"))?;
+            }
             restore_pending_main_window(app.handle());
 
             #[cfg(any(target_os = "windows", target_os = "linux"))]
