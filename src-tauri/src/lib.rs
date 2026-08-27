@@ -7117,44 +7117,83 @@ async fn remove_download_container_assets_permanently<R: tauri::Runtime>(
     // unlinking, so a later substitution still fails closed.
     validate_download_sidecars_permanently(primary, app_handle).await?;
 
-    let mut entries = tokio::fs::read_dir(primary)
-        .await
-        .map_err(|error| format!("could not inspect Torrent output directory: {error}"))?;
-    let mut metadata_entries = Vec::new();
+    // Inspect the complete tree without following links. If a real unowned
+    // entry is found, stop before deleting anything in the container. This
+    // preserves the whole user-owned subtree rather than trying to clean
+    // around it.
+    let mut pending = vec![(primary.to_path_buf(), false)];
+    let mut empty_directories = Vec::new();
+    let mut metadata_files = Vec::new();
     let mut has_unrelated_entries = false;
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|error| format!("could not inspect Torrent output directory: {error}"))?
-    {
-        let path = entry.path();
-        let entry_metadata = tokio::fs::symlink_metadata(&path)
-            .await
-            .map_err(|error| format!("could not inspect Torrent output entry: {error}"))?;
-        if metadata_is_link_or_reparse(&entry_metadata) {
-            return Err(format!(
-                "refusing to remove Torrent output directory containing symbolic link '{}'",
-                path.display()
-            ));
-        }
-        if !is_os_directory_metadata(&entry.file_name()) {
-            has_unrelated_entries = true;
+    'inspect: while let Some((directory, visited)) = pending.pop() {
+        if visited {
+            empty_directories.push(directory);
             continue;
         }
-        if !entry_metadata.is_file() {
-            return Err(format!(
-                "refusing to remove non-file OS metadata entry '{}'",
-                path.display()
-            ));
+        let mut entries = match tokio::fs::read_dir(&directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                continue;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "could not inspect Torrent output directory '{}': {error}",
+                    directory.display()
+                ));
+            }
+        };
+        let mut child_directories = Vec::new();
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|error| format!("could not inspect Torrent output directory: {error}"))?
+        {
+            let path = entry.path();
+            let entry_metadata = match tokio::fs::symlink_metadata(&path).await {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "could not inspect Torrent output entry '{}': {error}",
+                        path.display()
+                    ));
+                }
+            };
+            if metadata_is_link_or_reparse(&entry_metadata) {
+                return Err(format!(
+                    "refusing to remove Torrent output directory containing symbolic link '{}'",
+                    path.display()
+                ));
+            }
+            if entry_metadata.is_dir() {
+                child_directories.push(path);
+            } else if is_os_directory_metadata(&entry.file_name()) {
+                if !entry_metadata.is_file() {
+                    return Err(format!(
+                        "refusing to remove non-file OS metadata entry '{}'",
+                        path.display()
+                    ));
+                }
+                validate_exact_file_for_permanent_removal(&path, app_handle).await?;
+                metadata_files.push(path);
+            } else {
+                has_unrelated_entries = true;
+                break 'inspect;
+            }
         }
-        validate_exact_file_for_permanent_removal(&path, app_handle).await?;
-        metadata_entries.push(path);
+
+        pending.push((directory, true));
+        pending.extend(
+            child_directories
+                .into_iter()
+                .rev()
+                .map(|child| (child, false)),
+        );
     }
 
+    // Sidecars are still exact, independently owned assets, so remove them
+    // even when an unrelated entry means that the output container remains.
     remove_download_sidecars_permanently(primary, app_handle).await?;
-    for path in metadata_entries {
-        remove_exact_file_permanently(&path, app_handle).await?;
-    }
     if has_unrelated_entries {
         log::debug!(
             "keeping Torrent output directory '{}': unrelated entries remain",
@@ -7163,28 +7202,32 @@ async fn remove_download_container_assets_permanently<R: tauri::Runtime>(
         return Ok(());
     }
 
-    for attempt in 0..=5 {
-        match tokio::fs::remove_dir(primary).await {
-            Ok(()) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
-                // A user or another process may have added an unrelated file
-                // after inspection. Preserve it and leave the directory in
-                // place; owned files were already removed exactly.
-                log::debug!(
-                    "keeping Torrent output directory '{}': it became non-empty during cleanup",
-                    primary.display()
-                );
-                return Ok(());
-            }
-            Err(error) if attempt == 5 => {
-                return Err(format!(
-                    "could not permanently remove Torrent output directory '{}' after retries: {error}",
-                    primary.display()
-                ));
-            }
-            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
+    for path in metadata_files {
+        remove_exact_file_permanently(&path, app_handle).await?;
+    }
+
+    // remove_dir is deliberately non-recursive. The visit markers put child
+    // directories before their parents, so a file or directory added after
+    // inspection makes that directory (and then its parents) fail closed
+    // without deleting newly-created unowned content.
+    for directory in &empty_directories {
+        let removed = remove_empty_directory_permanently(directory).await?;
+        if crate::platform::paths_equal(directory, primary) && !removed {
+            log::debug!(
+                "keeping Torrent output directory '{}': it became non-empty during cleanup",
+                primary.display()
+            );
         }
+    }
+
+    if !empty_directories
+        .iter()
+        .any(|directory| crate::platform::paths_equal(directory, primary))
+    {
+        log::debug!(
+            "keeping Torrent output directory '{}': it disappeared during cleanup",
+            primary.display()
+        );
     }
     Ok(())
 }
@@ -7257,28 +7300,73 @@ fn is_os_directory_metadata(name: &std::ffi::OsStr) -> bool {
 }
 
 async fn directory_has_non_metadata_entries(path: &std::path::Path) -> Result<bool, String> {
-    match tokio::fs::read_dir(path).await {
-        Ok(mut entries) => loop {
-            match entries.next_entry().await {
-                Ok(Some(entry)) if is_os_directory_metadata(&entry.file_name()) => continue,
-                Ok(Some(_)) => break Ok(true),
-                Ok(None) => break Ok(false),
+    let mut directories = vec![path.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let mut entries = match tokio::fs::read_dir(&directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "could not inspect directory '{}': {}",
+                    directory.display(),
+                    error
+                ));
+            }
+        };
+        while let Some(entry) = entries.next_entry().await.map_err(|error| {
+            format!(
+                "could not inspect directory '{}': {}",
+                directory.display(),
+                error
+            )
+        })? {
+            let metadata = match tokio::fs::symlink_metadata(entry.path()).await {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => {
-                    break Err(format!(
-                        "could not inspect directory '{}': {}",
-                        path.display(),
+                    return Err(format!(
+                        "could not inspect directory entry '{}': {}",
+                        entry.path().display(),
                         error
                     ));
                 }
+            };
+            if metadata_is_link_or_reparse(&metadata) {
+                return Ok(true);
             }
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(format!(
-            "could not inspect directory '{}': {}",
-            path.display(),
-            error
-        )),
+            if metadata.is_dir() {
+                directories.push(entry.path());
+            } else if is_os_directory_metadata(&entry.file_name()) {
+                // These names are ignorable only for regular OS metadata
+                // files. A directory with a metadata-like name may contain
+                // real user content and must be inspected normally.
+                continue;
+            } else {
+                return Ok(true);
+            }
+        }
     }
+    Ok(false)
+}
+
+async fn remove_empty_directory_permanently(path: &std::path::Path) -> Result<bool, String> {
+    for attempt in 0..=5 {
+        match tokio::fs::remove_dir(path).await {
+            Ok(()) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                return Ok(false);
+            }
+            Err(error) if attempt == 5 => {
+                return Err(format!(
+                    "could not permanently remove empty Torrent directory '{}' after retries: {error}",
+                    path.display()
+                ));
+            }
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
+        }
+    }
+    Ok(false)
 }
 
 async fn remove_download_container_assets<R: tauri::Runtime>(
@@ -16224,10 +16312,26 @@ mod tests {
         assert!(!directory_has_non_metadata_entries(directory.path())
             .await
             .unwrap());
-        std::fs::write(directory.path().join("MD5"), b"unselected").unwrap();
+        let empty_nested = directory.path().join("MD5").join("nested");
+        std::fs::create_dir_all(&empty_nested).unwrap();
+        assert!(!directory_has_non_metadata_entries(directory.path())
+            .await
+            .unwrap());
+        std::fs::write(empty_nested.join("unselected"), b"unselected").unwrap();
         assert!(directory_has_non_metadata_entries(directory.path())
             .await
             .unwrap());
+
+        let metadata_named_root = tempfile::tempdir().unwrap();
+        let metadata_named_directory = metadata_named_root.path().join(".localized");
+        std::fs::create_dir_all(&metadata_named_directory).unwrap();
+        std::fs::write(metadata_named_directory.join("unselected"), b"unselected").unwrap();
+        assert!(
+            directory_has_non_metadata_entries(metadata_named_root.path())
+                .await
+                .unwrap()
+        );
+        drop(metadata_named_root);
     }
 
     #[test]
@@ -16664,7 +16768,8 @@ mod tests {
         let container = directory.path().join("torrent-output");
         std::fs::create_dir(&container).unwrap();
         std::fs::write(container.join(".DS_Store"), b"metadata").unwrap();
-        let unrelated = container.join("unselected.bin");
+        let unrelated = container.join("unselected").join("unselected.bin");
+        std::fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
         std::fs::write(&unrelated, b"preserve").unwrap();
 
         remove_download_container_assets_permanently(&container, app.handle())
@@ -16673,6 +16778,40 @@ mod tests {
 
         assert!(container.is_dir());
         assert!(unrelated.exists());
+        drop(directory);
+    }
+
+    #[tokio::test]
+    async fn permanent_torrent_container_cleanup_removes_empty_nested_directories() {
+        use tauri::Manager;
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let storage_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let storage_layout = crate::storage::StorageLayout::resolve(
+            app.handle(),
+            crate::storage::StorageMode::Portable {
+                root: storage_root.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        app.manage(crate::db::init(&storage_layout).unwrap());
+        let download_root =
+            configure_test_download_root(app.handle(), &storage_root.path().join("downloads"));
+        let directory = tempfile::tempdir_in(&download_root).unwrap();
+        let container = directory.path().join("torrent-output");
+        let empty_nested = container.join("MD5").join("nested");
+        std::fs::create_dir_all(&empty_nested).unwrap();
+        std::fs::create_dir(container.join(".localized")).unwrap();
+        std::fs::write(container.join(".DS_Store"), b"metadata").unwrap();
+        std::fs::write(container.join("MD5").join(".DS_Store"), b"metadata").unwrap();
+
+        remove_download_container_assets_permanently(&container, app.handle())
+            .await
+            .expect("an empty Torrent output tree should be permanently removable");
+
+        assert!(!container.exists());
         drop(directory);
     }
 

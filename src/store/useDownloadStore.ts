@@ -2061,6 +2061,13 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     if (pendingDispatch) {
       await pendingDispatch;
     }
+    // The native command classifies PermanentIfUnfinished from the durable
+    // row. Flush the current UI snapshot only after invalidating and joining
+    // any pending dispatch, so a status transition from that dispatch cannot
+    // leave SQLite behind the state used for native removal.
+    if (deleteFile && !preserveResumable && assetRemovalPolicy === 'permanentIfUnfinished') {
+      await flushDownloadPersistence();
+    }
     const item = get().downloads.find(d => d.id === id);
 
     if (item) {
@@ -3303,9 +3310,14 @@ export const flushDownloadPersistence = async (): Promise<void> => {
   if (!downloadPersistenceReady) return;
   while (true) {
     const snapshot = persistenceSnapshotForState(useDownloadStore.getState());
-    if (snapshot.key === lastCommittedPersistenceKey) return;
     await queuePersistenceSnapshot(snapshot);
-    if (persistenceSnapshotForState(useDownloadStore.getState()).key === lastCommittedPersistenceKey) {
+    const current = persistenceSnapshotForState(useDownloadStore.getState());
+    if (
+      current.key === snapshot.key &&
+      current.key === lastCommittedPersistenceKey &&
+      !persistenceSaveInFlight &&
+      nextPersistenceSnapshot === null
+    ) {
       return;
     }
   }

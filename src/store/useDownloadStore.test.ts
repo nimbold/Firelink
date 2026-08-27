@@ -2196,6 +2196,64 @@ describe('useDownloadStore', () => {
     }
   });
 
+  it('waits for in-flight persistence before flushing the current state', async () => {
+    const id = 'flush-current-state';
+    const completed = {
+      id,
+      url: 'https://example.com/file',
+      fileName: 'file',
+      status: 'completed' as const,
+      category: 'Other' as const,
+      dateAdded: ''
+    };
+    useDownloadStore.setState({ downloads: [completed] as any[] });
+    const disposePersistence = initializeDownloadPersistence('main');
+    const events: string[] = [];
+    let releaseDownloadingCommit!: () => void;
+    let signalDownloadingCommitStarted!: () => void;
+    const downloadingCommitStarted = new Promise<void>(resolve => {
+      signalDownloadingCommitStarted = resolve;
+    });
+    const downloadingCommitGate = new Promise<void>(resolve => {
+      releaseDownloadingCommit = resolve;
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: any) => {
+      if (command === 'db_commit_download_state') {
+        const status = (JSON.parse(args.downloadsData) as Array<{ status: string }>)[0]?.status ?? 'empty';
+        events.push(`commit:${status}`);
+        if (status === 'downloading') {
+          signalDownloadingCommitStarted();
+          await downloadingCommitGate;
+        }
+        return undefined;
+      }
+      return undefined;
+    });
+
+    try {
+      await flushDownloadPersistence();
+      events.length = 0;
+      useDownloadStore.getState().updateDownload(id, { status: 'downloading' });
+      await downloadingCommitStarted;
+      useDownloadStore.getState().updateDownload(id, { status: 'completed' });
+
+      let flushResolved = false;
+      const flushing = flushDownloadPersistence().then(() => {
+        flushResolved = true;
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(flushResolved).toBe(false);
+
+      releaseDownloadingCommit();
+      await flushing;
+      expect(events).toEqual(['commit:downloading', 'commit:completed']);
+    } finally {
+      releaseDownloadingCommit();
+      disposePersistence();
+    }
+  });
+
   it('waits for durable queued state before resuming an existing lifecycle', async () => {
     useDownloadStore.setState({
       downloads: [{
@@ -3871,6 +3929,138 @@ describe('useDownloadStore', () => {
       preserveResumable: false,
       assetRemovalPolicy: 'permanentIfUnfinished'
     });
+  });
+
+  it('flushes the current Delete File status before invoking native removal', async () => {
+    const disposePersistence = initializeDownloadPersistence('main');
+    const events: string[] = [];
+    let releaseCommit!: () => void;
+    let signalCommitStarted!: () => void;
+    const commitStarted = new Promise<void>(resolve => {
+      signalCommitStarted = resolve;
+    });
+    const commitGate = new Promise<void>(resolve => {
+      releaseCommit = resolve;
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: any) => {
+      if (command === 'db_commit_download_state') {
+        const status = (JSON.parse(args.downloadsData) as Array<{ status: string }>)[0]?.status ?? 'empty';
+        events.push(`commit:${status}`);
+        signalCommitStarted();
+        await commitGate;
+        return undefined;
+      }
+      if (command === 'remove_download') {
+        events.push('remove');
+      }
+      return undefined;
+    });
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'completed-delete', url: 'https://example.com/file', fileName: 'file', status: 'completed', category: 'Other', dateAdded: '' }
+      ] as any[]
+    });
+
+    try {
+      await commitStarted;
+      const removing = useDownloadStore.getState().removeDownload(
+        'completed-delete',
+        true,
+        false,
+        'permanentIfUnfinished'
+      );
+
+      await Promise.resolve();
+      expect(events).toEqual(['commit:completed']);
+
+      releaseCommit();
+      await removing;
+      expect(events).toEqual(['commit:completed', 'remove', 'commit:empty']);
+    } finally {
+      releaseCommit();
+      disposePersistence();
+    }
+  });
+
+  it('waits for an in-flight dispatch before flushing Delete File status', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        {
+          id: 'dispatch-delete-race',
+          url: 'https://example.com/file',
+          fileName: 'file',
+          destination: '/tmp',
+          status: 'ready',
+          category: 'Other',
+          dateAdded: ''
+        }
+      ] as any[]
+    });
+    const disposePersistence = initializeDownloadPersistence('main');
+    const events: string[] = [];
+    let releaseEnqueue!: () => void;
+    let signalEnqueueStarted!: () => void;
+    let releaseCompletedCommit!: () => void;
+    let signalCompletedCommitStarted!: () => void;
+    const enqueueStarted = new Promise<void>(resolve => {
+      signalEnqueueStarted = resolve;
+    });
+    const enqueueGate = new Promise<void>(resolve => {
+      releaseEnqueue = resolve;
+    });
+    const completedCommitStarted = new Promise<void>(resolve => {
+      signalCompletedCommitStarted = resolve;
+    });
+    const completedCommitGate = new Promise<void>(resolve => {
+      releaseCompletedCommit = resolve;
+    });
+
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: any) => {
+      if (command === 'db_commit_download_state') {
+        const status = (JSON.parse(args.downloadsData) as Array<{ status: string }>)[0]?.status ?? 'empty';
+        events.push(`commit:${status}`);
+        if (status === 'completed') {
+          signalCompletedCommitStarted();
+          await completedCommitGate;
+        }
+        return undefined;
+      }
+      if (command === 'enqueue_download') {
+        signalEnqueueStarted();
+        await enqueueGate;
+        useDownloadStore.getState().updateDownload('dispatch-delete-race', { status: 'completed' });
+        return { id: 'dispatch-delete-race', filename: 'file' };
+      }
+      if (command === 'remove_download') {
+        events.push(args.deleteAssets ? 'remove-user' : 'remove-stale');
+      }
+      if (command === 'get_pending_order') return [];
+      return undefined;
+    });
+
+    try {
+      const dispatching = dispatchItem('dispatch-delete-race');
+      await enqueueStarted;
+      const removing = useDownloadStore.getState().removeDownload(
+        'dispatch-delete-race',
+        true,
+        false,
+        'permanentIfUnfinished'
+      );
+
+      releaseEnqueue();
+      await completedCommitStarted;
+      await expect(dispatching).resolves.toBe(false);
+      expect(events).not.toContain('remove-user');
+
+      releaseCompletedCommit();
+      await removing;
+      expect(events.indexOf('commit:completed')).toBeLessThan(events.indexOf('remove-user'));
+    } finally {
+      releaseEnqueue();
+      releaseCompletedCommit();
+      disposePersistence();
+    }
   });
 
   it('starts staged queue items in their persisted queue order', async () => {
