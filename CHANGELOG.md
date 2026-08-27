@@ -5,6 +5,53 @@ All notable changes to Firelink will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-08-27
+
+This release adds built-in Torrent downloads and a dedicated Properties window, while making regular downloads, browser handoffs, and cross-platform packages more dependable.
+
+### New features
+
+- **Torrent downloads**
+  - Add `.torrent` files and magnet links from the Add window, file associations, `magnet:` links, and Firelink Companion.
+  - Resolve remote metadata before enqueueing and safely reuse validated Torrent metadata.
+  - Select files, prioritize pieces, preallocate or allocate as needed, verify existing data, remove unselected files safely, and add per-file web seeds.
+  - Manage trackers and exclusions, tracker timing, DHT/IPv6/PEX/LPD discovery, encryption, peer limits, network identity, and resource limits.
+  - View file progress, piece availability, connected and listed peers, seeders, upload totals and speed, and the info hash.
+  - Set upload limits, seed time or ratio, stop timeout, concurrent seed slots, and move Torrent data to a new location.
+  - Use a dedicated Torrents category with pause, resume, retry, redownload, and safe cleanup.
+- **Download and Torrent Properties windows**
+  - Open a selected download in its own window with overview, transfer, and advanced controls.
+  - Use Torrent tabs for file selection, trackers, peers, options, and live diagnostics.
+  - Edit supported settings while a transfer is active, including speed, connections, Torrent upload and peer limits, seeding, verification, allocation, and encryption.
+  - Inspect allocation, exact progress, resume failures, destinations, and current diagnostics; copy long URLs or paths and export magnet links where available.
+  - Keep the window size during the app session while the window follows the current theme and locale.
+- **Adaptive mirror selection**
+  - Optionally use recent transfer performance to choose among multiple mirrors. Mirror statistics stay private on this device.
+- **Transfer and layout visibility**
+  - Show the file-allocation phase while a normal download prepares its destination.
+  - Remember the main-window size and position and the Folders collapse preference between launches.
+
+### Improvements
+
+- Improve normal-download recovery across restarts, stale transfers, redirects, mirrors, connection-pool slowdowns, retries, and resume operations without saved credentials.
+- Improve media recovery and resume messaging, preserve exact progress at the end of a transfer, and restore adaptive YouTube formats. This responds to the interrupted-YouTube-download report in [#36](https://github.com/nimbold/Firelink/issues/36).
+- Make browser and deep-link inputs arrive in order, keep magnet clipboard handoffs usable, and make Add-window destination and metadata validation clearer.
+- Improve the download table, sidebar, Add window, Settings, RTL keyboard navigation, and accessibility behavior at narrow window sizes.
+- Add clear guidance for the macOS first-launch security warning and safe approval steps, responding to [#34](https://github.com/nimbold/Firelink/issues/34).
+- Refresh bundled engines and dependencies, resume interrupted engine downloads safely, and strengthen package, release, and cross-platform verification.
+
+### Fixes
+
+- Retry affected transfers through the system resolver when a VPN or network tunnel leaves aria2 unable to resolve a host, addressing [#35](https://github.com/nimbold/Firelink/issues/35).
+- Prevent late or duplicate lifecycle events from reviving, removing, or misreporting a download after a newer action has already won.
+- Keep replacement, removal, and pre-admission cleanup from leaving stale queue entries, partial files, or misleading progress behind.
+- Keep completed, paused, failed, and retrying downloads authoritative while allocation and progress updates arrive asynchronously.
+- Make scheduled actions, speed limits, logs, persisted settings, and browser credentials safer when several changes happen close together.
+
+### Compatibility
+
+- Use [Firelink Companion `2.2.0`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.0), or the [latest Companion release](https://github.com/nimbold/Firelink-Extension/releases/latest), with Firelink `1.4.0`.
+
 ## [1.3.1] - 2026-07-30
 
 This hotfix improves filename handling, localized display details, and release reliability across platforms.

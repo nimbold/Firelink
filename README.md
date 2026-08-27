@@ -28,9 +28,9 @@ It uses a Rust and Tauri backend with a React and TypeScript interface. Required
 
 ## Status
 
-Firelink `1.3.1` is the latest desktop release.
+Firelink `1.4.0` is the latest desktop release.
 
-It is paired with [the latest Firelink Companion release, `2.1.0`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.1.0). The Companion did not change for this hotfix.
+Use [the latest Firelink Companion release, `2.2.0`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.0) with Firelink. The Companion is maintained in the [Firelink-Extension repository](https://github.com/nimbold/Firelink-Extension).
 
 The project is actively maintained. See the [changelog](CHANGELOG.md) for release history and current work.
 
@@ -40,8 +40,12 @@ Translations are available for English, Simplified Chinese, Hebrew, Persian, Ukr
 
 - Segmented HTTP and HTTPS downloads with retries, speed limits, and connection controls.
 - Media and playlist downloads through yt-dlp, FFmpeg, and Deno.
+- BitTorrent downloads from `.torrent` files, magnet links, and browser handoff, with file selection, web seeds, seeding, and live diagnostics.
+- Standalone Download and Torrent Properties windows with live controls, transfer details, and safe Torrent relocation.
+- Adaptive mirror selection for multi-source downloads.
 - An Add window for metadata, duplicate handling, save locations, and download options.
 - Persistent queues with pause, resume, retry, redownload, and scheduling.
+- Visible allocation and resume status with clearer transfer diagnostics.
 - Live speed and connection controls for active downloads.
 - A customizable download table with sorting, column selection, reordering, and bulk actions.
 - File organization with categories, default folders, and per-download locations.
@@ -95,7 +99,7 @@ Only use these steps for Firelink downloaded from the [official GitHub release p
 
 ## Browser integration
 
-[Firelink Companion `2.1.0`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.1.0) connects browser downloads, links, and media pages to Firelink. Use the latest Companion release with the latest Firelink release; no extension update is needed for Firelink `1.3.1`.
+[Firelink Companion `2.2.0`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.0) connects browser downloads, links, media pages, magnets, and Torrent metadata to Firelink. Use the [latest Companion release](https://github.com/nimbold/Firelink-Extension/releases/latest) with the [latest Firelink release](https://github.com/nimbold/Firelink/releases/latest).
 
 Captured links open Firelink's Add window for review before they are started or queued.
 

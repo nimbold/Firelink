@@ -1636,7 +1636,7 @@ runEngineChecks(false);
                   value={settings.torrentPeerIdPrefix}
                   label={t($ => $.settings.network.torrentPeerIdPrefix)}
                   description={t($ => $.settings.network.torrentPeerIdPrefixDescription)}
-                  placeholder="-FL-1-3-1-"
+                  placeholder="-FL-1-4-0-"
                   maxLength={20}
                   onCommit={settings.setTorrentPeerIdPrefix}
                   onError={showTorrentNetworkInputError}
@@ -1646,7 +1646,7 @@ runEngineChecks(false);
                   value={settings.torrentPeerAgent}
                   label={t($ => $.settings.network.torrentPeerAgent)}
                   description={t($ => $.settings.network.torrentPeerAgentDescription)}
-                  placeholder="Firelink/1.3.1"
+                  placeholder="Firelink/1.4.0"
                   maxLength={128}
                   onCommit={settings.setTorrentPeerAgent}
                   onError={showTorrentNetworkInputError}
