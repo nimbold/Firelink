@@ -37,6 +37,7 @@ const child = spawn(executable, [], {
 });
 
 let stderr = '';
+let stdout = '';
 let spawnError = null;
 let readyPort = null;
 let childExit = null;
@@ -55,7 +56,9 @@ child.on('exit', (code, signal) => {
 child.stderr.on('data', data => {
   stderr += data.toString();
 });
-child.stdout.on('data', () => {});
+child.stdout.on('data', data => {
+  stdout += data.toString();
+});
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -185,6 +188,45 @@ if ($visible.Count -gt 0) {
     const detail = [error.stdout?.toString(), error.stderr?.toString()].filter(Boolean).join('\n').trim();
     throw new Error(detail || 'Visible child process window check failed.');
   }
+}
+
+function windowsCrashDiagnostics() {
+  if (process.platform !== 'win32') {
+    return '';
+  }
+
+  const script = `
+$start = (Get-Date).AddMinutes(-15)
+$events = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $start } -ErrorAction SilentlyContinue |
+  Where-Object {
+    $_.ProviderName -in @('Application Error', 'Windows Error Reporting') -and
+    $_.Message -match '(?i)firelink'
+  } |
+  Select-Object -First 8)
+foreach ($event in $events) {
+  Write-Output ("EVENT " + $event.TimeCreated.ToString('o') + " " + $event.ProviderName + " ID=" + $event.Id)
+  Write-Output $event.Message
+}
+`;
+
+  try {
+    return execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+
+function startupDiagnostics() {
+  const sections = [];
+  if (stdout.trim()) sections.push(`Firelink stdout:\n${stdout.slice(-6000)}`);
+  if (stderr.trim()) sections.push(`Firelink stderr:\n${stderr.slice(-6000)}`);
+  const crashEvents = windowsCrashDiagnostics();
+  if (crashEvents) sections.push(`Windows application events:\n${crashEvents.slice(-12000)}`);
+  return sections.join('\n\n');
 }
 
 function waitForChildExit(timeoutMs) {
@@ -396,6 +438,8 @@ try {
   console.log(`Packaged Firelink smoke passed on 127.0.0.1:${readyPort} with ${stabilityMs}ms stability`);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
+  const diagnostics = startupDiagnostics();
+  if (diagnostics) console.error(`\nStartup diagnostics:\n${diagnostics}`);
   process.exitCode = 1;
 } finally {
   if (!await terminateChild()) {
