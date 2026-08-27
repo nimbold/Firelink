@@ -439,7 +439,6 @@ pub fn open_download_properties_window(
         .visible(false)
         // A hidden WebView2 must not request focus during construction. The
         // native reveal path focuses it after the window is visible.
-        .focused(false)
         .transparent(true);
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     let builder = builder.decorations(false);
