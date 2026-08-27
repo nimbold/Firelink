@@ -18200,9 +18200,8 @@ fn toggle_log_pause(caller: tauri::WebviewWindow, pause: bool) -> Result<(), Str
 }
 
 #[tauri::command]
-fn is_log_paused(caller: tauri::WebviewWindow) -> bool {
-    properties_window::ensure_main_window(&caller).is_ok()
-        && LOG_PAUSED.load(std::sync::atomic::Ordering::Relaxed)
+fn is_log_paused() -> bool {
+    LOG_PAUSED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[tauri::command]
