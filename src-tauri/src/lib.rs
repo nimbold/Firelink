@@ -19860,42 +19860,7 @@ pub fn run() {
                 }
             }
         })
-.invoke_handler(tauri::generate_handler![
- get_engine_status, get_aria2_engine_status, get_ytdlp_engine_status, get_ffmpeg_engine_status,
- get_deno_engine_status, test_ytdlp, test_aria2c, test_ffmpeg, test_deno,
- pause_download, resume_download, fetch_metadata, inspect_torrent, rekey_torrent_metadata, remove_torrent_metadata, fetch_media_metadata, fetch_media_playlist_metadata,
-            begin_dock_badge_session, update_dock_badge, get_platform_info, approve_download_root, set_prevent_sleep, set_power_preferences, get_free_space, perform_system_action,
-            ack_schedule_trigger,
-            check_automation_permission, request_automation_permission, open_automation_settings,
-            set_keychain_password, get_keychain_password, delete_keychain_password,
-            save_site_login, delete_site_login,
-            hydrate_extension_pairing_token, get_session_pairing_token, regenerate_pairing_token, grant_keychain_access,
-            get_keychain_grant_status, accept_keychain_grant, abandon_keychain_grant,
-            authorize_keychain_access,
-            acknowledge_pairing_token_change,
-            inspect_download_target, toggle_tray_icon, set_extension_pairing_token,
-            get_extension_server_port, set_extension_frontend_ready, ack_frontend_exit, ack_extension_download, set_concurrent_limit, set_queue_concurrency_limits, set_download_speed_limit, set_torrent_upload_limit, set_torrent_peer_options, get_torrent_peers, get_torrent_availability, get_torrent_file_progress, get_torrent_piece_progress, get_torrent_file_selection, set_torrent_file_selection, get_torrent_details, get_torrent_magnet_link, export_torrent_metadata, move_torrent_data, cancel_torrent_move_data, verify_torrent_data, get_torrent_web_seeds, set_torrent_web_seeds, set_torrent_max_open_files, set_torrent_overall_upload_limit, set_global_speed_limit, remove_download, get_download_primary_path,
-            detach_download_for_reconfigure,
-            enqueue_download, enqueue_many, cancel_enqueue_generation, move_in_queue, move_many_in_queue, remove_from_queue, get_pending_order,
-            commands::reveal_in_file_manager, commands::open_downloaded_file,
-            properties_window::open_download_properties_window,
-            properties_window::get_properties_window_download_id,
-            properties_window::properties_window_send_ready,
-            properties_window::properties_window_reveal,
-            properties_window::properties_window_send_action,
-            properties_window::validate_properties_window_request,
-            properties_window::close_download_properties_window,
-            properties_window::properties_window_registry_remove_for_download,
-            parity::get_system_proxy, parity::get_file_category, parity::check_for_updates, parity::is_supported_media, parity::get_supported_media_domains,
-            parity::create_category_directories,
-            db_save_settings, db_load_settings, canonicalize_torrent_network_setting,
-            db_get_all_downloads, db_replace_downloads,
-            db_commit_download_state,
-            clear_torrent_removal_paths, reconcile_torrent_removal_reservations,
-            db_get_all_queues, db_replace_queues,
-            read_logs, export_logs, toggle_log_pause, is_log_paused, clear_logs,
-            set_log_stream_active
-        ])
+.invoke_handler(tauri::generate_handler![begin_dock_badge_session, is_log_paused])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| match event {
