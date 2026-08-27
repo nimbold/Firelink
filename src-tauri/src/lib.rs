@@ -18200,9 +18200,12 @@ fn toggle_log_pause(caller: tauri::WebviewWindow, pause: bool) -> Result<(), Str
 }
 
 #[tauri::command]
-fn is_log_paused(caller: tauri::WebviewWindow) -> bool {
-    properties_window::ensure_main_window(&caller).is_ok()
-        && LOG_PAUSED.load(std::sync::atomic::Ordering::Relaxed)
+fn is_log_paused() -> bool {
+    // This read is needed during renderer bootstrap, including by standalone
+    // Properties windows. Avoid extracting a WebviewWindow here: on Windows,
+    // WebView2 can invoke the command while its host is still initializing.
+    // Mutating logging commands remain restricted to the main window below.
+    LOG_PAUSED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[tauri::command]
