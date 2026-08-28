@@ -515,6 +515,13 @@ mod tests {
     use std::sync::Mutex;
     use tokio::sync::{oneshot, watch, Notify};
 
+    // These tests exercise the real HTTP client. Keep the probe budgets long
+    // enough for a busy hosted runner to establish a loopback connection, and
+    // keep the polling/termination assertions independently bounded.
+    const HTTP_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+    const HTTP_INITIAL_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+    const HTTP_TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
     enum ScriptedReply {
         Result(Value),
         RpcError(String),
@@ -603,20 +610,34 @@ mod tests {
         }
 
         async fn wait_for_method(&self, method: &str, occurrence: usize) {
-            loop {
-                let count = self
-                    .state
-                    .calls
-                    .lock()
-                    .expect("scripted RPC call log lock should work")
-                    .iter()
-                    .filter(|call| call.method == method)
-                    .count();
-                if count >= occurrence {
-                    return;
+            let wait = async {
+                loop {
+                    // Register before checking the predicate so a concurrent
+                    // handler cannot notify between the check and await.
+                    let notified = self.state.call_notification.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    let count = self
+                        .state
+                        .calls
+                        .lock()
+                        .expect("scripted RPC call log lock should work")
+                        .iter()
+                        .filter(|call| call.method == method)
+                        .count();
+                    if count >= occurrence {
+                        return;
+                    }
+                    notified.as_mut().await;
                 }
-                self.state.call_notification.notified().await;
-            }
+            };
+            tokio::time::timeout(HTTP_TEST_TIMEOUT, wait)
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "timed out waiting for scripted RPC method {method:?} occurrence {occurrence}"
+                    )
+                });
         }
 
         async fn shutdown(mut self) {
@@ -1188,8 +1209,8 @@ mod tests {
                 &probe_path,
                 "system",
                 true,
-                Duration::from_secs(2),
-                Duration::from_millis(200),
+                HTTP_PROBE_TIMEOUT,
+                HTTP_INITIAL_PROBE_TIMEOUT,
                 Duration::ZERO,
             )
             .await
@@ -1203,7 +1224,7 @@ mod tests {
         tokio::fs::write(&metadata_path, b"metadata from alternate resolver")
             .await
             .expect("alternate metadata fixture should be writable");
-        let bytes = tokio::time::timeout(Duration::from_secs(1), task)
+        let bytes = tokio::time::timeout(HTTP_TEST_TIMEOUT, task)
             .await
             .expect("resolver fallback should remain bounded")
             .expect("resolver fallback task should not panic")
@@ -1286,8 +1307,8 @@ mod tests {
             &metadata_path,
             "system",
             true,
-            Duration::from_secs(1),
-            Duration::from_millis(100),
+            HTTP_PROBE_TIMEOUT,
+            HTTP_INITIAL_PROBE_TIMEOUT,
             Duration::ZERO,
         )
         .await
@@ -1336,8 +1357,8 @@ mod tests {
             &metadata_path,
             "system",
             true,
-            Duration::from_secs(1),
-            Duration::from_millis(100),
+            HTTP_PROBE_TIMEOUT,
+            HTTP_INITIAL_PROBE_TIMEOUT,
             Duration::ZERO,
         )
         .await
@@ -1434,7 +1455,7 @@ mod tests {
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
             options,
             &metadata_path,
-            Duration::from_secs(1),
+            HTTP_PROBE_TIMEOUT,
             Duration::ZERO,
         )
         .await
@@ -1517,7 +1538,7 @@ mod tests {
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
             Map::new(),
             &metadata_path,
-            Duration::from_secs(1),
+            HTTP_PROBE_TIMEOUT,
             Duration::ZERO,
         )
         .await
@@ -1574,7 +1595,7 @@ mod tests {
                 "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
                 Map::new(),
                 &metadata_path,
-                Duration::from_secs(1),
+                HTTP_PROBE_TIMEOUT,
                 Duration::ZERO,
             )
             .await
@@ -1604,7 +1625,7 @@ mod tests {
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
             Map::new(),
             &metadata_path,
-            Duration::from_secs(1),
+            HTTP_PROBE_TIMEOUT,
             Duration::ZERO,
         )
         .await
@@ -1651,7 +1672,7 @@ mod tests {
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
             Map::new(),
             &metadata_path,
-            Duration::from_secs(1),
+            HTTP_PROBE_TIMEOUT,
             Duration::ZERO,
         )
         .await
@@ -1696,7 +1717,7 @@ mod tests {
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
             Map::new(),
             &metadata_path,
-            Duration::from_secs(1),
+            HTTP_PROBE_TIMEOUT,
             Duration::ZERO,
         )
         .await
@@ -1749,7 +1770,7 @@ mod tests {
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
             Map::new(),
             &metadata_path,
-            Duration::from_secs(1),
+            HTTP_PROBE_TIMEOUT,
             Duration::ZERO,
         )
         .await
@@ -1846,14 +1867,14 @@ mod tests {
                 "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
                 Map::new(),
                 &probe_path,
-                Duration::from_millis(40),
+                HTTP_PROBE_TIMEOUT,
                 Duration::from_millis(5),
             )
             .await
         });
         server.wait_for_method("aria2.tellStatus", 1).await;
         server.terminate().await;
-        let result = tokio::time::timeout(Duration::from_secs(2), task)
+        let result = tokio::time::timeout(HTTP_TEST_TIMEOUT, task)
             .await
             .expect("probe should finish after daemon shutdown")
             .expect("probe task should not panic")
@@ -1882,14 +1903,14 @@ mod tests {
                 "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
                 Map::new(),
                 &probe_path,
-                Duration::from_secs(1),
+                HTTP_PROBE_TIMEOUT,
                 Duration::ZERO,
             )
             .await
         });
         server.wait_for_method("aria2.forceRemove", 1).await;
         server.terminate().await;
-        let result = tokio::time::timeout(Duration::from_secs(2), task)
+        let result = tokio::time::timeout(HTTP_TEST_TIMEOUT, task)
             .await
             .expect("cleanup should finish after daemon shutdown")
             .expect("cleanup task should not panic")
