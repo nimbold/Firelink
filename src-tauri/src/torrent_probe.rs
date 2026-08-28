@@ -20,12 +20,40 @@ pub(crate) enum ProbeFailure {
     Cleanup(String),
 }
 
+#[allow(dead_code)]
 pub(crate) async fn run_metadata_probe<C: RpcClient + 'static>(
+    client: Arc<C>,
+    source: &str,
+    options: Map<String, Value>,
+    metadata_path: &Path,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<Vec<u8>, ProbeFailure> {
+    let deadline = Instant::now() + timeout;
+    run_metadata_probe_with_deadlines(
+        client,
+        source,
+        options,
+        metadata_path,
+        deadline,
+        deadline,
+        poll_interval,
+    )
+    .await
+}
+
+/// Run one metadata probe with separate metadata and cleanup deadlines.
+///
+/// The split is important for resolver fallback: the first resolver gets its
+/// own bounded attempt, while cleanup of its GID consumes only the shared
+/// operation deadline before a second resolver may be started.
+pub(crate) async fn run_metadata_probe_with_deadlines<C: RpcClient + 'static>(
     client: Arc<C>,
     source: &str,
     mut options: Map<String, Value>,
     metadata_path: &Path,
-    timeout: Duration,
+    metadata_deadline: Instant,
+    cleanup_deadline: Instant,
     poll_interval: Duration,
 ) -> Result<Vec<u8>, ProbeFailure> {
     // This probe only resolves magnet metadata. It must never allow Aria2 to
@@ -34,18 +62,27 @@ pub(crate) async fn run_metadata_probe<C: RpcClient + 'static>(
     options.insert("follow-torrent".to_string(), json!("false"));
     options.insert("follow-metalink".to_string(), json!("false"));
     let mut cleanup_guard = ProbeCleanupGuard::new(Arc::clone(&client), metadata_path);
-    let result = match client
-        .call("aria2.addUri", json!([[source], options]))
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => {
+    let add_result = tokio::time::timeout(
+        metadata_deadline.saturating_duration_since(Instant::now()),
+        client.call("aria2.addUri", json!([[source], options])),
+    )
+    .await;
+    let result = match add_result {
+        Err(_) => {
+            cleanup_guard.disarm();
+            return Err(ProbeFailure::Metadata(
+                "Aria2 could not start magnet metadata resolution before the resolver attempt deadline"
+                    .to_string(),
+            ));
+        }
+        Ok(Err(error)) => {
             cleanup_guard.disarm();
             return Err(ProbeFailure::Metadata(format!(
                 "Aria2 could not start magnet metadata resolution: {}",
                 crate::redact_sensitive_text(&error)
             )));
         }
+        Ok(Ok(result)) => result,
     };
     let gid = match result.as_str().filter(|value| !value.is_empty()) {
         Some(gid) => gid.to_string(),
@@ -59,33 +96,42 @@ pub(crate) async fn run_metadata_probe<C: RpcClient + 'static>(
     cleanup_guard.set_gid(gid.clone());
 
     let metadata_result = async {
-        let deadline = Instant::now() + timeout;
         loop {
-            let status = match client
-                .call(
+            let status = match tokio::time::timeout(
+                metadata_deadline.saturating_duration_since(Instant::now()),
+                client.call(
                     "aria2.tellStatus",
                     json!([&gid, ["status", "errorCode", "errorMessage"]]),
-                )
-                .await
+                ),
+            )
+            .await
             {
-                Ok(status) => status,
-                Err(error) if crate::aria2_gid_not_found(&error) => {
+                Err(_) => {
+                    return Err(ProbeFailure::Metadata(
+                        "Aria2 magnet metadata resolution timed out".to_string(),
+                    ));
+                }
+                Ok(Ok(status)) => status,
+                Ok(Err(error)) if crate::aria2_gid_not_found(&error) => {
                     return Err(ProbeFailure::Metadata(
                         "Aria2 removed the magnet metadata probe before metadata was saved"
                             .to_string(),
                     ));
                 }
-                Err(error) if crate::retry::is_transient_network_error(&error) => {
-                    if Instant::now() >= deadline {
+                Ok(Err(error)) if crate::retry::is_transient_network_error(&error) => {
+                    if Instant::now() >= metadata_deadline {
                         return Err(ProbeFailure::Metadata(format!(
                             "Aria2 metadata resolution status failed: {}",
                             crate::redact_sensitive_text(&error)
                         )));
                     }
-                    tokio::time::sleep(poll_interval).await;
+                    tokio::time::sleep(
+                        poll_interval.min(metadata_deadline.saturating_duration_since(Instant::now())),
+                    )
+                    .await;
                     continue;
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     return Err(ProbeFailure::Metadata(format!(
                         "Aria2 metadata resolution status failed: {}",
                         crate::redact_sensitive_text(&error)
@@ -125,29 +171,180 @@ pub(crate) async fn run_metadata_probe<C: RpcClient + 'static>(
                     )));
                 }
             }
-            if Instant::now() >= deadline {
+            if Instant::now() >= metadata_deadline {
                 return Err(ProbeFailure::Metadata(
                     "Aria2 magnet metadata resolution timed out".to_string(),
                 ));
             }
-            tokio::time::sleep(poll_interval).await;
+            tokio::time::sleep(
+                poll_interval.min(metadata_deadline.saturating_duration_since(Instant::now())),
+            )
+            .await;
         }
 
-        tokio::fs::read(metadata_path).await.map_err(|error| {
-            ProbeFailure::Metadata(format!(
+        let remaining = metadata_deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, tokio::fs::read(metadata_path)).await {
+            Err(_) => Err(ProbeFailure::Metadata(
+                "Aria2 magnet metadata file read timed out".to_string(),
+            )),
+            Ok(Ok(bytes)) => Ok(bytes),
+            Ok(Err(error)) => Err(ProbeFailure::Metadata(format!(
                 "Aria2 did not save magnet metadata ({:?})",
                 error.kind()
-            ))
-        })
+            ))),
+        }
     }
     .await;
 
-    let cleanup_result = cleanup_metadata_probe(client.as_ref(), &gid).await;
+    let cleanup_result = match tokio::time::timeout(
+        cleanup_deadline.saturating_duration_since(Instant::now()),
+        cleanup_metadata_probe(client.as_ref(), &gid),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "failed to remove aria2 gid {gid} before the metadata operation deadline"
+        )),
+    };
     if let Err(error) = cleanup_result {
         return Err(ProbeFailure::Cleanup(error));
     }
     cleanup_guard.disarm();
     metadata_result
+}
+
+/// Run direct magnet metadata discovery through the system resolver first,
+/// then use Aria2's alternate resolver only after the first probe has failed
+/// and its GID has been cleaned up. Both attempts share one absolute deadline.
+pub(crate) async fn run_metadata_probe_with_resolver_fallback<C: RpcClient + 'static>(
+    client: Arc<C>,
+    source: &str,
+    initial_options: Map<String, Value>,
+    metadata_path: &Path,
+    initial_resolver_mode: &'static str,
+    fallback_to_automatic: bool,
+    total_timeout: Duration,
+    initial_timeout: Duration,
+    poll_interval: Duration,
+) -> Result<Vec<u8>, ProbeFailure> {
+    let operation_started = Instant::now();
+    let operation_deadline = operation_started + total_timeout;
+    let initial_deadline = (operation_started + initial_timeout).min(operation_deadline);
+
+    log::debug!(
+        "magnet metadata probe [resolver_mode={initial_resolver_mode} outcome=started error_class=none elapsed_ms=0]"
+    );
+    let first_started = Instant::now();
+    let first_result = run_metadata_probe_with_deadlines(
+        Arc::clone(&client),
+        source,
+        initial_options.clone(),
+        metadata_path,
+        initial_deadline,
+        operation_deadline,
+        poll_interval,
+    )
+    .await;
+    log_probe_result(initial_resolver_mode, first_started, &first_result);
+
+    let should_try_alternate = initial_resolver_mode == "system"
+        && fallback_to_automatic
+        && probe_failure_allows_resolver_fallback(&first_result)
+        && Instant::now() < operation_deadline;
+    if !should_try_alternate {
+        return first_result;
+    }
+
+    // The first probe has completed its lifecycle cleanup. Remove any
+    // partial metadata before reusing the path so a stale result can never be
+    // adopted by the alternate resolver.
+    let clear_result = match tokio::time::timeout(
+        operation_deadline.saturating_duration_since(Instant::now()),
+        tokio::fs::remove_file(metadata_path),
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(Err(error)) => Err(format!("filesystem error ({:?})", error.kind())),
+        Err(_) => Err("timed out before the metadata operation deadline".to_string()),
+    };
+    if let Err(error) = clear_result {
+        let cleanup_failure = ProbeFailure::Cleanup(format!(
+            "could not clear stale magnet metadata before resolver fallback: {error}"
+        ));
+        log::debug!(
+            "magnet metadata probe [resolver_mode=automatic outcome=cleanup-failure error_class=cleanup elapsed_ms={}]",
+            Instant::now().duration_since(operation_started).as_millis()
+        );
+        return Err(cleanup_failure);
+    }
+
+    let mut alternate_options = initial_options;
+    alternate_options.remove("async-dns");
+    log::debug!(
+        "magnet metadata probe [resolver_mode=automatic outcome=started error_class=none elapsed_ms={}]",
+        operation_started.elapsed().as_millis()
+    );
+    let alternate_started = Instant::now();
+    let alternate_result = run_metadata_probe_with_deadlines(
+        client,
+        source,
+        alternate_options,
+        metadata_path,
+        operation_deadline,
+        operation_deadline,
+        poll_interval,
+    )
+    .await;
+    log_probe_result("automatic", alternate_started, &alternate_result);
+    alternate_result
+}
+
+fn probe_failure_allows_resolver_fallback(result: &Result<Vec<u8>, ProbeFailure>) -> bool {
+    let Err(ProbeFailure::Metadata(error)) = result else {
+        return false;
+    };
+    // An alternate resolver can only repair a resolver-owned failure. Keep
+    // malformed metadata, missing output, daemon/status errors, cancellation,
+    // and every cleanup uncertainty on the original result. The generic
+    // operation timeout is emitted only by the bounded add/status polling
+    // path; file-read and addUri-start deadlines use distinct messages so an
+    // uncertain GID is never duplicated by a fallback attempt.
+    crate::retry::is_aria2_name_resolution_error(error)
+        || error == "Aria2 magnet metadata resolution timed out"
+}
+
+fn log_probe_result(
+    resolver_mode: &str,
+    started: Instant,
+    result: &Result<Vec<u8>, ProbeFailure>,
+) {
+    let (outcome, error_class) = match result {
+        Ok(_) => ("probe-success", "none"),
+        Err(ProbeFailure::Metadata(error)) => ("metadata-failure", probe_error_class(error)),
+        Err(ProbeFailure::Cleanup(error)) => ("cleanup-failure", probe_error_class(error)),
+    };
+    log::debug!(
+        "magnet metadata probe [resolver_mode={resolver_mode} outcome={outcome} error_class={error_class} elapsed_ms={}]",
+        started.elapsed().as_millis()
+    );
+}
+
+fn probe_error_class(error: &str) -> &'static str {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("cleanup") || lower.contains("remove aria2 gid") {
+        "cleanup"
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        "timeout"
+    } else if lower.contains("dns") || lower.contains("name resolution") {
+        "name_resolution"
+    } else if lower.contains("metadata") || lower.contains("torrent") {
+        "metadata"
+    } else {
+        "probe"
+    }
 }
 
 struct ProbeCleanupGuard<C: RpcClient + 'static> {
@@ -941,6 +1138,271 @@ mod tests {
 
     fn status_reply(status: &str) -> ScriptedReply {
         ScriptedReply::Result(json!({ "status": status }))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolver_fallback_cleans_the_first_gid_and_rejects_stale_metadata() {
+        let server = ScriptedRpcServer::start(scripts([
+            (
+                "aria2.addUri",
+                vec![
+                    ScriptedReply::Result(json!("gid-1")),
+                    ScriptedReply::Delay(
+                        Duration::from_millis(50),
+                        Box::new(ScriptedReply::Result(json!("gid-2"))),
+                    ),
+                ],
+            ),
+            (
+                "aria2.tellStatus",
+                vec![
+                    ScriptedReply::Result(json!({
+                        "status": "error",
+                        "errorCode": "19",
+                        "errorMessage": "Name resolution failed",
+                    })),
+                    status_reply("removed"),
+                    status_reply("complete"),
+                    status_reply("removed"),
+                ],
+            ),
+            (
+                "aria2.forceRemove",
+                vec![
+                    ScriptedReply::Result(json!("gid-1")),
+                    ScriptedReply::Result(json!("gid-2")),
+                ],
+            ),
+        ]))
+        .await;
+        let (_temporary, probe_dir, metadata_path) = probe_fixture().await;
+        let probe_path = metadata_path.clone();
+        let client = server.client();
+        let task = tokio::spawn(async move {
+            let mut options = Map::new();
+            options.insert("async-dns".to_string(), json!("false"));
+            run_metadata_probe_with_resolver_fallback(
+                client,
+                "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                options,
+                &probe_path,
+                "system",
+                true,
+                Duration::from_secs(2),
+                Duration::from_millis(200),
+                Duration::ZERO,
+            )
+            .await
+        });
+
+        server.wait_for_method("aria2.addUri", 2).await;
+        assert!(
+            !metadata_path.exists(),
+            "the first probe's stale metadata must be removed before fallback"
+        );
+        tokio::fs::write(&metadata_path, b"metadata from alternate resolver")
+            .await
+            .expect("alternate metadata fixture should be writable");
+        let bytes = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("resolver fallback should remain bounded")
+            .expect("resolver fallback task should not panic")
+            .expect("alternate resolver should complete the probe");
+        assert_eq!(bytes, b"metadata from alternate resolver");
+
+        let calls = server.calls();
+        let add_calls = calls
+            .iter()
+            .filter(|(method, _)| method == "aria2.addUri")
+            .collect::<Vec<_>>();
+        assert_eq!(add_calls.len(), 2);
+        let first_options = add_calls[0]
+            .1
+            .as_array()
+            .and_then(|params| params.get(2))
+            .and_then(Value::as_object)
+            .expect("first addUri options should be recorded");
+        assert_eq!(first_options.get("async-dns"), Some(&json!("false")));
+        let alternate_options = add_calls[1]
+            .1
+            .as_array()
+            .and_then(|params| params.get(2))
+            .and_then(Value::as_object)
+            .expect("alternate addUri options should be recorded");
+        assert!(!alternate_options.contains_key("async-dns"));
+
+        let first_force_remove = calls
+            .iter()
+            .position(|(method, _)| method == "aria2.forceRemove")
+            .expect("first probe must be cleaned up");
+        let second_add = calls
+            .iter()
+            .rposition(|(method, _)| method == "aria2.addUri")
+            .expect("alternate probe must be started");
+        assert!(
+            first_force_remove < second_add,
+            "alternate probing must wait for first-GID cleanup"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, _)| method == "aria2.forceRemove")
+                .count(),
+            2
+        );
+
+        tokio::fs::remove_dir_all(&probe_dir)
+            .await
+            .expect("successful fallback fixture should be removable");
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolver_fallback_does_not_repeat_invalid_metadata_failures() {
+        let server = ScriptedRpcServer::start(scripts([
+            ("aria2.addUri", vec![ScriptedReply::Result(json!("gid-1"))]),
+            (
+                "aria2.tellStatus",
+                vec![
+                    ScriptedReply::Result(json!({
+                        "status": "error",
+                        "errorCode": "1",
+                        "errorMessage": "tracker rejected metadata",
+                    })),
+                    status_reply("removed"),
+                ],
+            ),
+            (
+                "aria2.forceRemove",
+                vec![ScriptedReply::Result(json!("gid-1"))],
+            ),
+        ]))
+        .await;
+        let (_temporary, probe_dir, metadata_path) = probe_fixture().await;
+        let error = run_metadata_probe_with_resolver_fallback(
+            server.client(),
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            Map::new(),
+            &metadata_path,
+            "system",
+            true,
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+            Duration::ZERO,
+        )
+        .await
+        .expect_err("invalid metadata failure should remain on the initial route");
+        assert!(matches!(error, ProbeFailure::Metadata(message) if message.contains("could not resolve")));
+        assert_eq!(
+            server
+                .calls()
+                .iter()
+                .filter(|(method, _)| method == "aria2.addUri")
+                .count(),
+            1
+        );
+        tokio::fs::remove_dir_all(&probe_dir)
+            .await
+            .expect("failed probe fixture should be removable");
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolver_fallback_does_not_run_after_cleanup_uncertainty() {
+        let server = ScriptedRpcServer::start(scripts([
+            ("aria2.addUri", vec![ScriptedReply::Result(json!("gid-1"))]),
+            (
+                "aria2.tellStatus",
+                vec![
+                    ScriptedReply::Result(json!({
+                        "status": "error",
+                        "errorCode": "19",
+                        "errorMessage": "Name resolution failed",
+                    })),
+                    status_reply("active"),
+                ],
+            ),
+            (
+                "aria2.forceRemove",
+                vec![ScriptedReply::RpcError("temporary cleanup failure".to_string())],
+            ),
+        ]))
+        .await;
+        let (_temporary, probe_dir, metadata_path) = probe_fixture().await;
+        let error = run_metadata_probe_with_resolver_fallback(
+            server.client(),
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            Map::new(),
+            &metadata_path,
+            "system",
+            true,
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+            Duration::ZERO,
+        )
+        .await
+        .expect_err("cleanup uncertainty must stop resolver fallback");
+        assert!(matches!(error, ProbeFailure::Cleanup(_)));
+        assert_eq!(
+            server
+                .calls()
+                .iter()
+                .filter(|(method, _)| method == "aria2.addUri")
+                .count(),
+            1
+        );
+        tokio::fs::remove_dir_all(&probe_dir)
+            .await
+            .expect("uncertain probe fixture should be removable by the test");
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolver_fallback_is_not_started_after_cancellation() {
+        let server = ScriptedRpcServer::start(scripts([
+            ("aria2.addUri", vec![ScriptedReply::Result(json!("gid-1"))]),
+            (
+                "aria2.tellStatus",
+                vec![ScriptedReply::Hang, status_reply("removed")],
+            ),
+            (
+                "aria2.forceRemove",
+                vec![ScriptedReply::Result(json!("gid-1"))],
+            ),
+        ]))
+        .await;
+        let (_temporary, probe_dir, metadata_path) = probe_fixture().await;
+        let probe_path = metadata_path.clone();
+        let client = server.client();
+        let task = tokio::spawn(async move {
+            run_metadata_probe_with_resolver_fallback(
+                client,
+                "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                Map::new(),
+                &probe_path,
+                "system",
+                true,
+                Duration::from_secs(60),
+                Duration::from_secs(20),
+                Duration::from_secs(60),
+            )
+            .await
+        });
+        server.wait_for_method("aria2.tellStatus", 1).await;
+        task.abort();
+        let _ = task.await;
+        server.wait_for_method("aria2.forceRemove", 1).await;
+        assert_eq!(
+            server
+                .calls()
+                .iter()
+                .filter(|(method, _)| method == "aria2.addUri")
+                .count(),
+            1,
+            "cancellation must not start the alternate resolver"
+        );
+        wait_for_path(&probe_dir, false).await;
+        server.terminate().await;
     }
 
     #[tokio::test(flavor = "current_thread")]

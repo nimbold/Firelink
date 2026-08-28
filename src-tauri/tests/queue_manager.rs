@@ -2304,9 +2304,9 @@ async fn resolver_failure_uses_one_system_fallback_without_retry_budget() {
     let manager = Arc::new(mgr);
     manager.set_aria2_async_dns_supported(true);
     let mut task = aria2_task("resolver-fallback");
+    task.payload.aria2_resolver_mode = Aria2ResolverMode::System;
     task.payload.max_tries = Some(0);
     task.payload.headers = Some("X-Test: retained".to_string());
-    task.payload.proxy = Some("http://127.0.0.1:8123".to_string());
     manager.push(task).await.unwrap();
 
     let dispatcher = {
@@ -2341,32 +2341,33 @@ async fn resolver_failure_uses_one_system_fallback_without_retry_budget() {
         }
     })
     .await
-    .expect("resolver failure should re-add once with the system resolver");
+    .expect("resolver failure should re-add once with Aria2's alternate resolver");
     assert_eq!(
         *spawner.add_resolver_modes.lock().unwrap(),
-        vec![Aria2ResolverMode::Automatic, Aria2ResolverMode::System]
+        vec![Aria2ResolverMode::System, Aria2ResolverMode::Automatic]
     );
     assert_eq!(
         *spawner.add_transfer_context.lock().unwrap(),
         vec![
             (
-                Aria2ResolverMode::Automatic,
+                Aria2ResolverMode::System,
                 Some("X-Test: retained".to_string()),
-                Some("http://127.0.0.1:8123".to_string()),
+                None,
                 None,
             ),
             (
-                Aria2ResolverMode::System,
+                Aria2ResolverMode::Automatic,
                 Some("X-Test: retained".to_string()),
-                Some("http://127.0.0.1:8123".to_string()),
+                None,
                 None,
             ),
         ]
     );
     assert_eq!(spawner.add_uri_calls.load(Ordering::SeqCst), 2);
 
-    // A second resolver failure is now on the system mode. With max_tries=0
-    // it must terminate instead of switching back or consuming another add.
+    // A second resolver failure is now on the alternate mode. With
+    // max_tries=0 it must terminate instead of switching back or consuming
+    // another add.
     manager
         .handle_aria2_event(
             "gid-2",

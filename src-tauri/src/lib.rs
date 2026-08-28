@@ -1699,59 +1699,22 @@ fn should_cleanup_media_artifacts_after_failure(
     !(crate::retry::is_transient_network_error(failure_reason) && strike < max_retries)
 }
 
-fn is_blocked_network_address(ip: std::net::IpAddr) -> bool {
-    if ip.is_loopback() || ip.is_multicast() || ip.is_unspecified() {
-        return true;
-    }
-    match ip {
-        std::net::IpAddr::V4(ipv4) => ipv4.is_private() || ipv4.is_link_local(),
-        std::net::IpAddr::V6(ipv6) => {
-            ipv6.to_ipv4().is_some_and(|ipv4| is_blocked_network_address(ipv4.into()))
-                || (ipv6.segments()[0] & 0xfe00) == 0xfc00
-                || (ipv6.segments()[0] & 0xffc0) == 0xfe80
-        }
-    }
-}
-
-async fn resolve_and_validate_url_host(
-    parsed: &reqwest::Url,
-) -> Result<(String, std::net::SocketAddr), String> {
-    let host = parsed.host_str().ok_or("SSRF blocked: No host")?;
-    let lookup_host = host.trim_start_matches('[').trim_end_matches(']');
-    let port = parsed.port_or_known_default().unwrap_or_else(|| match parsed.scheme() {
-        "ftp" => 21,
-        "sftp" => 22,
-        _ => 80,
-    });
-
-    let addrs: Vec<_> = if let Ok(ip) = lookup_host.parse::<std::net::IpAddr>() {
-        vec![std::net::SocketAddr::new(ip, port)]
-    } else {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            tokio::net::lookup_host((lookup_host, port)),
-        )
-        .await
-        .map_err(|_| "SSRF blocked: DNS resolution timed out")?
-        .map_err(|_| "SSRF blocked: DNS resolution failed")?
-        .collect()
-    };
-    let addr = addrs.first().copied().ok_or("SSRF blocked: No DNS records")?;
-    if addrs.iter().any(|candidate| is_blocked_network_address(candidate.ip())) {
-        return Err("SSRF blocked: Private/local IP not allowed".to_string());
-    }
-    Ok((lookup_host.to_string(), addr))
-}
-
-async fn validate_url_ssrf(url: &str) -> Result<Option<(String, std::net::SocketAddr)>, String> {
-    let parsed = reqwest::Url::parse(url).map_err(|_| "SSRF blocked: Invalid URL")?;
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err("SSRF blocked: Only HTTP/HTTPS schemes allowed".to_string());
-    }
-    resolve_and_validate_url_host(&parsed).await.map(Some)
-}
-
 const MAX_REMOTE_TORRENT_REDIRECTS: usize = 5;
+
+fn validate_http_url_route(url: &str) -> Result<reqwest::Url, String> {
+    crate::network::parse_and_validate_url(
+        url,
+        &["http", "https"],
+        crate::network::CredentialPolicy::Allow,
+    )
+    .map_err(|error| {
+        if error == "Unsupported URL scheme" {
+            "SSRF blocked: Only HTTP/HTTPS schemes allowed".to_string()
+        } else {
+            error
+        }
+    })
+}
 
 fn is_remote_torrent_source(source: &str, explicitly_torrent: bool) -> bool {
     if crate::torrent::is_remote_torrent_url(source) {
@@ -1780,6 +1743,7 @@ async fn fetch_remote_torrent_bytes(
         .map(crate::queue::aria2_all_proxy_value)
         .transpose()?
         .flatten();
+    let route = crate::network::NetworkRoute::from_proxy(proxy.as_deref());
     let mut current = reqwest::Url::parse(source)
         .map_err(|_| "SSRF blocked: Invalid URL".to_string())?;
     let original_origin = Some(current.clone());
@@ -1799,21 +1763,18 @@ async fn fetch_remote_torrent_bytes(
             return Err("Torrent metadata URLs must not contain credentials".to_string());
         }
 
-        let (host, address) = validate_url_ssrf(current.as_str())
-            .await?
-            .ok_or_else(|| "SSRF blocked: No host".to_string())?;
+        crate::network::validate_url(
+            &current,
+            &["http", "https"],
+            crate::network::CredentialPolicy::Reject(
+                "Torrent metadata URLs must not contain credentials",
+            ),
+        )?;
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(FILE_METADATA_TIMEOUT)
             .user_agent("Firelink torrent metadata");
-        match proxy.as_deref().map(str::trim) {
-            Some("") => builder = builder.no_proxy(),
-            Some(proxy) => {
-                builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|error| error.to_string())?);
-            }
-            None => {}
-        }
-        builder = builder.resolve(&host, address);
+        builder = route.configure_reqwest(builder)?;
         let same_origin_credentials = should_send_metadata_credentials(
             original_origin.as_ref(),
             Some(&current),
@@ -1995,6 +1956,7 @@ async fn fetch_metadata(
 ) -> Result<MetadataResponse, String> {
     properties_window::ensure_main_window(&caller)?;
     ensure_reqwest_crypto_provider();
+    let route = crate::network::NetworkRoute::from_proxy(proxy.as_deref());
 
     let metadata_started = Instant::now();
     let mut current_url = url.clone();
@@ -2037,27 +1999,20 @@ async fn fetch_metadata(
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(FILE_METADATA_TIMEOUT);
-        if let Some(proxy) = proxy.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            if proxy.eq_ignore_ascii_case("none") {
-                builder = builder.no_proxy();
-            } else {
-                let proxy = match reqwest::Proxy::all(proxy) {
-                    Ok(proxy) => proxy,
-                    Err(error) => {
-                        log::warn!(
-                            "metadata [stage=metadata operation=client result=failed host={} error_code=proxy_configuration elapsed_ms={}]",
-                            reqwest::Url::parse(&current_url)
-                                .ok()
-                                .and_then(|value| value.host_str().map(str::to_string))
-                                .unwrap_or_else(|| "<unknown host>".to_string()),
-                            metadata_started.elapsed().as_millis()
-                        );
-                        return Err(crate::redact_sensitive_text(&error.to_string()));
-                    }
-                };
-                builder = builder.proxy(proxy);
+        builder = match route.configure_reqwest(builder) {
+            Ok(builder) => builder,
+            Err(error) => {
+                log::warn!(
+                    "metadata [stage=metadata operation=client result=failed host={} error_code=proxy_configuration elapsed_ms={}]",
+                    reqwest::Url::parse(&current_url)
+                        .ok()
+                        .and_then(|value| value.host_str().map(str::to_string))
+                        .unwrap_or_else(|| "<unknown host>".to_string()),
+                    metadata_started.elapsed().as_millis()
+                );
+                return Err(error);
             }
-        }
+        };
 
         if let Some(ref ua) = user_agent {
             let ua = ua.trim();
@@ -2085,38 +2040,33 @@ async fn fetch_metadata(
             .host_str()
             .unwrap_or("<unknown host>")
             .to_string();
-        let dns_started = Instant::now();
-        let resolved_addr = match parsed_current_url.scheme() {
-            "http" | "https" => validate_url_ssrf(&current_url).await,
-            "ftp" | "sftp" => resolve_and_validate_url_host(&parsed_current_url)
-                .await
-                .map(Some),
-            _ => Err("Unsupported URL scheme".to_string()),
+        let allowed_schemes: &[&str] = match parsed_current_url.scheme() {
+            "http" | "https" | "ftp" | "sftp" => &["http", "https", "ftp", "sftp"],
+            _ => return Err("Unsupported URL scheme".to_string()),
         };
-        let resolved_addr = match resolved_addr {
-            Ok(resolved_addr) => {
+        match crate::network::validate_url(
+            &parsed_current_url,
+            allowed_schemes,
+            crate::network::CredentialPolicy::Allow,
+        ) {
+            Ok(()) => {
                 log::info!(
-                    "metadata [stage=dns operation=resolve host={} result=ok elapsed_ms={} total_elapsed_ms={}]",
+                    "metadata [stage=network_policy operation=validate host={} result=ok route={} total_elapsed_ms={}]",
                     metadata_host,
-                    dns_started.elapsed().as_millis(),
+                    route.label(),
                     metadata_started.elapsed().as_millis()
                 );
-                resolved_addr
             }
             Err(error) => {
                 log::warn!(
-                    "metadata [stage=dns operation=resolve host={} result=failed error_code={} elapsed_ms={} total_elapsed_ms={}]",
+                    "metadata [stage=network_policy operation=validate host={} result=failed error_code={} route={} total_elapsed_ms={}]",
                     metadata_host,
                     metadata_error_code(&error),
-                    dns_started.elapsed().as_millis(),
+                    route.label(),
                     metadata_started.elapsed().as_millis()
                 );
                 return Err(error);
             }
-        };
-
-        if let Some((host, addr)) = resolved_addr {
-            builder = builder.resolve(&host, addr);
         }
 
         let current_origin = reqwest::Url::parse(&current_url).ok();
@@ -2689,7 +2639,7 @@ async fn fetch_media_metadata(
     proxy: Option<String>,
 ) -> Result<MediaMetadata, String> {
     properties_window::ensure_main_window(&caller)?;
-    validate_url_ssrf(&url).await?;
+    validate_http_url_route(&url)?;
     let cache_key = media_metadata_cache_key(
         &url,
         &cookie_browser,
@@ -2826,7 +2776,7 @@ async fn fetch_media_playlist_metadata(
     proxy: Option<String>,
 ) -> Result<MediaPlaylistMetadata, String> {
     properties_window::ensure_main_window(&caller)?;
-    validate_url_ssrf(&url).await?;
+    validate_http_url_route(&url)?;
 
     let result = fetch_media_playlist_metadata_uncached(
         app_handle.clone(),
@@ -2917,12 +2867,9 @@ async fn fetch_media_playlist_metadata_uncached(
         }
     }
 
-    if let Some(proxy) = proxy.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        if proxy.eq_ignore_ascii_case("none") {
-            cmd = cmd.arg("--proxy").arg("");
-        } else {
-            cmd = cmd.arg("--proxy").arg(proxy);
-        }
+    let route = crate::network::NetworkRoute::from_proxy(proxy.as_deref());
+    if let Some(proxy) = route.ytdlp_proxy_value() {
+        cmd = cmd.arg("--proxy").arg(proxy);
     }
 
     if let Some(ua) = user_agent
@@ -3031,12 +2978,9 @@ async fn fetch_media_metadata_uncached(
         }
     }
 
-    if let Some(proxy) = proxy.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        if proxy.eq_ignore_ascii_case("none") {
-            cmd = cmd.arg("--proxy").arg("");
-        } else {
-            cmd = cmd.arg("--proxy").arg(proxy);
-        }
+    let route = crate::network::NetworkRoute::from_proxy(proxy.as_deref());
+    if let Some(proxy) = route.ytdlp_proxy_value() {
+        cmd = cmd.arg("--proxy").arg(proxy);
     }
 
     if let Some(ua) = user_agent
@@ -3609,6 +3553,7 @@ mod engines;
 pub mod error;
 #[allow(dead_code)]
 pub mod ipc;
+mod network;
 mod parity;
 mod power;
 mod platform;
@@ -4803,6 +4748,7 @@ pub(crate) async fn start_media_download_internal(
     max_tries: Option<i32>,
     cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<std::path::PathBuf, String> {
+    validate_http_url_route(&url)?;
     let cookie_source = normalize_media_cookie_source(cookie_source.as_deref())?;
     let safe_filename = crate::download_ownership::canonical_download_filename(&filename);
 
@@ -4880,6 +4826,7 @@ pub(crate) async fn start_media_download_internal(
     let mut strike = 0_usize;
     let mut effective_cookie_source = cookie_source;
     let mut browser_cookie_fallback_used = false;
+    let route = crate::network::NetworkRoute::from_proxy(proxy.as_deref());
 
     while strike <= max_retries {
         if *cancel_rx.borrow() {
@@ -4932,12 +4879,8 @@ pub(crate) async fn start_media_download_internal(
             cmd = cmd.arg("--limit-rate").arg(limit);
         }
 
-        if let Some(p) = proxy.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            if p.eq_ignore_ascii_case("none") {
-                cmd = cmd.arg("--proxy").arg("");
-            } else {
-                cmd = cmd.arg("--proxy").arg(p);
-            }
+        if let Some(proxy) = route.ytdlp_proxy_value() {
+            cmd = cmd.arg("--proxy").arg(proxy);
         }
 
         if let Some(cs) = effective_cookie_source.as_ref() {
@@ -8099,13 +8042,12 @@ fn enqueue_lifecycle_generation(item: &queue::EnqueueItem) -> Result<u64, String
 }
 
 async fn validate_enqueue_url(url: &str) -> Result<(), String> {
-    let parsed = reqwest::Url::parse(url).map_err(|_| "SSRF blocked: Invalid URL".to_string())?;
-    match parsed.scheme() {
-        "http" | "https" | "ftp" | "sftp" => {
-            resolve_and_validate_url_host(&parsed).await.map(|_| ())
-        }
-        _ => Err("Unsupported URL scheme".to_string()),
-    }
+    crate::network::parse_and_validate_url(
+        url,
+        &["http", "https", "ftp", "sftp"],
+        crate::network::CredentialPolicy::Allow,
+    )
+    .map(|_| ())
 }
 
 async fn validate_enqueue_uris(url: &str, mirrors: Option<&str>) -> Result<(), String> {
@@ -8127,15 +8069,20 @@ pub(crate) async fn validate_torrent_web_seed_destinations(seeds: &[String]) -> 
         {
             return Err("Torrent web-seed URI must use HTTP or HTTPS without credentials or fragments".to_string());
         }
-        resolve_and_validate_url_host(&parsed).await?;
+        crate::network::validate_url(
+            &parsed,
+            &["http", "https"],
+            crate::network::CredentialPolicy::Reject(
+                "Torrent web-seed URI must use HTTP or HTTPS without credentials or fragments",
+            ),
+        )?;
     }
     Ok(())
 }
 
 /// Embedded web seeds are optional Torrent accelerators, not the transfer's
-/// source of truth. Keep the peer-only path usable when a stale seed domain is
-/// temporarily unavailable, while still rejecting destinations that resolve
-/// to local or private addresses before they are offered to Aria2.
+/// source of truth. Validate them before they are offered to Aria2; hostnames
+/// remain route-owned and are intentionally not resolved by Firelink.
 pub(crate) async fn filter_torrent_web_seed_destinations(
     seeds: &[String],
 ) -> Result<Vec<String>, String> {
@@ -8151,22 +8098,26 @@ pub(crate) async fn filter_torrent_web_seed_destinations(
         {
             return Err("Torrent web-seed URI must use HTTP or HTTPS without credentials or fragments".to_string());
         }
-        match resolve_and_validate_url_host(&parsed).await {
-            Ok(_) => allowed.push(seed.clone()),
-            Err(error)
-                if error == "SSRF blocked: DNS resolution failed"
-                    || error == "SSRF blocked: DNS resolution timed out"
-                    || error == "SSRF blocked: No DNS records" =>
-            {
-                log::warn!(
-                    "Skipping unavailable embedded Torrent web seed {}",
-                    parsed.host_str().unwrap_or("<unknown host>")
-                );
-            }
-            Err(error) => return Err(error),
-        }
+        crate::network::validate_url(
+            &parsed,
+            &["http", "https"],
+            crate::network::CredentialPolicy::Reject(
+                "Torrent web-seed URI must use HTTP or HTTPS without credentials or fragments",
+            ),
+        )?;
+        allowed.push(seed.clone());
     }
     Ok(allowed)
+}
+
+fn validate_torrent_metadata_network_policy(bytes: &[u8]) -> Result<(), String> {
+    crate::torrent::validate_torrent_tracker_metadata(bytes)?;
+    let details = crate::torrent::torrent_details_from_bytes(bytes)?;
+    queue::validate_torrent_tracker_destinations(&details.trackers)?;
+    for web_seed in &details.web_seeds {
+        queue::normalize_torrent_web_seed_uri(web_seed)?;
+    }
+    Ok(())
 }
 
 async fn validate_torrent_enqueue(
@@ -8202,6 +8153,7 @@ async fn validate_torrent_enqueue(
         let path = crate::torrent::validate_managed_torrent_path(app_handle, &item.id, path)?;
         let bytes = crate::torrent::read_bounded_torrent_bytes_sync(&path)
             .map_err(|error| format!("could not read cached torrent metadata: {error}"))?;
+        validate_torrent_metadata_network_policy(&bytes)?;
         let metadata = crate::torrent::parse_torrent_bytes(&bytes)?;
         let normalized_user_web_seeds = queue::normalize_torrent_web_seeds(
             item.torrent_web_seeds.as_deref(),
@@ -9191,49 +9143,6 @@ async fn remove_magnet_metadata_probe_dir(path: &std::path::Path) -> Result<(), 
     }
 }
 
-struct MagnetMetadataProbeTelemetry {
-    info_hash: String,
-    started_at: Instant,
-    outcome: Option<&'static str>,
-}
-
-impl MagnetMetadataProbeTelemetry {
-    fn new(info_hash: &str, tracker_bearing: bool, proxy_configured: bool) -> Self {
-        log::debug!(
-            "magnet metadata probe started: info_hash={info_hash}, tracker_bearing={tracker_bearing}, proxy_configured={proxy_configured}"
-        );
-        Self {
-            info_hash: info_hash.to_string(),
-            started_at: Instant::now(),
-            outcome: None,
-        }
-    }
-
-    fn finish(&mut self, outcome: &'static str) {
-        if self.outcome.is_some() {
-            return;
-        }
-        self.outcome = Some(outcome);
-        log::debug!(
-            "magnet metadata probe finished: info_hash={}, outcome={outcome}, elapsed_ms={}",
-            self.info_hash,
-            self.started_at.elapsed().as_millis()
-        );
-    }
-}
-
-impl Drop for MagnetMetadataProbeTelemetry {
-    fn drop(&mut self) {
-        if self.outcome.is_none() {
-            log::debug!(
-                "magnet metadata probe finished: info_hash={}, outcome=canceled, elapsed_ms={}",
-                self.info_hash,
-                self.started_at.elapsed().as_millis()
-            );
-        }
-    }
-}
-
 async fn resolve_magnet_metadata(
     app_handle: &tauri::AppHandle,
     state: &AppState,
@@ -9256,6 +9165,7 @@ async fn resolve_magnet_metadata(
             .await
         {
             Ok(Some(bytes)) => {
+                validate_torrent_metadata_network_policy(&bytes)?;
                 let parsed = crate::torrent::parse_torrent_bytes(&bytes)?;
                 crate::torrent::validate_info_hash(Some(&expected.info_hash), &parsed.info_hash)?;
                 let torrent_path =
@@ -9329,26 +9239,24 @@ async fn resolve_magnet_metadata(
 
     let client = std::sync::Arc::new(Aria2RpcClient { port, secret });
     let sanitized_source = crate::torrent::sanitize_magnet_uri_for_aria2(source)?;
-    let mut telemetry = MagnetMetadataProbeTelemetry::new(
-        &expected.info_hash,
-        sanitized_source.contains("tr="),
-        proxy_value.is_some(),
-    );
-    let metadata_result = crate::torrent_probe::run_metadata_probe(
+    let direct_route = proxy_value
+        .as_deref()
+        .is_none_or(|proxy| proxy.trim().is_empty());
+    let alternate_resolver_available =
+        direct_route && state.queue_manager.aria2_async_dns_supported();
+    let first_resolver_mode = if direct_route { "system" } else { "configured" };
+    let metadata_result = crate::torrent_probe::run_metadata_probe_with_resolver_fallback(
         client,
         &sanitized_source,
         options,
         &metadata_path,
+        first_resolver_mode,
+        alternate_resolver_available,
         Duration::from_secs(60),
+        Duration::from_secs(20),
         Duration::from_millis(250),
     )
     .await;
-
-    match &metadata_result {
-        Ok(_) => telemetry.finish("probe-success"),
-        Err(crate::torrent_probe::ProbeFailure::Metadata(_)) => telemetry.finish("metadata-failure"),
-        Err(crate::torrent_probe::ProbeFailure::Cleanup(_)) => telemetry.finish("cleanup-failure"),
-    }
 
     let bytes = match metadata_result {
         Ok(bytes) => bytes,
@@ -9376,6 +9284,7 @@ async fn resolve_magnet_metadata(
     if let Err(error) = remove_magnet_metadata_probe_dir(&probe_dir).await {
         return Err(error);
     }
+    validate_torrent_metadata_network_policy(&bytes)?;
     let parsed = crate::torrent::parse_torrent_bytes(&bytes)?;
     crate::torrent::validate_info_hash(Some(&expected.info_hash), &parsed.info_hash)?;
     let torrent_path = if cache {
@@ -9430,6 +9339,7 @@ async fn inspect_torrent(
         )
             .await
             .map_err(AppError::Internal)?;
+        validate_torrent_metadata_network_policy(&bytes).map_err(AppError::Internal)?;
         let parsed = crate::torrent::parse_torrent_bytes(&bytes).map_err(AppError::Internal)?;
         let torrent_path = if cache != Some(false) {
             let torrent_path = crate::torrent::cache_torrent_bytes(&app_handle, &id, &bytes)
@@ -13913,6 +13823,7 @@ mod tests {
         normalize_media_connections,
         normalize_media_cookie_source,
         validate_enqueue_url, validate_enqueue_uris, validate_keychain_grant_request_id,
+        validate_torrent_metadata_network_policy,
         aria2_gid_not_found,
         aria2_download_state_progress, preflight_download_destination_access,
         retained_torrent_id_from_persisted_record,
@@ -14885,7 +14796,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enqueue_url_validation_blocks_local_http_but_preserves_ftp() {
+    async fn enqueue_url_validation_blocks_literal_local_targets_without_dns_preflight() {
+        assert_eq!(
+            validate_enqueue_url("https://this-host-does-not-resolve.invalid/file.zip").await,
+            Ok(())
+        );
         assert_eq!(
             validate_enqueue_url("http://127.0.0.1/file.zip").await,
             Err("SSRF blocked: Private/local IP not allowed".to_string())
@@ -14902,9 +14817,56 @@ mod tests {
             validate_enqueue_url("http://[::ffff:127.0.0.1]/file.zip").await,
             Err("SSRF blocked: Private/local IP not allowed".to_string())
         );
+        for url in [
+            "http://localhost/file.zip",
+            "http://localhost./file.zip",
+            "http://downloads.localhost/file.zip",
+        ] {
+            assert_eq!(
+                validate_enqueue_url(url).await,
+                Err("SSRF blocked: Private/local IP not allowed".to_string()),
+                "{url}"
+            );
+        }
         assert_eq!(
             validate_enqueue_url("file:///tmp/file.zip").await,
             Err("Unsupported URL scheme".to_string())
+        );
+        assert_eq!(
+            validate_enqueue_url("ftp://this-host-does-not-resolve.invalid/file.zip").await,
+            Ok(())
+        );
+        assert_eq!(
+            validate_enqueue_url("sftp://this-host-does-not-resolve.invalid/file.zip").await,
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn cached_torrent_network_policy_validates_trackers_without_resolving_hostnames() {
+        assert_eq!(
+            validate_torrent_metadata_network_policy(
+                b"d8:announce25:http://127.0.0.1/announce4:infod6:lengthi5e4:name4:test12:piece lengthi2e6:pieces20:01234567890123456789ee"
+            ),
+            Err("SSRF blocked: Private/local IP not allowed".to_string())
+        );
+        assert_eq!(
+            validate_torrent_metadata_network_policy(
+                b"d8:announce49:https://tracker-does-not-resolve.invalid/announce4:infod6:lengthi5e4:name4:test12:piece lengthi2e6:pieces20:01234567890123456789ee"
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_torrent_metadata_network_policy(
+                b"d4:infod6:lengthi5e4:name4:test12:piece lengthi2e6:pieces20:01234567890123456789e8:url-list21:http://127.0.0.1/filee"
+            ),
+            Err("SSRF blocked: Private/local IP not allowed".to_string())
+        );
+        assert_eq!(
+            validate_torrent_metadata_network_policy(
+                b"d4:infod6:lengthi5e4:name4:test12:piece lengthi2e6:pieces20:01234567890123456789e8:url-list19:https://x.invalid/ae"
+            ),
+            Ok(())
         );
     }
 

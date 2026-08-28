@@ -877,8 +877,6 @@ export const AddDownloadsModal = () => {
           const metadataBlockedReason = [
             'SSRF blocked: Invalid URL',
             'SSRF blocked: No host',
-            'SSRF blocked: DNS resolution failed',
-            'SSRF blocked: No DNS records',
             'SSRF blocked: Private/local IP not allowed'
           ].some(prefix => errorMessage.startsWith(prefix))
             ? 'unsafe-url' as const
@@ -1625,10 +1623,12 @@ export const AddDownloadsModal = () => {
             } else if (!isMagnetUrl(item.sourceUrl)) {
               // Keep a safe fallback for rows restored from an older draft
               // shape that did not retain the preview cache identity.
+              const proxy = await getProxyArgs(useSettingsStore.getState());
               const torrentData = await invoke('inspect_torrent', {
                 source: item.sourceUrl,
                 id,
                 cache: true,
+                proxy: proxy ?? undefined,
                 headers: headersForRow(contextUrl) || undefined,
                 cookies: cookiesForRow(contextUrl, item.sourceUrl) || undefined,
                 cookieScopes: requestContextForUrl(contextUrl)?.cookieScopes || undefined,

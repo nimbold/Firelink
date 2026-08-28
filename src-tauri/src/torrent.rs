@@ -382,6 +382,7 @@ pub fn sanitize_torrent_bytes_for_aria2(bytes: &[u8]) -> Result<(Vec<u8>, Vec<St
         BencodeValue::Dict(value) => value,
         _ => return Err("torrent root is not a dictionary".to_string()),
     };
+    validate_torrent_tracker_metadata(bytes)?;
     let web_seeds = parse_torrent_web_seeds(root.get(b"url-list".as_slice()))?;
     let mut sanitized = root;
     sanitized.remove(b"url-list".as_slice());
@@ -484,6 +485,27 @@ fn torrent_tracker_metadata_is_safe(root: &BTreeMap<Vec<u8>, BencodeValue>) -> b
         }
     }
     true
+}
+
+/// Validate the tracker fields before handing original metainfo to Aria2.
+/// `torrent_details_from_bytes` intentionally omits malformed tracker values
+/// from its display projection, but Aria2 consumes the original bencode and
+/// would otherwise still see those values.
+pub fn validate_torrent_tracker_metadata(bytes: &[u8]) -> Result<(), String> {
+    if bytes.is_empty() || bytes.len() > MAX_TORRENT_BYTES {
+        return Err(format!(
+            "torrent metadata must be between 1 byte and {MAX_TORRENT_BYTES} bytes"
+        ));
+    }
+    let root = match Parser::new(bytes).parse()? {
+        BencodeValue::Dict(value) => value,
+        _ => return Err("torrent root is not a dictionary".to_string()),
+    };
+    if torrent_tracker_metadata_is_safe(&root) {
+        Ok(())
+    } else {
+        Err("torrent metadata contains an invalid tracker URI".to_string())
+    }
 }
 
 fn parse_torrent_web_seeds(value: Option<&BencodeValue>) -> Result<Vec<String>, String> {
@@ -1527,6 +1549,26 @@ mod tests {
             b"d4:infod6:lengthi5e4:name4:teste8:url-list1:xe"
         )
         .expect("web-seed-bearing torrent metadata should parse"));
+    }
+
+    #[test]
+    fn tracker_metadata_syntax_rejects_malformed_values_before_aria2() {
+        assert!(validate_torrent_tracker_metadata(
+            b"d8:announce30:ftp://tracker.example/announce4:infod6:lengthi5e4:name4:testee"
+        )
+        .is_err());
+        assert!(validate_torrent_tracker_metadata(
+            b"d8:announce25:http://127.0.0.1/announce4:infod6:lengthi5e4:name4:testee"
+        )
+        .is_ok());
+        assert!(validate_torrent_tracker_metadata(
+            b"d8:announce32:https://tracker.example/announce4:infod6:lengthi5e4:name4:testee"
+        )
+        .is_ok());
+        assert!(sanitize_torrent_bytes_for_aria2(
+            b"d8:announce30:ftp://tracker.example/announce4:infod6:lengthi5e4:name4:testee"
+        )
+        .is_err());
     }
 
     #[test]

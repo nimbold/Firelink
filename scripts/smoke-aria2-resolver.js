@@ -69,6 +69,14 @@ async function rpc(port, secret, method, params = []) {
   return body.result;
 }
 
+async function forceRemoveIfPresent(port, secret, gid) {
+  try {
+    await rpc(port, secret, 'aria2.forceRemove', [gid]);
+  } catch (error) {
+    if (!/not found|no such download|active download not found/i.test(error.message)) throw error;
+  }
+}
+
 function childExited(child) {
   return child.exitCode !== null || child.signalCode !== null;
 }
@@ -218,7 +226,37 @@ try {
     throw new Error(`aria2.addTorrent did not retain async-dns=false: ${JSON.stringify(torrentOptions)}`);
   }
 
-  console.log('[PASS] Aria2 retained system-resolver mode for normal and Torrent transfers');
+  const proxyRoute = 'http://127.0.0.1:9';
+  const normalizedProxyRoute = new URL(proxyRoute).toString();
+  const proxiedUriResult = await rpc(rpcPort, secret, 'aria2.addUri', [['https://route-owned.invalid/file'], {
+    'all-proxy': proxyRoute,
+    pause: 'true',
+    out: 'resolver-proxied.bin',
+  }]);
+  const proxiedUriOptions = await rpc(rpcPort, secret, 'aria2.getOption', [proxiedUriResult]);
+  if (proxiedUriOptions['all-proxy'] !== normalizedProxyRoute) {
+    throw new Error(`aria2.addUri did not retain the configured proxy route: ${JSON.stringify(proxiedUriOptions)}`);
+  }
+  if (proxiedUriOptions['async-dns'] === 'false') {
+    throw new Error(`proxied aria2.addUri unexpectedly forced system DNS resolution: ${JSON.stringify(proxiedUriOptions)}`);
+  }
+
+  const proxiedTorrentResult = await rpc(rpcPort, secret, 'aria2.addTorrent', [torrent, [], {
+    'all-proxy': proxyRoute,
+    pause: 'true',
+    dir: tempRoot,
+  }]);
+  const proxiedTorrentOptions = await rpc(rpcPort, secret, 'aria2.getOption', [proxiedTorrentResult]);
+  if (proxiedTorrentOptions['all-proxy'] !== normalizedProxyRoute) {
+    throw new Error(`aria2.addTorrent did not retain the configured proxy route: ${JSON.stringify(proxiedTorrentOptions)}`);
+  }
+  if (proxiedTorrentOptions['async-dns'] === 'false') {
+    throw new Error(`proxied aria2.addTorrent unexpectedly forced system DNS resolution: ${JSON.stringify(proxiedTorrentOptions)}`);
+  }
+  await forceRemoveIfPresent(rpcPort, secret, proxiedUriResult);
+  await forceRemoveIfPresent(rpcPort, secret, proxiedTorrentResult);
+
+  console.log('[PASS] Aria2 retained system-resolver mode for direct normal/Torrent transfers and configured proxy mode for proxied transfers');
 } catch (error) {
   const detail = stderr.trim();
   throw new Error(`${error.message}${detail ? `\n${detail}` : ''}`);

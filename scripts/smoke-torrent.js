@@ -790,12 +790,15 @@ async function main() {
       dir: probeDir,
       'bt-metadata-only': 'true',
       'bt-save-metadata': 'true',
+      'async-dns': 'false',
       'max-tries': '3',
       'retry-wait': '1',
       'connect-timeout': '5',
       timeout: '15',
       'auto-file-renaming': 'false',
     }]);
+    const probeOptions = await rpc(client.rpcPort, client.secret, 'aria2.getOption', [probeGid]);
+    assert(probeOptions['async-dns'] === 'false', 'direct magnet metadata probe did not retain system DNS resolution');
     const probeStatus = await waitForTerminal(client, probeGid, 30000);
     assert(probeStatus.status === 'complete', 'magnet metadata probe did not complete');
     const savedTorrentPaths = fs.readdirSync(probeDir)
@@ -841,7 +844,22 @@ async function main() {
     if (probeRemoved) await waitForRemoved(client, probeGid);
     fs.rmSync(probeDir, { recursive: true, force: true });
     fs.mkdirSync(probeDir, { recursive: true });
-    console.log('[OK] metadata probe was removed after resolution');
+    const proxiedProbeRoute = 'http://127.0.0.1:9';
+    const normalizedProxiedProbeRoute = new URL(proxiedProbeRoute).toString();
+    const proxiedProbeGid = await rpc(client.rpcPort, client.secret, 'aria2.addUri', [[magnet], {
+      dir: probeDir,
+      'bt-metadata-only': 'true',
+      'bt-save-metadata': 'true',
+      'all-proxy': proxiedProbeRoute,
+      pause: 'true',
+      'auto-file-renaming': 'false',
+    }]);
+    const proxiedProbeOptions = await rpc(client.rpcPort, client.secret, 'aria2.getOption', [proxiedProbeGid]);
+    assert(proxiedProbeOptions['all-proxy'] === normalizedProxiedProbeRoute, 'proxied magnet metadata probe did not retain the configured proxy route');
+    assert(proxiedProbeOptions['async-dns'] !== 'false', 'proxied magnet metadata probe unexpectedly forced system DNS resolution');
+    assert(await forceRemoveIfPresent(client, proxiedProbeGid), 'proxied magnet metadata probe was not removable');
+    await waitForRemoved(client, proxiedProbeGid);
+    console.log('[OK] metadata probe was removed after resolution; direct and proxied resolver modes were retained');
 
     const finalGid = await rpc(client.rpcPort, client.secret, 'aria2.addTorrent', [
       trackerlessTorrentBytes.toString('base64'),

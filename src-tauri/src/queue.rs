@@ -199,6 +199,13 @@ pub(crate) fn normalize_torrent_web_seed_uri(value: &str) -> Result<String, Stri
     {
         return Err("Torrent web-seed URI must have a host and no credentials or fragment".to_string());
     }
+    crate::network::validate_url(
+        &parsed,
+        &["http", "https"],
+        crate::network::CredentialPolicy::Reject(
+            "Torrent web-seed URI must have a host and no credentials or fragment",
+        ),
+    )?;
     Ok(parsed.to_string())
 }
 
@@ -995,18 +1002,26 @@ fn is_direct_magnet_payload(payload: &SpawnPayload) -> bool {
             .is_some_and(|scheme| scheme.eq_ignore_ascii_case("magnet:"))
 }
 
+fn proxy_uses_direct_network(proxy: Option<&str>) -> bool {
+    proxy.is_none_or(|proxy| {
+        let proxy = proxy.trim();
+        proxy.is_empty() || proxy.eq_ignore_ascii_case("none")
+    })
+}
+
+fn payload_uses_direct_network(payload: &SpawnPayload) -> bool {
+    proxy_uses_direct_network(payload.proxy.as_deref())
+}
+
 fn torrent_uses_direct_network(payload: &SpawnPayload) -> bool {
     payload.is_torrent
         && !payload.torrent_verify_only
-        && payload.proxy.as_deref().is_none_or(|proxy| {
-            let proxy = proxy.trim();
-            proxy.is_empty() || proxy.eq_ignore_ascii_case("none")
-        })
+        && payload_uses_direct_network(payload)
 }
 
 fn aria2_effective_resolver_mode(payload: &SpawnPayload) -> &'static str {
     if payload.aria2_resolver_mode == Aria2ResolverMode::System
-        || torrent_uses_direct_network(payload)
+        && payload_uses_direct_network(payload)
     {
         "system"
     } else {
@@ -1110,10 +1125,12 @@ enum SeedAdmissionOutcome {
 /// (String/Option) to match the existing command signatures exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Aria2ResolverMode {
-    /// Use Aria2's normal resolver configuration. This is the initial mode
-    /// and deliberately leaves daemon-wide behavior unchanged.
+    /// Use Aria2's normal asynchronous resolver configuration. This is the
+    /// bounded alternate mode for a direct transfer after the system route
+    /// cannot resolve the target.
     Automatic,
-    /// Use the host operating system resolver for this transfer.
+    /// Use the host operating system resolver for this direct transfer. This
+    /// is the initial mode so TUN/VPN DNS interception remains authoritative.
     System,
 }
 
@@ -1476,8 +1493,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .store(supported, Ordering::Relaxed);
     }
 
-    fn aria2_system_resolver_fallback_available(&self) -> bool {
+    pub(crate) fn aria2_async_dns_supported(&self) -> bool {
         self.aria2_async_dns_supported.load(Ordering::Relaxed)
+    }
+
+    fn aria2_alternate_resolver_available(&self) -> bool {
+        self.aria2_async_dns_supported()
     }
 
     /// Accept one lifecycle-fenced Aria2 status sample and return Firelink's
@@ -6045,9 +6066,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
             &payload,
             &error,
             strike,
-            self.aria2_system_resolver_fallback_available(),
+            self.aria2_alternate_resolver_available(),
         );
-        let resolver_fallback = retry_action == Aria2RetryAction::SystemResolverFallback;
+        let resolver_fallback = retry_action == Aria2RetryAction::AlternateResolverFallback;
         let requested_connections = self
             .aria2_requested_connections(&id)
             .await
@@ -6057,7 +6078,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .await
             .unwrap_or(requested_connections);
         let action = match retry_action {
-            Aria2RetryAction::SystemResolverFallback => "system_resolver_fallback",
+            Aria2RetryAction::AlternateResolverFallback => "alternate_resolver_fallback",
             Aria2RetryAction::OrdinaryRetry => "ordinary_retry",
             Aria2RetryAction::Terminal => "terminal",
         };
@@ -6125,7 +6146,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         }
 
         if resolver_fallback {
-            payload.aria2_resolver_mode = Aria2ResolverMode::System;
+            payload.aria2_resolver_mode = Aria2ResolverMode::Automatic;
             self.aria2_payloads
                 .lock()
                 .await
@@ -6613,19 +6634,20 @@ fn is_retryable_aria2_error_for_payload(payload: &SpawnPayload, error: &str) -> 
             && is_aria2_low_speed_error(error))
 }
 
-fn should_use_aria2_system_resolver_fallback(
+fn should_use_aria2_alternate_resolver_fallback(
     payload: &SpawnPayload,
     error: &str,
     async_dns_supported: bool,
 ) -> bool {
     async_dns_supported
-        && payload.aria2_resolver_mode == Aria2ResolverMode::Automatic
+        && payload.aria2_resolver_mode == Aria2ResolverMode::System
+        && payload_uses_direct_network(payload)
         && is_aria2_name_resolution_error(error)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Aria2RetryAction {
-    SystemResolverFallback,
+    AlternateResolverFallback,
     OrdinaryRetry,
     Terminal,
 }
@@ -6636,8 +6658,8 @@ fn aria2_retry_action(
     strike: usize,
     async_dns_supported: bool,
 ) -> Aria2RetryAction {
-    if should_use_aria2_system_resolver_fallback(payload, error, async_dns_supported) {
-        return Aria2RetryAction::SystemResolverFallback;
+    if should_use_aria2_alternate_resolver_fallback(payload, error, async_dns_supported) {
+        return Aria2RetryAction::AlternateResolverFallback;
     }
     if is_retryable_aria2_error_for_payload(payload, error)
         && strike < automatic_retry_limit(payload.max_tries)
@@ -6797,7 +6819,11 @@ async fn prepare_normal_transfer(
         if !is_http_uri(&uri) {
             let parsed =
                 reqwest::Url::parse(&uri).map_err(|_| "SSRF blocked: Invalid URL".to_string())?;
-            crate::resolve_and_validate_url_host(&parsed).await?;
+            crate::network::validate_url(
+                &parsed,
+                &["http", "https", "ftp", "sftp"],
+                crate::network::CredentialPolicy::Allow,
+            )?;
             let uri_credentials_allowed = can_forward_payload_credentials(&credential_origin, &parsed);
             if index > 0
                 && payload_has_credential_material(payload)
@@ -6994,26 +7020,8 @@ fn uri_host_for_log(uri: &str) -> String {
         .unwrap_or_else(|| "<unknown host>".to_string())
 }
 
-fn proxy_scheme(proxy: &str) -> Option<String> {
-    proxy
-        .split_once("://")
-        .map(|(scheme, _)| scheme.trim().to_ascii_lowercase())
-}
-
 pub(crate) fn aria2_all_proxy_value(proxy: &str) -> Result<Option<String>, String> {
-    let proxy = proxy.trim();
-    if proxy.is_empty() {
-        return Ok(None);
-    }
-    if proxy.eq_ignore_ascii_case("none") {
-        return Ok(Some(String::new()));
-    }
-    if proxy_scheme(proxy).is_some_and(|scheme| scheme.starts_with("socks")) {
-        return Err(
-            "SOCKS system proxies are not supported for normal file downloads because aria2 only accepts HTTP/HTTPS/FTP proxy URLs. Use an HTTP proxy endpoint for normal downloads, or use media downloads where yt-dlp supports SOCKS.".to_string(),
-        );
-    }
-    Ok(Some(proxy.to_string()))
+    crate::network::NetworkRoute::from_proxy(Some(proxy)).aria2_proxy_value()
 }
 
 pub(crate) fn proxy_route_for_log(proxy: Option<&str>) -> &'static str {
@@ -7052,45 +7060,22 @@ async fn probe_bounded_range_support_with_local_override(
     let mut current = reqwest::Url::parse(uri).map_err(|error| error.to_string())?;
     let mut credentials_allowed = can_forward_payload_credentials(credential_origin, &current);
     for redirect_count in 0..=5 {
-        let (host, address) = if allow_localhost {
-            let host = current
-                .host_str()
-                .ok_or_else(|| "range probe test URL has no host".to_string())?;
-            let ip = host
-                .parse::<std::net::IpAddr>()
-                .map_err(|_| "range probe test URL must use an IP host".to_string())?;
-            (
-                host.to_string(),
-                std::net::SocketAddr::new(
-                    ip,
-                    current.port_or_known_default().unwrap_or(80),
-                ),
-            )
-        } else {
-            crate::resolve_and_validate_url_host(&current).await?
-        };
+        if !allow_localhost {
+            crate::network::validate_url(
+                &current,
+                &["http", "https"],
+                crate::network::CredentialPolicy::Allow,
+            )?;
+        }
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(10))
-            .resolve(&host, address);
-
-        if allow_localhost {
-            builder = builder.no_proxy();
-        }
-
-        if let Some(proxy) = payload
-            .proxy
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            if proxy.eq_ignore_ascii_case("none") {
-                builder = builder.no_proxy();
-            } else {
-                builder =
-                    builder.proxy(reqwest::Proxy::all(proxy).map_err(|error| error.to_string())?);
-            }
-        }
+            .timeout(std::time::Duration::from_secs(10));
+        let route = if allow_localhost {
+            crate::network::NetworkRoute::Direct
+        } else {
+            crate::network::NetworkRoute::from_proxy(payload.proxy.as_deref())
+        };
+        builder = route.configure_reqwest(builder)?;
 
         let client = builder.build().map_err(|error| error.to_string())?;
         let request = client
@@ -7288,11 +7273,15 @@ async fn validate_aria2_transfer_network_policy(
                 message: "Unsupported URL scheme".to_string(),
             });
         }
-        // This is deliberately repeated immediately before addUri/addTorrent
-        // so admission-time DNS is not the only policy check. Aria2 still
-        // resolves independently later; Firelink therefore does not claim
-        // that this is an IP pinning boundary.
-        if let Err(error) = crate::resolve_and_validate_url_host(&parsed).await {
+        // Keep this check immediately before addUri so every retry and every
+        // mirror is fenced by the same literal-target policy. Hostname DNS
+        // belongs to the selected consumer route and is intentionally not
+        // performed here.
+        if let Err(error) = crate::network::validate_url(
+            &parsed,
+            &["http", "https", "ftp", "sftp"],
+            crate::network::CredentialPolicy::Allow,
+        ) {
             return Err(Aria2NetworkPolicyError {
                 host: uri_host_for_log(uri),
                 message: error,
@@ -7420,9 +7409,11 @@ fn apply_aria2_normal_reliability_options(
 
 fn apply_aria2_resolver_options(
     options: &mut serde_json::Map<String, serde_json::Value>,
-    mode: Aria2ResolverMode,
+    payload: &SpawnPayload,
 ) {
-    if mode == Aria2ResolverMode::System {
+    if payload.aria2_resolver_mode == Aria2ResolverMode::System
+        && payload_uses_direct_network(payload)
+    {
         options.insert("async-dns".to_string(), serde_json::json!("false"));
     }
 }
@@ -8011,7 +8002,7 @@ pub(crate) fn normalize_torrent_tracker_uri(value: &str) -> Result<String, Strin
     if token.chars().any(char::is_control) {
         return Err("torrent tracker URI contains a control character".to_string());
     }
-    let parsed = url::Url::parse(token).map_err(|_| "torrent tracker URI is invalid".to_string())?;
+    let parsed = reqwest::Url::parse(token).map_err(|_| "torrent tracker URI is invalid".to_string())?;
     if !matches!(parsed.scheme(), "http" | "https" | "udp") {
         return Err("torrent tracker URI must use http, https, or udp".to_string());
     }
@@ -8024,6 +8015,11 @@ pub(crate) fn normalize_torrent_tracker_uri(value: &str) -> Result<String, Strin
     if parsed.fragment().is_some() {
         return Err("torrent tracker URI must not contain a fragment".to_string());
     }
+    crate::network::validate_url(
+        &parsed,
+        &["http", "https", "udp"],
+        crate::network::CredentialPolicy::Allow,
+    )?;
     Ok(parsed.to_string())
 }
 
@@ -8102,6 +8098,13 @@ fn normalize_torrent_tracker_list(
 
 pub(crate) fn normalize_torrent_trackers(value: Option<&str>) -> Result<Option<String>, String> {
     normalize_torrent_tracker_list(value, false)
+}
+
+pub(crate) fn validate_torrent_tracker_destinations(trackers: &[String]) -> Result<(), String> {
+    for tracker in trackers {
+        normalize_torrent_tracker_uri(tracker)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn normalize_torrent_exclude_trackers(
@@ -8212,7 +8215,9 @@ fn apply_aria2_torrent_options(
     options.insert("bt-metadata-only".to_string(), serde_json::json!("false"));
     options.insert("bt-save-metadata".to_string(), serde_json::json!("false"));
     options.insert("follow-torrent".to_string(), serde_json::json!("false"));
-    if torrent_uses_direct_network(payload) {
+    if torrent_uses_direct_network(payload)
+        && payload.aria2_resolver_mode == Aria2ResolverMode::System
+    {
         // Aria2's async resolver is independent of the system resolver. TUN
         // clients commonly install DNS interception/routing at the system
         // resolver boundary, so direct Torrent discovery must use the same
@@ -8569,7 +8574,7 @@ impl SidecarSpawner for ProductionSpawner {
         if let Some(prox) = proxy_value {
             options.insert("all-proxy".to_string(), serde_json::json!(prox));
         }
-        apply_aria2_resolver_options(&mut options, payload.aria2_resolver_mode);
+        apply_aria2_resolver_options(&mut options, payload);
         let retry_strike = state.queue_manager.aria2_retry_strike(id).await;
         let transfer_host = transfer_uris
             .first()
@@ -8604,6 +8609,8 @@ impl SidecarSpawner for ProductionSpawner {
                     crate::torrent::sanitize_torrent_bytes_for_aria2(&bytes)?;
                 let embedded_web_seeds =
                     crate::filter_torrent_web_seed_destinations(&embedded_web_seeds).await?;
+                let torrent_details = crate::torrent::torrent_details_from_bytes(&sanitized_bytes)?;
+                validate_torrent_tracker_destinations(&torrent_details.trackers)?;
                 let metadata = crate::torrent::parse_torrent_bytes(&sanitized_bytes)?;
                 options.insert(
                     "index-out".to_string(),
@@ -9251,6 +9258,11 @@ impl EnqueueItem {
         let mut item = self;
         item.strip_torrent_credentials();
         let media = item.is_media.unwrap_or(false);
+        let aria2_resolver_mode = if proxy_uses_direct_network(item.proxy.as_deref()) {
+            Aria2ResolverMode::System
+        } else {
+            Aria2ResolverMode::Automatic
+        };
         let kind = if media {
             TaskKind::Media
         } else {
@@ -9287,7 +9299,7 @@ impl EnqueueItem {
                 retry_not_found_errors: item.retry_not_found_errors.unwrap_or(false),
                 adaptive_mirror_selection: item.adaptive_mirror_selection.unwrap_or(true),
                 proxy: item.proxy,
-                aria2_resolver_mode: Aria2ResolverMode::Automatic,
+                aria2_resolver_mode,
                 format_selector: item.format_selector,
                 cookie_source: item.cookie_source,
                 is_media: media,
@@ -9889,12 +9901,54 @@ mod tests {
     #[test]
     fn aria2_system_resolver_mode_is_per_transfer_and_preserves_automatic_default() {
         let mut automatic = serde_json::Map::new();
-        apply_aria2_resolver_options(&mut automatic, Aria2ResolverMode::Automatic);
+        apply_aria2_resolver_options(
+            &mut automatic,
+            &SpawnPayload {
+                aria2_resolver_mode: Aria2ResolverMode::Automatic,
+                ..Default::default()
+            },
+        );
         assert!(!automatic.contains_key("async-dns"));
 
         let mut system = serde_json::Map::new();
-        apply_aria2_resolver_options(&mut system, Aria2ResolverMode::System);
+        apply_aria2_resolver_options(
+            &mut system,
+            &SpawnPayload {
+                aria2_resolver_mode: Aria2ResolverMode::System,
+                ..Default::default()
+            },
+        );
         assert_eq!(system.get("async-dns"), Some(&serde_json::json!("false")));
+    }
+
+    #[test]
+    fn enqueue_route_selects_system_resolver_for_direct_transfers() {
+        let direct: EnqueueItem = serde_json::from_value(serde_json::json!({
+            "id": "direct",
+            "queue_id": "main",
+            "url": "https://example.com/file",
+            "destination": "/tmp",
+            "filename": "file"
+        }))
+        .unwrap();
+        assert_eq!(
+            direct.into_task().payload.aria2_resolver_mode,
+            Aria2ResolverMode::System
+        );
+
+        let proxied: EnqueueItem = serde_json::from_value(serde_json::json!({
+            "id": "proxied",
+            "queue_id": "main",
+            "url": "https://example.com/file",
+            "destination": "/tmp",
+            "filename": "file",
+            "proxy": "http://proxy.example:8080"
+        }))
+        .unwrap();
+        assert_eq!(
+            proxied.into_task().payload.aria2_resolver_mode,
+            Aria2ResolverMode::Automatic
+        );
     }
 
     #[test]
@@ -10144,6 +10198,7 @@ mod tests {
             &mut options,
             &SpawnPayload {
                 is_torrent: true,
+                aria2_resolver_mode: Aria2ResolverMode::System,
                 ..Default::default()
             },
         )
@@ -10180,6 +10235,7 @@ mod tests {
         assert_eq!(
             aria2_effective_resolver_mode(&SpawnPayload {
                 is_torrent: true,
+                aria2_resolver_mode: Aria2ResolverMode::System,
                 ..Default::default()
             }),
             "system"
@@ -10188,6 +10244,38 @@ mod tests {
             aria2_effective_resolver_mode(&SpawnPayload {
                 is_torrent: true,
                 proxy: Some("http://127.0.0.1:8080".to_string()),
+                ..Default::default()
+            }),
+            "automatic"
+        );
+    }
+
+    #[test]
+    fn resolver_options_never_force_local_dns_for_configured_proxy_routes() {
+        let mut direct = serde_json::Map::new();
+        apply_aria2_resolver_options(
+            &mut direct,
+            &SpawnPayload {
+                aria2_resolver_mode: Aria2ResolverMode::System,
+                ..Default::default()
+            },
+        );
+        assert_eq!(direct.get("async-dns"), Some(&serde_json::json!("false")));
+
+        let mut proxied = serde_json::Map::new();
+        apply_aria2_resolver_options(
+            &mut proxied,
+            &SpawnPayload {
+                aria2_resolver_mode: Aria2ResolverMode::System,
+                proxy: Some("http://proxy.example:8080".to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(!proxied.contains_key("async-dns"));
+        assert_eq!(
+            aria2_effective_resolver_mode(&SpawnPayload {
+                aria2_resolver_mode: Aria2ResolverMode::System,
+                proxy: Some("http://proxy.example:8080".to_string()),
                 ..Default::default()
             }),
             "automatic"
@@ -10571,11 +10659,20 @@ mod tests {
             "ftp://tracker.example/announce",
             "https://user:pass@tracker.example/announce",
             "https://tracker.example/announce#fragment",
+            "https://127.0.0.1/announce",
+            "https://localhost/announce",
             "https://tracker.example/announce,",
             "https://",
         ] {
             assert!(normalize_torrent_trackers(Some(value)).is_err(), "{value}");
         }
+        assert_eq!(
+            normalize_torrent_trackers(Some(
+                "https://this-tracker-does-not-resolve.invalid/announce"
+            ))
+            .unwrap(),
+            Some("https://this-tracker-does-not-resolve.invalid/announce".to_string())
+        );
         let too_many = (0..=MAX_TORRENT_TRACKERS)
             .map(|index| format!("https://tracker{index}.example/announce"))
             .collect::<Vec<_>>()
@@ -10600,6 +10697,8 @@ mod tests {
             "sftp://mirror.example/file",
             "https://user:pass@mirror.example/file",
             "https://mirror.example/file#fragment",
+            "https://127.0.0.1/file",
+            "https://mirror.localhost/file",
         ] {
             assert!(
                 normalize_torrent_mirror_uris(Some(value)).is_err(),
@@ -10631,6 +10730,25 @@ mod tests {
             expected_initial_torrent_web_seed_state(&current, &explicit),
             expected
         );
+    }
+
+    #[test]
+    fn torrent_tracker_destination_validation_keeps_dns_route_owned() {
+        assert!(validate_torrent_tracker_destinations(&[
+            "https://tracker-does-not-resolve.invalid/announce".to_string(),
+            "udp://tracker-does-not-resolve.invalid:6969/announce".to_string(),
+        ])
+        .is_ok());
+        for tracker in [
+            "https://127.0.0.1/announce",
+            "https://[::1]/announce",
+            "udp://localhost:6969/announce",
+        ] {
+            assert!(
+                validate_torrent_tracker_destinations(&[tracker.to_string()]).is_err(),
+                "{tracker}"
+            );
+        }
     }
 
     #[test]
@@ -12268,24 +12386,28 @@ mod tests {
     fn aria2_name_resolution_error_is_retryable_for_resolver_recovery() {
         let error = "aria2 error code 19: Name resolution for example.test failed: Could not contact DNS servers.";
         assert!(is_retryable_aria2_error(error));
-        assert!(should_use_aria2_system_resolver_fallback(
-            &SpawnPayload::default(),
+        let direct_initial = SpawnPayload {
+            aria2_resolver_mode: Aria2ResolverMode::System,
+            ..Default::default()
+        };
+        assert!(should_use_aria2_alternate_resolver_fallback(
+            &direct_initial,
             error,
             true,
         ));
         assert_eq!(
-            aria2_retry_action(&SpawnPayload::default(), error, 0, true),
-            Aria2RetryAction::SystemResolverFallback
+            aria2_retry_action(&direct_initial, error, 0, true),
+            Aria2RetryAction::AlternateResolverFallback
         );
-        assert!(!should_use_aria2_system_resolver_fallback(
+        assert!(!should_use_aria2_alternate_resolver_fallback(
             &SpawnPayload {
-                aria2_resolver_mode: Aria2ResolverMode::System,
+                aria2_resolver_mode: Aria2ResolverMode::Automatic,
                 ..Default::default()
             },
             error,
             true,
         ));
-        assert!(!should_use_aria2_system_resolver_fallback(
+        assert!(!should_use_aria2_alternate_resolver_fallback(
             &SpawnPayload::default(),
             error,
             false,
@@ -12301,12 +12423,12 @@ mod tests {
                 0,
                 true,
             ),
-            Aria2RetryAction::Terminal
+            Aria2RetryAction::AlternateResolverFallback
         );
         assert_eq!(
             aria2_retry_action(
                 &SpawnPayload {
-                    aria2_resolver_mode: Aria2ResolverMode::System,
+                    aria2_resolver_mode: Aria2ResolverMode::Automatic,
                     max_tries: Some(1),
                     ..Default::default()
                 },
