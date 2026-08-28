@@ -1255,8 +1255,11 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         throw error;
       }
     };
-    const credentialsUpdated = (['password', 'cookies', 'headers'] as const)
+    const credentialsUpdated = (['username', 'password', 'cookies', 'headers'] as const)
       .some(field => Object.prototype.hasOwnProperty.call(updates, field));
+    const nextUsernameMaterial = hasCredentialMaterial(
+      Object.prototype.hasOwnProperty.call(updates, 'username') ? updates.username : item.username,
+    );
     const nextCredentialMaterial = (['password', 'cookies', 'headers'] as const)
       .some(field => field === 'headers'
         ? hasCredentialBearingHeaders(
@@ -1272,7 +1275,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         : { ...updates, fileName: canonicalizeDownloadFileName(updates.fileName) }),
       ...(credentialsUpdated && nextCredentialMaterial
         ? { credentialsRequired: false }
-        : credentialsUpdated && item.credentialsRequired === true
+        : credentialsUpdated && (nextUsernameMaterial || item.credentialsRequired === true)
           ? { credentialsRequired: true }
           : {}),
       ...(item.isTorrent === true

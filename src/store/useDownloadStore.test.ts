@@ -211,6 +211,54 @@ describe('useDownloadStore', () => {
     expect(useDownloadStore.getState().downloads[0].credentialsRequired).toBe(false);
   });
 
+  it('marks a username-only properties change for credential recovery', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'username-only-properties',
+        url: 'https://secure.example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'failed',
+        category: 'Other',
+        dateAdded: '',
+      }] as any[],
+    });
+
+    await useDownloadStore.getState().applyProperties('username-only-properties', {
+      username: 'alice',
+    });
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      username: 'alice',
+      credentialsRequired: true,
+    });
+  });
+
+  it('keeps the recovery marker when clearing a password leaves a username', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'username-without-password',
+        url: 'https://secure.example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'failed',
+        category: 'Other',
+        dateAdded: '',
+        username: 'alice',
+        password: 'secret',
+        credentialsRequired: false,
+      }] as any[],
+    });
+
+    await useDownloadStore.getState().applyProperties('username-without-password', {
+      password: undefined,
+    });
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      username: 'alice',
+      password: undefined,
+      credentialsRequired: true,
+    });
+  });
+
   it('clears a persisted Torrent removal reservation when a paused item disables cleanup', async () => {
     useDownloadStore.setState({
       downloads: [{
