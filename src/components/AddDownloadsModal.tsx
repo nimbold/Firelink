@@ -723,7 +723,11 @@ export const AddDownloadsModal = () => {
               url: row.sourceUrl,
               cookieBrowser: browserArg,
               userAgent: settingsStore.customUserAgent.trim() || null,
-              username: useAuth ? username.trim() || null : login?.username || null,
+              username: useAuth
+                ? username.trim() || null
+                : typeof keychainPassword === 'string' && keychainPassword.trim()
+                  ? login?.username || null
+                  : null,
               password: useAuth ? password || null : keychainPassword,
               headers: rowHeaders || null,
               cookies: rowCookies || null,
@@ -827,7 +831,11 @@ export const AddDownloadsModal = () => {
             const meta = await invoke('fetch_metadata', {
               url: row.sourceUrl,
               userAgent: settingsStore.customUserAgent.trim() || null,
-              username: useAuth ? username.trim() || null : login?.username || null,
+              username: useAuth
+                ? username.trim() || null
+                : typeof keychainPassword === 'string' && keychainPassword.trim()
+                  ? login?.username || null
+                  : null,
               password: useAuth ? password || null : keychainPassword,
               headers: headersForRow(contextUrl) || null,
               cookies: cookiesForRow(contextUrl, row.sourceUrl) || null,

@@ -5,10 +5,8 @@ import type { DownloadErrorKind } from '../bindings/DownloadErrorKind';
 import { listenEvent as listen } from '../ipc';
 import type { DownloadItem } from '../bindings/DownloadItem';
 import type { DownloadProgressEvent } from '../bindings/DownloadProgressEvent';
-import { canStartDownload } from '../utils/downloadActions';
 import { categoryForDownload, isDownloadStatus } from '../utils/downloads';
 import { useDownloadProgressStore } from './downloadProgressStore';
-import i18n from '../i18n';
 
 import {
   clearDownloadControlIntent,
@@ -535,17 +533,7 @@ const startDownloadListeners = async () => {
       if (event.payload === 'pause-all') {
         void mainStore.pauseAll();
       } else if (event.payload === 'resume-all') {
-        const credentialMarkedIds = mainStore.downloads
-          .filter(download =>
-            download.credentialsRequired === true
-            && (download.status === 'queued' || canStartDownload(download.status))
-          )
-          .map(download => download.id);
-        const resumeWithoutCredentials = credentialMarkedIds.length > 0
-          && window.confirm(i18n.t($ => $.properties.resumeWithoutCredentialsConfirm));
-        void mainStore.startAll({
-          resumeWithoutCredentialsIds: resumeWithoutCredentials ? credentialMarkedIds : []
-        });
+        void mainStore.startAll();
       }
     }),
   ]);

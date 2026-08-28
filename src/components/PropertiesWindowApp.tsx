@@ -1225,15 +1225,13 @@ export const PropertiesWindowApp = () => {
   );
   const progressPercent = allocationPending ? '—' : `${Math.round(progress * 100)}%`;
   const statusTone = allocationPending ? 'downloading' : propertiesStatusTone(snapshot.status);
-  const lifecycleLabel = snapshot.credentialsRequired === true
-    ? t($ => $.properties.retryWithoutCredentials)
-    : lifecycleAction === 'pause'
-      ? t($ => $.downloads.actions.pause)
-      : lifecycleAction === 'resume'
-        ? t($ => $.downloads.actions.resume)
-        : lifecycleAction === 'retry'
-          ? t($ => $.downloads.actions.retry)
-          : t($ => $.downloads.actions.start);
+  const lifecycleLabel = lifecycleAction === 'pause'
+    ? t($ => $.downloads.actions.pause)
+    : lifecycleAction === 'resume'
+      ? t($ => $.downloads.actions.resume)
+      : lifecycleAction === 'retry'
+        ? t($ => $.downloads.actions.retry)
+        : t($ => $.downloads.actions.start);
   const tabLabel = (tab: PropertiesTab) => {
     switch (tab) {
       case 'overview': return t($ => $.properties.tabs.overview);
@@ -1278,16 +1276,7 @@ export const PropertiesWindowApp = () => {
                   && !window.confirm(t($ => $.downloadTable.nonResumableOne))) {
                   return;
                 }
-                const resumeWithoutCredentials = (lifecycleAction === 'resume' || lifecycleAction === 'retry')
-                  && snapshot.credentialsRequired === true;
-                if (resumeWithoutCredentials
-                  && !window.confirm(t($ => $.properties.resumeWithoutCredentialsConfirm))) {
-                  return;
-                }
-                void requestAction(
-                  'pause-resume',
-                  resumeWithoutCredentials ? { resumeWithoutCredentials: true } : undefined,
-                );
+                void requestAction('pause-resume');
               }}
             >
               {lifecycleAction === 'pause' ? <Pause size={14} /> : <Play size={14} />}
@@ -1704,7 +1693,6 @@ export const PropertiesWindowApp = () => {
 
         {activeTab === 'advanced' && <div className="space-y-4">
           <p className="text-xs text-text-muted">{t($ => $.properties.advancedTransfer)}</p>
-          {snapshot.credentialsRequired === true && <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200" role="alert">{t($ => $.properties.credentialsRequired)}</p>}
           {isSftp && <label className="block max-w-2xl text-xs text-text-muted">{t($ => $.properties.sftpHostKeyMd)}<input className="app-control mt-1 w-full font-mono" value={sftpHostKeyMd} onChange={event => { setSftpHostKeyMd(event.target.value); setDraftTab('advanced'); }} placeholder={t($ => $.properties.sftpHostKeyMdHint)} disabled={!editingEnabled} autoComplete="off" /><span className="mt-1 block text-[11px]">{t($ => $.properties.sftpHostKeyMdDescription)}</span></label>}
           <div className="grid max-w-2xl gap-3 rounded-lg border border-border-modal bg-bg-input/30 p-3 text-xs sm:grid-cols-2">
             <div><span className="text-text-muted">{connectionHeaderLabel}</span><p className="mt-1">{connectionValue}</p></div>

@@ -538,15 +538,12 @@ export const PropertiesWindowBridgeHost = () => {
                 throw new Error('The download did not reach a paused or terminal state');
               }
             } else {
-              const resumeWithoutCredentials = typeof request.payload === 'object'
-                && request.payload !== null
-                && 'resumeWithoutCredentials' in request.payload
-                && request.payload.resumeWithoutCredentials === true;
-              const resumed = await store.resumeDownload(
-                request.downloadId,
-                resumeWithoutCredentials ? { resumeWithoutCredentials: true } : undefined,
-              );
+              const resumed = await store.resumeDownload(request.downloadId);
               if (!resumed) {
+                // The resume request may have opened the main window's
+                // keychain consent modal. It is a pending user decision, not
+                // a backend rejection to report from the child window.
+                if (useSettingsStore.getState().showKeychainModal) break;
                 throw new Error(i18n.t($ => $.downloadTable.backendRejectedStart));
               }
               // resumeDownload returns after the lifecycle request has been

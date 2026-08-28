@@ -251,9 +251,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     : waitingForPeers
     ? t($ => $.downloads.status.waitingForPeers)
     : t($ => $.downloads.status[download.status]);
-  const visibleErrorStatusLabel = download.credentialsRequired === true
-    ? t($ => $.properties.credentialsRequired)
-    : download.lastErrorKind === 'nameResolution'
+  const visibleErrorStatusLabel = download.lastErrorKind === 'nameResolution'
     ? download.status === 'retrying' && download.lastResolverFallback === true
       ? t($ => $.downloads.errors.nameResolutionRetrying)
       : download.status === 'failed'
@@ -371,7 +369,6 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                   download.status === 'failed'
                   || download.status === 'retrying'
                   || download.lastErrorKind === 'destinationAccess'
-                  || download.credentialsRequired === true
                 )
                   ? download.lastError
                   : (download.status === 'queued' || download.status === 'staged') && queueIndex !== -1
@@ -487,14 +484,10 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
         onClick={() => isBulkSelection ? handleResumeSelected() : handleResume(download)}
         className="app-icon-button main-control-button"
         title={resumeSelectionCount === null
-          ? download.credentialsRequired === true
-            ? t($ => $.properties.retryWithoutCredentials)
-            : download.status === 'paused' ? t($ => $.downloads.actions.resume) : t($ => $.downloads.actions.start)
+          ? download.status === 'paused' ? t($ => $.downloads.actions.resume) : t($ => $.downloads.actions.start)
           : `${t($ => $.downloadTable.startResume)} (${selectedCountLabel(resumeSelectionCount)})`}
         aria-label={resumeSelectionCount === null
-          ? download.credentialsRequired === true
-            ? t($ => $.properties.retryWithoutCredentials)
-            : download.status === 'paused' ? t($ => $.downloads.actions.resume) : t($ => $.downloads.actions.start)
+          ? download.status === 'paused' ? t($ => $.downloads.actions.resume) : t($ => $.downloads.actions.start)
           : `${t($ => $.downloadTable.startResume)} (${selectedCountLabel(resumeSelectionCount)})`}
       >
         <Play size={14} fill="currentColor" />

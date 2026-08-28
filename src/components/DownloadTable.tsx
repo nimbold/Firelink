@@ -1878,15 +1878,12 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     try {
       const current = useDownloadStore.getState().downloads.find(download => download.id === item.id);
       if (!current) return;
-      let resumeWithoutCredentials = false;
-      if (current.credentialsRequired === true) {
-        resumeWithoutCredentials = window.confirm(t($ => $.properties.resumeWithoutCredentialsConfirm));
-        if (!resumeWithoutCredentials) return;
-      }
-      const resumed = await useDownloadStore.getState().resumeDownload(item.id, {
-        resumeWithoutCredentials
-      });
+      const resumed = await useDownloadStore.getState().resumeDownload(item.id);
       if (!resumed) {
+        // A configured site login opens the keychain consent modal instead of
+        // starting a credentialless request. That is a pending user decision,
+        // not a backend rejection, so do not show a second misleading error.
+        if (useSettingsStore.getState().showKeychainModal) return;
         const latest = useDownloadStore.getState().downloads.find(
           download => download.id === item.id
         );
@@ -1929,42 +1926,13 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   const handleResumeSelected = useCallback(() => {
     const ids = Array.from(selectedIdsRef.current);
     if (ids.length === 0) return;
-    const selected = useDownloadStore.getState().downloads.filter(download => ids.includes(download.id));
-    const credentialMarkedIds = selected
-      .filter(download => download.credentialsRequired === true && canStartDownload(download.status))
-      .map(download => download.id);
-    if (credentialMarkedIds.length > 0
-      && !window.confirm(t($ => $.properties.resumeWithoutCredentialsConfirm))) {
-      // Continue ordinary selected resumes. Credential-marked rows remain
-      // fail-closed and can be handled individually after the user supplies
-      // credentials or confirms a credentialless retry.
-      const credentialMarkedIdSet = new Set(credentialMarkedIds);
-      const ordinaryIds = ids.filter(id => !credentialMarkedIdSet.has(id));
-      if (ordinaryIds.length === 0) return;
-      void startSelected(ordinaryIds).catch(error => {
-        showInteractionError(t($ => $.downloadTable.resumeFailed), error);
-      });
-      return;
-    }
-    void startSelected(ids, {
-      resumeWithoutCredentialsIds: credentialMarkedIds
-    }).catch(error => {
+    void startSelected(ids).catch(error => {
       showInteractionError(t($ => $.downloadTable.resumeFailed), error);
     });
   }, [showInteractionError, startSelected, t]);
 
   const handleStartAll = useCallback(() => {
-    const credentialMarkedIds = useDownloadStore.getState().downloads
-      .filter(download =>
-        download.credentialsRequired === true
-        && (download.status === 'queued' || canStartDownload(download.status))
-      )
-      .map(download => download.id);
-    const resumeWithoutCredentials = credentialMarkedIds.length > 0
-      && window.confirm(t($ => $.properties.resumeWithoutCredentialsConfirm));
-    void startAll({
-      resumeWithoutCredentialsIds: resumeWithoutCredentials ? credentialMarkedIds : []
-    }).catch(error => {
+    void startAll().catch(error => {
       showInteractionError(t($ => $.downloadTable.resumeFailed), error);
     });
   }, [showInteractionError, startAll, t]);

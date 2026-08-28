@@ -7,12 +7,11 @@ import {
   ChevronDown,
   type LucideIcon
 } from 'lucide-react';
-import { useDownloadStore, DownloadCategory, Queue, MAIN_QUEUE_ID } from '../store/useDownloadStore';
+import { useDownloadStore, DownloadCategory, Queue } from '../store/useDownloadStore';
 import { ActiveView, useSettingsStore } from '../store/useSettingsStore';
 import { WindowDragRegion } from './WindowDragRegion';
 import { useToast } from '../contexts/ToastContext';
 import { isTransferActiveStatus } from '../utils/downloads';
-import { canStartDownload } from '../utils/downloadActions';
 import { clampFloatingPosition } from '../utils/floatingPosition';
 import { useTranslation } from 'react-i18next';
 
@@ -525,19 +524,8 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             className="w-full text-start px-3 py-1.5 flex items-center hover:bg-item-hover"
             onClick={() => {
               const queueId = contextMenu.id;
-              const credentialMarkedIds = downloads
-                .filter(download =>
-                  (download.queueId || MAIN_QUEUE_ID) === queueId
-                  && download.credentialsRequired === true
-                  && (download.status === 'queued' || canStartDownload(download.status))
-                )
-                .map(download => download.id);
-              const resumeWithoutCredentials = credentialMarkedIds.length > 0
-                && window.confirm(t($ => $.properties.resumeWithoutCredentialsConfirm));
               setContextMenu(null);
-              void startQueue(queueId, {
-                resumeWithoutCredentialsIds: resumeWithoutCredentials ? credentialMarkedIds : []
-              }).catch(error => {
+              void startQueue(queueId).catch(error => {
                 addToast({
                   message: t($ => $.sidebar.startQueueFailed, { detail: String(error) }),
                   variant: 'error',

@@ -74,7 +74,6 @@ const PROPERTIES_SNAPSHOT_KEYS = [
   'queuePosition',
   'hasBeenDispatched',
   'lastError',
-  'credentialsRequired',
   'lastErrorKind',
   'lastResolverFallback',
   'lastTry',
@@ -303,8 +302,7 @@ export type PropertiesActionRequest = {
   payload?: PropertiesPatch
     | { selectedIndices: number[] | null }
     | { limit: string | null }
-    | { maxPeers: string | null; peerSpeedLimit: string | null }
-    | { resumeWithoutCredentials: boolean };
+    | { maxPeers: string | null; peerSpeedLimit: string | null };
 };
 
 export type PropertiesActionResult = {

@@ -318,6 +318,13 @@ html[data-font-family="monospace"] {
   body {
     width: 100%;
     height: 100%;
+    background-color: transparent;
+  }
+
+  #root {
+    width: 100%;
+    height: 100%;
+    background-color: transparent;
   }
 
   body.is-resizing,
@@ -609,6 +616,7 @@ html[data-list-density="relaxed"] {
     font-weight: 700;
     letter-spacing: -0.01em;
     -webkit-app-region: drag;
+    app-region: drag;
   }
 
   .properties-window-titlebar span {
@@ -2433,6 +2441,7 @@ html[data-list-density="relaxed"] {
     right: auto;
     z-index: 80;
     -webkit-app-region: no-drag;
+    app-region: no-drag;
   }
 
   /* Native-decorated windows do not render the custom control rail. Keep the
@@ -3253,6 +3262,7 @@ html[data-list-density="relaxed"] {
   direction: ltr;
   gap: 9px;
   -webkit-app-region: no-drag;
+  app-region: no-drag;
   pointer-events: auto;
 }
 
@@ -3288,6 +3298,7 @@ html[data-list-density="relaxed"] {
     color 120ms ease,
     transform 120ms ease;
   -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 .window-control.close {
@@ -3481,6 +3492,8 @@ html[data-list-density="relaxed"] {
   direction: ltr;
     border-bottom: 1px solid hsl(var(--border-color));
   background: hsl(var(--statusbar-bg));
+  -webkit-app-region: drag;
+  app-region: drag;
 }
 
 .app-workspace--sidebar-right .main-titlebar {
@@ -3523,6 +3536,7 @@ html[data-list-density="relaxed"] {
     border: 1px solid hsl(var(--border-modal));
     background: hsl(var(--bg-input));
     -webkit-app-region: no-drag;
+    app-region: no-drag;
   }
 
   .main-control-button {
@@ -3534,6 +3548,7 @@ html[data-list-density="relaxed"] {
     color: hsl(var(--text-secondary));
     border-inline-end: 1px solid hsl(var(--border-color));
     -webkit-app-region: no-drag;
+    app-region: no-drag;
   }
 
   .main-control-button svg {
