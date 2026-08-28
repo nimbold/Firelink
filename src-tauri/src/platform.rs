@@ -47,11 +47,33 @@ pub fn file_identity(path: &Path) -> Option<String> {
         succeeded
     };
     result.then(|| {
-        format!(
-            "{}:{}:{}",
-            metadata.dwVolumeSerialNumber, metadata.nFileIndexHigh, metadata.nFileIndexLow
-        )
+        format_file_identity(&metadata)
     })
+}
+
+/// Return the identity of the already-open Windows file handle. This keeps a
+/// replacement check tied to the same file that was hashed instead of
+/// reopening the path and trusting a second path lookup.
+#[cfg(target_os = "windows")]
+pub fn file_identity_for_handle(file: &std::fs::File) -> Option<String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut metadata = BY_HANDLE_FILE_INFORMATION::default();
+    let succeeded = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut metadata) != 0 };
+    succeeded.then(|| format_file_identity(&metadata))
+}
+
+#[cfg(target_os = "windows")]
+fn format_file_identity(
+    metadata: &windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION,
+) -> String {
+    format!(
+        "{}:{}:{}",
+        metadata.dwVolumeSerialNumber, metadata.nFileIndexHigh, metadata.nFileIndexLow
+    )
 }
 
 const ATOMIC_TEMP_PREFIX: &str = ".firelink-atomic-";

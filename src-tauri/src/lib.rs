@@ -6318,7 +6318,8 @@ async fn remove_download(
                 &app_handle,
                 &persisted,
                 native_lifecycle_was_admitted,
-            )?;
+            )
+            .await?;
             let expected_assets_present =
                 expected_unadmitted_download_assets_present(&app_handle, &persisted)?;
             (
@@ -6494,7 +6495,7 @@ struct UnownedReplacementTarget {
     fingerprint: String,
 }
 
-fn validate_unowned_replacement_target<R: tauri::Runtime>(
+async fn validate_unowned_replacement_target<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     target: &std::path::Path,
     expected_fingerprint: &str,
@@ -6531,7 +6532,7 @@ fn validate_unowned_replacement_target<R: tauri::Runtime>(
             ));
         }
     }
-    if target_fingerprint(target, metadata) != expected_fingerprint {
+    if !target_fingerprint_matches_async(target, metadata, expected_fingerprint).await? {
         return Err(
             "The replacement target changed after duplicate resolution. Reopen the conflict and choose Replace again."
                 .to_string(),
@@ -6540,7 +6541,7 @@ fn validate_unowned_replacement_target<R: tauri::Runtime>(
     Ok(())
 }
 
-fn inspect_unowned_replacement_target<R: tauri::Runtime>(
+async fn inspect_unowned_replacement_target<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     persisted: &crate::ipc::DownloadItem,
     native_lifecycle_was_admitted: bool,
@@ -6600,7 +6601,8 @@ fn inspect_unowned_replacement_target<R: tauri::Runtime>(
         expected_fingerprint,
         &metadata,
         &persisted.id,
-    )?;
+    )
+    .await?;
     Ok(Some(UnownedReplacementTarget {
         download_id: persisted.id.clone(),
         target,
@@ -6632,7 +6634,8 @@ async fn remove_unowned_replacement_target<R: tauri::Runtime>(
             expected_fingerprint,
             &metadata,
             allowed_legacy_owner_id,
-        )?;
+        )
+        .await?;
 
         if permanent {
             match tokio::fs::remove_file(target).await {
@@ -6670,7 +6673,8 @@ async fn remove_unowned_replacement_target<R: tauri::Runtime>(
                         expected_fingerprint,
                         &current_metadata,
                         allowed_legacy_owner_id,
-                    )?;
+                    )
+                    .await?;
                     match std::fs::remove_file(target) {
                         Ok(()) => Ok(()),
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -6975,7 +6979,7 @@ async fn exact_file_fingerprint_for_permanent_removal<R: tauri::Runtime>(
             path.display()
         ));
     }
-    Ok(Some(target_fingerprint(path, &metadata)))
+    Ok(Some(target_fingerprint_async(path, &metadata).await?))
 }
 
 async fn validate_exact_file_for_permanent_removal<R: tauri::Runtime>(
@@ -7285,7 +7289,7 @@ async fn managed_torrent_metadata_fingerprint<R: tauri::Runtime>(
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
         return Err("refusing to permanently remove non-regular managed Torrent metadata".to_string());
     }
-    Ok(Some(target_fingerprint(path, &metadata)))
+    Ok(Some(target_fingerprint_async(path, &metadata).await?))
 }
 
 fn is_os_directory_metadata(name: &std::ffi::OsStr) -> bool {
@@ -8546,7 +8550,13 @@ async fn restore_download_replacement(
     if metadata_is_link_or_reparse(&quarantine_metadata) || !quarantine_metadata.is_file() {
         return Err("Cannot restore replacement quarantine because it is not a regular file".to_string());
     }
-    if target_fingerprint(&reservation.quarantine, &quarantine_metadata) != reservation.fingerprint {
+    if !target_fingerprint_matches_async(
+        &reservation.quarantine,
+        &quarantine_metadata,
+        &reservation.fingerprint,
+    )
+    .await?
+    {
         return Err("Cannot restore replacement quarantine because its contents changed".to_string());
     }
     if tokio::fs::symlink_metadata(&reservation.target).await.is_ok() {
@@ -8642,7 +8652,23 @@ async fn finalize_download_replacement(
             return;
         }
     };
-    if target_fingerprint(&reservation.quarantine, &quarantine_metadata) != reservation.fingerprint {
+    let quarantine_matches = match target_fingerprint_matches_async(
+        &reservation.quarantine,
+        &quarantine_metadata,
+        &reservation.fingerprint,
+    )
+    .await {
+        Ok(matches) => matches,
+        Err(error) => {
+            log::warn!(
+                "download replacement cleanup [{}]: retained recovery journal because quarantine could not be fingerprinted: {}",
+                reservation.target.display(),
+                error
+            );
+            return;
+        }
+    };
+    if !quarantine_matches {
         log::warn!(
             "download replacement cleanup [{}]: retained recovery journal because quarantine changed",
             reservation.target.display()
@@ -8700,8 +8726,7 @@ async fn prepare_download_replacement(
             "Download target is already owned by Firelink download {owner}"
         ));
     }
-    let current_fingerprint = target_fingerprint(target, &metadata);
-    if current_fingerprint != expected_fingerprint {
+    if !target_fingerprint_matches_async(target, &metadata, expected_fingerprint).await? {
         return Err(
             "The file changed after duplicate resolution. Reopen the conflict and choose Replace again."
                 .to_string(),
@@ -8765,7 +8790,12 @@ async fn prepare_download_replacement(
     };
     if metadata_is_link_or_reparse(&staged_metadata)
         || !staged_metadata.is_file()
-        || target_fingerprint(&reservation.quarantine, &staged_metadata) != expected_fingerprint
+        || !target_fingerprint_matches_async(
+            &reservation.quarantine,
+            &staged_metadata,
+            expected_fingerprint,
+        )
+        .await?
     {
         let _ = restore_staged_replacement_after_validation_failure(&reservation).await;
         return Err("The replacement target changed while it was being staged".to_string());
@@ -8895,18 +8925,24 @@ fn recover_download_replacement_journals(
             }
         };
         let quarantine_exists = match std::fs::symlink_metadata(&journal.quarantine) {
-            Ok(metadata)
-                if metadata_is_link_or_reparse(&metadata)
-                    || !metadata.is_file()
-                    || target_fingerprint(&journal.quarantine, &metadata) != journal.fingerprint =>
-            {
-                log::warn!(
-                    "leaving download replacement journal [{}]: quarantine is not the original regular file",
-                    journal.id
-                );
-                continue;
+            Ok(metadata) => {
+                let fingerprint_matches = !metadata_is_link_or_reparse(&metadata)
+                    && metadata.is_file()
+                    && target_fingerprint_matches(
+                        &journal.quarantine,
+                        &metadata,
+                        &journal.fingerprint,
+                    )
+                        .unwrap_or(false);
+                if !fingerprint_matches {
+                    log::warn!(
+                        "leaving download replacement journal [{}]: quarantine is not the original regular file",
+                        journal.id
+                    );
+                    continue;
+                }
+                true
             }
-            Ok(_) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => {
                 log::warn!(
@@ -13273,8 +13309,95 @@ fn db_replace_queues(
     crate::db::replace_queues(&mut connection, &data)
 }
 
-fn target_fingerprint(path: &std::path::Path, metadata: &std::fs::Metadata) -> String {
-    #[cfg(not(target_os = "windows"))]
+fn target_fingerprint(
+    path: &std::path::Path,
+    metadata: &std::fs::Metadata,
+) -> Result<String, String> {
+    use sha2::Digest;
+    use std::io::Read;
+
+    let identity = target_identity(path, metadata);
+    let modified = target_modified(metadata);
+    let changed = target_changed(metadata);
+
+    // The metadata snapshot is part of the authorization decision. Open the
+    // file before hashing and reject a path that was replaced between the
+    // snapshot and the open; otherwise a race could authorize a digest for a
+    // different file.
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("could not read file fingerprint: {error}"))?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| format!("could not inspect file fingerprint: {error}"))?;
+    if !opened_metadata.is_file() || opened_metadata.len() != metadata.len() {
+        return Err("file changed while its fingerprint was being computed".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened_metadata.dev() != metadata.dev() || opened_metadata.ino() != metadata.ino() {
+            return Err("file changed while its fingerprint was being computed".to_string());
+        }
+    }
+    #[cfg(windows)]
+    {
+        let opened_identity = crate::platform::file_identity_for_handle(&file)
+            .map(|identity| format!("windows:{identity}"))
+            .ok_or_else(|| "could not inspect file identity for fingerprint".to_string())?;
+        if opened_identity != identity {
+            return Err("file changed while its fingerprint was being computed".to_string());
+        }
+    }
+
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("could not read file fingerprint: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let final_metadata = file
+        .metadata()
+        .map_err(|error| format!("could not inspect file fingerprint: {error}"))?;
+    if !final_metadata.is_file()
+        || final_metadata.len() != metadata.len()
+        || final_metadata.modified().ok() != metadata.modified().ok()
+    {
+        return Err("file changed while its fingerprint was being computed".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if final_metadata.dev() != metadata.dev()
+            || final_metadata.ino() != metadata.ino()
+            || final_metadata.ctime() != metadata.ctime()
+            || final_metadata.ctime_nsec() != metadata.ctime_nsec()
+        {
+            return Err("file changed while its fingerprint was being computed".to_string());
+        }
+    }
+    let content_digest = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    Ok(format!(
+        "v2:{}:{}:{}:{}:{}",
+        identity,
+        metadata.len(),
+        modified,
+        changed,
+        content_digest
+    ))
+}
+
+fn target_identity(path: &std::path::Path, metadata: &std::fs::Metadata) -> String {
+    #[cfg(not(windows))]
     let _ = path;
     #[cfg(unix)]
     let identity = {
@@ -13287,13 +13410,87 @@ fn target_fingerprint(path: &std::path::Path, metadata: &std::fs::Metadata) -> S
         .unwrap_or_else(|| format!("windows-path:{}", crate::platform::path_identity(path)));
     #[cfg(not(any(unix, windows)))]
     let identity = "portable".to_string();
-    let modified = metadata
+    identity
+}
+
+fn target_modified(metadata: &std::fs::Metadata) -> String {
+    metadata
         .modified()
         .ok()
         .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|value| format!("{}:{}", value.as_secs(), value.subsec_nanos()))
-        .unwrap_or_else(|| "unknown".to_string());
-    format!("{}:{}:{}", identity, metadata.len(), modified)
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn target_changed(metadata: &std::fs::Metadata) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        return format!("{}:{}", metadata.ctime(), metadata.ctime_nsec());
+    }
+    #[cfg(not(unix))]
+    {
+        "unknown".to_string()
+    }
+}
+
+/// Preserve the metadata-only format emitted before content hashing was
+/// introduced. It is accepted only for already-persisted replacement state;
+/// all new fingerprints use the v2 content-bound format above.
+fn legacy_target_fingerprint(path: &std::path::Path, metadata: &std::fs::Metadata) -> String {
+    format!(
+        "{}:{}:{}",
+        target_identity(path, metadata),
+        metadata.len(),
+        target_modified(metadata)
+    )
+}
+
+fn target_fingerprint_matches(
+    path: &std::path::Path,
+    metadata: &std::fs::Metadata,
+    expected_fingerprint: &str,
+) -> Result<bool, String> {
+    if expected_fingerprint.starts_with("v2:") {
+        return Ok(target_fingerprint(path, metadata)? == expected_fingerprint);
+    }
+    if expected_fingerprint.starts_with("unix:")
+        || expected_fingerprint.starts_with("windows:")
+        || expected_fingerprint.starts_with("portable:")
+    {
+        return Ok(legacy_target_fingerprint(path, metadata) == expected_fingerprint);
+    }
+    Ok(false)
+}
+
+async fn target_fingerprint_async(
+    path: &std::path::Path,
+    metadata: &std::fs::Metadata,
+) -> Result<String, String> {
+    let path = path.to_path_buf();
+    let metadata = metadata.clone();
+    tokio::task::spawn_blocking(move || target_fingerprint(&path, &metadata))
+        .await
+        .map_err(|error| format!("file fingerprint worker failed: {error}"))?
+}
+
+async fn target_fingerprint_matches_async(
+    path: &std::path::Path,
+    metadata: &std::fs::Metadata,
+    expected_fingerprint: &str,
+) -> Result<bool, String> {
+    if expected_fingerprint.starts_with("v2:") {
+        return Ok(
+            target_fingerprint_async(path, metadata).await? == expected_fingerprint,
+        );
+    }
+    if expected_fingerprint.starts_with("unix:")
+        || expected_fingerprint.starts_with("windows:")
+        || expected_fingerprint.starts_with("portable:")
+    {
+        return Ok(legacy_target_fingerprint(path, metadata) == expected_fingerprint);
+    }
+    Ok(false)
 }
 
 fn classify_download_target(metadata: &std::fs::Metadata) -> crate::ipc::DownloadTargetKind {
@@ -13309,7 +13506,7 @@ fn classify_download_target(metadata: &std::fs::Metadata) -> crate::ipc::Downloa
 }
 
 #[tauri::command]
-fn inspect_download_target(
+async fn inspect_download_target(
     caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     path: String,
@@ -13353,10 +13550,14 @@ fn inspect_download_target(
     }
 
     let owned_by = crate::download_ownership::owner_for_path(&app_handle, &resolved)?;
+    let fingerprint = if kind == crate::ipc::DownloadTargetKind::RegularFile {
+        target_fingerprint_async(&resolved, &metadata).await.ok()
+    } else {
+        None
+    };
     Ok(crate::ipc::DownloadTargetInfo {
         kind,
-        fingerprint: (kind == crate::ipc::DownloadTargetKind::RegularFile)
-            .then(|| target_fingerprint(&resolved, &metadata)),
+        fingerprint,
         owned_by,
     })
 }
@@ -13835,7 +14036,8 @@ mod tests {
         classify_download_target, download_target_lock, inspect_unowned_replacement_target,
         remove_unowned_replacement_target,
         remove_download_assets_permanently, remove_download_container_assets_permanently,
-        restore_download_replacement, target_fingerprint, DownloadReplacementReservation,
+        restore_download_replacement, legacy_target_fingerprint, target_fingerprint,
+        target_fingerprint_matches, DownloadReplacementReservation,
     };
     #[cfg(target_os = "macos")]
     use super::should_apply_dock_badge_update;
@@ -14092,7 +14294,8 @@ mod tests {
             configure_test_download_root(app.handle(), &storage_root.path().join("downloads"));
         let target = download_root.join("replace.bin");
         std::fs::write(&target, b"original").unwrap();
-        let fingerprint = target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap());
+        let fingerprint =
+            target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap()).unwrap();
         let item: crate::ipc::DownloadItem = serde_json::from_value(json!({
             "id": "staged-replacement",
             "url": "https://example.com/file.bin",
@@ -14107,6 +14310,7 @@ mod tests {
         .unwrap();
 
         let authorized = inspect_unowned_replacement_target(app.handle(), &item, false)
+            .await
             .unwrap()
             .expect("matching pre-admission replacement should be authorized");
         assert_eq!(authorized.target, target);
@@ -14115,12 +14319,14 @@ mod tests {
         ambiguous_item.has_been_dispatched = None;
         assert!(
             inspect_unowned_replacement_target(app.handle(), &ambiguous_item, false)
+                .await
                 .unwrap()
                 .is_none()
         );
 
         crate::download_ownership::set_primary_path(app.handle(), "other-owner", &target).unwrap();
         let error = inspect_unowned_replacement_target(app.handle(), &item, false)
+            .await
             .expect_err("a Firelink-owned target must not use unowned replacement cleanup");
         assert!(error.contains("owned by Firelink download other-owner"));
         crate::download_ownership::remove(app.handle(), "other-owner").unwrap();
@@ -14139,6 +14345,7 @@ mod tests {
         drop(connection);
         assert!(
             inspect_unowned_replacement_target(app.handle(), &item, false)
+                .await
                 .unwrap()
                 .is_some()
         );
@@ -14155,6 +14362,7 @@ mod tests {
 
         std::fs::write(&target, b"changed target").unwrap();
         let error = inspect_unowned_replacement_target(app.handle(), &item, false)
+            .await
             .expect_err("a changed target must not inherit replacement authorization");
         assert!(error.contains("changed after duplicate resolution"));
     }
@@ -14179,7 +14387,8 @@ mod tests {
             configure_test_download_root(app.handle(), &storage_root.path().join("downloads"));
         let target = download_root.join("replace.bin");
         std::fs::write(&target, b"original").unwrap();
-        let fingerprint = target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap());
+        let fingerprint =
+            target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap()).unwrap();
 
         remove_unowned_replacement_target(
             &target,
@@ -16500,14 +16709,30 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let target = directory.path().join("replace.bin");
         std::fs::write(&target, b"old").unwrap();
-        let initial = target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap());
+        let initial =
+            target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap()).unwrap();
+        let legacy =
+            legacy_target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap());
         assert_eq!(
             initial,
-            target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap())
+            target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap()).unwrap()
         );
+        assert!(target_fingerprint_matches(
+            &target,
+            &std::fs::symlink_metadata(&target).unwrap(),
+            &initial,
+        )
+        .unwrap());
+        assert!(target_fingerprint_matches(
+            &target,
+            &std::fs::symlink_metadata(&target).unwrap(),
+            &legacy,
+        )
+        .unwrap());
 
         std::fs::write(&target, b"new content").unwrap();
-        let changed = target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap());
+        let changed =
+            target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap()).unwrap();
         assert_ne!(initial, changed);
     }
 
@@ -16568,8 +16793,11 @@ mod tests {
         let quarantine = directory.path().join(".firelink-replaced-target.tmp");
         let journal = directory.path().join("replacement.json");
         std::fs::write(&quarantine, b"original").unwrap();
-        let fingerprint =
-            target_fingerprint(&quarantine, &std::fs::symlink_metadata(&quarantine).unwrap());
+        let fingerprint = target_fingerprint(
+            &quarantine,
+            &std::fs::symlink_metadata(&quarantine).unwrap(),
+        )
+        .unwrap();
         std::fs::write(&journal, b"journal").unwrap();
 
         restore_download_replacement(&DownloadReplacementReservation {
@@ -16594,8 +16822,11 @@ mod tests {
         let journal = directory.path().join("replacement.json");
         std::fs::write(&target, b"new-admission").unwrap();
         std::fs::write(&quarantine, b"old-file").unwrap();
-        let fingerprint =
-            target_fingerprint(&quarantine, &std::fs::symlink_metadata(&quarantine).unwrap());
+        let fingerprint = target_fingerprint(
+            &quarantine,
+            &std::fs::symlink_metadata(&quarantine).unwrap(),
+        )
+        .unwrap();
         std::fs::write(&journal, b"journal").unwrap();
 
         let error = restore_download_replacement(&DownloadReplacementReservation {
@@ -16620,8 +16851,11 @@ mod tests {
         let quarantine = directory.path().join(".firelink-replaced-target.tmp");
         let journal = directory.path().join("replacement.json");
         std::fs::write(&quarantine, b"old-file").unwrap();
-        let fingerprint =
-            target_fingerprint(&quarantine, &std::fs::symlink_metadata(&quarantine).unwrap());
+        let fingerprint = target_fingerprint(
+            &quarantine,
+            &std::fs::symlink_metadata(&quarantine).unwrap(),
+        )
+        .unwrap();
         std::fs::write(&quarantine, b"tampered-file").unwrap();
         std::fs::write(&journal, b"journal").unwrap();
 
