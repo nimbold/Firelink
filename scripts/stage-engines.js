@@ -4,6 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { collectRegularFiles, sha256, treeDigest } from './engine-payload-integrity.js';
+import {
+  acquireExclusiveFileLock,
+  assertExclusiveFileLockHeld,
+} from './engine-staging-lock.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -104,29 +108,48 @@ if (targetLock) {
 }
 
 const destination = path.join(outputRoot, target);
-fs.rmSync(outputRoot, { recursive: true, force: true });
-fs.mkdirSync(destination, { recursive: true });
-
-for (const name of expectedNames) {
-  fs.copyFileSync(path.join(source, name), path.join(destination, name));
-  if (!isWindowsTarget) {
-    fs.chmodSync(path.join(destination, name), 0o755);
-  }
+const stagingLockPath = `${outputRoot}.lock`;
+const inheritedLockPid = process.env.FIRELINK_ENGINE_STAGING_LOCK_PID;
+const inheritedLockToken = process.env.FIRELINK_ENGINE_STAGING_LOCK_TOKEN;
+const inheritedStagingLock = inheritedLockPid !== undefined || inheritedLockToken !== undefined;
+if (inheritedStagingLock) {
+  assertExclusiveFileLockHeld(stagingLockPath, {
+    pid: Number(inheritedLockPid),
+    token: inheritedLockToken,
+  });
 }
+const releaseStageLock = inheritedStagingLock
+  ? null
+  : await acquireExclusiveFileLock(stagingLockPath);
+try {
+  // Tauri packages the shared engine-dist root. Keep exactly one target in it;
+  // the lock serializes this replacement when local stage commands overlap.
+  fs.rmSync(outputRoot, { recursive: true, force: true });
+  fs.mkdirSync(destination, { recursive: true });
 
-for (const runtimeDir of ['_internal', 'aria2-libs']) {
-  const sourceDir = path.join(source, runtimeDir);
-  if (fs.existsSync(sourceDir)) {
-    fs.cpSync(sourceDir, path.join(destination, runtimeDir), {
-      recursive: true,
-      dereference: false,
-      preserveTimestamps: true,
-    });
+  for (const name of expectedNames) {
+    fs.copyFileSync(path.join(source, name), path.join(destination, name));
+    if (!isWindowsTarget) {
+      fs.chmodSync(path.join(destination, name), 0o755);
+    }
   }
-}
-const payloadManifest = path.join(source, 'payload-manifest.json');
-if (fs.existsSync(payloadManifest)) {
-  fs.copyFileSync(payloadManifest, path.join(destination, 'payload-manifest.json'));
+
+  for (const runtimeDir of ['_internal', 'aria2-libs']) {
+    const sourceDir = path.join(source, runtimeDir);
+    if (fs.existsSync(sourceDir)) {
+      fs.cpSync(sourceDir, path.join(destination, runtimeDir), {
+        recursive: true,
+        dereference: false,
+        preserveTimestamps: true,
+      });
+    }
+  }
+  const payloadManifest = path.join(source, 'payload-manifest.json');
+  if (fs.existsSync(payloadManifest)) {
+    fs.copyFileSync(payloadManifest, path.join(destination, 'payload-manifest.json'));
+  }
+} finally {
+  releaseStageLock?.();
 }
 
 console.log(`Staged Firelink engines for ${target} from ${source}`);

@@ -40,7 +40,7 @@
     "test:torrent:rpc": "cd src-tauri && cargo test --test torrent_rpc -- --nocapture",
     "verify:macos-signing": "node scripts/verify-macos-signing.js",
     "preview": "vite preview",
-    "tauri": "tauri",
+    "tauri": "node scripts/tauri-command.js",
     "test": "vitest"
   },
   "dependencies": {
@@ -60,7 +60,7 @@
     "@tauri-apps/plugin-notification": "^2.3.3",
     "@tauri-apps/plugin-opener": "^2",
     "i18next": "^26.4.0",
-    "lucide-react": "^1.34.0",
+    "lucide-react": "^1.37.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-i18next": "^17.0.12",
@@ -70,7 +70,7 @@
     "@tauri-apps/cli": "^2.11.4",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
-    "@vitejs/plugin-react": "^6.1.0",
+    "@vitejs/plugin-react": "^6.1.1",
     "autoprefixer": "^10.5.4",
     "postcss": "^8.5.26",
     "tailwindcss": "^4.3.3",

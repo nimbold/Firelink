@@ -8,14 +8,14 @@
         "sha256": "30b4c14aafab6082becff7881e41b76df46dc43ea7633479410a91e29da492bf"
       },
       "deno": {
-        "version": "2.9.5",
-        "url": "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-pc-windows-msvc.zip",
-        "sha256": "171efab55ac6b9881fd53ee4c20f8bf3bb1340ffc618483746909014db12216a"
+        "version": "2.9.6",
+        "url": "https://github.com/denoland/deno/releases/download/v2.9.6/deno-x86_64-pc-windows-msvc.zip",
+        "sha256": "15e5300b0ba3c3695a7621d90160a746ec9e710228cee639afa9d580f6e3cd11"
       },
       "ffmpeg": {
-        "version": "8.1.2-46-g139afe709a",
-        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-26-13-06/ffmpeg-n8.1.2-46-g139afe709a-win64-gpl-8.1.zip",
-        "sha256": "f966bc2e843bcd680dedd6d1a2c0c895bab859a402c6dd107cbe72a796dfebcf"
+        "version": "8.1.2-50-g1a748fe2cd",
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-29-13-12/ffmpeg-n8.1.2-50-g1a748fe2cd-win64-gpl-8.1.zip",
+        "sha256": "3b56a6e46944cbe87692a4a72b29d95e527cbbd9925fc7beb07bb63d578cd5ae"
       },
       "aria2c": {
         "version": "1.37.0",
@@ -30,14 +30,14 @@
         "sha256": "32e72032766bef9199d99d15beb69fd52e46df8f8b06f0d8745db59e04d339e9"
       },
       "deno": {
-        "version": "2.9.5",
-        "url": "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-unknown-linux-gnu.zip",
-        "sha256": "8b010a3b1a4a0188a67cdb8a7a27348b2a501af78aec7fc74f2ace167368d530"
+        "version": "2.9.6",
+        "url": "https://github.com/denoland/deno/releases/download/v2.9.6/deno-x86_64-unknown-linux-gnu.zip",
+        "sha256": "394f07f4da2bebe6ce6f1e7ce0fa16429b29b08c35e3fac3fe25972676dff4b2"
       },
       "ffmpeg": {
-        "version": "8.1.2-46-g139afe709a",
-        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-26-13-06/ffmpeg-n8.1.2-46-g139afe709a-linux64-gpl-8.1.tar.xz",
-        "sha256": "0814f4491c2673ea505be8fb65a76c2bfabaa5aad8f33d49b1c5b87a2262e8c5"
+        "version": "8.1.2-50-g1a748fe2cd",
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-29-13-12/ffmpeg-n8.1.2-50-g1a748fe2cd-linux64-gpl-8.1.tar.xz",
+        "sha256": "be243f2520d6e7e92c82b015ed72a3f5b57c7970801c0d51f031457122653c76"
       },
       "aria2c": {
         "version": "1.37.0",
