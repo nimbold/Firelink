@@ -1,6 +1,6 @@
 use firelink_lib::queue::{
-    Aria2RecreateOutcome, Aria2RefreshOutcome, Aria2ResolverMode, QueueManager, QueuedTask,
-    SidecarSpawner, SpawnPayload, TaskKind, MEDIA_RUN_CANCELLED,
+    Aria2RecreateOutcome, Aria2RefreshOutcome, QueueManager, QueuedTask, SidecarSpawner,
+    SpawnPayload, TaskKind, MEDIA_RUN_CANCELLED,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -27,15 +27,7 @@ struct CountingSpawner {
     torrent_peer_options_release: tokio::sync::Notify,
     add_speed_limits: std::sync::Mutex<Vec<Option<String>>>,
     add_peer_options: std::sync::Mutex<Vec<(Option<u32>, Option<String>)>>,
-    add_resolver_modes: std::sync::Mutex<Vec<Aria2ResolverMode>>,
-    add_transfer_context: std::sync::Mutex<
-        Vec<(
-            Aria2ResolverMode,
-            Option<String>,
-            Option<String>,
-            Option<i32>,
-        )>,
-    >,
+    add_transfer_context: std::sync::Mutex<Vec<(Option<String>, Option<String>, Option<i32>)>>,
     block_speed_limit: std::sync::atomic::AtomicBool,
     speed_limit_started: tokio::sync::Notify,
     speed_limit_release: tokio::sync::Notify,
@@ -220,7 +212,6 @@ impl CountingSpawner {
             torrent_peer_options_release: tokio::sync::Notify::new(),
             add_speed_limits: std::sync::Mutex::new(Vec::new()),
             add_peer_options: std::sync::Mutex::new(Vec::new()),
-            add_resolver_modes: std::sync::Mutex::new(Vec::new()),
             add_transfer_context: std::sync::Mutex::new(Vec::new()),
             block_speed_limit: std::sync::atomic::AtomicBool::new(false),
             speed_limit_started: tokio::sync::Notify::new(),
@@ -305,12 +296,7 @@ impl firelink_lib::queue::SidecarSpawner for CountingSpawner {
                 payload.torrent_max_peers,
                 payload.torrent_peer_speed_limit.clone(),
             ));
-        self.add_resolver_modes
-            .lock()
-            .unwrap()
-            .push(payload.aria2_resolver_mode);
         self.add_transfer_context.lock().unwrap().push((
-            payload.aria2_resolver_mode,
             payload.headers.clone(),
             payload.proxy.clone(),
             payload.connections,
@@ -2297,15 +2283,13 @@ async fn transient_aria2_error_reissues_after_backoff() {
 }
 
 #[tokio::test]
-async fn resolver_failure_uses_one_system_fallback_without_retry_budget() {
+async fn resolver_failure_retries_without_entering_blocking_system_dns() {
     use firelink_lib::queue::PendingOutcome;
 
     let (mgr, spawner) = make_manager(1);
     let manager = Arc::new(mgr);
-    manager.set_aria2_async_dns_supported(true);
     let mut task = aria2_task("resolver-fallback");
-    task.payload.aria2_resolver_mode = Aria2ResolverMode::System;
-    task.payload.max_tries = Some(0);
+    task.payload.max_tries = Some(1);
     task.payload.headers = Some("X-Test: retained".to_string());
     manager.push(task).await.unwrap();
 
@@ -2341,33 +2325,19 @@ async fn resolver_failure_uses_one_system_fallback_without_retry_budget() {
         }
     })
     .await
-    .expect("resolver failure should re-add once with Aria2's alternate resolver");
-    assert_eq!(
-        *spawner.add_resolver_modes.lock().unwrap(),
-        vec![Aria2ResolverMode::System, Aria2ResolverMode::Automatic]
-    );
+    .expect("resolver failure should re-add once on the non-blocking resolver");
     assert_eq!(
         *spawner.add_transfer_context.lock().unwrap(),
         vec![
-            (
-                Aria2ResolverMode::System,
-                Some("X-Test: retained".to_string()),
-                None,
-                None,
-            ),
-            (
-                Aria2ResolverMode::Automatic,
-                Some("X-Test: retained".to_string()),
-                None,
-                None,
-            ),
+            (Some("X-Test: retained".to_string()), None, None),
+            (Some("X-Test: retained".to_string()), None, None),
         ]
     );
     assert_eq!(spawner.add_uri_calls.load(Ordering::SeqCst), 2);
 
-    // A second resolver failure is now on the alternate mode. With
-    // max_tries=0 it must terminate instead of switching back or consuming
-    // another add.
+    // The configured retry budget is exhausted after one non-blocking retry.
+    // A repeated DNS error must terminate without entering system DNS or
+    // scheduling another add.
     manager
         .handle_aria2_event(
             "gid-2",

@@ -9,6 +9,7 @@ use tokio::io::AsyncReadExt;
 use crate::ipc::{TorrentFile, TorrentMetadata};
 
 pub const MAX_TORRENT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TORRENT_DHT_NODES: usize = 256;
 
 #[derive(Debug, Clone)]
 pub struct ParsedTorrent {
@@ -417,6 +418,12 @@ fn bounded_uri(value: &str, schemes: &[&str]) -> Option<String> {
     {
         return None;
     }
+    crate::network::validate_url(
+        &parsed,
+        schemes,
+        crate::network::CredentialPolicy::Allow,
+    )
+    .ok()?;
     Some(parsed.to_string())
 }
 
@@ -487,6 +494,40 @@ fn torrent_tracker_metadata_is_safe(root: &BTreeMap<Vec<u8>, BencodeValue>) -> b
     true
 }
 
+fn torrent_nodes_metadata_is_safe(root: &BTreeMap<Vec<u8>, BencodeValue>) -> bool {
+    let Some(nodes) = root.get(b"nodes".as_slice()) else {
+        return true;
+    };
+    let BencodeValue::List(nodes) = nodes else {
+        return false;
+    };
+    if nodes.len() > MAX_TORRENT_DHT_NODES {
+        return false;
+    }
+
+    nodes.iter().all(|node| {
+        let BencodeValue::List(parts) = node else {
+            return false;
+        };
+        if parts.len() != 2 {
+            return false;
+        }
+        let BencodeValue::Bytes(host) = &parts[0] else {
+            return false;
+        };
+        if host.is_empty() || host.len() > crate::queue::MAX_TORRENT_NETWORK_VALUE_LENGTH {
+            return false;
+        }
+        let Ok(host) = std::str::from_utf8(host) else {
+            return false;
+        };
+        if crate::network::validate_host(host).is_err() {
+            return false;
+        }
+        matches!(&parts[1], BencodeValue::Integer(port) if (1..=u16::MAX as i64).contains(port))
+    })
+}
+
 /// Validate the tracker fields before handing original metainfo to Aria2.
 /// `torrent_details_from_bytes` intentionally omits malformed tracker values
 /// from its display projection, but Aria2 consumes the original bencode and
@@ -501,10 +542,10 @@ pub fn validate_torrent_tracker_metadata(bytes: &[u8]) -> Result<(), String> {
         BencodeValue::Dict(value) => value,
         _ => return Err("torrent root is not a dictionary".to_string()),
     };
-    if torrent_tracker_metadata_is_safe(&root) {
+    if torrent_tracker_metadata_is_safe(&root) && torrent_nodes_metadata_is_safe(&root) {
         Ok(())
     } else {
-        Err("torrent metadata contains an invalid tracker URI".to_string())
+        Err("torrent metadata contains an invalid network destination".to_string())
     }
 }
 
@@ -528,8 +569,25 @@ fn parse_torrent_web_seeds(value: Option<&BencodeValue>) -> Result<Vec<String>, 
         let value = String::from_utf8(bytes.clone())
             .map_err(|_| "torrent url-list contains invalid UTF-8".to_string())?;
         let value = value.trim();
-        let uri = bounded_uri(value, &["http", "https"])
-            .ok_or_else(|| "torrent url-list contains an invalid HTTP(S) web seed".to_string())?;
+        if value.len() > 2_048 || value.chars().any(char::is_control) {
+            return Err("torrent url-list contains an invalid HTTP(S) web seed".to_string());
+        }
+        let parsed = url::Url::parse(value)
+            .map_err(|_| "torrent url-list contains an invalid HTTP(S) web seed".to_string())?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().is_none_or(str::is_empty)
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err("torrent url-list contains an invalid HTTP(S) web seed".to_string());
+        }
+        crate::network::validate_url(
+            &parsed,
+            &["http", "https"],
+            crate::network::CredentialPolicy::Allow,
+        )?;
+        let uri = parsed.to_string();
         if !normalized.contains(&uri) {
             normalized.push(uri);
         }
@@ -1367,6 +1425,21 @@ pub async fn remove_managed_torrent<R: tauri::Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    fn torrent_with_root_value(key: &[u8], value: BencodeValue) -> Vec<u8> {
+        let info = BencodeValue::Dict(BTreeMap::from([
+            (b"length".to_vec(), BencodeValue::Integer(5)),
+            (b"name".to_vec(), BencodeValue::Bytes(b"test".to_vec())),
+        ]));
+        let root = BencodeValue::Dict(BTreeMap::from([
+            (b"info".to_vec(), info),
+            (key.to_vec(), value),
+        ]));
+        let mut bytes = Vec::new();
+        encode(&root, &mut bytes);
+        bytes
+    }
 
     #[test]
     fn parses_single_file_torrent_and_hashes_info_dictionary() {
@@ -1560,7 +1633,7 @@ mod tests {
         assert!(validate_torrent_tracker_metadata(
             b"d8:announce25:http://127.0.0.1/announce4:infod6:lengthi5e4:name4:testee"
         )
-        .is_ok());
+        .is_err());
         assert!(validate_torrent_tracker_metadata(
             b"d8:announce32:https://tracker.example/announce4:infod6:lengthi5e4:name4:testee"
         )
@@ -1569,6 +1642,40 @@ mod tests {
             b"d8:announce30:ftp://tracker.example/announce4:infod6:lengthi5e4:name4:testee"
         )
         .is_err());
+    }
+
+    #[test]
+    fn torrent_network_metadata_rejects_local_nodes_and_seeds_without_dns() {
+        for host in [
+            b"127.1".as_slice(),
+            b"2130706433".as_slice(),
+            b"[::ffff:127.0.0.1]".as_slice(),
+            b"localhost".as_slice(),
+        ] {
+            let bytes = torrent_with_root_value(
+                b"nodes",
+                BencodeValue::List(vec![BencodeValue::List(vec![
+                    BencodeValue::Bytes(host.to_vec()),
+                    BencodeValue::Integer(6881),
+                ])]),
+            );
+            assert!(
+                validate_torrent_tracker_metadata(&bytes).is_err(),
+                "{host:?}"
+            );
+        }
+
+        let public_node = torrent_with_root_value(
+            b"nodes",
+            BencodeValue::List(vec![BencodeValue::List(vec![
+                BencodeValue::Bytes(b"node-does-not-resolve.invalid".to_vec()),
+                BencodeValue::Integer(6881),
+            ])]),
+        );
+        assert!(validate_torrent_tracker_metadata(&public_node).is_ok());
+
+        let local_seed = b"d4:infod6:lengthi5e4:name4:teste8:url-list17:http://127.0.0.1/ee";
+        assert!(parse_torrent_bytes(local_seed).is_err());
     }
 
     #[test]

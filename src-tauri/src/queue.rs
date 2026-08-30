@@ -5,8 +5,8 @@ use crate::ipc::{
 };
 use crate::power::PowerManager;
 use crate::retry::{
-    aria2_error_code, backoff_and_emit, is_aria2_name_resolution_error,
-    is_transient_network_error, network_error_class, BackoffOutcome, MAX_RETRIES,
+    aria2_error_code, backoff_and_emit, is_transient_network_error, network_error_class,
+    BackoffOutcome, MAX_RETRIES,
 };
 use log;
 use serde::Deserialize;
@@ -1002,28 +1002,13 @@ fn is_direct_magnet_payload(payload: &SpawnPayload) -> bool {
             .is_some_and(|scheme| scheme.eq_ignore_ascii_case("magnet:"))
 }
 
-fn proxy_uses_direct_network(proxy: Option<&str>) -> bool {
-    proxy.is_none_or(|proxy| {
-        let proxy = proxy.trim();
-        proxy.is_empty() || proxy.eq_ignore_ascii_case("none")
-    })
-}
-
-fn payload_uses_direct_network(payload: &SpawnPayload) -> bool {
-    proxy_uses_direct_network(payload.proxy.as_deref())
-}
-
-fn torrent_uses_direct_network(payload: &SpawnPayload) -> bool {
-    payload.is_torrent
-        && !payload.torrent_verify_only
-        && payload_uses_direct_network(payload)
-}
-
-fn aria2_effective_resolver_mode(payload: &SpawnPayload) -> &'static str {
-    if payload.aria2_resolver_mode == Aria2ResolverMode::System
-        && payload_uses_direct_network(payload)
+fn aria2_resolver_route_for_log(payload: &SpawnPayload) -> &'static str {
+    if payload
+        .proxy
+        .as_deref()
+        .is_some_and(|proxy| !proxy.trim().is_empty() && !proxy.eq_ignore_ascii_case("none"))
     {
-        "system"
+        "configured"
     } else {
         "automatic"
     }
@@ -1123,23 +1108,6 @@ enum SeedAdmissionOutcome {
 
 /// Args mirroring start_download / start_media_download. Kept untyped-loose
 /// (String/Option) to match the existing command signatures exactly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Aria2ResolverMode {
-    /// Use Aria2's normal asynchronous resolver configuration. This is the
-    /// bounded alternate mode for a direct transfer after the system route
-    /// cannot resolve the target.
-    Automatic,
-    /// Use the host operating system resolver for this direct transfer. This
-    /// is the initial mode so TUN/VPN DNS interception remains authoritative.
-    System,
-}
-
-impl Default for Aria2ResolverMode {
-    fn default() -> Self {
-        Self::Automatic
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct SpawnPayload {
     pub url: String,
@@ -1160,9 +1128,6 @@ pub struct SpawnPayload {
     pub retry_not_found_errors: bool,
     pub adaptive_mirror_selection: bool,
     pub proxy: Option<String>,
-    /// Runtime-only resolver selection. This is never part of an enqueue or
-    /// persisted download payload.
-    pub aria2_resolver_mode: Aria2ResolverMode,
     pub format_selector: Option<String>,
     pub cookie_source: Option<String>,
     pub is_media: bool,
@@ -1365,11 +1330,6 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
     /// cap as a degraded connection pool.
     aria2_global_speed_limit: Arc<StdMutex<Option<String>>>,
 
-    /// Capability reported by aria2.getVersion. Keep the fallback disabled
-    /// until the daemon explicitly advertises Async DNS; an unknown
-    /// capability must not be treated as permission to change resolver mode.
-    aria2_async_dns_supported: AtomicBool,
-
     /// 0-based transient-error strike counter per aria2 download id.
     aria2_retry_strikes: Mutex<HashMap<String, usize>>,
 
@@ -1466,7 +1426,6 @@ impl<R: tauri::Runtime> QueueManager<R> {
             aria2_dispatch_inflight: Mutex::new(HashMap::new()),
             aria2_dispatch_notify: Notify::new(),
             aria2_global_speed_limit: Arc::new(StdMutex::new(None)),
-            aria2_async_dns_supported: AtomicBool::new(false),
             aria2_retry_strikes: Mutex::new(HashMap::new()),
             aria2_retry_cancelled: Mutex::new(HashSet::new()),
             aria2_retry_inflight: Mutex::new(HashMap::new()),
@@ -1486,19 +1445,6 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
     pub fn power_manager(&self) -> Arc<PowerManager> {
         Arc::clone(&self.power_manager)
-    }
-
-    pub fn set_aria2_async_dns_supported(&self, supported: bool) {
-        self.aria2_async_dns_supported
-            .store(supported, Ordering::Relaxed);
-    }
-
-    pub(crate) fn aria2_async_dns_supported(&self) -> bool {
-        self.aria2_async_dns_supported.load(Ordering::Relaxed)
-    }
-
-    fn aria2_alternate_resolver_available(&self) -> bool {
-        self.aria2_async_dns_supported()
     }
 
     /// Accept one lifecycle-fenced Aria2 status sample and return Firelink's
@@ -6062,13 +6008,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             *entry
         };
 
-        let retry_action = aria2_retry_action(
-            &payload,
-            &error,
-            strike,
-            self.aria2_alternate_resolver_available(),
-        );
-        let resolver_fallback = retry_action == Aria2RetryAction::AlternateResolverFallback;
+        let retry_action = aria2_retry_action(&payload, &error, strike);
         let requested_connections = self
             .aria2_requested_connections(&id)
             .await
@@ -6078,7 +6018,6 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .await
             .unwrap_or(requested_connections);
         let action = match retry_action {
-            Aria2RetryAction::AlternateResolverFallback => "alternate_resolver_fallback",
             Aria2RetryAction::OrdinaryRetry => "ordinary_retry",
             Aria2RetryAction::Terminal => "terminal",
         };
@@ -6091,16 +6030,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
             mapping.epoch,
             strike,
             action,
-            aria2_effective_resolver_mode(&payload),
+            aria2_resolver_route_for_log(&payload),
             network_error_class(&error),
             error_code,
             requested_connections,
             effective_connections
         );
-        // Switching resolver strategy is a bounded transfer repair, not an
-        // ordinary retry. It must still run when the user configured zero
-        // automatic retries, while every later failure follows the normal
-        // retry budget and never switches back to the first strategy.
         if retry_action == Aria2RetryAction::Terminal {
             self.apply_completion_locked_with_progress(
                 &id,
@@ -6145,14 +6080,6 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 .insert(id.clone(), payload.clone());
         }
 
-        if resolver_fallback {
-            payload.aria2_resolver_mode = Aria2ResolverMode::Automatic;
-            self.aria2_payloads
-                .lock()
-                .await
-                .insert(id.clone(), payload.clone());
-        }
-
         let this = Arc::clone(self);
         let id_for_task = id.clone();
         let error_for_emit = error.clone();
@@ -6174,11 +6101,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             };
             let outcome = backoff_and_emit(strike, error_for_emit, retry_cancel, |reason| {
                 use tauri::Emitter;
-                let event = if resolver_fallback {
-                    DownloadStateEvent::retrying_with_resolver_fallback(&id_for_task, reason)
-                } else {
-                    DownloadStateEvent::retrying(&id_for_task, reason)
-                };
+                let event = DownloadStateEvent::retrying(&id_for_task, reason);
                 let _ = this.app_handle.emit("download-state", event);
             })
             .await;
@@ -6262,12 +6185,10 @@ impl<R: tauri::Runtime> QueueManager<R> {
                             .await;
                         return;
                     }
-                    if !resolver_fallback {
-                        this.aria2_retry_strikes
-                            .lock()
-                            .await
-                            .insert(id_for_task.clone(), strike + 1);
-                    }
+                    this.aria2_retry_strikes
+                        .lock()
+                        .await
+                        .insert(id_for_task.clone(), strike + 1);
                     let new_gid_for_event = new_gid.clone();
                     let buffered_outcome = this.remember_gid(id_for_task.clone(), new_gid).await;
                     // Install the replacement GID before exposing the
@@ -6634,33 +6555,13 @@ fn is_retryable_aria2_error_for_payload(payload: &SpawnPayload, error: &str) -> 
             && is_aria2_low_speed_error(error))
 }
 
-fn should_use_aria2_alternate_resolver_fallback(
-    payload: &SpawnPayload,
-    error: &str,
-    async_dns_supported: bool,
-) -> bool {
-    async_dns_supported
-        && payload.aria2_resolver_mode == Aria2ResolverMode::System
-        && payload_uses_direct_network(payload)
-        && is_aria2_name_resolution_error(error)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Aria2RetryAction {
-    AlternateResolverFallback,
     OrdinaryRetry,
     Terminal,
 }
 
-fn aria2_retry_action(
-    payload: &SpawnPayload,
-    error: &str,
-    strike: usize,
-    async_dns_supported: bool,
-) -> Aria2RetryAction {
-    if should_use_aria2_alternate_resolver_fallback(payload, error, async_dns_supported) {
-        return Aria2RetryAction::AlternateResolverFallback;
-    }
+fn aria2_retry_action(payload: &SpawnPayload, error: &str, strike: usize) -> Aria2RetryAction {
     if is_retryable_aria2_error_for_payload(payload, error)
         && strike < automatic_retry_limit(payload.max_tries)
     {
@@ -7405,17 +7306,6 @@ fn apply_aria2_normal_reliability_options(
         );
     }
     Ok(())
-}
-
-fn apply_aria2_resolver_options(
-    options: &mut serde_json::Map<String, serde_json::Value>,
-    payload: &SpawnPayload,
-) {
-    if payload.aria2_resolver_mode == Aria2ResolverMode::System
-        && payload_uses_direct_network(payload)
-    {
-        options.insert("async-dns".to_string(), serde_json::json!("false"));
-    }
 }
 
 fn should_apply_aria2_connection_options(payload: &SpawnPayload) -> bool {
@@ -8215,18 +8105,6 @@ fn apply_aria2_torrent_options(
     options.insert("bt-metadata-only".to_string(), serde_json::json!("false"));
     options.insert("bt-save-metadata".to_string(), serde_json::json!("false"));
     options.insert("follow-torrent".to_string(), serde_json::json!("false"));
-    if torrent_uses_direct_network(payload)
-        && payload.aria2_resolver_mode == Aria2ResolverMode::System
-    {
-        // Aria2's async resolver is independent of the system resolver. TUN
-        // clients commonly install DNS interception/routing at the system
-        // resolver boundary, so direct Torrent discovery must use the same
-        // resolver path as the working HTTP/media clients. Do not override an
-        // explicitly configured proxy route, where local DNS could leak or
-        // bypass the proxy's name-resolution policy.
-        options.insert("async-dns".to_string(), serde_json::json!("false"));
-    }
-
     let seed_time = payload
         .torrent_seed_time
         .map(|value| format_aria2_torrent_number(value, "seed time"))
@@ -8574,7 +8452,6 @@ impl SidecarSpawner for ProductionSpawner {
         if let Some(prox) = proxy_value {
             options.insert("all-proxy".to_string(), serde_json::json!(prox));
         }
-        apply_aria2_resolver_options(&mut options, payload);
         let retry_strike = state.queue_manager.aria2_retry_strike(id).await;
         let transfer_host = transfer_uris
             .first()
@@ -8590,7 +8467,7 @@ impl SidecarSpawner for ProductionSpawner {
             requested_connections,
             transfer_connections,
             transfer_uris.len(),
-            aria2_effective_resolver_mode(payload),
+            aria2_resolver_route_for_log(payload),
             proxy_route_for_log(payload.proxy.as_deref()),
             admission_started.elapsed().as_millis()
         );
@@ -9258,11 +9135,6 @@ impl EnqueueItem {
         let mut item = self;
         item.strip_torrent_credentials();
         let media = item.is_media.unwrap_or(false);
-        let aria2_resolver_mode = if proxy_uses_direct_network(item.proxy.as_deref()) {
-            Aria2ResolverMode::System
-        } else {
-            Aria2ResolverMode::Automatic
-        };
         let kind = if media {
             TaskKind::Media
         } else {
@@ -9299,7 +9171,6 @@ impl EnqueueItem {
                 retry_not_found_errors: item.retry_not_found_errors.unwrap_or(false),
                 adaptive_mirror_selection: item.adaptive_mirror_selection.unwrap_or(true),
                 proxy: item.proxy,
-                aria2_resolver_mode,
                 format_selector: item.format_selector,
                 cookie_source: item.cookie_source,
                 is_media: media,
@@ -9899,59 +9770,6 @@ mod tests {
     }
 
     #[test]
-    fn aria2_system_resolver_mode_is_per_transfer_and_preserves_automatic_default() {
-        let mut automatic = serde_json::Map::new();
-        apply_aria2_resolver_options(
-            &mut automatic,
-            &SpawnPayload {
-                aria2_resolver_mode: Aria2ResolverMode::Automatic,
-                ..Default::default()
-            },
-        );
-        assert!(!automatic.contains_key("async-dns"));
-
-        let mut system = serde_json::Map::new();
-        apply_aria2_resolver_options(
-            &mut system,
-            &SpawnPayload {
-                aria2_resolver_mode: Aria2ResolverMode::System,
-                ..Default::default()
-            },
-        );
-        assert_eq!(system.get("async-dns"), Some(&serde_json::json!("false")));
-    }
-
-    #[test]
-    fn enqueue_route_selects_system_resolver_for_direct_transfers() {
-        let direct: EnqueueItem = serde_json::from_value(serde_json::json!({
-            "id": "direct",
-            "queue_id": "main",
-            "url": "https://example.com/file",
-            "destination": "/tmp",
-            "filename": "file"
-        }))
-        .unwrap();
-        assert_eq!(
-            direct.into_task().payload.aria2_resolver_mode,
-            Aria2ResolverMode::System
-        );
-
-        let proxied: EnqueueItem = serde_json::from_value(serde_json::json!({
-            "id": "proxied",
-            "queue_id": "main",
-            "url": "https://example.com/file",
-            "destination": "/tmp",
-            "filename": "file",
-            "proxy": "http://proxy.example:8080"
-        }))
-        .unwrap();
-        assert_eq!(
-            proxied.into_task().payload.aria2_resolver_mode,
-            Aria2ResolverMode::Automatic
-        );
-    }
-
-    #[test]
     fn resolver_state_events_are_typed_and_redacted() {
         let event = DownloadStateEvent::failed(
             "dns-event",
@@ -10198,7 +10016,6 @@ mod tests {
             &mut options,
             &SpawnPayload {
                 is_torrent: true,
-                aria2_resolver_mode: Aria2ResolverMode::System,
                 ..Default::default()
             },
         )
@@ -10216,10 +10033,7 @@ mod tests {
             options.get("follow-torrent"),
             Some(&serde_json::json!("false"))
         );
-        assert_eq!(
-            options.get("async-dns"),
-            Some(&serde_json::json!("false"))
-        );
+        assert!(!options.contains_key("async-dns"));
 
         let mut proxied_options = serde_json::Map::new();
         apply_aria2_torrent_options(
@@ -10232,54 +10046,6 @@ mod tests {
         )
         .unwrap();
         assert!(!proxied_options.contains_key("async-dns"));
-        assert_eq!(
-            aria2_effective_resolver_mode(&SpawnPayload {
-                is_torrent: true,
-                aria2_resolver_mode: Aria2ResolverMode::System,
-                ..Default::default()
-            }),
-            "system"
-        );
-        assert_eq!(
-            aria2_effective_resolver_mode(&SpawnPayload {
-                is_torrent: true,
-                proxy: Some("http://127.0.0.1:8080".to_string()),
-                ..Default::default()
-            }),
-            "automatic"
-        );
-    }
-
-    #[test]
-    fn resolver_options_never_force_local_dns_for_configured_proxy_routes() {
-        let mut direct = serde_json::Map::new();
-        apply_aria2_resolver_options(
-            &mut direct,
-            &SpawnPayload {
-                aria2_resolver_mode: Aria2ResolverMode::System,
-                ..Default::default()
-            },
-        );
-        assert_eq!(direct.get("async-dns"), Some(&serde_json::json!("false")));
-
-        let mut proxied = serde_json::Map::new();
-        apply_aria2_resolver_options(
-            &mut proxied,
-            &SpawnPayload {
-                aria2_resolver_mode: Aria2ResolverMode::System,
-                proxy: Some("http://proxy.example:8080".to_string()),
-                ..Default::default()
-            },
-        );
-        assert!(!proxied.contains_key("async-dns"));
-        assert_eq!(
-            aria2_effective_resolver_mode(&SpawnPayload {
-                aria2_resolver_mode: Aria2ResolverMode::System,
-                proxy: Some("http://proxy.example:8080".to_string()),
-                ..Default::default()
-            }),
-            "automatic"
-        );
     }
 
     #[test]
@@ -12319,7 +12085,7 @@ mod tests {
         let low_speed = "aria2 error code 5: Download speed is too slow";
 
         assert_eq!(
-            aria2_retry_action(&SpawnPayload::default(), not_found, 0, false),
+            aria2_retry_action(&SpawnPayload::default(), not_found, 0),
             Aria2RetryAction::Terminal
         );
         assert_eq!(
@@ -12331,7 +12097,6 @@ mod tests {
                 },
                 not_found,
                 0,
-                false,
             ),
             Aria2RetryAction::OrdinaryRetry
         );
@@ -12344,12 +12109,11 @@ mod tests {
                 },
                 not_found,
                 1,
-                false,
             ),
             Aria2RetryAction::Terminal
         );
         assert_eq!(
-            aria2_retry_action(&SpawnPayload::default(), low_speed, 0, false),
+            aria2_retry_action(&SpawnPayload::default(), low_speed, 0),
             Aria2RetryAction::Terminal
         );
         assert_eq!(
@@ -12361,7 +12125,6 @@ mod tests {
                 },
                 low_speed,
                 0,
-                false,
             ),
             Aria2RetryAction::OrdinaryRetry
         );
@@ -12376,67 +12139,36 @@ mod tests {
                 },
                 low_speed,
                 0,
-                false,
             ),
             Aria2RetryAction::Terminal
         );
     }
 
     #[test]
-    fn aria2_name_resolution_error_is_retryable_for_resolver_recovery() {
+    fn aria2_name_resolution_error_stays_on_bounded_retry_path() {
         let error = "aria2 error code 19: Name resolution for example.test failed: Could not contact DNS servers.";
         assert!(is_retryable_aria2_error(error));
-        let direct_initial = SpawnPayload {
-            aria2_resolver_mode: Aria2ResolverMode::System,
-            ..Default::default()
-        };
-        assert!(should_use_aria2_alternate_resolver_fallback(
-            &direct_initial,
-            error,
-            true,
-        ));
-        assert_eq!(
-            aria2_retry_action(&direct_initial, error, 0, true),
-            Aria2RetryAction::AlternateResolverFallback
-        );
-        assert!(!should_use_aria2_alternate_resolver_fallback(
-            &SpawnPayload {
-                aria2_resolver_mode: Aria2ResolverMode::Automatic,
-                ..Default::default()
-            },
-            error,
-            true,
-        ));
-        assert!(!should_use_aria2_alternate_resolver_fallback(
-            &SpawnPayload::default(),
-            error,
-            false,
-        ));
         assert_eq!(
             aria2_retry_action(
                 &SpawnPayload {
-                    aria2_resolver_mode: Aria2ResolverMode::System,
-                    max_tries: Some(0),
-                    ..Default::default()
-                },
-                error,
-                0,
-                true,
-            ),
-            Aria2RetryAction::AlternateResolverFallback
-        );
-        assert_eq!(
-            aria2_retry_action(
-                &SpawnPayload {
-                    aria2_resolver_mode: Aria2ResolverMode::Automatic,
                     max_tries: Some(1),
                     ..Default::default()
                 },
                 error,
                 0,
-                true,
             ),
             Aria2RetryAction::OrdinaryRetry
+        );
+        assert_eq!(
+            aria2_retry_action(
+                &SpawnPayload {
+                    max_tries: Some(0),
+                    ..Default::default()
+                },
+                error,
+                0,
+            ),
+            Aria2RetryAction::Terminal
         );
     }
 

@@ -45,20 +45,29 @@ impl NetworkRoute {
 
     /// Translate the route into Aria2's all-proxy option without changing the
     /// target hostname. Aria2 accepts HTTP-family proxy endpoints for normal
-    /// transfers; SOCKS remains a yt-dlp-only route in Firelink.
+    /// transfers; reqwest and yt-dlp consumers may still retain SOCKS routes.
     pub(crate) fn aria2_proxy_value(&self) -> Result<Option<String>, String> {
         match self {
             Self::Inherited => Ok(None),
             Self::Direct => Ok(Some(String::new())),
             Self::Proxy(value) => {
-                let is_socks = value.split_once("://").is_some_and(|(scheme, _)| {
-                    scheme.eq_ignore_ascii_case("socks")
-                        || scheme.to_ascii_lowercase().starts_with("socks")
-                });
+                let parsed = Url::parse(value).map_err(|error| {
+                    crate::redact_sensitive_text(&format!("invalid Aria2 proxy URL: {error}"))
+                })?;
+                if parsed.host_str().is_none_or(str::is_empty) {
+                    return Err("invalid Aria2 proxy URL: proxy must include a host".to_string());
+                }
+                let is_socks = parsed.scheme().eq_ignore_ascii_case("socks")
+                    || parsed.scheme().to_ascii_lowercase().starts_with("socks");
                 if is_socks {
                     return Err(
                         "SOCKS system proxies are not supported for normal file downloads because aria2 only accepts HTTP/HTTPS/FTP proxy URLs. Use an HTTP proxy endpoint for normal downloads, or use media downloads where yt-dlp supports SOCKS."
                             .to_string(),
+                    );
+                }
+                if !matches!(parsed.scheme(), "http" | "https" | "ftp") {
+                    return Err(
+                        "Aria2 proxy must use an HTTP, HTTPS, or FTP proxy URL".to_string(),
                     );
                 }
                 Ok(Some(value.clone()))
@@ -116,15 +125,7 @@ pub(crate) fn validate_url(
         }
     }
 
-    let normalized_host = host.trim_matches(['[', ']']);
-    if is_local_hostname(normalized_host) {
-        return Err("SSRF blocked: Private/local IP not allowed".to_string());
-    }
-    if parse_literal_ip(normalized_host).is_some_and(is_blocked_network_address) {
-        return Err("SSRF blocked: Private/local IP not allowed".to_string());
-    }
-
-    Ok(())
+    validate_host(host)
 }
 
 pub(crate) fn parse_and_validate_url(
@@ -148,13 +149,71 @@ pub(crate) fn is_local_hostname(host: &str) -> bool {
         || normalized.ends_with(".local")
 }
 
+/// Validate a network hostname without asking the application to resolve it.
+///
+/// This is also used for hostname/port pairs embedded in Torrent metadata,
+/// where no URL parser has normalized legacy numeric IPv4 spellings for us.
+pub(crate) fn validate_host(host: &str) -> Result<(), String> {
+    if host.is_empty()
+        || host
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err("SSRF blocked: Invalid host".to_string());
+    }
+    let normalized_host = host.trim_end_matches('.');
+    let bracketed = normalized_host.starts_with('[') || normalized_host.ends_with(']');
+    let normalized_host = match (
+        normalized_host.starts_with('['),
+        normalized_host.ends_with(']'),
+    ) {
+        (true, true) => &normalized_host[1..normalized_host.len() - 1],
+        (false, false) => normalized_host,
+        _ => return Err("SSRF blocked: Invalid host".to_string()),
+    };
+    if normalized_host.is_empty() {
+        return Err("SSRF blocked: Invalid host".to_string());
+    }
+    if bracketed && (!normalized_host.contains(':') || parse_literal_ip(normalized_host).is_none())
+    {
+        return Err("SSRF blocked: Invalid host".to_string());
+    }
+    if is_local_hostname(normalized_host)
+        || parse_literal_ip(normalized_host).is_some_and(is_blocked_network_address)
+    {
+        return Err("SSRF blocked: Private/local IP not allowed".to_string());
+    }
+    if normalized_host.contains(':') && parse_literal_ip(normalized_host).is_none() {
+        return Err("SSRF blocked: Invalid host".to_string());
+    }
+    if !normalized_host.contains(':') && url::Host::parse(normalized_host).is_err() {
+        return Err("SSRF blocked: Invalid host".to_string());
+    }
+    Ok(())
+}
+
 fn parse_literal_ip(host: &str) -> Option<IpAddr> {
     let host = host.trim_end_matches('.');
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Some(ip);
     }
-    host.split_once("%25")
-        .and_then(|(address, _zone)| address.parse::<IpAddr>().ok())
+    if let Some((address, _zone)) = host.split_once("%25") {
+        if let Ok(ip) = address.parse::<IpAddr>() {
+            return Some(ip);
+        }
+    }
+
+    // URL parsers commonly canonicalize legacy IPv4 literals such as 127.1,
+    // decimal IPv4, hexadecimal IPv4, and octal IPv4. Reuse that canonical
+    // parser for raw Torrent node hosts so those spellings cannot bypass the
+    // literal-target policy without performing DNS.
+    let candidate = if host.contains(':') {
+        format!("http://[{host}]/")
+    } else {
+        format!("http://{host}/")
+    };
+    let parsed = Url::parse(&candidate).ok()?;
+    parsed.host_str()?.parse::<IpAddr>().ok()
 }
 
 pub(crate) fn is_blocked_network_address(ip: IpAddr) -> bool {
@@ -164,7 +223,11 @@ pub(crate) fn is_blocked_network_address(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ipv4) => ipv4.is_private() || ipv4.is_link_local(),
         IpAddr::V6(ipv6) => {
-            ipv6.to_ipv4()
+            // Check both IPv4-mapped and deprecated IPv4-compatible forms;
+            // either can encode a local IPv4 destination behind an IPv6
+            // literal.
+            ipv6.to_ipv4_mapped()
+                .or_else(|| ipv6.to_ipv4())
                 .is_some_and(|ipv4| is_blocked_network_address(ipv4.into()))
                 || (ipv6.segments()[0] & 0xfe00) == 0xfc00
                 || (ipv6.segments()[0] & 0xffc0) == 0xfe80
@@ -188,6 +251,7 @@ mod tests {
             "http://169.254.10.2/file",
             "http://[::1]/file",
             "http://[::ffff:127.0.0.1]/file",
+            "http://[::ffff:169.254.169.254]/file",
             "http://[fc00::1]/file",
             "http://[fe80::1]/file",
             "http://127.0.0.1./file",
@@ -242,10 +306,32 @@ mod tests {
             ),
             Ok(())
         );
+        assert_eq!(
+            validate("https://[2001:db8::1]/file", &["http", "https"]),
+            Ok(())
+        );
+        assert_eq!(
+            validate_host("2001:db8::1"),
+            Ok(()),
+            "public IPv6 literals must remain usable without DNS"
+        );
+    }
+
+    #[test]
+    fn raw_hosts_reject_legacy_literals_without_resolving_public_names() {
+        for host in ["127.1", "2130706433", "0x7f000001", "0177.0.0.1", "0"] {
+            assert_eq!(
+                validate_host(host),
+                Err("SSRF blocked: Private/local IP not allowed".to_string()),
+                "{host}"
+            );
+        }
+        assert!(validate_host("node-does-not-resolve.invalid").is_ok());
     }
 
     #[test]
     fn route_mapping_preserves_direct_and_proxy_choices() {
+        crate::ensure_reqwest_crypto_provider();
         assert_eq!(NetworkRoute::from_proxy(None), NetworkRoute::Inherited);
         assert_eq!(NetworkRoute::from_proxy(Some("none")), NetworkRoute::Direct);
         assert_eq!(NetworkRoute::from_proxy(Some("  ")), NetworkRoute::Direct);
@@ -274,6 +360,26 @@ mod tests {
                 .aria2_proxy_value()
                 .is_err()
         );
+        assert!(NetworkRoute::from_proxy(Some("http://[invalid"))
+            .aria2_proxy_value()
+            .is_err());
+        assert!(NetworkRoute::from_proxy(Some("file:///tmp/proxy"))
+            .aria2_proxy_value()
+            .is_err());
+        assert!(
+            NetworkRoute::from_proxy(Some("socks5://proxy.example:1080"))
+                .configure_reqwest(reqwest::Client::builder())
+                .and_then(|builder| builder.build().map_err(|error| error.to_string()))
+                .is_ok(),
+            "reqwest-backed metadata must retain supported SOCKS routes"
+        );
+    }
+
+    #[test]
+    fn raw_hosts_reject_unbalanced_ipv6_brackets() {
+        assert!(validate_host("[2001:db8::1").is_err());
+        assert!(validate_host("2001:db8::1]").is_err());
+        assert!(validate_host("[download.example]").is_err());
     }
 
     #[test]

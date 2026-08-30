@@ -1739,11 +1739,11 @@ async fn fetch_remote_torrent_bytes(
     cookie_scopes: Option<&[extension_server::ExtensionCookieScope]>,
 ) -> Result<Vec<u8>, String> {
     ensure_reqwest_crypto_provider();
-    let proxy = proxy
-        .map(crate::queue::aria2_all_proxy_value)
-        .transpose()?
-        .flatten();
-    let route = crate::network::NetworkRoute::from_proxy(proxy.as_deref());
+    // This fetch is reqwest-backed, so preserve the route exactly as supplied.
+    // In particular, SOCKS is a valid reqwest route even though Aria2 cannot
+    // use it for normal transfers. Sharing Aria2's proxy validator here would
+    // reject a supported remote-torrent metadata path before reqwest sees it.
+    let route = crate::network::NetworkRoute::from_proxy(proxy);
     let mut current = reqwest::Url::parse(source)
         .map_err(|_| "SSRF blocked: Invalid URL".to_string())?;
     let original_origin = Some(current.clone());
@@ -3464,6 +3464,17 @@ struct Aria2DaemonGuard {
     last_stderr: Mutex<String>,
     config_path: Mutex<Option<tempfile::TempPath>>,
     shutdown_state: AtomicU8,
+}
+
+fn aria2_supports_async_dns(version: &serde_json::Value) -> bool {
+    version
+        .get("enabledFeatures")
+        .and_then(|features| features.as_array())
+        .is_some_and(|features| {
+            features
+                .iter()
+                .any(|feature| feature.as_str() == Some("Async DNS"))
+        })
 }
 
 impl Aria2DaemonGuard {
@@ -9190,6 +9201,10 @@ async fn resolve_magnet_metadata(
     cache: bool,
 ) -> Result<crate::ipc::TorrentMetadata, String> {
     let expected = crate::torrent::inspect_source(source)?;
+    // Validate and normalize the Magnet before creating any filesystem
+    // state. Otherwise a malformed secondary parameter can leave an orphaned
+    // probe directory even though Aria2 was never contacted.
+    let sanitized_source = crate::torrent::sanitize_magnet_uri_for_aria2(source)?;
     let managed_path = crate::torrent::managed_torrent_path(app_handle, id)?;
     let proxy_value = proxy
         .map(crate::queue::aria2_all_proxy_value)
@@ -9244,15 +9259,6 @@ async fn resolve_magnet_metadata(
     options.insert("connect-timeout".to_string(), serde_json::json!("20"));
     options.insert("timeout".to_string(), serde_json::json!("60"));
     options.insert("auto-file-renaming".to_string(), serde_json::json!("false"));
-    if proxy_value
-        .as_deref()
-        .is_none_or(|proxy| proxy.trim().is_empty())
-    {
-        // Keep optional magnet metadata refreshes on the same system DNS
-        // route as direct Torrent transfers when a TUN client owns resolver
-        // interception. Explicit proxy routes retain their own DNS policy.
-        options.insert("async-dns".to_string(), serde_json::json!("false"));
-    }
     if let Some(proxy) = proxy_value.as_deref() {
         options.insert("all-proxy".to_string(), serde_json::json!(proxy));
     }
@@ -9274,23 +9280,26 @@ async fn resolve_magnet_metadata(
     }
 
     let client = std::sync::Arc::new(Aria2RpcClient { port, secret });
-    let sanitized_source = crate::torrent::sanitize_magnet_uri_for_aria2(source)?;
-    let direct_route = proxy_value
+    let resolver_mode = if proxy_value
         .as_deref()
-        .is_none_or(|proxy| proxy.trim().is_empty());
-    let alternate_resolver_available =
-        direct_route && state.queue_manager.aria2_async_dns_supported();
-    let first_resolver_mode = if direct_route { "system" } else { "configured" };
-    let metadata_result = crate::torrent_probe::run_metadata_probe_with_resolver_fallback(
+        .is_none_or(|proxy| proxy.trim().is_empty())
+    {
+        "automatic"
+    } else {
+        "configured"
+    };
+    let metadata_result = crate::torrent_probe::run_bounded_metadata_probe(
         client,
         &sanitized_source,
         options,
         &metadata_path,
-        first_resolver_mode,
-        alternate_resolver_available,
-        Duration::from_secs(60),
-        Duration::from_secs(20),
-        Duration::from_millis(250),
+        resolver_mode,
+        crate::torrent_probe::MetadataProbeSchedule {
+            total_timeout: Duration::from_secs(60),
+            metadata_timeout: Duration::from_secs(55),
+            cleanup_reserve: Duration::from_secs(5),
+            poll_interval: Duration::from_millis(250),
+        },
     )
     .await;
 
@@ -14025,6 +14034,7 @@ mod tests {
         normalize_media_cookie_source,
         validate_enqueue_url, validate_enqueue_uris, validate_keychain_grant_request_id,
         validate_torrent_metadata_network_policy,
+        aria2_supports_async_dns,
         aria2_gid_not_found,
         aria2_download_state_progress, preflight_download_destination_access,
         retained_torrent_id_from_persisted_record,
@@ -14060,6 +14070,17 @@ mod tests {
         ));
         assert!(!aria2_gid_not_found("error trying to connect: connection refused"));
         assert!(!aria2_gid_not_found("aria2 error code 3: Resource not found"));
+    }
+
+    #[test]
+    fn aria2_async_dns_capability_requires_an_explicit_feature() {
+        assert!(aria2_supports_async_dns(&json!({
+            "enabledFeatures": ["Async DNS", "BitTorrent"]
+        })));
+        assert!(!aria2_supports_async_dns(&json!({
+            "enabledFeatures": ["BitTorrent"]
+        })));
+        assert!(!aria2_supports_async_dns(&json!({})));
     }
 
     #[test]
@@ -15057,7 +15078,7 @@ mod tests {
             validate_torrent_metadata_network_policy(
                 b"d8:announce25:http://127.0.0.1/announce4:infod6:lengthi5e4:name4:test12:piece lengthi2e6:pieces20:01234567890123456789ee"
             ),
-            Err("SSRF blocked: Private/local IP not allowed".to_string())
+            Err("torrent metadata contains an invalid network destination".to_string())
         );
         assert_eq!(
             validate_torrent_metadata_network_policy(
@@ -15103,16 +15124,6 @@ mod tests {
             .await,
             Err("Torrent metadata URLs must not contain credentials".to_string())
         );
-        let proxy_error = super::fetch_remote_torrent_bytes(
-            "https://example.com/sample.torrent",
-            Some("socks5://127.0.0.1:1080"),
-            None,
-            None,
-            None,
-        )
-        .await
-        .expect_err("remote Torrent metadata must use the shared proxy policy");
-        assert!(proxy_error.contains("SOCKS"));
     }
 
     #[tokio::test]
@@ -18696,8 +18707,6 @@ pub fn run() {
             });
 
             let queue_manager_poll = Arc::clone(&queue_manager);
-            let queue_manager_capability = Arc::clone(&queue_manager);
-
             app.manage(AppState {
                 download_coordinator: download::DownloadCoordinator::spawn(app.handle().clone()),
                 storage_layout,
@@ -18871,6 +18880,10 @@ pub fn run() {
                                 .arg("--download-result=hide")
                                 .arg("--max-concurrent-downloads=9999")
                                 .arg("--check-certificate=true")
+                                // Firelink relies on Aria2's asynchronous
+                                // resolver so a slow DNS answer cannot block
+                                // the daemon's shared RPC/control loop.
+                                .arg("--async-dns=true")
                                 .arg(format!("--stop-with-process={}", std::process::id()));
 
                             apply_aria2_torrent_global_options(
@@ -18999,23 +19012,31 @@ pub fn run() {
                                         match rpc_call(attempt_port, &aria2_secret_clone, "aria2.getVersion", serde_json::json!([])).await {
                                             Ok(ver) => {
                                                 let v = ver.get("version").and_then(|v| v.as_str()).unwrap_or("unknown");
-                                                let async_dns_supported = ver
-                                                    .get("enabledFeatures")
-                                                    .and_then(|features| features.as_array())
-                                                    .map(|features| {
-                                                        features.iter().any(|feature| {
-                                                            feature.as_str() == Some("Async DNS")
-                                                        })
-                                                    })
-                                                    .unwrap_or(false);
-                                                queue_manager_capability
-                                                    .set_aria2_async_dns_supported(async_dns_supported);
+                                                let async_dns_supported =
+                                                    aria2_supports_async_dns(&ver);
                                                 log::info!(
                                                     "aria2 daemon ready (version {}) on port {} (async DNS: {})",
                                                     v,
                                                     attempt_port,
                                                     async_dns_supported
                                                 );
+                                                if !async_dns_supported {
+                                                    let error = "bundled aria2 does not support asynchronous DNS; network transfers are disabled".to_string();
+                                                    log::error!("{}", error);
+                                                    *guard.startup_error.lock().unwrap() =
+                                                        Some(error);
+                                                    // The route-safe Aria2 contract depends on
+                                                    // asynchronous DNS. Do not leave a daemon
+                                                    // running in a mode that can block its RPC
+                                                    // loop behind a system resolver.
+                                                    shutdown_aria2_daemon(app_handle_bg.clone())
+                                                        .await;
+                                                    aria2_port_clone.store(
+                                                        0,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                                    return;
+                                                }
                                                 ready = true;
                                                 break;
                                             }

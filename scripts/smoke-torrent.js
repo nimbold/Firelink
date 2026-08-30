@@ -305,6 +305,7 @@ async function startDaemon({ name, rpcPort, listenPort, directory, extraArgs = [
       '--enable-dht=false',
       '--enable-peer-exchange=false',
       '--bt-enable-lpd=false',
+      '--async-dns=true',
       '--console-log-level=error',
       '--quiet=true',
       ...(selectedListenPort ? [`--listen-port=${selectedListenPort}`] : []),
@@ -720,7 +721,6 @@ async function main() {
       'bt-metadata-only': 'false',
       'bt-save-metadata': 'false',
       'follow-torrent': 'false',
-      'async-dns': 'false',
       'max-tries': '3',
       'retry-wait': '2',
       'connect-timeout': '20',
@@ -767,7 +767,7 @@ async function main() {
     assert(directHandoff.parent.status === 'complete', `normal magnet parent did not complete metadata: ${JSON.stringify(directHandoff.parent)}`);
     assert(directHandoff.parent.files?.some(file => String(file.path).startsWith('[METADATA]')), 'normal magnet parent did not expose a metadata file');
     assert(directOptions['bt-metadata-only'] === 'false', 'normal magnet child did not retain payload mode');
-    assert(directOptions['async-dns'] === 'false', 'direct Torrent did not retain system DNS resolution');
+    assert(directOptions['async-dns'] !== 'false', 'fresh direct Torrent unexpectedly disabled asynchronous DNS');
     await rpc(client.rpcPort, client.secret, 'aria2.removeDownloadResult', [directGid]);
     try {
       await rpc(client.rpcPort, client.secret, 'aria2.removeDownloadResult', [directHandoff.childGid]);
@@ -790,7 +790,6 @@ async function main() {
       dir: probeDir,
       'bt-metadata-only': 'true',
       'bt-save-metadata': 'true',
-      'async-dns': 'false',
       'max-tries': '3',
       'retry-wait': '1',
       'connect-timeout': '5',
@@ -798,7 +797,7 @@ async function main() {
       'auto-file-renaming': 'false',
     }]);
     const probeOptions = await rpc(client.rpcPort, client.secret, 'aria2.getOption', [probeGid]);
-    assert(probeOptions['async-dns'] === 'false', 'direct magnet metadata probe did not retain system DNS resolution');
+    assert(probeOptions['async-dns'] !== 'false', 'fresh direct magnet probe unexpectedly disabled asynchronous DNS');
     const probeStatus = await waitForTerminal(client, probeGid, 30000);
     assert(probeStatus.status === 'complete', 'magnet metadata probe did not complete');
     const savedTorrentPaths = fs.readdirSync(probeDir)
@@ -859,7 +858,7 @@ async function main() {
     assert(proxiedProbeOptions['async-dns'] !== 'false', 'proxied magnet metadata probe unexpectedly forced system DNS resolution');
     assert(await forceRemoveIfPresent(client, proxiedProbeGid), 'proxied magnet metadata probe was not removable');
     await waitForRemoved(client, proxiedProbeGid);
-    console.log('[OK] metadata probe was removed after resolution; direct and proxied resolver modes were retained');
+    console.log('[OK] metadata probe was removed after resolution; direct and proxied probes kept asynchronous DNS');
 
     const finalGid = await rpc(client.rpcPort, client.secret, 'aria2.addTorrent', [
       trackerlessTorrentBytes.toString('base64'),

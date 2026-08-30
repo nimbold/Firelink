@@ -189,6 +189,7 @@ const child = spawn(binaryPath, [
   `--dir=${tempRoot}`,
   '--file-allocation=none',
   '--enable-dht=false',
+  '--async-dns=true',
   '--console-log-level=error',
   '--quiet=true',
 ], { env: environment, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -198,15 +199,17 @@ child.stderr.on('data', chunk => { stderr += chunk.toString(); });
 try {
   const version = await waitForRpc(rpcPort, secret);
   const features = Array.isArray(version.enabledFeatures) ? version.enabledFeatures : [];
-  console.log(`[INFO] aria2 ${version.version || 'unknown'}; Async DNS: ${features.includes('Async DNS') ? 'supported' : 'not advertised'}`);
+  if (!features.includes('Async DNS')) {
+    throw new Error(`packaged aria2 must advertise Async DNS for route-safe transfers: ${JSON.stringify(version)}`);
+  }
+  console.log(`[INFO] aria2 ${version.version || 'unknown'}; Async DNS: supported`);
 
   const uriResult = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${contentPort}/file`], {
-    'async-dns': 'false',
     out: 'resolver-normal.bin',
   }]);
   const uriOptions = await rpc(rpcPort, secret, 'aria2.getOption', [uriResult]);
-  if (uriOptions['async-dns'] !== 'false') {
-    throw new Error(`aria2.addUri did not retain async-dns=false: ${JSON.stringify(uriOptions)}`);
+  if (uriOptions['async-dns'] === 'false') {
+    throw new Error(`direct aria2.addUri unexpectedly disabled asynchronous DNS: ${JSON.stringify(uriOptions)}`);
   }
 
   const torrent = bencode({
@@ -218,12 +221,11 @@ try {
     },
   }).toString('base64');
   const torrentResult = await rpc(rpcPort, secret, 'aria2.addTorrent', [torrent, [], {
-    'async-dns': 'false',
     dir: tempRoot,
   }]);
   const torrentOptions = await rpc(rpcPort, secret, 'aria2.getOption', [torrentResult]);
-  if (torrentOptions['async-dns'] !== 'false') {
-    throw new Error(`aria2.addTorrent did not retain async-dns=false: ${JSON.stringify(torrentOptions)}`);
+  if (torrentOptions['async-dns'] === 'false') {
+    throw new Error(`direct aria2.addTorrent unexpectedly disabled asynchronous DNS: ${JSON.stringify(torrentOptions)}`);
   }
 
   const proxyRoute = 'http://127.0.0.1:9';
@@ -256,7 +258,7 @@ try {
   await forceRemoveIfPresent(rpcPort, secret, proxiedUriResult);
   await forceRemoveIfPresent(rpcPort, secret, proxiedTorrentResult);
 
-  console.log('[PASS] Aria2 retained system-resolver mode for direct normal/Torrent transfers and configured proxy mode for proxied transfers');
+  console.log('[PASS] Aria2 kept asynchronous DNS for fresh direct and proxied normal/Torrent transfers');
 } catch (error) {
   const detail = stderr.trim();
   throw new Error(`${error.message}${detail ? `\n${detail}` : ''}`);
