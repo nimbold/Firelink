@@ -45,9 +45,6 @@ lerna-debug.log*
 target/
 src-tauri/target/
 src-tauri/gen/
-src-tauri/engine-dist/
-src-tauri/engine-dist.lock
-src-tauri/engine-dist.lock.*
 src-tauri/provisioned-engines/
 
 # Locally provisioned native engines

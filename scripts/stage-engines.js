@@ -1,37 +1,26 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { collectRegularFiles, sha256, treeDigest } from './engine-payload-integrity.js';
+import { promoteDirectory, removePathWithRetry } from './engine-payload-promotion.js';
 import {
-  acquireExclusiveFileLock,
-  assertExclusiveFileLockHeld,
-} from './engine-staging-lock.js';
+  assertSafeOutputRoot,
+  resolveOutputRoot,
+  resolveTargetTriple,
+} from './engine-workspace.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
 const binariesRoot = path.join(repoRoot, 'src-tauri', 'binaries');
-const outputRoot = path.join(repoRoot, 'src-tauri', 'engine-dist');
 const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, 'engines.lock.json'), 'utf8'));
 
-const archMap = { x64: 'x86_64', arm64: 'aarch64' };
-const platformMap = {
-  darwin: 'apple-darwin',
-  win32: 'pc-windows-msvc',
-  linux: 'unknown-linux-gnu',
-};
-
-function argValue(name) {
-  const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : undefined;
-}
-
-const hostTarget = `${archMap[os.arch()]}-${platformMap[os.platform()]}`;
-const target = argValue('--target')
-  || process.env.TAURI_ENV_TARGET_TRIPLE
-  || process.env.FIRELINK_TARGET_TRIPLE
-  || hostTarget;
+const target = resolveTargetTriple();
+const outputRoot = assertSafeOutputRoot(resolveOutputRoot(), [
+  repoRoot,
+  path.join(repoRoot, 'src-tauri'),
+  path.join(repoRoot, 'src-tauri', 'engine-dist'),
+]);
 const isWindowsTarget = target.includes('windows');
 const suffix = isWindowsTarget ? '.exe' : '';
 const engines = ['yt-dlp', 'aria2c', 'ffmpeg', 'deno'];
@@ -107,37 +96,25 @@ if (targetLock) {
   }
 }
 
+fs.mkdirSync(outputRoot, { recursive: true, mode: 0o700 });
 const destination = path.join(outputRoot, target);
-const stagingLockPath = `${outputRoot}.lock`;
-const inheritedLockPid = process.env.FIRELINK_ENGINE_STAGING_LOCK_PID;
-const inheritedLockToken = process.env.FIRELINK_ENGINE_STAGING_LOCK_TOKEN;
-const inheritedStagingLock = inheritedLockPid !== undefined || inheritedLockToken !== undefined;
-if (inheritedStagingLock) {
-  assertExclusiveFileLockHeld(stagingLockPath, {
-    pid: Number(inheritedLockPid),
-    token: inheritedLockToken,
-  });
-}
-const releaseStageLock = inheritedStagingLock
-  ? null
-  : await acquireExclusiveFileLock(stagingLockPath);
+const temporaryRoot = fs.mkdtempSync(path.join(outputRoot, `.staging-${target}-${process.pid}-`));
+const temporaryDestination = path.join(temporaryRoot, target);
+
 try {
-  // Tauri packages the shared engine-dist root. Keep exactly one target in it;
-  // the lock serializes this replacement when local stage commands overlap.
-  fs.rmSync(outputRoot, { recursive: true, force: true });
-  fs.mkdirSync(destination, { recursive: true });
+  fs.mkdirSync(temporaryDestination, { recursive: true, mode: 0o700 });
 
   for (const name of expectedNames) {
-    fs.copyFileSync(path.join(source, name), path.join(destination, name));
+    fs.copyFileSync(path.join(source, name), path.join(temporaryDestination, name));
     if (!isWindowsTarget) {
-      fs.chmodSync(path.join(destination, name), 0o755);
+      fs.chmodSync(path.join(temporaryDestination, name), 0o755);
     }
   }
 
   for (const runtimeDir of ['_internal', 'aria2-libs']) {
     const sourceDir = path.join(source, runtimeDir);
     if (fs.existsSync(sourceDir)) {
-      fs.cpSync(sourceDir, path.join(destination, runtimeDir), {
+      fs.cpSync(sourceDir, path.join(temporaryDestination, runtimeDir), {
         recursive: true,
         dereference: false,
         preserveTimestamps: true,
@@ -146,10 +123,11 @@ try {
   }
   const payloadManifest = path.join(source, 'payload-manifest.json');
   if (fs.existsSync(payloadManifest)) {
-    fs.copyFileSync(payloadManifest, path.join(destination, 'payload-manifest.json'));
+    fs.copyFileSync(payloadManifest, path.join(temporaryDestination, 'payload-manifest.json'));
   }
+  await promoteDirectory(temporaryDestination, destination);
 } finally {
-  releaseStageLock?.();
+  await removePathWithRetry(temporaryRoot);
 }
 
-console.log(`Staged Firelink engines for ${target} from ${source}`);
+console.log(`Staged Firelink engines for ${target} from ${source} into ${destination}`);

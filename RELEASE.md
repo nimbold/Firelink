@@ -22,7 +22,8 @@ Firelink never falls back to system-installed media tools.
 - `engines.lock.json` pins current committed macOS payload hashes.
 - `engine-sources.lock.json` pins Windows/Linux source archives and checksums.
 - `scripts/provision-engines.js` downloads and verifies target archives.
-- `scripts/stage-engines.js` creates one target-specific bundle payload.
+- `scripts/stage-engines.js` creates one target-specific bundle payload in an
+  invocation-owned temporary workspace.
 - `scripts/verify-binaries.js` runs architecture, packaging, version, and RPC checks.
 
 Linux `.deb` and `.rpm` packages are built with the complete verified engine payload. The AppImage is bundled separately with the engine resource excluded from the initial Linux packaging pass, then repacked from the verified payload because the AppImage tooling can rewrite bundled native binaries.
@@ -41,13 +42,34 @@ Keep versions aligned:
 
 ```bash
 npm ci
-node scripts/stage-engines.js --target aarch64-apple-darwin
-node scripts/verify-binaries.js --staged --target aarch64-apple-darwin
 npm test -- --run
 npm run build
 cd src-tauri && cargo test --all-targets
 cd ..
 npm run tauri build -- --target aarch64-apple-darwin --bundles dmg
+```
+
+`npm run tauri` owns engine staging for `dev`, `build`, and `bundle`. The
+wrapper creates a private workspace, verifies the payload, and removes the
+workspace after Tauri exits. To stage and verify a payload manually, provide a
+private output root explicitly:
+
+```bash
+ENGINE_OUTPUT_ROOT="$(mktemp -d -t firelink-engines)/engine-dist"
+FIRELINK_ENGINE_OUTPUT_ROOT="$ENGINE_OUTPUT_ROOT" \
+  node scripts/stage-engines.js --target aarch64-apple-darwin
+FIRELINK_ENGINE_OUTPUT_ROOT="$ENGINE_OUTPUT_ROOT" \
+  node scripts/verify-binaries.js --staged --target aarch64-apple-darwin
+```
+
+Do not use `src-tauri/engine-dist` or another repository-shared directory as
+the manual output root. On Windows, set `FIRELINK_ENGINE_OUTPUT_ROOT` to a
+private directory under `$env:TEMP` and use the PowerShell form:
+
+```powershell
+$env:FIRELINK_ENGINE_OUTPUT_ROOT = Join-Path $env:TEMP "firelink-engines-$PID\engine-dist"
+node scripts/stage-engines.js --target x86_64-pc-windows-msvc
+node scripts/verify-binaries.js --staged --target x86_64-pc-windows-msvc
 ```
 
 Verify the DMG and the app it contains, then launch outside the repository

@@ -6,9 +6,9 @@ import net from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  acquireExclusiveFileLock,
-  assertExclusiveFileLockHeld,
-} from './engine-staging-lock.js';
+  resolveOutputRoot,
+  resolveTargetTriple,
+} from './engine-workspace.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,9 +33,7 @@ if (!currentArch || !currentPlatform) {
   process.exit(1);
 }
 
-const targetTriple = argValue('--target')
-  || process.env.FIRELINK_TARGET_TRIPLE
-  || `${currentArch}-${currentPlatform}`;
+const targetTriple = resolveTargetTriple();
 const hostTriple = `${currentArch}-${currentPlatform}`;
 const canExecuteTarget = targetTriple === hostTriple;
 const isWindows = targetTriple.includes('windows');
@@ -85,7 +83,7 @@ function findEngineRoot(root) {
 
 const configuredRoot = argValue('--root')
   || (process.argv.includes('--staged')
-    ? path.join(scriptsDir, '..', 'src-tauri', 'engine-dist', targetTriple)
+    ? path.join(resolveOutputRoot(), targetTriple)
     : searchRoot
       ? findEngineRoot(searchRoot)
       : null);
@@ -94,19 +92,6 @@ const binariesDir = configuredRoot
   : path.join(scriptsDir, '..', 'src-tauri', 'binaries');
 const requiredEngines = ['yt-dlp', 'aria2c', 'ffmpeg', 'deno'];
 const stagedVerification = process.argv.includes('--staged');
-const stagingLockPath = path.join(scriptsDir, '..', 'src-tauri', 'engine-dist.lock');
-const inheritedLockPid = process.env.FIRELINK_ENGINE_STAGING_LOCK_PID;
-const inheritedLockToken = process.env.FIRELINK_ENGINE_STAGING_LOCK_TOKEN;
-const inheritedStagingLock = inheritedLockPid !== undefined || inheritedLockToken !== undefined;
-if (stagedVerification && inheritedStagingLock) {
-  assertExclusiveFileLockHeld(stagingLockPath, {
-    pid: Number(inheritedLockPid),
-    token: inheritedLockToken,
-  });
-}
-const releaseStagingLock = stagedVerification && !inheritedStagingLock
-  ? await acquireExclusiveFileLock(stagingLockPath)
-  : null;
 
 const FORBIDDEN_OTOOL_PATHS = ['/opt/homebrew', '/usr/local/Cellar'];
 const FORBIDDEN_STDERR = [
@@ -189,7 +174,6 @@ for (const eng of requiredEngines) {
 
 if (exitCode !== 0) {
   console.error('\nAborting: missing required sidecars.');
-  releaseStagingLock?.();
   process.exit(1);
 }
 
@@ -602,7 +586,6 @@ if (canExecuteTarget) {
 
 // ───── Result ─────
 console.log('');
-releaseStagingLock?.();
 if (exitCode !== 0) {
   console.error(`[FAIL] ${exitCode} engine verification check(s) failed.`);
   process.exit(1);

@@ -7,6 +7,7 @@
     "beforeDevCommand": "node scripts/stage-engines.js && npm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "node scripts/before-tauri-build.js",
+    "beforeBundleCommand": "node scripts/before-tauri-bundle.js",
     "frontendDist": "../dist"
   },
   "app": {
@@ -36,7 +37,6 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "engine-dist/": "engine-dist/",
       "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
     },
     "fileAssociations": [

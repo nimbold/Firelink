@@ -24,12 +24,18 @@ const argumentIndex = process.argv.indexOf('--binary');
 const binaryPath = path.resolve(
   argumentIndex >= 0
     ? process.argv[argumentIndex + 1]
-    : path.join(
-        repoRoot,
-        'src-tauri',
-        'binaries',
-        `aria2c-${targetTriple}${process.platform === 'win32' ? '.exe' : ''}`,
-      ),
+    : process.env.FIRELINK_ENGINE_OUTPUT_ROOT
+      ? path.join(
+          process.env.FIRELINK_ENGINE_OUTPUT_ROOT,
+          targetTriple,
+          `aria2c-${targetTriple}${process.platform === 'win32' ? '.exe' : ''}`,
+        )
+      : path.join(
+          repoRoot,
+          'src-tauri',
+          'binaries',
+          `aria2c-${targetTriple}${process.platform === 'win32' ? '.exe' : ''}`,
+        ),
 );
 
 if (!fs.existsSync(binaryPath)) {

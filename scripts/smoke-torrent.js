@@ -36,7 +36,10 @@ if (!arch || !platform) {
 const targetTriple = `${arch}-${platform}`;
 const executableName = `aria2c-${targetTriple}${os.platform() === 'win32' ? '.exe' : ''}`;
 const binaryPath = path.resolve(
-  argumentValue('--binary') || path.join(repoRoot, 'src-tauri', 'binaries', executableName),
+  argumentValue('--binary')
+    || (process.env.FIRELINK_ENGINE_OUTPUT_ROOT
+      ? path.join(process.env.FIRELINK_ENGINE_OUTPUT_ROOT, targetTriple, executableName)
+      : path.join(repoRoot, 'src-tauri', 'binaries', executableName)),
 );
 
 const runtimeAbortController = new AbortController();

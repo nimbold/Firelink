@@ -8,6 +8,23 @@ pub fn resolve_bundled_binary_path(
     let binary_name = crate::platform::engine_binary_name(engine);
     let target = crate::platform::target_triple();
 
+    #[cfg(debug_assertions)]
+    if let Some(runtime_root) = std::env::var_os("FIRELINK_ENGINE_RUNTIME_ROOT") {
+        for candidate in runtime_candidates(Path::new(&runtime_root), &target, &binary_name) {
+            if candidate.is_file() {
+                let absolute = candidate.canonicalize().map_err(|error| {
+                    format!("Failed to canonicalize '{}': {error}", candidate.display())
+                })?;
+                log::info!(
+                    "Resolved development engine '{}' for target '{}'",
+                    engine,
+                    target
+                );
+                return Ok(absolute);
+            }
+        }
+    }
+
     if let Ok(resource_dir) = app_handle.path().resource_dir() {
         for candidate in packaged_candidates(&resource_dir, &target, &binary_name) {
             if candidate.is_file() {
@@ -120,6 +137,11 @@ fn executable_relative_candidates(
 }
 
 #[cfg(any(debug_assertions, test))]
+fn runtime_candidates(root: &Path, target: &str, binary_name: &str) -> Vec<PathBuf> {
+    vec![root.join(target).join(binary_name)]
+}
+
+#[cfg(any(debug_assertions, test))]
 fn development_candidates(cwd: &Path, target: &str, binary_name: &str) -> Vec<PathBuf> {
     let roots = [cwd.to_path_buf(), cwd.join("src-tauri")];
     let mut candidates = Vec::new();
@@ -163,7 +185,10 @@ fn aria2_openssl_modules_dir(binary_path: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{development_candidates, development_candidates_for_runtime, packaged_candidates};
+    use super::{
+        development_candidates, development_candidates_for_runtime, packaged_candidates,
+        runtime_candidates,
+    };
     use std::path::Path;
 
     #[test]
@@ -191,6 +216,21 @@ mod tests {
         assert_eq!(
             candidates[0],
             Path::new("/repo/engine-dist/x86_64-pc-windows-msvc/aria2c-x86_64-pc-windows-msvc.exe")
+        );
+    }
+
+    #[test]
+    fn configured_development_layout_is_target_scoped() {
+        let candidates = runtime_candidates(
+            Path::new("/tmp/firelink-engine-run/engine-dist"),
+            "x86_64-unknown-linux-gnu",
+            "yt-dlp-x86_64-unknown-linux-gnu",
+        );
+        assert_eq!(
+            candidates[0],
+            Path::new(
+                "/tmp/firelink-engine-run/engine-dist/x86_64-unknown-linux-gnu/yt-dlp-x86_64-unknown-linux-gnu"
+            )
         );
     }
 

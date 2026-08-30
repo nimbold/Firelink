@@ -118,12 +118,20 @@ jobs:
         if: runner.os != 'macOS'
         run: node scripts/provision-engines.js --target ${{ matrix.target }}
       - name: Stage and verify engines
+        env:
+          FIRELINK_ENGINE_OUTPUT_ROOT: ${{ runner.temp }}/firelink-engine-workspace/${{ matrix.target }}/engine-dist
         run: |
           node scripts/stage-engines.js --target ${{ matrix.target }}
           node scripts/verify-binaries.js --staged --target ${{ matrix.target }}
       - name: Run Torrent process smoke
-        run: node scripts/smoke-torrent.js --binary src-tauri/engine-dist/${{ matrix.target }}/aria2c-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }} --failure-paths
+        env:
+          FIRELINK_ENGINE_OUTPUT_ROOT: ${{ runner.temp }}/firelink-engine-workspace/${{ matrix.target }}/engine-dist
+        run: node scripts/smoke-torrent.js --failure-paths
       - name: Run Aria2 resolver smoke
-        run: node scripts/smoke-aria2-resolver.js --binary src-tauri/engine-dist/${{ matrix.target }}/aria2c-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }}
+        env:
+          FIRELINK_ENGINE_OUTPUT_ROOT: ${{ runner.temp }}/firelink-engine-workspace/${{ matrix.target }}/engine-dist
+        run: node scripts/smoke-aria2-resolver.js
       - name: Run Aria2 normal-transfer smoke
-        run: node scripts/smoke-aria2-transfers.js --binary src-tauri/engine-dist/${{ matrix.target }}/aria2c-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }}
+        env:
+          FIRELINK_ENGINE_OUTPUT_ROOT: ${{ runner.temp }}/firelink-engine-workspace/${{ matrix.target }}/engine-dist
+        run: node scripts/smoke-aria2-transfers.js

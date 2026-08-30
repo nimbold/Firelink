@@ -93,10 +93,10 @@ function run(command, args, options = {}) {
   });
 }
 
-async function runChecked(command, args, label = command) {
+async function runChecked(command, args, label = command, options = {}) {
   let result;
   try {
-    result = await run(command, args);
+    result = await run(command, args, options);
   } catch (error) {
     throw new Error(`Failed to run ${label}: ${error.message}`, { cause: error });
   }
@@ -130,13 +130,14 @@ async function main() {
   assertSafeTarget(target);
 
   // The native-package build has already staged and verified the engines.
-  // Verify once more before creating the AppImage so a failed preparation
-  // cannot produce an artifact that later appears valid only because its
-  // payload is absent.
+  // Verify the immutable provisioned payload once more before creating the
+  // AppImage so a failed preparation cannot produce an artifact that later
+  // appears valid only because its payload is absent.
+  const provisionedRoot = path.join(repoRoot, 'src-tauri', 'provisioned-engines', target);
   await runChecked(
     process.execPath,
-    ['scripts/verify-binaries.js', '--staged', '--target', target],
-    'staged engine verification'
+    ['scripts/verify-binaries.js', '--root', provisionedRoot, '--target', target],
+    'provisioned engine verification'
   );
 
   if (receivedSignal) {
@@ -146,7 +147,9 @@ async function main() {
   }
 
   const [npmCommand, npmArgs] = npmInvocation(appImageBundleArguments(target));
-  await runChecked(npmCommand, npmArgs, 'Tauri AppImage bundling');
+  await runChecked(npmCommand, npmArgs, 'Tauri AppImage bundling', {
+    env: { FIRELINK_SKIP_ENGINE_RESOURCE: '1' },
+  });
 
   if (receivedSignal) {
     const error = new Error(`Build interrupted by ${receivedSignal}.`);
