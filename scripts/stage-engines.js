@@ -46,11 +46,13 @@ if (!source) {
 }
 
 if (targetLock) {
-  try {
-    assertAria2RouteSource(targetLock.engines?.aria2c, target);
-  } catch (error) {
-    console.error(error.message);
-    process.exit(1);
+  if (targetLock.engines?.aria2c?.firelinkRouteContract) {
+    try {
+      assertAria2RouteSource(targetLock.engines.aria2c, target);
+    } catch (error) {
+      console.error(error.message);
+      process.exit(1);
+    }
   }
 
   for (const engine of engines) {
@@ -86,11 +88,13 @@ if (targetLock) {
     console.error(`Payload manifest target mismatch: ${manifest.target}`);
     process.exit(1);
   }
-  try {
-    assertAria2RouteSource(manifest.generatedFrom?.aria2c, target);
-  } catch (error) {
-    console.error(error.message);
-    process.exit(1);
+  if (manifest.generatedFrom?.aria2c?.firelinkRouteContract) {
+    try {
+      assertAria2RouteSource(manifest.generatedFrom.aria2c, target);
+    } catch (error) {
+      console.error(error.message);
+      process.exit(1);
+    }
   }
   for (const [relative, expected] of Object.entries(manifest.files || {})) {
     const file = path.join(source, relative);

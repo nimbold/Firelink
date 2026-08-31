@@ -15,9 +15,43 @@ pub(crate) const ARIA2_NETWORK_TARGET_POLICY: &str = "firelink-v1";
 pub(crate) const ARIA2_NETWORK_TARGET_POLICY_DIGEST: &str =
     "sha256:064503d30f1a043e79113f7e44ddfb517fbf2c578a332896355180743eaf1705";
 
-/// Stamp the route contract on each Aria2 request as well as on the daemon.
-/// This keeps a later global-option mutation from silently changing the DNS or
-/// literal-target policy of a queued transfer.
+/// Select Aria2's standard resolver path for a transfer.
+///
+/// This is deliberately the production default: hostname resolution remains
+/// owned by the OS/TUN route and stock Aria2 builds remain usable. Remove the
+/// optional Firelink-only fields as well so a caller cannot accidentally carry
+/// alternate-resolver options into a system-resolver request.
+pub(crate) fn apply_aria2_system_resolver(
+    options: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    options.insert("async-dns".to_string(), serde_json::json!("false"));
+    options.remove("dns-resolver");
+    options.remove("network-target-policy");
+}
+
+/// Select the system resolver for a transfer on a daemon that has already
+/// advertised the optional Firelink route contract.
+///
+/// The custom daemon's default target policy is route-aware and would still
+/// reject private answers if the policy were merely omitted. Set it to `none`
+/// explicitly for the system-resolver route; stock daemons never receive this
+/// optional field.
+pub(crate) fn apply_aria2_system_resolver_for_daemon(
+    options: &mut serde_json::Map<String, serde_json::Value>,
+    firelink_route_contract_available: bool,
+) {
+    apply_aria2_system_resolver(options);
+    if firelink_route_contract_available {
+        options.insert(
+            "network-target-policy".to_string(),
+            serde_json::json!("none"),
+        );
+    }
+}
+
+/// Select the optional Firelink-patched Aria2 resolver and target policy for a
+/// transfer. Callers must first attest the daemon capabilities with
+/// `aria2_route_capability_error`.
 pub(crate) fn apply_aria2_route_contract(
     options: &mut serde_json::Map<String, serde_json::Value>,
 ) {
@@ -32,8 +66,19 @@ pub(crate) fn apply_aria2_route_contract(
     );
 }
 
-/// Verify the exact fork contract before Firelink admits network work.
-pub(crate) fn aria2_route_contract_error(version: &serde_json::Value) -> Option<String> {
+fn has_string_capability(version: &serde_json::Value, field: &str, expected: &str) -> bool {
+    version
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(expected)))
+}
+
+/// Verify that an Aria2 daemon exposes the optional Firelink route features.
+///
+/// The selected resolver and policy are intentionally not checked here: the
+/// daemon starts in system-resolver mode and the alternate settings are
+/// applied only to an individual fallback transfer.
+pub(crate) fn aria2_route_capability_error(version: &serde_json::Value) -> Option<String> {
     let async_dns = version
         .get("enabledFeatures")
         .and_then(serde_json::Value::as_array)
@@ -47,21 +92,7 @@ pub(crate) fn aria2_route_contract_error(version: &serde_json::Value) -> Option<
     }
 
     for (field, expected, label) in [
-        (
-            "firelinkRevision",
-            ARIA2_FIRELINK_REVISION,
-            "Firelink engine revision",
-        ),
-        (
-            "firelinkDnsResolver",
-            ARIA2_DNS_RESOLVER,
-            "native DNS resolver",
-        ),
-        (
-            "firelinkNetworkTargetPolicy",
-            ARIA2_NETWORK_TARGET_POLICY,
-            "network target policy",
-        ),
+        ("firelinkRevision", ARIA2_FIRELINK_REVISION, "Firelink engine revision"),
         (
             "firelinkNetworkTargetPolicyDigest",
             ARIA2_NETWORK_TARGET_POLICY_DIGEST,
@@ -72,12 +103,58 @@ pub(crate) fn aria2_route_contract_error(version: &serde_json::Value) -> Option<
             return Some(format!("bundled aria2 has an incompatible {label}"));
         }
     }
+    if !has_string_capability(version, "firelinkDnsResolvers", ARIA2_DNS_RESOLVER) {
+        return Some("bundled aria2 does not expose the native DNS resolver".to_string());
+    }
+    if !has_string_capability(
+        version,
+        "firelinkNetworkTargetPolicies",
+        ARIA2_NETWORK_TARGET_POLICY,
+    ) {
+        return Some("bundled aria2 does not expose the network target policy".to_string());
+    }
+    None
+}
+
+/// Verify that the optional Firelink route settings are active for the
+/// current transfer/daemon option scope.
+#[cfg(test)]
+pub(crate) fn aria2_route_contract_error(version: &serde_json::Value) -> Option<String> {
+    if let Some(error) = aria2_route_capability_error(version) {
+        return Some(error);
+    }
+    if version
+        .get("firelinkDnsResolver")
+        .and_then(serde_json::Value::as_str)
+        != Some(ARIA2_DNS_RESOLVER)
+    {
+        return Some("bundled aria2 is not using the native DNS resolver".to_string());
+    }
+    if version
+        .get("firelinkNetworkTargetPolicy")
+        .and_then(serde_json::Value::as_str)
+        != Some(ARIA2_NETWORK_TARGET_POLICY)
+    {
+        return Some("bundled aria2 is not using the network target policy".to_string());
+    }
     if version
         .get("firelinkNetworkTargetPolicyEnforced")
         .and_then(serde_json::Value::as_bool)
         != Some(true)
     {
         return Some("bundled aria2 is not enforcing the network target policy".to_string());
+    }
+    None
+}
+
+/// Verify the standard RPC response needed by every supported Aria2 build.
+pub(crate) fn aria2_baseline_error(version: &serde_json::Value) -> Option<String> {
+    if version
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        return Some("bundled aria2 returned an invalid version response".to_string());
     }
     None
 }
@@ -332,30 +409,38 @@ mod tests {
     }
 
     #[test]
-    fn aria2_route_contract_requires_exact_capabilities() {
+    fn aria2_route_capabilities_are_distinct_from_active_options() {
         let valid = serde_json::json!({
+            "version": "1.37.0",
             "enabledFeatures": ["Async DNS", "BitTorrent"],
             "firelinkRevision": ARIA2_FIRELINK_REVISION,
-            "firelinkDnsResolver": ARIA2_DNS_RESOLVER,
+            "firelinkDnsResolver": "disabled",
+            "firelinkDnsResolvers": [ARIA2_DNS_RESOLVER],
             "firelinkNetworkTargetPolicy": ARIA2_NETWORK_TARGET_POLICY,
+            "firelinkNetworkTargetPolicies": ["none", ARIA2_NETWORK_TARGET_POLICY],
             "firelinkNetworkTargetPolicyDigest": ARIA2_NETWORK_TARGET_POLICY_DIGEST,
-            "firelinkNetworkTargetPolicyEnforced": true,
+            "firelinkNetworkTargetPolicyEnforced": false,
         });
-        assert_eq!(aria2_route_contract_error(&valid), None);
+        assert_eq!(aria2_route_capability_error(&valid), None);
+        assert!(aria2_route_contract_error(&valid).is_some());
+
+        let mut active = valid.clone();
+        active["firelinkDnsResolver"] = serde_json::json!(ARIA2_DNS_RESOLVER);
+        active["firelinkNetworkTargetPolicyEnforced"] = serde_json::json!(true);
+        assert_eq!(aria2_route_contract_error(&active), None);
 
         for field in [
             "firelinkRevision",
-            "firelinkDnsResolver",
-            "firelinkNetworkTargetPolicy",
+            "firelinkDnsResolvers",
+            "firelinkNetworkTargetPolicies",
             "firelinkNetworkTargetPolicyDigest",
-            "firelinkNetworkTargetPolicyEnforced",
         ] {
-            let mut invalid = valid.clone();
+            let mut invalid = active.clone();
             invalid.as_object_mut().unwrap().remove(field);
-            assert!(aria2_route_contract_error(&invalid).is_some(), "{field}");
+            assert!(aria2_route_capability_error(&invalid).is_some(), "{field}");
         }
 
-        let mut wrong_digest = valid.clone();
+        let mut wrong_digest = active.clone();
         wrong_digest["firelinkNetworkTargetPolicyDigest"] = serde_json::json!("sha256:wrong");
         assert!(aria2_route_contract_error(&wrong_digest).is_some());
         assert!(aria2_route_contract_error(&serde_json::json!({
@@ -377,6 +462,48 @@ mod tests {
             options.get("network-target-policy"),
             Some(&serde_json::json!(ARIA2_NETWORK_TARGET_POLICY))
         );
+    }
+
+    #[test]
+    fn aria2_system_options_remove_optional_route_fields() {
+        let mut options = serde_json::Map::from_iter([
+            ("dns-resolver".to_string(), serde_json::json!(ARIA2_DNS_RESOLVER)),
+            (
+                "network-target-policy".to_string(),
+                serde_json::json!(ARIA2_NETWORK_TARGET_POLICY),
+            ),
+        ]);
+        apply_aria2_system_resolver(&mut options);
+        assert_eq!(options.get("async-dns"), Some(&serde_json::json!("false")));
+        assert!(!options.contains_key("dns-resolver"));
+        assert!(!options.contains_key("network-target-policy"));
+    }
+
+    #[test]
+    fn aria2_system_options_disable_the_custom_default_policy_only_when_attested() {
+        let mut stock_options = serde_json::Map::new();
+        apply_aria2_system_resolver_for_daemon(&mut stock_options, false);
+        assert!(!stock_options.contains_key("network-target-policy"));
+
+        let mut patched_options = serde_json::Map::new();
+        apply_aria2_system_resolver_for_daemon(&mut patched_options, true);
+        assert_eq!(
+            patched_options.get("network-target-policy"),
+            Some(&serde_json::json!("none"))
+        );
+        assert_eq!(patched_options.get("async-dns"), Some(&serde_json::json!("false")));
+    }
+
+    #[test]
+    fn stock_aria2_baseline_response_is_accepted_without_firelink_fields() {
+        assert_eq!(
+            aria2_baseline_error(&serde_json::json!({
+                "version": "1.37.0",
+                "enabledFeatures": ["Async DNS", "BitTorrent"],
+            })),
+            None
+        );
+        assert!(aria2_baseline_error(&serde_json::json!({})).is_some());
     }
 
     #[test]

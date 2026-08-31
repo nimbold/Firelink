@@ -5,6 +5,7 @@ import {
   ARIA2_FIRELINK_REVISION,
   ARIA2_NETWORK_TARGET_POLICY,
   ARIA2_NETWORK_TARGET_POLICY_DIGEST,
+  assertAria2SystemResolverOptions,
   assertAria2RouteCapabilities,
   assertAria2RouteContract,
   assertAria2RouteSource,
@@ -14,6 +15,7 @@ const secureVersion = {
   enabledFeatures: ['Async DNS'],
   firelinkRevision: ARIA2_FIRELINK_REVISION,
   firelinkDnsResolver: ARIA2_DNS_RESOLVER,
+  firelinkDnsResolvers: [ARIA2_DNS_RESOLVER],
   firelinkNetworkTargetPolicies: ['none', ARIA2_NETWORK_TARGET_POLICY],
   firelinkNetworkTargetPolicy: ARIA2_NETWORK_TARGET_POLICY,
   firelinkNetworkTargetPolicyDigest: ARIA2_NETWORK_TARGET_POLICY_DIGEST,
@@ -60,5 +62,22 @@ test('route capabilities are distinct from the active local-fixture policy', () 
       firelinkNetworkTargetPolicyEnforced: false,
     }),
     /route contract mismatch for firelinkNetworkTargetPolicy/,
+  );
+});
+
+test('system resolver options cannot retain the custom target policy', () => {
+  assert.doesNotThrow(() => assertAria2SystemResolverOptions({
+    'async-dns': 'false',
+  }));
+  assert.doesNotThrow(() => assertAria2SystemResolverOptions({
+    'async-dns': 'false',
+    'network-target-policy': 'none',
+  }));
+  assert.throws(
+    () => assertAria2SystemResolverOptions({
+      'async-dns': 'false',
+      'network-target-policy': ARIA2_NETWORK_TARGET_POLICY,
+    }),
+    /active target policy/,
   );
 });

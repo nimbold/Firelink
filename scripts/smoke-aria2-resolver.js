@@ -9,10 +9,13 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  ARIA2_ROUTE_DAEMON_ARGS,
+  ARIA2_SYSTEM_RESOLVER_DAEMON_ARGS,
+  ARIA2_SYSTEM_RESOLVER_OPTIONS,
   ARIA2_ROUTE_OPTIONS,
-  assertAria2RouteContract,
+  assertAria2Baseline,
   assertAria2RouteOptions,
+  assertAria2SystemResolverOptions,
+  hasAria2RouteCapabilities,
 } from './aria2-route-contract.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -201,7 +204,7 @@ const child = spawn(binaryPath, [
   `--dir=${tempRoot}`,
   '--file-allocation=none',
   '--enable-dht=false',
-  ...ARIA2_ROUTE_DAEMON_ARGS,
+  ...ARIA2_SYSTEM_RESOLVER_DAEMON_ARGS,
   '--console-log-level=error',
   '--quiet=true',
 ], { env: environment, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -210,18 +213,26 @@ child.stderr.on('data', chunk => { stderr += chunk.toString(); });
 
 try {
   const version = await waitForRpc(rpcPort, secret);
-  assertAria2RouteContract(version);
-  console.log(`[INFO] aria2 ${version.version || 'unknown'}; Firelink route contract verified`);
+  assertAria2Baseline(version);
+  const routeCapabilitiesAvailable = hasAria2RouteCapabilities(version);
+  if (routeCapabilitiesAvailable) {
+    // The fixture server is intentionally loopback. Disable only the custom
+    // target policy for this smoke daemon after capabilities are attested.
+    await rpc(rpcPort, secret, 'aria2.changeGlobalOption', [{ 'network-target-policy': 'none' }]);
+    console.log(`[INFO] aria2 ${version.version || 'unknown'}; optional Firelink route capabilities available`);
+  } else {
+    console.log(`[INFO] aria2 ${version.version || 'unknown'}; using stock system-resolver capabilities`);
+  }
+  const systemFixtureOptions = routeCapabilitiesAvailable
+    ? { ...ARIA2_SYSTEM_RESOLVER_OPTIONS, 'network-target-policy': 'none' }
+    : { ...ARIA2_SYSTEM_RESOLVER_OPTIONS };
 
   const uriResult = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${contentPort}/file`], {
-    ...ARIA2_ROUTE_OPTIONS,
-    'network-target-policy': 'none',
+    ...systemFixtureOptions,
     out: 'resolver-normal.bin',
   }]);
   const uriOptions = await rpc(rpcPort, secret, 'aria2.getOption', [uriResult]);
-  if (uriOptions['async-dns'] !== 'true' || uriOptions['dns-resolver'] !== 'native-async') {
-    throw new Error(`direct fixture transfer did not retain native asynchronous DNS: ${JSON.stringify(uriOptions)}`);
-  }
+  assertAria2SystemResolverOptions(uriOptions, 'direct aria2.addUri');
 
   const torrent = bencode({
     info: {
@@ -232,16 +243,16 @@ try {
     },
   }).toString('base64');
   const torrentResult = await rpc(rpcPort, secret, 'aria2.addTorrent', [torrent, [], {
-    ...ARIA2_ROUTE_OPTIONS,
+    ...systemFixtureOptions,
     dir: tempRoot,
   }]);
   const torrentOptions = await rpc(rpcPort, secret, 'aria2.getOption', [torrentResult]);
-  assertAria2RouteOptions(torrentOptions, 'direct aria2.addTorrent');
+  assertAria2SystemResolverOptions(torrentOptions, 'direct aria2.addTorrent');
 
   const proxyRoute = 'http://127.0.0.1:9';
   const normalizedProxyRoute = new URL(proxyRoute).toString();
   const proxiedUriResult = await rpc(rpcPort, secret, 'aria2.addUri', [['https://route-owned.invalid/file'], {
-    ...ARIA2_ROUTE_OPTIONS,
+    ...systemFixtureOptions,
     'all-proxy': proxyRoute,
     pause: 'true',
     out: 'resolver-proxied.bin',
@@ -250,10 +261,10 @@ try {
   if (proxiedUriOptions['all-proxy'] !== normalizedProxyRoute) {
     throw new Error(`aria2.addUri did not retain the configured proxy route: ${JSON.stringify(proxiedUriOptions)}`);
   }
-  assertAria2RouteOptions(proxiedUriOptions, 'proxied aria2.addUri');
+  assertAria2SystemResolverOptions(proxiedUriOptions, 'proxied aria2.addUri');
 
   const proxiedTorrentResult = await rpc(rpcPort, secret, 'aria2.addTorrent', [torrent, [], {
-    ...ARIA2_ROUTE_OPTIONS,
+    ...systemFixtureOptions,
     'all-proxy': proxyRoute,
     pause: 'true',
     dir: tempRoot,
@@ -262,11 +273,22 @@ try {
   if (proxiedTorrentOptions['all-proxy'] !== normalizedProxyRoute) {
     throw new Error(`aria2.addTorrent did not retain the configured proxy route: ${JSON.stringify(proxiedTorrentOptions)}`);
   }
-  assertAria2RouteOptions(proxiedTorrentOptions, 'proxied aria2.addTorrent');
+  assertAria2SystemResolverOptions(proxiedTorrentOptions, 'proxied aria2.addTorrent');
+
+  if (routeCapabilitiesAvailable) {
+    const alternateResult = await rpc(rpcPort, secret, 'aria2.addUri', [['https://route-owned.invalid/alternate'], {
+      ...ARIA2_ROUTE_OPTIONS,
+      pause: 'true',
+      out: 'resolver-alternate.bin',
+    }]);
+    const alternateOptions = await rpc(rpcPort, secret, 'aria2.getOption', [alternateResult]);
+    assertAria2RouteOptions(alternateOptions, 'alternate aria2.addUri');
+    await forceRemoveIfPresent(rpcPort, secret, alternateResult);
+  }
   await forceRemoveIfPresent(rpcPort, secret, proxiedUriResult);
   await forceRemoveIfPresent(rpcPort, secret, proxiedTorrentResult);
 
-  console.log('[PASS] Aria2 kept asynchronous DNS for fresh direct and proxied normal/Torrent transfers');
+  console.log('[PASS] Aria2 preserved system route options for direct/proxied normal/Torrent transfers');
 } catch (error) {
   const detail = stderr.trim();
   throw new Error(`${error.message}${detail ? `\n${detail}` : ''}`);

@@ -10,7 +10,9 @@ import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   ARIA2_DNS_RESOLVER,
-  assertAria2RouteCapabilities,
+  ARIA2_SYSTEM_RESOLVER_DAEMON_ARGS,
+  assertAria2Baseline,
+  hasAria2RouteCapabilities,
 } from './aria2-route-contract.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -73,10 +75,10 @@ let signalTerminationRequested = false;
 class DaemonExitedError extends Error {}
 
 function assertFixtureRouteOptions(options, context) {
-  if (options['async-dns'] !== 'true'
-      || options['dns-resolver'] !== ARIA2_DNS_RESOLVER
-      || options['network-target-policy'] !== 'none') {
-    throw new Error(`${context} did not retain the local-fixture resolver contract: ${JSON.stringify(options)}`);
+  if (options['async-dns'] !== 'false'
+      || (Object.hasOwn(options, 'dns-resolver')
+        && options['dns-resolver'] !== ARIA2_DNS_RESOLVER)) {
+    throw new Error(`${context} did not retain the system resolver contract: ${JSON.stringify(options)}`);
   }
 }
 
@@ -320,9 +322,7 @@ async function startDaemon({ name, rpcPort, listenPort, directory, extraArgs = [
       '--enable-dht=false',
       '--enable-peer-exchange=false',
       '--bt-enable-lpd=false',
-      '--async-dns=true',
-      `--dns-resolver=${ARIA2_DNS_RESOLVER}`,
-      '--network-target-policy=none',
+      ...ARIA2_SYSTEM_RESOLVER_DAEMON_ARGS,
       '--console-log-level=error',
       '--quiet=true',
       ...(selectedListenPort ? [`--listen-port=${selectedListenPort}`] : []),
@@ -352,7 +352,20 @@ async function startDaemon({ name, rpcPort, listenPort, directory, extraArgs = [
           return false;
         }
       }, 10000);
-      assertAria2RouteCapabilities(version);
+      assertAria2Baseline(version);
+      if (Array.isArray(version.enabledFeatures) && version.enabledFeatures.includes('Async DNS')) {
+        // Use the standard system resolver for every fixture transfer. This
+        // also covers fixture additions that intentionally omit per-transfer
+        // route fields; product additions still stamp async-dns=false on
+        // every request.
+        await rpc(selectedRpcPort, secret, 'aria2.changeGlobalOption', [{ 'async-dns': 'false' }]);
+      }
+      if (hasAria2RouteCapabilities(version)) {
+        // The smoke fixtures intentionally use loopback tracker/peer routes.
+        // Disable only the custom target policy after capabilities are
+        // attested; stock Aria2 has no such option to send.
+        await rpc(selectedRpcPort, secret, 'aria2.changeGlobalOption', [{ 'network-target-policy': 'none' }]);
+      }
       return daemon;
     } catch (error) {
       lastError = error;
@@ -875,7 +888,7 @@ async function main() {
     assertFixtureRouteOptions(proxiedProbeOptions, 'proxied magnet metadata probe');
     assert(await forceRemoveIfPresent(client, proxiedProbeGid), 'proxied magnet metadata probe was not removable');
     await waitForRemoved(client, proxiedProbeGid);
-    console.log('[OK] metadata probe was removed after resolution; direct and proxied probes kept asynchronous DNS');
+    console.log('[OK] metadata probe was removed after resolution; direct and proxied probes kept system resolver options');
 
     const finalGid = await rpc(client.rpcPort, client.secret, 'aria2.addTorrent', [
       trackerlessTorrentBytes.toString('base64'),

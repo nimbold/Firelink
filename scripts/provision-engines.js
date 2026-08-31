@@ -40,15 +40,13 @@ if (!targetSources) {
   process.exit(1);
 }
 
-try {
-  // Firelink passes route-contract options to every production Aria2 daemon.
-  // A stock archive would either reject those options or silently omit the
-  // literal-target policy on non-macOS targets, so fail before downloading or
-  // staging an unusable payload.
-  assertAria2RouteSource(targetSources.aria2c, target);
-} catch (error) {
-  console.error(error.message);
-  process.exit(1);
+if (targetSources.aria2c?.firelinkRouteContract) {
+  try {
+    assertAria2RouteSource(targetSources.aria2c, target);
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
 }
 
 const destination = path.join(repoRoot, 'src-tauri', 'provisioned-engines', target);

@@ -3463,6 +3463,7 @@ struct Aria2DaemonGuard {
     startup_error: Mutex<Option<String>>,
     last_stderr: Mutex<String>,
     config_path: Mutex<Option<tempfile::TempPath>>,
+    route_contract_available: AtomicBool,
     shutdown_state: AtomicU8,
 }
 
@@ -3473,8 +3474,18 @@ impl Aria2DaemonGuard {
             startup_error: Mutex::new(None),
             last_stderr: Mutex::new(String::new()),
             config_path: Mutex::new(None),
+            route_contract_available: AtomicBool::new(false),
             shutdown_state: AtomicU8::new(0),
         }
+    }
+
+    fn route_contract_available(&self) -> bool {
+        self.route_contract_available.load(Ordering::Acquire)
+    }
+
+    fn set_route_contract_available(&self, available: bool) {
+        self.route_contract_available
+            .store(available, Ordering::Release);
     }
 
     fn exit_allowed(&self) -> bool {
@@ -4369,7 +4380,7 @@ async fn check_aria2(app_handle: &tauri::AppHandle, port: u16, secret: &str) -> 
     let rpc_ready = if daemon_alive {
         rpc_call(port, secret, "aria2.getVersion", serde_json::json!([]))
             .await
-            .is_ok_and(|version| crate::network::aria2_route_contract_error(&version).is_none())
+            .is_ok_and(|version| crate::network::aria2_baseline_error(&version).is_none())
     } else {
         false
     };
@@ -9188,6 +9199,20 @@ async fn remove_magnet_metadata_probe_dir(path: &std::path::Path) -> Result<(), 
     }
 }
 
+const MAGNET_METADATA_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+const MAGNET_SYSTEM_RESOLVER_ATTEMPT: Duration = Duration::from_secs(20);
+const MAGNET_ALTERNATE_RESOLVER_ATTEMPT: Duration = Duration::from_secs(40);
+const MAGNET_PROBE_CLEANUP_RESERVE: Duration = Duration::from_secs(5);
+
+fn magnet_probe_schedule(total_timeout: Duration) -> crate::torrent_probe::MetadataProbeSchedule {
+    crate::torrent_probe::MetadataProbeSchedule {
+        total_timeout,
+        metadata_timeout: total_timeout.saturating_sub(MAGNET_PROBE_CLEANUP_RESERVE),
+        cleanup_reserve: MAGNET_PROBE_CLEANUP_RESERVE.min(total_timeout),
+        poll_interval: Duration::from_millis(250),
+    }
+}
+
 async fn resolve_magnet_metadata(
     app_handle: &tauri::AppHandle,
     state: &AppState,
@@ -9235,6 +9260,7 @@ async fn resolve_magnet_metadata(
     let storage_root = managed_path
         .parent()
         .ok_or_else(|| "torrent storage has no parent directory".to_string())?;
+    let operation_deadline = Instant::now() + MAGNET_METADATA_TOTAL_TIMEOUT;
     let probe_dir = storage_root.join(format!(".probe-{}", uuid::Uuid::new_v4().simple()));
     tokio::fs::create_dir_all(&probe_dir)
         .await
@@ -9245,20 +9271,20 @@ async fn resolve_magnet_metadata(
         .load(std::sync::atomic::Ordering::Relaxed);
     let secret = state.aria2_secret.clone();
     let metadata_path = probe_dir.join(format!("{}.torrent", expected.info_hash));
-    let mut options = serde_json::Map::new();
-    options.insert(
+    let mut base_options = serde_json::Map::new();
+    base_options.insert(
         "dir".to_string(),
         serde_json::json!(probe_dir.to_string_lossy().to_string()),
     );
-    options.insert("bt-metadata-only".to_string(), serde_json::json!("true"));
-    options.insert("bt-save-metadata".to_string(), serde_json::json!("true"));
-    options.insert("max-tries".to_string(), serde_json::json!("3"));
-    options.insert("retry-wait".to_string(), serde_json::json!("2"));
-    options.insert("connect-timeout".to_string(), serde_json::json!("20"));
-    options.insert("timeout".to_string(), serde_json::json!("60"));
-    options.insert("auto-file-renaming".to_string(), serde_json::json!("false"));
+    base_options.insert("bt-metadata-only".to_string(), serde_json::json!("true"));
+    base_options.insert("bt-save-metadata".to_string(), serde_json::json!("true"));
+    base_options.insert("max-tries".to_string(), serde_json::json!("3"));
+    base_options.insert("retry-wait".to_string(), serde_json::json!("2"));
+    base_options.insert("connect-timeout".to_string(), serde_json::json!("20"));
+    base_options.insert("timeout".to_string(), serde_json::json!("60"));
+    base_options.insert("auto-file-renaming".to_string(), serde_json::json!("false"));
     if let Some(proxy) = proxy_value.as_deref() {
-        options.insert("all-proxy".to_string(), serde_json::json!(proxy));
+        base_options.insert("all-proxy".to_string(), serde_json::json!(proxy));
     }
     let mut header_list = Vec::new();
     if let Some(cookies) = cookies.map(str::trim).filter(|value| !value.is_empty()) {
@@ -9274,32 +9300,92 @@ async fn resolve_magnet_metadata(
         );
     }
     if !header_list.is_empty() {
-        options.insert("header".to_string(), serde_json::json!(header_list));
+        base_options.insert("header".to_string(), serde_json::json!(header_list));
     }
 
     let client = std::sync::Arc::new(Aria2RpcClient { port, secret });
-    let resolver_mode = if proxy_value
+    let direct_route = proxy_value
         .as_deref()
-        .is_none_or(|proxy| proxy.trim().is_empty())
-    {
-        "automatic"
-    } else {
-        "configured"
-    };
-    let metadata_result = crate::torrent_probe::run_bounded_metadata_probe(
+        .is_none_or(|proxy| proxy.trim().is_empty());
+    let route_contract_available = app_handle
+        .state::<Aria2DaemonGuard>()
+        .route_contract_available();
+    let mut system_options = base_options.clone();
+    crate::network::apply_aria2_system_resolver_for_daemon(
+        &mut system_options,
+        route_contract_available,
+    );
+    let first_result = crate::torrent_probe::run_bounded_metadata_probe(
         client,
         &sanitized_source,
-        options,
+        system_options,
         &metadata_path,
-        resolver_mode,
-        crate::torrent_probe::MetadataProbeSchedule {
-            total_timeout: Duration::from_secs(60),
-            metadata_timeout: Duration::from_secs(55),
-            cleanup_reserve: Duration::from_secs(5),
-            poll_interval: Duration::from_millis(250),
-        },
+        "system",
+        magnet_probe_schedule(MAGNET_SYSTEM_RESOLVER_ATTEMPT),
     )
     .await;
+
+    let metadata_result = match first_result {
+        error @ Err(_) if direct_route
+            && route_contract_available
+            && error
+                .as_ref()
+                .err()
+                .is_some_and(crate::torrent_probe::allows_resolver_fallback) =>
+        {
+            let cleanup_budget = operation_deadline.saturating_duration_since(Instant::now());
+            match tokio::time::timeout(cleanup_budget, remove_magnet_metadata_probe_dir(&probe_dir))
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    return Err(format!(
+                        "could not clean up magnet metadata probe before resolver fallback: {error}"
+                    ));
+                }
+                Err(_) => {
+                    return Err(
+                        "could not clean up magnet metadata probe before resolver fallback: cleanup timed out"
+                            .to_string(),
+                    );
+                }
+            }
+            let create_budget = operation_deadline.saturating_duration_since(Instant::now());
+            match tokio::time::timeout(create_budget, tokio::fs::create_dir_all(&probe_dir)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    return Err(format!(
+                        "could not recreate magnet metadata probe before resolver fallback: {error}"
+                    ));
+                }
+                Err(_) => {
+                    return Err(
+                        "could not recreate magnet metadata probe before resolver fallback: creation timed out"
+                            .to_string(),
+                    );
+                }
+            }
+            let alternate_budget = MAGNET_ALTERNATE_RESOLVER_ATTEMPT
+                .min(operation_deadline.saturating_duration_since(Instant::now()));
+            let mut alternate_options = base_options;
+            crate::network::apply_aria2_route_contract(&mut alternate_options);
+            crate::torrent_probe::run_bounded_metadata_probe(
+                std::sync::Arc::new(Aria2RpcClient {
+                    port: state
+                        .aria2_port
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    secret: state.aria2_secret.clone(),
+                }),
+                &sanitized_source,
+                alternate_options,
+                &metadata_path,
+                "alternate",
+                magnet_probe_schedule(alternate_budget),
+            )
+            .await
+        }
+        other => other,
+    };
 
     let bytes = match metadata_result {
         Ok(bytes) => bytes,
@@ -18444,8 +18530,8 @@ pub fn run() {
     let frontend_exit_flush = Arc::new(FrontendExitFlush::new());
 
     // Zero is the explicit not-ready sentinel. Publishing a candidate port
-    // before the daemon's route contract is attested could make commands or
-    // the WebSocket listener attach to an unrelated local service.
+    // before the daemon's baseline RPC is attested could make commands or the
+    // WebSocket listener attach to an unrelated local service.
     let aria2_port = Arc::new(std::sync::atomic::AtomicU16::new(0));
     let aria2_port_clone = Arc::clone(&aria2_port);
     let aria2_secret = uuid::Uuid::new_v4().to_string();
@@ -18846,6 +18932,9 @@ pub fn run() {
                                 continue;
                             }
                             attempted_rpc_port = true;
+                            app_handle_bg
+                                .state::<Aria2DaemonGuard>()
+                                .set_route_contract_available(false);
                             let mut cmd = std::process::Command::new(&binary_path);
                             crate::platform::hide_child_console(&mut cmd);
                             crate::engines::apply_aria2_environment(&mut cmd, &binary_path);
@@ -18868,18 +18957,12 @@ pub fn run() {
                                 .arg("--download-result=hide")
                                 .arg("--max-concurrent-downloads=9999")
                                 .arg("--check-certificate=true")
-                                // Firelink relies on Aria2's asynchronous
-                                // resolver so a slow DNS answer cannot block
-                                // the daemon's shared RPC/control loop.
-                                .arg("--async-dns=true")
-                                .arg(format!(
-                                    "--dns-resolver={}",
-                                    crate::network::ARIA2_DNS_RESOLVER
-                                ))
-                                .arg(format!(
-                                    "--network-target-policy={}",
-                                    crate::network::ARIA2_NETWORK_TARGET_POLICY
-                                ))
+                                // Resolver choice is explicit per transfer.
+                                // Do not force Firelink-only options at daemon
+                                // startup: the locked Windows/Linux engines
+                                // are stock Aria2 builds, while a patched
+                                // build advertises its optional fallback via
+                                // getVersion.
                                 .arg(format!("--stop-with-process={}", std::process::id()));
 
                             apply_aria2_torrent_global_options(
@@ -19003,31 +19086,30 @@ pub fn run() {
                                     while start.elapsed() < std::time::Duration::from_secs(5) {
                                         match rpc_call(attempt_port, &aria2_secret_clone, "aria2.getVersion", serde_json::json!([])).await {
                                             Ok(ver) => {
+                                                if let Some(error) =
+                                                    crate::network::aria2_baseline_error(&ver)
+                                                {
+                                                    last_err = error;
+                                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                                    continue;
+                                                }
                                                 let v = ver.get("version").and_then(|v| v.as_str()).unwrap_or("unknown");
-                                                let contract_error =
-                                                    crate::network::aria2_route_contract_error(&ver);
+                                                let capability_error =
+                                                    crate::network::aria2_route_capability_error(&ver);
                                                 log::info!(
-                                                    "aria2 daemon ready (version {}) on port {} (route contract: {})",
+                                                    "aria2 daemon ready (version {}) on port {} (alternate resolver: {})",
                                                     v,
                                                     attempt_port,
-                                                    if contract_error.is_none() { "verified" } else { "incompatible" }
+                                                    if capability_error.is_none() { "available" } else { "unavailable" }
                                                 );
-                                                if let Some(contract_error) = contract_error {
-                                                    let error = format!("{contract_error}; network transfers are disabled");
-                                                    log::error!("{}", error);
-                                                    *guard.startup_error.lock().unwrap() =
-                                                        Some(error);
-                                                    // The route-safe Aria2 contract depends on
-                                                    // asynchronous DNS. Do not leave a daemon
-                                                    // running in a mode that can block its RPC
-                                                    // loop behind a system resolver.
-                                                    shutdown_aria2_daemon(app_handle_bg.clone())
-                                                        .await;
-                                                    aria2_port_clone.store(
-                                                        0,
-                                                        std::sync::atomic::Ordering::Relaxed,
+                                                guard.set_route_contract_available(
+                                                    capability_error.is_none(),
+                                                );
+                                                if let Some(capability_error) = capability_error {
+                                                    log::warn!(
+                                                        "aria2 alternate resolver unavailable; using system resolver only: {}",
+                                                        capability_error
                                                     );
-                                                    return;
                                                 }
                                                 aria2_port_clone.store(
                                                     attempt_port,
@@ -19267,9 +19349,8 @@ pub fn run() {
                     interval.tick().await;
                     if poll_port.load(std::sync::atomic::Ordering::Acquire) == 0 {
                         // The daemon launcher publishes the port only after
-                        // the exact route contract is attested. Avoid
-                        // generating RPC failures while startup is pending or
-                        // permanently unavailable.
+                        // baseline RPC readiness is attested. Avoid generating
+                        // RPC failures while startup is pending or unavailable.
                         continue;
                     }
                     // Terminal cleanup removes a download's GID mapping. Do

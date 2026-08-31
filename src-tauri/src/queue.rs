@@ -1010,7 +1010,7 @@ fn aria2_resolver_route_for_log(payload: &SpawnPayload) -> &'static str {
     {
         "configured"
     } else {
-        "automatic"
+        "system"
     }
 }
 
@@ -8342,7 +8342,18 @@ impl SidecarSpawner for ProductionSpawner {
         let attempt_epoch = state.queue_manager.current_aria2_control_epoch(id).await;
         let admission_started = Instant::now();
         let mut options = serde_json::Map::new();
-        crate::network::apply_aria2_route_contract(&mut options);
+        // Keep hostname resolution on the system/TUN route for every normal
+        // and Torrent transfer. The optional Firelink resolver is reserved for
+        // an explicit magnet metadata fallback and is never forced onto stock
+        // Aria2 builds.
+        let route_contract_available = self
+            .app_handle
+            .state::<crate::Aria2DaemonGuard>()
+            .route_contract_available();
+        crate::network::apply_aria2_system_resolver_for_daemon(
+            &mut options,
+            route_contract_available,
+        );
         let mut connection_options = None;
         let resolved_dest = crate::resolve_path(&payload.destination, &self.app_handle);
         if !crate::is_safe_path(&resolved_dest, &self.app_handle) {

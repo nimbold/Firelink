@@ -33,11 +33,12 @@ pub(crate) struct MetadataProbeSchedule {
 pub(crate) async fn run_metadata_probe<C: RpcClient + 'static>(
     client: Arc<C>,
     source: &str,
-    options: Map<String, Value>,
+    mut options: Map<String, Value>,
     metadata_path: &Path,
     timeout: Duration,
     poll_interval: Duration,
 ) -> Result<Vec<u8>, ProbeFailure> {
+    crate::network::apply_aria2_system_resolver(&mut options);
     let deadline = Instant::now() + timeout;
     run_metadata_probe_with_deadlines(
         client,
@@ -66,8 +67,9 @@ pub(crate) async fn run_metadata_probe_with_deadlines<C: RpcClient + 'static>(
 ) -> Result<Vec<u8>, ProbeFailure> {
     // This probe only resolves magnet metadata. It must never allow Aria2 to
     // interpret a downloaded metadata file as another child download because
-    // the probe cleanup guard owns the complete addUri lifecycle.
-    crate::network::apply_aria2_route_contract(&mut options);
+    // the probe cleanup guard owns the complete addUri lifecycle. The caller
+    // selects the system or optional alternate resolver before entering this
+    // lifecycle; this function must not silently change that route.
     options.insert("follow-torrent".to_string(), json!("false"));
     options.insert("follow-metalink".to_string(), json!("false"));
     let planned_gid = new_probe_gid();
@@ -283,11 +285,10 @@ async fn finish_failed_probe<C: RpcClient + 'static>(
     }
 }
 
-/// Run magnet metadata discovery through Aria2's asynchronous resolver while
-/// reserving part of the absolute deadline for deterministic GID cleanup. A
-/// synchronous system-resolver retry is intentionally excluded because
-/// Aria2 executes getaddrinfo on its shared event loop and can otherwise
-/// stall every transfer and the local RPC control channel.
+/// Run one bounded magnet metadata attempt while reserving part of the
+/// absolute deadline for deterministic GID cleanup. Resolver selection is
+/// explicit in `options`; this function never starts a second route or hides a
+/// cleanup failure behind a retry.
 pub(crate) async fn run_bounded_metadata_probe<C: RpcClient + 'static>(
     client: Arc<C>,
     source: &str,
@@ -351,6 +352,16 @@ fn probe_error_class(error: &str) -> &'static str {
         "metadata"
     } else {
         "probe"
+    }
+}
+
+pub(crate) fn allows_resolver_fallback(error: &ProbeFailure) -> bool {
+    match error {
+        ProbeFailure::Cleanup(_) => false,
+        ProbeFailure::Metadata(error) => {
+            matches!(probe_error_class(error), "timeout" | "name_resolution")
+                || crate::retry::is_transient_network_error(error)
+        }
     }
 }
 
@@ -1178,6 +1189,7 @@ mod tests {
         statuses: Mutex<VecDeque<Result<Value, String>>>,
         force_remove: Mutex<Result<Value, String>>,
         removed: AtomicBool,
+        hang_first_status: AtomicBool,
         calls: Mutex<Vec<String>>,
         call_notification: tokio::sync::Notify,
     }
@@ -1191,9 +1203,14 @@ mod tests {
                 statuses: Mutex::new(statuses.into_iter().collect()),
                 force_remove: Mutex::new(force_remove),
                 removed: AtomicBool::new(false),
+                hang_first_status: AtomicBool::new(false),
                 calls: Mutex::new(Vec::new()),
                 call_notification: tokio::sync::Notify::new(),
             }
+        }
+
+        fn hang_first_status(&self) {
+            self.hang_first_status.store(true, Ordering::Release);
         }
 
         fn status(name: &str) -> Result<Value, String> {
@@ -1228,6 +1245,10 @@ mod tests {
             match method {
                 "aria2.addUri" => Ok(json!("gid-1")),
                 "aria2.tellStatus" => {
+                    if self.hang_first_status.swap(false, Ordering::AcqRel) {
+                        std::future::pending::<()>().await;
+                        unreachable!("the first status call should remain pending");
+                    }
                     if let Some(status) = self
                         .statuses
                         .lock()
@@ -1576,25 +1597,30 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn generic_metadata_timeout_does_not_enter_blocking_system_resolver() {
-        let server = ScriptedRpcServer::start(scripts([
-            ("aria2.addUri", vec![ScriptedReply::Result(json!("gid-1"))]),
-            (
-                "aria2.tellStatus",
-                vec![ScriptedReply::Hang, status_reply("removed")],
-            ),
-            (
-                "aria2.forceRemove",
-                vec![ScriptedReply::Result(json!("gid-1"))],
-            ),
-        ]))
-        .await;
-        let (_temporary, probe_dir, metadata_path) = probe_fixture().await;
+        // Use a deterministic pending RPC rather than a loopback HTTP server.
+        // The assertion is about the probe deadline and cleanup ownership, so
+        // socket scheduling must not decide whether the addUri call settles
+        // before a 100ms test budget on a busy hosted runner.
+        let rpc = Arc::new(FakeRpc::new(
+            [FakeRpc::status("removed")],
+            Ok(json!("gid-1")),
+        ));
+        rpc.hang_first_status();
+        let temporary = tempfile::tempdir().expect("temporary probe storage should exist");
+        let metadata_path = temporary.path().join("metadata.torrent");
+        tokio::fs::write(&metadata_path, b"torrent metadata")
+            .await
+            .expect("metadata fixture should be writable");
         let error = run_bounded_metadata_probe(
-            server.client(),
+            rpc.clone(),
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
-            Map::new(),
+            {
+                let mut options = Map::new();
+                crate::network::apply_aria2_system_resolver(&mut options);
+                options
+            },
             &metadata_path,
-            "automatic",
+            "system",
             MetadataProbeSchedule {
                 total_timeout: Duration::from_millis(500),
                 metadata_timeout: Duration::from_millis(100),
@@ -1606,18 +1632,13 @@ mod tests {
         .expect_err("a metadata timeout should remain on the non-blocking route");
         assert!(matches!(error, ProbeFailure::Metadata(message) if message.contains("timed out")));
         assert_eq!(
-            server
-                .calls()
+            rpc.call_names()
                 .iter()
-                .filter(|(method, _)| method == "aria2.addUri")
+                .filter(|method| method.as_str() == "aria2.addUri")
                 .count(),
             1,
             "peer or tracker timeouts must not trigger the synchronous resolver"
         );
-        tokio::fs::remove_dir_all(&probe_dir)
-            .await
-            .expect("timed-out probe fixture should be removable");
-        server.shutdown().await;
     }
 
     #[tokio::test(flavor = "current_thread")]

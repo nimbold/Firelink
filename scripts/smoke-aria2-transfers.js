@@ -10,8 +10,9 @@ import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   ARIA2_LOCAL_FIXTURE_OPTIONS,
-  ARIA2_ROUTE_DAEMON_ARGS,
-  assertAria2RouteContract,
+  ARIA2_SYSTEM_RESOLVER_DAEMON_ARGS,
+  assertAria2Baseline,
+  hasAria2RouteCapabilities,
 } from './aria2-route-contract.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -331,7 +332,7 @@ const child = spawn(binaryPath, [
   '--enable-dht=false',
   '--console-log-level=error',
   '--quiet=true',
-  ...ARIA2_ROUTE_DAEMON_ARGS,
+  ...ARIA2_SYSTEM_RESOLVER_DAEMON_ARGS,
   `--server-stat-if=${serverStatPath}`,
   `--server-stat-of=${serverStatPath}`,
 ], { env: environment, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -340,8 +341,13 @@ child.stderr.on('data', chunk => { stderr += chunk.toString(); });
 
 try {
   const version = await waitForRpc(rpcPort, secret);
-  assertAria2RouteContract(version);
-  console.log(`[INFO] aria2 ${version.version || 'unknown'} normal-transfer smoke`);
+  assertAria2Baseline(version);
+  if (hasAria2RouteCapabilities(version)) {
+    // The fixture server is intentionally loopback. Disable only the custom
+    // target policy after the optional capabilities have been attested.
+    await rpc(rpcPort, secret, 'aria2.changeGlobalOption', [{ 'network-target-policy': 'none' }]);
+  }
+  console.log(`[INFO] aria2 ${version.version || 'unknown'} normal-transfer smoke (system resolver)`);
 
   const rangeGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/range`], {
     ...ARIA2_LOCAL_FIXTURE_OPTIONS,
