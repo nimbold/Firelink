@@ -2,6 +2,79 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Return a stable identity for an existing directory.
+///
+/// Canonical paths alone are not a sufficient ownership fence on Windows,
+/// where Aria2 may report different casing or separators for the same
+/// directory. Pair canonicalization with the platform's filesystem identity
+/// so callers compare the object a path resolves to instead of its spelling.
+pub fn directory_identity(path: &Path) -> io::Result<String> {
+    let canonical = std::fs::canonicalize(path)?;
+    let metadata = std::fs::metadata(&canonical)?;
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            "path is not a directory",
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        return Ok(format!("{}:{}", metadata.dev(), metadata.ino()));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return windows_directory_identity(&canonical);
+    }
+
+    #[allow(unreachable_code)]
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_directory_identity(path: &Path) -> io::Result<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let wide_path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            wide_path.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+
+    let mut metadata = BY_HANDLE_FILE_INFORMATION::default();
+    let succeeded = unsafe { GetFileInformationByHandle(handle, &mut metadata) != 0 };
+    let error = (!succeeded).then(io::Error::last_os_error);
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    match error {
+        Some(error) => Err(error),
+        None => Ok(format_file_identity(&metadata)),
+    }
+}
+
 /// Return a stable filesystem identity for an existing Windows file without
 /// relying on unstable `std::fs::MetadataExt` APIs. The handle is opened with
 /// delete sharing so inspection does not unnecessarily block normal cleanup

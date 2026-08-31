@@ -9,6 +9,79 @@ use std::net::IpAddr;
 
 use reqwest::{ClientBuilder, Proxy, Url};
 
+pub(crate) const ARIA2_FIRELINK_REVISION: &str = "firelink-native-dns-v1";
+pub(crate) const ARIA2_DNS_RESOLVER: &str = "native-async";
+pub(crate) const ARIA2_NETWORK_TARGET_POLICY: &str = "firelink-v1";
+pub(crate) const ARIA2_NETWORK_TARGET_POLICY_DIGEST: &str =
+    "sha256:064503d30f1a043e79113f7e44ddfb517fbf2c578a332896355180743eaf1705";
+
+/// Stamp the route contract on each Aria2 request as well as on the daemon.
+/// This keeps a later global-option mutation from silently changing the DNS or
+/// literal-target policy of a queued transfer.
+pub(crate) fn apply_aria2_route_contract(
+    options: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    options.insert("async-dns".to_string(), serde_json::json!("true"));
+    options.insert(
+        "dns-resolver".to_string(),
+        serde_json::json!(ARIA2_DNS_RESOLVER),
+    );
+    options.insert(
+        "network-target-policy".to_string(),
+        serde_json::json!(ARIA2_NETWORK_TARGET_POLICY),
+    );
+}
+
+/// Verify the exact fork contract before Firelink admits network work.
+pub(crate) fn aria2_route_contract_error(version: &serde_json::Value) -> Option<String> {
+    let async_dns = version
+        .get("enabledFeatures")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|features| {
+            features
+                .iter()
+                .any(|feature| feature.as_str() == Some("Async DNS"))
+        });
+    if !async_dns {
+        return Some("bundled aria2 does not support asynchronous DNS".to_string());
+    }
+
+    for (field, expected, label) in [
+        (
+            "firelinkRevision",
+            ARIA2_FIRELINK_REVISION,
+            "Firelink engine revision",
+        ),
+        (
+            "firelinkDnsResolver",
+            ARIA2_DNS_RESOLVER,
+            "native DNS resolver",
+        ),
+        (
+            "firelinkNetworkTargetPolicy",
+            ARIA2_NETWORK_TARGET_POLICY,
+            "network target policy",
+        ),
+        (
+            "firelinkNetworkTargetPolicyDigest",
+            ARIA2_NETWORK_TARGET_POLICY_DIGEST,
+            "network target policy digest",
+        ),
+    ] {
+        if version.get(field).and_then(serde_json::Value::as_str) != Some(expected) {
+            return Some(format!("bundled aria2 has an incompatible {label}"));
+        }
+    }
+    if version
+        .get("firelinkNetworkTargetPolicyEnforced")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return Some("bundled aria2 is not enforcing the network target policy".to_string());
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NetworkRoute {
     /// Preserve reqwest's normal environment/OS route selection.
@@ -141,10 +214,17 @@ pub(crate) fn parse_and_validate_url(
 pub(crate) fn is_local_hostname(host: &str) -> bool {
     let normalized = host.trim().trim_end_matches('.').to_ascii_lowercase();
     normalized == "localhost"
+        || matches!(normalized.as_str(), "local" | "broadcasthost")
         || normalized.ends_with(".localhost")
         || matches!(
             normalized.as_str(),
-            "localhost.localdomain" | "ip6-localhost" | "ip6-loopback"
+            "localhost.localdomain"
+                | "localhost6"
+                | "localhost6.localdomain6"
+                | "ip6-localhost"
+                | "ip6-loopback"
+                | "ip6-allnodes"
+                | "ip6-allrouters"
         )
         || normalized.ends_with(".local")
 }
@@ -221,7 +301,14 @@ pub(crate) fn is_blocked_network_address(ip: IpAddr) -> bool {
         return true;
     }
     match ip {
-        IpAddr::V4(ipv4) => ipv4.is_private() || ipv4.is_link_local(),
+        IpAddr::V4(ipv4) => {
+            let octets = ipv4.octets();
+            octets[0] == 0
+                || ipv4.is_private()
+                || ipv4.is_link_local()
+                || (octets[0] == 100 && octets[1] & 0xc0 == 0x40)
+                || octets == [255, 255, 255, 255]
+        }
         IpAddr::V6(ipv6) => {
             // Check both IPv4-mapped and deprecated IPv4-compatible forms;
             // either can encode a local IPv4 destination behind an IPv6
@@ -231,6 +318,7 @@ pub(crate) fn is_blocked_network_address(ip: IpAddr) -> bool {
                 .is_some_and(|ipv4| is_blocked_network_address(ipv4.into()))
                 || (ipv6.segments()[0] & 0xfe00) == 0xfc00
                 || (ipv6.segments()[0] & 0xffc0) == 0xfe80
+                || (ipv6.segments()[0] & 0xffc0) == 0xfec0
         }
     }
 }
@@ -244,16 +332,68 @@ mod tests {
     }
 
     #[test]
+    fn aria2_route_contract_requires_exact_capabilities() {
+        let valid = serde_json::json!({
+            "enabledFeatures": ["Async DNS", "BitTorrent"],
+            "firelinkRevision": ARIA2_FIRELINK_REVISION,
+            "firelinkDnsResolver": ARIA2_DNS_RESOLVER,
+            "firelinkNetworkTargetPolicy": ARIA2_NETWORK_TARGET_POLICY,
+            "firelinkNetworkTargetPolicyDigest": ARIA2_NETWORK_TARGET_POLICY_DIGEST,
+            "firelinkNetworkTargetPolicyEnforced": true,
+        });
+        assert_eq!(aria2_route_contract_error(&valid), None);
+
+        for field in [
+            "firelinkRevision",
+            "firelinkDnsResolver",
+            "firelinkNetworkTargetPolicy",
+            "firelinkNetworkTargetPolicyDigest",
+            "firelinkNetworkTargetPolicyEnforced",
+        ] {
+            let mut invalid = valid.clone();
+            invalid.as_object_mut().unwrap().remove(field);
+            assert!(aria2_route_contract_error(&invalid).is_some(), "{field}");
+        }
+
+        let mut wrong_digest = valid.clone();
+        wrong_digest["firelinkNetworkTargetPolicyDigest"] = serde_json::json!("sha256:wrong");
+        assert!(aria2_route_contract_error(&wrong_digest).is_some());
+        assert!(aria2_route_contract_error(&serde_json::json!({
+            "enabledFeatures": ["BitTorrent"]
+        }))
+        .is_some());
+    }
+
+    #[test]
+    fn aria2_route_options_are_explicit_per_transfer() {
+        let mut options = serde_json::Map::new();
+        apply_aria2_route_contract(&mut options);
+        assert_eq!(options.get("async-dns"), Some(&serde_json::json!("true")));
+        assert_eq!(
+            options.get("dns-resolver"),
+            Some(&serde_json::json!(ARIA2_DNS_RESOLVER))
+        );
+        assert_eq!(
+            options.get("network-target-policy"),
+            Some(&serde_json::json!(ARIA2_NETWORK_TARGET_POLICY))
+        );
+    }
+
+    #[test]
     fn rejects_literal_local_and_mapped_addresses() {
         for raw in [
             "http://127.0.0.1/file",
+            "http://0.0.0.1/file",
             "http://10.0.0.8/file",
+            "http://100.64.0.1/file",
             "http://169.254.10.2/file",
+            "http://255.255.255.255/file",
             "http://[::1]/file",
             "http://[::ffff:127.0.0.1]/file",
             "http://[::ffff:169.254.169.254]/file",
             "http://[fc00::1]/file",
             "http://[fe80::1]/file",
+            "http://[fec0::1]/file",
             "http://127.0.0.1./file",
             // URL parsers commonly canonicalize these legacy IPv4 literal
             // spellings, but keep the policy test explicit so a parser
@@ -279,6 +419,9 @@ mod tests {
             "http://localhost./file",
             "http://media.localhost/file",
             "http://localhost.localdomain/file",
+            "http://localhost6/file",
+            "http://broadcasthost/file",
+            "http://local/file",
             "http://printer.local/file",
         ] {
             assert_eq!(

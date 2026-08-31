@@ -12,6 +12,7 @@ import {
   removeOrphanedProvisioningDirectories,
   removePathWithRetry,
 } from './engine-payload-promotion.js';
+import { assertAria2RouteSource } from './aria2-route-contract.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -36,6 +37,17 @@ if (!target) {
 const targetSources = sourceLock.targets?.[target];
 if (!targetSources) {
   console.error(`No source lock exists for ${target}.`);
+  process.exit(1);
+}
+
+try {
+  // Firelink passes route-contract options to every production Aria2 daemon.
+  // A stock archive would either reject those options or silently omit the
+  // literal-target policy on non-macOS targets, so fail before downloading or
+  // staging an unusable payload.
+  assertAria2RouteSource(targetSources.aria2c, target);
+} catch (error) {
+  console.error(error.message);
   process.exit(1);
 }
 
@@ -134,7 +146,10 @@ function writePayloadManifest() {
         {
           version: source.version,
           url: source.url || source.sourceUrl,
-          sha256: source.sha256 || source.sourceSha256
+          sha256: source.sha256 || source.sourceSha256,
+          ...(name === 'aria2c' && source.firelinkRouteContract
+            ? { firelinkRouteContract: source.firelinkRouteContract }
+            : {})
         }
       ])
     ),

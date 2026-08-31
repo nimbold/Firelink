@@ -6574,6 +6574,7 @@ fn aria2_retry_action(payload: &SpawnPayload, error: &str, strike: usize) -> Ari
 fn is_aria2_rpc_unavailable(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     is_transient_network_error(error)
+        || lower.contains("aria2 daemon is not ready")
         || lower.contains("aria2 did not become ready")
         || lower.contains("connection refused")
         || lower.contains("failed to connect")
@@ -8341,6 +8342,7 @@ impl SidecarSpawner for ProductionSpawner {
         let attempt_epoch = state.queue_manager.current_aria2_control_epoch(id).await;
         let admission_started = Instant::now();
         let mut options = serde_json::Map::new();
+        crate::network::apply_aria2_route_contract(&mut options);
         let mut connection_options = None;
         let resolved_dest = crate::resolve_path(&payload.destination, &self.app_handle);
         if !crate::is_safe_path(&resolved_dest, &self.app_handle) {
@@ -12180,6 +12182,7 @@ mod tests {
         assert!(is_aria2_rpc_unavailable(
             "aria2 did not become ready: connection refused"
         ));
+        assert!(is_aria2_rpc_unavailable("aria2 daemon is not ready"));
         assert!(!is_aria2_rpc_unavailable(
             "aria2 error code 3: Resource not found"
         ));

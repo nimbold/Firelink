@@ -8,6 +8,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {
+  ARIA2_LOCAL_FIXTURE_OPTIONS,
+  ARIA2_ROUTE_DAEMON_ARGS,
+  assertAria2RouteContract,
+} from './aria2-route-contract.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arch = { x64: 'x86_64', arm64: 'aarch64' }[os.arch()];
@@ -326,6 +331,7 @@ const child = spawn(binaryPath, [
   '--enable-dht=false',
   '--console-log-level=error',
   '--quiet=true',
+  ...ARIA2_ROUTE_DAEMON_ARGS,
   `--server-stat-if=${serverStatPath}`,
   `--server-stat-of=${serverStatPath}`,
 ], { env: environment, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -334,9 +340,11 @@ child.stderr.on('data', chunk => { stderr += chunk.toString(); });
 
 try {
   const version = await waitForRpc(rpcPort, secret);
+  assertAria2RouteContract(version);
   console.log(`[INFO] aria2 ${version.version || 'unknown'} normal-transfer smoke`);
 
   const rangeGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/range`], {
+    ...ARIA2_LOCAL_FIXTURE_OPTIONS,
     out: 'range.bin', split: '4', 'max-connection-per-server': '4', 'min-split-size': '1M',
   }]);
   const rangeStatus = await waitForTerminal(rpcPort, secret, rangeGid);
@@ -345,6 +353,7 @@ try {
   }
 
   const noRangeGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/no-range`], {
+    ...ARIA2_LOCAL_FIXTURE_OPTIONS,
     out: 'no-range.bin', split: '1', 'max-connection-per-server': '1',
   }]);
   if ((await waitForTerminal(rpcPort, secret, noRangeGid)).status !== 'complete') {
@@ -352,6 +361,7 @@ try {
   }
 
   const authenticatedGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/authenticated`], {
+    ...ARIA2_LOCAL_FIXTURE_OPTIONS,
     out: 'authenticated.bin', 'http-user': 'fixture-user', 'http-passwd': 'fixture-password',
     header: ['Cookie: fixture-cookie=present', 'X-Firelink-Auth: present'],
   }]);
@@ -360,6 +370,7 @@ try {
   }
 
   const resumeGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/throttled`], {
+    ...ARIA2_LOCAL_FIXTURE_OPTIONS,
     out: 'resume.bin', split: '1', continue: 'true',
   }]);
   await waitForProgress(rpcPort, secret, resumeGid);
@@ -374,6 +385,7 @@ try {
   }
 
   const cancelGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/throttled`], {
+    ...ARIA2_LOCAL_FIXTURE_OPTIONS,
     out: 'cancel.bin', split: '1',
   }]);
   await waitForProgress(rpcPort, secret, cancelGid);
@@ -386,17 +398,19 @@ try {
   const mirrorGid = await rpc(rpcPort, secret, 'aria2.addUri', [[
     `http://127.0.0.1:${fixturePort}/missing`,
     `http://127.0.0.1:${fixturePort}/range`,
-  ], { out: 'mirror.bin', split: '1', 'max-tries': '1', 'uri-selector': 'adaptive' }]);
+  ], { ...ARIA2_LOCAL_FIXTURE_OPTIONS, out: 'mirror.bin', split: '1', 'max-tries': '1', 'uri-selector': 'adaptive' }]);
   const mirrorStatus = await waitForTerminal(rpcPort, secret, mirrorGid);
   if (mirrorStatus.status !== 'complete') throw new Error(`adaptive mirror failover failed: ${JSON.stringify(mirrorStatus)}`);
 
   const checksumGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/range`], {
+    ...ARIA2_LOCAL_FIXTURE_OPTIONS,
     out: 'checksum.bin', checksum: `sha-256=${checksum}`, 'check-integrity': 'true',
   }]);
   if ((await waitForTerminal(rpcPort, secret, checksumGid)).status !== 'complete') {
     throw new Error('valid checksum transfer did not complete');
   }
   const mismatchGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/range`], {
+    ...ARIA2_LOCAL_FIXTURE_OPTIONS,
     out: 'checksum-mismatch.bin', checksum: `sha-256=${'0'.repeat(64)}`, 'check-integrity': 'true',
   }]);
   const mismatchStatus = await waitForTerminal(rpcPort, secret, mismatchGid);
@@ -423,6 +437,7 @@ try {
   if (!redirectLocation) throw new Error('redirect preflight returned no Location header');
   const resolvedRedirect = new URL(redirectLocation, redirectProbe.url);
   const redirectGid = await rpc(rpcPort, secret, 'aria2.addUri', [[resolvedRedirect.toString()], {
+    ...ARIA2_LOCAL_FIXTURE_OPTIONS,
     out: 'redirect.bin',
   }]);
   const redirectStatus = await waitForTerminal(rpcPort, secret, redirectGid);
@@ -431,6 +446,7 @@ try {
   }
 
   const missingGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/missing`], {
+    ...ARIA2_LOCAL_FIXTURE_OPTIONS,
     out: 'missing.bin', 'max-tries': '1',
   }]);
   const missingStatus = await waitForTerminal(rpcPort, secret, missingGid);
@@ -439,6 +455,7 @@ try {
   }
 
   const lowSpeedGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/slow`], {
+    ...ARIA2_LOCAL_FIXTURE_OPTIONS,
     out: 'low-speed.bin', 'max-tries': '1', 'lowest-speed-limit': '1M', timeout: '20',
   }]);
   const lowSpeedStatus = await waitForTerminal(rpcPort, secret, lowSpeedGid, 25000);
@@ -447,6 +464,7 @@ try {
   }
 
   const malformedGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/malformed`], {
+    ...ARIA2_LOCAL_FIXTURE_OPTIONS,
     out: 'malformed.bin', 'max-tries': '1',
   }]);
   if ((await waitForTerminal(rpcPort, secret, malformedGid)).status !== 'error') {
@@ -454,6 +472,7 @@ try {
   }
 
   const proxyGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/range`], {
+    ...ARIA2_LOCAL_FIXTURE_OPTIONS,
     out: 'proxy.bin', 'all-proxy': `http://127.0.0.1:${unavailableProxyPort}`, 'max-tries': '1',
   }]);
   if ((await waitForTerminal(rpcPort, secret, proxyGid)).status !== 'error') {

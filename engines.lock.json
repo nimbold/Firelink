@@ -10,10 +10,16 @@
           "sha256": "4f54eb67e4e96c7c3ffa49dd5deb81bc348bbb495080889b47d157d5c6d74443"
         },
         "aria2c": {
-          "version": "1.37.0",
-          "source": "https://github.com/aria2/aria2",
-          "build": "arm64 executable with adjacent aria2-libs",
-          "sha256": "111b2f5ed760f1e1a2ec06117c4e8094fcde336ba16122dda1c5e7209bf1862d"
+          "version": "1.37.0-firelink-native-dns-v1",
+          "source": "https://github.com/aria2/aria2/tree/release-1.37.0",
+          "build": "Firelink native-async DNS and network-target-policy patch set; arm64 executable with adjacent aria2-libs",
+          "firelinkRouteContract": {
+            "revision": "firelink-native-dns-v1",
+            "dnsResolver": "native-async",
+            "networkTargetPolicy": "firelink-v1",
+            "networkTargetPolicyDigest": "sha256:064503d30f1a043e79113f7e44ddfb517fbf2c578a332896355180743eaf1705"
+          },
+          "sha256": "913ddf47f1194f5f22c69f8b5179bbeb48ebf1cf73c62a8d385b05f8dd521614"
         },
         "ffmpeg": {
           "version": "N-125892-g406c5a37aa",

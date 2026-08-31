@@ -3466,17 +3466,6 @@ struct Aria2DaemonGuard {
     shutdown_state: AtomicU8,
 }
 
-fn aria2_supports_async_dns(version: &serde_json::Value) -> bool {
-    version
-        .get("enabledFeatures")
-        .and_then(|features| features.as_array())
-        .is_some_and(|features| {
-            features
-                .iter()
-                .any(|feature| feature.as_str() == Some("Async DNS"))
-        })
-}
-
 impl Aria2DaemonGuard {
     fn new() -> Self {
         Self {
@@ -4031,6 +4020,10 @@ pub async fn rpc_call(
 ) -> Result<serde_json::Value, String> {
     ensure_reqwest_crypto_provider();
 
+    if port == 0 {
+        return Err("aria2 daemon is not ready".to_string());
+    }
+
     let url = format!("http://127.0.0.1:{}/jsonrpc", port);
     let mut payload = serde_json::Map::new();
     payload.insert("jsonrpc".to_string(), serde_json::json!("2.0"));
@@ -4120,8 +4113,13 @@ async fn test_aria2c(
         return Err(format!("aria2 daemon unavailable: {err}"));
     }
 
+    let port = state.aria2_port.load(std::sync::atomic::Ordering::Acquire);
+    if port == 0 {
+        return Err("aria2 daemon is not ready".to_string());
+    }
+
     let result = rpc_call(
-        state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+        port,
         &state.aria2_secret,
         "aria2.getVersion",
         serde_json::json!([]),
@@ -4357,7 +4355,7 @@ async fn check_aria2(app_handle: &tauri::AppHandle, port: u16, secret: &str) -> 
             .clone();
         (se, stderr)
     };
-    let daemon_alive = startup_err.is_none();
+    let daemon_alive = startup_err.is_none() && port != 0;
     let last_stderr_tail = if daemon_stderr.is_empty() {
         None
     } else {
@@ -4371,7 +4369,7 @@ async fn check_aria2(app_handle: &tauri::AppHandle, port: u16, secret: &str) -> 
     let rpc_ready = if daemon_alive {
         rpc_call(port, secret, "aria2.getVersion", serde_json::json!([]))
             .await
-            .is_ok()
+            .is_ok_and(|version| crate::network::aria2_route_contract_error(&version).is_none())
     } else {
         false
     };
@@ -14034,7 +14032,6 @@ mod tests {
         normalize_media_cookie_source,
         validate_enqueue_url, validate_enqueue_uris, validate_keychain_grant_request_id,
         validate_torrent_metadata_network_policy,
-        aria2_supports_async_dns,
         aria2_gid_not_found,
         aria2_download_state_progress, preflight_download_destination_access,
         retained_torrent_id_from_persisted_record,
@@ -14070,17 +14067,6 @@ mod tests {
         ));
         assert!(!aria2_gid_not_found("error trying to connect: connection refused"));
         assert!(!aria2_gid_not_found("aria2 error code 3: Resource not found"));
-    }
-
-    #[test]
-    fn aria2_async_dns_capability_requires_an_explicit_feature() {
-        assert!(aria2_supports_async_dns(&json!({
-            "enabledFeatures": ["Async DNS", "BitTorrent"]
-        })));
-        assert!(!aria2_supports_async_dns(&json!({
-            "enabledFeatures": ["BitTorrent"]
-        })));
-        assert!(!aria2_supports_async_dns(&json!({})));
     }
 
     #[test]
@@ -18457,8 +18443,10 @@ pub fn run() {
         tokio::sync::watch::channel(false);
     let frontend_exit_flush = Arc::new(FrontendExitFlush::new());
 
-    let initial_aria2_port = 6800; // Will be determined dynamically in background
-    let aria2_port = Arc::new(std::sync::atomic::AtomicU16::new(initial_aria2_port));
+    // Zero is the explicit not-ready sentinel. Publishing a candidate port
+    // before the daemon's route contract is attested could make commands or
+    // the WebSocket listener attach to an unrelated local service.
+    let aria2_port = Arc::new(std::sync::atomic::AtomicU16::new(0));
     let aria2_port_clone = Arc::clone(&aria2_port);
     let aria2_secret = uuid::Uuid::new_v4().to_string();
     let builder = tauri::Builder::default()
@@ -18840,7 +18828,7 @@ pub fn run() {
             let app_handle_bg = app.handle().clone();
             tauri::async_runtime::spawn(async move {
 
-                let mut ws_port = 6800;
+                let mut ws_port = None;
                 match resolve_bundled_binary_path(&app_handle_bg, "aria2c") {
                     Ok(binary_path) => {
                         let mut success = false;
@@ -18884,6 +18872,14 @@ pub fn run() {
                                 // resolver so a slow DNS answer cannot block
                                 // the daemon's shared RPC/control loop.
                                 .arg("--async-dns=true")
+                                .arg(format!(
+                                    "--dns-resolver={}",
+                                    crate::network::ARIA2_DNS_RESOLVER
+                                ))
+                                .arg(format!(
+                                    "--network-target-policy={}",
+                                    crate::network::ARIA2_NETWORK_TARGET_POLICY
+                                ))
                                 .arg(format!("--stop-with-process={}", std::process::id()));
 
                             apply_aria2_torrent_global_options(
@@ -18974,10 +18970,6 @@ pub fn run() {
 
                                     log::info!("aria2c spawned successfully on port {}", attempt_port);
 
-                                    aria2_port_clone.store(attempt_port, std::sync::atomic::Ordering::Relaxed);
-                                    ws_port = attempt_port;
-                                    success = true;
-
                                     let daemon_app = app_handle_bg.clone();
                                     if let Some(stderr) = child.stderr.take() {
                                         std::thread::spawn(move || {
@@ -19012,16 +19004,16 @@ pub fn run() {
                                         match rpc_call(attempt_port, &aria2_secret_clone, "aria2.getVersion", serde_json::json!([])).await {
                                             Ok(ver) => {
                                                 let v = ver.get("version").and_then(|v| v.as_str()).unwrap_or("unknown");
-                                                let async_dns_supported =
-                                                    aria2_supports_async_dns(&ver);
+                                                let contract_error =
+                                                    crate::network::aria2_route_contract_error(&ver);
                                                 log::info!(
-                                                    "aria2 daemon ready (version {}) on port {} (async DNS: {})",
+                                                    "aria2 daemon ready (version {}) on port {} (route contract: {})",
                                                     v,
                                                     attempt_port,
-                                                    async_dns_supported
+                                                    if contract_error.is_none() { "verified" } else { "incompatible" }
                                                 );
-                                                if !async_dns_supported {
-                                                    let error = "bundled aria2 does not support asynchronous DNS; network transfers are disabled".to_string();
+                                                if let Some(contract_error) = contract_error {
+                                                    let error = format!("{contract_error}; network transfers are disabled");
                                                     log::error!("{}", error);
                                                     *guard.startup_error.lock().unwrap() =
                                                         Some(error);
@@ -19037,6 +19029,13 @@ pub fn run() {
                                                     );
                                                     return;
                                                 }
+                                                aria2_port_clone.store(
+                                                    attempt_port,
+                                                    std::sync::atomic::Ordering::Release,
+                                                );
+                                                ws_port = Some(attempt_port);
+                                                success = true;
+                                                *guard.startup_error.lock().unwrap() = None;
                                                 ready = true;
                                                 break;
                                             }
@@ -19050,6 +19049,12 @@ pub fn run() {
                                         let err = if last_err.is_empty() { "aria2 daemon did not become ready within 5 seconds".to_string() } else { format!("aria2 did not become ready: {last_err}") };
                                         log::error!("{}", err);
                                         *guard.startup_error.lock().unwrap() = Some(err);
+                                        shutdown_aria2_daemon(app_handle_bg.clone()).await;
+                                        aria2_port_clone.store(
+                                            0,
+                                            std::sync::atomic::Ordering::Release,
+                                        );
+                                        return;
                                     }
                                     break;
                                 }
@@ -19068,14 +19073,33 @@ pub fn run() {
                                     "No Aria2 RPC port is available outside the configured Torrent TCP listen ports".to_string()
                                 }
                             }));
+                            aria2_port_clone.store(
+                                0,
+                                std::sync::atomic::Ordering::Release,
+                            );
+                            return;
                         }
                     }
                     Err(e) => {
                         log::error!("Failed to resolve aria2c binary: {}", e);
                         let guard = app_handle_bg.state::<Aria2DaemonGuard>();
                         *guard.startup_error.lock().unwrap() = Some(format!("Failed to resolve aria2c: {e}"));
+                        aria2_port_clone.store(
+                            0,
+                            std::sync::atomic::Ordering::Release,
+                        );
+                        return;
                     }
                 }
+
+                let Some(ws_port) = ws_port else {
+                    log::error!("aria2 startup completed without a verified WebSocket port");
+                    aria2_port_clone.store(
+                        0,
+                        std::sync::atomic::Ordering::Release,
+                    );
+                    return;
+                };
 
                 let mut ws_retries = 0;
                 loop {
@@ -19241,6 +19265,13 @@ pub fn run() {
                 let mut relocation_checks = HashSet::new();
                 loop {
                     interval.tick().await;
+                    if poll_port.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                        // The daemon launcher publishes the port only after
+                        // the exact route contract is attested. Avoid
+                        // generating RPC failures while startup is pending or
+                        // permanently unavailable.
+                        continue;
+                    }
                     // Terminal cleanup removes a download's GID mapping. Do
                     // not retain one observation per historical download for
                     // the lifetime of the poller.

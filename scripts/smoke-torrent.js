@@ -8,6 +8,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {
+  ARIA2_DNS_RESOLVER,
+  assertAria2RouteCapabilities,
+} from './aria2-route-contract.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -67,6 +71,14 @@ let cleanupPromise;
 let signalTerminationRequested = false;
 
 class DaemonExitedError extends Error {}
+
+function assertFixtureRouteOptions(options, context) {
+  if (options['async-dns'] !== 'true'
+      || options['dns-resolver'] !== ARIA2_DNS_RESOLVER
+      || options['network-target-policy'] !== 'none') {
+    throw new Error(`${context} did not retain the local-fixture resolver contract: ${JSON.stringify(options)}`);
+  }
+}
 
 function childExited(child) {
   return child.exitCode !== null || child.signalCode !== null;
@@ -309,6 +321,8 @@ async function startDaemon({ name, rpcPort, listenPort, directory, extraArgs = [
       '--enable-peer-exchange=false',
       '--bt-enable-lpd=false',
       '--async-dns=true',
+      `--dns-resolver=${ARIA2_DNS_RESOLVER}`,
+      '--network-target-policy=none',
       '--console-log-level=error',
       '--quiet=true',
       ...(selectedListenPort ? [`--listen-port=${selectedListenPort}`] : []),
@@ -330,15 +344,15 @@ async function startDaemon({ name, rpcPort, listenPort, directory, extraArgs = [
     };
     activeDaemons.add(daemon);
     try {
-      await waitFor(`${name} Aria2 RPC`, async () => {
+      const version = await waitFor(`${name} Aria2 RPC`, async () => {
         if (exit) throw new DaemonExitedError(`${name} exited: ${exit.error?.message || `${exit.code}/${exit.signal}`}`);
         try {
-          await rpc(selectedRpcPort, secret, 'aria2.getVersion');
-          return true;
+          return await rpc(selectedRpcPort, secret, 'aria2.getVersion');
         } catch {
           return false;
         }
       }, 10000);
+      assertAria2RouteCapabilities(version);
       return daemon;
     } catch (error) {
       lastError = error;
@@ -770,7 +784,7 @@ async function main() {
     assert(directHandoff.parent.status === 'complete', `normal magnet parent did not complete metadata: ${JSON.stringify(directHandoff.parent)}`);
     assert(directHandoff.parent.files?.some(file => String(file.path).startsWith('[METADATA]')), 'normal magnet parent did not expose a metadata file');
     assert(directOptions['bt-metadata-only'] === 'false', 'normal magnet child did not retain payload mode');
-    assert(directOptions['async-dns'] !== 'false', 'fresh direct Torrent unexpectedly disabled asynchronous DNS');
+    assertFixtureRouteOptions(directOptions, 'fresh direct Torrent');
     await rpc(client.rpcPort, client.secret, 'aria2.removeDownloadResult', [directGid]);
     try {
       await rpc(client.rpcPort, client.secret, 'aria2.removeDownloadResult', [directHandoff.childGid]);
@@ -800,7 +814,7 @@ async function main() {
       'auto-file-renaming': 'false',
     }]);
     const probeOptions = await rpc(client.rpcPort, client.secret, 'aria2.getOption', [probeGid]);
-    assert(probeOptions['async-dns'] !== 'false', 'fresh direct magnet probe unexpectedly disabled asynchronous DNS');
+    assertFixtureRouteOptions(probeOptions, 'fresh direct magnet probe');
     const probeStatus = await waitForTerminal(client, probeGid, 30000);
     assert(probeStatus.status === 'complete', 'magnet metadata probe did not complete');
     const savedTorrentPaths = fs.readdirSync(probeDir)
@@ -858,7 +872,7 @@ async function main() {
     }]);
     const proxiedProbeOptions = await rpc(client.rpcPort, client.secret, 'aria2.getOption', [proxiedProbeGid]);
     assert(proxiedProbeOptions['all-proxy'] === normalizedProxiedProbeRoute, 'proxied magnet metadata probe did not retain the configured proxy route');
-    assert(proxiedProbeOptions['async-dns'] !== 'false', 'proxied magnet metadata probe unexpectedly forced system DNS resolution');
+    assertFixtureRouteOptions(proxiedProbeOptions, 'proxied magnet metadata probe');
     assert(await forceRemoveIfPresent(client, proxiedProbeGid), 'proxied magnet metadata probe was not removable');
     await waitForRemoved(client, proxiedProbeGid);
     console.log('[OK] metadata probe was removed after resolution; direct and proxied probes kept asynchronous DNS');

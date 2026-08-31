@@ -8,6 +8,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {
+  ARIA2_ROUTE_DAEMON_ARGS,
+  ARIA2_ROUTE_OPTIONS,
+  assertAria2RouteContract,
+  assertAria2RouteOptions,
+} from './aria2-route-contract.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arch = { x64: 'x86_64', arm64: 'aarch64' }[os.arch()];
@@ -195,7 +201,7 @@ const child = spawn(binaryPath, [
   `--dir=${tempRoot}`,
   '--file-allocation=none',
   '--enable-dht=false',
-  '--async-dns=true',
+  ...ARIA2_ROUTE_DAEMON_ARGS,
   '--console-log-level=error',
   '--quiet=true',
 ], { env: environment, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -204,18 +210,17 @@ child.stderr.on('data', chunk => { stderr += chunk.toString(); });
 
 try {
   const version = await waitForRpc(rpcPort, secret);
-  const features = Array.isArray(version.enabledFeatures) ? version.enabledFeatures : [];
-  if (!features.includes('Async DNS')) {
-    throw new Error(`packaged aria2 must advertise Async DNS for route-safe transfers: ${JSON.stringify(version)}`);
-  }
-  console.log(`[INFO] aria2 ${version.version || 'unknown'}; Async DNS: supported`);
+  assertAria2RouteContract(version);
+  console.log(`[INFO] aria2 ${version.version || 'unknown'}; Firelink route contract verified`);
 
   const uriResult = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${contentPort}/file`], {
+    ...ARIA2_ROUTE_OPTIONS,
+    'network-target-policy': 'none',
     out: 'resolver-normal.bin',
   }]);
   const uriOptions = await rpc(rpcPort, secret, 'aria2.getOption', [uriResult]);
-  if (uriOptions['async-dns'] === 'false') {
-    throw new Error(`direct aria2.addUri unexpectedly disabled asynchronous DNS: ${JSON.stringify(uriOptions)}`);
+  if (uriOptions['async-dns'] !== 'true' || uriOptions['dns-resolver'] !== 'native-async') {
+    throw new Error(`direct fixture transfer did not retain native asynchronous DNS: ${JSON.stringify(uriOptions)}`);
   }
 
   const torrent = bencode({
@@ -227,16 +232,16 @@ try {
     },
   }).toString('base64');
   const torrentResult = await rpc(rpcPort, secret, 'aria2.addTorrent', [torrent, [], {
+    ...ARIA2_ROUTE_OPTIONS,
     dir: tempRoot,
   }]);
   const torrentOptions = await rpc(rpcPort, secret, 'aria2.getOption', [torrentResult]);
-  if (torrentOptions['async-dns'] === 'false') {
-    throw new Error(`direct aria2.addTorrent unexpectedly disabled asynchronous DNS: ${JSON.stringify(torrentOptions)}`);
-  }
+  assertAria2RouteOptions(torrentOptions, 'direct aria2.addTorrent');
 
   const proxyRoute = 'http://127.0.0.1:9';
   const normalizedProxyRoute = new URL(proxyRoute).toString();
   const proxiedUriResult = await rpc(rpcPort, secret, 'aria2.addUri', [['https://route-owned.invalid/file'], {
+    ...ARIA2_ROUTE_OPTIONS,
     'all-proxy': proxyRoute,
     pause: 'true',
     out: 'resolver-proxied.bin',
@@ -245,11 +250,10 @@ try {
   if (proxiedUriOptions['all-proxy'] !== normalizedProxyRoute) {
     throw new Error(`aria2.addUri did not retain the configured proxy route: ${JSON.stringify(proxiedUriOptions)}`);
   }
-  if (proxiedUriOptions['async-dns'] === 'false') {
-    throw new Error(`proxied aria2.addUri unexpectedly forced system DNS resolution: ${JSON.stringify(proxiedUriOptions)}`);
-  }
+  assertAria2RouteOptions(proxiedUriOptions, 'proxied aria2.addUri');
 
   const proxiedTorrentResult = await rpc(rpcPort, secret, 'aria2.addTorrent', [torrent, [], {
+    ...ARIA2_ROUTE_OPTIONS,
     'all-proxy': proxyRoute,
     pause: 'true',
     dir: tempRoot,
@@ -258,9 +262,7 @@ try {
   if (proxiedTorrentOptions['all-proxy'] !== normalizedProxyRoute) {
     throw new Error(`aria2.addTorrent did not retain the configured proxy route: ${JSON.stringify(proxiedTorrentOptions)}`);
   }
-  if (proxiedTorrentOptions['async-dns'] === 'false') {
-    throw new Error(`proxied aria2.addTorrent unexpectedly forced system DNS resolution: ${JSON.stringify(proxiedTorrentOptions)}`);
-  }
+  assertAria2RouteOptions(proxiedTorrentOptions, 'proxied aria2.addTorrent');
   await forceRemoveIfPresent(rpcPort, secret, proxiedUriResult);
   await forceRemoveIfPresent(rpcPort, secret, proxiedTorrentResult);
 

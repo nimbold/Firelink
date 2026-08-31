@@ -9,6 +9,7 @@ import {
   resolveOutputRoot,
   resolveTargetTriple,
 } from './engine-workspace.js';
+import { assertAria2RouteSource } from './aria2-route-contract.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -45,6 +46,13 @@ if (!source) {
 }
 
 if (targetLock) {
+  try {
+    assertAria2RouteSource(targetLock.engines?.aria2c, target);
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
+
   for (const engine of engines) {
     const name = `${engine}-${target}${suffix}`;
     const expected = targetLock.engines?.[engine]?.sha256;
@@ -76,6 +84,12 @@ if (targetLock) {
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   if (manifest.target !== target) {
     console.error(`Payload manifest target mismatch: ${manifest.target}`);
+    process.exit(1);
+  }
+  try {
+    assertAria2RouteSource(manifest.generatedFrom?.aria2c, target);
+  } catch (error) {
+    console.error(error.message);
     process.exit(1);
   }
   for (const [relative, expected] of Object.entries(manifest.files || {})) {

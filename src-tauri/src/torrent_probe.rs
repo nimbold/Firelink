@@ -67,11 +67,17 @@ pub(crate) async fn run_metadata_probe_with_deadlines<C: RpcClient + 'static>(
     // This probe only resolves magnet metadata. It must never allow Aria2 to
     // interpret a downloaded metadata file as another child download because
     // the probe cleanup guard owns the complete addUri lifecycle.
+    crate::network::apply_aria2_route_contract(&mut options);
     options.insert("follow-torrent".to_string(), json!("false"));
     options.insert("follow-metalink".to_string(), json!("false"));
     let planned_gid = new_probe_gid();
     options.insert("gid".to_string(), json!(&planned_gid));
-    let mut cleanup_guard = ProbeCleanupGuard::new(Arc::clone(&client), metadata_path);
+    // No Aria2 request has started until the ownership fence is recorded. A
+    // setup failure is therefore a metadata failure, allowing the caller that
+    // created the probe directory to remove it without treating it as a live
+    // remote-GID cleanup failure.
+    let mut cleanup_guard = ProbeCleanupGuard::new(Arc::clone(&client), metadata_path)
+        .map_err(|error| ProbeFailure::Metadata(format!("could not prepare magnet metadata probe: {error}")))?;
     cleanup_guard.set_planned_gid(planned_gid);
     cleanup_guard.set_pending_add(tokio::spawn({
         let client = Arc::clone(&client);
@@ -354,20 +360,34 @@ struct ProbeCleanupGuard<C: RpcClient + 'static> {
     planned_gid: Option<String>,
     pending_add: Option<tokio::task::JoinHandle<Result<Value, String>>>,
     probe_dir: Option<PathBuf>,
+    probe_dir_identity: Option<String>,
 }
 
 impl<C: RpcClient + 'static> ProbeCleanupGuard<C> {
-    fn new(client: Arc<C>, metadata_path: &Path) -> Self {
-        Self {
+    fn new(client: Arc<C>, metadata_path: &Path) -> Result<Self, String> {
+        let probe_dir = metadata_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(Path::to_path_buf);
+        let probe_dir_identity = probe_dir
+            .as_deref()
+            .ok_or_else(|| "cannot record magnet metadata probe ownership".to_string())
+            .and_then(|path| {
+                crate::platform::directory_identity(path).map_err(|error| {
+                    format!(
+                        "cannot record magnet metadata probe ownership ({:?})",
+                        error.kind()
+                    )
+                })
+            })?;
+        Ok(Self {
             client,
             gids: Vec::new(),
             planned_gid: None,
             pending_add: None,
-            probe_dir: metadata_path
-                .parent()
-                .filter(|path| !path.as_os_str().is_empty())
-                .map(Path::to_path_buf),
-        }
+            probe_dir,
+            probe_dir_identity: Some(probe_dir_identity),
+        })
     }
 
     fn set_planned_gid(&mut self, gid: String) {
@@ -429,16 +449,23 @@ impl<C: RpcClient + 'static> ProbeCleanupGuard<C> {
                 self.planned_gid = Some(planned_gid);
                 return Err("cannot verify magnet metadata probe ownership".to_string());
             };
+            let Some(probe_dir_identity) = self.probe_dir_identity.as_ref() else {
+                self.planned_gid = Some(planned_gid);
+                return Err("cannot verify magnet metadata probe ownership".to_string());
+            };
             let ownership = tokio::time::timeout(
                 deadline.saturating_duration_since(Instant::now()),
-                query_probe_gid_directory(self.client.as_ref(), &planned_gid),
+                verify_probe_gid_ownership(
+                    self.client.as_ref(),
+                    &planned_gid,
+                    probe_dir,
+                    probe_dir_identity,
+                ),
             )
             .await;
             match ownership {
-                Ok(Ok(Some(directory))) if directory == *probe_dir => {
-                    self.gids.push(planned_gid);
-                }
-                Ok(Ok(Some(_))) | Ok(Ok(None)) => {
+                Ok(Ok(true)) => self.gids.push(planned_gid),
+                Ok(Ok(false)) => {
                     // A planned GID that belongs to another directory, or
                     // no longer exists, is not ours to remove. This closes the
                     // collision/ambiguous-add path without force-removing an
@@ -492,6 +519,7 @@ impl<C: RpcClient + 'static> ProbeCleanupGuard<C> {
         self.planned_gid = None;
         self.pending_add = None;
         self.probe_dir = None;
+        self.probe_dir_identity = None;
     }
 }
 
@@ -501,10 +529,12 @@ impl<C: RpcClient + 'static> Drop for ProbeCleanupGuard<C> {
         let mut planned_gid = self.planned_gid.take();
         let pending_add = self.pending_add.take();
         let probe_dir = self.probe_dir.take();
+        let probe_dir_identity = self.probe_dir_identity.take();
         if gids.is_empty()
             && planned_gid.is_none()
             && pending_add.is_none()
             && probe_dir.is_none()
+            && probe_dir_identity.is_none()
         {
             return;
         }
@@ -555,16 +585,25 @@ impl<C: RpcClient + 'static> Drop for ProbeCleanupGuard<C> {
                     );
                     return;
                 };
+                let Some(probe_dir_identity) = probe_dir_identity.as_ref() else {
+                    log::warn!(
+                        "canceled magnet metadata probe has no recorded directory identity"
+                    );
+                    return;
+                };
                 match tokio::time::timeout(
                     CANCELLATION_CLEANUP_ATTEMPT_TIMEOUT,
-                    query_probe_gid_directory(client.as_ref(), &candidate),
+                    verify_probe_gid_ownership(
+                        client.as_ref(),
+                        &candidate,
+                        probe_dir,
+                        probe_dir_identity,
+                    ),
                 )
                 .await
                 {
-                    Ok(Ok(Some(directory))) if directory == *probe_dir => {
-                        gids.push(candidate);
-                    }
-                    Ok(Ok(Some(_))) | Ok(Ok(None)) => {
+                    Ok(Ok(true)) => gids.push(candidate),
+                    Ok(Ok(false)) => {
                         // The candidate is either another transfer's GID or
                         // already gone; neither case is safe to force-remove.
                     }
@@ -640,6 +679,36 @@ impl<C: RpcClient + 'static> Drop for ProbeCleanupGuard<C> {
     }
 }
 
+/// Verify ownership of an addUri GID before force-removing it.
+///
+/// The normal fence is the filesystem identity recorded before the addUri
+/// call. If the probe directory has already disappeared, there is no identity
+/// left to compare; in that one case an exact route/path match is sufficient
+/// to remove the remote GID. forceRemove only affects Aria2 state, so this
+/// closes the orphaned-GID leak without deleting a replacement directory.
+async fn verify_probe_gid_ownership<C: RpcClient>(
+    client: &C,
+    gid: &str,
+    probe_dir: &Path,
+    probe_dir_identity: &str,
+) -> Result<bool, String> {
+    let Some(reported_directory) = query_probe_gid_directory(client, gid).await? else {
+        return Ok(false);
+    };
+
+    match crate::platform::directory_identity(&reported_directory) {
+        Ok(reported_identity) => Ok(reported_identity == probe_dir_identity),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(
+            !probe_dir.exists()
+                && crate::platform::paths_equal(probe_dir, &reported_directory),
+        ),
+        Err(error) => Err(format!(
+            "could not verify magnet metadata probe directory identity ({:?})",
+            error.kind()
+        )),
+    }
+}
+
 async fn cleanup_metadata_probe<C: RpcClient>(client: &C, gid: &str) -> Result<(), String> {
     match client.call("aria2.forceRemove", json!([gid])).await {
         Ok(result) => {
@@ -675,12 +744,26 @@ async fn query_probe_gid_directory<C: RpcClient>(
             ));
         }
     };
-    let directory = result
+    if let Some(directory) = result
         .get("dir")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("aria2 gid {gid} ownership response has no directory"))?;
-    Ok(Some(PathBuf::from(directory)))
+    {
+        return Ok(Some(PathBuf::from(directory)));
+    }
+    if result
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| matches!(status, "complete" | "error" | "removed"))
+    {
+        // A terminal GID no longer needs a forceRemove. Some Aria2 versions
+        // omit `dir` from terminal status, so absence of that field is not an
+        // ownership uncertainty in this state.
+        return Ok(None);
+    }
+    Err(format!(
+        "aria2 gid {gid} ownership response has no directory"
+    ))
 }
 
 async fn aria2_status<C: RpcClient>(client: &C, gid: &str) -> Result<String, String> {
@@ -1048,6 +1131,30 @@ mod tests {
             .await
             .expect("metadata fixture should be writable");
         (temporary, probe_dir, metadata_path)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn probe_setup_failure_is_reported_before_any_aria2_request() {
+        let temporary = tempfile::tempdir().expect("temporary probe storage should exist");
+        let metadata_path = temporary.path().join("missing").join("metadata.torrent");
+        let server = ScriptedRpcServer::start(Vec::new()).await;
+
+        let error = run_metadata_probe(
+            server.client(),
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            Map::new(),
+            &metadata_path,
+            Duration::from_secs(1),
+            Duration::ZERO,
+        )
+        .await
+        .expect_err("a missing probe directory should fail before Aria2 is contacted");
+        assert!(matches!(
+            error,
+            ProbeFailure::Metadata(message) if message.contains("could not prepare")
+        ));
+        assert!(server.calls().is_empty());
+        server.shutdown().await;
     }
 
     async fn wait_for_path(path: &Path, should_exist: bool) {
@@ -1528,7 +1635,10 @@ mod tests {
             (
                 "aria2.tellStatus",
                 vec![
-                    status_reply_with_directory("active", &probe_dir),
+                    // Aria2 may spell the same directory differently across
+                    // platforms. Ownership must use filesystem identity, not
+                    // textual PathBuf equality.
+                    status_reply_with_directory("active", &probe_dir.join(".")),
                     status_reply("removed"),
                 ],
             ),
@@ -1577,6 +1687,70 @@ mod tests {
             .await
             .expect("the caller should remove the probe directory after cleanup succeeds");
         server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cleanup_removes_planned_gid_when_probe_directory_is_already_missing() {
+        let (_temporary, probe_dir, metadata_path) = probe_fixture().await;
+        let server = ScriptedRpcServer::start(scripts([
+            (
+                "aria2.tellStatus",
+                vec![
+                    status_reply_with_directory("active", &probe_dir),
+                    status_reply("removed"),
+                ],
+            ),
+            (
+                "aria2.forceRemove",
+                vec![ScriptedReply::Result(json!("gid-planned"))],
+            ),
+        ]))
+        .await;
+        let mut guard = ProbeCleanupGuard::new(server.client(), &metadata_path)
+            .expect("probe ownership should be recorded before deletion");
+        guard.set_planned_gid("gid-planned".to_string());
+        tokio::fs::remove_dir_all(&probe_dir)
+            .await
+            .expect("test should remove the probe directory before cleanup");
+
+        guard
+            .cleanup_until(Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("an exact missing probe path still owns the planned GID");
+        assert!(server
+            .calls()
+            .iter()
+            .any(|(method, params)| method == "aria2.forceRemove"
+                && params
+                    .as_array()
+                    .and_then(|values| values.last())
+                    .and_then(Value::as_str)
+                    == Some("gid-planned")));
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cleanup_accepts_terminal_planned_gid_without_directory() {
+        let (_temporary, probe_dir, metadata_path) = probe_fixture().await;
+        let server = ScriptedRpcServer::start(scripts([(
+            "aria2.tellStatus",
+            vec![status_reply("removed")],
+        )]))
+        .await;
+        let mut guard = ProbeCleanupGuard::new(server.client(), &metadata_path)
+            .expect("probe ownership should be recorded before cleanup");
+        guard.set_planned_gid("gid-terminal".to_string());
+
+        guard
+            .cleanup_until(Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("a terminal planned GID needs no directory ownership check");
+        assert!(!server.calls().iter().any(|(method, _)|
+            method == "aria2.forceRemove"));
+        server.shutdown().await;
+        tokio::fs::remove_dir_all(&probe_dir)
+            .await
+            .expect("terminal probe fixture should be removable");
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -9,6 +9,10 @@ import {
   resolveOutputRoot,
   resolveTargetTriple,
 } from './engine-workspace.js';
+import {
+  ARIA2_ROUTE_DAEMON_ARGS,
+  assertAria2RouteContract,
+} from './aria2-route-contract.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -469,6 +473,7 @@ if (canExecuteTarget) {
         '--quiet',
         '--console-log-level=error',
         '--rpc-listen-all=false',
+        ...ARIA2_ROUTE_DAEMON_ARGS,
       ], {
         env: engineEnv('aria2c'),
         stdio: ['ignore', 'ignore', 'pipe'],
@@ -563,6 +568,7 @@ if (canExecuteTarget) {
       try {
         const resp = JSON.parse(result.data);
         if (resp?.result?.version) {
+          assertAria2RouteContract(resp.result);
           ok(`aria2 RPC version: ${resp.result.version}`);
         } else {
           fail(`aria2 RPC unexpected response: ${result.data}`);
