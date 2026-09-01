@@ -24,9 +24,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png", "test"] }
-tauri-plugin-opener = "2"
-tauri-plugin-dialog = "2.7.2"
-tauri-plugin-shell = "2"
+tauri-plugin-opener = "2.5.5"
+tauri-plugin-dialog = "2.7.3"
+tauri-plugin-shell = "2.3.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["fs", "process", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time"] }
@@ -35,15 +35,15 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
 uuid = { version = "1", features = ["v4"] }
 ts-rs = { version = "12", features = ["serde-compat", "uuid-impl"] }
-tauri-plugin-notification = "2.3.3"
-tauri-plugin-clipboard-manager = "2.3.2"
+tauri-plugin-notification = "2.4.0"
+tauri-plugin-clipboard-manager = "2.3.3"
 sysinfo = "0.39.3"
 hmac = "0.13"
 sha2 = "0.11"
 sha1 = "0.10"
 base64 = "0.22"
-tauri-plugin-deep-link = "2"
-tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
+tauri-plugin-deep-link = "2.4.10"
+tauri-plugin-single-instance = { version = "2.4.4", features = ["deep-link"] }
 tempfile = "3"
 thiserror = "2.0.19"
 axum = "0.8.9"
@@ -58,7 +58,7 @@ chrono = "0.4.38"
 url = "2"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 log = "0.4.32"
-tauri-plugin-log = "2.9.0"
+tauri-plugin-log = "2.9.1"
 trash = "5"
 async-trait = "0.1"
 keyring-core = "1.0.0"
