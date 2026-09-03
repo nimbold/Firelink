@@ -9200,8 +9200,8 @@ async fn remove_magnet_metadata_probe_dir(path: &std::path::Path) -> Result<(), 
 }
 
 const MAGNET_METADATA_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
-const MAGNET_SYSTEM_RESOLVER_ATTEMPT: Duration = Duration::from_secs(20);
-const MAGNET_ALTERNATE_RESOLVER_ATTEMPT: Duration = Duration::from_secs(40);
+const MAGNET_PRIMARY_RESOLVER_ATTEMPT: Duration = Duration::from_secs(35);
+const MAGNET_FALLBACK_RESOLVER_ATTEMPT: Duration = Duration::from_secs(25);
 const MAGNET_PROBE_CLEANUP_RESERVE: Duration = Duration::from_secs(5);
 
 fn magnet_probe_schedule(total_timeout: Duration) -> crate::torrent_probe::MetadataProbeSchedule {
@@ -9310,18 +9310,18 @@ async fn resolve_magnet_metadata(
     let route_contract_available = app_handle
         .state::<Aria2DaemonGuard>()
         .route_contract_available();
-    let mut system_options = base_options.clone();
-    crate::network::apply_aria2_system_resolver_for_daemon(
-        &mut system_options,
+    let mut primary_options = base_options.clone();
+    crate::network::apply_aria2_transfer_resolver(
+        &mut primary_options,
         route_contract_available,
     );
     let first_result = crate::torrent_probe::run_bounded_metadata_probe(
         client,
         &sanitized_source,
-        system_options,
+        primary_options,
         &metadata_path,
-        "system",
-        magnet_probe_schedule(MAGNET_SYSTEM_RESOLVER_ATTEMPT),
+        if route_contract_available { "route" } else { "stock" },
+        magnet_probe_schedule(MAGNET_PRIMARY_RESOLVER_ATTEMPT),
     )
     .await;
 
@@ -9333,7 +9333,9 @@ async fn resolve_magnet_metadata(
                 .err()
                 .is_some_and(crate::torrent_probe::allows_resolver_fallback) =>
         {
-            let cleanup_budget = operation_deadline.saturating_duration_since(Instant::now());
+            let cleanup_budget = operation_deadline
+                .saturating_duration_since(Instant::now())
+                .max(MAGNET_PROBE_CLEANUP_RESERVE);
             match tokio::time::timeout(cleanup_budget, remove_magnet_metadata_probe_dir(&probe_dir))
                 .await
             {
@@ -9350,7 +9352,9 @@ async fn resolve_magnet_metadata(
                     );
                 }
             }
-            let create_budget = operation_deadline.saturating_duration_since(Instant::now());
+            let create_budget = operation_deadline
+                .saturating_duration_since(Instant::now())
+                .max(MAGNET_PROBE_CLEANUP_RESERVE);
             match tokio::time::timeout(create_budget, tokio::fs::create_dir_all(&probe_dir)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
@@ -9365,10 +9369,10 @@ async fn resolve_magnet_metadata(
                     );
                 }
             }
-            let alternate_budget = MAGNET_ALTERNATE_RESOLVER_ATTEMPT
+            let fallback_budget = MAGNET_FALLBACK_RESOLVER_ATTEMPT
                 .min(operation_deadline.saturating_duration_since(Instant::now()));
-            let mut alternate_options = base_options;
-            crate::network::apply_aria2_route_contract(&mut alternate_options);
+            let mut fallback_options = base_options;
+            crate::network::apply_aria2_system_resolver_for_daemon(&mut fallback_options, true);
             crate::torrent_probe::run_bounded_metadata_probe(
                 std::sync::Arc::new(Aria2RpcClient {
                     port: state
@@ -9377,10 +9381,10 @@ async fn resolve_magnet_metadata(
                     secret: state.aria2_secret.clone(),
                 }),
                 &sanitized_source,
-                alternate_options,
+                fallback_options,
                 &metadata_path,
-                "alternate",
-                magnet_probe_schedule(alternate_budget),
+                "system",
+                magnet_probe_schedule(fallback_budget),
             )
             .await
         }

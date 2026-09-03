@@ -8342,15 +8342,17 @@ impl SidecarSpawner for ProductionSpawner {
         let attempt_epoch = state.queue_manager.current_aria2_control_epoch(id).await;
         let admission_started = Instant::now();
         let mut options = serde_json::Map::new();
-        // Keep hostname resolution on the system/TUN route for every normal
-        // and Torrent transfer. The optional Firelink resolver is reserved for
-        // an explicit magnet metadata fallback and is never forced onto stock
-        // Aria2 builds.
+        // Keep hostname resolution route-aware and non-blocking for every
+        // normal and Torrent transfer. When the Firelink route contract is
+        // available, transfers use NativeAsyncResolver on background worker
+        // threads to honor TUN, VPN, and proxy routes without blocking Aria2's
+        // single-threaded event loop. Stock Aria2 builds fall back to clean
+        // standard resolver options without unsupported flags.
         let route_contract_available = self
             .app_handle
             .state::<crate::Aria2DaemonGuard>()
             .route_contract_available();
-        crate::network::apply_aria2_system_resolver_for_daemon(
+        crate::network::apply_aria2_transfer_resolver(
             &mut options,
             route_contract_available,
         );

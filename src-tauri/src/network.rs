@@ -66,6 +66,31 @@ pub(crate) fn apply_aria2_route_contract(
     );
 }
 
+/// Select the appropriate resolver options for a transfer based on whether the
+/// running Aria2 daemon advertises the Firelink route contract.
+///
+/// When the Firelink route contract is available, transfers MUST use the
+/// native-async resolver (`dns-resolver=native-async`, `async-dns=true`,
+/// `network-target-policy=firelink-v1`). This executes the OS resolver
+/// (`getaddrinfo`) on asynchronous worker threads, fully honoring TUN, VPN,
+/// and proxy routes (e.g. Shadowrocket, Happ, Sing-box, V2RayN) without
+/// blocking Aria2's single-threaded event loop or its RPC server.
+///
+/// When the route contract is unavailable (stock Aria2 builds), Firelink falls
+/// back to standard system resolver options (`async-dns=false`) without
+/// passing custom options that would be rejected by stock binaries.
+pub(crate) fn apply_aria2_transfer_resolver(
+    options: &mut serde_json::Map<String, serde_json::Value>,
+    route_contract_available: bool,
+) {
+    if route_contract_available {
+        apply_aria2_route_contract(options);
+    } else {
+        apply_aria2_system_resolver_for_daemon(options, false);
+    }
+}
+
+
 fn has_string_capability(version: &serde_json::Value, field: &str, expected: &str) -> bool {
     version
         .get(field)
@@ -492,6 +517,33 @@ mod tests {
             Some(&serde_json::json!("none"))
         );
         assert_eq!(patched_options.get("async-dns"), Some(&serde_json::json!("false")));
+    }
+
+    #[test]
+    fn aria2_transfer_resolver_selects_route_contract_when_available_and_stock_otherwise() {
+        let mut patched_options = serde_json::Map::new();
+        apply_aria2_transfer_resolver(&mut patched_options, true);
+        assert_eq!(
+            patched_options.get("async-dns"),
+            Some(&serde_json::json!("true"))
+        );
+        assert_eq!(
+            patched_options.get("dns-resolver"),
+            Some(&serde_json::json!(ARIA2_DNS_RESOLVER))
+        );
+        assert_eq!(
+            patched_options.get("network-target-policy"),
+            Some(&serde_json::json!(ARIA2_NETWORK_TARGET_POLICY))
+        );
+
+        let mut stock_options = serde_json::Map::new();
+        apply_aria2_transfer_resolver(&mut stock_options, false);
+        assert_eq!(
+            stock_options.get("async-dns"),
+            Some(&serde_json::json!("false"))
+        );
+        assert!(!stock_options.contains_key("dns-resolver"));
+        assert!(!stock_options.contains_key("network-target-policy"));
     }
 
     #[test]

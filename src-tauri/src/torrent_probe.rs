@@ -250,8 +250,11 @@ pub(crate) async fn run_metadata_probe_with_deadlines<C: RpcClient + 'static>(
     }
     .await;
 
+    let cleanup_budget = cleanup_deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_secs(5));
     let cleanup_result = match tokio::time::timeout(
-        cleanup_deadline.saturating_duration_since(Instant::now()),
+        cleanup_budget,
         cleanup_metadata_probe(client.as_ref(), &gid),
     )
     .await
@@ -497,9 +500,12 @@ impl<C: RpcClient + 'static> ProbeCleanupGuard<C> {
         }
 
         let mut first_error = None;
+        let cleanup_budget = deadline
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_secs(5));
         for gid in self.gids.clone() {
             match tokio::time::timeout(
-                deadline.saturating_duration_since(Instant::now()),
+                cleanup_budget,
                 cleanup_metadata_probe(self.client.as_ref(), &gid),
             )
             .await
