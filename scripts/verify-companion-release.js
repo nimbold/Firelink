@@ -22,7 +22,7 @@ export function exactVersionTag(extensionRoot, expectedTag) {
         stdio: ['ignore', 'pipe', 'ignore'],
         env: {
           ...process.env,
-          GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL || (process.platform === 'win32' ? 'NUL' : '/dev/null'),
+          GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
           GIT_CONFIG_NOSYSTEM: '1',
         },
       }

@@ -680,6 +680,9 @@ pub fn get_supported_media_domains() -> Vec<String> {
 #[tauri::command]
 pub fn is_supported_media(url: String) -> bool {
     if let Ok(parsed_url) = reqwest::Url::parse(&url) {
+        if !matches!(parsed_url.scheme(), "http" | "https") {
+            return false;
+        }
         if let Some(host) = parsed_url.host_str() {
             let host_lower = host.to_lowercase();
             for domain in SUPPORTED_DOMAINS.iter() {
@@ -694,7 +697,7 @@ pub fn is_supported_media(url: String) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::get_file_category;
+    use super::{get_file_category, is_supported_media};
     use crate::ipc::DownloadCategory;
 
     #[test]
@@ -707,5 +710,14 @@ mod tests {
             get_file_category("Example.mkv".to_string()),
             DownloadCategory::Movies
         ));
+    }
+
+    #[test]
+    fn only_http_urls_are_supported_media_routes() {
+        assert!(is_supported_media(
+            "https://youtube.com/watch?v=video".to_string()
+        ));
+        assert!(!is_supported_media("ftp://youtube.com/video".to_string()));
+        assert!(!is_supported_media("sftp://youtube.com/video".to_string()));
     }
 }

@@ -5,9 +5,18 @@ use std::time::Duration;
 use tauri::Emitter;
 
 fn minute_of_day(value: &str) -> Option<u32> {
-    let (hour, minute) = value.split_once(':')?;
-    let hour = hour.parse::<u32>().ok()?;
-    let minute = minute.parse::<u32>().ok()?;
+    let bytes = value.as_bytes();
+    if bytes.len() != 5
+        || bytes[2] != b':'
+        || !bytes[0].is_ascii_digit()
+        || !bytes[1].is_ascii_digit()
+        || !bytes[3].is_ascii_digit()
+        || !bytes[4].is_ascii_digit()
+    {
+        return None;
+    }
+    let hour = u32::from(bytes[0] - b'0') * 10 + u32::from(bytes[1] - b'0');
+    let minute = u32::from(bytes[3] - b'0') * 10 + u32::from(bytes[4] - b'0');
     (hour < 24 && minute < 60).then_some(hour * 60 + minute)
 }
 
@@ -254,6 +263,10 @@ mod tests {
     fn rejects_invalid_scheduler_times() {
         assert_eq!(minute_of_day("24:00"), None);
         assert_eq!(minute_of_day("12:60"), None);
+        assert_eq!(minute_of_day("1:02"), None);
+        assert_eq!(minute_of_day("01:2"), None);
+        assert_eq!(minute_of_day(" 01:02"), None);
+        assert_eq!(minute_of_day("01:02 "), None);
         assert_eq!(minute_of_day("bad"), None);
     }
 

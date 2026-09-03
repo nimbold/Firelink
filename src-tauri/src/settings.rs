@@ -545,8 +545,15 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
         if !active_ids.is_array() {
             state.remove("schedulerActiveDownloadIds");
         } else if let Some(ids_arr) = state.get_mut("schedulerActiveDownloadIds").and_then(Value::as_array_mut) {
-            ids_arr.retain(|v| v.as_str().is_some());
+            ids_arr.retain(|v| v.as_str().is_some_and(|id| !id.trim().is_empty()));
         }
+    }
+    if !state
+        .get("schedulerActiveDownloadIds")
+        .and_then(Value::as_array)
+        .is_some_and(|ids| !ids.is_empty())
+    {
+        state.insert("schedulerRunning".to_string(), Value::Bool(false));
     }
     if let Some(overrides) = state.get("categoryDirectoryOverrides") {
         if !overrides.is_object() {
@@ -1529,6 +1536,39 @@ mod tests {
         assert_eq!(settings.scheduler.post_queue_action, crate::ipc::PostQueueAction::None);
         assert_eq!(settings.scheduler.selected_days, default_settings().scheduler.selected_days);
         assert_eq!(settings.scheduler.selected_queue_ids, default_settings().scheduler.selected_queue_ids);
+        assert!(!settings.scheduler_running);
+        assert!(settings.scheduler_active_download_ids.is_empty());
+    }
+
+    #[test]
+    fn filters_empty_scheduler_active_download_ids() {
+        let stored = json!({
+            "state": {
+                "schedulerRunning": true,
+                "schedulerActiveDownloadIds": ["", "  ", "download-1", 42]
+            }
+        });
+
+        let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
+
+        assert_eq!(
+            settings.scheduler_active_download_ids,
+            vec!["download-1".to_string()]
+        );
+        assert!(settings.scheduler_running);
+    }
+
+    #[test]
+    fn does_not_restore_a_running_scheduler_without_active_download_ids() {
+        let stored = json!({
+            "state": {
+                "schedulerRunning": true,
+                "schedulerActiveDownloadIds": ["", "  ", 42]
+            }
+        });
+
+        let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
+
         assert!(!settings.scheduler_running);
         assert!(settings.scheduler_active_download_ids.is_empty());
     }

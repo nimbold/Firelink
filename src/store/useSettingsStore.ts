@@ -166,6 +166,13 @@ const persistedBoolean = (value: unknown, fallback: boolean) =>
 const persistedString = (value: unknown, fallback: string): string =>
   typeof value === 'string' ? value : fallback;
 
+const sanitizeSchedulerActiveDownloadIds = (
+  value: unknown,
+  fallback: string[]
+): string[] => Array.isArray(value)
+  ? value.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+  : fallback;
+
 const persistedFiniteInteger = (
   value: unknown,
   minimum: number,
@@ -865,7 +872,12 @@ export const useSettingsStore = create<SettingsState>()(
         shouldPersistLegacyFoldersFallback = false;
         state.setFoldersCollapsed(state.isFoldersCollapsed);
       },
-      partialize: (state): PersistedSettingsSnapshot => ({
+      partialize: (state): PersistedSettingsSnapshot => {
+        const schedulerActiveDownloadIds = sanitizeSchedulerActiveDownloadIds(
+          state.schedulerActiveDownloadIds,
+          []
+        );
+        return ({
         theme: state.theme,
         fontFamily: state.fontFamily,
         windowControlStyle: state.windowControlStyle,
@@ -888,8 +900,8 @@ export const useSettingsStore = create<SettingsState>()(
         sidebarPosition: state.sidebarPosition,
         activeSettingsTab: state.activeSettingsTab,
         scheduler: state.scheduler,
-        schedulerRunning: state.schedulerRunning,
-        schedulerActiveDownloadIds: state.schedulerActiveDownloadIds,
+        schedulerRunning: state.schedulerRunning && schedulerActiveDownloadIds.length > 0,
+        schedulerActiveDownloadIds,
         schedulerLastStartKey: state.schedulerLastStartKey,
         schedulerLastStopKey: state.schedulerLastStopKey,
         lastCustomSpeedLimitKiB: state.lastCustomSpeedLimitKiB,
@@ -940,7 +952,8 @@ export const useSettingsStore = create<SettingsState>()(
         keychainAccessVersion: state.keychainAccessVersion,
         keychainPromptDismissed: state.keychainPromptDismissed,
         autoCheckUpdates: state.autoCheckUpdates
-      }),
+        });
+      },
       merge: (persistedState: unknown, currentState) => {
         const persisted = persistedState && typeof persistedState === 'object'
           ? persistedState as Partial<SettingsState>
@@ -953,6 +966,10 @@ export const useSettingsStore = create<SettingsState>()(
         const foldersCollapsedFallback = legacyFoldersCollapsed
           ?? currentState.isFoldersCollapsed;
         const locations = normalizeDownloadLocationSettings(persisted);
+        const schedulerActiveDownloadIds = sanitizeSchedulerActiveDownloadIds(
+          persisted.schedulerActiveDownloadIds,
+          currentState.schedulerActiveDownloadIds
+        );
         return ({
           ...currentState,
           ...persisted,
@@ -1180,10 +1197,9 @@ export const useSettingsStore = create<SettingsState>()(
             ? persisted.scheduler.postQueueAction
             : currentState.scheduler.postQueueAction
         },
-        schedulerRunning: persistedBoolean(persisted.schedulerRunning, currentState.schedulerRunning),
-        schedulerActiveDownloadIds: Array.isArray(persisted.schedulerActiveDownloadIds)
-          ? persisted.schedulerActiveDownloadIds.filter((id): id is string => typeof id === 'string')
-          : currentState.schedulerActiveDownloadIds,
+        schedulerRunning: persistedBoolean(persisted.schedulerRunning, currentState.schedulerRunning)
+          && schedulerActiveDownloadIds.length > 0,
+        schedulerActiveDownloadIds,
         schedulerLastStartKey: persistedString(persisted.schedulerLastStartKey, currentState.schedulerLastStartKey),
         schedulerLastStopKey: persistedString(persisted.schedulerLastStopKey, currentState.schedulerLastStopKey),
         siteLogins: Array.isArray(persisted.siteLogins)

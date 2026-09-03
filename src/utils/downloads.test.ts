@@ -9,6 +9,7 @@ import {
   canonicalizeDownloadFileName,
   categoryForDownload,
   categoryForFileName,
+  isMediaUrl,
   isAllocationPhaseVisible,
   isAllocationPhaseEligible,
   isValidTorrentExcludeTrackerList,
@@ -48,6 +49,14 @@ describe('download category detection', () => {
     expect(categoryForFileName('Example.mkv')).toBe('Movies');
     expect(categoryForDownload('Renamed', true, 'Other')).toBe('Other');
     expect(categoryForDownload('Renamed', true, 'Torrents')).toBe('Torrents');
+  });
+
+  it('only classifies HTTP(S) provider URLs as media', () => {
+    expect(isMediaUrl('https://www.youtube.com/watch?v=video')).toBe(true);
+    expect(isMediaUrl('http://youtu.be/video')).toBe(true);
+    expect(isMediaUrl('ftp://youtube.com/video.mp4')).toBe(false);
+    expect(isMediaUrl('sftp://youtube.com/video.mp4')).toBe(false);
+    expect(isMediaUrl('magnet://youtube.com/video')).toBe(false);
   });
 });
 

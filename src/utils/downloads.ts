@@ -595,6 +595,7 @@ export const downloadFileNamesMatch = (left: string, right: string): boolean => 
 export const isMediaUrl = (rawUrl: string): boolean => {
   try {
     const url = new URL(rawUrl);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
     return MEDIA_DOMAINS.some(domain =>
       url.hostname === domain || url.hostname.endsWith(`.${domain}`)
     );

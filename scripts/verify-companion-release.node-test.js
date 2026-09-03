@@ -120,6 +120,7 @@ test('rejects a Companion tag for another version', () => {
 
 test('exactVersionTag resolves tag on HEAD with isolated git environment', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'firelink-git-test-'));
+  const previousGlobalConfig = process.env.GIT_CONFIG_GLOBAL;
   try {
     const gitEnv = {
       ...process.env,
@@ -134,9 +135,17 @@ test('exactVersionTag resolves tag on HEAD with isolated git environment', () =>
     execFileSync('git', ['-C', root, 'commit', '--allow-empty', '-m', 'test'], { env: gitEnv, stdio: 'ignore' });
     execFileSync('git', ['-C', root, 'tag', 'v2.0.7'], { env: gitEnv, stdio: 'ignore' });
 
+    const globalConfig = path.join(root, 'global.gitconfig');
+    fs.writeFileSync(globalConfig, '[alias]\n\ttag = !printf "v2.0.8\\n"\n');
+    process.env.GIT_CONFIG_GLOBAL = globalConfig;
     assert.equal(exactVersionTag(root, 'v2.0.7'), 'v2.0.7');
     assert.equal(exactVersionTag(root, 'v2.0.8'), null);
   } finally {
+    if (previousGlobalConfig === undefined) {
+      delete process.env.GIT_CONFIG_GLOBAL;
+    } else {
+      process.env.GIT_CONFIG_GLOBAL = previousGlobalConfig;
+    }
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

@@ -9368,9 +9368,7 @@ async fn resolve_magnet_metadata(
                 .err()
                 .is_some_and(crate::torrent_probe::allows_resolver_fallback) =>
         {
-            let cleanup_budget = operation_deadline
-                .saturating_duration_since(Instant::now())
-                .max(MAGNET_PROBE_CLEANUP_RESERVE);
+            let cleanup_budget = operation_deadline.saturating_duration_since(Instant::now());
             match tokio::time::timeout(cleanup_budget, remove_magnet_metadata_probe_dir(&probe_dir))
                 .await
             {
@@ -9387,9 +9385,7 @@ async fn resolve_magnet_metadata(
                     );
                 }
             }
-            let create_budget = operation_deadline
-                .saturating_duration_since(Instant::now())
-                .max(MAGNET_PROBE_CLEANUP_RESERVE);
+            let create_budget = operation_deadline.saturating_duration_since(Instant::now());
             match tokio::time::timeout(create_budget, tokio::fs::create_dir_all(&probe_dir)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {

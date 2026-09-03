@@ -132,6 +132,49 @@ describe('durable main-window and sidebar preferences', () => {
     expect(fallbackResult?.scheduler.selectedQueueIds).toEqual(current.scheduler.selectedQueueIds);
   });
 
+  it('filters empty scheduler active download IDs during hydration', () => {
+    const merge = useSettingsStore.persist.getOptions().merge;
+    expect(merge).toBeTypeOf('function');
+    const current = useSettingsStore.getState();
+
+    const result = merge?.({
+      schedulerActiveDownloadIds: ['', '  ', 'download-1', 42] as any
+    }, current);
+
+    expect(result?.schedulerActiveDownloadIds).toEqual(['download-1']);
+  });
+
+  it('does not restore a running scheduler without active download IDs', () => {
+    const merge = useSettingsStore.persist.getOptions().merge;
+    expect(merge).toBeTypeOf('function');
+    const current = useSettingsStore.getState();
+
+    const result = merge?.({
+      schedulerRunning: true,
+      schedulerActiveDownloadIds: ['', '  ', 42] as any
+    }, current);
+
+    expect(result?.schedulerRunning).toBe(false);
+    expect(result?.schedulerActiveDownloadIds).toEqual([]);
+  });
+
+  it('does not persist a running scheduler without active download IDs', () => {
+    const partialize = useSettingsStore.persist.getOptions().partialize;
+    expect(partialize).toBeTypeOf('function');
+    const current = useSettingsStore.getState();
+
+    const snapshot = partialize?.({
+      ...current,
+      schedulerRunning: true,
+      schedulerActiveDownloadIds: []
+    });
+
+    expect(snapshot).toMatchObject({
+      schedulerRunning: false,
+      schedulerActiveDownloadIds: []
+    });
+  });
+
   it('sanitizes setter calls for enum and numeric settings', () => {
     useSettingsStore.getState().setMediaCookieSource('invalid-browser' as any);
     expect(useSettingsStore.getState().mediaCookieSource).toBe('none');

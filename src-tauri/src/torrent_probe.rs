@@ -250,9 +250,7 @@ pub(crate) async fn run_metadata_probe_with_deadlines<C: RpcClient + 'static>(
     }
     .await;
 
-    let cleanup_budget = cleanup_deadline
-        .saturating_duration_since(Instant::now())
-        .max(Duration::from_secs(5));
+    let cleanup_budget = cleanup_deadline.saturating_duration_since(Instant::now());
     let cleanup_result = match tokio::time::timeout(
         cleanup_budget,
         cleanup_metadata_probe(client.as_ref(), &gid),
@@ -500,10 +498,8 @@ impl<C: RpcClient + 'static> ProbeCleanupGuard<C> {
         }
 
         let mut first_error = None;
-        let cleanup_budget = deadline
-            .saturating_duration_since(Instant::now())
-            .max(Duration::from_secs(5));
         for gid in self.gids.clone() {
+            let cleanup_budget = deadline.saturating_duration_since(Instant::now());
             match tokio::time::timeout(
                 cleanup_budget,
                 cleanup_metadata_probe(self.client.as_ref(), &gid),
@@ -1599,6 +1595,44 @@ mod tests {
             .await
             .expect("failed probe fixture should be removable");
         server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cleanup_never_extends_absolute_probe_deadline() {
+        let server = ScriptedRpcServer::start(scripts([
+            ("aria2.addUri", vec![ScriptedReply::Result(json!("gid-1"))]),
+            ("aria2.tellStatus", vec![ScriptedReply::Hang]),
+            ("aria2.forceRemove", vec![ScriptedReply::Hang]),
+        ]))
+        .await;
+        let (_temporary, probe_dir, metadata_path) = probe_fixture().await;
+        let error = tokio::time::timeout(
+            Duration::from_millis(500),
+            run_bounded_metadata_probe(
+                server.client(),
+                "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                Map::new(),
+                &metadata_path,
+                "automatic",
+                MetadataProbeSchedule {
+                    total_timeout: Duration::from_millis(100),
+                    metadata_timeout: Duration::from_millis(20),
+                    cleanup_reserve: Duration::from_millis(80),
+                    poll_interval: Duration::ZERO,
+                },
+            ),
+        )
+        .await
+        .expect("cleanup must not extend the absolute probe deadline")
+        .expect_err("a cleanup timeout should be reported");
+        assert!(matches!(
+            error,
+            ProbeFailure::Cleanup(message) if message.contains("failed to remove aria2 gid")
+        ));
+        server.terminate().await;
+        tokio::fs::remove_dir_all(&probe_dir)
+            .await
+            .expect("the probe fixture should be removable after the server stops");
     }
 
     #[tokio::test(flavor = "current_thread")]

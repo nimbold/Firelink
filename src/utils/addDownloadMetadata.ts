@@ -153,6 +153,7 @@ type ParsedInput = {
 export const isYouTubePlaylistUrl = (rawUrl: string): boolean => {
   try {
     const url = new URL(rawUrl);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
     const hostname = url.hostname.toLowerCase();
     const isYouTube = hostname === 'youtube.com' || hostname.endsWith('.youtube.com');
     const pathname = url.pathname.replace(/\/+$/, '') || '/';

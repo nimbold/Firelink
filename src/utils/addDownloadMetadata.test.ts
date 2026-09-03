@@ -87,6 +87,8 @@ describe('add download metadata workflow', () => {
     expect(isYouTubePlaylistUrl('https://music.youtube.com/playlist?list=PL123')).toBe(true);
     expect(isYouTubePlaylistUrl('https://www.youtube.com/watch?v=video&list=PL123')).toBe(false);
     expect(isYouTubePlaylistUrl('https://example.com/playlist?list=PL123')).toBe(false);
+    expect(isYouTubePlaylistUrl('ftp://youtube.com/playlist?list=PL123')).toBe(false);
+    expect(isYouTubePlaylistUrl('sftp://youtube.com/playlist?list=PL123')).toBe(false);
   });
 
   it('admits magnets and local torrent files through the Add window metadata path', () => {
