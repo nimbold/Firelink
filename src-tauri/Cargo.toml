@@ -32,38 +32,38 @@ serde_json = "1"
 tokio = { version = "1", features = ["fs", "process", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time"] }
 regex = "1.10"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "stream", "socks"] }
-rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
 uuid = { version = "1", features = ["v4"] }
 ts-rs = { version = "12", features = ["serde-compat", "uuid-impl"] }
 tauri-plugin-notification = "2.4.0"
 tauri-plugin-clipboard-manager = "2.3.3"
-sysinfo = "0.39.3"
+sysinfo = "0.39.6"
 hmac = "0.13"
 sha2 = "0.11"
-sha1 = "0.10"
+sha1 = "0.11"
 base64 = "0.22"
 tauri-plugin-deep-link = "2.4.10"
 tauri-plugin-single-instance = { version = "2.4.4", features = ["deep-link"] }
 tempfile = "3"
-thiserror = "2.0.19"
+thiserror = "2.0.20"
 axum = "0.8.9"
 tower-http = { version = "0.7", features = ["cors", "limit"] }
 sysproxy = "0.3.0"
 semver = "1.0.28"
-keepawake = "0.6.0"
+keepawake = "0.6.1"
 system_shutdown = "4.1.0"
 tokio-tungstenite = "0.30.0"
 futures-util = { version = "0.3.33", features = ["sink"] }
 chrono = "0.4.38"
 url = "2"
-rusqlite = { version = "0.40.1", features = ["bundled"] }
-log = "0.4.32"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+log = "0.4.34"
 tauri-plugin-log = "2.9.1"
 trash = "5"
 async-trait = "0.1"
 keyring-core = "1.0.0"
 [target.'cfg(target_os = "macos")'.dependencies]
-apple-native-keyring-store = { version = "1.0.1", features = ["keychain"] }
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
 objc = "0.2.7"
 unicode-normalization = "0.1.25"
 
@@ -72,4 +72,4 @@ windows-native-keyring-store = "1.1.0"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus-secret-service-keyring-store = { version = "1.0.0", features = ["crypto-rust"] }
+zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
