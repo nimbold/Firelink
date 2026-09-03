@@ -5,6 +5,29 @@ All notable changes to Firelink will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-09-03
+
+This release resolves Windows WebView2 startup crashes and focus deadlocks, adds route-aware transfers and native asynchronous DNS resolution for TUN proxies, isolates engine staging workspaces, and prepares Firelink Companion 2.2.1 for Microsoft Edge Add-ons.
+
+### Fixes
+
+- Prevent Windows WebView2 startup crashes and focus recursion by deferring window activation, isolating AppData junctions, and gating renderer IPC behind post-load event ticks, addressing [#37](https://github.com/nimbold/Firelink/issues/37).
+- Prevent Properties window deadlocks on Windows by serializing child WebViews and excluding custom caption rails from drag hit-testing, addressing [#37](https://github.com/nimbold/Firelink/issues/37).
+- Restore immediate credential recovery for edited downloads without stale keychain password conflicts.
+- Implement route-aware transfers with native asynchronous DNS resolution (`firelink-native-dns-v1`) to prevent Aria2 loop freezes under TUN/VPN proxies (such as Shadowrocket or Sing-box), while preserving fallback for stock Aria2 daemons, addressing [#38](https://github.com/nimbold/Firelink/issues/38).
+- Harden route-aware Torrent metadata resolution and magnet probe cleanup on active proxy routes.
+
+### Improvements
+
+- Isolate engine staging per build invocation with atomic workspaces (`FIRELINK_ENGINE_OUTPUT_ROOT`), avoiding shared staging locks.
+- Update locked engine sources: BtbN FFmpeg autobuild to 2026-09-02, yt-dlp to 2026.08.19, Deno to 2.9.6, and Aria2 to 1.37.0.
+- Stabilize cross-platform CI replacement fingerprints and Linux Torrent probe test harnesses.
+- Advance Firelink Companion submodule to `2.2.1` with localization metadata and Edge Add-ons support, addressing [#39](https://github.com/nimbold/Firelink/issues/39).
+
+### Compatibility
+
+- Use [Firelink Companion `2.2.1`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.1), or the [latest Companion release](https://github.com/nimbold/Firelink-Extension/releases/latest), with Firelink `1.4.1`.
+
 ## [1.4.0] - 2026-08-27
 
 This release adds built-in Torrent downloads and a dedicated Properties window, while making regular downloads, browser handoffs, and cross-platform packages more dependable.
