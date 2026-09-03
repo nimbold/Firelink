@@ -466,6 +466,12 @@ const engineRunId = useRef(0);
   const [maxConcurrentDownloadsInput, setMaxConcurrentDownloadsInput] = useState(
     () => String(settings.maxConcurrentDownloads)
   );
+  const [maxAutomaticRetriesInput, setMaxAutomaticRetriesInput] = useState(
+    () => String(settings.maxAutomaticRetries)
+  );
+  const [minimumNormalDownloadSpeedKiBInput, setMinimumNormalDownloadSpeedKiBInput] = useState(
+    () => String(settings.minimumNormalDownloadSpeedKiB)
+  );
   const [proxyPortInput, setProxyPortInput] = useState(() => String(settings.proxyPort));
   const [torrentMaxOpenFilesInput, setTorrentMaxOpenFilesInput] = useState(
     () => String(settings.torrentMaxOpenFiles)
@@ -489,6 +495,14 @@ const engineRunId = useRef(0);
   useEffect(() => {
     setMaxConcurrentDownloadsInput(String(settings.maxConcurrentDownloads));
   }, [settings.maxConcurrentDownloads]);
+
+  useEffect(() => {
+    setMaxAutomaticRetriesInput(String(settings.maxAutomaticRetries));
+  }, [settings.maxAutomaticRetries]);
+
+  useEffect(() => {
+    setMinimumNormalDownloadSpeedKiBInput(String(settings.minimumNormalDownloadSpeedKiB));
+  }, [settings.minimumNormalDownloadSpeedKiB]);
 
   useEffect(() => {
     setProxyPortInput(String(settings.proxyPort));
@@ -1068,14 +1082,24 @@ runEngineChecks(false);
                   </div>
                   <input
                     type="number" min="0" max="10"
-                    value={settings.maxAutomaticRetries}
-                    onChange={(e) => settings.setMaxAutomaticRetries(Number(e.target.value))}
-                    onBlur={(e) => {
-                      const val = Number(e.target.value);
-                      if (val < 0) settings.setMaxAutomaticRetries(0);
-                      if (val > 10) settings.setMaxAutomaticRetries(10);
+                    value={maxAutomaticRetriesInput}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setMaxAutomaticRetriesInput(value);
+                      if (value !== '' && Number.isFinite(Number(value))) {
+                        settings.setMaxAutomaticRetries(Number(value));
+                      }
                     }}
+                    onBlur={(e) => commitBoundedIntegerInput(
+                      e.target.value,
+                      settings.maxAutomaticRetries,
+                      0,
+                      10,
+                      settings.setMaxAutomaticRetries,
+                      setMaxAutomaticRetriesInput
+                    )}
                     className="app-control w-24 text-center"
+                    aria-label={t($ => $.settings.downloads.automaticRetries)}
                   />
                 </div>
                 <div className="mac-settings-row">
@@ -1085,8 +1109,22 @@ runEngineChecks(false);
                   </div>
                   <input
                     type="number" min="0" max="1048576"
-                    value={settings.minimumNormalDownloadSpeedKiB}
-                    onChange={(event) => settings.setMinimumNormalDownloadSpeedKiB(Number(event.target.value))}
+                    value={minimumNormalDownloadSpeedKiBInput}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setMinimumNormalDownloadSpeedKiBInput(value);
+                      if (value !== '' && Number.isFinite(Number(value))) {
+                        settings.setMinimumNormalDownloadSpeedKiB(Number(value));
+                      }
+                    }}
+                    onBlur={(event) => commitBoundedIntegerInput(
+                      event.target.value,
+                      settings.minimumNormalDownloadSpeedKiB,
+                      0,
+                      1048576,
+                      settings.setMinimumNormalDownloadSpeedKiB,
+                      setMinimumNormalDownloadSpeedKiBInput
+                    )}
                     className="app-control w-24 text-center"
                     aria-label={t($ => $.settings.downloads.minimumNormalDownloadSpeed)}
                   />
@@ -2260,7 +2298,7 @@ className="app-button px-3 py-1.5 text-[12px] flex items-center gap-1.5 disabled
                       }}
                       className="w-full bg-item-hover hover:bg-item-hover/80 text-text-primary border border-border-modal font-medium py-1 px-2 rounded text-[11px] flex items-center justify-center gap-1 transition-colors"
                     >
-                      <RefreshCw size={11} /> Regenerate
+                      <RefreshCw size={11} /> {t($ => $.settings.integrations.regenerateToken)}
                     </button>
                   </div>
                 </div>

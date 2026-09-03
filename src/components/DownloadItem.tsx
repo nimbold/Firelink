@@ -50,6 +50,7 @@ interface DownloadItemProps {
   onMoveInQueue: (id: string, direction: 'up' | 'down') => void;
   onQueueDragStart: (id: string, event: React.PointerEvent<HTMLDivElement>) => void;
   onClick: (e: React.MouseEvent, item: DownloadItemType) => void;
+  onRowKeyDown?: (event: React.KeyboardEvent<HTMLDivElement>, download: DownloadItemType) => void;
 }
 
 export const DownloadItem = React.memo<DownloadItemProps>(({
@@ -74,6 +75,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   onMoveInQueue,
   onQueueDragStart,
   onClick,
+  onRowKeyDown,
 }) => {
   const { t, i18n } = useTranslation();
   const calendarPreference = useSettingsStore(state => state.calendarPreference);
@@ -518,7 +520,10 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
       <button
         onClick={(e) => {
           e.stopPropagation();
-          setContextMenu({ x: e.clientX, y: e.clientY, id: download.id });
+          const rect = e.currentTarget.getBoundingClientRect();
+          const x = e.clientX || rect.left;
+          const y = e.clientY || rect.bottom + 4;
+          setContextMenu({ x, y, id: download.id });
         }}
         className="app-icon-button main-control-button"
         title={t($ => $.downloads.actions.options)}
@@ -584,11 +589,21 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
           event.preventDefault();
           event.stopPropagation();
           onMoveInQueue(download.id, event.key === 'ArrowUp' ? 'up' : 'down');
+          return;
         }
+        onRowKeyDown?.(event, download);
       }}
       onContextMenu={(e) => {
         e.preventDefault();
-        setContextMenu({ x: e.clientX, y: e.clientY, id: download.id });
+        const isKeyboard = (e.clientX === 0 && e.clientY === 0) || (e.button === 0 && e.detail === 0);
+        let x = e.clientX;
+        let y = e.clientY;
+        if (isKeyboard && rowRef.current) {
+          const rect = rowRef.current.getBoundingClientRect();
+          x = rect.left + 40;
+          y = rect.top + rect.height / 2;
+        }
+        setContextMenu({ x, y, id: download.id });
       }}
     >
       <div

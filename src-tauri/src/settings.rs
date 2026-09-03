@@ -454,6 +454,9 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
     sanitize_integer_setting(state, "maxConcurrentDownloads", |value| value.as_u64().is_some());
     sanitize_integer_setting(state, "perServerConnections", |value| value.as_i64().is_some());
     sanitize_integer_setting(state, "maxAutomaticRetries", |value| value.as_i64().is_some());
+    sanitize_integer_setting(state, "minimumNormalDownloadSpeedKiB", |value| value.as_u64().is_some());
+    sanitize_integer_setting(state, "lastCustomSpeedLimitKiB", |value| value.as_u64().is_some());
+    sanitize_allowed_string(state, "lastCustomSpeedLimitUnit", &["KB/s", "MB/s"]);
     sanitize_integer_setting(state, "proxyPort", |value| {
         value
             .as_u64()
@@ -483,18 +486,77 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
         })
     });
     for key in [
+        "categorySubfoldersEnabled",
+        "logsEnabled",
         "isSidebarVisible",
+        "isFoldersCollapsed",
+        "schedulerRunning",
+        "retryNotFoundErrors",
+        "adaptiveMirrorSelection",
+        "showNotifications",
+        "playCompletionSound",
+        "autoAddClipboardLinks",
+        "showDockBadge",
+        "showMenuBarIcon",
         "torrentEnableDht",
         "torrentEnableDht6",
         "torrentEnablePex",
         "torrentEnableLpd",
         "torrentSeparateSeedSlots",
         "torrentIpv6Enabled",
+        "askWhereToSaveEachFile",
+        "rememberLastUsedDownloadDirectory",
+        "preventsSleepWhileDownloading",
+        "preventsDisplaySleepWhileDownloading",
+        "autoCheckUpdates",
+        "keychainAccessGranted",
     ] {
         sanitize_boolean_setting(state, key);
     }
-    for key in ["proxyHost", "customUserAgent"] {
+    for key in [
+        "proxyHost",
+        "customUserAgent",
+        "globalSpeedLimit",
+        "torrentOverallUploadLimit",
+        "baseDownloadFolder",
+        "schedulerLastStartKey",
+        "schedulerLastStopKey",
+    ] {
         sanitize_string_setting(state, key);
+    }
+    if let Some(presets) = state.get("speedLimitPresetValues") {
+        if !presets.is_array() {
+            state.remove("speedLimitPresetValues");
+        } else if let Some(presets_arr) = state.get_mut("speedLimitPresetValues").and_then(Value::as_array_mut) {
+            presets_arr.retain(|v| v.as_f64().is_some_and(|f| f.is_finite() && f > 0.0));
+            if presets_arr.is_empty() {
+                state.remove("speedLimitPresetValues");
+            }
+        }
+    }
+    if let Some(roots) = state.get("approvedDownloadRoots") {
+        if !roots.is_array() {
+            state.remove("approvedDownloadRoots");
+        } else if let Some(roots_arr) = state.get_mut("approvedDownloadRoots").and_then(Value::as_array_mut) {
+            roots_arr.retain(|v| v.as_str().is_some());
+        }
+    }
+    if let Some(active_ids) = state.get("schedulerActiveDownloadIds") {
+        if !active_ids.is_array() {
+            state.remove("schedulerActiveDownloadIds");
+        } else if let Some(ids_arr) = state.get_mut("schedulerActiveDownloadIds").and_then(Value::as_array_mut) {
+            ids_arr.retain(|v| v.as_str().is_some());
+        }
+    }
+    if let Some(overrides) = state.get("categoryDirectoryOverrides") {
+        if !overrides.is_object() {
+            state.remove("categoryDirectoryOverrides");
+        }
+    }
+    if let Some(subfolders) = state.get("categorySubfolders") {
+        if !subfolders.is_object() {
+            state.remove("categorySubfolders");
+        }
     }
     sanitize_torrent_network_string(state, "torrentListenPort", |value| {
         crate::queue::normalize_torrent_port_spec(Some(value), "TCP listen ports").is_ok()
@@ -590,6 +652,32 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
             "postQueueAction",
             &["none", "sleep", "restart", "shutdown"],
         );
+        for key in ["enabled", "stopTimeEnabled", "everyday"] {
+            sanitize_boolean_setting(scheduler, key);
+        }
+        for key in ["startTime", "stopTime"] {
+            sanitize_string_setting(scheduler, key);
+        }
+        if let Some(days) = scheduler.get("selectedDays") {
+            if !days.is_array() {
+                scheduler.remove("selectedDays");
+            } else if let Some(days_arr) = scheduler.get_mut("selectedDays").and_then(Value::as_array_mut) {
+                days_arr.retain(|v| v.as_u64().is_some_and(|n| n <= 6));
+                if days_arr.is_empty() {
+                    scheduler.remove("selectedDays");
+                }
+            }
+        }
+        if let Some(queue_ids) = scheduler.get("selectedQueueIds") {
+            if !queue_ids.is_array() {
+                scheduler.remove("selectedQueueIds");
+            } else if let Some(queue_ids_arr) = scheduler.get_mut("selectedQueueIds").and_then(Value::as_array_mut) {
+                queue_ids_arr.retain(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()));
+                if queue_ids_arr.is_empty() {
+                    scheduler.remove("selectedQueueIds");
+                }
+            }
+        }
     }
 
     if let Some(logins) = state.get_mut("siteLogins").and_then(Value::as_array_mut) {
@@ -762,6 +850,19 @@ fn validate_settings(settings: &mut PersistedSettings) {
     .ok()
     .flatten()
     .unwrap_or_default();
+    settings.last_custom_speed_limit_ki_b = settings.last_custom_speed_limit_ki_b.clamp(1, 10_485_760);
+    settings.speed_limit_preset_values.retain(|v| v.is_finite() && *v > 0.0);
+    if settings.speed_limit_preset_values.is_empty() {
+        settings.speed_limit_preset_values = default_settings().speed_limit_preset_values;
+    }
+    settings.scheduler.selected_days.retain(|d| (0..=6).contains(d));
+    if settings.scheduler.selected_days.is_empty() {
+        settings.scheduler.selected_days = default_settings().scheduler.selected_days;
+    }
+    settings.scheduler.selected_queue_ids.retain(|q| !q.trim().is_empty());
+    if settings.scheduler.selected_queue_ids.is_empty() {
+        settings.scheduler.selected_queue_ids = default_settings().scheduler.selected_queue_ids;
+    }
     if !matches!(
         settings.last_custom_speed_limit_unit.as_str(),
         "KB/s" | "MB/s"
@@ -1394,6 +1495,42 @@ mod tests {
         assert_eq!(settings.proxy_port, 8080);
         assert!(settings.custom_user_agent.is_empty());
         assert!(settings.is_sidebar_visible);
+    }
+
+    #[test]
+    fn decodes_malformed_speed_and_scheduler_settings_without_error() {
+        let stored = json!({
+            "state": {
+                "minimumNormalDownloadSpeedKiB": "very-fast",
+                "lastCustomSpeedLimitKiB": -50,
+                "lastCustomSpeedLimitUnit": "TB/s",
+                "speedLimitPresetValues": ["not-a-number", -1.0, 0.0],
+                "approvedDownloadRoots": 12345,
+                "scheduler": {
+                    "enabled": "yes",
+                    "postQueueAction": "explode",
+                    "selectedDays": [99, "monday"],
+                    "selectedQueueIds": ["", "  "]
+                },
+                "schedulerRunning": "active",
+                "schedulerActiveDownloadIds": "none"
+            },
+            "version": 6
+        });
+
+        let settings = decode_stored_settings(&Value::String(stored.to_string())).unwrap();
+
+        assert_eq!(settings.minimum_normal_download_speed_ki_b, 0);
+        assert_eq!(settings.last_custom_speed_limit_ki_b, 1024);
+        assert_eq!(settings.last_custom_speed_limit_unit, "MB/s");
+        assert_eq!(settings.speed_limit_preset_values, default_settings().speed_limit_preset_values);
+        assert_eq!(settings.approved_download_roots, default_settings().approved_download_roots);
+        assert!(!settings.scheduler.enabled);
+        assert_eq!(settings.scheduler.post_queue_action, crate::ipc::PostQueueAction::None);
+        assert_eq!(settings.scheduler.selected_days, default_settings().scheduler.selected_days);
+        assert_eq!(settings.scheduler.selected_queue_ids, default_settings().scheduler.selected_queue_ids);
+        assert!(!settings.scheduler_running);
+        assert!(settings.scheduler_active_download_ids.is_empty());
     }
 
     #[test]

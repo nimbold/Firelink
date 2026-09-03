@@ -2701,6 +2701,7 @@ html[data-list-density="relaxed"] {
     color: hsl(var(--text-secondary));
     background: transparent;
     -webkit-app-region: no-drag;
+    app-region: no-drag;
   }
 
   .sidebar-toggle-button:hover {

@@ -57,4 +57,64 @@ describe('download table sorting', () => {
     expect(persisted.speed).toBeUndefined();
     expect(persisted.eta).toBeUndefined();
   });
+
+  it('parses estimated sizes with ~ or ≈ prefixes and sorts them accurately', () => {
+    expect(parseDownloadSize('~1.2 GB')).toBe(1.2 * 1024 ** 3);
+    expect(parseDownloadSize('~ 500 MB')).toBe(500 * 1024 ** 2);
+    expect(parseDownloadSize('≈250 KB')).toBe(250 * 1024);
+
+    expect(sortedIds([
+      item('missing', { size: '-' }),
+      item('est-1g', { size: '~1 GB' }),
+      item('final-500m', { size: '500 MB' }),
+      item('exact-bytes', { totalBytes: 2 * 1024 ** 3 }),
+    ], { column: 'Size', direction: 'asc' })).toEqual([
+      'final-500m',
+      'est-1g',
+      'exact-bytes',
+      'missing'
+    ]);
+  });
+
+  it('keeps unknown and missing values last in descending sort for Size, Speed, ETA, and Date Added', () => {
+    expect(sortedIds([
+      item('unknown-size', { size: '-' }),
+      item('small-size', { size: '100 MB' }),
+      item('large-size', { size: '1 GB' }),
+    ], { column: 'Size', direction: 'desc' })).toEqual([
+      'large-size',
+      'small-size',
+      'unknown-size'
+    ]);
+
+    expect(sortedIds([
+      item('unknown-speed', { speed: '-' }),
+      item('fast-speed', { speed: '10 MB/s' }),
+      item('slow-speed', { speed: '1 MB/s' }),
+    ], { column: 'Speed', direction: 'desc' })).toEqual([
+      'fast-speed',
+      'slow-speed',
+      'unknown-speed'
+    ]);
+
+    expect(sortedIds([
+      item('unknown-eta', { eta: '-' }),
+      item('long-eta', { eta: '2h' }),
+      item('short-eta', { eta: '5m' }),
+    ], { column: 'ETA', direction: 'desc' })).toEqual([
+      'long-eta',
+      'short-eta',
+      'unknown-eta'
+    ]);
+
+    expect(sortedIds([
+      item('unknown-date', { dateAdded: '' }),
+      item('newer-date', { dateAdded: '2026-08-01T00:00:00.000Z' }),
+      item('older-date', { dateAdded: '2026-01-01T00:00:00.000Z' }),
+    ], { column: 'Date Added', direction: 'desc' })).toEqual([
+      'newer-date',
+      'older-date',
+      'unknown-date'
+    ]);
+  });
 });

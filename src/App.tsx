@@ -42,12 +42,18 @@ import { formatDownloadBytes } from './utils/downloadProgress';
 import { synchronizeDocumentAppearance } from './utils/documentAppearance';
 import { createMainWindowSizePersistence } from './utils/mainWindowState';
 import { createSidebarResizeSession } from './utils/sidebarResize';
+import {
+  resolveFallbackFilter,
+  shouldRestoreSidebarRevealFocus,
+  shouldRestoreSidebarToggleFocus
+} from './utils/sidebarFocus';
 import type { MainWindowSize } from './bindings/MainWindowSize';
 import {
   beginSchedulerControl,
   consumeSchedulerHandoffIds,
   handoffSupersededSchedulerIds,
-  isSchedulerControlCurrent
+  isSchedulerControlCurrent,
+  registerPostActionCanceller
 } from './utils/schedulerControl';
 import { createSerialTaskQueue } from './utils/serialTaskQueue';
 
@@ -202,7 +208,9 @@ function App() {
   });
   const sidebarResizeCleanupRef = useRef<(() => void) | null>(null);
   const sidebarRevealRef = useRef<HTMLButtonElement>(null);
+  const sidebarToggleRef = useRef<HTMLButtonElement>(null);
   const restoreSidebarFocusRef = useRef(false);
+  const restoreRevealFocusRef = useRef(false);
 
   const theme = useSettingsStore(state => state.theme);
   const windowControlStylePreference = useSettingsStore(state => state.windowControlStyle);
@@ -244,6 +252,18 @@ function App() {
   const isAddModalOpen = useDownloadStore(state => state.isAddModalOpen);
   const isDeleteModalOpen = useDownloadStore(state => state.deleteModalState.isOpen);
   const downloads = useDownloadStore(state => state.downloads);
+  const queues = useDownloadStore(state => state.queues);
+
+  useEffect(() => {
+    const fallback = resolveFallbackFilter(
+      filter,
+      queues.map(queue => queue.id),
+      queues.length > 0,
+    );
+    if (fallback !== filter) {
+      setFilter(fallback as SidebarFilter);
+    }
+  }, [filter, queues]);
   const activeDownloadCount = downloads.filter(download => isTransferActiveStatus(download.status)).length;
   const queuedCount = downloads.filter(download =>
     download.status === 'queued' || download.status === 'staged'
@@ -262,6 +282,8 @@ function App() {
   const schedulerRunning = useSettingsStore(state => state.schedulerRunning);
   const schedulerActiveDownloadIds = useSettingsStore(state => state.schedulerActiveDownloadIds);
   const pendingPostActionTimer = useRef<number | null>(null);
+  const pendingPostActionToastId = useRef<string | null>(null);
+  const pendingForceActionToastId = useRef<string | null>(null);
   const startupResumeStarted = useRef(false);
   const startupInputReady = useRef(false);
   const extensionProcessing = useRef(createSerialTaskQueue());
@@ -308,7 +330,15 @@ function App() {
       window.clearTimeout(pendingPostActionTimer.current);
       pendingPostActionTimer.current = null;
     }
-  }, []);
+    if (pendingPostActionToastId.current !== null) {
+      removeToast(pendingPostActionToastId.current);
+      pendingPostActionToastId.current = null;
+    }
+    if (pendingForceActionToastId.current !== null) {
+      removeToast(pendingForceActionToastId.current);
+      pendingForceActionToastId.current = null;
+    }
+  }, [removeToast]);
 
   const queueFrontendReadyUpdate = useCallback((ready: boolean) => {
     const update = frontendReadyUpdate.current
@@ -341,13 +371,15 @@ function App() {
 
     const actionLabel = t($ => $.scheduler.postActions[action]);
     let timerId: number | null = null;
-    let toastId: string | null = null;
     const showForceActionToast = () => {
-      let forceToastId: string | null = null;
+      if (pendingForceActionToastId.current !== null) {
+        removeToast(pendingForceActionToastId.current);
+        pendingForceActionToastId.current = null;
+      }
       const proceed = () => {
-        if (forceToastId !== null) {
-          removeToast(forceToastId);
-          forceToastId = null;
+        if (pendingForceActionToastId.current !== null) {
+          removeToast(pendingForceActionToastId.current);
+          pendingForceActionToastId.current = null;
         }
         invoke('perform_system_action', { action, force: true }).catch(error => {
           console.error('Forced scheduled post action failed:', error);
@@ -358,7 +390,7 @@ function App() {
           });
         });
       };
-      forceToastId = addToast({
+      pendingForceActionToastId.current = addToast({
         variant: 'warning',
         isActionable: true,
         duration: 0,
@@ -391,16 +423,8 @@ function App() {
         });
       });
     };
-    const cancel = () => {
-      clearPendingPostActionTimer();
-      timerId = null;
-      if (toastId !== null) {
-        removeToast(toastId);
-        toastId = null;
-      }
-    };
 
-    toastId = addToast({
+    const toastId = addToast({
       variant: 'warning',
       isActionable: true,
       onDismiss: clearPendingPostActionTimer,
@@ -410,18 +434,19 @@ function App() {
           <button
             type="button"
             className="app-button px-2 py-1"
-            onClick={cancel}
+            onClick={clearPendingPostActionTimer}
           >
             {t($ => $.actions.cancel)}
           </button>
         </div>
       )
     });
+    pendingPostActionToastId.current = toastId;
 
     timerId = window.setTimeout(() => {
-      if (toastId !== null) {
+      if (pendingPostActionToastId.current === toastId) {
         removeToast(toastId);
-        toastId = null;
+        pendingPostActionToastId.current = null;
       }
       if (pendingPostActionTimer.current === timerId) {
         pendingPostActionTimer.current = null;
@@ -466,24 +491,43 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (isSidebarVisible) return;
-    if (restoreSidebarFocusRef.current) {
-      restoreSidebarFocusRef.current = false;
-      sidebarRevealRef.current?.focus({ preventScroll: true });
+    if (!isSidebarVisible) {
+      if (restoreSidebarFocusRef.current) {
+        restoreSidebarFocusRef.current = false;
+        sidebarRevealRef.current?.focus({ preventScroll: true });
+      }
+      return;
+    }
+    if (restoreRevealFocusRef.current) {
+      restoreRevealFocusRef.current = false;
+      sidebarToggleRef.current?.focus({ preventScroll: true });
     }
   }, [isSidebarVisible]);
 
   const handleSidebarToggle = () => {
+    const activeElement = document.activeElement;
     if (isSidebarVisible) {
-      const activeElement = document.activeElement;
-      restoreSidebarFocusRef.current = activeElement instanceof HTMLElement
-        && Boolean(activeElement.closest('.app-sidebar-shell'));
+      restoreSidebarFocusRef.current = shouldRestoreSidebarRevealFocus(
+        activeElement,
+        document.querySelector('.app-sidebar-shell'),
+      );
+      restoreRevealFocusRef.current = false;
+    } else {
+      restoreRevealFocusRef.current = shouldRestoreSidebarToggleFocus(
+        activeElement,
+        sidebarRevealRef.current,
+      );
+      restoreSidebarFocusRef.current = false;
     }
     toggleSidebar();
   };
 
   useEffect(() => {
-    return clearPendingPostActionTimer;
+    const unregister = registerPostActionCanceller(clearPendingPostActionTimer);
+    return () => {
+      unregister();
+      clearPendingPostActionTimer();
+    };
   }, [clearPendingPostActionTimer]);
 
   useEffect(() => {
@@ -1209,6 +1253,7 @@ function App() {
         >
           <Sidebar
             selectedFilter={filter}
+            toggleButtonRef={sidebarToggleRef}
             onToggleSidebar={handleSidebarToggle}
             onSelectFilter={(f) => {
               setFilter(f);
@@ -1234,7 +1279,10 @@ function App() {
           <button
             type="button"
             ref={sidebarRevealRef}
-            onClick={toggleSidebar}
+            data-tauri-drag-region="false"
+            onPointerDown={event => event.stopPropagation()}
+            onMouseDown={event => event.stopPropagation()}
+            onClick={handleSidebarToggle}
             className="app-icon-button app-sidebar-reveal-button h-7 w-7"
             title={t($ => $.actions.showSidebar)}
             aria-label={t($ => $.actions.showSidebar)}

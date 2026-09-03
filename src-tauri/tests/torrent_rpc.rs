@@ -94,3 +94,35 @@ async fn production_rpc_client_preserves_http_gateway_context() {
     );
     stop_server(shutdown, task).await;
 }
+
+#[tokio::test]
+async fn production_rpc_client_bypasses_environment_proxy() {
+    let app = Router::new().route("/jsonrpc", post(successful_rpc));
+    let (address, shutdown, task) = start_server(app).await;
+
+    // Even if an invalid or hostile HTTP proxy is set in the environment,
+    // loopback JSON-RPC calls must bypass the proxy and connect directly to loopback.
+    struct EnvGuard(&'static str, Option<String>);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.1 {
+                Some(val) => std::env::set_var(self.0, val),
+                None => std::env::remove_var(self.0),
+            }
+        }
+    }
+    let _guard = EnvGuard("HTTP_PROXY", std::env::var("HTTP_PROXY").ok());
+    std::env::set_var("HTTP_PROXY", "http://192.0.2.1:8080");
+
+    let result = rpc_call(
+        address.port(),
+        "test-secret",
+        "aria2.getVersion",
+        json!([{"include": "version"}]),
+    )
+    .await
+    .expect("RPC client must bypass HTTP_PROXY and succeed over loopback");
+
+    assert_eq!(result, json!({"version": "test"}));
+    stop_server(shutdown, task).await;
+}

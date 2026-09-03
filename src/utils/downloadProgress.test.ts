@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   formatDownloadBytes,
   formatDownloadTotal,
+  formatTorrentRatio,
   resolveDownloadFraction,
   resolveDownloadSizeDisplay,
 } from './downloadProgress';
@@ -106,5 +107,25 @@ describe('resolveDownloadFraction', () => {
       totalBytes: 100,
       status: 'paused',
     })).toBe(1);
+  });
+});
+
+describe('formatTorrentRatio', () => {
+  it('formats positive torrent ratio with two decimal places', () => {
+    expect(formatTorrentRatio(1500, 1000, 'en-US')).toBe('1.50');
+    expect(formatTorrentRatio(2345, 1000, 'en-US')).toBe('2.35');
+  });
+
+  it('formats torrent ratio using the specified locale', () => {
+    const formatted = formatTorrentRatio(1500, 1000, 'fa');
+    expect(formatted).toBe(new Intl.NumberFormat('fa', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(1.5));
+  });
+
+  it('returns a dash when ratio cannot be calculated', () => {
+    expect(formatTorrentRatio(0, 0, 'en-US')).toBe('—');
+    expect(formatTorrentRatio(-10, 1000, 'en-US')).toBe('—');
+    expect(formatTorrentRatio(1000, -10, 'en-US')).toBe('—');
+    expect(formatTorrentRatio(1000, 0, 'en-US')).toBe('—');
+    expect(formatTorrentRatio(Number.NaN, 1000, 'en-US')).toBe('—');
   });
 });

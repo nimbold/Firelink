@@ -14,7 +14,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import { invokeCommand as invoke } from '../ipc';
 import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResolutionModal';
-import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, headerNameHasCredentialMaterial, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, MAX_TORRENT_TRACKER_INTERVAL, MAX_TORRENT_TRACKER_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentWebSeedDrafts, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, serializeTorrentPreviewPriority, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type TorrentEncryptionPolicy, type TorrentFileAllocation } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, headerNameHasCredentialMaterial, isMediaUrl, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, MAX_TORRENT_TRACKER_INTERVAL, MAX_TORRENT_TRACKER_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentWebSeedDrafts, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, serializeTorrentPreviewPriority, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type TorrentEncryptionPolicy, type TorrentFileAllocation } from '../utils/downloads';
 import { fetchMediaMetadataDeduped, fetchMediaPlaylistMetadataDeduped } from '../utils/mediaMetadata';
 import {
   expandTilde,
@@ -228,7 +228,7 @@ export const AddDownloadsModal = () => {
   const modalRef = useModalFocus(isAddModalOpen);
   const [pendingAction, setPendingAction] = useState<AddDownloadAction>({ type: 'start-now' });
   const [pendingUseSharedDestination, setPendingUseSharedDestination] = useState(false);
-  const [pendingDestinationOverrides, setPendingDestinationOverrides] = useState<Record<number, string>>({});
+  const [pendingDestinationOverrides, setPendingDestinationOverrides] = useState<Record<string | number, string>>({});
   const [resolvedLocation, setResolvedLocation] = useState('');
   const [isQueueMenuOpen, setIsQueueMenuOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -322,15 +322,28 @@ export const AddDownloadsModal = () => {
   const requestContextForUrl = (url: string) =>
     pendingAddRequestContexts[normalizeComparableUrl(url)];
   const hasExtensionRequestContext = Object.keys(pendingAddRequestContexts).length > 0;
-  const headersForRow = (sourceUrl: string) => {
+  const headersForRow = (sourceUrl: string, isMedia = false) => {
     if (headersManuallyEditedRef.current) return headers.trim();
     const context = requestContextForUrl(sourceUrl);
+    const media = isMedia || context?.media === true || isMediaUrl(sourceUrl);
+    if (media) {
+      const raw = context ? extensionHeaders(context) : (hasExtensionRequestContext ? '' : headers.trim());
+      return raw
+        .split(/\r?\n/)
+        .filter(line => {
+          const separator = line.indexOf(':');
+          return separator > 0 && !headerNameHasCredentialMaterial(line.slice(0, separator));
+        })
+        .join('\n')
+        .trim();
+    }
     if (context) return extensionHeaders(context).trim();
     return hasExtensionRequestContext ? '' : headers.trim();
   };
-  const cookiesForRow = (sourceUrl: string, targetUrl = sourceUrl) => {
+  const cookiesForRow = (sourceUrl: string, targetUrl = sourceUrl, isMedia = false) => {
     if (cookiesManuallyEditedRef.current) return cookies.trim();
     const context = requestContextForUrl(sourceUrl);
+    if (isMedia || context?.media === true || isMediaUrl(sourceUrl)) return '';
     const scopedCookies = cookieScopeForUrl(context, targetUrl);
     if (scopedCookies) return scopedCookies;
     if (context && urlsHaveDifferentOrigins(sourceUrl, targetUrl)) return '';
@@ -440,7 +453,9 @@ export const AddDownloadsModal = () => {
       pendingAddHeaders
     ].filter(Boolean).join('\n'));
     headersManuallyEditedRef.current = false;
-    setCookies(initialContext?.cookies || pendingAddCookies);
+    const isSingleInitialMedia = initialContext?.media === true
+      || (initialUrlLines.length === 1 && isMediaUrl(initialUrlLines[0]));
+    setCookies(isSingleInitialMedia ? '' : (initialContext?.cookies || pendingAddCookies));
     cookiesManuallyEditedRef.current = false;
     setMirrors('');
     setIsQueueMenuOpen(false);
@@ -1011,6 +1026,11 @@ export const AddDownloadsModal = () => {
     }
     } catch (e) {
       console.error("Failed to select folder:", e);
+      addToast({
+        message: e instanceof Error ? e.message : String(e),
+        variant: 'error',
+        isActionable: true
+      });
     }
   };
 
@@ -1178,7 +1198,7 @@ export const AddDownloadsModal = () => {
     ++folderPickerRequestRef.current;
     let finalLocation = saveLocation;
     let useSharedDestination = isSaveLocationManual;
-    const destinationOverrides: Record<number, string> = {};
+    const destinationOverrides: Record<string | number, string> = {};
     const settings = useSettingsStore.getState();
     const platform = await getPlatformInfo().catch(() => ({ os: 'unknown' }));
     if (settings.askWhereToSaveEachFile && parsedItems.length > 0) {
@@ -1201,6 +1221,7 @@ export const AddDownloadsModal = () => {
           if (selected && typeof selected === 'string') {
             const approvedPath = await useSettingsStore.getState().approveDownloadRoot(selected);
             destinationOverrides[index] = approvedPath;
+            destinationOverrides[item.id] = approvedPath;
             const currentSettings = useSettingsStore.getState();
             if (currentSettings.rememberLastUsedDownloadDirectory) {
               pendingLastUsedDownloadDirectoryRef.current = approvedPath;
@@ -1213,6 +1234,11 @@ export const AddDownloadsModal = () => {
           }
         } catch (e) {
           console.error("Failed to select folder:", e);
+          addToast({
+            message: e instanceof Error ? e.message : String(e),
+            variant: 'error',
+            isActionable: true
+          });
           pendingLastUsedDownloadDirectoryRef.current = null;
           isSubmittingRef.current = false;
           setIsSubmitting(false);
@@ -1257,7 +1283,7 @@ export const AddDownloadsModal = () => {
       );
       if (urlMatch) {
         newConflicts.push({
-          id: i.toString(),
+          id: item.id,
           fileName: finalFile,
           reason: { type: 'url', msg: t($ => $.addDownloads.urlAlreadyQueued) },
           resolution: 'rename',
@@ -1266,7 +1292,7 @@ export const AddDownloadsModal = () => {
         });
       } else if (hasBatchConflict) {
         newConflicts.push({
-          id: i.toString(),
+          id: item.id,
           fileName: finalFile,
           reason: { type: 'file', msg: t($ => $.addDownloads.destinationConflict) },
           resolution: 'rename',
@@ -1313,7 +1339,7 @@ export const AddDownloadsModal = () => {
           const canReplace = !reservedFilenameMatchIds.has(filenameMatch.id)
             && !isTransferLocked(filenameMatch.status);
           newConflicts.push({
-            id: i.toString(),
+            id: item.id,
             fileName: finalFile,
             reason: { type: 'file', msg: t($ => $.addDownloads.matchingDownloadFilename) },
             resolution: canReplace ? 'replace' : 'rename',
@@ -1368,7 +1394,7 @@ export const AddDownloadsModal = () => {
           : false;
         if (existingDownload || fileExistsOnDisk || hasFirelinkOwnedTarget) {
           newConflicts.push({
-            id: i.toString(),
+            id: item.id,
             fileName: finalFile,
             reason: {
               type: 'file',
@@ -1416,7 +1442,7 @@ export const AddDownloadsModal = () => {
       resolution: 'rename' | 'replace' | 'skip';
       replaceFingerprint?: string;
     }[],
-    destinationOverrides: Record<number, string> = {}
+    destinationOverrides: Record<string | number, string> = {}
   ) => {
       let itemsToAdd: Array<AddDownloadDraftRow | null> = parsedItems.map(item =>
         item.selected === false ? null : item
@@ -1426,10 +1452,14 @@ export const AddDownloadsModal = () => {
 
       if (resolutions) {
          for (const res of resolutions) {
-             const idx = parseInt(res.id);
+             const idx = itemsToAdd.findIndex((candidate, index) =>
+               candidate !== null && (candidate.id === res.id || String(index) === res.id)
+             );
+             if (idx === -1) continue;
              const item = itemsToAdd[idx];
              if (!item) continue;
              const conflict = conflicts.find(c => c.id === res.id);
+             const itemOverride = destinationOverrides[item.id] ?? destinationOverrides[idx];
 
              if (res.resolution === 'skip') {
                  itemsToAdd[idx] = null;
@@ -1442,7 +1472,7 @@ export const AddDownloadsModal = () => {
           finalFile,
           finalLocation,
           useSharedDestination,
-          destinationOverrides[idx],
+          itemOverride,
           item.isTorrent === true
         );
                  
@@ -1455,11 +1485,12 @@ export const AddDownloadsModal = () => {
                    const candidateFile = candidate.isMedia
                      ? mediaFileNameForSelectedFormat(candidate.file, candidate)
                      : canonicalizeDownloadFileName(candidate.file);
+                   const candidateOverride = destinationOverrides[candidate.id] ?? destinationOverrides[candidateIndex];
                    const candidateLocation = await destinationForFile(
                      candidateFile,
                      finalLocation,
                      useSharedDestination,
-                     destinationOverrides[candidateIndex],
+                     candidateOverride,
                      candidate.isTorrent === true
                    );
                    batchTargets.push({ location: candidateLocation, fileName: candidateFile });
@@ -1522,7 +1553,7 @@ export const AddDownloadsModal = () => {
           finalFile,
           finalLocation,
           useSharedDestination,
-          destinationOverrides[idx],
+          itemOverride,
           item.isTorrent === true
         );
         const store = useDownloadStore.getState();
@@ -1530,7 +1561,7 @@ export const AddDownloadsModal = () => {
           ? store.downloads.find(download => download.id === conflict.existingDownloadId)
           : undefined;
         const currentSettings = useSettingsStore.getState();
-        if (!existingItem && !conflict?.existingDownloadId) {
+        if (!existingItem) {
           for (const download of store.downloads) {
             const destination = download.destination ||
               await resolveCategoryDestination(currentSettings, download.category);
@@ -1549,58 +1580,89 @@ export const AddDownloadsModal = () => {
           }
         }
 
-                 if (existingItem && isTransferLocked(existingItem.status)) {
-                   throw new Error(t($ => $.addDownloads.pauseBeforeReplace, { file: existingItem.fileName }));
-                 }
+        if (existingItem && isTransferLocked(existingItem.status)) {
+          throw new Error(t($ => $.addDownloads.pauseBeforeReplace, { file: existingItem.fileName }));
+        }
 
-                 if (!existingItem) {
-                   if (!res.replaceFingerprint || conflict?.existingDownloadId) {
-                     throw new Error(t($ => $.addDownloads.cannotReplace, { file: finalFile }));
-                   }
-                   itemsToAdd[idx] = {
-                     ...item,
-                     replaceExistingFingerprint: res.replaceFingerprint
-                   };
-                   continue;
-                 }
-                const incomingMediaFormat = mediaFormatSelectorForRow(item);
-                const mediaFormatChanged = item.isMedia
-                  && existingItem.mediaFormatSelector !== incomingMediaFormat;
-                const torrentReplacement = Boolean(item.isTorrent) || Boolean(existingItem.isTorrent);
-                if (existingItem.status === 'completed' || mediaFormatChanged || torrentReplacement) {
-                  // Completed replacements must remove the old file so the
-                  // new transfer cannot be treated as an already-complete
-                  // aria2 target. A torrent replacement also needs a fresh
-                  // identity because its cached metadata is keyed by the
-                  // new row ID and its output contract differs from a normal
-                  // file transfer. Unfinished ordinary rows use the in-place
-                  // path to preserve their resumable assets and progress.
-                  await store.removeDownload(existingItem.id, true, false);
-                 } else {
-                   const contextUrl = requestContextUrlForRow(item);
-                   const replaced = await store.replaceDownload(existingItem.id, {
-                     url: item.downloadUrl,
-                     username: useAuth ? username.trim() : undefined,
-                     password: useAuth ? password.trim() : undefined,
-                     headers: headersForRow(contextUrl) || undefined,
-                     cookies: cookiesForRow(contextUrl, item.downloadUrl) || undefined,
-                     mirrors: mirrors.trim() || undefined,
-                     lastError: undefined
-                   }, pendingAction);
-                   if (!replaced) {
-                     const rejected = useDownloadStore.getState().downloads.find(download => download.id === existingItem.id);
-                     throw new Error(rejected?.lastError || t($ => $.addDownloads.backendRejectedStart));
-                   }
+        if (!existingItem) {
+          let diskTargetKind: string | null = null;
+          let diskTargetFingerprint: string | undefined;
+          let diskTargetOwner: string | undefined;
+          try {
+            const targetInfo = await invoke('inspect_download_target', {
+              path: await resolveDownloadFilePath(itemLocation, finalFile)
+            });
+            diskTargetKind = targetInfo.kind;
+            diskTargetFingerprint = targetInfo.fingerprint;
+            diskTargetOwner = targetInfo.ownedBy;
+          } catch (e) {
+            console.error("Failed to check if file exists on disk:", e);
+          }
 
-                   // The existing row was updated in place; do not create a
-                   // second identity for the same filename.
-                   itemsToAdd[idx] = null;
-                   updatedCount += 1;
-                   continue;
-                 }
-             }
-         }
+          if (diskTargetKind === 'regularFile' && diskTargetFingerprint && !diskTargetOwner) {
+            itemsToAdd[idx] = {
+              ...item,
+              replaceExistingFingerprint: diskTargetFingerprint
+            };
+            continue;
+          }
+
+          if (diskTargetKind === 'missing' || !diskTargetKind) {
+            itemsToAdd[idx] = {
+              ...item,
+              replaceExistingFingerprint: undefined
+            };
+            continue;
+          }
+
+          if (res.replaceFingerprint && diskTargetFingerprint === res.replaceFingerprint) {
+            itemsToAdd[idx] = {
+              ...item,
+              replaceExistingFingerprint: res.replaceFingerprint
+            };
+            continue;
+          }
+
+          throw new Error(t($ => $.addDownloads.cannotReplace, { file: finalFile }));
+        }
+        const incomingMediaFormat = mediaFormatSelectorForRow(item);
+        const mediaFormatChanged = item.isMedia
+          && existingItem.mediaFormatSelector !== incomingMediaFormat;
+        const torrentReplacement = Boolean(item.isTorrent) || Boolean(existingItem.isTorrent);
+        if (existingItem.status === 'completed' || mediaFormatChanged || torrentReplacement) {
+          // Completed replacements must remove the old file so the
+          // new transfer cannot be treated as an already-complete
+          // aria2 target. A torrent replacement also needs a fresh
+          // identity because its cached metadata is keyed by the
+          // new row ID and its output contract differs from a normal
+          // file transfer. Unfinished ordinary rows use the in-place
+          // path to preserve their resumable assets and progress.
+          await store.removeDownload(existingItem.id, true, false);
+         } else {
+           const contextUrl = requestContextUrlForRow(item);
+           const replaced = await store.replaceDownload(existingItem.id, {
+             url: item.downloadUrl,
+             username: useAuth ? username.trim() : undefined,
+             password: useAuth ? password.trim() : undefined,
+             headers: headersForRow(contextUrl, item.isMedia) || undefined,
+             cookies: cookiesForRow(contextUrl, item.downloadUrl, item.isMedia) || undefined,
+             mirrors: mirrors.trim() || undefined,
+             lastError: undefined
+           }, pendingAction);
+           if (!replaced) {
+             const rejected = useDownloadStore.getState().downloads.find(download => download.id === existingItem.id);
+             throw new Error(rejected?.lastError || t($ => $.addDownloads.backendRejectedStart));
+           }
+
+           // The existing row was updated in place; do not create a
+           // second identity for the same filename.
+           itemsToAdd[idx] = null;
+            updatedCount += 1;
+            continue;
+          }
+        }
       }
+    }
 
       let addedCount = 0;
       const failures: string[] = [];
@@ -1629,8 +1691,8 @@ export const AddDownloadsModal = () => {
                 id,
                 cache: true,
                 proxy: proxy ?? undefined,
-                headers: headersForRow(contextUrl) || undefined,
-                cookies: cookiesForRow(contextUrl, item.sourceUrl) || undefined,
+                headers: headersForRow(contextUrl, item.isMedia) || undefined,
+                cookies: cookiesForRow(contextUrl, item.sourceUrl, item.isMedia) || undefined,
                 cookieScopes: requestContextForUrl(contextUrl)?.cookieScopes || undefined,
                 torrent: true
               });
@@ -1642,6 +1704,7 @@ export const AddDownloadsModal = () => {
             : canonicalizeDownloadFileName(item.file);
           let formatSelector = mediaFormatSelectorForRow(item);
         const category = categoryForFileName(finalFile, item.isTorrent === true);
+        const itemOverride = destinationOverrides[item.id] ?? destinationOverrides[itemIndex];
         const added = await addDownload({
           id,
           url: item.downloadUrl,
@@ -1658,18 +1721,18 @@ export const AddDownloadsModal = () => {
           sftpHostKeyMd: !item.isTorrent && item.sourceUrl.trim().toLowerCase().startsWith('sftp:')
             ? sftpHostKeyMd.trim() || undefined
             : undefined,
-          headers: item.isTorrent ? undefined : headersForRow(contextUrl) || undefined,
+          headers: item.isTorrent ? undefined : headersForRow(contextUrl, item.isMedia) || undefined,
           checksum: checksumEnabled && checksumValue.trim()
             ? `${checksumAlgo}=${checksumValue.trim()}`
             : undefined,
-          cookies: item.isTorrent ? undefined : cookiesForRow(contextUrl, item.downloadUrl) || undefined,
+          cookies: item.isTorrent ? undefined : cookiesForRow(contextUrl, item.downloadUrl, item.isMedia) || undefined,
           mirrors: mirrors.trim() || undefined,
-          destination: useSharedDestination || saveInDedicatedFolder || destinationOverrides[itemIndex]
+          destination: useSharedDestination || saveInDedicatedFolder || itemOverride
             ? await destinationForFile(
                 finalFile,
                 finalLocation,
                 useSharedDestination,
-                destinationOverrides[itemIndex],
+                itemOverride,
                 item.isTorrent === true
               )
             : undefined,

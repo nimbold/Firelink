@@ -336,6 +336,33 @@ describe('add download metadata workflow', () => {
     expect(rows.some(item => item.isPlaylist)).toBe(false);
   });
 
+  it('retains the playlist row when expansion has no valid video entries', () => {
+    const playlistUrl = 'https://www.youtube.com/playlist?list=PL_EMPTY';
+    const rows = reconcileDownloadRows(
+      playlistUrl,
+      [],
+      undefined,
+      new Set(),
+      undefined,
+      {},
+      {},
+      {
+        [playlistUrl]: {
+          title: 'Empty playlist',
+          playlist_id: 'PL_EMPTY',
+          entry_count: 0,
+          skipped_entries: 0,
+          truncated: false,
+          entries: []
+        }
+      }
+    );
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].sourceUrl).toBe(playlistUrl);
+    expect(rows[0].isPlaylist).toBe(true);
+  });
+
   it('forces explicit extension media fetches through media metadata for any http page', () => {
     const rows = reconcileDownloadRows(
       'https://adult.example/watch/123',

@@ -2,16 +2,32 @@ let schedulerControlGeneration = 0;
 let latestRunQueueIds: ReadonlySet<string> | null = null;
 const schedulerHandoffs = new Map<number, Set<string>>();
 
+let postActionCanceller: (() => void) | null = null;
+
+export const registerPostActionCanceller = (canceller: () => void): (() => void) => {
+  postActionCanceller = canceller;
+  return () => {
+    if (postActionCanceller === canceller) {
+      postActionCanceller = null;
+    }
+  };
+};
+
+export const cancelPendingPostAction = (): void => {
+  postActionCanceller?.();
+};
+
 /**
  * Start a new scheduler control lifecycle. A later manual pause or scheduler
  * event invalidates earlier asynchronous queue operations before they can
- * publish stale running state.
+ * publish stale running state, and cancels any pending post-queue action.
  */
 export const beginSchedulerControl = (runQueueIds?: readonly string[]): number => {
   schedulerControlGeneration += 1;
   latestRunQueueIds = runQueueIds ? new Set(runQueueIds) : null;
   schedulerHandoffs.clear();
   if (runQueueIds) schedulerHandoffs.set(schedulerControlGeneration, new Set());
+  postActionCanceller?.();
   return schedulerControlGeneration;
 };
 

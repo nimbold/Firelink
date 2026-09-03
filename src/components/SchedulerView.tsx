@@ -205,6 +205,8 @@ export default function SchedulerView() {
         variant: 'success'
       });
     } else {
+      useSettingsStore.getState().setSchedulerRunning(false);
+      useSettingsStore.getState().setSchedulerActiveDownloadIds([]);
       addToast({ message: t($ => $.scheduler.noStartableDownloads), variant: 'info' });
     }
   };
@@ -213,17 +215,30 @@ export default function SchedulerView() {
     const generation = beginSchedulerControl();
     const savedQueueIds = savedSettings.selectedQueueIds
       .filter(queueId => availableQueueIds.has(queueId));
-    const savedQueueSet = new Set(savedQueueIds);
-    const trackedIdsOutsideSavedQueues = useSettingsStore.getState().schedulerActiveDownloadIds
-      .filter(id => {
-        const queueId = useDownloadStore.getState().downloads.find(download => download.id === id)?.queueId || MAIN_QUEUE_ID;
-        return !savedQueueSet.has(queueId);
-      });
+    const targetQueueIds = new Set<string>([
+      ...savedQueueIds,
+      ...effectiveSelectedQueueIds
+    ]);
+    const trackedDownloadIds = useSettingsStore.getState().schedulerActiveDownloadIds;
+    const downloads = useDownloadStore.getState().downloads;
+    for (const id of trackedDownloadIds) {
+      const queueId = downloads.find(d => d.id === id)?.queueId || MAIN_QUEUE_ID;
+      if (availableQueueIds.has(queueId)) {
+        targetQueueIds.add(queueId);
+      }
+    }
+    const targetQueueList = Array.from(targetQueueIds);
+    const targetQueueSet = new Set(targetQueueList);
+    const trackedIdsOutsideQueues = trackedDownloadIds.filter(id => {
+      const queueId = downloads.find(d => d.id === id)?.queueId || MAIN_QUEUE_ID;
+      return !targetQueueSet.has(queueId);
+    });
+
     const counts = await Promise.all(
-      savedQueueIds.map(queueId => useDownloadStore.getState().pauseQueue(queueId))
+      targetQueueList.map(queueId => useDownloadStore.getState().pauseQueue(queueId))
     );
     const directPauseResults = await Promise.allSettled(
-      trackedIdsOutsideSavedQueues.map(id => useDownloadStore.getState().pauseDownload(id))
+      trackedIdsOutsideQueues.map(id => useDownloadStore.getState().pauseDownload(id))
     );
     if (!isSchedulerControlCurrent(generation)) return;
     const count = counts.reduce((total, queueCount) => total + queueCount, 0)

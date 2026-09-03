@@ -1121,6 +1121,7 @@ const uk = {
       tokenCopied: 'Токен скопійовано в буфер обміну!',
       tokenCopyFailed: 'Не вдалося скопіювати токен: {{detail}}',
       pairingTokenRegenerated: 'Токен підключення згенеровано наново',
+      regenerateToken: 'Згенерувати токен наново',
       regenerateFailed: 'Не вдалося згенерувати токен підключення наново: {{detail}}',
       getExtension: 'Отримати розширення',
       extensionDescription: 'Встановіть Firelink Companion для браузерів Firefox або Chromium.',

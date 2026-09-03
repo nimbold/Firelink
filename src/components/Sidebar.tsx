@@ -21,10 +21,11 @@ interface SidebarProps {
   selectedFilter: SidebarFilter;
   onToggleSidebar?: () => void;
   onSelectFilter: (filter: SidebarFilter) => void;
+  toggleButtonRef?: React.Ref<HTMLButtonElement>;
 }
 
 export const Sidebar: React.FC<SidebarProps> = (props) => {
-  const { selectedFilter, onToggleSidebar, onSelectFilter } = props;
+  const { selectedFilter, onToggleSidebar, onSelectFilter, toggleButtonRef } = props;
   const { downloads, queues, addQueue, renameQueue, removeQueue, startQueue, pauseQueue, setQueueConcurrency } = useDownloadStore();
   const {
     activeView,
@@ -116,7 +117,11 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
   useEffect(() => {
     const handleCloseMenu = () => setContextMenu(null);
     const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setContextMenu(null);
+      if (event.key === 'Escape' && contextMenuRef.current) {
+        event.preventDefault();
+        event.stopPropagation();
+        setContextMenu(null);
+      }
     };
     window.addEventListener('click', handleCloseMenu);
     window.addEventListener('keydown', handleEscape);
@@ -388,6 +393,10 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
 
         <button
           type="button"
+          ref={toggleButtonRef}
+          data-tauri-drag-region="false"
+          onPointerDown={event => event.stopPropagation()}
+          onMouseDown={event => event.stopPropagation()}
           onClick={onToggleSidebar ?? toggleSidebar}
           className="sidebar-toggle-button"
           title={t($ => $.actions.hideSidebar)}

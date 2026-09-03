@@ -1121,6 +1121,7 @@ const ru = {
       tokenCopied: 'Токен скопирован в буфер обмена!',
       tokenCopyFailed: 'Не удалось скопировать токен: {{detail}}',
       pairingTokenRegenerated: 'Токен сопряжения сгенерирован заново',
+      regenerateToken: 'Сгенерировать токен заново',
       regenerateFailed: 'Не удалось сгенерировать токен сопряжения заново: {{detail}}',
       getExtension: 'Получить расширение',
       extensionDescription: 'Установите Firelink Companion для браузеров Firefox или Chromium.',

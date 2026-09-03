@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   beginSchedulerControl,
+  cancelPendingPostAction,
   consumeSchedulerHandoffIds,
   handoffSupersededSchedulerIds,
-  isSchedulerControlCurrent
+  isSchedulerControlCurrent,
+  registerPostActionCanceller
 } from './schedulerControl';
 
 describe('scheduler control generation', () => {
@@ -33,5 +35,22 @@ describe('scheduler control generation', () => {
 
     expect(handoffSupersededSchedulerIds(['download-a'], () => 'queue-a')).toEqual(new Set());
     expect(consumeSchedulerHandoffIds(pause)).toEqual(new Set());
+  });
+
+  it('cancels pending post actions when a new control generation begins', () => {
+    let cancelled = 0;
+    const unregister = registerPostActionCanceller(() => {
+      cancelled += 1;
+    });
+
+    beginSchedulerControl();
+    expect(cancelled).toBe(1);
+
+    cancelPendingPostAction();
+    expect(cancelled).toBe(2);
+
+    unregister();
+    beginSchedulerControl();
+    expect(cancelled).toBe(2);
   });
 });

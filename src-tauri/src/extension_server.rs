@@ -731,8 +731,9 @@ mod tests {
     use super::{
         acknowledge_extension_download, add_server_identity, claim_request_at,
         has_allowed_request_origin, is_valid_client_nonce, normalize_download,
-        required_client_nonce, sign_server_proof, ExtensionCookieScope, ExtensionRequest,
-        MAX_URL_COUNT, PROTOCOL_VERSION_HEADER, SERVER_HEADER,
+        normalize_url, required_client_nonce, same_origin_url, sanitize_filename,
+        sign_server_proof, ExtensionCookieScope, ExtensionRequest, MAX_URL_COUNT,
+        PROTOCOL_VERSION_HEADER, SERVER_HEADER,
     };
     use axum::{
         http::{HeaderMap, HeaderValue, StatusCode},
@@ -1181,5 +1182,71 @@ mod tests {
             sign_server_proof(timestamp, nonce, port + 1, &token).unwrap(),
             expected
         );
+    }
+
+    #[test]
+    fn sanitize_filename_strips_path_traversal_and_rejects_empty_or_special_names() {
+        assert_eq!(sanitize_filename("../../etc/passwd"), Some("passwd".to_string()));
+        assert_eq!(
+            sanitize_filename(r"..\..\Windows\System32\calc.exe"),
+            Some("calc.exe".to_string())
+        );
+        assert_eq!(
+            sanitize_filename("valid_report.pdf"),
+            Some("valid_report.pdf".to_string())
+        );
+        assert!(sanitize_filename(".").is_none());
+        assert!(sanitize_filename("..").is_none());
+        assert!(sanitize_filename("").is_none());
+        assert!(sanitize_filename("   ").is_none());
+        assert!(sanitize_filename(&"a".repeat(256)).is_none());
+    }
+
+    #[test]
+    fn normalize_url_rejects_dangerous_or_unsupported_schemes() {
+        assert!(normalize_url("file:///etc/passwd").is_none());
+        assert!(normalize_url("javascript:alert(1)").is_none());
+        assert!(normalize_url("data:text/html,<h1>test</h1>").is_none());
+        assert!(normalize_url("blob:https://example.com/uuid").is_none());
+        assert_eq!(
+            normalize_url("https://example.com/file.zip"),
+            Some("https://example.com/file.zip".to_string())
+        );
+        assert_eq!(
+            normalize_url("http://example.com/file.zip"),
+            Some("http://example.com/file.zip".to_string())
+        );
+        assert_eq!(
+            normalize_url("ftp://example.com/file.zip"),
+            Some("ftp://example.com/file.zip".to_string())
+        );
+        assert_eq!(
+            normalize_url("sftp://example.com/file.zip"),
+            Some("sftp://example.com/file.zip".to_string())
+        );
+        assert_eq!(
+            normalize_url("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"),
+            Some("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".to_string())
+        );
+    }
+
+    #[test]
+    fn same_origin_url_strictly_matches_scheme_host_and_port() {
+        assert!(same_origin_url(
+            "https://example.com/path1",
+            "https://example.com/path2"
+        ));
+        assert!(!same_origin_url(
+            "http://example.com/path",
+            "https://example.com/path"
+        ));
+        assert!(!same_origin_url(
+            "https://example.com:8443/path",
+            "https://example.com/path"
+        ));
+        assert!(!same_origin_url(
+            "https://other.example/path",
+            "https://example.com/path"
+        ));
     }
 }

@@ -1121,6 +1121,7 @@ const he = {
       tokenCopied: 'האסימון הועתק ללוח!',
       tokenCopyFailed: 'לא ניתן להעתיק את האסימון: {{detail}}',
       pairingTokenRegenerated: 'אסימון הצימוד נוצר מחדש',
+      regenerateToken: 'צור אסימון מחדש',
       regenerateFailed: 'לא ניתן ליצור מחדש אסימון צימוד: {{detail}}',
       getExtension: 'קבלת התוסף',
       extensionDescription: 'התקן את Firelink Companion עבור דפדפני Firefox או Chromium.',

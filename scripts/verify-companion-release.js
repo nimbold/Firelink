@@ -12,12 +12,20 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
-function exactVersionTag(extensionRoot, expectedTag) {
+export function exactVersionTag(extensionRoot, expectedTag) {
   try {
     const tags = execFileSync(
       'git',
       ['-C', extensionRoot, 'tag', '--points-at', 'HEAD', '--list', '--', expectedTag],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        env: {
+          ...process.env,
+          GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL || (process.platform === 'win32' ? 'NUL' : '/dev/null'),
+          GIT_CONFIG_NOSYSTEM: '1',
+        },
+      }
     )
       .split(/\r?\n/)
       .map(tag => tag.trim())

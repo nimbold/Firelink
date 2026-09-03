@@ -21,7 +21,11 @@ const SIZE_UNITS: Record<string, number> = {
 };
 
 const valueOrNull = (value?: string): string | null => {
-  const trimmed = value?.trim();
+  let trimmed = value?.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('~') || trimmed.startsWith('≈')) {
+    trimmed = trimmed.slice(1).trim();
+  }
   return trimmed && trimmed !== '-' && !/^unknown$/i.test(trimmed) ? trimmed : null;
 };
 
@@ -40,6 +44,16 @@ const parseUnitValue = (value?: string, units = SIZE_UNITS): number | null => {
 };
 
 export const parseDownloadSize = (value?: string): number | null => parseUnitValue(value);
+
+export const resolveSortableSize = (download: DownloadItem): number | null => {
+  if (typeof download.totalBytes === 'number' && Number.isFinite(download.totalBytes) && download.totalBytes > 0) {
+    return download.totalBytes;
+  }
+  if (download.status === 'completed' && typeof download.downloadedBytes === 'number' && Number.isFinite(download.downloadedBytes) && download.downloadedBytes > 0) {
+    return download.downloadedBytes;
+  }
+  return parseDownloadSize(download.size);
+};
 
 export const parseDownloadSpeed = (value?: string): number | null =>
   parseUnitValue(value, SIZE_UNITS);
@@ -65,12 +79,18 @@ export const parseDownloadEta = (value?: string): number | null => {
   return matched && Number.isFinite(seconds) ? seconds : null;
 };
 
-const compareValues = (left: string | number | null, right: string | number | null): number => {
+const compareValues = (
+  left: string | number | null,
+  right: string | number | null,
+  direction: DownloadSortDirection
+): number => {
   if (left === null && right === null) return 0;
   if (left === null) return 1;
   if (right === null) return -1;
-  if (typeof left === 'number' && typeof right === 'number') return left - right;
-  return String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: 'base' });
+  const comparison = typeof left === 'number' && typeof right === 'number'
+    ? left - right
+    : String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: 'base' });
+  return direction === 'asc' ? comparison : -comparison;
 };
 
 const parseDownloadDate = (value?: string): number | null => {
@@ -84,27 +104,27 @@ export const sortDownloads = (downloads: DownloadItem[], config: DownloadSortCon
     let comparison: number;
     switch (config.column) {
       case 'File Name':
-        comparison = compareValues(left.fileName || left.url, right.fileName || right.url);
+        comparison = compareValues(left.fileName || left.url, right.fileName || right.url, config.direction);
         break;
       case 'Size':
-        comparison = compareValues(parseDownloadSize(left.size), parseDownloadSize(right.size));
+        comparison = compareValues(resolveSortableSize(left), resolveSortableSize(right), config.direction);
         break;
       case 'Status':
-        comparison = compareValues(left.status, right.status);
+        comparison = compareValues(left.status, right.status, config.direction);
         break;
       case 'Speed':
-        comparison = compareValues(parseDownloadSpeed(left.speed), parseDownloadSpeed(right.speed));
+        comparison = compareValues(parseDownloadSpeed(left.speed), parseDownloadSpeed(right.speed), config.direction);
         break;
       case 'ETA':
-        comparison = compareValues(parseDownloadEta(left.eta), parseDownloadEta(right.eta));
+        comparison = compareValues(parseDownloadEta(left.eta), parseDownloadEta(right.eta), config.direction);
         break;
       case 'Date Added':
-        comparison = compareValues(parseDownloadDate(left.dateAdded), parseDownloadDate(right.dateAdded));
+        comparison = compareValues(parseDownloadDate(left.dateAdded), parseDownloadDate(right.dateAdded), config.direction);
         break;
     }
 
     if (comparison === 0) comparison = left.id.localeCompare(right.id);
-    return config.direction === 'asc' ? comparison : -comparison;
+    return comparison;
   });
   return sorted;
 };

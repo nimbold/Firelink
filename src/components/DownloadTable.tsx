@@ -739,6 +739,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     persistColumnWidths(widths);
     persistColumnOrder(order);
     persistColumnAlignments(alignments);
+    setQueueSortConfig(null);
     setColumnMenu(null);
   };
 
@@ -749,6 +750,10 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     };
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        if (contextMenuRef.current || columnMenuRef.current) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
         setContextMenu(null);
         setColumnMenu(null);
       }
@@ -1752,8 +1757,19 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   }, [sortedDownloads]);
 
   useEffect(() => {
+    setContextMenu(null);
+    setColumnMenu(null);
     setQueueSortConfig(null);
   }, [filter, isQueueFilter]);
+
+  const writeToClipboard = useCallback(async (text: string): Promise<void> => {
+    try {
+      await writeClipboardText(text);
+    } catch {
+      await navigator.clipboard.writeText(text);
+    }
+  }, []);
+
   const handleItemClick = useCallback((e: React.MouseEvent, item: DownloadItem) => {
     if (suppressQueueClickRef.current) {
       clearQueueClickSuppression();
@@ -1789,6 +1805,82 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     setContextMenu(menu);
   }, [clampMenuPosition]);
 
+  const handleRowKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>, item: DownloadItem) => {
+    if (e.target instanceof Element && e.target.closest('button, a, input, textarea, select')) {
+      return;
+    }
+
+    if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      const row = queueRowForId(item.id);
+      const rect = row?.getBoundingClientRect();
+      const x = rect ? rect.left + 40 : 100;
+      const y = rect ? rect.top + rect.height / 2 : 100;
+      handleContextMenu({ x, y, id: item.id });
+      return;
+    }
+
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      handleDownloadDoubleClick(item);
+      return;
+    }
+
+    if (e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
+      const nextSelection = updateDownloadSelection({
+        orderedIds: sortedDownloadsRef.current.map(d => d.id),
+        selectedIds: selectedIdsRef.current,
+        lastSelectedId: lastSelectedIdRef.current,
+        targetId: item.id,
+        extendRange: e.shiftKey,
+        toggle: true,
+      });
+      setSelectedIds(nextSelection.selectedIds);
+      setLastSelectedId(nextSelection.lastSelectedId);
+      return;
+    }
+
+    if (
+      !e.altKey &&
+      !e.metaKey &&
+      !e.ctrlKey &&
+      (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End')
+    ) {
+      const items = sortedDownloadsRef.current;
+      const currentIndex = items.findIndex(d => d.id === item.id);
+      if (currentIndex === -1) return;
+
+      let targetIndex = currentIndex;
+      if (e.key === 'ArrowDown') targetIndex = Math.min(items.length - 1, currentIndex + 1);
+      else if (e.key === 'ArrowUp') targetIndex = Math.max(0, currentIndex - 1);
+      else if (e.key === 'Home') targetIndex = 0;
+      else if (e.key === 'End') targetIndex = items.length - 1;
+
+      if (targetIndex !== currentIndex) {
+        e.preventDefault();
+        e.stopPropagation();
+        const targetItem = items[targetIndex];
+        const nextSelection = updateDownloadSelection({
+          orderedIds: items.map(d => d.id),
+          selectedIds: selectedIdsRef.current,
+          lastSelectedId: lastSelectedIdRef.current,
+          targetId: targetItem.id,
+          extendRange: e.shiftKey,
+          toggle: false,
+        });
+        setSelectedIds(nextSelection.selectedIds);
+        setLastSelectedId(nextSelection.lastSelectedId);
+        const targetElement = queueRowForId(targetItem.id);
+        targetElement?.focus({ preventScroll: false });
+        targetElement?.scrollIntoView({ block: 'nearest' });
+      }
+    }
+  }, [handleContextMenu, handleDownloadDoubleClick]);
+
   const handleMoveInQueue = useCallback((id: string, direction: 'up' | 'down') => {
     if (
       queueDragStateRef.current ||
@@ -1821,15 +1913,22 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   }, [moveInQueue, showInteractionError, t]);
 
   const handleSort = (column: DownloadSortColumn) => {
-    const update = (current: DownloadSortConfig | null): DownloadSortConfig =>
-      current?.column === column
-        ? { column, direction: current.direction === 'asc' ? 'desc' : 'asc' }
-        : { column, direction: 'asc' };
-
     if (isQueueFilter) {
-      setQueueSortConfig(update);
+      setQueueSortConfig(current => {
+        if (current?.column !== column) {
+          return { column, direction: 'asc' };
+        }
+        if (current.direction === 'asc') {
+          return { column, direction: 'desc' };
+        }
+        return null;
+      });
     } else {
-      setSortConfig(current => update(current));
+      setSortConfig(current =>
+        current?.column === column
+          ? { column, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+          : { column, direction: 'asc' }
+      );
     }
   };
 
@@ -2302,6 +2401,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
                         onMoveInQueue={handleMoveInQueue}
                         onQueueDragStart={stableHandleQueueDragStart}
                         onClick={handleItemClick}
+                        onRowKeyDown={handleRowKeyDown}
                       />
                     ))}
                     <div className="flex-1 min-h-0 bg-transparent pointer-events-none" />
@@ -2346,6 +2446,21 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
           className="download-column-menu app-modal fixed z-[70] min-w-[188px] max-h-[calc(100vh-16px)] overflow-y-auto overflow-x-hidden py-1.5 text-[12px] font-medium text-text-primary"
           style={{ top: columnMenuPosition?.y, left: columnMenuPosition?.x }}
           onClick={event => event.stopPropagation()}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+              e.preventDefault();
+              e.stopPropagation();
+              const menu = columnMenuRef.current;
+              if (!menu) return;
+              const buttons = Array.from(menu.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+              if (buttons.length === 0) return;
+              const activeIdx = buttons.indexOf(document.activeElement as HTMLButtonElement);
+              const nextIdx = e.key === 'ArrowDown'
+                ? (activeIdx + 1) % buttons.length
+                : (activeIdx <= 0 ? buttons.length - 1 : activeIdx - 1);
+              buttons[nextIdx]?.focus();
+            }
+          }}
         >
           <div className="download-column-menu-title px-3 py-1.5 text-text-muted">
             {columnLabels.get(columnMenu.key) ?? columnMenu.key}
@@ -2394,6 +2509,21 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
              left: contextMenuPosition?.x,
           }}
           onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+              e.preventDefault();
+              e.stopPropagation();
+              const menu = contextMenuRef.current;
+              if (!menu) return;
+              const buttons = Array.from(menu.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+              if (buttons.length === 0) return;
+              const activeIdx = buttons.indexOf(document.activeElement as HTMLButtonElement);
+              const nextIdx = e.key === 'ArrowDown'
+                ? (activeIdx + 1) % buttons.length
+                : (activeIdx <= 0 ? buttons.length - 1 : activeIdx - 1);
+              buttons[nextIdx]?.focus();
+            }
+          }}
         >
           {selectedIds.size > 1 ? (() => {
             const selectedDownloads = Array.from(selectedIds)
@@ -2457,7 +2587,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
                     .map(id => downloads.find(d => d.id === id)?.url)
                     .filter(Boolean)
                     .join('\n');
-                  navigator.clipboard.writeText(urls).catch(error => {
+                  writeToClipboard(urls).catch(error => {
                     showInteractionError(t($ => $.downloadTable.copyAddressesFailed), error);
                   });
                 }}
@@ -2564,7 +2694,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
               <button
                 onClick={() => {
                   setContextMenu(null);
-                  navigator.clipboard.writeText(contextItem.url).catch(error => {
+                  writeToClipboard(contextItem.url).catch(error => {
                     showInteractionError(t($ => $.downloadTable.copyAddressFailed), error);
                   });
                 }}
@@ -2579,7 +2709,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
                     setContextMenu(null);
                     try {
                       const magnet = await invoke('get_torrent_magnet_link', { id: contextItem.id });
-                      await writeClipboardText(magnet);
+                      await writeToClipboard(magnet);
                     } catch (error) {
                       showInteractionError(t($ => $.downloadTable.copyMagnetFailed), error);
                     }
@@ -2600,7 +2730,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
                       return;
                     }
                     try {
-                      await navigator.clipboard.writeText(fullPath);
+                      await writeToClipboard(fullPath);
                     } catch (error) {
                       showInteractionError(t($ => $.downloadTable.copyPathFailed), error);
                     }

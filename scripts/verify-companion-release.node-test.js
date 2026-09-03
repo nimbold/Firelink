@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { verifyCompanionRelease } from './verify-companion-release.js';
+import { execFileSync } from 'node:child_process';
+import { exactVersionTag, verifyCompanionRelease } from './verify-companion-release.js';
 
 function createFixture(packageVersion, manifestVersion) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'firelink-companion-release-'));
@@ -112,6 +113,29 @@ test('rejects a Companion tag for another version', () => {
       () => verifyCompanionRelease({ repositoryRoot: root, resolveExactTag: () => 'v2.0.6' }),
       /does not match v2.0.7/
     );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('exactVersionTag resolves tag on HEAD with isolated git environment', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'firelink-git-test-'));
+  try {
+    const gitEnv = {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_AUTHOR_NAME: 'Test',
+      GIT_AUTHOR_EMAIL: 'test@example.com',
+      GIT_COMMITTER_NAME: 'Test',
+      GIT_COMMITTER_EMAIL: 'test@example.com',
+    };
+    execFileSync('git', ['init', root], { env: gitEnv, stdio: 'ignore' });
+    execFileSync('git', ['-C', root, 'commit', '--allow-empty', '-m', 'test'], { env: gitEnv, stdio: 'ignore' });
+    execFileSync('git', ['-C', root, 'tag', 'v2.0.7'], { env: gitEnv, stdio: 'ignore' });
+
+    assert.equal(exactVersionTag(root, 'v2.0.7'), 'v2.0.7');
+    assert.equal(exactVersionTag(root, 'v2.0.8'), null);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -2640,6 +2640,13 @@ async fn fetch_media_metadata(
 ) -> Result<MediaMetadata, String> {
     properties_window::ensure_main_window(&caller)?;
     validate_http_url_route(&url)?;
+    let cookie_browser = normalize_media_cookie_source(cookie_browser.as_deref())?;
+    let user_agent = user_agent.map(|ua| ua.trim().to_string()).filter(|ua| !ua.is_empty());
+    let username = username.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+    let password = password.filter(|p| !p.is_empty());
+    let headers = headers.map(|h| h.trim().to_string()).filter(|h| !h.is_empty());
+    let cookies = cookies.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
+    let proxy = proxy.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
     let cache_key = media_metadata_cache_key(
         &url,
         &cookie_browser,
@@ -2777,6 +2784,13 @@ async fn fetch_media_playlist_metadata(
 ) -> Result<MediaPlaylistMetadata, String> {
     properties_window::ensure_main_window(&caller)?;
     validate_http_url_route(&url)?;
+    let cookie_browser = normalize_media_cookie_source(cookie_browser.as_deref())?;
+    let user_agent = user_agent.map(|ua| ua.trim().to_string()).filter(|ua| !ua.is_empty());
+    let username = username.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+    let password = password.filter(|p| !p.is_empty());
+    let headers = headers.map(|h| h.trim().to_string()).filter(|h| !h.is_empty());
+    let cookies = cookies.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
+    let proxy = proxy.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
 
     let result = fetch_media_playlist_metadata_uncached(
         app_handle.clone(),
@@ -2862,8 +2876,8 @@ async fn fetch_media_playlist_metadata_uncached(
         .arg("no-youtube-unavailable-videos");
 
     if let Some(browser) = cookie_browser.as_deref() {
-        if !browser.is_empty() {
-            cmd = cmd.arg("--cookies-from-browser").arg(browser);
+        if !browser.is_empty() && browser != "none" {
+            cmd = cmd.arg("--cookies-from-browser").arg(ytdlp_cookie_browser_arg(browser));
         }
     }
 
@@ -2973,8 +2987,8 @@ async fn fetch_media_metadata_uncached(
         .arg("%(.{title,duration,thumbnail,formats})j");
 
     if let Some(browser) = cookie_browser.as_deref() {
-        if !browser.is_empty() {
-            cmd = cmd.arg("--cookies-from-browser").arg(browser);
+        if !browser.is_empty() && browser != "none" {
+            cmd = cmd.arg("--cookies-from-browser").arg(ytdlp_cookie_browser_arg(browser));
         }
     }
 
@@ -4048,6 +4062,7 @@ pub async fn rpc_call(
     payload.insert("params".to_string(), serde_json::json!(p));
 
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(std::time::Duration::from_secs(3))
         .build()
         .map_err(|e| e.to_string())?;
@@ -4748,6 +4763,49 @@ fn normalize_media_cookie_source(source: Option<&str>) -> Result<Option<String>,
     Err("Unsupported media browser-cookie source".to_string())
 }
 
+fn ytdlp_cookie_browser_arg(browser: &str) -> String {
+    let trimmed = browser.trim();
+    if trimmed.eq_ignore_ascii_case("safari") {
+        "safari:".to_string()
+    } else {
+        trimmed.to_ascii_lowercase()
+    }
+}
+
+fn media_format_and_container_args(format: &str, safe_filename: &str) -> Vec<String> {
+    let mut args = vec!["-f".to_string(), format.to_string()];
+    let lower_filename = safe_filename.to_ascii_lowercase();
+    if lower_filename.ends_with(".mp3") {
+        args.extend(["-x".to_string(), "--audio-format".to_string(), "mp3".to_string()]);
+    } else if lower_filename.ends_with(".m4a") {
+        args.extend(["-x".to_string(), "--audio-format".to_string(), "m4a".to_string()]);
+    } else if lower_filename.ends_with(".opus") {
+        args.extend(["-x".to_string(), "--audio-format".to_string(), "opus".to_string()]);
+    } else if lower_filename.ends_with(".flac") {
+        args.extend(["-x".to_string(), "--audio-format".to_string(), "flac".to_string()]);
+    } else if lower_filename.ends_with(".aac") {
+        args.extend(["-x".to_string(), "--audio-format".to_string(), "aac".to_string()]);
+    } else if lower_filename.ends_with(".wav") {
+        args.extend(["-x".to_string(), "--audio-format".to_string(), "wav".to_string()]);
+    } else if lower_filename.ends_with(".alac") {
+        args.extend(["-x".to_string(), "--audio-format".to_string(), "alac".to_string()]);
+    } else if lower_filename.ends_with(".ogg") {
+        args.extend(["-x".to_string(), "--audio-format".to_string(), "vorbis".to_string()]);
+    } else if lower_filename.ends_with(".mp4") {
+        args.extend(["--merge-output-format".to_string(), "mp4".to_string()]);
+    } else if lower_filename.ends_with(".webm") {
+        args.extend(["--merge-output-format".to_string(), "webm".to_string()]);
+    } else {
+        args.extend([
+            "--merge-output-format".to_string(),
+            "mkv".to_string(),
+            "--remux-video".to_string(),
+            "mkv".to_string(),
+        ]);
+    }
+    args
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn start_media_download_internal(
     app_handle: tauri::AppHandle,
@@ -4904,12 +4962,8 @@ pub(crate) async fn start_media_download_internal(
         }
 
         if let Some(cs) = effective_cookie_source.as_ref() {
-            let mut cs = cs.clone();
             if !cs.is_empty() && cs != "none" {
-                if cs == "safari" {
-                    cs = "safari:".to_string()
-                }
-                cmd = cmd.arg("--cookies-from-browser").arg(cs);
+                cmd = cmd.arg("--cookies-from-browser").arg(ytdlp_cookie_browser_arg(cs));
             }
         }
 
@@ -4924,27 +4978,8 @@ pub(crate) async fn start_media_download_internal(
         }
 
         if let Some(format) = format_selector.as_ref() {
-            cmd = cmd.arg("-f").arg(format);
-            if safe_filename.ends_with(".mp3") {
-                cmd = cmd.arg("-x").arg("--audio-format").arg("mp3");
-            } else if safe_filename.ends_with(".m4a") {
-                cmd = cmd.arg("-x").arg("--audio-format").arg("m4a");
-            } else if safe_filename.ends_with(".opus") {
-                cmd = cmd.arg("-x").arg("--audio-format").arg("opus");
-            } else if safe_filename.ends_with(".mp4") {
-                cmd = cmd.arg("--merge-output-format").arg("mp4");
-            } else if safe_filename.ends_with(".webm") {
-                cmd = cmd.arg("--merge-output-format").arg("webm");
-            } else {
-                // `--merge-output-format` only affects split video/audio
-                // selections. A progressive MP4/WebM stream already includes
-                // audio, so also request remuxing to keep an MKV option from
-                // producing a mismatched file extension and container.
-                cmd = cmd
-                    .arg("--merge-output-format")
-                    .arg("mkv")
-                    .arg("--remux-video")
-                    .arg("mkv");
+            for arg in media_format_and_container_args(format, &safe_filename) {
+                cmd = cmd.arg(arg);
             }
         }
 
@@ -10116,7 +10151,7 @@ async fn set_torrent_upload_limit(
         .await
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 async fn set_torrent_peer_options(
     caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
@@ -10379,7 +10414,7 @@ async fn get_torrent_file_selection(
     Ok(torrent_file_selection_snapshot(&metadata, selected.as_deref()))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 async fn set_torrent_file_selection(
     caller: tauri::WebviewWindow,
     properties: tauri::State<'_, properties_window::PropertiesWindowRegistry>,
@@ -14120,6 +14155,8 @@ mod tests {
         parse_media_playlist_metadata,
         normalize_media_connections,
         normalize_media_cookie_source,
+        media_format_and_container_args,
+        ytdlp_cookie_browser_arg,
         validate_enqueue_url, validate_enqueue_uris, validate_keychain_grant_request_id,
         validate_torrent_metadata_network_policy,
         aria2_gid_not_found,
@@ -17686,6 +17723,52 @@ mod tests {
         );
         assert!(normalize_media_cookie_source(Some("profile=secret")).is_err());
         assert!(normalize_media_cookie_source(Some("unknown-browser")).is_err());
+    }
+
+    #[test]
+    fn ytdlp_cookie_browser_arg_formats_safari_and_other_browsers() {
+        assert_eq!(ytdlp_cookie_browser_arg("safari"), "safari:");
+        assert_eq!(ytdlp_cookie_browser_arg(" Safari "), "safari:");
+        assert_eq!(ytdlp_cookie_browser_arg("chrome"), "chrome");
+        assert_eq!(ytdlp_cookie_browser_arg(" Firefox "), "firefox");
+    }
+
+    #[test]
+    fn media_format_and_container_args_dispatches_audio_and_video_correctly() {
+        // Audio extractions (case-insensitive)
+        let mp3_args = media_format_and_container_args("ba", "song.MP3");
+        assert_eq!(mp3_args, vec!["-f", "ba", "-x", "--audio-format", "mp3"]);
+
+        let m4a_args = media_format_and_container_args("140", "song.m4a");
+        assert_eq!(m4a_args, vec!["-f", "140", "-x", "--audio-format", "m4a"]);
+
+        let opus_args = media_format_and_container_args("251", "track.Opus");
+        assert_eq!(opus_args, vec!["-f", "251", "-x", "--audio-format", "opus"]);
+
+        let flac_args = media_format_and_container_args("ba", "lossless.flac");
+        assert_eq!(flac_args, vec!["-f", "ba", "-x", "--audio-format", "flac"]);
+
+        let aac_args = media_format_and_container_args("ba", "audio.aac");
+        assert_eq!(aac_args, vec!["-f", "ba", "-x", "--audio-format", "aac"]);
+
+        let wav_args = media_format_and_container_args("ba", "recording.wav");
+        assert_eq!(wav_args, vec!["-f", "ba", "-x", "--audio-format", "wav"]);
+
+        let ogg_args = media_format_and_container_args("ba", "audio.ogg");
+        assert_eq!(ogg_args, vec!["-f", "ba", "-x", "--audio-format", "vorbis"]);
+
+        // Video containers
+        let mp4_args = media_format_and_container_args("137+140", "video.MP4");
+        assert_eq!(mp4_args, vec!["-f", "137+140", "--merge-output-format", "mp4"]);
+
+        let webm_args = media_format_and_container_args("248+251", "video.webm");
+        assert_eq!(webm_args, vec!["-f", "248+251", "--merge-output-format", "webm"]);
+
+        let mkv_args = media_format_and_container_args("301+251", "video.mkv");
+        assert_eq!(
+            mkv_args,
+            vec!["-f", "301+251", "--merge-output-format", "mkv", "--remux-video", "mkv"]
+        );
     }
 
     #[test]

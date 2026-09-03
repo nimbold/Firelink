@@ -1121,6 +1121,7 @@ const zhCN = {
       tokenCopied: '令牌已复制到剪贴板！',
       tokenCopyFailed: '无法复制令牌：{{detail}}',
       pairingTokenRegenerated: '配对令牌已重新生成',
+      regenerateToken: '重新生成令牌',
       regenerateFailed: '无法重新生成配对令牌：{{detail}}',
       getExtension: '获取扩展',
       extensionDescription: '安装适用于 Firefox 或 Chromium 浏览器的 Firelink Companion。',

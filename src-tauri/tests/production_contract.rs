@@ -123,3 +123,73 @@ fn headless_queue_lifecycle_eligibility_and_retry_contracts_hold() {
     );
     assert!(is_permanent_network_error("HTTP 403 Forbidden"));
 }
+
+#[derive(serde::Deserialize, PartialEq, Debug)]
+#[serde(rename_all = "snake_case")]
+struct TorrentPeerOptionsArgs {
+    id: String,
+    max_peers: Option<i64>,
+    peer_speed_limit: Option<String>,
+}
+
+#[derive(serde::Deserialize, PartialEq, Debug)]
+#[serde(rename_all = "snake_case")]
+struct TorrentFileSelectionArgs {
+    id: String,
+    selected_indices: Option<Vec<u32>>,
+}
+
+#[derive(serde::Deserialize, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+struct BuggyTorrentPeerOptionsArgs {
+    id: String,
+    max_peers: Option<i64>,
+    peer_speed_limit: Option<String>,
+}
+
+#[derive(serde::Deserialize, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+struct BuggyTorrentFileSelectionArgs {
+    id: String,
+    selected_indices: Option<Vec<u32>>,
+}
+
+#[test]
+fn ipc_snake_case_deserialization_contract_preserves_torrent_arguments() {
+    let peer_payload = serde_json::json!({
+        "id": "dl-123",
+        "max_peers": 42,
+        "peer_speed_limit": "2M"
+    });
+
+    // The fixed snake_case contract receives and preserves the frontend's arguments:
+    let fixed_peer: TorrentPeerOptionsArgs = serde_json::from_value(peer_payload.clone())
+        .expect("snake_case deserializer should parse torrent peer options");
+    assert_eq!(fixed_peer.id, "dl-123");
+    assert_eq!(fixed_peer.max_peers, Some(42));
+    assert_eq!(fixed_peer.peer_speed_limit.as_deref(), Some("2M"));
+
+    // The buggy default camelCase contract dropped the arguments to None silently:
+    let buggy_peer: BuggyTorrentPeerOptionsArgs = serde_json::from_value(peer_payload)
+        .expect("camelCase deserializer parses but silently drops snake_case keys");
+    assert_eq!(buggy_peer.id, "dl-123");
+    assert_eq!(buggy_peer.max_peers, None);
+    assert_eq!(buggy_peer.peer_speed_limit, None);
+
+    let selection_payload = serde_json::json!({
+        "id": "dl-456",
+        "selected_indices": [1, 3, 5]
+    });
+
+    // The fixed snake_case contract receives and preserves selected file indices:
+    let fixed_selection: TorrentFileSelectionArgs = serde_json::from_value(selection_payload.clone())
+        .expect("snake_case deserializer should parse selected indices");
+    assert_eq!(fixed_selection.id, "dl-456");
+    assert_eq!(fixed_selection.selected_indices, Some(vec![1, 3, 5]));
+
+    // The buggy default camelCase contract dropped selected indices to None (selecting all files):
+    let buggy_selection: BuggyTorrentFileSelectionArgs = serde_json::from_value(selection_payload)
+        .expect("camelCase deserializer parses but silently drops snake_case keys");
+    assert_eq!(buggy_selection.id, "dl-456");
+    assert_eq!(buggy_selection.selected_indices, None);
+}

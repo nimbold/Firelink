@@ -11,7 +11,7 @@ import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
 import type { Queue } from '../bindings/Queue';
 import { useSettingsStore } from './useSettingsStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
-import { canonicalizeDownloadFileName, categoryForDownload, categoryForFileName, hasCredentialBearingHeaders, headerNameHasCredentialMaterial, headersWithoutCredentialMaterial, isActiveDownloadStatus, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForDownload, categoryForFileName, hasCredentialBearingHeaders, headerNameHasCredentialMaterial, headersWithoutCredentialMaterial, isActiveDownloadStatus, isMediaUrl, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
 import {
   resolveCategoryDestination
 } from '../utils/downloadLocations';
@@ -1844,8 +1844,11 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     const mergedUrls = existingUrls ? `${existingUrls}\n${urls}` : urls;
     const cleanReferer = referer?.trim() || '';
     const cleanFilename = filename?.trim() || '';
-    const cleanHeaders = headers?.trim() || '';
-    const cleanCookies = cookies?.trim() || '';
+    const isExplicitMedia = media === true;
+    const cleanHeaders = isExplicitMedia
+      ? stripSensitiveMediaHeaders(headers)
+      : (headers?.trim() || '');
+    const cleanCookies = isExplicitMedia ? '' : (cookies?.trim() || '');
     // Keep the first modal request's grouping decision stable while later
     // handoffs append URLs. This avoids moving an already-visible destination
     // when a second request races with the user's Add-window setup.
@@ -1853,12 +1856,14 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     const nextBatchName = nextBatch
       ? (isAppending ? state.pendingAddBatchName : batchName?.trim() || '')
       : '';
-    const cleanCookieScopes = cookieScopes
-      ?.map(scope => ({
-        url: scope.url.trim(),
-        cookies: scope.cookies.trim()
-      }))
-      .filter(scope => scope.url && scope.cookies);
+    const cleanCookieScopes = isExplicitMedia
+      ? undefined
+      : cookieScopes
+          ?.map(scope => ({
+            url: scope.url.trim(),
+            cookies: scope.cookies.trim()
+          }))
+          .filter(scope => scope.url && scope.cookies);
     const requestVersion = state.pendingAddRequestVersion + 1;
     const pendingAddRequestContexts = isAppending
       ? { ...state.pendingAddRequestContexts }
@@ -1876,14 +1881,15 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       } catch {
         // The Add modal will mark malformed input invalid; retain its original key here.
       }
+      const isItemMedia = isExplicitMedia || isMediaUrl(trimmedUrl);
       pendingAddRequestContexts[key] = {
         version: requestVersion,
         referer: cleanReferer,
         filename: cleanFilename,
-        headers: cleanHeaders,
-        cookies: cleanCookies,
-        ...(cleanCookieScopes?.length ? { cookieScopes: cleanCookieScopes } : {}),
-        media,
+        headers: isItemMedia ? stripSensitiveMediaHeaders(cleanHeaders) : cleanHeaders,
+        cookies: isItemMedia ? '' : cleanCookies,
+        ...(cleanCookieScopes?.length && !isItemMedia ? { cookieScopes: cleanCookieScopes } : {}),
+        media: isItemMedia,
         ...(torrent ? { torrent: true } : {})
       };
     }
@@ -1899,7 +1905,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       pendingAddReferer: cleanReferer,
       pendingAddFilename: cleanFilename,
       pendingAddHeaders: cleanHeaders,
-      pendingAddCookies: cleanCookies,
+      pendingAddCookies: isExplicitMedia ? '' : cleanCookies,
       pendingAddMediaUrls,
       pendingAddTorrentUrls,
       pendingAddBatch: nextBatch,

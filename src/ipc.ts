@@ -154,6 +154,7 @@ type CommandMap = {
   get_file_category: { args: { filename: string }; result: DownloadCategory };
   check_for_updates: { args: undefined; result: ReleaseCheckOutcome };
   get_supported_media_domains: { args: undefined; result: string[] };
+  is_supported_media: { args: { url: string }; result: boolean };
   db_save_settings: { args: { data: string }; result: void };
   db_load_settings: { args: undefined; result: string | null };
   canonicalize_torrent_network_setting: {

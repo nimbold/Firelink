@@ -331,6 +331,27 @@ describe('useDownloadStore', () => {
     expect(state.pendingAddRequestContexts['https://example.com/file.bin']?.media).toBe(false);
   });
 
+  it('discards legacy cookies and sensitive headers for explicit media and media domains', () => {
+    useDownloadStore.getState().toggleAddModal(false);
+    useDownloadStore.getState().openAddModalWithUrls(
+      'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+      'https://www.youtube.com',
+      'video.mp4',
+      'Authorization: Bearer secret\nUser-Agent: FirelinkTest',
+      'session=leak',
+      true,
+      [{ url: 'https://www.youtube.com', cookies: 'session=leak' }]
+    );
+
+    const state = useDownloadStore.getState();
+    expect(state.pendingAddCookies).toBe('');
+    const context = state.pendingAddRequestContexts['https://www.youtube.com/watch?v=dQw4w9WgXcQ'];
+    expect(context?.cookies).toBe('');
+    expect(context?.cookieScopes).toBeUndefined();
+    expect(context?.headers).toBe('User-Agent: FirelinkTest');
+    expect(context?.media).toBe(true);
+  });
+
   it('replaces a paused download URL in place and preserves its progress', async () => {
     useDownloadStore.setState({
       downloads: [{

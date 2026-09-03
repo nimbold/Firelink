@@ -91,6 +91,64 @@ describe('durable main-window and sidebar preferences', () => {
     });
   });
 
+  it('pins volatile navigation and sanitizes scheduler and cookie source during hydration', () => {
+    const merge = useSettingsStore.persist.getOptions().merge;
+    expect(merge).toBeTypeOf('function');
+    const current = useSettingsStore.getState();
+
+    const result = merge?.({
+      activeView: 'logs' as any,
+      showKeychainModal: true as any,
+      mediaCookieSource: 'internet-explorer' as any,
+      lastCustomSpeedLimitUnit: 'GB/s',
+      scheduler: {
+        enabled: 'yes' as any,
+        postQueueAction: 'self-destruct' as any,
+        selectedDays: [10, -1, 3],
+        selectedQueueIds: ['   ', 'queue-1']
+      },
+      schedulerRunning: 'running' as any,
+      schedulerActiveDownloadIds: 'all' as any
+    }, current);
+
+    expect(result?.activeView).toBe(current.activeView);
+    expect(result?.showKeychainModal).toBe(false);
+    expect(result?.mediaCookieSource).toBe('none');
+    expect(result?.lastCustomSpeedLimitUnit).toBe(current.lastCustomSpeedLimitUnit);
+    expect(result?.scheduler.enabled).toBe(current.scheduler.enabled);
+    expect(result?.scheduler.postQueueAction).toBe('none');
+    expect(result?.scheduler.selectedDays).toEqual([3]);
+    expect(result?.scheduler.selectedQueueIds).toEqual(['queue-1']);
+    expect(result?.schedulerRunning).toBe(current.schedulerRunning);
+    expect(result?.schedulerActiveDownloadIds).toEqual(current.schedulerActiveDownloadIds);
+
+    const fallbackResult = merge?.({
+      scheduler: {
+        selectedDays: [-5, 99] as any,
+        selectedQueueIds: ['   ', ''] as any
+      }
+    }, current);
+    expect(fallbackResult?.scheduler.selectedDays).toEqual(current.scheduler.selectedDays);
+    expect(fallbackResult?.scheduler.selectedQueueIds).toEqual(current.scheduler.selectedQueueIds);
+  });
+
+  it('sanitizes setter calls for enum and numeric settings', () => {
+    useSettingsStore.getState().setMediaCookieSource('invalid-browser' as any);
+    expect(useSettingsStore.getState().mediaCookieSource).toBe('none');
+
+    useSettingsStore.getState().setTheme('invalid-theme' as any);
+    expect(useSettingsStore.getState().theme).toBe('system');
+
+    useSettingsStore.getState().setLastCustomSpeedLimitKiB(-500);
+    expect(useSettingsStore.getState().lastCustomSpeedLimitKiB).toBe(1);
+
+    useSettingsStore.getState().setLastCustomSpeedLimitKiB(20_000_000);
+    expect(useSettingsStore.getState().lastCustomSpeedLimitKiB).toBe(10_485_760);
+
+    useSettingsStore.getState().setLastCustomSpeedLimitUnit('PB/s' as any);
+    expect(useSettingsStore.getState().lastCustomSpeedLimitUnit).toBe('MB/s');
+  });
+
   it('uses the legacy localStorage value only when durable state is absent', () => {
     const originalWindow = globalThis.window;
     Object.defineProperty(globalThis, 'window', {

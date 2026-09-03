@@ -1121,6 +1121,7 @@ const fa = {
       tokenCopied: 'توکن در کلیپ‌بورد کپی شد!',
       tokenCopyFailed: 'توکن کپی نشد: {{detail}}',
       pairingTokenRegenerated: 'توکن جفت‌سازی دوباره ایجاد شد',
+      regenerateToken: 'ایجاد دوباره توکن',
       regenerateFailed: 'ایجاد دوباره توکن جفت‌سازی ناموفق بود: {{detail}}',
       getExtension: 'دریافت افزونه',
       extensionDescription: 'Firelink Companion را برای مرورگرهای Firefox یا Chromium نصب کنید.',

@@ -1121,6 +1121,7 @@ const common = {
       tokenCopied: 'Token copied to clipboard!',
       tokenCopyFailed: 'Could not copy token: {{detail}}',
       pairingTokenRegenerated: 'Pairing token regenerated',
+      regenerateToken: 'Regenerate Token',
       regenerateFailed: 'Could not regenerate pairing token: {{detail}}',
       getExtension: 'Get Extension',
       extensionDescription: 'Install Firelink Companion for Firefox or Chromium browsers.',

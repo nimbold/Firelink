@@ -212,6 +212,7 @@ const parseInputLines = (
       const expansion = playlistExpansions[sourceUrl];
       if (expansion) {
         const playlistSelected = selectedBySourceUrl[sourceUrl] !== false;
+        let validEntryCount = 0;
         for (const [position, entry] of expansion.entries.entries()) {
           let entryUrl: string;
           try {
@@ -221,6 +222,7 @@ const parseInputLines = (
           } catch {
             continue;
           }
+          validEntryCount++;
           if (seen.has(entryUrl)) continue;
           seen.add(entryUrl);
           parsed.push({
@@ -239,7 +241,9 @@ const parseInputLines = (
         // The playlist has been successfully discovered even when every
         // entry was already represented by another input row. Do not put the
         // source playlist back into loading state in that case.
-        continue;
+        if (validEntryCount > 0) {
+          continue;
+        }
       }
     }
 

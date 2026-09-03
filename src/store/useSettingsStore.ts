@@ -126,6 +126,7 @@ const MEDIA_COOKIE_SOURCE_VALUES = [
 const SETTINGS_TAB_VALUES = [
   'downloads', 'lookandfeel', 'network', 'locations', 'sitelogins', 'power', 'engine', 'integrations', 'about'
 ] as const;
+const POST_QUEUE_ACTION_VALUES = ['none', 'sleep', 'restart', 'shutdown'] as const;
 
 type PersistedSettingsSnapshot = PersistedSettings & {
   language: AppLocalePreference;
@@ -498,20 +499,31 @@ export const useSettingsStore = create<SettingsState>()(
       autoCheckUpdates: true,
       showKeychainModal: false,
 
-      setTheme: (theme) => { info('Settings updated: theme'); set({ theme }); },
+      setTheme: (theme) => {
+        const safe = isAllowedSetting(THEME_VALUES, theme) ? theme : 'system';
+        info('Settings updated: theme');
+        set({ theme: safe });
+      },
       setFontFamily: (fontFamily) => {
+        const safe = isAllowedSetting(FONT_FAMILY_VALUES, fontFamily) ? fontFamily : 'system';
         info('Settings updated: fontFamily');
-        set({ fontFamily });
+        set({ fontFamily: safe });
       },
       setWindowControlStyle: (windowControlStyle) => {
+        const safe = isAllowedSetting(WINDOW_CONTROL_STYLE_VALUES, windowControlStyle) ? windowControlStyle : 'auto';
         info('Settings updated: windowControlStyle');
-        set({ windowControlStyle });
+        set({ windowControlStyle: safe });
       },
       setCalendarPreference: (calendarPreference) => {
+        const safe = isCalendarPreference(calendarPreference) ? calendarPreference : DEFAULT_CALENDAR_PREFERENCE;
         info('Settings updated: calendarPreference');
-        set({ calendarPreference });
+        set({ calendarPreference: safe });
       },
-      setLanguage: (language) => { info('Settings updated: language'); set({ language }); },
+      setLanguage: (language) => {
+        const safe = isAppLocalePreference(language) ? language : 'system';
+        info('Settings updated: language');
+        set({ language: safe });
+      },
       setBaseDownloadFolder: (path) => {
         info('Settings updated: baseDownloadFolder');
         set({ baseDownloadFolder: path });
@@ -561,7 +573,10 @@ export const useSettingsStore = create<SettingsState>()(
       },
       setSpeedLimitPresetValues: (speedLimitPresetValues) => set({ speedLimitPresetValues }),
       setLogsEnabled: (logsEnabled) => set({ logsEnabled }),
-      setSidebarPosition: (sidebarPosition) => set({ sidebarPosition }),
+      setSidebarPosition: (sidebarPosition) => {
+        const safe = isAllowedSetting(SIDEBAR_POSITION_VALUES, sidebarPosition) ? sidebarPosition : 'auto';
+        set({ sidebarPosition: safe });
+      },
       setFoldersCollapsed: (isFoldersCollapsed) => set({ isFoldersCollapsed }),
       toggleFoldersCollapsed: () => set(state => ({ isFoldersCollapsed: !state.isFoldersCollapsed })),
       setMainWindowSize: (size) => {
@@ -569,14 +584,23 @@ export const useSettingsStore = create<SettingsState>()(
         if (normalized) set({ mainWindowSize: normalized });
       },
       setActiveView: (view) => set({ activeView: view }),
-      setActiveSettingsTab: (activeSettingsTab) => set({ activeSettingsTab }),
+      setActiveSettingsTab: (activeSettingsTab) => {
+        const safe = isAllowedSetting(SETTINGS_TAB_VALUES, activeSettingsTab) ? activeSettingsTab : 'downloads';
+        set({ activeSettingsTab: safe });
+      },
       setScheduler: (scheduler) => set({ scheduler }),
       setSchedulerRunning: (schedulerRunning) => set({ schedulerRunning }),
       setSchedulerActiveDownloadIds: (schedulerActiveDownloadIds) => set({ schedulerActiveDownloadIds }),
       setSchedulerLastStartKey: (schedulerLastStartKey) => set({ schedulerLastStartKey }),
       setSchedulerLastStopKey: (schedulerLastStopKey) => set({ schedulerLastStopKey }),
-      setLastCustomSpeedLimitKiB: (lastCustomSpeedLimitKiB) => set({ lastCustomSpeedLimitKiB }),
-      setLastCustomSpeedLimitUnit: (lastCustomSpeedLimitUnit) => set({ lastCustomSpeedLimitUnit }),
+      setLastCustomSpeedLimitKiB: (lastCustomSpeedLimitKiB) => set({
+        lastCustomSpeedLimitKiB: clampSettingInteger(lastCustomSpeedLimitKiB, 1, 10_485_760, 1024)
+      }),
+      setLastCustomSpeedLimitUnit: (lastCustomSpeedLimitUnit) => set({
+        lastCustomSpeedLimitUnit: lastCustomSpeedLimitUnit === 'KB/s' || lastCustomSpeedLimitUnit === 'MB/s'
+          ? lastCustomSpeedLimitUnit
+          : 'MB/s'
+      }),
       toggleSidebar: () => set((state) => ({ isSidebarVisible: !state.isSidebarVisible })),
 
       setPerServerConnections: (perServerConnections) => set({
@@ -598,8 +622,14 @@ export const useSettingsStore = create<SettingsState>()(
       setShowNotifications: (showNotifications) => set({ showNotifications }),
       setPlayCompletionSound: (playCompletionSound) => set({ playCompletionSound }),
       setAutoAddClipboardLinks: (autoAddClipboardLinks) => set({ autoAddClipboardLinks }),
-      setAppFontSize: (appFontSize) => set({ appFontSize }),
-      setListRowDensity: (listRowDensity) => set({ listRowDensity }),
+      setAppFontSize: (appFontSize) => {
+        const safe = isAllowedSetting(APP_FONT_SIZE_VALUES, appFontSize) ? appFontSize : 'standard';
+        set({ appFontSize: safe });
+      },
+      setListRowDensity: (listRowDensity) => {
+        const safe = isAllowedSetting(LIST_ROW_DENSITY_VALUES, listRowDensity) ? listRowDensity : 'standard';
+        set({ listRowDensity: safe });
+      },
       setShowDockBadge: (showDockBadge) => {
         set(state => ({
           showDockBadge,
@@ -607,7 +637,10 @@ export const useSettingsStore = create<SettingsState>()(
         }));
       },
       setShowMenuBarIcon: (showMenuBarIcon) => set({ showMenuBarIcon }),
-      setProxyMode: (proxyMode) => set({ proxyMode }),
+      setProxyMode: (proxyMode) => {
+        const safe = isAllowedSetting(PROXY_MODE_VALUES, proxyMode) ? proxyMode : 'none';
+        set({ proxyMode: safe });
+      },
       setProxyHost: (proxyHost) => set({ proxyHost }),
       setProxyPort: (proxyPort) => set({
         proxyPort: Number.isFinite(proxyPort)
@@ -687,7 +720,11 @@ export const useSettingsStore = create<SettingsState>()(
         info('Settings updated: preventsDisplaySleepWhileDownloading');
         set({ preventsDisplaySleepWhileDownloading });
       },
-      setMediaCookieSource: (mediaCookieSource) => { info('Settings updated: mediaCookieSource'); set({ mediaCookieSource }); },
+      setMediaCookieSource: (mediaCookieSource) => {
+        const safe = isAllowedSetting(MEDIA_COOKIE_SOURCE_VALUES, mediaCookieSource) ? mediaCookieSource : 'none';
+        info('Settings updated: mediaCookieSource');
+        set({ mediaCookieSource: safe });
+      },
       setRememberLastUsedDownloadDirectory: (rememberLastUsedDownloadDirectory) => {
         info('Settings updated: rememberLastUsedDownloadDirectory');
         set({
@@ -924,6 +961,9 @@ export const useSettingsStore = create<SettingsState>()(
           // Never hydrate the remembered Add-window path from persisted data.
           lastUsedDownloadDirectory: currentState.lastUsedDownloadDirectory,
           keychainAccessReady: currentState.keychainAccessReady,
+          activeView: currentState.activeView,
+          showKeychainModal: currentState.showKeychainModal,
+          dockBadgeSyncVersion: currentState.dockBadgeSyncVersion,
           theme: isAllowedSetting(THEME_VALUES, persisted.theme)
             ? persisted.theme
             : currentState.theme,
@@ -1118,12 +1158,34 @@ export const useSettingsStore = create<SettingsState>()(
             : currentState.approvedDownloadRoots,
         scheduler: {
           ...currentState.scheduler,
-          ...persisted.scheduler,
-          selectedQueueIds: Array.isArray(persisted.scheduler?.selectedQueueIds)
-            && persisted.scheduler.selectedQueueIds.length > 0
-            ? persisted.scheduler.selectedQueueIds
-            : currentState.scheduler.selectedQueueIds
+          ...(isRecord(persisted.scheduler) ? persisted.scheduler : {}),
+          enabled: persistedBoolean(persisted.scheduler?.enabled, currentState.scheduler.enabled),
+          startTime: persistedString(persisted.scheduler?.startTime, currentState.scheduler.startTime),
+          stopTimeEnabled: persistedBoolean(persisted.scheduler?.stopTimeEnabled, currentState.scheduler.stopTimeEnabled),
+          stopTime: persistedString(persisted.scheduler?.stopTime, currentState.scheduler.stopTime),
+          everyday: persistedBoolean(persisted.scheduler?.everyday, currentState.scheduler.everyday),
+          selectedDays: (() => {
+            const days = Array.isArray(persisted.scheduler?.selectedDays)
+              ? persisted.scheduler.selectedDays.filter((day): day is number => typeof day === 'number' && Number.isInteger(day) && day >= 0 && day <= 6)
+              : [];
+            return days.length > 0 ? days : currentState.scheduler.selectedDays;
+          })(),
+          selectedQueueIds: (() => {
+            const queues = Array.isArray(persisted.scheduler?.selectedQueueIds)
+              ? persisted.scheduler.selectedQueueIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+              : [];
+            return queues.length > 0 ? queues : currentState.scheduler.selectedQueueIds;
+          })(),
+          postQueueAction: isAllowedSetting(POST_QUEUE_ACTION_VALUES, persisted.scheduler?.postQueueAction)
+            ? persisted.scheduler.postQueueAction
+            : currentState.scheduler.postQueueAction
         },
+        schedulerRunning: persistedBoolean(persisted.schedulerRunning, currentState.schedulerRunning),
+        schedulerActiveDownloadIds: Array.isArray(persisted.schedulerActiveDownloadIds)
+          ? persisted.schedulerActiveDownloadIds.filter((id): id is string => typeof id === 'string')
+          : currentState.schedulerActiveDownloadIds,
+        schedulerLastStartKey: persistedString(persisted.schedulerLastStartKey, currentState.schedulerLastStartKey),
+        schedulerLastStopKey: persistedString(persisted.schedulerLastStopKey, currentState.schedulerLastStopKey),
         siteLogins: Array.isArray(persisted.siteLogins)
           ? sanitizeSiteLogins(persisted.siteLogins)
           : currentState.siteLogins

@@ -641,4 +641,56 @@ describe('Properties window bridge', () => {
     expect(assigned).toBe(unlisten);
     expect(unlisten).not.toHaveBeenCalled();
   });
+
+  it('strictly validates numeric boundaries, speed limits, and tracker syntax in patch copies', () => {
+    const baseItem = { isTorrent: false, status: 'ready' as const };
+    const torrentItem = { isTorrent: true, status: 'paused' as const };
+
+    // Connections bounds (1 to 16, whole numbers)
+    expect(() => copyEditablePropertiesPatch({ connections: 0 }, baseItem)).toThrow('Connections must be a whole number from 1 to 16');
+    expect(() => copyEditablePropertiesPatch({ connections: 17 }, baseItem)).toThrow('Connections must be a whole number from 1 to 16');
+    expect(() => copyEditablePropertiesPatch({ connections: 1.5 }, baseItem)).toThrow('Connections must be a whole number from 1 to 16');
+    expect(() => copyEditablePropertiesPatch({ connections: Number.NaN }, baseItem)).toThrow('Connections must be a whole number from 1 to 16');
+    expect(copyEditablePropertiesPatch({ connections: 1 }, baseItem)).toMatchObject({ connections: 1 });
+    expect(copyEditablePropertiesPatch({ connections: 16 }, baseItem)).toMatchObject({ connections: 16 });
+
+    // Torrent max peers bounds (0 to 1000, whole numbers)
+    expect(() => copyEditablePropertiesPatch({ torrentMaxPeers: -1 }, torrentItem)).toThrow('Torrent maximum peers must be a whole number from 0 to 1000');
+    expect(() => copyEditablePropertiesPatch({ torrentMaxPeers: 1001 }, torrentItem)).toThrow('Torrent maximum peers must be a whole number from 0 to 1000');
+    expect(() => copyEditablePropertiesPatch({ torrentMaxPeers: 10.5 }, torrentItem)).toThrow('Torrent maximum peers must be a whole number from 0 to 1000');
+    expect(copyEditablePropertiesPatch({ torrentMaxPeers: 0 }, torrentItem)).toMatchObject({ torrentMaxPeers: 0 });
+    expect(copyEditablePropertiesPatch({ torrentMaxPeers: 1000 }, torrentItem)).toMatchObject({ torrentMaxPeers: 1000 });
+
+    // Speed limit normalization and invalid formats
+    expect(() => copyEditablePropertiesPatch({ speedLimit: 'invalid' }, baseItem)).toThrow('Invalid download speed limit');
+    expect(() => copyEditablePropertiesPatch({ speedLimit: '0M' }, baseItem)).toThrow('Invalid download speed limit');
+    expect(() => copyEditablePropertiesPatch({ speedLimit: '-5M' }, baseItem)).toThrow('Invalid download speed limit');
+    expect(copyEditablePropertiesPatch({ speedLimit: '2M' }, baseItem)).toMatchObject({ speedLimit: '2M' });
+    expect(copyEditablePropertiesPatch({ speedLimit: ' 500K ' }, baseItem)).toMatchObject({ speedLimit: '500K' });
+    expect(copyEditablePropertiesPatch({ speedLimit: '' }, baseItem).speedLimit).toBeUndefined();
+
+    // Torrent seed settings
+    expect(() => copyEditablePropertiesPatch({ torrentSeedTime: -1 }, torrentItem)).toThrow('Invalid torrentSeedTime');
+    expect(() => copyEditablePropertiesPatch({ torrentSeedTime: Number.NaN }, torrentItem)).toThrow('Invalid torrentSeedTime');
+    expect(() => copyEditablePropertiesPatch({ torrentSeedRatio: -0.1 }, torrentItem)).toThrow('Invalid torrentSeedRatio');
+    expect(copyEditablePropertiesPatch({ torrentSeedTime: 0 }, torrentItem)).toMatchObject({ torrentSeedTime: 0 });
+    expect(copyEditablePropertiesPatch({ torrentSeedRatio: 1.5 }, torrentItem)).toMatchObject({ torrentSeedRatio: 1.5 });
+
+    // Torrent stop timeout
+    expect(() => copyEditablePropertiesPatch({ torrentStopTimeout: -1 }, torrentItem)).toThrow('Invalid torrentStopTimeout');
+    expect(() => copyEditablePropertiesPatch({ torrentStopTimeout: 7 * 24 * 60 * 60 + 1 }, torrentItem)).toThrow('Invalid torrentStopTimeout');
+    expect(copyEditablePropertiesPatch({ torrentStopTimeout: 3600 }, torrentItem)).toMatchObject({ torrentStopTimeout: 3600 });
+
+    // Torrent trackers validation
+    expect(() => copyEditablePropertiesPatch({ torrentTrackers: 'not-a-url' }, torrentItem)).toThrow('Invalid Torrent tracker list');
+    expect(() => copyEditablePropertiesPatch({ torrentTrackers: 'ftp://unsupported.tracker/announce' }, torrentItem)).toThrow('Invalid Torrent tracker list');
+    expect(copyEditablePropertiesPatch({ torrentTrackers: 'https://tracker.example/announce' }, torrentItem))
+      .toMatchObject({ torrentTrackers: 'https://tracker.example/announce' });
+
+    // Torrent policies
+    expect(() => copyEditablePropertiesPatch({ torrentEncryptionPolicy: 'invalid' as any }, torrentItem)).toThrow('Invalid torrentEncryptionPolicy');
+    expect(() => copyEditablePropertiesPatch({ torrentFileAllocation: 'invalid' as any }, torrentItem)).toThrow('Invalid torrentFileAllocation');
+    expect(copyEditablePropertiesPatch({ torrentEncryptionPolicy: 'require-crypto' }, torrentItem)).toMatchObject({ torrentEncryptionPolicy: 'require-crypto' });
+    expect(copyEditablePropertiesPatch({ torrentFileAllocation: 'prealloc' }, torrentItem)).toMatchObject({ torrentFileAllocation: 'prealloc' });
+  });
 });
