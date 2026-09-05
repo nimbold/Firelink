@@ -28,6 +28,11 @@ const MAX_PENDING_DOWNLOAD_STARTS: usize = 1024;
 pub const MEDIA_RUN_CANCELLED: &str = "__firelink_media_run_cancelled__";
 pub const DOWNLOAD_CONNECTIONS_MIN: i32 = 1;
 pub const DOWNLOAD_CONNECTIONS_MAX: i32 = 16;
+
+fn encode_aria2_torrent_payload(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 pub const MAX_TORRENT_PIECE_PRIORITY_SIZE_MIB: u64 = 1024;
 pub const MAX_TORRENT_TRACKER_TIMEOUT: u32 = 604_800;
 pub const MAX_TORRENT_TRACKER_INTERVAL: u32 = 604_800;
@@ -8518,7 +8523,7 @@ impl SidecarSpawner for ProductionSpawner {
                         serde_json::json!(indices.iter().map(u32::to_string).collect::<Vec<_>>().join(",")),
                     );
                 }
-                let encoded = base64::engine::general_purpose::STANDARD.encode(sanitized_bytes);
+                let encoded = encode_aria2_torrent_payload(&sanitized_bytes);
                 let fallback_web_seeds =
                     normalize_torrent_mirror_uris(payload.mirrors.as_deref())?;
                 crate::validate_torrent_web_seed_destinations(&fallback_web_seeds).await?;
@@ -12377,6 +12382,14 @@ mod tests {
         assert_eq!(
             snapshot.seeded_seconds,
             MAX_TORRENT_SEED_ACCOUNTING_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn aria2_torrent_payload_uses_standard_padded_base64() {
+        assert_eq!(
+            encode_aria2_torrent_payload(b"Firelink\0torrent"),
+            "RmlyZWxpbmsAdG9ycmVudA=="
         );
     }
 }

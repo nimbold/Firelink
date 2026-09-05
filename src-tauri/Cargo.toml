@@ -41,7 +41,7 @@ sysinfo = "0.39.6"
 hmac = "0.13"
 sha2 = "0.11"
 sha1 = "0.11"
-base64 = "0.22"
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 tauri-plugin-deep-link = "2.4.10"
 tauri-plugin-single-instance = { version = "2.4.4", features = ["deep-link"] }
 tempfile = "3"
