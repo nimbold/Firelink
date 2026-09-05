@@ -1,7 +1,11 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { removePathWithRetry } from './engine-payload-promotion.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, '..');
 
 const ARCH_MAP = { x64: 'x86_64', arm64: 'aarch64' };
 const PLATFORM_MAP = {
@@ -94,18 +98,58 @@ export function assertSafeOutputRoot(outputRoot, forbiddenRoots = []) {
   return canonicalOutputRoot;
 }
 
+export function stripVerbatimPrefix(filePath) {
+  return typeof filePath === 'string' && filePath.startsWith('\\\\?\\')
+    ? filePath.slice(4)
+    : filePath;
+}
+
+export function resolveWorkspaceTempBase(referencePath = repoRoot) {
+  if (process.env.FIRELINK_ENGINE_WORKSPACE_BASE) {
+    return path.resolve(process.env.FIRELINK_ENGINE_WORKSPACE_BASE);
+  }
+
+  if (process.platform === 'win32') {
+    const referenceDrive = path.parse(path.resolve(referencePath)).root.toLowerCase();
+
+    if (process.env.RUNNER_TEMP) {
+      const runnerTemp = path.resolve(process.env.RUNNER_TEMP);
+      if (path.parse(runnerTemp).root.toLowerCase() === referenceDrive) {
+        return runnerTemp;
+      }
+    }
+
+    const osTemp = path.resolve(os.tmpdir());
+    if (path.parse(osTemp).root.toLowerCase() === referenceDrive) {
+      return osTemp;
+    }
+
+    const adjacentTemp = path.join(path.resolve(referencePath, '..'), '.firelink-engine-workspaces');
+    fs.mkdirSync(adjacentTemp, { recursive: true, mode: 0o700 });
+    return adjacentTemp;
+  }
+
+  if (process.env.RUNNER_TEMP) {
+    return path.resolve(process.env.RUNNER_TEMP);
+  }
+
+  return os.tmpdir();
+}
+
 export function createEngineWorkspace(target) {
   assertSafeTarget(target);
-  const workspace = fs.realpathSync.native(
-    fs.mkdtempSync(path.join(os.tmpdir(), `firelink-engine-${target}-${process.pid}-`)),
+  const tempBase = resolveWorkspaceTempBase();
+  const rawWorkspace = fs.realpathSync.native(
+    fs.mkdtempSync(path.join(tempBase, `firelink-engine-${target}-${process.pid}-`)),
   );
+  const workspace = stripVerbatimPrefix(rawWorkspace);
   const outputRoot = path.join(workspace, 'engine-dist');
   fs.mkdirSync(outputRoot, { recursive: true, mode: 0o700 });
   return { outputRoot, runtimeRoot: outputRoot, workspace };
 }
 
 export function engineResourceConfig(outputRoot) {
-  const source = `${path.resolve(outputRoot)}${path.sep}`;
+  const source = `${stripVerbatimPrefix(path.resolve(outputRoot))}${path.sep}`;
   return JSON.stringify({
     bundle: {
       resources: {
@@ -116,7 +160,7 @@ export function engineResourceConfig(outputRoot) {
 }
 
 export async function removeEngineWorkspace(workspace) {
-  const resolved = path.resolve(workspace);
+  const resolved = stripVerbatimPrefix(path.resolve(workspace));
   const basename = path.basename(resolved);
   if (!basename.startsWith('firelink-engine-')) {
     throw new Error(`Refusing to remove an unexpected engine workspace: ${resolved}`);

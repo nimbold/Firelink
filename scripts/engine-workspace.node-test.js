@@ -11,6 +11,8 @@ import {
   removeEngineWorkspace,
   resolveOutputRoot,
   resolveTargetTriple,
+  resolveWorkspaceTempBase,
+  stripVerbatimPrefix,
 } from './engine-workspace.js';
 
 test('target resolution accepts explicit and inline target arguments', () => {
@@ -88,5 +90,23 @@ test('output roots are checked after resolving symlinked parents', () => {
     );
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test('stripVerbatimPrefix removes Win32 verbatim namespaces', () => {
+  assert.equal(stripVerbatimPrefix('\\\\?\\D:\\a\\_temp'), 'D:\\a\\_temp');
+  assert.equal(stripVerbatimPrefix('D:\\a\\_temp'), 'D:\\a\\_temp');
+  assert.equal(stripVerbatimPrefix('/tmp/firelink'), '/tmp/firelink');
+});
+
+test('resolveWorkspaceTempBase honors FIRELINK_ENGINE_WORKSPACE_BASE override', () => {
+  const custom = path.resolve('/custom/engine/base');
+  const prev = process.env.FIRELINK_ENGINE_WORKSPACE_BASE;
+  process.env.FIRELINK_ENGINE_WORKSPACE_BASE = custom;
+  try {
+    assert.equal(resolveWorkspaceTempBase(), custom);
+  } finally {
+    if (prev === undefined) delete process.env.FIRELINK_ENGINE_WORKSPACE_BASE;
+    else process.env.FIRELINK_ENGINE_WORKSPACE_BASE = prev;
   }
 });
