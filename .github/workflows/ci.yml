@@ -30,7 +30,7 @@ jobs:
           submodules: recursive
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 22.12
           cache: npm
       - run: npm ci
       - run: node --test scripts/*.node-test.js
@@ -57,7 +57,7 @@ jobs:
           submodules: recursive
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 22.12
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
         with:

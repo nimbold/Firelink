@@ -3,6 +3,11 @@ import { invokeCommand } from '../ipc';
 let dockBadgeGeneration = 0;
 let dockBadgeSessionRequest: Promise<number> | null = null;
 
+export const resetDockBadgeStateForTests = (): void => {
+  dockBadgeGeneration = 0;
+  dockBadgeSessionRequest = null;
+};
+
 const getDockBadgeSession = (): Promise<number> => {
   if (!dockBadgeSessionRequest) {
     const request = invokeCommand('begin_dock_badge_session');

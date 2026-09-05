@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as ipc from '../ipc';
-import { updateDockBadge } from './dockBadge';
+import { resetDockBadgeStateForTests, updateDockBadge } from './dockBadge';
 
 vi.mock('../ipc', () => ({
   invokeCommand: vi.fn()
@@ -8,6 +8,7 @@ vi.mock('../ipc', () => ({
 
 describe('dock badge synchronization', () => {
   beforeEach(() => {
+    resetDockBadgeStateForTests();
     vi.clearAllMocks();
     vi.mocked(ipc.invokeCommand).mockImplementation(async command => (
       command === 'begin_dock_badge_session' ? 1 : undefined

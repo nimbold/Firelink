@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { commitDownloadState, dispatchItem, flushDownloadPersistence, getProxyArgs, getSiteLogin, hasStaleTemporaryMediaEstimate, initializeDownloadPersistence, MAIN_QUEUE_ID, normalizeCustomProxy, normalizePersistedDownloadProgress, normalizePersistedQueueState, normalizePersistedQueues, useDownloadStore } from './useDownloadStore';
+import { commitDownloadState, currentDownloadLifecycleGeneration, dispatchItem, flushDownloadPersistence, getProxyArgs, getSiteLogin, hasStaleTemporaryMediaEstimate, initializeDownloadPersistence, MAIN_QUEUE_ID, normalizeCustomProxy, normalizePersistedDownloadProgress, normalizePersistedQueueState, normalizePersistedQueues, resetDownloadStoreModuleStateForTests, useDownloadStore } from './useDownloadStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
 import { useSettingsStore } from './useSettingsStore';
 import * as ipc from '../ipc';
@@ -61,6 +61,7 @@ vi.mock('./useSettingsStore', () => ({
 
 describe('useDownloadStore', () => {
   beforeEach(() => {
+    resetDownloadStoreModuleStateForTests();
     vi.clearAllMocks();
     vi.mocked(useSettingsStore.getState).mockReturnValue({
       proxyMode: 'none',
@@ -1409,6 +1410,7 @@ describe('useDownloadStore', () => {
   });
 
   it('does not resurrect a row removed while its backend enqueue is in flight', async () => {
+    const initialGeneration = currentDownloadLifecycleGeneration('late');
     useDownloadStore.setState({
       downloads: [
         { id: 'late', url: 'http://test', fileName: 'late.bin', destination: '/tmp', status: 'queued', category: 'Other', dateAdded: '', queueId: 'MAIN', hasBeenDispatched: false },
@@ -1452,7 +1454,7 @@ describe('useDownloadStore', () => {
     expect(
       vi.mocked(ipc.invokeCommand).mock.calls.some(([command, args]) =>
         command === 'remove_download'
-        && (args as { expectedLifecycleGeneration?: string })?.expectedLifecycleGeneration === '0'
+        && (args as { expectedLifecycleGeneration?: string })?.expectedLifecycleGeneration === initialGeneration
       )
     ).toBe(true);
   });
@@ -1662,6 +1664,7 @@ describe('useDownloadStore', () => {
 
   it('resumeDownload unregisters ID and re-dispatches if un-resumable', async () => {
     let enqueueGeneration: string | undefined;
+    const initialGeneration = BigInt(currentDownloadLifecycleGeneration('resume-generation'));
     useDownloadStore.setState({
       downloads: [
         { id: 'resume-generation', url: 'http://test1', fileName: 'f1', destination: '/tmp', status: 'paused', category: 'Other', dateAdded: '', queueId: 'MAIN', hasBeenDispatched: true },
@@ -1689,7 +1692,7 @@ describe('useDownloadStore', () => {
       id: 'resume-generation',
       queueId: 'MAIN'
     });
-    expect(enqueueGeneration).toBe('1');
+    expect(enqueueGeneration).toBe((initialGeneration + 1n).toString());
     expect(useDownloadStore.getState().downloads[0].lastTry).toEqual(expect.any(String));
     expect(useDownloadStore.getState().backendRegisteredIds.has('resume-generation')).toBe(true); // Re-registered by dispatchItem
   });

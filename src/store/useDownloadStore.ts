@@ -3344,6 +3344,28 @@ export const flushDownloadPersistence = async (): Promise<void> => {
 
 let downloadPersistenceUnsubscribe: (() => void) | null = null;
 
+export const resetDownloadStoreModuleStateForTests = (): void => {
+  downloadPersistenceUnsubscribe?.();
+  downloadPersistenceUnsubscribe = null;
+  backendDispatchPromises.clear();
+  downloadLifecycleGenerations.clear();
+  queueReorderPromises.clear();
+  queueStartPromises.clear();
+  queueControlGenerations.clear();
+  queueConfigurationQueue = Promise.resolve();
+  downloadLifecycleOperations.clear();
+  pendingStartupResume = null;
+  downloadControlIntents.clear();
+  persistenceRevision = 0;
+  committedPersistenceRevision = 0;
+  lastRequestedPersistenceKey = null;
+  lastCommittedPersistenceKey = null;
+  nextPersistenceSnapshot = null;
+  persistenceSaveInFlight = false;
+  persistenceWaiters = [];
+  downloadPersistenceReady = false;
+};
+
 /**
  * Persistence is a main-webview service. Properties windows import the
  * download types and bridge helpers but must never install this subscription

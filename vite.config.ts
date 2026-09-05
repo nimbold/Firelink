@@ -68,6 +68,7 @@ export default defineConfig(async () => ({
     'import.meta.env.VITE_BUILD_ID': JSON.stringify(buildId)
   },
   test: {
+    fsModuleCache: true,
     exclude: [
       "Extensions/**",
       "**/node_modules/**",

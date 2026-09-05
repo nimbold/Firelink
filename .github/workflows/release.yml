@@ -43,7 +43,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 22.12
           cache: npm
       - name: Verify tagged release version
         if: github.event_name == 'push' || inputs.publish_release

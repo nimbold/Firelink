@@ -24,7 +24,7 @@
     "desktop"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.12"
   },
   "type": "module",
   "scripts": {
@@ -41,7 +41,8 @@
     "verify:macos-signing": "node scripts/verify-macos-signing.js",
     "preview": "vite preview",
     "tauri": "node scripts/tauri-command.js",
-    "test": "vitest"
+    "test": "vitest",
+    "test:race": "vitest run --repeats 5 src/utils/dockBadge.test.ts src/store/downloadStore.test.ts src/store/useDownloadStore.test.ts"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",
@@ -76,6 +77,6 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.2.2",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.0"
   }
 }
