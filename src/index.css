@@ -609,6 +609,7 @@ html[data-list-density="relaxed"] {
     border: 1px solid hsl(var(--window-frame-active));
     border-radius: 18px;
     background: var(--properties-body-surface);
+    transition: border-color 120ms ease;
   }
 
   .properties-window-shell[data-window-active="false"] {
@@ -618,6 +619,16 @@ html[data-list-density="relaxed"] {
   .properties-window-shell[data-window-active="false"] .properties-window-titlebar span,
   .properties-window-shell[data-window-active="false"] .window-controls {
     opacity: 0.58;
+  }
+
+  .properties-window-shell[data-window-active="false"] .window-controls:hover {
+    opacity: 1;
+  }
+
+  .properties-window-shell[data-window-active="false"] .window-controls--style-macos:not(:hover) .window-control {
+    background: hsl(var(--text-primary) / 0.18);
+    border-color: hsl(var(--text-primary) / 0.12);
+    box-shadow: none;
   }
 
   .properties-window-titlebar {
@@ -2336,6 +2347,7 @@ html[data-list-density="relaxed"] {
     border: 1px solid hsl(var(--window-frame-active));
     border-radius: var(--window-corner-radius);
     overflow: hidden;
+    transition: border-color 120ms ease;
   }
 
   .app-shell[data-window-active="false"] {
@@ -2345,6 +2357,16 @@ html[data-list-density="relaxed"] {
   .app-shell[data-window-active="false"] .main-titlebar-title,
   .app-shell[data-window-active="false"] .window-controls {
     opacity: 0.58;
+  }
+
+  .app-shell[data-window-active="false"] .window-controls:hover {
+    opacity: 1;
+  }
+
+  .app-shell[data-window-active="false"] .window-controls--style-macos:not(:hover) .window-control {
+    background: hsl(var(--text-primary) / 0.18);
+    border-color: hsl(var(--text-primary) / 0.12);
+    box-shadow: none;
   }
 
   @media (forced-colors: active) {
@@ -3309,6 +3331,7 @@ html[data-list-density="relaxed"] {
   -webkit-app-region: no-drag;
   app-region: no-drag;
   pointer-events: auto;
+  transition: opacity 120ms ease;
 }
 
 .app-shell {
@@ -3341,6 +3364,9 @@ html[data-list-density="relaxed"] {
   transition:
     filter 120ms ease,
     color 120ms ease,
+    background-color 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease,
     transform 120ms ease;
   -webkit-app-region: no-drag;
   app-region: no-drag;

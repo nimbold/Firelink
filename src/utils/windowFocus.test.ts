@@ -195,4 +195,56 @@ describe('window focus state', () => {
     await Promise.resolve();
     expect(disposeBlur).toHaveBeenCalledOnce();
   });
+
+  it('cleans up in-flight listeners when a sibling registration throws synchronously', async () => {
+    let resolveFocusRegistration: ((dispose: () => void) => void) | undefined;
+    const disposeFocus = vi.fn();
+    const onChange = vi.fn();
+    const source = {
+      hasFocus: () => true,
+      listenFocus: () => new Promise<() => void>(resolve => {
+        resolveFocusRegistration = resolve;
+      }),
+      listenBlur: () => {
+        throw new Error('synchronous blur registration failure');
+      },
+    };
+
+    const dispose = subscribeToWindowFocus(source, onChange);
+    dispose();
+    resolveFocusRegistration?.(disposeFocus);
+
+    await vi.waitFor(() => {
+      expect(disposeFocus).toHaveBeenCalledOnce();
+    });
+  });
+
+  it('deduplicates consecutive identical focus notifications', async () => {
+    const fixture = fakeWindow(false);
+    const onChange = vi.fn();
+    const dispose = subscribeToWindowFocus(fixture.source, onChange);
+    await vi.waitFor(() => expect(onChange).toHaveBeenLastCalledWith(false));
+    onChange.mockClear();
+
+    fixture.dispatch(true);
+    fixture.dispatch(true);
+    fixture.dispatch(false);
+    fixture.dispatch(false);
+
+    expect(onChange.mock.calls).toEqual([[true], [false]]);
+    dispose();
+  });
+
+  it('ignores non-function disposers safely during teardown', async () => {
+    const onChange = vi.fn();
+    const source = {
+      hasFocus: () => true,
+      listenFocus: async () => undefined as unknown as () => void,
+      listenBlur: async () => null as unknown as () => void,
+    };
+
+    const dispose = subscribeToWindowFocus(source, onChange);
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalledWith(true));
+    expect(() => dispose()).not.toThrow();
+  });
 });
