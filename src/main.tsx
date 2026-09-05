@@ -14,6 +14,7 @@ import { error as logError, warn as logWarn, initLogger } from "./utils/logger";
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invokeCommand as invoke } from './ipc';
 import { useWindowFocusState } from './utils/windowFocus';
+import './utils/platform';
 
 const isPropertiesWindow = getCurrentWindow().label.startsWith('properties-');
 

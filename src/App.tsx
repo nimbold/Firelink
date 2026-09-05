@@ -1222,7 +1222,7 @@ function App() {
   }, [autoAddClipboardLinks, coreReady, showKeychainModal]);
 
   return (
-    <div data-window-active={isWindowActive ? 'true' : 'false'} className={`app-shell flex h-screen w-screen overflow-hidden text-text-primary ${
+    <div data-window-active={isWindowActive ? 'true' : 'false'} className={`app-shell app-shell--style-${windowControlStyle} flex h-screen w-screen overflow-hidden text-text-primary ${
       isSidebarOnRight ? 'app-shell--sidebar-right' : 'app-shell--sidebar-left'
     } ${
       hasWindowChrome ? 'app-shell--window-chrome' : ''

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { shouldUseCustomWindowControls } from './platform';
+import { shouldUseCustomWindowControls, syncPlatformDataset } from './platform';
 
 describe('shouldUseCustomWindowControls', () => {
   it('keeps custom controls present while Windows/Linux detection is unresolved', () => {
@@ -18,5 +18,34 @@ describe('shouldUseCustomWindowControls', () => {
     expect(shouldUseCustomWindowControls('macos', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)')).toBe(true);
     expect(shouldUseCustomWindowControls('android', 'Mozilla/5.0 (Linux; Android 14)')).toBe(false);
     expect(shouldUseCustomWindowControls('unknown', 'Mozilla/5.0 (Linux; Android 14; Mobile)')).toBe(false);
+  });
+});
+
+describe('syncPlatformDataset', () => {
+  it('synchronizes known desktop platforms to document dataset', () => {
+    const mockDocument = { documentElement: { dataset: {} as Record<string, string | undefined> } };
+
+    syncPlatformDataset('macos', mockDocument);
+    expect(mockDocument.documentElement.dataset.platform).toBe('macos');
+
+    syncPlatformDataset('windows', mockDocument);
+    expect(mockDocument.documentElement.dataset.platform).toBe('windows');
+
+    syncPlatformDataset('linux', mockDocument);
+    expect(mockDocument.documentElement.dataset.platform).toBe('linux');
+  });
+
+  it('ignores unknown or unsupported platforms', () => {
+    const mockDocument = { documentElement: { dataset: { platform: 'macos' } } };
+
+    syncPlatformDataset('unknown', mockDocument);
+    expect(mockDocument.documentElement.dataset.platform).toBe('macos');
+
+    syncPlatformDataset('android', mockDocument);
+    expect(mockDocument.documentElement.dataset.platform).toBe('macos');
+  });
+
+  it('safely handles missing document in headless environments', () => {
+    expect(() => syncPlatformDataset('macos', undefined)).not.toThrow();
   });
 });

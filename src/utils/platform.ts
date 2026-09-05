@@ -22,12 +22,39 @@ export const shouldUseCustomWindowControls = (os: string, userAgent: string): bo
 let cached: PlatformInfo | null = null;
 let pending: Promise<PlatformInfo> | null = null;
 
+type TargetDocument = {
+  documentElement: {
+    dataset: Record<string, string | undefined>;
+  };
+};
+
+export const syncPlatformDataset = (
+  os: string,
+  targetDocument: TargetDocument | undefined = typeof document !== 'undefined' ? document : undefined,
+): void => {
+  if (!targetDocument) return;
+  if (os === 'macos' || os === 'windows' || os === 'linux') {
+    targetDocument.documentElement.dataset.platform = os;
+  }
+};
+
+if (typeof document !== 'undefined' && typeof navigator !== 'undefined') {
+  if (/Macintosh|Mac OS X/i.test(navigator.userAgent)) {
+    syncPlatformDataset('macos');
+  } else if (/Windows/i.test(navigator.userAgent)) {
+    syncPlatformDataset('windows');
+  } else if (/Linux/i.test(navigator.userAgent)) {
+    syncPlatformDataset('linux');
+  }
+}
+
 export const getPlatformInfo = (): Promise<PlatformInfo> => {
   if (cached) return Promise.resolve(cached);
   if (!pending) {
     pending = invoke('get_platform_info')
       .then(info => {
         cached = info;
+        syncPlatformDataset(info.os);
         return info;
       })
       .finally(() => {
