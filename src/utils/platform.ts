@@ -35,18 +35,23 @@ export const syncPlatformDataset = (
   if (!targetDocument) return;
   if (os === 'macos' || os === 'windows' || os === 'linux') {
     targetDocument.documentElement.dataset.platform = os;
+  } else {
+    delete targetDocument.documentElement.dataset.platform;
   }
 };
 
-if (typeof document !== 'undefined' && typeof navigator !== 'undefined') {
-  if (/Macintosh|Mac OS X/i.test(navigator.userAgent)) {
-    syncPlatformDataset('macos');
-  } else if (/Windows/i.test(navigator.userAgent)) {
-    syncPlatformDataset('windows');
-  } else if (/Linux/i.test(navigator.userAgent)) {
-    syncPlatformDataset('linux');
-  }
-}
+export const inferDesktopPlatform = (userAgent: string): PlatformInfo['os'] => {
+  if (/Android|iPhone|iPad|iPod|Mobile/i.test(userAgent)) return 'unknown';
+  if (/Macintosh|Mac OS X/i.test(userAgent)) return 'macos';
+  if (/Windows/i.test(userAgent)) return 'windows';
+  if (/Linux/i.test(userAgent)) return 'linux';
+  return 'unknown';
+};
+
+export const syncPlatformDatasetFromUserAgent = (
+  userAgent: string,
+  targetDocument: TargetDocument | undefined = typeof document !== 'undefined' ? document : undefined,
+): void => syncPlatformDataset(inferDesktopPlatform(userAgent), targetDocument);
 
 export const getPlatformInfo = (): Promise<PlatformInfo> => {
   if (cached) return Promise.resolve(cached);

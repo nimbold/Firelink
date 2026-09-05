@@ -2373,6 +2373,19 @@ html[data-list-density="relaxed"] {
     border-width: 0.5px;
   }
 
+  /* Linux uses an opaque GTK/WebKit surface, so renderer-only curves would
+     expose square native backing pixels. Maximized Windows surfaces likewise
+     need to meet the work area instead of leaving transparent corner cutouts.
+     macOS zoomed windows retain their native rounded AppKit contour. */
+  html[data-platform="linux"] :is(.app-shell, .properties-window-shell),
+  html[data-platform="windows"] :is(.app-shell, .properties-window-shell)[data-window-maximized="true"] {
+    border-radius: 0;
+  }
+
+  html[data-platform="windows"] :is(.app-shell, .properties-window-shell)[data-window-maximized="true"] {
+    border-color: transparent;
+  }
+
   @media (forced-colors: active) {
     .app-shell,
     .properties-window-shell {

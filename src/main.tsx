@@ -14,7 +14,10 @@ import { error as logError, warn as logWarn, initLogger } from "./utils/logger";
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invokeCommand as invoke } from './ipc';
 import { useWindowFocusState } from './utils/windowFocus';
-import './utils/platform';
+import { syncPlatformDatasetFromUserAgent } from './utils/platform';
+import { useWindowMaximizedState } from './utils/windowMaximized';
+
+syncPlatformDatasetFromUserAgent(navigator.userAgent);
 
 const isPropertiesWindow = getCurrentWindow().label.startsWith('properties-');
 
@@ -86,8 +89,9 @@ const renderRoot = (RootComponent: ComponentType) => {
 
 const PropertiesStartupFailure = () => {
   const isWindowActive = useWindowFocusState();
+  const isWindowMaximized = useWindowMaximizedState();
   return (
-    <main data-window-active={isWindowActive ? 'true' : 'false'} className="properties-window-shell flex h-screen min-h-0 flex-col items-center justify-center gap-4 bg-main-bg p-6 text-text-primary">
+    <main data-window-active={isWindowActive ? 'true' : 'false'} data-window-maximized={isWindowMaximized ? 'true' : 'false'} className="properties-window-shell flex h-screen min-h-0 flex-col items-center justify-center gap-4 bg-main-bg p-6 text-text-primary">
       <p role="alert">Download Properties could not be loaded.</p>
       <button
         type="button"
@@ -106,8 +110,9 @@ const PropertiesStartupFailure = () => {
 
 const MainStartupFailure = () => {
   const isWindowActive = useWindowFocusState();
+  const isWindowMaximized = useWindowMaximizedState();
   return (
-    <main data-window-active={isWindowActive ? 'true' : 'false'} className="app-shell flex h-screen min-h-0 flex-col items-center justify-center gap-4 bg-main-bg p-6 text-text-primary">
+    <main data-window-active={isWindowActive ? 'true' : 'false'} data-window-maximized={isWindowMaximized ? 'true' : 'false'} className="app-shell flex h-screen min-h-0 flex-col items-center justify-center gap-4 bg-main-bg p-6 text-text-primary">
       <p role="alert">Firelink could not be loaded.</p>
       <button
         type="button"
