@@ -179,6 +179,33 @@ test('selects a complete BtbN build for the current stable series', async () => 
   assert.equal(result.hashes.linux, 'b'.repeat(64));
 });
 
+test('selects a complete BtbN build for a two-part stable version and tag-exact assets', async () => {
+  const digest = value => `sha256:${value.repeat(64)}`;
+  const release = {
+    tag_name: 'autobuild-test',
+    assets: [
+      {
+        name: 'ffmpeg-n9.0-win64-gpl-9.0.zip',
+        browser_download_url: 'https://example.test/windows-exact.zip',
+        digest: digest('e'),
+      },
+      {
+        name: 'ffmpeg-n9.0-linux64-gpl-9.0.tar.xz',
+        browser_download_url: 'https://example.test/linux-exact.tar.xz',
+        digest: digest('f'),
+      },
+    ],
+  };
+  const result = await withMockFetch(
+    async () => new Response(JSON.stringify([release]), { status: 200 }),
+    () => latestBtbnFfmpegStableBuild('9.0'),
+  );
+
+  assert.equal(result.version, '9.0');
+  assert.equal(result.urls.windows, 'https://example.test/windows-exact.zip');
+  assert.equal(result.hashes.linux, 'f'.repeat(64));
+});
+
 test('rejects an incomplete BtbN stable target tuple', async () => {
   const release = {
     tag_name: 'autobuild-test',

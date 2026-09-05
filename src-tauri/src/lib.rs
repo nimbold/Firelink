@@ -4616,6 +4616,14 @@ fn parse_ffmpeg_version(output: &str) -> Option<String> {
     without_url
         .split('-')
         .next()
+        .map(|version| {
+            if let Some(rest) = version.strip_prefix(['n', 'N']) {
+                if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    return rest;
+                }
+            }
+            version
+        })
         .filter(|version| !version.trim().is_empty())
         .map(str::to_string)
 }
@@ -17928,6 +17936,13 @@ mod tests {
     #[test]
     fn parses_martin_riedl_ffmpeg_nine_stable_version() {
         let output = "ffmpeg version 9.0.1-https://www.martin-riedl.de Copyright (c) 2000-2026 the FFmpeg developers";
+
+        assert_eq!(parse_ffmpeg_version(output), Some("9.0.1".to_string()));
+    }
+
+    #[test]
+    fn parses_btbn_ffmpeg_prefixed_version() {
+        let output = "ffmpeg version n9.0.1-11-ge47273f4d9 Copyright (c) 2000-2026 the FFmpeg developers";
 
         assert_eq!(parse_ffmpeg_version(output), Some("9.0.1".to_string()));
     }

@@ -100,22 +100,7 @@ async fn native_system_proxy(runner: &dyn ProxyCommandRunner) -> Result<Option<S
 
 #[cfg(target_os = "linux")]
 async fn native_system_proxy(runner: &dyn ProxyCommandRunner) -> Result<Option<String>, String> {
-    let mode = runner
-        .stdout(
-            "gsettings",
-            &string_args(&["get", "org.gnome.system.proxy", "mode"]),
-        )
-        .await?;
-    if strip_gsettings_string(&mode) != "manual" {
-        return Ok(None);
-    }
-
-    for (service, scheme) in [("https", "http"), ("http", "http"), ("socks", "socks5")] {
-        if let Some(proxy) = linux_gsettings_proxy(runner, service, scheme).await {
-            return Ok(Some(proxy));
-        }
-    }
-    Ok(None)
+    linux_system_proxy(runner).await
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
@@ -127,20 +112,28 @@ fn string_args(args: &[&str]) -> Vec<String> {
     args.iter().map(|value| (*value).to_string()).collect()
 }
 
+#[cfg_attr(
+    all(not(target_os = "windows"), not(target_os = "linux"), not(target_os = "macos")),
+    allow(dead_code)
+)]
+fn is_probe_unavailable(error: &str) -> bool {
+    error.contains("is unavailable") || error.contains("exited unsuccessfully")
+}
+
 fn proxy_from_environment() -> Option<String> {
     [
-        "HTTPS_PROXY",
-        "https_proxy",
-        "HTTP_PROXY",
-        "http_proxy",
-        "ALL_PROXY",
-        "all_proxy",
+        ("HTTPS_PROXY", "http"),
+        ("https_proxy", "http"),
+        ("HTTP_PROXY", "http"),
+        ("http_proxy", "http"),
+        ("ALL_PROXY", "socks5"),
+        ("all_proxy", "socks5"),
     ]
     .into_iter()
-    .find_map(|name| {
+    .find_map(|(name, scheme)| {
         std::env::var(name)
             .ok()
-            .and_then(|value| normalize_proxy_address(&value, "http"))
+            .and_then(|value| normalize_proxy_address(&value, scheme))
     })
 }
 
@@ -180,7 +173,8 @@ fn proxy_from_host_port(host: &str, port: &str, scheme: &str) -> Option<String> 
     };
     let port = port.trim().parse::<u16>().ok().filter(|port| *port != 0)?;
     if host.is_empty()
-        || host.contains(['/', '@', '?', '#'])
+        || host.eq_ignore_ascii_case("(null)")
+        || host.contains(['/', '@', '?', '#', '(', ')'])
         || host.chars().any(char::is_whitespace)
     {
         return None;
@@ -224,13 +218,64 @@ fn parse_windows_proxy_server(value: &str) -> Option<String> {
     https.or(http).or(socks)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn scutil_dict_value<'a>(output: &'a str, key: &str) -> Option<&'a str> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some((k, v)) = trimmed.split_once(':') {
+            if k.trim().eq_ignore_ascii_case(key) {
+                let val = v.trim();
+                if !val.is_empty() {
+                    return Some(val);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn parse_macos_scutil_proxy(output: &str) -> Option<String> {
+    for (enable_key, proxy_key, port_key, scheme) in [
+        ("HTTPSEnable", "HTTPSProxy", "HTTPSPort", "http"),
+        ("HTTPEnable", "HTTPProxy", "HTTPPort", "http"),
+        ("SOCKSEnable", "SOCKSProxy", "SOCKSPort", "socks5"),
+    ] {
+        if scutil_dict_value(output, enable_key) == Some("1") {
+            if let (Some(server), Some(port)) = (
+                scutil_dict_value(output, proxy_key),
+                scutil_dict_value(output, port_key),
+            ) {
+                if let Some(proxy) = proxy_from_host_port(server, port, scheme) {
+                    return Some(proxy);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 async fn macos_system_proxy(runner: &dyn ProxyCommandRunner) -> Result<Option<String>, String> {
-    let services_output = runner
+    if let Ok(scutil_output) = runner.stdout("scutil", &string_args(&["--proxy"])).await {
+        if let Some(proxy) = parse_macos_scutil_proxy(&scutil_output) {
+            return Ok(Some(proxy));
+        }
+    }
+
+    let services_output = match runner
         .stdout("networksetup", &string_args(&["-listallnetworkservices"]))
-        .await?;
+        .await
+    {
+        Ok(output) => output,
+        Err(error) => {
+            if is_probe_unavailable(&error) {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+    };
     let services = parse_macos_network_services(&services_output)?;
-    let mut successful_probe = false;
     for (target, scheme) in [
         ("securewebproxy", "http"),
         ("webproxy", "http"),
@@ -239,18 +284,13 @@ async fn macos_system_proxy(runner: &dyn ProxyCommandRunner) -> Result<Option<St
         for service in &services {
             let args = vec![format!("-get{target}"), service.clone()];
             if let Ok(output) = runner.stdout("networksetup", &args).await {
-                successful_probe = true;
                 if let Some(proxy) = parse_macos_networksetup_proxy(&output, scheme) {
                     return Ok(Some(proxy));
                 }
             }
         }
     }
-    if !services.is_empty() && !successful_probe {
-        Err("failed to query enabled macOS proxy settings".to_string())
-    } else {
-        Ok(None)
-    }
+    Ok(None)
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -290,7 +330,36 @@ fn macos_networksetup_value<'a>(output: &'a str, key: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+async fn linux_system_proxy(runner: &dyn ProxyCommandRunner) -> Result<Option<String>, String> {
+    let mode = match runner
+        .stdout(
+            "gsettings",
+            &string_args(&["get", "org.gnome.system.proxy", "mode"]),
+        )
+        .await
+    {
+        Ok(mode) => mode,
+        Err(error) => {
+            if is_probe_unavailable(&error) {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+    };
+    if strip_gsettings_string(&mode) != "manual" {
+        return Ok(None);
+    }
+
+    for (service, scheme) in [("https", "http"), ("http", "http"), ("socks", "socks5")] {
+        if let Some(proxy) = linux_gsettings_proxy(runner, service, scheme).await {
+            return Ok(Some(proxy));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 async fn linux_gsettings_proxy(
     runner: &dyn ProxyCommandRunner,
     service: &str,
@@ -322,9 +391,9 @@ fn strip_gsettings_string(value: &str) -> String {
         .to_string()
 }
 
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 async fn windows_system_proxy(runner: &dyn ProxyCommandRunner) -> Result<Option<String>, String> {
-    let output = runner
+    let output = match runner
         .stdout(
             "reg",
             &string_args(&[
@@ -334,7 +403,16 @@ async fn windows_system_proxy(runner: &dyn ProxyCommandRunner) -> Result<Option<
                 "ProxyEnable",
             ]),
         )
-        .await?;
+        .await
+    {
+        Ok(output) => output,
+        Err(error) => {
+            if is_probe_unavailable(&error) {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+    };
     let enabled = registry_value(&output, "ProxyEnable")
         .as_deref()
         .is_some_and(windows_proxy_enabled);
@@ -342,7 +420,7 @@ async fn windows_system_proxy(runner: &dyn ProxyCommandRunner) -> Result<Option<
         return Ok(None);
     }
 
-    let output = runner
+    let output = match runner
         .stdout(
             "reg",
             &string_args(&[
@@ -352,7 +430,16 @@ async fn windows_system_proxy(runner: &dyn ProxyCommandRunner) -> Result<Option<
                 "ProxyServer",
             ]),
         )
-        .await?;
+        .await
+    {
+        Ok(output) => output,
+        Err(error) => {
+            if is_probe_unavailable(&error) {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+    };
     Ok(registry_value(&output, "ProxyServer").and_then(|value| parse_windows_proxy_server(&value)))
 }
 
@@ -395,9 +482,9 @@ fn registry_value(output: &str, name: &str) -> Option<String> {
 mod proxy_tests {
     use super::{
         bounded_native_system_proxy, normalize_proxy_address, parse_macos_network_services,
-        parse_macos_networksetup_proxy, parse_windows_proxy_server, proxy_from_host_port,
-        registry_value, strip_gsettings_string, windows_proxy_enabled, ProxyCommandRunner,
-        SystemProxyCommandRunner,
+        parse_macos_networksetup_proxy, parse_macos_scutil_proxy, parse_windows_proxy_server,
+        proxy_from_host_port, registry_value, strip_gsettings_string, windows_proxy_enabled,
+        ProxyCommandRunner, SystemProxyCommandRunner,
     };
     use std::time::Duration;
 
@@ -408,28 +495,53 @@ mod proxy_tests {
     struct SlowProxyCommandRunner;
 
     #[cfg(target_os = "macos")]
+    struct ScutilProxyCommandRunner;
+
+    #[cfg(target_os = "macos")]
     #[async_trait::async_trait]
     impl ProxyCommandRunner for MockProxyCommandRunner {
         async fn stdout(&self, program: &str, args: &[String]) -> Result<String, String> {
-            assert_eq!(program, "networksetup");
-            match args
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .as_slice()
-            {
-                ["-listallnetworkservices"] => Ok("Wi-Fi\nEthernet\n".to_string()),
-                ["-getsecurewebproxy", "Wi-Fi"] => {
-                    Ok("Enabled: No\nServer: ignored.example\nPort: 443\n".to_string())
+            match program {
+                "scutil" => {
+                    assert_eq!(args, &["--proxy"]);
+                    Ok("<dictionary> {\n  HTTPEnable : 0\n  HTTPSEnable : 0\n}\n".to_string())
                 }
-                ["-getsecurewebproxy", "Ethernet"] => {
-                    Ok("Enabled: Yes\nServer: secure.example\nPort: 8443\n".to_string())
-                }
-                ["-getwebproxy", _] | ["-getsocksfirewallproxy", _] => {
-                    panic!("lower-priority proxy was queried after HTTPS succeeded")
-                }
+                "networksetup" => match args
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .as_slice()
+                {
+                    ["-listallnetworkservices"] => Ok("Wi-Fi\nEthernet\n".to_string()),
+                    ["-getsecurewebproxy", "Wi-Fi"] => {
+                        Ok("Enabled: No\nServer: ignored.example\nPort: 443\n".to_string())
+                    }
+                    ["-getsecurewebproxy", "Ethernet"] => {
+                        Ok("Enabled: Yes\nServer: secure.example\nPort: 8443\n".to_string())
+                    }
+                    ["-getwebproxy", _] | ["-getsocksfirewallproxy", _] => {
+                        panic!("lower-priority proxy was queried after HTTPS succeeded")
+                    }
+                    _ => Err("unexpected command".to_string()),
+                },
                 _ => Err("unexpected command".to_string()),
             }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[async_trait::async_trait]
+    impl ProxyCommandRunner for ScutilProxyCommandRunner {
+        async fn stdout(&self, program: &str, args: &[String]) -> Result<String, String> {
+            assert_eq!(program, "scutil");
+            assert_eq!(args, &["--proxy"]);
+            Ok(r#"<dictionary> {
+  HTTPSEnable : 1
+  HTTPSPort : 8443
+  HTTPSProxy : scutil.example
+}
+"#
+            .to_string())
         }
     }
 
@@ -593,6 +705,132 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
         );
         assert!(!windows_proxy_enabled("0X0"));
         assert!(windows_proxy_enabled("0X1"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn selects_active_scutil_proxy_before_networksetup() {
+        assert_eq!(
+            super::macos_system_proxy(&ScutilProxyCommandRunner)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("http://scutil.example:8443")
+        );
+    }
+
+    #[test]
+    fn parses_macos_scutil_proxy_outputs() {
+        let scutil_https = r#"<dictionary> {
+  HTTPEnable : 1
+  HTTPPort : 8080
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 8443
+  HTTPSProxy : secure.local
+}
+"#;
+        assert_eq!(
+            parse_macos_scutil_proxy(scutil_https).as_deref(),
+            Some("http://secure.local:8443")
+        );
+
+        let scutil_socks = r#"<dictionary> {
+  HTTPEnable : 0
+  HTTPSEnable : 0
+  SOCKSEnable : 1
+  SOCKSPort : 1080
+  SOCKSProxy : 127.0.0.1
+}
+"#;
+        assert_eq!(
+            parse_macos_scutil_proxy(scutil_socks).as_deref(),
+            Some("socks5://127.0.0.1:1080")
+        );
+
+        let scutil_ipv6 = r#"<dictionary> {
+  HTTPEnable : 1
+  HTTPPort : 8080
+  HTTPProxy : 2001:db8::1
+}
+"#;
+        assert_eq!(
+            parse_macos_scutil_proxy(scutil_ipv6).as_deref(),
+            Some("http://[2001:db8::1]:8080")
+        );
+
+        let scutil_disabled = r#"<dictionary> {
+  HTTPEnable : 0
+  HTTPSEnable : 0
+  SOCKSEnable : 0
+}
+"#;
+        assert_eq!(parse_macos_scutil_proxy(scutil_disabled), None);
+    }
+
+    struct MockWindowsMissingRegRunner;
+
+    #[async_trait::async_trait]
+    impl ProxyCommandRunner for MockWindowsMissingRegRunner {
+        async fn stdout(&self, _program: &str, _args: &[String]) -> Result<String, String> {
+            Err("reg exited unsuccessfully".to_string())
+        }
+    }
+
+    struct MockWindowsEnabledRegRunner;
+
+    #[async_trait::async_trait]
+    impl ProxyCommandRunner for MockWindowsEnabledRegRunner {
+        async fn stdout(&self, program: &str, args: &[String]) -> Result<String, String> {
+            assert_eq!(program, "reg");
+            if args.iter().any(|a| a == "ProxyEnable") {
+                Ok("    ProxyEnable    REG_DWORD    0x1\n".to_string())
+            } else if args.iter().any(|a| a == "ProxyServer") {
+                Ok("    ProxyServer    REG_SZ       127.0.0.1:8080\n".to_string())
+            } else {
+                Err("reg exited unsuccessfully".to_string())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn windows_system_proxy_returns_none_when_value_is_missing() {
+        assert_eq!(
+            super::windows_system_proxy(&MockWindowsMissingRegRunner)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn windows_system_proxy_returns_configured_proxy() {
+        assert_eq!(
+            super::windows_system_proxy(&MockWindowsEnabledRegRunner)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("http://127.0.0.1:8080")
+        );
+    }
+
+    struct MockLinuxUnavailableGsettingsRunner;
+
+    #[async_trait::async_trait]
+    impl ProxyCommandRunner for MockLinuxUnavailableGsettingsRunner {
+        async fn stdout(&self, _program: &str, _args: &[String]) -> Result<String, String> {
+            Err("gsettings is unavailable: not found".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn linux_system_proxy_returns_none_when_gsettings_is_unavailable() {
+        assert_eq!(
+            super::linux_system_proxy(&MockLinuxUnavailableGsettingsRunner)
+                .await
+                .unwrap(),
+            None
+        );
     }
 }
 

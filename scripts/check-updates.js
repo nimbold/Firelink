@@ -177,14 +177,14 @@ function escapeRegExp(value) {
 }
 
 async function latestBtbnFfmpegStableBuild(stableVersion) {
-  if (!/^\d+\.\d+\.\d+$/.test(stableVersion)) {
+  if (!/^\d+\.\d+(?:\.\d+)?$/.test(stableVersion)) {
     throw new Error(`unsupported FFmpeg stable version: ${stableVersion}`);
   }
   const stableSeries = stableVersion.split('.').slice(0, 2).join('.');
   const versionPattern = escapeRegExp(stableVersion);
   const seriesPattern = escapeRegExp(stableSeries);
   const assetPattern = new RegExp(
-    `^ffmpeg-n(${versionPattern}-\\d+-g[0-9a-f]+)-(win64|linux64)-gpl-${seriesPattern}\\.(?:zip|tar\\.xz)$`
+    `^ffmpeg-n(${versionPattern}(?:-\\d+-g[0-9a-f]+)?)-(win64|linux64)-gpl-${seriesPattern}\\.(?:zip|tar\\.xz)$`
   );
   const releases = await fetchJson('https://api.github.com/repos/BtbN/FFmpeg-Builds/releases?per_page=10');
   if (!Array.isArray(releases)) throw new Error('BtbN releases response is not an array');
@@ -449,7 +449,12 @@ async function main() {
       async () => {
         const build = await latestMartinRiedlMacArm64Release();
         const stableVersion = await ffmpegStablePromise;
-        if (!build?.version || !build.url || !build.sha256 || build.version !== stableVersion) {
+        if (
+          !build?.version ||
+          !build.url ||
+          !build.sha256 ||
+          compareVersions(build.version, stableVersion) !== 0
+        ) {
           throw new Error('Martin Riedl FFmpeg provider response has no complete matching macOS arm64 stable build');
         }
         return build;
