@@ -1433,92 +1433,162 @@ runEngineChecks(false);
               </nav>
 
               <div id="network-settings-panel-general" className="settings-network-panel" role="tabpanel" aria-labelledby="network-settings-tab-general" hidden={networkSection !== 'general'} tabIndex={0}>
-              <h2 className="settings-section-title settings-network-section-title">{t($ => $.settings.network.proxy)}</h2>
-              <div className="mac-settings-group">
-                <div className="mac-settings-row settings-network-row settings-choice-row">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.network.mode)}</span>
-                    <small>{t($ => $.settings.network.modeDescription)}</small>
+                <h2 className="settings-section-title settings-network-section-title">{t($ => $.settings.network.proxy)}</h2>
+                <div className="mac-settings-group">
+                  <div className="mac-settings-row settings-network-row settings-choice-row">
+                    <div className="settings-row-label">
+                      <span>{t($ => $.settings.network.mode)}</span>
+                      <small>{t($ => $.settings.network.modeDescription)}</small>
+                    </div>
+                    <div className="settings-radio-group">
+                      {[
+                        ['none', t($ => $.settings.network.noProxy)],
+                        ['system', t($ => $.settings.network.systemProxy)],
+                        ['custom', t($ => $.settings.network.customProxy)],
+                      ].map(([value, label]) => (
+                        <label key={value}>
+                          <input
+                            type="radio"
+                            name="proxy-mode"
+                            checked={settings.proxyMode === value}
+                            onChange={() => settings.setProxyMode(value as typeof settings.proxyMode)}
+                          />
+                          <span>{label}</span>
+                        </label>
+                      ))}
+                    </div>
                   </div>
-                  <div className="settings-radio-group">
-                    {[
-                      ['none', t($ => $.settings.network.noProxy)],
-                      ['system', t($ => $.settings.network.systemProxy)],
-                      ['custom', t($ => $.settings.network.customProxy)],
-                    ].map(([value, label]) => (
-                      <label key={value}>
+                  {settings.proxyMode === 'custom' && (
+                    <>
+                      <div className="mac-settings-row settings-network-row">
+                        <div className="settings-row-label">
+                          <span>{t($ => $.settings.network.proxyHost)}</span>
+                          <small>{t($ => $.settings.network.proxyHostDescription)}</small>
+                        </div>
                         <input
-                          type="radio"
-                          name="proxy-mode"
-                          checked={settings.proxyMode === value}
-                          onChange={() => settings.setProxyMode(value as typeof settings.proxyMode)}
+                          type="text"
+                          value={settings.proxyHost}
+                          onChange={(e) => settings.setProxyHost(e.target.value)}
+                          placeholder={t($ => $.settings.network.proxyHostPlaceholder)}
+                          className="app-control settings-network-input font-mono"
                         />
-                        <span>{label}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                {settings.proxyMode === 'custom' && (
-                  <>
-                    <div className="mac-settings-row settings-network-row">
-                      <div className="settings-row-label">
-                        <span>{t($ => $.settings.network.proxyHost)}</span>
-                        <small>{t($ => $.settings.network.proxyHostDescription)}</small>
                       </div>
+                      <div className="mac-settings-row settings-network-row">
+                        <div className="settings-row-label">
+                          <span>{t($ => $.settings.network.proxyPort)}</span>
+                          <small>{t($ => $.settings.network.proxyPortDescription)}</small>
+                        </div>
+                        <input
+                          type="number" min="1" max="65535"
+                          value={proxyPortInput}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            setProxyPortInput(value);
+                            if (value !== '' && Number.isFinite(Number(value))) {
+                              settings.setProxyPort(Number(value));
+                            }
+                          }}
+                          onBlur={(e) => commitBoundedIntegerInput(
+                            e.target.value,
+                            settings.proxyPort,
+                            1,
+                            65535,
+                            settings.setProxyPort,
+                            setProxyPortInput
+                          )}
+                          className="app-control settings-port-input text-center"
+                        />
+                      </div>
+                    </>
+                  )}
+                  <p className="settings-group-footer">
+                    {settings.proxyMode === 'none' && t($ => $.settings.network.noProxyDescription)}
+                    {settings.proxyMode === 'system' && t($ => $.settings.network.systemProxyDescription, { platform: platform.os === 'macos' ? 'macOS' : platform.os === 'windows' ? 'Windows' : 'desktop' })}
+                    {settings.proxyMode === 'custom' && (normalizeCustomProxy(settings.proxyHost, settings.proxyPort)
+                      ? t($ => $.settings.network.customProxyDescription)
+                      : settings.proxyHost
+                        ? t($ => $.settings.network.invalidCustomProxy)
+                        : t($ => $.settings.network.incompleteCustomProxy))}
+                  </p>
+                  {settings.proxyMode === 'system' && systemProxyStatus !== 'idle' && (
+                    <p className="settings-group-footer settings-network-note" role="status">
+                      {systemProxyStatus === 'checking' && <RefreshCw size={14} className="animate-spin text-accent shrink-0" aria-hidden="true" />}
+                      {systemProxyStatus === 'detected' && <Check size={14} className="text-green-500 shrink-0" aria-hidden="true" />}
+                      {systemProxyStatus === 'none' && <Info size={14} className="text-accent shrink-0" aria-hidden="true" />}
+                      {systemProxyStatus === 'error' && <AlertCircle size={14} className="text-yellow-500 shrink-0" aria-hidden="true" />}
+                      <span>
+                        {systemProxyStatus === 'checking' && t($ => $.settings.network.checkingSystemProxy)}
+                        {systemProxyStatus === 'detected' && t($ => $.settings.network.detectedSystemProxy)}
+                        {systemProxyStatus === 'none' && t($ => $.settings.network.noSystemProxy)}
+                        {systemProxyStatus === 'error' && t($ => $.settings.network.systemProxyReadFailed)}
+                      </span>
+                    </p>
+                  )}
+                </div>
+
+                <h2 className="settings-section-title settings-network-section-title">{t($ => $.settings.network.identity)}</h2>
+                <div id="network-settings-group-general-identity" className="mac-settings-group settings-popup-group">
+                  <div className="mac-settings-row settings-network-row">
+                    <div className="settings-row-label">
+                      <span>{t($ => $.settings.network.customUserAgent)}</span>
+                      <small>{t($ => $.settings.network.userAgentDescription)}</small>
+                    </div>
+                    <div
+                      className="settings-combobox"
+                      ref={userAgentMenuRef}
+                      onBlur={(event) => {
+                        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                          setIsUserAgentMenuOpen(false);
+                        }
+                      }}
+                    >
                       <input
                         type="text"
-                        value={settings.proxyHost}
-                        onChange={(e) => settings.setProxyHost(e.target.value)}
-                        placeholder={t($ => $.settings.network.proxyHostPlaceholder)}
+                        value={settings.customUserAgent}
+                        onChange={(e) => settings.setCustomUserAgent(e.target.value)}
+                        onFocus={() => setIsUserAgentMenuOpen(true)}
+                        placeholder={t($ => $.settings.network.userAgentPlaceholder)}
                         className="app-control settings-network-input font-mono"
+                        role="combobox"
+                        aria-expanded={isUserAgentMenuOpen}
+                        aria-controls="user-agent-suggestions"
                       />
+                      {isUserAgentMenuOpen && (
+                        <div id="user-agent-suggestions" className="settings-combobox-menu" role="listbox">
+                          {USER_AGENT_SUGGESTIONS.map(option => (
+                            <button
+                              key={option.label}
+                              type="button"
+                              className="settings-combobox-option"
+                              role="option"
+                              aria-selected={settings.customUserAgent === option.value}
+                              onMouseDown={(event) => event.preventDefault()}
+                              onClick={() => {
+                                settings.setCustomUserAgent(option.value);
+                                setIsUserAgentMenuOpen(false);
+                              }}
+                            >
+                              <span className="settings-combobox-value">{option.value}</span>
+                              <span className="settings-combobox-meta">{
+                                (option.label === 'Chrome (Windows)' ? t($ => $.settings.network.chromeWindows)
+                                  : option.label === 'Chrome (macOS)' ? t($ => $.settings.network.chromeMacos)
+                                    : option.label === 'Edge (Windows)' ? t($ => $.settings.network.edgeWindows)
+                                      : option.label === 'Firefox (Windows)' ? t($ => $.settings.network.firefoxWindows)
+                                        : option.label === 'Firefox (macOS)' ? t($ => $.settings.network.firefoxMacos)
+                                          : t($ => $.settings.network.safariMacos))
+                                } · {
+                                  option.detail === 'Windows desktop'
+                                    ? t($ => $.settings.network.windowsDesktop)
+                                    : t($ => $.settings.network.macosDesktop)
+                                }</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                    <div className="mac-settings-row settings-network-row">
-                      <div className="settings-row-label">
-                        <span>{t($ => $.settings.network.proxyPort)}</span>
-                        <small>{t($ => $.settings.network.proxyPortDescription)}</small>
-                      </div>
-                      <input
-                        type="number" min="1" max="65535"
-                        value={proxyPortInput}
-                        onChange={(e) => {
-                          const value = e.target.value;
-                          setProxyPortInput(value);
-                          if (value !== '' && Number.isFinite(Number(value))) {
-                            settings.setProxyPort(Number(value));
-                          }
-                        }}
-                        onBlur={(e) => commitBoundedIntegerInput(
-                          e.target.value,
-                          settings.proxyPort,
-                          1,
-                          65535,
-                          settings.setProxyPort,
-                          setProxyPortInput
-                        )}
-                        className="app-control settings-port-input text-center"
-                      />
-                    </div>
-                  </>
-                )}
-                <p className="settings-group-footer">
-                  {settings.proxyMode === 'none' && t($ => $.settings.network.noProxyDescription)}
-                  {settings.proxyMode === 'system' && t($ => $.settings.network.systemProxyDescription, { platform: platform.os === 'macos' ? 'macOS' : platform.os === 'windows' ? 'Windows' : 'desktop' })}
-                  {settings.proxyMode === 'custom' && (normalizeCustomProxy(settings.proxyHost, settings.proxyPort)
-                    ? t($ => $.settings.network.customProxyDescription)
-                    : settings.proxyHost
-                      ? t($ => $.settings.network.invalidCustomProxy)
-                      : t($ => $.settings.network.incompleteCustomProxy))}
-                </p>
-                {settings.proxyMode === 'system' && (
-                  <p className="settings-group-footer" role="status">
-                    {systemProxyStatus === 'checking' && t($ => $.settings.network.checkingSystemProxy)}
-                    {systemProxyStatus === 'detected' && t($ => $.settings.network.detectedSystemProxy)}
-                    {systemProxyStatus === 'none' && t($ => $.settings.network.noSystemProxy)}
-                    {systemProxyStatus === 'error' && t($ => $.settings.network.systemProxyReadFailed)}
-                  </p>
-                )}
-              </div>
+                  </div>
+                  <p className="settings-group-footer">{t($ => $.settings.network.userAgentOverrides)}</p>
+                </div>
               </div>
 
               <div id="network-settings-panel-discovery" className="settings-network-panel" role="tabpanel" aria-labelledby="network-settings-tab-discovery" hidden={networkSection !== 'discovery'} tabIndex={0}>
@@ -1800,72 +1870,6 @@ runEngineChecks(false);
                 </p>
               </div>
               </div>
-
-              <section id="network-settings-group-general-identity" className="settings-network-panel" role="region" aria-label={t($ => $.settings.network.identity)} hidden={networkSection !== 'general'}>
-              <h2 className="settings-section-title settings-network-section-title">{t($ => $.settings.network.identity)}</h2>
-              <div className="mac-settings-group settings-popup-group">
-                <div className="mac-settings-row settings-network-row">
-                  <div className="settings-row-label">
-                    <span>{t($ => $.settings.network.customUserAgent)}</span>
-                    <small>{t($ => $.settings.network.userAgentDescription)}</small>
-                  </div>
-                  <div
-                    className="settings-combobox"
-                    ref={userAgentMenuRef}
-                    onBlur={(event) => {
-                      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-                        setIsUserAgentMenuOpen(false);
-                      }
-                    }}
-                  >
-                    <input
-                      type="text"
-                      value={settings.customUserAgent}
-                      onChange={(e) => settings.setCustomUserAgent(e.target.value)}
-                      onFocus={() => setIsUserAgentMenuOpen(true)}
-                      placeholder={t($ => $.settings.network.userAgentPlaceholder)}
-                      className="app-control settings-network-input font-mono"
-                      role="combobox"
-                      aria-expanded={isUserAgentMenuOpen}
-                      aria-controls="user-agent-suggestions"
-                    />
-                    {isUserAgentMenuOpen && (
-                      <div id="user-agent-suggestions" className="settings-combobox-menu" role="listbox">
-                        {USER_AGENT_SUGGESTIONS.map(option => (
-                          <button
-                            key={option.label}
-                            type="button"
-                            className="settings-combobox-option"
-                            role="option"
-                            aria-selected={settings.customUserAgent === option.value}
-                            onMouseDown={(event) => event.preventDefault()}
-                            onClick={() => {
-                              settings.setCustomUserAgent(option.value);
-                              setIsUserAgentMenuOpen(false);
-                            }}
-                          >
-                            <span className="settings-combobox-value">{option.value}</span>
-                            <span className="settings-combobox-meta">{
-                              (option.label === 'Chrome (Windows)' ? t($ => $.settings.network.chromeWindows)
-                                : option.label === 'Chrome (macOS)' ? t($ => $.settings.network.chromeMacos)
-                                  : option.label === 'Edge (Windows)' ? t($ => $.settings.network.edgeWindows)
-                                    : option.label === 'Firefox (Windows)' ? t($ => $.settings.network.firefoxWindows)
-                                      : option.label === 'Firefox (macOS)' ? t($ => $.settings.network.firefoxMacos)
-                                        : t($ => $.settings.network.safariMacos))
-                              } · {
-                                option.detail === 'Windows desktop'
-                                  ? t($ => $.settings.network.windowsDesktop)
-                                  : t($ => $.settings.network.macosDesktop)
-                              }</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-                <p className="settings-group-footer">{t($ => $.settings.network.userAgentOverrides)}</p>
-              </div>
-              </section>
             </div>
           )}
 
@@ -2056,7 +2060,7 @@ runEngineChecks(false);
                     aria-invalid={Boolean(loginFieldErrors.pattern)}
                     className="bg-bg-input border border-border-modal rounded-md px-3 py-1.5 w-full text-text-primary focus:outline-none"
                   />
-                  {loginFieldErrors.pattern && <p className="text-red-500 text-xs mt-1">{loginFieldErrors.pattern}</p>}
+                  {loginFieldErrors.pattern && <p className="text-red-500 text-xs mt-1 col-start-2">{loginFieldErrors.pattern}</p>}
                 </div>
 
                 <div className="grid grid-cols-[150px_1fr] items-center gap-4 text-[13px]">
@@ -2072,7 +2076,7 @@ runEngineChecks(false);
                     aria-invalid={Boolean(loginFieldErrors.username)}
                     className="bg-bg-input border border-border-modal rounded-md px-3 py-1.5 w-full text-text-primary focus:outline-none"
                   />
-                  {loginFieldErrors.username && <p className="text-red-500 text-xs mt-1">{loginFieldErrors.username}</p>}
+                  {loginFieldErrors.username && <p className="text-red-500 text-xs mt-1 col-start-2">{loginFieldErrors.username}</p>}
                 </div>
 
                 <div className="grid grid-cols-[150px_1fr] items-center gap-4 text-[13px]">
@@ -2088,7 +2092,7 @@ runEngineChecks(false);
                     aria-invalid={Boolean(loginFieldErrors.password)}
                     className="bg-bg-input border border-border-modal rounded-md px-3 py-1.5 w-full text-text-primary focus:outline-none"
                   />
-                  {loginFieldErrors.password && <p className="text-red-500 text-xs mt-1">{loginFieldErrors.password}</p>}
+                  {loginFieldErrors.password && <p className="text-red-500 text-xs mt-1 col-start-2">{loginFieldErrors.password}</p>}
                 </div>
 
                 <div className="flex justify-end pt-2">
@@ -2271,7 +2275,7 @@ className="app-button px-3 py-1.5 text-[12px] flex items-center gap-1.5 disabled
               <div className="grid grid-cols-3 gap-4">
 
                 {/* Step 1 */}
-                <div className="border border-border-modal rounded-lg p-4 bg-item-hover/5 flex flex-col justify-between h-[190px]">
+                <div className="border border-border-modal rounded-lg p-4 bg-item-hover/5 flex flex-col justify-between min-h-[190px]">
                   <div>
                     <div className="flex justify-between items-center mb-2">
                       <span className="bg-accent/25 text-accent font-bold rounded-full w-5 h-5 flex items-center justify-center text-xs">1</span>
@@ -2304,7 +2308,7 @@ className="app-button px-3 py-1.5 text-[12px] flex items-center gap-1.5 disabled
                 </div>
 
                 {/* Step 2 */}
-                <div className="border border-border-modal rounded-lg p-4 bg-item-hover/5 flex flex-col justify-between h-[190px]">
+                <div className="border border-border-modal rounded-lg p-4 bg-item-hover/5 flex flex-col justify-between min-h-[190px]">
                   <div>
                     <div className="flex justify-between items-center mb-2">
                       <span className="bg-orange-600/25 text-orange-500 font-bold rounded-full w-5 h-5 flex items-center justify-center text-xs">2</span>
@@ -2334,7 +2338,7 @@ className="app-button px-3 py-1.5 text-[12px] flex items-center gap-1.5 disabled
                 </div>
 
                 {/* Step 3 */}
-                <div className="border border-border-modal rounded-lg p-4 bg-item-hover/5 flex flex-col h-[190px]">
+                <div className="border border-border-modal rounded-lg p-4 bg-item-hover/5 flex flex-col min-h-[190px]">
                   <div className="flex justify-between items-center mb-2">
                     <span className="bg-green-600/25 text-green-500 font-bold rounded-full w-5 h-5 flex items-center justify-center text-xs">3</span>
                     <Puzzle size={16} className="text-green-500" />
