@@ -105,12 +105,12 @@ jobs:
         run: node scripts/provision-engines.js --target ${{ matrix.target }}
       - name: Build package
         if: runner.os != 'Linux'
-        run: npm run tauri build -- -vv --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+        run: node scripts/tauri-command.js build -vv --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
         env:
           APPIMAGE_EXTRACT_AND_RUN: 1
       - name: Build Linux native packages
         if: runner.os == 'Linux'
-        run: npm run tauri build -- -vv --target ${{ matrix.target }} --bundles deb,rpm
+        run: node scripts/tauri-command.js build -vv --target ${{ matrix.target }} --bundles deb,rpm
         env:
           APPIMAGE_EXTRACT_AND_RUN: 1
       - name: Verify and preserve Linux native packages
