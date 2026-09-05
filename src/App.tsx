@@ -56,6 +56,7 @@ import {
   registerPostActionCanceller
 } from './utils/schedulerControl';
 import { createSerialTaskQueue } from './utils/serialTaskQueue';
+import { useWindowFocusState } from './utils/windowFocus';
 
 const loadSettingsView = () => import('./components/SettingsView');
 const loadSchedulerView = () => import('./components/SchedulerView');
@@ -187,6 +188,7 @@ const playCompletionChime = async () => {
 function App() {
   const { i18n, t } = useTranslation();
   const platform = usePlatformInfo();
+  const isWindowActive = useWindowFocusState();
   const [filter, setFilter] = useState<SidebarFilter>('all');
   const [downloadTableSummary, setDownloadTableSummary] = useState<DownloadTableStatusSummary | null>(null);
   const [coreReady, setCoreReady] = useState(false);
@@ -1220,7 +1222,7 @@ function App() {
   }, [autoAddClipboardLinks, coreReady, showKeychainModal]);
 
   return (
-    <div className={`app-shell flex h-screen w-screen overflow-hidden text-text-primary ${
+    <div data-window-active={isWindowActive ? 'true' : 'false'} className={`app-shell flex h-screen w-screen overflow-hidden text-text-primary ${
       isSidebarOnRight ? 'app-shell--sidebar-right' : 'app-shell--sidebar-left'
     } ${
       hasWindowChrome ? 'app-shell--window-chrome' : ''

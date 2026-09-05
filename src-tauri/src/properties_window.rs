@@ -455,11 +455,13 @@ pub async fn open_download_properties_window(
         // A hidden WebView2 must not request focus during construction. The
         // native reveal path focuses it after the window is visible.
         .focused(false)
-        .transparent(true)
-        // The rounded surface is painted by the child renderer. Tao enables
-        // its undecorated Windows shadow by default, which leaves an opaque
-        // native frame outside that renderer surface at the corners.
-        .shadow(false);
+        .transparent(true);
+    // Native elevation follows the window shape on macOS. On Windows, Tauri
+    // gives an undecorated window the system contour and Windows 11 corners as
+    // well as its shadow. Linux does not implement this API, so its guaranteed
+    // boundary remains the renderer's theme-aware contour.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    let builder = builder.shadow(true);
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     let builder = builder.decorations(false);
     let build_result = builder.build();

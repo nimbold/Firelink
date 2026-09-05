@@ -23,4 +23,26 @@ describe('main window configuration', () => {
       });
     }
   });
+
+  it('uses native elevation where Tauri supports undecorated window shadows', () => {
+    for (const [platform, config] of [
+      ['macOS', macosConfiguration],
+      ['Windows', windowsConfiguration],
+    ] as const) {
+      expect(config.app.windows[0], platform).toMatchObject({
+        transparent: true,
+        decorations: false,
+        shadow: true,
+      });
+    }
+  });
+
+  it('keeps Linux on the renderer contour without claiming native shadow support', () => {
+    const mainWindow = linuxConfiguration.app.windows[0];
+    expect(mainWindow).toMatchObject({
+      transparent: false,
+      decorations: false,
+      shadow: false,
+    });
+  });
 });

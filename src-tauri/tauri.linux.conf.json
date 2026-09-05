@@ -9,7 +9,8 @@
         "minWidth": 960,
         "minHeight": 640,
         "transparent": false,
-        "decorations": false
+        "decorations": false,
+        "shadow": false
       }
     ]
   },

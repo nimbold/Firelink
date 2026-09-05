@@ -56,6 +56,7 @@ import { getPropertiesConnectionPresentation, getPropertiesProgress } from '../u
 import { isTorrentLiveStatus } from '../utils/propertiesTorrentLifecycle';
 import { isTorrentWaitingForPeers } from '../utils/torrentPresentation';
 import { copyTorrentFilePath } from '../utils/torrentFilePath';
+import { useWindowFocusState } from '../utils/windowFocus';
 import { WindowControls } from './WindowControls';
 import {
   TORRENT_ENCRYPTION_POLICY_DISABLED,
@@ -202,6 +203,7 @@ const propertiesDiagnosticLifecycleKey = (snapshot: PropertiesSnapshot): string 
 
 export const PropertiesWindowApp = () => {
   const { t } = useTranslation();
+  const isWindowActive = useWindowFocusState();
   const translationRef = useRef(t);
   translationRef.current = t;
   const currentWindow = useMemo(() => getCurrentWindow(), []);
@@ -1135,6 +1137,7 @@ export const PropertiesWindowApp = () => {
       <main
         className={windowShellClassName}
         style={windowShellStyle}
+        data-window-active={isWindowActive ? 'true' : 'false'}
         aria-labelledby="properties-window-title"
       >
         <WindowControls side={windowChrome.side} controlStyle={windowChrome.controlStyle} />
@@ -1249,6 +1252,7 @@ export const PropertiesWindowApp = () => {
     <main
       className={windowShellClassName}
       style={windowShellStyle}
+      data-window-active={isWindowActive ? 'true' : 'false'}
       aria-labelledby="properties-window-title"
     >
       <WindowControls side={windowChrome.side} controlStyle={windowChrome.controlStyle} />
