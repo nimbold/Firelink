@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { checkRows, fetchJson, fetchText, npmExecutable, providerAssetHashes } from './check-updates.js';
+import {
+  checkRows,
+  diffCargoMetadata,
+  fetchJson,
+  fetchText,
+  latestBtbnFfmpegStableBuild,
+  latestMartinRiedlMacArm64Release,
+  npmExecutable,
+  providerAssetHashes,
+} from './check-updates.js';
 
 async function withMockFetch(mockFetch, callback) {
   const originalFetch = globalThis.fetch;
@@ -116,4 +125,94 @@ test('npm executable selection uses the Windows command shim when needed', () =>
   assert.equal(npmExecutable('win32'), 'npm.cmd');
   assert.equal(npmExecutable('darwin'), 'npm');
   assert.equal(npmExecutable('linux'), 'npm');
+});
+
+test('selects a complete BtbN build for the current stable series', async () => {
+  const digest = value => `sha256:${value.repeat(64)}`;
+  const release = {
+    tag_name: 'autobuild-test',
+    assets: [
+      {
+        name: 'ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-9.0.zip',
+        browser_download_url: 'https://example.test/windows.zip',
+        digest: digest('a'),
+      },
+      {
+        name: 'ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0.tar.xz',
+        browser_download_url: 'https://example.test/linux.tar.xz',
+        digest: digest('b'),
+      },
+      {
+        name: 'ffmpeg-n8.1.2-50-g1a748fe2cd-win64-gpl-8.1.zip',
+        browser_download_url: 'https://example.test/old.zip',
+        digest: digest('c'),
+      },
+    ],
+  };
+  const result = await withMockFetch(
+    async () => new Response(JSON.stringify([release]), { status: 200 }),
+    () => latestBtbnFfmpegStableBuild('9.0.1'),
+  );
+
+  assert.equal(result.version, '9.0.1-11-ge47273f4d9');
+  assert.equal(result.urls.windows, 'https://example.test/windows.zip');
+  assert.equal(result.hashes.linux, 'b'.repeat(64));
+});
+
+test('rejects an incomplete BtbN stable target tuple', async () => {
+  const release = {
+    tag_name: 'autobuild-test',
+    assets: [{
+      name: 'ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-9.0.zip',
+      browser_download_url: 'https://example.test/windows.zip',
+      digest: `sha256:${'a'.repeat(64)}`,
+    }],
+  };
+  const result = await withMockFetch(
+    async () => new Response(JSON.stringify([release]), { status: 200 }),
+    () => latestBtbnFfmpegStableBuild('9.0.1'),
+  );
+  assert.equal(result, undefined);
+});
+
+test('requires a complete Martin Riedl stable artifact and digest', async () => {
+  const html = `
+    <h2>Download Release Build</h2>
+    <div><h3>macOS (Apple Silicon/arm64)</h3>
+    <p><b>Release: </b>9.0.1</p>
+    <a href="/download/macos/arm64/build/ffmpeg.zip">FFmpeg (ZIP)</a></div>`;
+  const result = await withMockFetch(
+    async url => new Response(
+      String(url).endsWith('.sha256') ? `${'d'.repeat(64)}  ffmpeg.zip\n` : html,
+      { status: 200 },
+    ),
+    () => latestMartinRiedlMacArm64Release(),
+  );
+  assert.deepEqual(result, {
+    version: '9.0.1',
+    url: 'https://ffmpeg.martin-riedl.de/download/macos/arm64/build/ffmpeg.zip',
+    sha256: 'd'.repeat(64),
+  });
+});
+
+test('reports compatible Cargo resolution drift from structured metadata', () => {
+  const metadata = versions => ({
+    packages: Object.entries(versions).map(([name, version]) => ({
+      name,
+      version,
+      source: 'registry+https://github.com/rust-lang/crates.io-index',
+    })),
+  });
+  assert.deepEqual(
+    diffCargoMetadata(metadata({ indexmap: '2.14.1', serde: '1.0.229' }), metadata({
+      indexmap: '2.14.2',
+      serde: '1.0.229',
+    })),
+    [{
+      name: 'indexmap',
+      version: '2.14.1',
+      latest: '2.14.2',
+      source: 'registry+https://github.com/rust-lang/crates.io-index',
+    }],
+  );
 });

@@ -9,6 +9,18 @@ permissions:
   contents: read
 
 jobs:
+  rust-security:
+    name: Rust advisory audit
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install locked cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Reject vulnerable resolved dependencies
+        working-directory: src-tauri
+        run: cargo audit
+
   frontend:
     name: Frontend checks
     runs-on: ubuntu-22.04
