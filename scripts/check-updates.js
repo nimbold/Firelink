@@ -324,7 +324,14 @@ function sourceEngineVersions(sourceLock) {
   const rows = [];
   for (const [target, engines] of Object.entries(sourceLock.targets || {})) {
     for (const [engine, meta] of Object.entries(engines)) {
-      rows.push({ target, engine, version: meta.version, url: meta.url, sha256: meta.sha256 });
+      rows.push({
+        target,
+        engine,
+        version: meta.version,
+        url: meta.url,
+        sha256: meta.sha256,
+        sourceSha256: meta.sourceSha256,
+      });
     }
   }
   return rows;
@@ -334,7 +341,14 @@ function packagedEngineVersions(engineLock) {
   const rows = [];
   for (const [target, targetLock] of Object.entries(engineLock.targets || {})) {
     for (const [engine, meta] of Object.entries(targetLock.engines || {})) {
-      rows.push({ target, engine, version: meta.version, url: meta.url, sha256: meta.sha256 });
+      rows.push({
+        target,
+        engine,
+        version: meta.version,
+        url: meta.url,
+        sha256: meta.sha256,
+        sourceSha256: meta.sourceSha256,
+      });
     }
   }
   return rows;
@@ -373,7 +387,8 @@ function checkRows(
     const versionOutdated = compareVersions(current, wanted) < 0;
     const sourceOutdated = Boolean(latestUrl && row.url && row.url !== latestUrl);
     const latestHash = latestHashesByTargetEngine[targetKey] || latestHashesByUrl[row.url];
-    const currentHash = typeof row.sha256 === 'string' ? row.sha256.toLowerCase() : '';
+    const checkedHash = row.sourceSha256 || row.sha256;
+    const currentHash = typeof checkedHash === 'string' ? checkedHash.toLowerCase() : '';
     const hashOutdated = Boolean(latestHash && currentHash !== latestHash);
     const status = versionOutdated
       ? 'outdated'
@@ -385,7 +400,7 @@ function checkRows(
     if (status !== 'current') outdated += 1;
     console.log(`  ${row.target} ${row.engine}: ${current} -> ${wanted} ${status}`);
     if (sourceOutdated) console.log(`    source: ${row.url} -> ${latestUrl}`);
-    if (hashOutdated) console.log(`    sha256: ${row.sha256 || 'missing'} -> ${latestHash}`);
+    if (hashOutdated) console.log(`    source sha256: ${checkedHash || 'missing'} -> ${latestHash}`);
   }
   return outdated;
 }

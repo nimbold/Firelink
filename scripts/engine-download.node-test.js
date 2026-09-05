@@ -225,3 +225,32 @@ test('propagates external cancellation without retrying an in-flight archive', a
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('rejects and removes an archive with a mismatched checksum', async () => {
+  const { directory, archive } = makeArchivePath();
+  const corrupt = Buffer.from('corrupt engine archive');
+
+  try {
+    await withMockFetch(
+      async () => new Response(corrupt, {
+        status: 200,
+        headers: { 'Content-Length': String(corrupt.length) },
+      }),
+      async () => {
+        await assert.rejects(
+          downloadEngineArchive({
+            name: 'ffmpeg',
+            url: 'https://example.test/ffmpeg.zip',
+            archive,
+            expectedSha256: digest(Buffer.from('trusted engine archive')),
+            attempts: 1,
+          }),
+          /Archive checksum mismatch for ffmpeg/,
+        );
+      },
+    );
+    assert.equal(fs.existsSync(archive), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

@@ -17926,6 +17926,13 @@ mod tests {
     }
 
     #[test]
+    fn parses_martin_riedl_ffmpeg_nine_stable_version() {
+        let output = "ffmpeg version 9.0.1-https://www.martin-riedl.de Copyright (c) 2000-2026 the FFmpeg developers";
+
+        assert_eq!(parse_ffmpeg_version(output), Some("9.0.1".to_string()));
+    }
+
+    #[test]
     fn uses_fragment_progress_instead_of_temporary_hls_size_estimates() {
         let line = format!(
             "{MEDIA_PROGRESS_PREFIX}{{\"downloaded_bytes\":1024,\"total_bytes_estimate\":1024,\"fragment_index\":0,\"fragment_count\":354,\"_percent_str\":\"100.0%\"}}"

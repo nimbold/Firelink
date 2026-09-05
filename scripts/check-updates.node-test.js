@@ -95,6 +95,26 @@ test('checkRows detects a provider hash change when version and URL are current'
   assert.equal(outdated, 1);
 });
 
+test('checkRows compares packaged source provenance without confusing the payload digest', () => {
+  const outdated = checkRows(
+    [{
+      target: 'aarch64-apple-darwin',
+      engine: 'ffmpeg',
+      version: '9.0.1',
+      url: 'https://example.test/ffmpeg.zip',
+      sourceSha256: 'a'.repeat(64),
+      sha256: 'b'.repeat(64),
+    }],
+    { ffmpeg: '9.0.1' },
+    { 'aarch64-apple-darwin:ffmpeg': '9.0.1' },
+    { 'aarch64-apple-darwin:ffmpeg': 'https://example.test/ffmpeg.zip' },
+    new Set(['ffmpeg']),
+    { 'aarch64-apple-darwin:ffmpeg': 'a'.repeat(64) },
+  );
+
+  assert.equal(outdated, 0);
+});
+
 test('checkRows detects an aria2 asset digest change when the provider supplies it', () => {
   const url = 'https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip';
   const digest = 'b'.repeat(64);
