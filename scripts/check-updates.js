@@ -264,6 +264,22 @@ function diffCargoMetadata(currentMetadata, updatedMetadata) {
         source: group.source,
       });
     }
+    for (const version of oldVersions.slice(newVersions.length)) {
+      changes.push({
+        name: group.name,
+        version,
+        latest: null,
+        source: group.source,
+      });
+    }
+    for (const latest of newVersions.slice(oldVersions.length)) {
+      changes.push({
+        name: group.name,
+        version: null,
+        latest,
+        source: group.source,
+      });
+    }
   }
   return changes.sort((left, right) => left.name.localeCompare(right.name));
 }
@@ -302,7 +318,7 @@ function printCargoReport(updates) {
   }
   console.log(`Rust Cargo: ${updates.length} compatible locked package update(s)`);
   for (const update of updates) {
-    console.log(`  ${update.name}: ${update.version} -> ${update.latest}`);
+    console.log(`  ${update.name}: ${update.version ?? '(absent)'} -> ${update.latest ?? '(removed)'}`);
   }
   return updates.length;
 }

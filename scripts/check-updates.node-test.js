@@ -236,3 +236,34 @@ test('reports compatible Cargo resolution drift from structured metadata', () =>
     }],
   );
 });
+
+test('reports packages added to or removed from the resolved Cargo graph', () => {
+  const metadata = packages => ({
+    packages: packages.map(([name, version]) => ({
+      name,
+      version,
+      source: 'registry+https://github.com/rust-lang/crates.io-index',
+    })),
+  });
+
+  assert.deepEqual(
+    diffCargoMetadata(
+      metadata([['removed-crate', '1.0.0'], ['stable-crate', '1.0.0']]),
+      metadata([['added-crate', '2.0.0'], ['stable-crate', '1.0.0']]),
+    ),
+    [
+      {
+        name: 'added-crate',
+        version: null,
+        latest: '2.0.0',
+        source: 'registry+https://github.com/rust-lang/crates.io-index',
+      },
+      {
+        name: 'removed-crate',
+        version: '1.0.0',
+        latest: null,
+        source: 'registry+https://github.com/rust-lang/crates.io-index',
+      },
+    ],
+  );
+});

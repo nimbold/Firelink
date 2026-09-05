@@ -8,7 +8,7 @@ use crate::ipc::DownloadCategory;
 #[tauri::command]
 pub async fn get_system_proxy(caller: tauri::WebviewWindow) -> Result<Option<String>, String> {
     crate::properties_window::ensure_main_window(&caller)?;
-    match native_system_proxy(&SystemProxyCommandRunner).await {
+    match bounded_native_system_proxy(&SystemProxyCommandRunner, PROXY_DISCOVERY_TIMEOUT).await {
         Ok(Some(proxy)) => Ok(Some(proxy)),
         Ok(None) => Ok(proxy_from_environment()),
         Err(native_error) => proxy_from_environment()
@@ -18,7 +18,18 @@ pub async fn get_system_proxy(caller: tauri::WebviewWindow) -> Result<Option<Str
 }
 
 const PROXY_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const PROXY_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(12);
 const PROXY_COMMAND_OUTPUT_LIMIT: u64 = 64 * 1024;
+const PROXY_NETWORK_SERVICE_LIMIT: usize = 32;
+
+async fn bounded_native_system_proxy(
+    runner: &dyn ProxyCommandRunner,
+    timeout: Duration,
+) -> Result<Option<String>, String> {
+    tokio::time::timeout(timeout, native_system_proxy(runner))
+        .await
+        .map_err(|_| "system proxy discovery timed out".to_string())?
+}
 
 #[async_trait::async_trait]
 trait ProxyCommandRunner: Sync {
@@ -134,7 +145,7 @@ fn proxy_from_environment() -> Option<String> {
 }
 
 fn normalize_proxy_address(raw: &str, default_scheme: &str) -> Option<String> {
-    let trimmed = raw.trim().trim_matches('"').trim_end_matches('/');
+    let trimmed = raw.trim().trim_matches('"');
     if trimmed.is_empty() {
         return None;
     }
@@ -150,7 +161,36 @@ fn normalize_proxy_address(raw: &str, default_scheme: &str) -> Option<String> {
         _ => return None,
     }
     parsed.host_str()?;
-    Some(candidate)
+    if parsed.port() == Some(0)
+        || !matches!(parsed.path(), "" | "/")
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    Some(candidate.trim_end_matches('/').to_string())
+}
+
+fn proxy_from_host_port(host: &str, port: &str, scheme: &str) -> Option<String> {
+    let host = host.trim();
+    let host = match (host.strip_prefix('['), host.strip_suffix(']')) {
+        (Some(without_open), Some(_)) => without_open.strip_suffix(']')?,
+        (None, None) => host,
+        _ => return None,
+    };
+    let port = port.trim().parse::<u16>().ok().filter(|port| *port != 0)?;
+    if host.is_empty()
+        || host.contains(['/', '@', '?', '#'])
+        || host.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    let formatted_host = if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    normalize_proxy_address(&format!("{scheme}://{formatted_host}:{port}"), scheme)
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -189,7 +229,7 @@ async fn macos_system_proxy(runner: &dyn ProxyCommandRunner) -> Result<Option<St
     let services_output = runner
         .stdout("networksetup", &string_args(&["-listallnetworkservices"]))
         .await?;
-    let services = parse_macos_network_services(&services_output);
+    let services = parse_macos_network_services(&services_output)?;
     let mut successful_probe = false;
     for (target, scheme) in [
         ("securewebproxy", "http"),
@@ -214,15 +254,19 @@ async fn macos_system_proxy(runner: &dyn ProxyCommandRunner) -> Result<Option<St
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn parse_macos_network_services(output: &str) -> Vec<String> {
-    output
+fn parse_macos_network_services(output: &str) -> Result<Vec<String>, String> {
+    let services = output
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .filter(|line| !line.starts_with("An asterisk"))
         .filter(|line| !line.starts_with('*'))
         .map(str::to_string)
-        .collect()
+        .collect::<Vec<_>>();
+    if services.len() > PROXY_NETWORK_SERVICE_LIMIT {
+        return Err("macOS returned too many network services".to_string());
+    }
+    Ok(services)
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -234,10 +278,9 @@ fn parse_macos_networksetup_proxy(output: &str, scheme: &str) -> Option<String> 
     }
     let server = macos_networksetup_value(output, "Server:")?;
     let port = macos_networksetup_value(output, "Port:")?;
-    normalize_proxy_address(&format!("{scheme}://{server}:{port}"), scheme)
+    proxy_from_host_port(server, port, scheme)
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn macos_networksetup_value<'a>(output: &'a str, key: &str) -> Option<&'a str> {
     output
@@ -267,7 +310,7 @@ async fn linux_gsettings_proxy(
         .await
         .ok()?;
     let port = port.trim();
-    normalize_proxy_address(&format!("{scheme}://{host}:{port}"), scheme)
+    proxy_from_host_port(&host, port, scheme)
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -351,13 +394,18 @@ fn registry_value(output: &str, name: &str) -> Option<String> {
 #[cfg(test)]
 mod proxy_tests {
     use super::{
-        normalize_proxy_address, parse_macos_network_services, parse_macos_networksetup_proxy,
-        parse_windows_proxy_server, registry_value, strip_gsettings_string, windows_proxy_enabled,
-        ProxyCommandRunner, SystemProxyCommandRunner,
+        bounded_native_system_proxy, normalize_proxy_address, parse_macos_network_services,
+        parse_macos_networksetup_proxy, parse_windows_proxy_server, proxy_from_host_port,
+        registry_value, strip_gsettings_string, windows_proxy_enabled, ProxyCommandRunner,
+        SystemProxyCommandRunner,
     };
+    use std::time::Duration;
 
     #[cfg(target_os = "macos")]
     struct MockProxyCommandRunner;
+
+    #[cfg(target_os = "macos")]
+    struct SlowProxyCommandRunner;
 
     #[cfg(target_os = "macos")]
     #[async_trait::async_trait]
@@ -385,6 +433,15 @@ mod proxy_tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[async_trait::async_trait]
+    impl ProxyCommandRunner for SlowProxyCommandRunner {
+        async fn stdout(&self, _program: &str, _args: &[String]) -> Result<String, String> {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Ok(String::new())
+        }
+    }
+
     #[test]
     fn normalizes_bare_proxy_addresses() {
         assert_eq!(
@@ -396,6 +453,33 @@ mod proxy_tests {
             Some("socks5://127.0.0.1:1080")
         );
         assert_eq!(normalize_proxy_address("file:///tmp/proxy", "http"), None);
+        assert_eq!(
+            normalize_proxy_address("http://proxy.test/secret", "http"),
+            None
+        );
+        assert_eq!(
+            normalize_proxy_address("http://proxy.test?token=secret", "http"),
+            None
+        );
+        assert_eq!(normalize_proxy_address("http://proxy.test:0", "http"), None);
+    }
+
+    #[test]
+    fn formats_native_proxy_hosts_without_accepting_structural_injection() {
+        assert_eq!(
+            proxy_from_host_port("2001:db8::1", "8080", "http").as_deref(),
+            Some("http://[2001:db8::1]:8080")
+        );
+        assert_eq!(
+            proxy_from_host_port("proxy.test/path", "8080", "http"),
+            None
+        );
+        assert_eq!(
+            proxy_from_host_port("user@proxy.test", "8080", "http"),
+            None
+        );
+        assert_eq!(proxy_from_host_port("[2001:db8::1", "8080", "http"), None);
+        assert_eq!(proxy_from_host_port("proxy.test", "0", "http"), None);
     }
 
     #[test]
@@ -423,7 +507,7 @@ Wi-Fi
 Thunderbolt Bridge
 "#;
         assert_eq!(
-            parse_macos_network_services(services),
+            parse_macos_network_services(services).unwrap(),
             vec!["Wi-Fi".to_string(), "Thunderbolt Bridge".to_string()]
         );
 
@@ -462,6 +546,27 @@ Authenticated Proxy Enabled: 0
                 .unwrap()
                 .as_deref(),
             Some("http://secure.example:8443")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn bounds_the_complete_native_proxy_discovery_lifecycle() {
+        let error = bounded_native_system_proxy(&SlowProxyCommandRunner, Duration::from_millis(10))
+            .await
+            .expect_err("the complete native probe must have one bounded deadline");
+        assert_eq!(error, "system proxy discovery timed out");
+    }
+
+    #[test]
+    fn rejects_oversized_macos_network_service_enumeration() {
+        let output = (0..100)
+            .map(|index| format!("Service {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            parse_macos_network_services(&output).unwrap_err(),
+            "macOS returned too many network services"
         );
     }
 
