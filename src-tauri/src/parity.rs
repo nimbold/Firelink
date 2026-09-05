@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-use std::process::Command;
+use std::{process::Stdio, time::Duration};
+use tokio::io::AsyncReadExt;
 use ts_rs::TS;
 
 use crate::ipc::DownloadCategory;
@@ -8,64 +8,112 @@ use crate::ipc::DownloadCategory;
 #[tauri::command]
 pub async fn get_system_proxy(caller: tauri::WebviewWindow) -> Result<Option<String>, String> {
     crate::properties_window::ensure_main_window(&caller)?;
-    match native_system_proxy() {
+    match native_system_proxy(&SystemProxyCommandRunner).await {
         Ok(Some(proxy)) => Ok(Some(proxy)),
         Ok(None) => Ok(proxy_from_environment()),
-        Err(native_error) => match sysproxy::Sysproxy::get_system_proxy() {
-            Ok(proxy) if proxy.enable => {
-                if proxy.host.contains('=') {
-                    Ok(parse_windows_proxy_server(&proxy.host).or_else(proxy_from_environment))
-                } else {
-                    Ok(normalize_sysproxy_address(&proxy.host, proxy.port)
-                        .or_else(proxy_from_environment))
-                }
+        Err(native_error) => proxy_from_environment()
+            .map(Some)
+            .ok_or_else(|| format!("failed to read system proxy settings: {native_error}")),
+    }
+}
+
+const PROXY_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const PROXY_COMMAND_OUTPUT_LIMIT: u64 = 64 * 1024;
+
+#[async_trait::async_trait]
+trait ProxyCommandRunner: Sync {
+    async fn stdout(&self, program: &str, args: &[String]) -> Result<String, String>;
+}
+
+struct SystemProxyCommandRunner;
+
+#[async_trait::async_trait]
+impl ProxyCommandRunner for SystemProxyCommandRunner {
+    async fn stdout(&self, program: &str, args: &[String]) -> Result<String, String> {
+        let mut command = tokio::process::Command::new(program);
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            command.as_std_mut().creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("{program} is unavailable: {error}"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| format!("failed to capture {program} output"))?;
+        let operation = async {
+            let mut bytes = Vec::new();
+            stdout
+                .take(PROXY_COMMAND_OUTPUT_LIMIT + 1)
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|error| format!("failed to read {program} output: {error}"))?;
+            if bytes.len() as u64 > PROXY_COMMAND_OUTPUT_LIMIT {
+                return Err(format!("{program} output exceeded the safety limit"));
             }
-            Ok(_) => Ok(proxy_from_environment()),
-            Err(error) => proxy_from_environment().map(Some).ok_or_else(|| {
-                format!(
-                    "failed to read system proxy settings: {native_error}; sysproxy fallback: {error}"
-                )
-            }),
-        },
+            let status = child
+                .wait()
+                .await
+                .map_err(|error| format!("failed to wait for {program}: {error}"))?;
+            if !status.success() {
+                return Err(format!("{program} exited unsuccessfully"));
+            }
+            String::from_utf8(bytes).map_err(|_| format!("{program} returned non-UTF-8 output"))
+        };
+
+        tokio::time::timeout(PROXY_COMMAND_TIMEOUT, operation)
+            .await
+            .map_err(|_| format!("{program} timed out"))?
     }
 }
 
 #[cfg(target_os = "windows")]
-fn native_system_proxy() -> Result<Option<String>, String> {
-    fallback_windows_proxy().map_err(|_| "failed to read Windows proxy registry".to_string())
+async fn native_system_proxy(runner: &dyn ProxyCommandRunner) -> Result<Option<String>, String> {
+    windows_system_proxy(runner).await
 }
 
 #[cfg(target_os = "macos")]
-fn native_system_proxy() -> Result<Option<String>, String> {
-    let proxy = sysproxy::Sysproxy::get_system_proxy().map_err(|error| error.to_string())?;
-    if !proxy.enable {
-        return Ok(None);
-    }
-    Ok(macos_proxy_for_host_port(&proxy.host, proxy.port)
-        .unwrap_or_else(|| {
-            normalize_sysproxy_address(&proxy.host, proxy.port)
-                .unwrap_or_else(|| format!("http://{}:{}", proxy.host, proxy.port))
-        })
-        .into())
+async fn native_system_proxy(runner: &dyn ProxyCommandRunner) -> Result<Option<String>, String> {
+    macos_system_proxy(runner).await
 }
 
 #[cfg(target_os = "linux")]
-fn native_system_proxy() -> Result<Option<String>, String> {
-    let mode =
-        command_stdout(Command::new("gsettings").args(["get", "org.gnome.system.proxy", "mode"]))
-            .map_err(|error| error.to_string())?;
+async fn native_system_proxy(runner: &dyn ProxyCommandRunner) -> Result<Option<String>, String> {
+    let mode = runner
+        .stdout(
+            "gsettings",
+            &string_args(&["get", "org.gnome.system.proxy", "mode"]),
+        )
+        .await?;
     if strip_gsettings_string(&mode) != "manual" {
         return Ok(None);
     }
 
-    Ok(linux_gsettings_proxy("https", "http")
-        .or_else(|| linux_gsettings_proxy("http", "http"))
-        .or_else(|| linux_gsettings_proxy("socks", "socks5")))
+    for (service, scheme) in [("https", "http"), ("http", "http"), ("socks", "socks5")] {
+        if let Some(proxy) = linux_gsettings_proxy(runner, service, scheme).await {
+            return Ok(Some(proxy));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-fn native_system_proxy() -> Result<Option<String>, String> {
+async fn native_system_proxy(_runner: &dyn ProxyCommandRunner) -> Result<Option<String>, String> {
     Ok(None)
+}
+
+fn string_args(args: &[&str]) -> Vec<String> {
+    args.iter().map(|value| (*value).to_string()).collect()
 }
 
 fn proxy_from_environment() -> Option<String> {
@@ -83,18 +131,6 @@ fn proxy_from_environment() -> Option<String> {
             .ok()
             .and_then(|value| normalize_proxy_address(&value, "http"))
     })
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn command_stdout(command: &mut Command) -> std::io::Result<String> {
-    let output = command.output()?;
-    if !output.status.success() {
-        return Err(std::io::Error::other(format!(
-            "command exited with {}",
-            output.status
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn normalize_proxy_address(raw: &str, default_scheme: &str) -> Option<String> {
@@ -117,27 +153,7 @@ fn normalize_proxy_address(raw: &str, default_scheme: &str) -> Option<String> {
     Some(candidate)
 }
 
-fn normalize_sysproxy_address(host: &str, port: u16) -> Option<String> {
-    let host = host.trim();
-    if host.is_empty() {
-        return None;
-    }
-
-    if host.contains("://") {
-        let mut parsed = url::Url::parse(host).ok()?;
-        if parsed.port().is_none() && port != 0 {
-            parsed.set_port(Some(port)).ok()?;
-        }
-        return normalize_proxy_address(parsed.as_str(), "http");
-    }
-
-    if port == 0 {
-        normalize_proxy_address(host, "http")
-    } else {
-        normalize_proxy_address(&format!("{host}:{port}"), "http")
-    }
-}
-
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_windows_proxy_server(value: &str) -> Option<String> {
     let value = value.trim().trim_matches('"');
     if value.is_empty() {
@@ -169,27 +185,32 @@ fn parse_windows_proxy_server(value: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_proxy_for_host_port(host: &str, port: u16) -> Option<String> {
-    let services_output =
-        command_stdout(Command::new("networksetup").arg("-listallnetworkservices")).ok()?;
-    for service in parse_macos_network_services(&services_output) {
-        for (target, scheme) in [
-            ("securewebproxy", "http"),
-            ("webproxy", "http"),
-            ("socksfirewallproxy", "socks5"),
-        ] {
-            let output = command_stdout(
-                Command::new("networksetup").args([format!("-get{target}"), service.clone()]),
-            )
-            .ok()?;
-            if let Some(proxy) = parse_macos_networksetup_proxy(&output, scheme)
-                .filter(|proxy| proxy_matches_host_port(proxy, host, port))
-            {
-                return Some(proxy);
+async fn macos_system_proxy(runner: &dyn ProxyCommandRunner) -> Result<Option<String>, String> {
+    let services_output = runner
+        .stdout("networksetup", &string_args(&["-listallnetworkservices"]))
+        .await?;
+    let services = parse_macos_network_services(&services_output);
+    let mut successful_probe = false;
+    for (target, scheme) in [
+        ("securewebproxy", "http"),
+        ("webproxy", "http"),
+        ("socksfirewallproxy", "socks5"),
+    ] {
+        for service in &services {
+            let args = vec![format!("-get{target}"), service.clone()];
+            if let Ok(output) = runner.stdout("networksetup", &args).await {
+                successful_probe = true;
+                if let Some(proxy) = parse_macos_networksetup_proxy(&output, scheme) {
+                    return Ok(Some(proxy));
+                }
             }
         }
     }
-    None
+    if !services.is_empty() && !successful_probe {
+        Err("failed to query enabled macOS proxy settings".to_string())
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -217,13 +238,6 @@ fn parse_macos_networksetup_proxy(output: &str, scheme: &str) -> Option<String> 
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn proxy_matches_host_port(proxy: &str, host: &str, port: u16) -> bool {
-    let Ok(parsed) = url::Url::parse(proxy) else {
-        return false;
-    };
-    parsed.host_str() == Some(host) && parsed.port() == Some(port)
-}
-
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn macos_networksetup_value<'a>(output: &'a str, key: &str) -> Option<&'a str> {
     output
@@ -234,14 +248,24 @@ fn macos_networksetup_value<'a>(output: &'a str, key: &str) -> Option<&'a str> {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_gsettings_proxy(service: &str, scheme: &str) -> Option<String> {
+async fn linux_gsettings_proxy(
+    runner: &dyn ProxyCommandRunner,
+    service: &str,
+    scheme: &str,
+) -> Option<String> {
     let schema = format!("org.gnome.system.proxy.{service}");
-    let host = command_stdout(Command::new("gsettings").args(["get", &schema, "host"])).ok()?;
+    let host = runner
+        .stdout("gsettings", &string_args(&["get", &schema, "host"]))
+        .await
+        .ok()?;
     let host = strip_gsettings_string(&host);
     if host.is_empty() {
         return None;
     }
-    let port = command_stdout(Command::new("gsettings").args(["get", &schema, "port"])).ok()?;
+    let port = runner
+        .stdout("gsettings", &string_args(&["get", &schema, "port"]))
+        .await
+        .ok()?;
     let port = port.trim();
     normalize_proxy_address(&format!("{scheme}://{host}:{port}"), scheme)
 }
@@ -256,51 +280,37 @@ fn strip_gsettings_string(value: &str) -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn fallback_windows_proxy() -> Result<Option<String>, ()> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    let output = Command::new("reg")
-        .args(&[
-            "query",
-            "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
-            "/v",
-            "ProxyEnable",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|_| ())?;
-
-    if !output.status.success() {
-        return Err(());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let enabled = registry_value(&stdout, "ProxyEnable")
+async fn windows_system_proxy(runner: &dyn ProxyCommandRunner) -> Result<Option<String>, String> {
+    let output = runner
+        .stdout(
+            "reg",
+            &string_args(&[
+                "query",
+                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+                "/v",
+                "ProxyEnable",
+            ]),
+        )
+        .await?;
+    let enabled = registry_value(&output, "ProxyEnable")
         .as_deref()
         .is_some_and(windows_proxy_enabled);
     if !enabled {
         return Ok(None);
     }
 
-    let output = Command::new("reg")
-        .args(&[
-            "query",
-            "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
-            "/v",
-            "ProxyServer",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|_| ())?;
-
-    if !output.status.success() {
-        return Err(());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(registry_value(&stdout, "ProxyServer").and_then(|value| parse_windows_proxy_server(&value)))
+    let output = runner
+        .stdout(
+            "reg",
+            &string_args(&[
+                "query",
+                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+                "/v",
+                "ProxyServer",
+            ]),
+        )
+        .await?;
+    Ok(registry_value(&output, "ProxyServer").and_then(|value| parse_windows_proxy_server(&value)))
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -341,10 +351,39 @@ fn registry_value(output: &str, name: &str) -> Option<String> {
 #[cfg(test)]
 mod proxy_tests {
     use super::{
-        normalize_proxy_address, normalize_sysproxy_address, parse_macos_network_services,
-        parse_macos_networksetup_proxy, parse_windows_proxy_server, proxy_matches_host_port,
-        registry_value, strip_gsettings_string, windows_proxy_enabled,
+        normalize_proxy_address, parse_macos_network_services, parse_macos_networksetup_proxy,
+        parse_windows_proxy_server, registry_value, strip_gsettings_string, windows_proxy_enabled,
+        ProxyCommandRunner, SystemProxyCommandRunner,
     };
+
+    #[cfg(target_os = "macos")]
+    struct MockProxyCommandRunner;
+
+    #[cfg(target_os = "macos")]
+    #[async_trait::async_trait]
+    impl ProxyCommandRunner for MockProxyCommandRunner {
+        async fn stdout(&self, program: &str, args: &[String]) -> Result<String, String> {
+            assert_eq!(program, "networksetup");
+            match args
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .as_slice()
+            {
+                ["-listallnetworkservices"] => Ok("Wi-Fi\nEthernet\n".to_string()),
+                ["-getsecurewebproxy", "Wi-Fi"] => {
+                    Ok("Enabled: No\nServer: ignored.example\nPort: 443\n".to_string())
+                }
+                ["-getsecurewebproxy", "Ethernet"] => {
+                    Ok("Enabled: Yes\nServer: secure.example\nPort: 8443\n".to_string())
+                }
+                ["-getwebproxy", _] | ["-getsocksfirewallproxy", _] => {
+                    panic!("lower-priority proxy was queried after HTTPS succeeded")
+                }
+                _ => Err("unexpected command".to_string()),
+            }
+        }
+    }
 
     #[test]
     fn normalizes_bare_proxy_addresses() {
@@ -376,22 +415,6 @@ mod proxy_tests {
     }
 
     #[test]
-    fn normalizes_sysproxy_host_without_duplicating_ports() {
-        assert_eq!(
-            normalize_sysproxy_address("http://proxy.local", 8080).as_deref(),
-            Some("http://proxy.local:8080")
-        );
-        assert_eq!(
-            normalize_sysproxy_address("http://proxy.local:9000", 8080).as_deref(),
-            Some("http://proxy.local:9000")
-        );
-        assert_eq!(
-            normalize_sysproxy_address("proxy.local", 8080).as_deref(),
-            Some("http://proxy.local:8080")
-        );
-    }
-
-    #[test]
     fn parses_macos_proxy_outputs_with_scheme() {
         let services = r#"
 An asterisk (*) denotes that a network service is disabled.
@@ -414,19 +437,32 @@ Authenticated Proxy Enabled: 0
             parse_macos_networksetup_proxy(proxy, "socks5").as_deref(),
             Some("socks5://127.0.0.1:1080")
         );
-        assert!(proxy_matches_host_port(
-            "socks5://127.0.0.1:1080",
-            "127.0.0.1",
-            1080
-        ));
-        assert!(!proxy_matches_host_port(
-            "socks5://127.0.0.1:1080",
-            "127.0.0.1",
-            1081
-        ));
-
         let disabled = proxy.replace("Enabled: Yes", "Enabled: No");
         assert_eq!(parse_macos_networksetup_proxy(&disabled, "socks5"), None);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn bounds_native_command_runtime_and_output() {
+        let runner = SystemProxyCommandRunner;
+        let oversized = format!("print('x' * {})", super::PROXY_COMMAND_OUTPUT_LIMIT + 1);
+        let error = runner
+            .stdout("python3", &["-c".to_string(), oversized])
+            .await
+            .expect_err("oversized output must fail closed");
+        assert!(error.contains("safety limit"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn selects_https_across_services_before_lower_priority_proxies() {
+        assert_eq!(
+            super::macos_system_proxy(&MockProxyCommandRunner)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("http://secure.example:8443")
+        );
     }
 
     #[test]
