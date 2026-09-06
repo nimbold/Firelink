@@ -7,6 +7,7 @@ if command -v cygpath >/dev/null 2>&1; then
   source_root="$(cygpath -u "$source_root")"
   patch_file="$(cygpath -u "$patch_file")"
   export PATH="/mingw64/bin:/usr/bin:$PATH"
+  export ACLOCAL_PATH="/mingw64/share/aclocal:/usr/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}"
   export PKG_CONFIG_PATH=/mingw64/lib/pkgconfig
 fi
 cd "$source_root"

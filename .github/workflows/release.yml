@@ -110,7 +110,7 @@ jobs:
         with:
           msystem: MINGW64
           install: >-
-            base-devel autoconf automake libtool gettext-devel
+            base-devel autoconf automake libtool gettext-devel pkgconf
             mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-openssl mingw-w64-x86_64-libssh2
             mingw-w64-x86_64-c-ares mingw-w64-x86_64-expat
