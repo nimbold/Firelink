@@ -145,6 +145,7 @@ function writePayloadManifest() {
           version: source.version,
           url: source.url || source.sourceUrl,
           sha256: source.sha256 || source.sourceSha256,
+          ...(source.buildFromSource ? { patchSha256: source.patchSha256, allocationTelemetry: true } : {}),
           ...(name === 'aria2c' && source.firelinkRouteContract
             ? { firelinkRouteContract: source.firelinkRouteContract }
             : {})
@@ -194,7 +195,25 @@ try {
   copyExecutable(findFile(ffmpeg, isWindows ? ['ffmpeg.exe'] : ['ffmpeg']), 'ffmpeg');
 
   const aria2 = await download('aria2c', targetSources.aria2c);
-  copyExecutable(findFile(aria2, isWindows ? ['aria2c.exe'] : ['aria2c']), 'aria2c');
+  const aria2Source = targetSources.aria2c;
+  if (aria2Source.buildFromSource !== true || aria2Source.allocationTelemetry !== true) {
+    throw new Error('Aria2 provisioning requires the allocation telemetry source build.');
+  }
+  const patchFile = path.join(repoRoot, aria2Source.patch);
+  if (sha256(patchFile) !== aria2Source.patchSha256) throw new Error('Aria2 source patch checksum mismatch');
+  const sourceRoots = fs.readdirSync(aria2, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && fs.existsSync(path.join(aria2, entry.name, 'configure.ac')))
+    .map(entry => path.join(aria2, entry.name));
+  if (sourceRoots.length !== 1) throw new Error('Aria2 archive must contain exactly one source root');
+  const [sourceRoot] = sourceRoots;
+  const bash = isWindows ? path.join(process.env.FIRELINK_MSYS2_ROOT || 'C:/msys64', 'usr/bin/bash.exe') : 'bash';
+  await execFileAsync(bash, [path.join(repoRoot, 'scripts/aria2/build.sh').replaceAll('\\', '/'), sourceRoot, patchFile], {
+    signal: provisioningAbortController.signal,
+    env: { ...process.env, ...(isWindows ? { MSYSTEM: 'MINGW64' } : {}) },
+    maxBuffer: 32 * 1024 * 1024,
+    timeout: 30 * 60 * 1000,
+  });
+  copyExecutable(path.join(sourceRoot, 'firelink-build', 'src', `aria2c${executableSuffix}`), 'aria2c');
 
   writePayloadManifest();
   throwIfProvisioningAborted();

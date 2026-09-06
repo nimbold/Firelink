@@ -7,6 +7,7 @@ import { MAX_DOWNLOAD_FILENAME_BYTES } from '../utils/downloads';
 
 vi.mock('../ipc', () => ({
   invokeCommand: vi.fn(),
+  listenEvent: vi.fn().mockResolvedValue(() => {}),
 }));
 
 // Mock window.__TAURI_INTERNALS__ and log to prevent errors
@@ -111,6 +112,64 @@ describe('useDownloadStore', () => {
       queues: [{ id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true }],
     });
     useDownloadProgressStore.setState({ progressMap: {}, retainedProgressMap: {}, moveProgressMap: {} });
+  });
+
+  it('closes confirmation before slow removal and keeps other downloads controllable', async () => {
+    const item = { id: 'slow-remove', url: 'https://example.com/file', fileName: 'file', status: 'paused' as const, fraction: 0, speed: '-', eta: '-', category: 'Other' as const, dateAdded: '2026-09-06', queueId: MAIN_QUEUE_ID };
+    useDownloadStore.setState({ downloads: [item], deleteModalState: { isOpen: true, downloadIds: [item.id] } });
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
+      if (command === 'submit_download_removals') return blocked;
+      return undefined as never;
+    });
+    const removing = useDownloadStore.getState().requestRemovals([item.id], true);
+    expect(useDownloadStore.getState().deleteModalState.isOpen).toBe(false);
+    expect(useDownloadStore.getState().downloads).toHaveLength(1);
+    expect(useDownloadStore.getState().removalJobs[item.id].phase).toBe('pending');
+    await expect(useDownloadStore.getState().resumeDownload(item.id)).rejects.toThrow();
+    useDownloadStore.getState().openAddModalWithUrls('https://example.com/other');
+    expect(useDownloadStore.getState().isAddModalOpen).toBe(true);
+    release();
+    await removing;
+    useDownloadStore.getState().applyRemovalJob({ id: item.id, revision: 1, deleteAssets: true, phase: 'completed', error: null });
+    expect(useDownloadStore.getState().downloads).toHaveLength(0);
+    useDownloadStore.getState().updateDownload(item.id, { status: 'downloading' });
+    expect(useDownloadStore.getState().downloads).toHaveLength(0);
+  });
+
+  it('does not let a stale removal event replace a newer completion', () => {
+    const completed = { id: 'revision-test', revision: 3, deleteAssets: true, phase: 'completed' as const, error: null };
+    useDownloadStore.getState().applyRemovalJob(completed);
+    useDownloadStore.getState().applyRemovalJob({ ...completed, revision: 2, phase: 'running' });
+    expect(useDownloadStore.getState().removalJobs[completed.id]).toEqual(completed);
+  });
+
+  it('keeps partial removal failures visible and does not repeat successful jobs', async () => {
+    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
+    const failed = { id: 'failed-removal', revision: 1, deleteAssets: true, phase: 'failed' as const, error: 'Drive unavailable' };
+    useDownloadStore.getState().applyRemovalJob(failed);
+    await useDownloadStore.getState().requestRemovals([failed.id], true);
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('submit_download_removals', expect.anything());
+    expect(useDownloadStore.getState().removalJobs[failed.id]).toEqual(failed);
+  });
+
+  it('does not resurrect a row when completion races startup hydration', async () => {
+    const completed = { id: 'hydration-removal', revision: 3, deleteAssets: true, phase: 'completed' as const, error: null };
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
+      if (command === 'list_download_removals') {
+        useDownloadStore.getState().applyRemovalJob(completed);
+        return [{ ...completed, revision: 1, phase: 'pending' }] as never;
+      }
+      if (command === 'db_get_all_queues') return [] as never;
+      if (command === 'db_get_all_downloads') return [JSON.stringify({
+        id: completed.id, status: 'paused', queueId: MAIN_QUEUE_ID,
+      })] as never;
+      return undefined as never;
+    });
+    await useDownloadStore.getState().initDB();
+    expect(useDownloadStore.getState().removalJobs[completed.id]).toEqual(completed);
+    expect(useDownloadStore.getState().downloads).toEqual([]);
   });
 
   it('invalidates in-flight Add-modal handoffs when the modal is toggled', () => {
@@ -847,6 +906,7 @@ describe('useDownloadStore', () => {
           JSON.stringify({ id: 'queue-a', name: 'Queue A', isMain: false, maxConcurrent: 0 })
         ];
       }
+      if (cmd === 'list_download_removals') return Promise.resolve([]);
       if (cmd === 'db_get_all_downloads') return [];
       return undefined;
     });
@@ -877,6 +937,7 @@ describe('useDownloadStore', () => {
     });
     vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
       if (cmd === 'db_get_all_queues') return [];
+      if (cmd === 'list_download_removals') return Promise.resolve([]);
       if (cmd === 'db_get_all_downloads') return [];
       return undefined;
     });
@@ -891,6 +952,7 @@ describe('useDownloadStore', () => {
       if (cmd === 'db_get_all_queues') {
         return [JSON.stringify({ id: 'legacy-main', name: 'Primary', isMain: true })];
       }
+      if (cmd === 'list_download_removals') return Promise.resolve([]);
       if (cmd === 'db_get_all_downloads') {
         return [
           JSON.stringify({
@@ -925,6 +987,7 @@ describe('useDownloadStore', () => {
   it('skips malformed persisted download records without blocking startup', async () => {
     vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
       if (cmd === 'db_get_all_queues') return [];
+      if (cmd === 'list_download_removals') return Promise.resolve([]);
       if (cmd === 'db_get_all_downloads') {
         return [
           '{not-json',
@@ -954,6 +1017,7 @@ describe('useDownloadStore', () => {
       if (cmd === 'db_get_all_queues') {
         return [JSON.stringify({ id: 'queue-a', name: 'Queue A', isMain: false })];
       }
+      if (cmd === 'list_download_removals') return Promise.resolve([]);
       if (cmd === 'db_get_all_downloads') {
         return [
           JSON.stringify({ id: 'active', status: 'downloading', queueId: 'queue-a', queuePosition: 0 }),
@@ -983,6 +1047,7 @@ describe('useDownloadStore', () => {
   it('removes persisted temporary media estimates that are smaller than downloaded bytes', async () => {
     vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
       if (cmd === 'db_get_all_queues') return [];
+      if (cmd === 'list_download_removals') return Promise.resolve([]);
       if (cmd === 'db_get_all_downloads') {
         return [JSON.stringify({
           id: 'stale-media-estimate',
@@ -3255,6 +3320,7 @@ describe('useDownloadStore', () => {
   it('preserves backend rejection reasons while auto-resuming saved queued items', async () => {
     vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
       if (cmd === 'db_get_all_queues') return [];
+      if (cmd === 'list_download_removals') return Promise.resolve([]);
       if (cmd === 'db_get_all_downloads') {
         return [JSON.stringify({
           id: 'startup-failed',
@@ -3290,6 +3356,7 @@ describe('useDownloadStore', () => {
   it('keeps startup destination permission failures retryable without backend registration', async () => {
     vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
       if (cmd === 'db_get_all_queues') return [];
+      if (cmd === 'list_download_removals') return Promise.resolve([]);
       if (cmd === 'db_get_all_downloads') {
         return [JSON.stringify({
           id: 'startup-destination-access',
@@ -3333,6 +3400,7 @@ describe('useDownloadStore', () => {
     });
     vi.mocked(ipc.invokeCommand).mockImplementation((cmd: string) => {
       if (cmd === 'db_get_all_queues') return Promise.resolve([]) as never;
+      if (cmd === 'list_download_removals') return Promise.resolve([]);
       if (cmd === 'db_get_all_downloads') {
         return Promise.resolve([JSON.stringify({
           id: 'startup-torrent-allocation',
@@ -3388,6 +3456,7 @@ describe('useDownloadStore', () => {
     } as unknown as ReturnType<typeof useSettingsStore.getState>);
     vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
       if (command === 'db_get_all_queues') return [];
+      if (command === 'list_download_removals') return [];
       if (command === 'db_get_all_downloads') {
         return [JSON.stringify({
           id: 'startup-proxy-blocked',
@@ -3419,6 +3488,7 @@ describe('useDownloadStore', () => {
   it('keeps accepted startup registrations when pending-order refresh fails', async () => {
     vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
       if (cmd === 'db_get_all_queues') return [];
+      if (cmd === 'list_download_removals') return Promise.resolve([]);
       if (cmd === 'db_get_all_downloads') {
         return [JSON.stringify({
           id: 'startup-accepted',
@@ -3459,6 +3529,7 @@ describe('useDownloadStore', () => {
   it('does not restore a registration after a fast startup terminal event', async () => {
     vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
       if (cmd === 'db_get_all_queues') return [];
+      if (cmd === 'list_download_removals') return Promise.resolve([]);
       if (cmd === 'db_get_all_downloads') {
         return [JSON.stringify({
           id: 'startup-completed',
@@ -3499,6 +3570,7 @@ describe('useDownloadStore', () => {
     } as unknown as ReturnType<typeof useSettingsStore.getState>);
     vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
       if (cmd === 'db_get_all_queues') return [];
+      if (cmd === 'list_download_removals') return Promise.resolve([]);
       if (cmd === 'db_get_all_downloads') {
         return [JSON.stringify({
           id: 'startup-credential-gated',
@@ -3548,6 +3620,7 @@ describe('useDownloadStore', () => {
     });
     vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
       if (cmd === 'db_get_all_queues') return [];
+      if (cmd === 'list_download_removals') return Promise.resolve([]);
       if (cmd === 'db_get_all_downloads') {
         return [JSON.stringify({
           id: 'startup-single-flight',
@@ -3808,6 +3881,7 @@ describe('useDownloadStore', () => {
   it('migrates legacy downloads without queue ids into the main queue', async () => {
     vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
       if (cmd === 'db_get_all_queues') return [];
+      if (cmd === 'list_download_removals') return Promise.resolve([]);
       if (cmd === 'db_get_all_downloads') {
         return [JSON.stringify({
           id: 'legacy',

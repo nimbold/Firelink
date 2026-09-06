@@ -1154,17 +1154,17 @@ export const PropertiesWindowApp = () => {
     );
   }
 
-  const editingEnabled = pendingAction === null && isEditableStatus(snapshot.status);
-  const liveNormalSpeedEnabled = pendingAction === null
+  const editingEnabled = !snapshot.removalPhase && pendingAction === null && isEditableStatus(snapshot.status);
+  const liveNormalSpeedEnabled = !snapshot.removalPhase && pendingAction === null
     && snapshot.isMedia !== true
     && snapshot.isTorrent !== true
     && isLiveNormalSpeedStatus(snapshot.status);
-  const liveTorrentOptionsEnabled = pendingAction === null
+  const liveTorrentOptionsEnabled = !snapshot.removalPhase && pendingAction === null
     && snapshot.isTorrent === true
     && isLiveTorrentControlStatus(snapshot.status);
-  const liveTorrentSpeedEnabled = liveTorrentOptionsEnabled && isLiveNormalSpeedStatus(snapshot.status);
+  const liveTorrentSpeedEnabled = !snapshot.removalPhase && liveTorrentOptionsEnabled && isLiveNormalSpeedStatus(snapshot.status);
   const identityEditingEnabled = editingEnabled && !isTorrent && ['ready', 'staged'].includes(snapshot.status);
-  const torrentMoveAvailable = ['paused', 'completed', 'failed'].includes(snapshot.status);
+  const torrentMoveAvailable = !snapshot.removalPhase && ['paused', 'completed', 'failed'].includes(snapshot.status);
   const progress = getPropertiesProgress(snapshot);
   const lifecycleAction = getPropertiesLifecycleAction(snapshot.status);
   const footerActions = getPropertiesFooterActions({
@@ -1181,12 +1181,13 @@ export const PropertiesWindowApp = () => {
     connectedPeers: snapshot.torrentConnectedPeers,
     connectedSeeders: snapshot.torrentConnectedSeeders,
   });
-  const allocationPending = snapshot.isTorrent !== true
-    && isAllocationPhaseVisible(snapshot.allocationPending === true, snapshot.status);
+  const allocationPending = !snapshot.removalPhase && isAllocationPhaseVisible(snapshot.allocationPending === true, snapshot.status);
   const total = snapshot.size || (snapshot.totalBytes === undefined
     ? t($ => $.addDownloads.unknownSize)
     : `${snapshot.totalIsEstimate ? '~' : ''}${formatDownloadBytes(snapshot.totalBytes)}`);
-  const statusLabel = allocationPending
+  const statusLabel = snapshot.removalPhase
+    ? t($ => snapshot.removalPhase === 'failed' ? $.downloads.removal.error : $.downloads.removal.removing)
+    : allocationPending
     ? t($ => $.downloads.status.allocatingFiles)
     : waitingForPeers
     ? t($ => $.downloads.status.waitingForPeers)
@@ -1230,8 +1231,9 @@ export const PropertiesWindowApp = () => {
     snapshot.queuePosition,
     position => t($ => $.properties.queuePosition, { position }),
   );
-  const progressPercent = allocationPending ? '—' : `${Math.round(progress * 100)}%`;
-  const statusTone = allocationPending ? 'downloading' : propertiesStatusTone(snapshot.status);
+  const indeterminate = allocationPending || snapshot.removalPhase === "pending" || snapshot.removalPhase === "running";
+  const progressPercent = indeterminate ? '—' : `${Math.round(progress * 100)}%`;
+  const statusTone = indeterminate ? 'downloading' : propertiesStatusTone(snapshot.status);
   const lifecycleLabel = lifecycleAction === 'pause'
     ? t($ => $.downloads.actions.pause)
     : lifecycleAction === 'resume'
@@ -1312,24 +1314,24 @@ export const PropertiesWindowApp = () => {
           <div
             className="properties-window-progress-track"
             aria-label={t($ => $.properties.progress)}
-            aria-busy={allocationPending}
-            aria-valuetext={allocationPending ? statusLabel : undefined}
+            aria-busy={indeterminate}
+            aria-valuetext={indeterminate ? statusLabel : undefined}
             role="progressbar"
-            aria-valuemin={allocationPending ? undefined : 0}
-            aria-valuemax={allocationPending ? undefined : 100}
-            aria-valuenow={allocationPending ? undefined : Math.round(progress * 100)}
+            aria-valuemin={indeterminate ? undefined : 0}
+            aria-valuemax={indeterminate ? undefined : 100}
+            aria-valuenow={indeterminate ? undefined : Math.round(progress * 100)}
           >
             <div
-              className={`properties-window-progress-fill ${allocationPending ? 'properties-progress-allocating' : `properties-progress-${statusTone}`}`}
-              style={{ width: allocationPending ? undefined : `${progress * 100}%` }}
+              className={`properties-window-progress-fill ${indeterminate ? 'properties-progress-allocating' : `properties-progress-${statusTone}`}`}
+              style={{ width: indeterminate ? undefined : `${progress * 100}%` }}
             />
           </div>
           <span className="properties-window-progress-percent">{progressPercent}</span>
         </div>
         <div className="properties-window-metrics" dir="ltr">
           <div className="properties-metric-card"><Download size={14} /><div className="properties-metric-content"><span className="properties-metric-label">{t($ => $.properties.size)}</span><strong className="properties-metric-value">{formatDownloadBytes(snapshot.downloadedBytes ?? 0)} / {total}</strong></div></div>
-          <div className="properties-metric-card"><Gauge size={14} /><div className="properties-metric-content"><span className="properties-metric-label">{t($ => $.properties.speed)}</span><strong className="properties-metric-value">{allocationPending ? '—' : snapshot.speed || '—'}</strong></div></div>
-          <div className="properties-metric-card"><Timer size={14} /><div className="properties-metric-content"><span className="properties-metric-label">{t($ => $.properties.eta)}</span><strong className="properties-metric-value">{allocationPending ? '—' : snapshot.eta || '—'}</strong></div></div>
+          <div className="properties-metric-card"><Gauge size={14} /><div className="properties-metric-content"><span className="properties-metric-label">{t($ => $.properties.speed)}</span><strong className="properties-metric-value">{indeterminate ? '—' : snapshot.speed || '—'}</strong></div></div>
+          <div className="properties-metric-card"><Timer size={14} /><div className="properties-metric-content"><span className="properties-metric-label">{t($ => $.properties.eta)}</span><strong className="properties-metric-value">{indeterminate ? '—' : snapshot.eta || '—'}</strong></div></div>
           {connectionPresentation.showHeaderMetric && <div className="properties-metric-card"><Users size={14} /><div className="properties-metric-content"><span className="properties-metric-label">{connectionHeaderLabel}</span>{connectionValue}</div></div>}
           {isTorrent && <>
             <div className="properties-metric-card"><Upload size={14} /><div className="properties-metric-content"><span className="properties-metric-label">{t($ => $.properties.torrentUploaded)}</span><strong className="properties-metric-value">{formatDownloadBytes(snapshot.torrentUploadedBytes ?? 0)}</strong></div></div>
@@ -1720,7 +1722,7 @@ export const PropertiesWindowApp = () => {
       </section>
 
       {(isDirty || errorMessage || notice || pendingTab || closePrompt) && <div className="shrink-0 border-t border-border-modal bg-sidebar-bg px-4 py-2" aria-live="polite">
-        {isPromptFooter ? <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span>{t($ => $.scheduler.unsavedChanges)}</span><div className="flex gap-2"><button type="button" className="app-button px-3 text-xs" disabled={pendingAction !== null} onClick={discardDraft}>{t($ => $.properties.discardChanges)}</button><button type="button" className="app-button app-button-primary px-3 text-xs" disabled={pendingAction !== null} onClick={() => { closeAfterSaveRef.current = closePrompt; switchAfterSaveRef.current = pendingTab; void applyActiveTab(); }}>{t($ => $.properties.save)}</button><button type="button" className="app-button px-3 text-xs" onClick={() => { switchAfterSaveRef.current = null; closeAfterSaveRef.current = false; setPendingTab(null); setClosePrompt(false); }}>{t($ => $.properties.keepEditing)}</button></div></div> : <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className={errorMessage ? 'text-red-400' : 'text-text-muted'}>{errorMessage || notice}</span><div className="flex gap-2">{footerActions.includes('discardChanges') && <><button type="button" className="app-button px-3 text-xs" disabled={pendingAction !== null} onClick={discardDraft}>{t($ => $.properties.discardChanges)}</button><button type="button" className="app-button app-button-primary px-3 text-xs" disabled={pendingAction !== null} onClick={() => void applyActiveTab()}><Save size={14} />{t($ => $.properties.save)}</button></>}<button type="button" className="app-button px-3 text-xs" onClick={() => void closeWindow()}><X size={14} />{t($ => $.window.close)}</button></div></div>}
+        {isPromptFooter ? <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span>{t($ => $.scheduler.unsavedChanges)}</span><div className="flex gap-2"><button type="button" className="app-button px-3 text-xs" disabled={pendingAction !== null} onClick={discardDraft}>{t($ => $.properties.discardChanges)}</button><button type="button" className="app-button app-button-primary px-3 text-xs" disabled={!!snapshot.removalPhase || pendingAction !== null} onClick={() => { closeAfterSaveRef.current = closePrompt; switchAfterSaveRef.current = pendingTab; void applyActiveTab(); }}>{t($ => $.properties.save)}</button><button type="button" className="app-button px-3 text-xs" onClick={() => { switchAfterSaveRef.current = null; closeAfterSaveRef.current = false; setPendingTab(null); setClosePrompt(false); }}>{t($ => $.properties.keepEditing)}</button></div></div> : <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className={errorMessage ? 'text-red-400' : 'text-text-muted'}>{errorMessage || notice}</span><div className="flex gap-2">{footerActions.includes('discardChanges') && <><button type="button" className="app-button px-3 text-xs" disabled={pendingAction !== null} onClick={discardDraft}>{t($ => $.properties.discardChanges)}</button><button type="button" className="app-button app-button-primary px-3 text-xs" disabled={!!snapshot.removalPhase || pendingAction !== null} onClick={() => void applyActiveTab()}><Save size={14} />{t($ => $.properties.save)}</button></>}<button type="button" className="app-button px-3 text-xs" onClick={() => void closeWindow()}><X size={14} />{t($ => $.window.close)}</button></div></div>}
       </div>}
     </main>
   );

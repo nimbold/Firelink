@@ -130,3 +130,9 @@ export function assertAria2RouteSource(source, target) {
     }
   }
 }
+
+export function assertAria2AllocationCapabilities(version) {
+  if (version?.firelinkAllocationTelemetry !== true) {
+    throw new Error('Bundled Aria2 does not expose file allocation telemetry');
+  }
+}

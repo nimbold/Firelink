@@ -7,7 +7,7 @@ use std::sync::Mutex;
 const DATABASE_NAME: &str = "firelink.sqlite";
 const LEGACY_STORE_NAME: &str = "store.bin";
 const LEGACY_BUNDLE_IDENTIFIER: &str = "com.nima.tauri-app";
-const CURRENT_SCHEMA_VERSION: i64 = 3;
+const CURRENT_SCHEMA_VERSION: i64 = 4;
 pub(crate) const TOKEN_CHANGED_NOTICE: &str = "pairing-token-changed";
 pub const PAIRING_TOKEN_KEYCHAIN_ID: &str = "extension-pairing-token";
 // Development builds are a different executable identity from the packaged
@@ -225,6 +225,13 @@ fn migrate_schema(connection: &mut Connection, from_version: i64) -> Result<(), 
                 ",
             )
             .map_err(|error| format!("failed to migrate torrent removal paths: {error}"))?;
+    }
+
+    if from_version < 4 {
+        transaction.execute_batch("CREATE TABLE download_removal_jobs (
+            id TEXT PRIMARY KEY, data TEXT NOT NULL
+        );
+        CREATE TABLE download_removal_assets (id TEXT PRIMARY KEY, data TEXT NOT NULL);").map_err(|error| format!("failed to migrate removal jobs: {error}"))?;
     }
 
     transaction
@@ -1582,12 +1589,17 @@ fn sanitize_persisted_downloads(connection: &mut Connection) -> Result<(), Strin
 
 fn replace_downloads_tx(transaction: &Transaction<'_>, downloads: &[String]) -> Result<(), String> {
     transaction
-        .execute("DELETE FROM downloads", [])
+        .execute("DELETE FROM downloads WHERE id NOT IN (SELECT id FROM download_removal_jobs)", [])
         .map_err(|error| format!("failed to clear downloads: {error}"))?;
     for data in downloads {
         let value: Value = serde_json::from_str(data)
             .map_err(|error| format!("failed to decode download: {error}"))?;
         let id = required_string(&value, "id")?;
+        // Native removal intent and terminal tombstones outrank renderer snapshots.
+        if transaction.query_row("SELECT EXISTS(SELECT 1 FROM download_removal_jobs WHERE id=?1)", [id], |row| row.get::<_, bool>(0))
+            .map_err(|error| error.to_string())? {
+            continue;
+        }
         let status = required_string(&value, "status")?;
         let queue_id = value.get("queueId").and_then(Value::as_str);
         transaction
@@ -2399,6 +2411,37 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::TempDir;
+
+    #[test]
+    fn removal_jobs_preserve_intent_and_prevent_stale_snapshot_resurrection() {
+        let root = TempDir::new().unwrap();
+        let db = init_at_path(root.path()).unwrap();
+        let mut connection = db.lock().unwrap();
+        let original = r#"[{"id":"remove-me","status":"paused","fileName":"payload"},{"id":"keep-me","status":"paused"}]"#;
+        replace_downloads(&mut connection, original, false).unwrap();
+        connection.execute("INSERT INTO download_removal_jobs VALUES ('remove-me', ?1)",
+            [r#"{"id":"remove-me","deleteAssets":true,"phase":"pending","error":null}"#]).unwrap();
+        replace_downloads(&mut connection, r#"[{"id":"keep-me","status":"completed"}]"#, false).unwrap();
+        assert_eq!(load_downloads(&connection).unwrap().len(), 2);
+        mutate_download(&mut connection, "remove-me", false, |row| {
+            row.insert("status".into(), json!("completed"));
+            Ok(())
+        }).unwrap();
+        replace_downloads(&mut connection, original, false).unwrap();
+        let completed: String = connection.query_row("SELECT status FROM downloads WHERE id='remove-me'", [], |row| row.get(0)).unwrap();
+        assert_eq!(completed, "completed");
+        connection.execute("DELETE FROM downloads WHERE id='remove-me'", []).unwrap();
+        connection.execute("UPDATE download_removal_jobs SET data=?1 WHERE id='remove-me'",
+            [r#"{"id":"remove-me","deleteAssets":true,"phase":"completed","error":null}"#]).unwrap();
+        replace_downloads(&mut connection, original, false).unwrap();
+        let saved = load_downloads(&connection).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].contains("keep-me"));
+        drop(connection);
+        drop(db);
+        let reopened = init_at_path(root.path()).unwrap();
+        assert_eq!(load_downloads(&reopened.lock().unwrap()).unwrap().len(), 1);
+    }
 
     #[test]
     fn site_login_settings_update_preserves_envelope_without_password() {

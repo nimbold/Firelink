@@ -73,6 +73,7 @@ const zhCN = {
     maximize: '最大化',
   },
   downloads: {
+    removal: { removing: "正在移除…", error: "移除失败", retry: "重试移除", pending: "下载移除操作正在等待执行。", failed: "请关闭正在使用文件的程序，检查磁盘访问权限，然后重试移除。" },
     actions: {
       moveUp: '上移',
       moveDown: '下移',

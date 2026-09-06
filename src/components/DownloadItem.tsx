@@ -1,3 +1,4 @@
+import { useDownloadStore } from "../store/useDownloadStore";
 import React from 'react';
 import { useDownloadProgressStore } from '../store/downloadProgressStore';
 import { Play, Pause, MoreVertical, Clock, RefreshCw } from 'lucide-react';
@@ -79,6 +80,8 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
 }) => {
   const { t, i18n } = useTranslation();
   const calendarPreference = useSettingsStore(state => state.calendarPreference);
+  const removal = useDownloadStore(state => state.removalJobs[download.id]);
+  const removing = !!removal && removal.phase !== "failed" && removal.phase !== "completed";
   const liveProgress = useDownloadProgressStore(state => state.progressMap[download.id]);
   const moveProgress = useDownloadProgressStore(state => state.moveProgressMap[download.id]);
   const rowRef = React.useRef<HTMLDivElement>(null);
@@ -87,7 +90,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   const [isActionHovered, setIsActionHovered] = React.useState(false);
   const [isActionFocused, setIsActionFocused] = React.useState(false);
   const [actionPosition, setActionPosition] = React.useState<React.CSSProperties | undefined>();
-  const waitingForPeers = isTorrentWaitingForPeers({
+  const waitingForPeers = !removal && isTorrentWaitingForPeers({
     isTorrent: download.isTorrent,
     status: download.status,
     downloadedBytes: liveProgress?.downloaded_bytes ?? download.downloadedBytes,
@@ -95,9 +98,8 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     connectedPeers: liveProgress?.active_connections,
     connectedSeeders: liveProgress?.num_seeders,
   });
-  const allocationVisible = download.isTorrent !== true
-    && isAllocationPhaseVisible(allocationPending, download.status);
-  const hasRowActions = download.status !== 'completed';
+  const allocationVisible = !removal && isAllocationPhaseVisible(allocationPending, download.status);
+  const hasRowActions = !removal && download.status !== 'completed';
   const isBulkSelection = isSelected && selectedDownloadCount > 1;
   const pauseSelectionCount = isBulkSelection && selectedActionCounts.pause > 0
     ? selectedActionCounts.pause
@@ -216,7 +218,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
       status: download.status,
     });
   const displayPercent = `${(displayFraction * 100).toFixed(0)}%`;
-  const displaySpeed = allocationVisible
+  const displaySpeed = removal || allocationVisible
     ? '-'
     : download.status === 'seeding'
     ? liveProgress?.upload_speed ?? '-'
@@ -225,7 +227,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     : download.status === 'processing'
       ? t($ => $.downloads.values.processing)
       : '-';
-  const displayEta = allocationVisible
+  const displayEta = removal || allocationVisible
     ? '-'
     : download.status === 'seeding'
     ? typeof download.torrentSeedRemaining === 'number' && Number.isFinite(download.torrentSeedRemaining) && download.torrentSeedRemaining > 0
@@ -248,7 +250,9 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     const value = download.status === 'completed' ? formatDownloadTotal(sizeDisplay) : sizeDisplay.fallback;
     return value === 'Unknown' ? t($ => $.addDownloads.unknown) : value;
   })();
-  const downloadStatusLabel = allocationVisible
+  const downloadStatusLabel = removal
+    ? t($ => removal.phase === 'failed' ? $.downloads.removal.error : $.downloads.removal.removing)
+    : allocationVisible
     ? t($ => $.downloads.status.allocatingFiles)
     : waitingForPeers
     ? t($ => $.downloads.status.waitingForPeers)
@@ -344,14 +348,14 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
           <div className="download-cell-content download-status-content">
             <div
               className="download-progress-track"
-              aria-label={allocationVisible || waitingForPeers ? downloadStatusLabel : undefined}
-              aria-busy={allocationVisible ? true : undefined}
-              aria-valuetext={allocationVisible || waitingForPeers ? downloadStatusLabel : undefined}
-              role={allocationVisible || waitingForPeers ? 'progressbar' : undefined}
+              aria-label={allocationVisible || waitingForPeers || removing ? downloadStatusLabel : undefined}
+              aria-busy={allocationVisible || removing ? true : undefined}
+              aria-valuetext={allocationVisible || waitingForPeers || removing ? downloadStatusLabel : undefined}
+              role={allocationVisible || waitingForPeers || removing ? 'progressbar' : undefined}
             >
               <div
                 className={`download-progress-fill ${
-                  allocationVisible ? 'allocating' :
+                  allocationVisible || removing ? 'allocating' :
                   download.status === 'paused' ? 'paused' :
                   download.status === 'seeding' ? 'seeding' :
                   download.status === 'processing' ? 'processing' :
@@ -360,7 +364,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                   download.status === 'queued' || download.status === 'staged' ? 'queued' :
                   download.status === 'retrying' ? 'retrying' : ''
                 }`}
-                style={{ width: allocationVisible ? undefined : `${displayFraction * 100}%` }}
+                style={{ width: allocationVisible || removing ? undefined : `${displayFraction * 100}%` }}
               />
             </div>
             <span
@@ -384,7 +388,8 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                   : downloadStatusLabel
               }
               className={`download-status flex items-center gap-1.5 ${
-                allocationVisible ? 'download-status-downloading' :
+                removal?.phase === 'failed' ? 'download-status-failed' :
+                removing || allocationVisible ? 'download-status-downloading' :
                 download.status === 'paused' ? 'download-status-paused' :
                 download.status === 'seeding' ? 'download-status-seeding' :
                 download.status === 'failed' ? 'download-status-failed' :
@@ -396,7 +401,13 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                 download.status === 'retrying' ? 'download-status-retrying' : ''
               }`}
             >
-              {allocationVisible ? (
+              {removal ? (
+                <>
+                  {removing && <RefreshCw size={12} className="animate-spin motion-reduce:animate-none shrink-0" aria-hidden="true" />}
+                  <span role="status" className="truncate" title={removal.phase === 'failed' ? t($ => $.downloads.removal.failed) : undefined}>{downloadStatusLabel}</span>
+                  {removal.phase === 'failed' && <button className="app-button shrink-0" onClick={event => { event.stopPropagation(); void useDownloadStore.getState().retryRemoval(download.id); }}>{t($ => $.downloads.removal.retry)}</button>}
+                </>
+              ) : allocationVisible ? (
                 <>
                   <RefreshCw size={12} className="animate-spin motion-reduce:animate-none shrink-0" aria-hidden="true" />
                   <span className="truncate">{downloadStatusLabel}</span>
@@ -567,7 +578,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
         // capture the pointer and suppress the click that applies Cmd/Ctrl or
         // Shift selection.
         if (
-          isQueueReorderable &&
+          !removal && isQueueReorderable &&
           !event.shiftKey &&
           !event.metaKey &&
           !event.ctrlKey &&
@@ -579,7 +590,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
       onClick={(e) => onClick(e, download)}
       onKeyDown={event => {
         if (
-          isQueueReorderable &&
+          !removal && isQueueReorderable &&
           event.altKey &&
           !event.metaKey &&
           !event.ctrlKey &&
@@ -595,6 +606,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
       }}
       onContextMenu={(e) => {
         e.preventDefault();
+        if (removal) return;
         const isKeyboard = (e.clientX === 0 && e.clientY === 0) || (e.button === 0 && e.detail === 0);
         let x = e.clientX;
         let y = e.clientY;

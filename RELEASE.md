@@ -26,6 +26,16 @@ Firelink never falls back to system-installed media tools.
   invocation-owned temporary workspace.
 - `scripts/verify-binaries.js` runs architecture, packaging, version, and RPC checks.
 
+Aria2 allocation telemetry is a required bundle capability. Windows and Linux
+provisioning now builds the checksum-pinned upstream source archive with
+`scripts/aria2/firelink.patch`; this patch also retains Firelink's native DNS,
+network target policy, and Torrent routing changes. CI installs the compiler
+and static-library prerequisites. Windows uses the MSYS2 installation returned
+by the setup action (`FIRELINK_MSYS2_ROOT`, default `C:/msys64` for local builds).
+The patch checksum is recorded in both source and payload provenance. Never
+replace these builds with stock Aria2 archives: package verification requires
+`firelinkAllocationTelemetry: true` from `aria2.getVersion`.
+
 Linux `.deb` and `.rpm` packages are built with the complete verified engine payload. The AppImage is bundled separately with the engine resource excluded from the initial Linux packaging pass, then repacked from the verified payload because the AppImage tooling can rewrite bundled native binaries.
 
 yt-dlp must remain its official PyInstaller **onedir** distribution: launcher plus adjacent `_internal` runtime. Onefile builds are rejected because repeated extraction caused roughly 17-second startup latency.

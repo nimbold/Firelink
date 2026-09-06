@@ -169,6 +169,7 @@ export type PropertiesSnapshotContext = {
   queueName?: string;
   windowChrome?: PropertiesWindowChrome;
   allocationPending?: boolean;
+  removalPhase?: "pending" | "running" | "failed" | "completed";
 };
 
 export type PropertiesSnapshot = SafePropertiesFields & {
@@ -176,6 +177,7 @@ export type PropertiesSnapshot = SafePropertiesFields & {
   windowChrome: PropertiesWindowChrome;
   queueName?: string;
   allocationPending?: boolean;
+  removalPhase?: "pending" | "running" | "failed" | "completed";
   lastErrorKind?: DownloadErrorKind;
   lastResolverFallback?: boolean;
   activeConnections?: number;
@@ -411,6 +413,7 @@ const copyWithoutSecrets = (
     windowChrome: context?.windowChrome ?? DEFAULT_PROPERTIES_WINDOW_CHROME,
     ...(lastErrorKind ? { lastErrorKind } : {}),
     ...(context?.queueName ? { queueName: context.queueName } : {}),
+    ...(context?.removalPhase ? { removalPhase: context.removalPhase } : {}),
     ...(context?.allocationPending === true ? { allocationPending: true } : {}),
     ...(live?.progress ? {
       fraction: live.progress.fraction,

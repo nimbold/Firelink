@@ -73,6 +73,7 @@ const he = {
     maximize: 'הגדלה',
   },
   downloads: {
+    removal: { removing: "מסיר…", error: "ההסרה נכשלה", retry: "נסה להסיר שוב", pending: "הסרת ההורדה ממתינה לביצוע.", failed: "סגור תוכניות שמשתמשות בקבצים, בדוק גישה לכונן והרשאות ונסה להסיר שוב." },
     actions: {
       moveUp: 'הזזה למעלה',
       moveDown: 'הזזה למטה',

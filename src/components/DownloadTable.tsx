@@ -1671,18 +1671,19 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     }
   }, [queueReorderableDownloads, queueReorderingEnabled]);
 
+  const removalJobs = useDownloadStore(state => state.removalJobs);
   const selectedDownloads = useMemo(
     () => filteredDownloads.filter(download => selectedIds.has(download.id)),
     [filteredDownloads, selectedIds]
   );
   const selectedActionCounts = useMemo(
-    () => countDownloadActions(selectedDownloads),
-    [selectedDownloads]
+    () => countDownloadActions(selectedDownloads.filter(download => !removalJobs[download.id])),
+    [selectedDownloads, removalJobs]
   );
   const hasStartableDownloads = downloads.some(download =>
-    download.status === 'queued' || canStartDownload(download.status)
+    !removalJobs[download.id] && (download.status === 'queued' || canStartDownload(download.status))
   );
-  const hasPausableDownloads = downloads.some(download => canPauseDownload(download.status));
+  const hasPausableDownloads = downloads.some(download => !removalJobs[download.id] && canPauseDownload(download.status));
   const summaryDownloads = selectedDownloads.length > 0 ? selectedDownloads : filteredDownloads;
   const downloadSummary = useMemo(
     () => summarizeDownloads(summaryDownloads, progressMap),
@@ -1997,7 +1998,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
 
   const getCurrentSelectedDownloads = useCallback(() => {
     const selected = selectedIdsRef.current;
-    return useDownloadStore.getState().downloads.filter(download => selected.has(download.id));
+    return useDownloadStore.getState().downloads.filter(download => selected.has(download.id) && !useDownloadStore.getState().removalJobs[download.id]);
   }, []);
 
   const handlePauseSelected = useCallback(async () => {

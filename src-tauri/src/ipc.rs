@@ -1011,3 +1011,20 @@ impl DownloadStateEvent {
         (error, error_kind)
     }
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct DownloadRemovalJob {
+    pub id: String,
+    #[serde(default)]
+    pub revision: u32,
+    pub delete_assets: bool,
+    pub phase: DownloadRemovalPhase,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum DownloadRemovalPhase { Pending, Running, Failed, Completed }

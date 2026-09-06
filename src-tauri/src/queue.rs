@@ -1317,6 +1317,7 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
     /// Current Aria2 lifecycles whose files are expected to be preallocated.
     /// The generation fences late start/clear events from an older GID.
     aria2_allocation_pending: Mutex<HashMap<String, (u64, u64)>>,
+    media_completed_generations: Mutex<HashMap<String, u64>>,
 
     /// download id -> spawn payload for aria2 transient-error re-addUri retries.
     aria2_payloads: Mutex<HashMap<String, SpawnPayload>>,
@@ -1426,6 +1427,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             pending_completion: Arc::new(Mutex::new(HashMap::new())),
             pending_download_starts: Arc::new(Mutex::new(HashSet::new())),
             aria2_allocation_pending: Mutex::new(HashMap::new()),
+            media_completed_generations: Mutex::new(HashMap::new()),
             aria2_payloads: Mutex::new(HashMap::new()),
             aria2_connection_options: Mutex::new(HashMap::new()),
             aria2_dispatch_inflight: Mutex::new(HashMap::new()),
@@ -1852,6 +1854,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             || !matches!(self.active_kind(&id).await, Some(TaskKind::Aria2))
         {
             self.abandon_seed_start(&id);
+            if self.removal_requested(&id) { self.release_seed_tracking(&id); }
             return;
         }
         let control_epoch = self.current_aria2_control_epoch(&id).await;
@@ -1875,10 +1878,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
             || !matches!(self.active_kind(&id).await, Some(TaskKind::Aria2))
             || self.aria2_gid_for_download(&id).as_deref() != Some(gid.as_str())
             || !self.is_aria2_control_epoch_current(&id, control_epoch).await
+            || self.removal_requested(&id)
         {
             self.release_aria2_permit_candidate(&id, waiter.lifecycle_generation)
                 .await;
             self.abandon_seed_start(&id);
+            if self.removal_requested(&id) { self.release_seed_tracking(&id); }
             return;
         }
         let epoch = self.next_aria2_control_epoch(&id).await;
@@ -2091,6 +2096,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
     /// Explicitly release a backend registry id (e.g. on un-resumable false paths, removals, or detach).
     pub async fn release_registered_id(&self, id: &str) {
+        self.media_completed_generations.lock().await.remove(id);
         self.registered_ids.lock().await.remove(id);
         self.registered_lifecycle_generations.lock().await.remove(id);
         // A released lifecycle cannot be resumed by a delayed retry worker.
@@ -2142,6 +2148,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             }
         };
         if released {
+            self.media_completed_generations.lock().await.remove(id);
             self.aria2_retry_cancelled.lock().await.remove(id);
             self.release_seed_tracking(id);
             self.notify.notify_waiters();
@@ -4270,6 +4277,27 @@ impl<R: tauri::Runtime> QueueManager<R> {
         }
     }
 
+    /// Apply explicit engine telemetry only to the observed native lifecycle.
+    pub async fn observe_aria2_allocation(&self, gid: &str, mapping: &Aria2GidMapping, pending: bool) {
+        let _guard = self.acquire_aria2_control(&mapping.id).await;
+        if !self.is_current_aria2_gid_mapping(gid, mapping)
+            || !self.is_aria2_control_epoch_current(&mapping.id, mapping.epoch).await {
+            return;
+        }
+        let Some(generation) = self.registered_lifecycle_generation(&mapping.id).await else { return; };
+        let changed = {
+            let mut entries = self.aria2_allocation_pending.lock().await;
+            if pending {
+                entries.insert(mapping.id.clone(), (mapping.epoch, generation)) != Some((mapping.epoch, generation))
+            } else {
+                entries.remove(&mapping.id).is_some()
+            }
+        };
+        if changed {
+            self.emit_allocation_event(&mapping.id, pending, generation);
+        }
+    }
+
     pub async fn complete_aria2_allocation_for_gid(&self, gid: &str, downloaded_bytes: u64) {
         // Aria2 reports an active GID with completedLength=0 while it is still
         // creating preallocated files. That observation is not native
@@ -4291,6 +4319,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             };
             mapping
         };
+        if self.aria2_is_torrent(&mapping.id).await { return; }
         if !self
             .is_current_aria2_gid_mapping(gid, &mapping)
             || !self
@@ -4324,6 +4353,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             };
             mapping
         };
+        if self.aria2_is_torrent(&mapping.id).await { return; }
         if !self
             .is_current_aria2_gid_mapping(gid, &mapping)
             || !self
@@ -4381,6 +4411,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// The long-running dispatcher. One instance is spawned in setup().
     /// It scans for a queue with capacity before reserving the global slot, so
     /// a saturated front queue cannot block later eligible queues.
+    fn removal_requested(&self, id: &str) -> bool {
+        let Some(db) = self.app_handle.try_state::<crate::db::DbState>() else { return false; };
+        let Ok(connection) = db.lock() else { return true; };
+        connection.query_row("SELECT EXISTS(SELECT 1 FROM download_removal_jobs WHERE id=?1)", [id], |row| row.get::<_, bool>(0)).unwrap_or(true)
+    }
+
     pub async fn run_dispatcher(self: Arc<Self>) {
         loop {
             let notified = self.notify.notified();
@@ -4417,7 +4453,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         // permit and active kind under the same guard prevents that command
         // from observing a half-started lifecycle.
         let control_guard = self.acquire_aria2_control(&id).await;
-        if !self
+        if self.removal_requested(&id) || !self
             .is_registered_generation(&id, lifecycle_generation)
             .await
         {
@@ -4645,6 +4681,21 @@ impl<R: tauri::Runtime> QueueManager<R> {
         }
     }
 
+    pub(crate) async fn media_payload_completed(&self, id: &str, generation: u64) -> bool {
+        self.media_completed_generations.lock().await.get(id).copied() == Some(generation)
+    }
+
+    fn persist_completed_removal_payload(&self, id: &str) -> Result<(), String> {
+        if !self.removal_requested(id) { return Ok(()); }
+        if let Some(db) = self.app_handle.try_state::<crate::db::DbState>() {
+            crate::db::mutate_download(&mut *db.lock()?, id, db.is_portable(), |row| {
+                row.insert("status".into(), serde_json::json!("completed"));
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
     /// Terminal handler for non-aria2 transfers. Emits state and frees the permit.
     /// Intentional cancellation is silent, but still releases backend ownership.
     /// Note: `id` is the frontend download UUID, which survives indefinitely as
@@ -4671,6 +4722,10 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
         match outcome {
             Ok(()) => {
+                if self.persist_completed_removal_payload(id).is_err() {
+                    log::error!("could not persist media completion during removal [id={}]", id);
+                    return;
+                }
                 self.emit_state(id, DownloadStatus::Completed);
                 self.release_registered_id_for_generation(id, lifecycle_generation)
                     .await;
@@ -4861,6 +4916,13 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 })
                 .unwrap_or((None, false, false))
         };
+        if matches!(outcome, PendingOutcome::Complete | PendingOutcome::Seeding)
+            && !(verification_only && !verification_observed)
+            && self.persist_completed_removal_payload(id).is_err()
+        {
+            log::error!("could not persist completion during removal [id={}]", id);
+            return;
+        }
         let outcome = match outcome {
             PendingOutcome::Complete if verification_only && !verification_observed => {
                 PendingOutcome::Error(
@@ -9010,6 +9072,13 @@ impl SidecarSpawner for ProductionSpawner {
             .await
         };
         if let Ok(path) = outcome.as_ref() {
+            // Publish completion evidence before Finished acknowledges a racing
+            // removal. The control lock may be held by that waiting remover.
+            state.queue_manager.media_completed_generations.lock().await
+                .insert(id.to_string(), lifecycle_generation);
+            if state.queue_manager.persist_completed_removal_payload(id).is_err() {
+                log::error!("could not persist media completion before removal acknowledgement [id={}]", id);
+            }
             let _ = crate::download_ownership::set_primary_path(&self.app_handle, id, path);
             if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
                 use tauri::Emitter;
@@ -9321,6 +9390,39 @@ mod tests {
                 ..SpawnPayload::default()
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn media_removal_completion_evidence_is_lifecycle_fenced() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
+        manager.reserve_enqueue_generation("media-removal", 7).await.unwrap();
+        manager.media_completed_generations.lock().await.insert("media-removal".into(), 7);
+        assert!(manager.media_payload_completed("media-removal", 7).await);
+        assert!(!manager.media_payload_completed("media-removal", 8).await);
+        manager.release_registered_id_for_generation("media-removal", 6).await;
+        assert!(manager.media_payload_completed("media-removal", 7).await);
+        manager.release_registered_id_for_generation("media-removal", 7).await;
+        assert!(!manager.media_payload_completed("media-removal", 7).await);
+    }
+
+    #[tokio::test]
+    async fn explicit_allocation_telemetry_ends_without_payload_and_rejects_old_epoch() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
+        manager.reserve_enqueue_generation("telemetry", 7).await.unwrap();
+        manager.next_aria2_control_epoch("telemetry").await;
+        manager.remember_gid("telemetry".into(), "telemetry-gid".into()).await;
+        let observed = manager.aria2_gid_mapping("telemetry-gid").unwrap();
+        manager.observe_aria2_allocation("telemetry-gid", &observed, true).await;
+        assert_eq!(allocation_pending_epoch(&manager, "telemetry"), Some((observed.epoch, 7)));
+        manager.observe_aria2_allocation("telemetry-gid", &observed, false).await;
+        assert_eq!(allocation_pending_epoch(&manager, "telemetry"), None);
+        manager.next_aria2_control_epoch("telemetry").await;
+        manager.observe_aria2_allocation("telemetry-gid", &observed, true).await;
+        assert_eq!(allocation_pending_epoch(&manager, "telemetry"), None);
     }
 
     #[tokio::test]

@@ -18,9 +18,19 @@
         "sha256": "41d735c9364a8deda25b3bd5f05abf37720316be9495edfe94f51bc088ce9d86"
       },
       "aria2c": {
-        "version": "1.37.0",
-        "url": "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip",
-        "sha256": "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288"
+        "version": "1.37.0-firelink-native-dns-v1",
+        "url": "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0.tar.xz",
+        "sha256": "60a420ad7085eb616cb6e2bdf0a7206d68ff3d37fb5a956dc44242eb2f79b66b",
+        "buildFromSource": true,
+        "patch": "scripts/aria2/firelink.patch",
+        "patchSha256": "b696988effe116fab40b52df61dab8af8042c65894a492e490d109f410a8ade6",
+        "allocationTelemetry": true,
+        "firelinkRouteContract": {
+          "revision": "firelink-native-dns-v1",
+          "dnsResolver": "native-async",
+          "networkTargetPolicy": "firelink-v1",
+          "networkTargetPolicyDigest": "sha256:064503d30f1a043e79113f7e44ddfb517fbf2c578a332896355180743eaf1705"
+        }
       }
     },
     "x86_64-unknown-linux-gnu": {
@@ -40,11 +50,19 @@
         "sha256": "1a4fa0f89f690bd81bddbb7cf3a65554095e8e9f9dc98693494e6f5fb97918c5"
       },
       "aria2c": {
-        "version": "1.37.0",
-        "url": "https://github.com/abcfy2/aria2-static-build/releases/download/1.37.0/aria2-x86_64-linux-musl_static.zip",
-        "sha256": "e0a09b12ef67f35f8a8e4fdddbec851d235b7c31da549d0578bff459032b499a",
-        "upstreamSource": "https://github.com/aria2/aria2/tree/release-1.37.0",
-        "builderSource": "https://github.com/abcfy2/aria2-static-build/tree/1.37.0"
+        "version": "1.37.0-firelink-native-dns-v1",
+        "url": "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0.tar.xz",
+        "sha256": "60a420ad7085eb616cb6e2bdf0a7206d68ff3d37fb5a956dc44242eb2f79b66b",
+        "buildFromSource": true,
+        "patch": "scripts/aria2/firelink.patch",
+        "patchSha256": "b696988effe116fab40b52df61dab8af8042c65894a492e490d109f410a8ade6",
+        "allocationTelemetry": true,
+        "firelinkRouteContract": {
+          "revision": "firelink-native-dns-v1",
+          "dnsResolver": "native-async",
+          "networkTargetPolicy": "firelink-v1",
+          "networkTargetPolicyDigest": "sha256:064503d30f1a043e79113f7e44ddfb517fbf2c578a332896355180743eaf1705"
+        }
       }
     }
   }

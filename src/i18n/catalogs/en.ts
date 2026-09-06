@@ -73,6 +73,7 @@ const common = {
     maximize: 'Maximize',
   },
   downloads: {
+    removal: { removing: "Removing…", error: "Removal failed", retry: "Retry removal", pending: "Download removal is pending.", failed: "Close programs using the files, check drive access and permissions, then retry removal." },
     actions: {
       moveUp: 'Move Up',
       moveDown: 'Move Down',

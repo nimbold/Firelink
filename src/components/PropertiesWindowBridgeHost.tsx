@@ -336,6 +336,7 @@ export const PropertiesWindowBridgeHost = () => {
           queueName: queue?.name,
           windowChrome,
           allocationPending: store.allocationPendingIds.has(downloadId),
+          removalPhase: store.removalJobs[downloadId]?.phase,
         }),
       });
       return true;
@@ -416,6 +417,9 @@ export const PropertiesWindowBridgeHost = () => {
         const item = store.downloads.find(download => download.id === request.downloadId);
         if (!item) throw new Error('Download no longer exists');
 
+        if (useDownloadStore.getState().removalJobs[request.downloadId]) {
+          throw new Error(i18n.t($ => $.downloads.removal.pending));
+        }
         switch (request.action) {
           case 'apply-properties': {
             await assertCurrentAction(request);
@@ -749,6 +753,7 @@ export const PropertiesWindowBridgeHost = () => {
           void invoke('properties_window_registry_remove_for_download', { id: downloadId }).catch(() => undefined);
         } else if (
           next !== before
+          || state.removalJobs[downloadId] !== previous.removalJobs[downloadId]
           || state.allocationPendingIds.has(downloadId) !== previous.allocationPendingIds.has(downloadId)
         ) {
           snapshotCoalescer.schedule(windowLabel);

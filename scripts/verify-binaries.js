@@ -12,6 +12,7 @@ import {
 import {
   ARIA2_SYSTEM_RESOLVER_DAEMON_ARGS,
   assertAria2Baseline,
+  assertAria2AllocationCapabilities,
 } from './aria2-route-contract.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -569,6 +570,7 @@ if (canExecuteTarget) {
         const resp = JSON.parse(result.data);
         if (resp?.result?.version) {
           assertAria2Baseline(resp.result);
+          assertAria2AllocationCapabilities(resp.result);
           ok(`aria2 RPC version: ${resp.result.version}`);
         } else {
           fail(`aria2 RPC unexpected response: ${result.data}`);

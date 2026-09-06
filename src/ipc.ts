@@ -1,3 +1,4 @@
+import type { DownloadRemovalJob } from "./bindings/DownloadRemovalJob";
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { error as logError } from './utils/logger';
 import { listen as tauriListen, type Event, type EventCallback, type UnlistenFn } from '@tauri-apps/api/event';
@@ -72,6 +73,10 @@ type CommandMap = {
   open_downloaded_file: { args: { path: string }; result: void };
   pause_download: { args: { id: string }; result: void };
   resume_download: { args: { id: string; queueId: string }; result: boolean };
+  submit_download_removals: { args: { ids: string[]; deleteAssets: boolean }; result: void };
+  list_download_removals: { args: undefined; result: DownloadRemovalJob[] };
+  resume_download_removals: { args: undefined; result: void };
+  retry_download_removal: { args: { id: string }; result: void };
   remove_download: {
     args: {
       id: string;
@@ -213,6 +218,7 @@ export function invokeCommand<K extends CommandName>(
 type EventMap = {
   'schedule-trigger': { action: 'start' | 'stop'; key: string };
   'download-progress': DownloadProgressEvent;
+  'download-removal': DownloadRemovalJob;
   'download-allocation': DownloadAllocationEvent;
   'download-state': DownloadStateEvent;
   'torrent-move-progress': import('./bindings/TorrentMoveProgressEvent').TorrentMoveProgressEvent;

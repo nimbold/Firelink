@@ -73,13 +73,12 @@ export const isTransferActiveStatus = (status: DownloadStatus): boolean =>
 export const isAllocationPhaseVisible = (
   allocationPending: boolean,
   status: DownloadStatus,
-): boolean => allocationPending && status !== 'completed' && status !== 'paused';
+): boolean => allocationPending && ['ready', 'staged', 'queued', 'downloading', 'retrying'].includes(status);
 
 /**
  * Allocation is a transient admission phase. Normal downloads retain the
- * existing preallocation behavior; Torrent rows use Aria2's Torrent-specific
- * allocation setting without exposing the normal-download hint, including
- * for verification-only work.
+ * existing preallocation hint. Torrent rows require explicit engine telemetry
+ * instead of inferring allocation from admission or the configured option.
  */
 export const isAllocationPhaseEligible = (
   download: Pick<DownloadItem, 'isMedia' | 'isTorrent' | 'torrentFileAllocation' | 'torrentVerifyOnly'>,

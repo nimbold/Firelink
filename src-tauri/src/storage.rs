@@ -19,6 +19,15 @@ pub enum StorageMode {
 
 impl StorageMode {
     pub fn detect() -> Self {
+        // Packaged smoke runs must never migrate or mutate the installed app's
+        // database. The harness creates an isolated root before launching us.
+        if std::env::var("FIRELINK_SMOKE_TEST").as_deref() == Ok("1") {
+            if let Some(root) = std::env::var_os("FIRELINK_SMOKE_STORAGE_ROOT").filter(|root| !root.is_empty()) {
+                let root = PathBuf::from(root);
+                assert!(root.is_absolute() && root.is_dir(), "invalid smoke storage root");
+                return Self::Portable { root };
+            }
+        }
         let Some(executable) = std::env::current_exe().ok() else {
             return Self::Standard;
         };

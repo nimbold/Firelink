@@ -1,4 +1,5 @@
 #![allow(unexpected_cfgs)]
+mod removal_jobs;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 use futures_util::StreamExt;
@@ -5253,6 +5254,7 @@ async fn pause_download(
     log::info!("pause_download called for id: {}", id);
 
     let _control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    removal_jobs::ensure_not_removing(&app_handle, &id)?;
     let active_kind = state.queue_manager.active_kind(&id).await;
     let registered_lifecycle_generation = state
         .queue_manager
@@ -5551,6 +5553,7 @@ async fn resume_download(
         return Err("Queue id cannot be empty".to_string());
     }
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    removal_jobs::ensure_not_removing(&app_handle, &id)?;
     let Some(gid) = state.queue_manager.aria2_gid_for_download(&id) else {
         log::info!(
             "aria2 resume [{}]: no mapped gid; re-enqueue is permitted",
@@ -6127,6 +6130,42 @@ async fn remove_download(
     expected_lifecycle_generation: Option<String>,
 ) -> Result<(), String> {
     properties_window::ensure_main_window(&caller)?;
+    removal_jobs::ensure_not_removing(&app_handle, &id)?;
+    remove_download_inner(app_handle, state, id, delete_assets, preserve_resumable,
+        asset_removal_policy, expected_lifecycle_generation, false).await
+}
+
+fn removal_status_has_completed_payload(status: &serde_json::Value) -> bool {
+    status.get("status").and_then(serde_json::Value::as_str) == Some("complete")
+        || status.get("seeder").is_some_and(|value| value.as_bool() == Some(true) || value.as_str() == Some("true"))
+}
+
+async fn removal_payload_completed(port: u16, secret: &str, gid: &str) -> Result<bool, String> {
+    match rpc_call(port, secret, "aria2.tellStatus",
+        serde_json::json!([gid, ["status", "seeder", "totalLength", "completedLength"]])).await {
+        Ok(status) => {
+            let bytes = |key: &str| status.get(key).and_then(serde_json::Value::as_str)
+                .and_then(|value| value.parse::<u64>().ok());
+            Ok(removal_status_has_completed_payload(&status)
+                || matches!((bytes("totalLength"), bytes("completedLength")), (Some(total), Some(done)) if total > 0 && done == total))
+        }
+        // A purged result cannot prove that the payload was unfinished.
+        // Preserve it through Trash instead of permitting irreversible cleanup.
+        Err(error) if aria2_gid_not_found(&error) => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
+async fn remove_download_inner(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    delete_assets: bool,
+    preserve_resumable: Option<bool>,
+    asset_removal_policy: Option<crate::ipc::DownloadAssetRemovalPolicy>,
+    expected_lifecycle_generation: Option<String>,
+    durable_removal_job: bool,
+) -> Result<(), String> {
     log::info!("remove_download called for id: {}", id);
     let preserve_resumable = preserve_resumable.unwrap_or(false);
     // The permanent policy is deliberately opt-in and is resolved against the
@@ -6144,21 +6183,36 @@ async fn remove_download(
         })
         .transpose()?;
     let mut control_guard = Some(state.queue_manager.acquire_aria2_control(&id).await);
+    if !durable_removal_job {
+        removal_jobs::ensure_not_removing(&app_handle, &id)?;
+    }
     let mut cleanup_control_guard: Option<queue::Aria2ControlGuard> = None;
     // Classify the removal from the durable row only after taking the same
     // lifecycle guard that protects stopping the native owner. This prevents
     // a completed/unfinished decision from racing a terminal transition or a
     // replacement lifecycle for the same download id.
-    let permanent_asset_removal = if permanent_if_unfinished_requested {
+    let mut permanent_asset_removal = if permanent_if_unfinished_requested {
         let persisted = load_persisted_download_item(
             &app_handle.state::<crate::db::DbState>(),
             &id,
         )?;
-        !matches!(persisted.status, crate::ipc::DownloadStatus::Completed)
+        let daemon_completed = if let Some(gid) = state.queue_manager.aria2_gid_for_download(&id) {
+            removal_payload_completed(state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+                &state.aria2_secret, &gid).await?
+        } else { false };
+        if daemon_completed {
+            let db = app_handle.state::<crate::db::DbState>();
+            crate::db::mutate_download(&mut *db.lock()?, &id, db.is_portable(), |row| {
+                row.insert("status".into(), serde_json::json!("completed"));
+                Ok(())
+            })?;
+        }
+        !daemon_completed && !matches!(persisted.status, crate::ipc::DownloadStatus::Completed | crate::ipc::DownloadStatus::Seeding | crate::ipc::DownloadStatus::WaitingToSeed)
     } else {
         false
     };
 
+    let removal_stop_started = Instant::now();
     let active_kind = state.queue_manager.active_kind(&id).await;
     let registered_lifecycle_generation = state
         .queue_manager
@@ -6237,6 +6291,17 @@ async fn remove_download(
         if let Err(error) = removal_result {
             state.queue_manager.allow_aria2_retries(&id).await;
             return Err(error);
+        }
+        if permanent_asset_removal && removal_payload_completed(
+            state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+            &state.aria2_secret, gid).await?
+        {
+            let db = app_handle.state::<crate::db::DbState>();
+            crate::db::mutate_download(&mut *db.lock()?, &id, db.is_portable(), |row| {
+                row.insert("status".into(), serde_json::json!("completed"));
+                Ok(())
+            })?;
+            permanent_asset_removal = false;
         }
         state.queue_manager.next_aria2_control_epoch(&id).await;
         state.queue_manager.clear_aria2_retry_state(&id).await;
@@ -6327,6 +6392,17 @@ async fn remove_download(
                 state.queue_manager.allow_aria2_retries(&id).await;
                 return Err(error);
             }
+            if permanent_asset_removal && removal_payload_completed(
+                state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
+                &state.aria2_secret, &late_gid).await?
+            {
+                let db = app_handle.state::<crate::db::DbState>();
+                crate::db::mutate_download(&mut *db.lock()?, &id, db.is_portable(), |row| {
+                    row.insert("status".into(), serde_json::json!("completed"));
+                    Ok(())
+                })?;
+                permanent_asset_removal = false;
+            }
             state.queue_manager.next_aria2_control_epoch(&id).await;
             state.queue_manager.clear_aria2_retry_state(&id).await;
             state.queue_manager.forget_torrent_telemetry(&id).await;
@@ -6360,6 +6436,19 @@ async fn remove_download(
         }
     };
 
+    if permanent_asset_removal && state.queue_manager
+        .media_payload_completed(&id, media_lifecycle_generation).await
+    {
+        let db = app_handle.state::<crate::db::DbState>();
+        crate::db::mutate_download(&mut *db.lock()?, &id, db.is_portable(), |row| {
+            row.insert("status".into(), serde_json::json!("completed"));
+            Ok(())
+        })?;
+        permanent_asset_removal = false;
+    }
+
+    log::info!("download removal [id={} stage=stop elapsed_ms={}]", id, removal_stop_started.elapsed().as_millis());
+    let removal_cleanup_started = Instant::now();
     let owned_paths = crate::download_ownership::owned_paths_for_id(&app_handle, &id)?;
     let primary_path = crate::download_ownership::primary_path_for_id(&app_handle, &id)?;
     let torrent_removal_paths =
@@ -6462,6 +6551,25 @@ async fn remove_download(
         }
     }
 
+    if durable_removal_job {
+        let mut roots = Vec::new();
+        if should_delete_assets {
+            roots.extend(owned_paths.iter().cloned());
+            roots.extend(primary_path.iter().cloned());
+            roots.extend(unowned_replacement_target.iter().map(|target| target.target.clone()));
+            for path in roots.clone() {
+                for suffix in [".aria2", ".part", ".ytdl"] {
+                    let mut sidecar = path.as_os_str().to_os_string();
+                    sidecar.push(suffix);
+                    roots.push(sidecar.into());
+                }
+                roots.extend(collect_media_processing_artifacts_for_permanent_removal(&path, &app_handle).await?);
+            }
+        }
+        roots.push(crate::torrent::managed_torrent_path(&app_handle, &id)?);
+        removal_jobs::fence_assets(&app_handle, &id, &roots)?;
+    }
+
     let cleanup_result = async {
         if should_delete_assets {
             for path in &owned_paths {
@@ -6492,16 +6600,19 @@ async fn remove_download(
                 .await?;
             }
         }
-        if permanent_asset_removal {
+        if permanent_asset_removal || durable_removal_job {
             remove_managed_torrent_permanently(&app_handle, &id).await?;
         } else {
             crate::torrent::remove_managed_torrent(&app_handle, &id).await;
         }
-        crate::download_ownership::remove(&app_handle, &id)?;
+        if !removal_jobs::has_job(&app_handle, &id)? {
+            crate::download_ownership::remove(&app_handle, &id)?;
+        }
         Ok::<(), String>(())
     }
     .await;
     drop(cleanup_target_guards);
+    log::info!("download removal [id={} stage=cleanup success={} elapsed_ms={}]", id, cleanup_result.is_ok(), removal_cleanup_started.elapsed().as_millis());
 
     state.queue_manager.release_registered_id(&id).await;
     cleanup_result
@@ -7500,6 +7611,7 @@ async fn detach_download_for_reconfigure(
     properties_window::ensure_main_window(&caller)?;
     log::info!("detach_download_for_reconfigure called for id: {}", id);
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    removal_jobs::ensure_not_removing(&app_handle, &id)?;
     detach_download_for_reconfigure_locked(
         &app_handle,
         state.inner(),
@@ -9611,6 +9723,7 @@ async fn enqueue_download_locked(
     mut item: queue::EnqueueItem,
     _control_guard: &queue::Aria2ControlGuard,
 ) -> Result<crate::ipc::EnqueueAccepted, AppError> {
+    removal_jobs::ensure_not_removing(app_handle, &item.id).map_err(AppError::Internal)?;
     if item.is_torrent.unwrap_or(false) {
         validate_torrent_enqueue(app_handle, &mut item)
             .await
@@ -9799,7 +9912,9 @@ async fn enqueue_many(
         // serialized with pause/resume/remove for this download. The guard is
         // intentionally held through every early-continue path below.
         let _control_guard = state.queue_manager.acquire_aria2_control(&id).await;
-        let validation = if item.is_torrent.unwrap_or(false) {
+        let validation = if let Err(error) = removal_jobs::ensure_not_removing(&app_handle, &id) {
+            Err(error)
+        } else if item.is_torrent.unwrap_or(false) {
             validate_torrent_enqueue(&app_handle, &mut item).await
         } else {
             match queue::normalize_sftp_host_key_md(item.sftp_host_key_md.as_deref()) {
@@ -10090,6 +10205,7 @@ async fn remove_from_queue(
 ) -> Result<bool, AppError> {
     properties_window::ensure_main_window(&caller).map_err(AppError::Internal)?;
     let _control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    removal_jobs::ensure_not_removing(&app_handle, &id).map_err(AppError::Internal)?;
     let removed = state.queue_manager.remove_from_pending(&id).await;
     if removed {
         let _ = crate::download_ownership::remove(&app_handle, &id);
@@ -10430,6 +10546,7 @@ async fn set_torrent_file_selection(
 ) -> Result<crate::ipc::TorrentFileSelectionSnapshot, String> {
     properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    removal_jobs::ensure_not_removing(&app_handle, &id)?;
     let item = load_persisted_torrent_item(database.inner(), &id)?;
     if item.is_torrent != Some(true) {
         return Err("file selection is available only for Torrent downloads".to_string());
@@ -11252,6 +11369,7 @@ async fn move_torrent_data(
         Some(session_id)
     };
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    removal_jobs::ensure_not_removing(&app_handle, &id)?;
     if let Some(session_id) = properties_session_id.as_deref() {
         if !properties.session_matches(caller.label(), session_id)? {
             return Err("Properties window session is no longer current".to_string());
@@ -11788,6 +11906,7 @@ async fn verify_torrent_data(
     // replacement with pause/resume/remove so a paused GID cannot reject the
     // maintenance enqueue as a duplicate task or race it with a late event.
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    removal_jobs::ensure_not_removing(&app_handle, &id)?;
     let item = load_persisted_torrent_item(database.inner(), &id)?;
     if item.is_torrent != Some(true) {
         return Err("integrity verification is available only for Torrent downloads".to_string());
@@ -12139,6 +12258,7 @@ async fn set_torrent_web_seeds(
 ) -> Result<Vec<crate::ipc::TorrentWebSeed>, String> {
     properties_window::ensure_main_window(&caller)?;
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    removal_jobs::ensure_not_removing(&state.queue_manager.app_handle(), &id)?;
     let active = state.queue_manager.is_registered(&id).await
         && matches!(state.queue_manager.active_kind(&id).await, Some(crate::queue::TaskKind::Aria2));
     let normalized = if active {
@@ -14116,6 +14236,17 @@ fn ack_extension_download(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn removal_recognizes_completed_seeders_without_confusing_downloaders() {
+        for status in [serde_json::json!({"status": "complete"}),
+            serde_json::json!({"status": "active", "seeder": "true"}),
+            serde_json::json!({"status": "paused", "seeder": true})] {
+            assert!(super::removal_status_has_completed_payload(&status));
+        }
+        assert!(!super::removal_status_has_completed_payload(&serde_json::json!({"status": "active", "seeder": "false"})));
+        assert!(!super::removal_status_has_completed_payload(&serde_json::json!({})));
+    }
+
     use super::{
         aggregate_media_byte_progress, aggregate_media_fraction, append_ytdlp_config_option,
         append_ytdlp_http_headers,
@@ -19485,8 +19616,12 @@ pub fn run() {
                         "errorCode",
                         "errorMessage",
                         "verifiedLength",
-                        "verifyIntegrityPending"
+                        "verifyIntegrityPending",
+                        "fileAllocationPending"
                     ]]);
+                    let allocation_mappings: HashMap<_, _> = poll_mgr.aria2_gid_mappings().into_iter()
+                        .filter_map(|(gid, _)| poll_mgr.aria2_gid_mapping(&gid).map(|mapping| (gid, mapping)))
+                        .collect();
                     let active_poll_started = Instant::now();
                     let active_list = match rpc_call(
                         poll_port.load(std::sync::atomic::Ordering::Relaxed),
@@ -19877,9 +20012,17 @@ pub fn run() {
                                     // notification was lost, this is sufficient
                                     // to end the allocation phase for the same
                                     // mapped lifecycle.
-                                    poll_mgr
-                                        .complete_aria2_allocation_for_gid(gid, completed)
-                                        .await;
+                                    if let Some(pending) = status_info.get("fileAllocationPending").and_then(|value| value.as_bool()) {
+                                        if let Some(observed) = allocation_mappings.get(gid) {
+                                            poll_mgr.observe_aria2_allocation(gid, observed, pending && !verify_pending && verified_length.is_none()).await;
+                                        }
+                                    } else if is_torrent {
+                                        if let Some(observed) = allocation_mappings.get(gid) {
+                                            poll_mgr.observe_aria2_allocation(gid, observed, false).await;
+                                        }
+                                    } else {
+                                        poll_mgr.complete_aria2_allocation_for_gid(gid, completed).await;
+                                    }
                                     if !poll_mgr.is_current_aria2_gid_mapping(gid, &mapping)
                                         || !poll_mgr
                                             .is_aria2_control_epoch_current(&id, control_epoch)
@@ -20393,6 +20536,10 @@ pub fn run() {
     ]);
     let download_queue_handler: FirelinkInvokeHandler = Box::new(tauri::generate_handler![
         remove_download,
+        removal_jobs::submit_download_removals,
+        removal_jobs::list_download_removals,
+        removal_jobs::resume_download_removals,
+        removal_jobs::retry_download_removal,
         get_download_primary_path,
         detach_download_for_reconfigure,
         enqueue_download,
@@ -20522,6 +20669,10 @@ pub fn run() {
                 | "set_torrent_overall_upload_limit"
                 | "set_global_speed_limit" => torrent_storage_handler(invoke),
                 "remove_download"
+                | "submit_download_removals"
+                | "list_download_removals"
+                | "resume_download_removals"
+                | "retry_download_removal"
                 | "get_download_primary_path"
                 | "detach_download_for_reconfigure"
                 | "enqueue_download"

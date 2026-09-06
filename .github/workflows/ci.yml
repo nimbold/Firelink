@@ -126,8 +126,25 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: src-tauri
         run: cargo test --test torrent_web_seed --target ${{ matrix.target }} -- --nocapture
+      - name: Install Aria2 source build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y autoconf automake libtool gettext autopoint libssl-dev libssh2-1-dev libgcrypt20-dev libc-ares-dev libexpat1-dev libsqlite3-dev zlib1g-dev
+      - name: Install Aria2 source build dependencies (Windows)
+        id: aria2-msys
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: >-
+            base-devel autoconf automake libtool gettext-devel
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-openssl mingw-w64-x86_64-libssh2
+            mingw-w64-x86_64-c-ares mingw-w64-x86_64-expat
+            mingw-w64-x86_64-sqlite3 mingw-w64-x86_64-zlib
       - name: Provision locked engines
         if: runner.os != 'macOS'
+        env:
+          FIRELINK_MSYS2_ROOT: ${{ steps.aria2-msys.outputs.msys2-location }}
         run: node scripts/provision-engines.js --target ${{ matrix.target }}
       - name: Stage and verify engines
         env:

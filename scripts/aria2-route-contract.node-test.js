@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  assertAria2AllocationCapabilities,
   ARIA2_DNS_RESOLVER,
   ARIA2_FIRELINK_REVISION,
   ARIA2_NETWORK_TARGET_POLICY,
@@ -80,4 +81,10 @@ test('system resolver options cannot retain the custom target policy', () => {
     }),
     /active target policy/,
   );
+});
+
+test('allocation telemetry is mandatory and must be a JSON boolean capability', () => {
+  assert.throws(() => assertAria2AllocationCapabilities({ version: '1.37.0' }));
+  assert.throws(() => assertAria2AllocationCapabilities({ firelinkAllocationTelemetry: 'true' }));
+  assert.doesNotThrow(() => assertAria2AllocationCapabilities({ firelinkAllocationTelemetry: true }));
 });

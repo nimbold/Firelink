@@ -1,0 +1,3747 @@
+diff --git a/configure.ac b/configure.ac
+index 14b340f4..ffc8ecfe 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -111,0 +112,5 @@ AM_PROG_AS
++# Native asynchronous DNS uses std::thread even when c-ares is not available.
++# Reuse gettext's portable thread detection so the resolver is linked with
++# the platform's required thread library on systems where it is separate.
++gl_THREADLIB
++
+@@ -638,7 +643,3 @@ AM_CONDITIONAL([HAVE_LIBEXPAT], [test "x$have_libexpat" = "xyes"])
+-if test "x$have_libcares" = "xyes"; then
+-  AC_DEFINE([ENABLE_ASYNC_DNS], [1],
+-            [Define to 1 if asynchronous DNS support is enabled.])
+-  AM_CONDITIONAL([ENABLE_ASYNC_DNS], true)
+-else
+-  AM_CONDITIONAL([ENABLE_ASYNC_DNS], false)
+-fi
++AC_DEFINE([ENABLE_ASYNC_DNS], [1],
++          [Define to 1 if asynchronous DNS support is enabled.])
++AM_CONDITIONAL([ENABLE_ASYNC_DNS], true)
+@@ -1034,0 +1036,2 @@ fi
++EXTRALIBS="$EXTRALIBS $LIBMULTITHREAD"
++
+diff --git a/src/AbstractCommand.cc b/src/AbstractCommand.cc
+index 1502d570..d3448c4f 100644
+--- a/src/AbstractCommand.cc
++++ b/src/AbstractCommand.cc
+@@ -69,0 +70 @@
++#include "NetworkTargetPolicy.h"
+@@ -325,5 +326,15 @@ bool AbstractCommand::execute()
+-        A2_LOG_DEBUG(fmt("CUID#%" PRId64 " - Marking IP address %s as bad",
+-                         getCuid(), req_->getConnectedAddr().c_str()));
+-        e_->markBadIPAddress(req_->getConnectedHostname(),
+-                             req_->getConnectedAddr(),
+-                             req_->getConnectedPort());
++        if (isRouteAwareNetworkPolicy()) {
++          A2_LOG_DEBUG(fmt("CUID#%" PRId64
++                           " - Discarding route-aware address %s",
++                           getCuid(), req_->getConnectedAddr().c_str()));
++          req_->markRouteResolvedAddressBad(req_->getConnectedHostname(),
++                                            req_->getConnectedAddr(),
++                                            req_->getConnectedPort());
++        }
++        else {
++          A2_LOG_DEBUG(fmt("CUID#%" PRId64 " - Marking IP address %s as bad",
++                           getCuid(), req_->getConnectedAddr().c_str()));
++          e_->markBadIPAddress(req_->getConnectedHostname(),
++                               req_->getConnectedAddr(),
++                               req_->getConnectedPort());
++        }
+@@ -331,3 +342,6 @@ bool AbstractCommand::execute()
+-      if (e_->findCachedIPAddress(req_->getConnectedHostname(),
+-                                  req_->getConnectedPort())
+-              .empty()) {
++      if (isRouteAwareNetworkPolicy()) {
++        req_->clearRouteResolvedAddresses();
++      }
++      else if (e_->findCachedIPAddress(req_->getConnectedHostname(),
++                                       req_->getConnectedPort())
++                   .empty()) {
+@@ -443,0 +458 @@ bool AbstractCommand::prepareForRetry(time_t wait)
++    req_->clearRouteResolvedAddresses();
+@@ -762,0 +778,2 @@ std::string AbstractCommand::resolveHostname(std::vector<std::string>& addrs,
++  const bool routeAware = isRouteAwareNetworkPolicy();
++
+@@ -768,6 +785,14 @@ std::string AbstractCommand::resolveHostname(std::vector<std::string>& addrs,
+-  e_->findAllCachedIPAddresses(std::back_inserter(addrs), hostname, port);
+-  if (!addrs.empty()) {
+-    auto ipaddr = addrs.front();
+-    A2_LOG_INFO(fmt(MSG_DNS_CACHE_HIT, getCuid(), hostname.c_str(),
+-                    strjoin(std::begin(addrs), std::end(addrs), ", ").c_str()));
+-    return ipaddr;
++  if (routeAware) {
++    if (req_->getRouteResolvedAddresses(hostname, port, addrs)) {
++      return addrs.front();
++    }
++  }
++  else {
++    e_->findAllCachedIPAddresses(std::back_inserter(addrs), hostname, port);
++    if (!addrs.empty()) {
++      auto ipaddr = addrs.front();
++      A2_LOG_INFO(
++          fmt(MSG_DNS_CACHE_HIT, getCuid(), hostname.c_str(),
++              strjoin(std::begin(addrs), std::end(addrs), ", ").c_str()));
++      return ipaddr;
++    }
+@@ -817,0 +843,5 @@ std::string AbstractCommand::resolveHostname(std::vector<std::string>& addrs,
++  if (routeAware) {
++    req_->setRouteResolvedAddresses(hostname, port, addrs);
++    return addrs.front();
++  }
++
+@@ -824,0 +855,19 @@ std::string AbstractCommand::resolveHostname(std::vector<std::string>& addrs,
++void AbstractCommand::validateNetworkTarget() const
++{
++  if (!network::isFirelinkPolicyEnabled(getOption().get())) {
++    return;
++  }
++
++  std::string reason;
++  if (!network::validateUri(req_->getCurrentUri(), &reason)) {
++    throw DL_ABORT_EX2(fmt("CUID#%" PRId64 " - Network target rejected: %s",
++                           getCuid(), reason.c_str()),
++                       error_code::NAME_RESOLVE_ERROR);
++  }
++}
++
++bool AbstractCommand::isRouteAwareNetworkPolicy() const
++{
++  return network::isFirelinkPolicyEnabled(getOption().get());
++}
++
+@@ -845 +894,25 @@ bool AbstractCommand::checkIfConnectionEstablished(
+-  // See also InitiateConnectionCommand::executeInternal()
++  // See also InitiateConnectionCommand::executeInternal(). Route-aware DNS
++  // deliberately has no process-wide cache, so consume the address from the
++  // current Request-owned attempt instead.
++  if (isRouteAwareNetworkPolicy()) {
++    if (req_->markRouteResolvedAddressBad(connectedHostname, connectedAddr,
++                                          connectedPort)) {
++      A2_LOG_INFO(fmt(MSG_CONNECT_FAILED_AND_RETRY, getCuid(),
++                      connectedAddr.c_str(), connectedPort));
++      e_->setNoWait(true);
++      e_->addCommand(
++          InitiateConnectionCommandFactory::createInitiateConnectionCommand(
++              getCuid(), req_, fileEntry_, requestGroup_, e_));
++      return false;
++    }
++    req_->clearRouteResolvedAddresses();
++    // Don't set error if proxy server is used and its method is GET.
++    if (resolveProxyMethod(req_->getProtocol()) != V_GET ||
++        !isProxyRequest(req_->getProtocol(), getOption())) {
++      e_->getRequestGroupMan()
++          ->getOrCreateServerStat(req_->getHost(), req_->getProtocol())
++          ->setError();
++    }
++    throw DL_RETRY_EX(fmt(MSG_ESTABLISHING_CONNECTION_FAILED, error.c_str()));
++  }
++
+diff --git a/src/AbstractCommand.h b/src/AbstractCommand.h
+index 1cb366df..aa182825 100644
+--- a/src/AbstractCommand.h
++++ b/src/AbstractCommand.h
+@@ -140,0 +141,5 @@ public:
++  // Validate the current request URI before selecting a direct or proxy
++  // connection. Proxy endpoints are route-owned and are validated by their
++  // own connection path.
++  void validateNetworkTarget() const;
++
+@@ -204,0 +210,2 @@ public:
++  bool isRouteAwareNetworkPolicy() const;
++
+diff --git a/src/AsyncNameResolver.cc b/src/AsyncNameResolver.cc
+index b041d6f9..defd0cf1 100644
+--- a/src/AsyncNameResolver.cc
++++ b/src/AsyncNameResolver.cc
+@@ -18,2 +18 @@
+- * along with this program; if not, write to the Free Software
+- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+@@ -28,5 +27,5 @@
+- * file(s) with this exception, you may extend this exception to your
+- * version of the file(s), but you are not obligated to do so.  If you
+- * do not wish to do so, delete this exception statement from your
+- * version.  If you delete this exception statement from all source
+- * files in the program, then also delete it here.
++ * file(s) with this exception, you may extend this exception to
++ * your version of the file(s), but you are not obligated to do so.
++ * If you do not wish to do so, delete this exception statement from
++ * your version.  If you delete this exception statement from all
++ * source files in the program, then also delete it here.
+@@ -36,0 +36 @@
++#include <algorithm>
+@@ -46 +46,2 @@ namespace aria2 {
+-void callback(void* arg, int status, int timeouts, struct hostent* host)
++#ifdef HAVE_LIBCARES
++void callback(void* arg, int status, int /*timeouts*/, struct hostent* host)
+@@ -53,0 +55,5 @@ void callback(void* arg, int status, int timeouts, struct hostent* host)
++  if (!host) {
++    resolverPtr->error_ = "c-ares returned no host data";
++    resolverPtr->status_ = AsyncNameResolver::STATUS_ERROR;
++    return;
++  }
+@@ -67,0 +74 @@ void callback(void* arg, int status, int timeouts, struct hostent* host)
++#endif // HAVE_LIBCARES
+@@ -75 +82,16 @@ AsyncNameResolver::AsyncNameResolver(int family
+-    : status_(STATUS_READY), family_(family)
++    : status_(STATUS_READY),
++      family_(family),
++#ifdef HAVE_LIBCARES
++      channel_(nullptr),
++#endif // HAVE_LIBCARES
++      resolverMode_(
++#ifdef HAVE_LIBCARES
++          RESOLVER_CARES
++#else
++          RESOLVER_NATIVE_ASYNC
++#endif
++      )
++#ifdef HAVE_ARES_ADDR_NODE
++      ,
++      servers_(servers)
++#endif // HAVE_ARES_ADDR_NODE
+@@ -77,2 +99,18 @@ AsyncNameResolver::AsyncNameResolver(int family
+-  // TODO evaluate return value
+-  ares_init(&channel_);
++#ifdef HAVE_LIBCARES
++  initializeCares();
++#else
++  nativeResolver_ = make_unique<NativeAsyncResolver>(family_);
++#endif // HAVE_LIBCARES
++}
++
++#ifdef HAVE_LIBCARES
++void AsyncNameResolver::initializeCares()
++{
++  channel_ = nullptr;
++  const int status = ares_init(&channel_);
++  if (status != ARES_SUCCESS) {
++    error_ = ares_strerror(status);
++    status_ = STATUS_ERROR;
++    A2_LOG_DEBUG(fmt("ares_init failed: %s", error_.c_str()));
++    return;
++  }
+@@ -80,5 +118,2 @@ AsyncNameResolver::AsyncNameResolver(int family
+-  if (servers) {
+-    // ares_set_servers has been added since c-ares 1.7.1
+-    if (ares_set_servers(channel_, servers) != ARES_SUCCESS) {
+-      A2_LOG_DEBUG("ares_set_servers failed");
+-    }
++  if (servers_ && ares_set_servers(channel_, servers_) != ARES_SUCCESS) {
++    A2_LOG_DEBUG("ares_set_servers failed");
+@@ -87,0 +123 @@ AsyncNameResolver::AsyncNameResolver(int family
++#endif // HAVE_LIBCARES
+@@ -89 +125,46 @@ AsyncNameResolver::AsyncNameResolver(int family
+-AsyncNameResolver::~AsyncNameResolver() { ares_destroy(channel_); }
++AsyncNameResolver::~AsyncNameResolver()
++{
++#ifdef HAVE_LIBCARES
++  if (channel_) {
++    ares_destroy(channel_);
++  }
++#endif // HAVE_LIBCARES
++}
++
++void AsyncNameResolver::setResolverMode(ResolverMode mode)
++{
++  if (mode == resolverMode_) {
++#ifdef HAVE_LIBCARES
++    if (mode == RESOLVER_CARES && !channel_) {
++      initializeCares();
++    }
++#endif // HAVE_LIBCARES
++    if (mode == RESOLVER_NATIVE_ASYNC && !nativeResolver_) {
++      nativeResolver_ = make_unique<NativeAsyncResolver>(family_);
++    }
++    return;
++  }
++
++#ifdef HAVE_LIBCARES
++  if (channel_) {
++    ares_destroy(channel_);
++    channel_ = nullptr;
++  }
++#endif // HAVE_LIBCARES
++  nativeResolver_.reset();
++  resolverMode_ = mode;
++
++  if (resolverMode_ == RESOLVER_NATIVE_ASYNC) {
++    nativeResolver_ = make_unique<NativeAsyncResolver>(family_);
++    return;
++  }
++
++#ifdef HAVE_LIBCARES
++  initializeCares();
++#else
++  // The option parser does not expose c-ares when it is not built.  Keep the
++  // class safe for API callers that nevertheless request it.
++  resolverMode_ = RESOLVER_NATIVE_ASYNC;
++  nativeResolver_ = make_unique<NativeAsyncResolver>(family_);
++#endif // HAVE_LIBCARES
++}
+@@ -91,0 +173,6 @@ void AsyncNameResolver::resolve(const std::string& name)
++{
++  resolve(name, std::chrono::steady_clock::now() + std::chrono::seconds(30));
++}
++
++void AsyncNameResolver::resolve(
++    const std::string& name, std::chrono::steady_clock::time_point deadline)
+@@ -93,0 +181,2 @@ void AsyncNameResolver::resolve(const std::string& name)
++  resolvedAddresses_.clear();
++  error_.clear();
+@@ -94,0 +184,11 @@ void AsyncNameResolver::resolve(const std::string& name)
++  if (resolverMode_ == RESOLVER_NATIVE_ASYNC) {
++    nativeResolver_->resolve(name, deadline);
++    return;
++  }
++
++#ifdef HAVE_LIBCARES
++  if (!channel_) {
++    error_ = "c-ares resolver is unavailable";
++    status_ = STATUS_ERROR;
++    return;
++  }
+@@ -95,0 +196,4 @@ void AsyncNameResolver::resolve(const std::string& name)
++#else
++  error_ = "c-ares resolver is unavailable";
++  status_ = STATUS_ERROR;
++#endif // HAVE_LIBCARES
+@@ -99,0 +204,12 @@ int AsyncNameResolver::getFds(fd_set* rfdsPtr, fd_set* wfdsPtr) const
++  if (resolverMode_ == RESOLVER_NATIVE_ASYNC) {
++    const sock_t socket = nativeResolver_->getSocket();
++    if (socket == static_cast<sock_t>(-1)) {
++      return 0;
++    }
++    FD_SET(socket, rfdsPtr);
++    return socket;
++  }
++#ifdef HAVE_LIBCARES
++  if (!channel_) {
++    return 0;
++  }
+@@ -100,0 +217,3 @@ int AsyncNameResolver::getFds(fd_set* rfdsPtr, fd_set* wfdsPtr) const
++#else
++  return 0;
++#endif // HAVE_LIBCARES
+@@ -105,3 +224,20 @@ void AsyncNameResolver::process(fd_set* rfdsPtr, fd_set* wfdsPtr)
+-  ares_process(channel_, rfdsPtr, wfdsPtr);
+-}
+-
++  if (resolverMode_ == RESOLVER_NATIVE_ASYNC) {
++    const sock_t socket = nativeResolver_->getSocket();
++    const sock_t readfd =
++        socket != static_cast<sock_t>(-1) && FD_ISSET(socket, rfdsPtr)
++            ? socket
++            : static_cast<sock_t>(-1);
++    // SelectEventPoll calls this after both socket activity and timer expiry.
++    // Always process once so a stalled getaddrinfo() observes its deadline.
++    nativeResolver_->process(readfd, static_cast<sock_t>(-1));
++    if (nativeResolver_->getStatus() == NativeAsyncResolver::STATUS_SUCCESS) {
++      resolvedAddresses_ = nativeResolver_->getResolvedAddresses();
++      status_ = STATUS_SUCCESS;
++    }
++    else if (nativeResolver_->getStatus() ==
++             NativeAsyncResolver::STATUS_ERROR) {
++      error_ = nativeResolver_->getError();
++      status_ = STATUS_ERROR;
++    }
++    return;
++  }
+@@ -108,0 +245,5 @@ void AsyncNameResolver::process(fd_set* rfdsPtr, fd_set* wfdsPtr)
++  if (channel_) {
++    ares_process(channel_, rfdsPtr, wfdsPtr);
++  }
++#endif // HAVE_LIBCARES
++}
+@@ -110 +251 @@ void AsyncNameResolver::process(fd_set* rfdsPtr, fd_set* wfdsPtr)
+-int AsyncNameResolver::getsock(sock_t* sockets) const
++uint32_t AsyncNameResolver::getsock(sock_t* sockets) const
+@@ -112,2 +253,40 @@ int AsyncNameResolver::getsock(sock_t* sockets) const
+-  return ares_getsock(channel_, reinterpret_cast<ares_socket_t*>(sockets),
+-                      ARES_GETSOCK_MAXNUM);
++  if (resolverMode_ == RESOLVER_NATIVE_ASYNC) {
++    const sock_t socket = nativeResolver_->getSocket();
++    if (socket == static_cast<sock_t>(-1)) {
++      return 0;
++    }
++    sockets[0] = socket;
++    return 1;
++  }
++
++#ifdef HAVE_LIBCARES
++  if (!channel_) {
++    return 0;
++  }
++  ares_socket_t aresSockets[ARES_GETSOCK_MAXNUM];
++  const int aresMask = ares_getsock(
++      channel_, aresSockets, ARES_GETSOCK_MAXNUM);
++  uint32_t mask = 0;
++  for (size_t i = 0; i < ARES_GETSOCK_MAXNUM && i < MAX_SOCKETS; ++i) {
++    int events = 0;
++    if (ARES_GETSOCK_READABLE(aresMask, i)) {
++      events |= 1;
++    }
++    if (ARES_GETSOCK_WRITABLE(aresMask, i)) {
++      events |= 2;
++    }
++    if (events == 0) {
++      break;
++    }
++    sockets[i] = static_cast<sock_t>(aresSockets[i]);
++    if (events & 1) {
++      mask |= (1u << (2 * i));
++    }
++    if (events & 2) {
++      mask |= (1u << (2 * i + 1));
++    }
++  }
++  return mask;
++#else
++  return 0;
++#endif // HAVE_LIBCARES
+@@ -116 +295 @@ int AsyncNameResolver::getsock(sock_t* sockets) const
+-void AsyncNameResolver::process(ares_socket_t readfd, ares_socket_t writefd)
++void AsyncNameResolver::process(sock_t readfd, sock_t writefd)
+@@ -118,2 +297,13 @@ void AsyncNameResolver::process(ares_socket_t readfd, ares_socket_t writefd)
+-  ares_process_fd(channel_, readfd, writefd);
+-}
++  if (resolverMode_ == RESOLVER_NATIVE_ASYNC) {
++    nativeResolver_->process(readfd, writefd);
++    if (nativeResolver_->getStatus() == NativeAsyncResolver::STATUS_SUCCESS) {
++      resolvedAddresses_ = nativeResolver_->getResolvedAddresses();
++      status_ = STATUS_SUCCESS;
++    }
++    else if (nativeResolver_->getStatus() ==
++             NativeAsyncResolver::STATUS_ERROR) {
++      error_ = nativeResolver_->getError();
++      status_ = STATUS_ERROR;
++    }
++    return;
++  }
+@@ -120,0 +311,8 @@ void AsyncNameResolver::process(ares_socket_t readfd, ares_socket_t writefd)
++#ifdef HAVE_LIBCARES
++  if (channel_) {
++    ares_process_fd(channel_, static_cast<ares_socket_t>(readfd),
++                    static_cast<ares_socket_t>(writefd));
++  }
++#else
++  (void)readfd;
++  (void)writefd;
+@@ -121,0 +320 @@ void AsyncNameResolver::process(ares_socket_t readfd, ares_socket_t writefd)
++}
+@@ -127,0 +327,6 @@ bool AsyncNameResolver::operator==(const AsyncNameResolver& resolver) const
++void AsyncNameResolver::setAddr(const std::string& addrString)
++{
++  resolvedAddresses_.push_back(addrString);
++  status_ = STATUS_SUCCESS;
++}
++
+@@ -131,0 +337 @@ void AsyncNameResolver::reset()
++  error_.clear();
+@@ -133,3 +339,11 @@ void AsyncNameResolver::reset()
+-  ares_destroy(channel_);
+-  // TODO evaluate return value
+-  ares_init(&channel_);
++  if (resolverMode_ == RESOLVER_NATIVE_ASYNC) {
++    nativeResolver_->reset();
++    return;
++  }
++#ifdef HAVE_LIBCARES
++  if (channel_) {
++    ares_destroy(channel_);
++    channel_ = nullptr;
++  }
++  initializeCares();
++#endif // HAVE_LIBCARES
+diff --git a/src/AsyncNameResolver.h b/src/AsyncNameResolver.h
+index 31a6ebe9..a7513762 100644
+--- a/src/AsyncNameResolver.h
++++ b/src/AsyncNameResolver.h
+@@ -39,0 +40,3 @@
++#include <chrono>
++#include <cstdint>
++#include <memory>
+@@ -43 +46,3 @@
+-#include <ares.h>
++#ifdef HAVE_LIBCARES
++#  include <ares.h>
++#endif // HAVE_LIBCARES
+@@ -45,0 +51 @@
++#include "NativeAsyncResolver.h"
+@@ -49,0 +56 @@ class AsyncNameResolver {
++#ifdef HAVE_LIBCARES
+@@ -51,0 +59 @@ class AsyncNameResolver {
++#endif // HAVE_LIBCARES
+@@ -60,0 +69,7 @@ public:
++  enum ResolverMode {
++    RESOLVER_NATIVE_ASYNC,
++    RESOLVER_CARES,
++  };
++
++  static const size_t MAX_SOCKETS = 16;
++
+@@ -63,0 +79 @@ private:
++#ifdef HAVE_LIBCARES
+@@ -65,0 +82,9 @@ private:
++  void initializeCares();
++#endif // HAVE_LIBCARES
++
++  ResolverMode resolverMode_;
++  std::unique_ptr<NativeAsyncResolver> nativeResolver_;
++#ifdef HAVE_ARES_ADDR_NODE
++  ares_addr_node* servers_;
++#endif // HAVE_ARES_ADDR_NODE
++
+@@ -79,0 +105,2 @@ public:
++  void setResolverMode(ResolverMode mode);
++
+@@ -81,0 +109,3 @@ public:
++  void resolve(const std::string& name,
++               std::chrono::steady_clock::time_point deadline);
++
+@@ -96 +125,0 @@ public:
+-#ifdef HAVE_LIBCARES
+@@ -98 +127,5 @@ public:
+-  int getsock(sock_t* sockets) const;
++  /**
++   * Return a normalized socket mask. Bit 2*i means readable socket i and
++   * bit 2*i+1 means writable socket i.
++   */
++  uint32_t getsock(sock_t* sockets) const;
+@@ -100,3 +133 @@ public:
+-  void process(ares_socket_t readfd, ares_socket_t writefd);
+-
+-#endif // HAVE_LIBCARES
++  void process(sock_t readfd, sock_t writefd);
+diff --git a/src/AsyncNameResolverMan.cc b/src/AsyncNameResolverMan.cc
+index be073561..bb0464fa 100644
+--- a/src/AsyncNameResolverMan.cc
++++ b/src/AsyncNameResolverMan.cc
+@@ -52 +52,5 @@ AsyncNameResolverMan::AsyncNameResolverMan()
+-    : numResolver_(0), resolverCheck_(0), ipv4_(true), ipv6_(true)
++    : numResolver_(0),
++      resolverCheck_(0),
++      ipv4_(true),
++      ipv6_(true),
++      nativeResolver_(true)
+@@ -97 +101,7 @@ void AsyncNameResolverMan::startAsyncFamily(const std::string& hostname,
+-  asyncNameResolver_[numResolver_]->resolve(hostname);
++  asyncNameResolver_[numResolver_]->setResolverMode(
++      nativeResolver_ ? AsyncNameResolver::RESOLVER_NATIVE_ASYNC
++                      : AsyncNameResolver::RESOLVER_CARES);
++  asyncNameResolver_[numResolver_]->resolve(
++      hostname,
++      std::chrono::steady_clock::now() +
++          std::chrono::seconds(e->getOption()->getAsInt(PREF_DNS_TIMEOUT)));
+@@ -224,0 +235,2 @@ void configureAsyncNameResolverMan(AsyncNameResolverMan* asyncNameResolverMan,
++  asyncNameResolverMan->setNativeResolver(
++      option->get(PREF_DNS_RESOLVER) != V_CARES);
+diff --git a/src/AsyncNameResolverMan.h b/src/AsyncNameResolverMan.h
+index 617474ec..2d2edb5e 100644
+--- a/src/AsyncNameResolverMan.h
++++ b/src/AsyncNameResolverMan.h
+@@ -39,0 +40 @@
++#include <chrono>
+@@ -81,0 +83,6 @@ public:
++  // Selects the resolver implementation used by newly started lookups.
++  void setNativeResolver(bool nativeResolver)
++  {
++    nativeResolver_ = nativeResolver;
++  }
++
+@@ -94,0 +102 @@ private:
++  bool nativeResolver_;
+diff --git a/src/ConnectCommand.cc b/src/ConnectCommand.cc
+index 5d1566be..909a4e73 100644
+--- a/src/ConnectCommand.cc
++++ b/src/ConnectCommand.cc
+@@ -92,3 +92,10 @@ bool ConnectCommand::executeInternal()
+-    getDownloadEngine()->markBadIPAddress(getRequest()->getConnectedHostname(),
+-                                          getRequest()->getConnectedAddr(),
+-                                          getRequest()->getConnectedPort());
++    if (isRouteAwareNetworkPolicy()) {
++      getRequest()->markRouteResolvedAddressBad(
++          getRequest()->getConnectedHostname(), getRequest()->getConnectedAddr(),
++          getRequest()->getConnectedPort());
++    }
++    else {
++      getDownloadEngine()->markBadIPAddress(
++          getRequest()->getConnectedHostname(),
++          getRequest()->getConnectedAddr(), getRequest()->getConnectedPort());
++    }
+@@ -110,0 +118 @@ bool ConnectCommand::executeInternal()
++  getRequest()->clearRouteResolvedAddresses();
+diff --git a/src/DHTEntryPointNameResolveCommand.cc b/src/DHTEntryPointNameResolveCommand.cc
+index 35ceee0c..93b08df6 100644
+--- a/src/DHTEntryPointNameResolveCommand.cc
++++ b/src/DHTEntryPointNameResolveCommand.cc
+@@ -43,0 +44 @@
++#include "DHTMessageDispatcher.h"
+@@ -52,0 +54 @@
++#include "NetworkTargetPolicy.h"
+@@ -69,0 +72 @@ DHTEntryPointNameResolveCommand::DHTEntryPointNameResolveCommand(
++      messageDispatcher_{nullptr},
+@@ -98,0 +102,9 @@ bool DHTEntryPointNameResolveCommand::execute()
++        if (network::isFirelinkPolicyEnabled(e_->getOption())) {
++          std::string reason;
++          if (!network::validateHost(hostname, &reason)) {
++            A2_LOG_INFO(fmt("DHT entry point rejected by policy: %s",
++                            reason.c_str()));
++            entryPoints_.pop_front();
++            continue;
++          }
++        }
+@@ -124,0 +137,9 @@ bool DHTEntryPointNameResolveCommand::execute()
++        if (network::isFirelinkPolicyEnabled(e_->getOption())) {
++          std::string reason;
++          if (!network::validateHost(hostname, &reason)) {
++            A2_LOG_INFO(fmt("DHT entry point rejected by policy: %s",
++                            reason.c_str()));
++            entryPoints_.pop_front();
++            continue;
++          }
++        }
+@@ -154,0 +176,3 @@ void DHTEntryPointNameResolveCommand::addPingTask(
++  if (messageDispatcher_) {
++    messageDispatcher_->allowRouteOwnedAddress(addr.first);
++  }
+@@ -225,0 +250,6 @@ void DHTEntryPointNameResolveCommand::setLocalNode(
++void DHTEntryPointNameResolveCommand::setMessageDispatcher(
++    DHTMessageDispatcher* messageDispatcher)
++{
++  messageDispatcher_ = messageDispatcher;
++}
++
+diff --git a/src/DHTEntryPointNameResolveCommand.h b/src/DHTEntryPointNameResolveCommand.h
+index 3e131833..ad8b6251 100644
+--- a/src/DHTEntryPointNameResolveCommand.h
++++ b/src/DHTEntryPointNameResolveCommand.h
+@@ -51,0 +52 @@ class DHTNode;
++class DHTMessageDispatcher;
+@@ -72,0 +74,2 @@ private:
++  DHTMessageDispatcher* messageDispatcher_;
++
+@@ -105,0 +109,2 @@ public:
++
++  void setMessageDispatcher(DHTMessageDispatcher* messageDispatcher);
+diff --git a/src/DHTMessageDispatcher.h b/src/DHTMessageDispatcher.h
+index 72617876..02f54be2 100644
+--- a/src/DHTMessageDispatcher.h
++++ b/src/DHTMessageDispatcher.h
+@@ -40,0 +41 @@
++#include <string>
+@@ -64,0 +66,5 @@ public:
++
++  // A hostname-resolved bootstrap address belongs to the active OS/TUN route,
++  // even when it is represented by a synthetic private IP. Implementations
++  // that enforce literal-target policy may retain a bounded, expiring grant.
++  virtual void allowRouteOwnedAddress(const std::string&) {}
+diff --git a/src/DHTMessageDispatcherImpl.cc b/src/DHTMessageDispatcherImpl.cc
+index 97327d63..1082ecb0 100644
+--- a/src/DHTMessageDispatcherImpl.cc
++++ b/src/DHTMessageDispatcherImpl.cc
+@@ -46,0 +47 @@
++#include "NetworkTargetPolicy.h"
+@@ -49,0 +51,5 @@ namespace aria2 {
++namespace {
++const size_t MAX_ROUTE_OWNED_DHT_ADDRESSES = 256;
++const auto ROUTE_OWNED_DHT_ADDRESS_TTL = std::chrono::minutes(5);
++} // namespace
++
+@@ -51,2 +57,5 @@ DHTMessageDispatcherImpl::DHTMessageDispatcherImpl(
+-    const std::shared_ptr<DHTMessageTracker>& tracker)
+-    : tracker_{tracker}, timeout_{DHT_MESSAGE_TIMEOUT}
++    const std::shared_ptr<DHTMessageTracker>& tracker,
++    bool networkTargetPolicyEnabled)
++    : tracker_{tracker},
++      timeout_{DHT_MESSAGE_TIMEOUT},
++      networkTargetPolicyEnabled_{networkTargetPolicyEnabled}
+@@ -73,0 +83,27 @@ bool DHTMessageDispatcherImpl::sendMessage(DHTMessageEntry* entry)
++    if (networkTargetPolicyEnabled_) {
++      const auto& remoteNode = entry->message->getRemoteNode();
++      std::string reason;
++      const auto now = std::chrono::steady_clock::now();
++      for (auto itr = routeOwnedAddresses_.begin();
++           itr != routeOwnedAddresses_.end();) {
++        if (itr->second <= now) {
++          itr = routeOwnedAddresses_.erase(itr);
++        }
++        else {
++          ++itr;
++        }
++      }
++      const bool routeOwned =
++          remoteNode && routeOwnedAddresses_.find(remoteNode->getIPAddress()) !=
++                            routeOwnedAddresses_.end();
++      if (!remoteNode ||
++          (!routeOwned &&
++           !network::validateHost(remoteNode->getIPAddress(), &reason))) {
++        A2_LOG_INFO(fmt("DHT target rejected by policy: %s", reason.c_str()));
++        if (!entry->message->isReply()) {
++          tracker_->addMessage(entry->message.get(), 0_s,
++                               std::move(entry->callback));
++        }
++        return true;
++      }
++    }
+@@ -100,0 +137,23 @@ bool DHTMessageDispatcherImpl::sendMessage(DHTMessageEntry* entry)
++void DHTMessageDispatcherImpl::allowRouteOwnedAddress(
++    const std::string& address)
++{
++  if (!networkTargetPolicyEnabled_ || address.empty()) {
++    return;
++  }
++  const auto now = std::chrono::steady_clock::now();
++  for (auto itr = routeOwnedAddresses_.begin();
++       itr != routeOwnedAddresses_.end();) {
++    if (itr->second <= now) {
++      itr = routeOwnedAddresses_.erase(itr);
++    }
++    else {
++      ++itr;
++    }
++  }
++  if (routeOwnedAddresses_.size() >= MAX_ROUTE_OWNED_DHT_ADDRESSES &&
++      routeOwnedAddresses_.find(address) == routeOwnedAddresses_.end()) {
++    return;
++  }
++  routeOwnedAddresses_[address] = now + ROUTE_OWNED_DHT_ADDRESS_TTL;
++}
++
+diff --git a/src/DHTMessageDispatcherImpl.h b/src/DHTMessageDispatcherImpl.h
+index c65076c0..e64aa8e6 100644
+--- a/src/DHTMessageDispatcherImpl.h
++++ b/src/DHTMessageDispatcherImpl.h
+@@ -38,0 +39 @@
++#include <chrono>
+@@ -39,0 +41 @@
++#include <map>
+@@ -53,0 +56,5 @@ private:
++  bool networkTargetPolicyEnabled_;
++
++  std::map<std::string, std::chrono::steady_clock::time_point>
++      routeOwnedAddresses_;
++
+@@ -57 +64,3 @@ public:
+-  DHTMessageDispatcherImpl(const std::shared_ptr<DHTMessageTracker>& tracker);
++  DHTMessageDispatcherImpl(
++      const std::shared_ptr<DHTMessageTracker>& tracker,
++      bool networkTargetPolicyEnabled = false);
+@@ -73,0 +83,2 @@ public:
++  void allowRouteOwnedAddress(const std::string& address) CXX11_OVERRIDE;
++
+diff --git a/src/DHTMessageTrackerEntry.cc b/src/DHTMessageTrackerEntry.cc
+index 9a4f4ad8..b0a21916 100644
+--- a/src/DHTMessageTrackerEntry.cc
++++ b/src/DHTMessageTrackerEntry.cc
+@@ -41,0 +42,3 @@
++#include "Logger.h"
++#include "LogFactory.h"
++#include "fmt.h"
+@@ -76 +79,3 @@ bool DHTMessageTrackerEntry::match(const std::string& transactionID,
+-    return targetNode_->getIPAddress() == "::ffff:" + ipaddr;
++    if (targetNode_->getIPAddress() == "::ffff:" + ipaddr) {
++      return true;
++    }
+@@ -79 +84,3 @@ bool DHTMessageTrackerEntry::match(const std::string& transactionID,
+-    return ipaddr == "::ffff:" + targetNode_->getIPAddress();
++    if (ipaddr == "::ffff:" + targetNode_->getIPAddress()) {
++      return true;
++    }
+@@ -81 +88,10 @@ bool DHTMessageTrackerEntry::match(const std::string& transactionID,
+-  return false;
++  // Under TUN / Fake-IP / NAT rewrites, the remote IP may be translated.
++  // Transaction ID is a unique random 4-byte string per inflight query.
++  // If transaction ID matches and port matches, accept and update targetNode_
++  // IP address to the translated IP.
++  A2_LOG_INFO(fmt("DHT matched inflight tracker entry by transactionID across "
++                  "address translation (expected %s:%u, got %s:%u)",
++                  targetNode_->getIPAddress().c_str(), targetNode_->getPort(),
++                  ipaddr.c_str(), port));
++  targetNode_->setIPAddress(ipaddr);
++  return true;
+diff --git a/src/DHTSetup.cc b/src/DHTSetup.cc
+index d107a53e..a43e851b 100644
+--- a/src/DHTSetup.cc
++++ b/src/DHTSetup.cc
+@@ -75,0 +76 @@
++#include "NetworkTargetPolicy.h"
+@@ -145 +146,2 @@ DHTSetup::setup(DownloadEngine* e, int family)
+-    auto dispatcher = make_unique<DHTMessageDispatcherImpl>(tracker);
++    auto dispatcher = make_unique<DHTMessageDispatcherImpl>(
++        tracker, network::isFirelinkPolicyEnabled(e->getOption()));
+@@ -186,0 +189 @@ DHTSetup::setup(DownloadEngine* e, int family)
++    std::vector<std::pair<std::string, uint16_t>> entryPoints;
+@@ -188,18 +191,5 @@ DHTSetup::setup(DownloadEngine* e, int family)
+-      {
+-        PrefPtr prefEntryPointPort = family == AF_INET
+-                                         ? PREF_DHT_ENTRY_POINT_PORT
+-                                         : PREF_DHT_ENTRY_POINT_PORT6;
+-        std::pair<std::string, uint16_t> addr(
+-            e->getOption()->get(prefEntryPointHost),
+-            e->getOption()->getAsInt(prefEntryPointPort));
+-        std::vector<std::pair<std::string, uint16_t>> entryPoints;
+-        entryPoints.push_back(addr);
+-        auto command = make_unique<DHTEntryPointNameResolveCommand>(
+-            e->newCUID(), e, family, entryPoints);
+-        command->setBootstrapEnabled(true);
+-        command->setTaskQueue(taskQueue.get());
+-        command->setTaskFactory(taskFactory.get());
+-        command->setRoutingTable(routingTable.get());
+-        command->setLocalNode(localNode);
+-        tempCommands.push_back(std::move(command));
+-      }
++      PrefPtr prefEntryPointPort = family == AF_INET
++                                       ? PREF_DHT_ENTRY_POINT_PORT
++                                       : PREF_DHT_ENTRY_POINT_PORT6;
++      entryPoints.emplace_back(e->getOption()->get(prefEntryPointHost),
++                               e->getOption()->getAsInt(prefEntryPointPort));
+@@ -208 +198,22 @@ DHTSetup::setup(DownloadEngine* e, int family)
+-      A2_LOG_INFO("No DHT entry point specified.");
++      A2_LOG_INFO("No DHT entry point specified; using default bootstrap nodes.");
++      if (family == AF_INET) {
++        entryPoints.emplace_back("router.bittorrent.com", 6881);
++        entryPoints.emplace_back("dht.transmissionbt.com", 6881);
++        entryPoints.emplace_back("router.utorrent.com", 6881);
++        entryPoints.emplace_back("dht.libtorrent.org", 25401);
++      }
++      else {
++        entryPoints.emplace_back("dht.transmissionbt.com", 6881);
++        entryPoints.emplace_back("router.bittorrent.com", 6881);
++      }
++    }
++    if (!entryPoints.empty()) {
++      auto command = make_unique<DHTEntryPointNameResolveCommand>(
++          e->newCUID(), e, family, entryPoints);
++      command->setBootstrapEnabled(true);
++      command->setTaskQueue(taskQueue.get());
++      command->setTaskFactory(taskFactory.get());
++      command->setRoutingTable(routingTable.get());
++      command->setLocalNode(localNode);
++      command->setMessageDispatcher(dispatcher.get());
++      tempCommands.push_back(std::move(command));
+diff --git a/src/DownloadEngine.cc b/src/DownloadEngine.cc
+index 2037f66f..a692d366 100644
+--- a/src/DownloadEngine.cc
++++ b/src/DownloadEngine.cc
+@@ -77,0 +78 @@
++#include "NetworkTargetPolicy.h"
+@@ -314,0 +316,7 @@ void DownloadEngine::poolSocket(const std::string& key,
++  if (isRouteAwareNetworkPolicy()) {
++    // A pooled socket is already bound to the route that existed when it was
++    // opened. Without a route generation from the OS/TUN layer, reusing it
++    // could silently bypass a route change, so route-aware transfers always
++    // establish a fresh connection.
++    return;
++  }
+@@ -460,0 +469,3 @@ DownloadEngine::popPooledSocket(const std::string& ipaddr, uint16_t port,
++  if (isRouteAwareNetworkPolicy()) {
++    return nullptr;
++  }
+@@ -476,0 +488,3 @@ DownloadEngine::popPooledSocket(std::string& options, const std::string& ipaddr,
++  if (isRouteAwareNetworkPolicy()) {
++    return nullptr;
++  }
+@@ -538,0 +553,5 @@ cuid_t DownloadEngine::newCUID() { return cuidCounter_.newID(); }
++bool DownloadEngine::isRouteAwareNetworkPolicy() const
++{
++  return option_ && network::isFirelinkPolicyEnabled(option_);
++}
++
+diff --git a/src/DownloadEngine.h b/src/DownloadEngine.h
+index b544cfc6..7d9dfd25 100644
+--- a/src/DownloadEngine.h
++++ b/src/DownloadEngine.h
+@@ -235,0 +236,2 @@ public:
++  bool isRouteAwareNetworkPolicy() const;
++
+diff --git a/src/Event.h b/src/Event.h
+index df8c4387..b34f892b 100644
+--- a/src/Event.h
++++ b/src/Event.h
+@@ -41,0 +42 @@
++#include <cstdint>
+@@ -150,2 +151,2 @@ public:
+-    ares_socket_t readfd;
+-    ares_socket_t writefd;
++    sock_t readfd;
++    sock_t writefd;
+@@ -157 +158 @@ public:
+-      readfd = ARES_SOCKET_BAD;
++      readfd = static_cast<sock_t>(-1);
+@@ -164 +165 @@ public:
+-      writefd = ARES_SOCKET_BAD;
++      writefd = static_cast<sock_t>(-1);
+@@ -298 +299 @@ private:
+-  sock_t sockets_[ARES_GETSOCK_MAXNUM];
++  sock_t sockets_[AsyncNameResolver::MAX_SOCKETS];
+@@ -327 +328 @@ public:
+-    int mask = nameResolver_->getsock(sockets_);
++    uint32_t mask = nameResolver_->getsock(sockets_);
+@@ -332 +333 @@ public:
+-    for (i = 0; i < ARES_GETSOCK_MAXNUM; ++i) {
++    for (i = 0; i < AsyncNameResolver::MAX_SOCKETS; ++i) {
+@@ -334 +335 @@ public:
+-      if (ARES_GETSOCK_READABLE(mask, i)) {
++      if (mask & (1u << (2 * i))) {
+@@ -337 +338 @@ public:
+-      if (ARES_GETSOCK_WRITABLE(mask, i)) {
++      if (mask & (1u << (2 * i + 1))) {
+@@ -356,2 +357,2 @@ public:
+-  // Calls AsyncNameResolver::process(ARES_SOCKET_BAD,
+-  // ARES_SOCKET_BAD).
++  // Calls AsyncNameResolver::process() without a socket event.  This gives
++  // resolver implementations a chance to process timer-driven completions.
+@@ -360 +361,6 @@ public:
+-    nameResolver_->process(ARES_SOCKET_BAD, ARES_SOCKET_BAD);
++    const auto previousStatus = nameResolver_->getStatus();
++    nameResolver_->process(static_cast<sock_t>(-1),
++                           static_cast<sock_t>(-1));
++    if (nameResolver_->getStatus() != previousStatus) {
++      command_->setStatusActive();
++    }
+diff --git a/src/FirelinkCapabilities.cc b/src/FirelinkCapabilities.cc
+new file mode 100644
+index 00000000..202b8660
+--- /dev/null
++++ b/src/FirelinkCapabilities.cc
+@@ -0,0 +1,28 @@
++/* <!-- copyright */
++/*
++ * aria2 - The high speed download utility
++ *
++ * Copyright (C) 2006 Tatsuhiro Tsujikawa
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ */
++/* copyright --> */
++#include "FirelinkCapabilities.h"
++
++namespace aria2 {
++namespace firelink {
++
++const char REVISION[] = "firelink-native-dns-v1";
++const char DNS_RESOLVER[] = "native-async";
++const char NETWORK_TARGET_POLICY[] = "firelink-v1";
++
++// SHA-256 of the canonical policy vector documented by the literal CIDRs and
++// route-owned hostname/redirect/proxy rules in NetworkTargetPolicy.cc.
++const char NETWORK_TARGET_POLICY_DIGEST[] =
++    "sha256:064503d30f1a043e79113f7e44ddfb517fbf2c578a332896355180743eaf1705";
++
++} // namespace firelink
++} // namespace aria2
+diff --git a/src/FirelinkCapabilities.h b/src/FirelinkCapabilities.h
+new file mode 100644
+index 00000000..6a76fce8
+--- /dev/null
++++ b/src/FirelinkCapabilities.h
+@@ -0,0 +1,27 @@
++/* <!-- copyright */
++/*
++ * aria2 - The high speed download utility
++ *
++ * Copyright (C) 2006 Tatsuhiro Tsujikawa
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ */
++/* copyright --> */
++#ifndef D_FIRELINK_CAPABILITIES_H
++#define D_FIRELINK_CAPABILITIES_H
++
++namespace aria2 {
++namespace firelink {
++
++extern const char REVISION[];
++extern const char DNS_RESOLVER[];
++extern const char NETWORK_TARGET_POLICY[];
++extern const char NETWORK_TARGET_POLICY_DIGEST[];
++
++} // namespace firelink
++} // namespace aria2
++
++#endif // D_FIRELINK_CAPABILITIES_H
+diff --git a/src/FtpInitiateConnectionCommand.cc b/src/FtpInitiateConnectionCommand.cc
+index b41655f8..00ad8d77 100644
+--- a/src/FtpInitiateConnectionCommand.cc
++++ b/src/FtpInitiateConnectionCommand.cc
+@@ -128 +128 @@ std::unique_ptr<Command> FtpInitiateConnectionCommand::createNextCommandProxied(
+-    setupBackupConnection(hostname, addr, port, c.get());
++    setupBackupConnection(resolvedAddresses, addr, port, c.get());
+@@ -132,0 +133 @@ std::unique_ptr<Command> FtpInitiateConnectionCommand::createNextCommandProxied(
++  getRequest()->clearRouteResolvedAddresses();
+@@ -202 +203 @@ std::unique_ptr<Command> FtpInitiateConnectionCommand::createNextCommandPlain(
+-    setupBackupConnection(hostname, addr, port, c.get());
++    setupBackupConnection(resolvedAddresses, addr, port, c.get());
+@@ -206,0 +208 @@ std::unique_ptr<Command> FtpInitiateConnectionCommand::createNextCommandPlain(
++  getRequest()->clearRouteResolvedAddresses();
+diff --git a/src/FtpNegotiationCommand.cc b/src/FtpNegotiationCommand.cc
+index d9100b42..c071531b 100644
+--- a/src/FtpNegotiationCommand.cc
++++ b/src/FtpNegotiationCommand.cc
+@@ -750 +750 @@ bool FtpNegotiationCommand::sendTunnelRequest()
+-      std::string error = getSocket()->getSocketError();
++      std::string error = dataSocket_->getSocketError();
+@@ -753,4 +753,17 @@ bool FtpNegotiationCommand::sendTunnelRequest()
+-        getDownloadEngine()->markBadIPAddress(proxyReq->getHost(), proxyAddr_,
+-                                              proxyReq->getPort());
+-        std::string nextProxyAddr = getDownloadEngine()->findCachedIPAddress(
+-            proxyReq->getHost(), proxyReq->getPort());
++        std::string nextProxyAddr;
++        if (isRouteAwareNetworkPolicy()) {
++          getRequest()->markRouteResolvedAddressBad(
++              proxyReq->getHost(), proxyAddr_, proxyReq->getPort());
++          std::vector<std::string> addrs;
++          getRequest()->getRouteResolvedAddresses(
++              proxyReq->getHost(), proxyReq->getPort(), addrs);
++          if (!addrs.empty()) {
++            nextProxyAddr = addrs.front();
++          }
++        }
++        else {
++          getDownloadEngine()->markBadIPAddress(
++              proxyReq->getHost(), proxyAddr_, proxyReq->getPort());
++          nextProxyAddr = getDownloadEngine()->findCachedIPAddress(
++              proxyReq->getHost(), proxyReq->getPort());
++        }
+@@ -758,2 +771,7 @@ bool FtpNegotiationCommand::sendTunnelRequest()
+-          getDownloadEngine()->removeCachedIPAddress(proxyReq->getHost(),
+-                                                     proxyReq->getPort());
++          if (isRouteAwareNetworkPolicy()) {
++            getRequest()->clearRouteResolvedAddresses();
++          }
++          else {
++            getDownloadEngine()->removeCachedIPAddress(proxyReq->getHost(),
++                                                       proxyReq->getPort());
++          }
+@@ -796,0 +815 @@ bool FtpNegotiationCommand::sendTunnelRequest()
++    getRequest()->clearRouteResolvedAddresses();
+diff --git a/src/HttpInitiateConnectionCommand.cc b/src/HttpInitiateConnectionCommand.cc
+index 74c74b7a..0e62c0a2 100644
+--- a/src/HttpInitiateConnectionCommand.cc
++++ b/src/HttpInitiateConnectionCommand.cc
+@@ -101 +101 @@ std::unique_ptr<Command> HttpInitiateConnectionCommand::createNextCommand(
+-      setupBackupConnection(hostname, addr, port, c.get());
++      setupBackupConnection(resolvedAddresses, addr, port, c.get());
+@@ -105,0 +106 @@ std::unique_ptr<Command> HttpInitiateConnectionCommand::createNextCommand(
++      getRequest()->clearRouteResolvedAddresses();
+@@ -133 +134 @@ std::unique_ptr<Command> HttpInitiateConnectionCommand::createNextCommand(
+-      setupBackupConnection(hostname, addr, port, c.get());
++      setupBackupConnection(resolvedAddresses, addr, port, c.get());
+@@ -138,0 +140 @@ std::unique_ptr<Command> HttpInitiateConnectionCommand::createNextCommand(
++      getRequest()->clearRouteResolvedAddresses();
+diff --git a/src/HttpSkipResponseCommand.cc b/src/HttpSkipResponseCommand.cc
+index a722d774..faa7550a 100644
+--- a/src/HttpSkipResponseCommand.cc
++++ b/src/HttpSkipResponseCommand.cc
+@@ -200,0 +201 @@ bool HttpSkipResponseCommand::processResponse()
++    validateNetworkTarget();
+diff --git a/src/InitiateConnectionCommand.cc b/src/InitiateConnectionCommand.cc
+index b23413e8..279cfe8b 100644
+--- a/src/InitiateConnectionCommand.cc
++++ b/src/InitiateConnectionCommand.cc
+@@ -75,0 +76,2 @@ bool InitiateConnectionCommand::executeInternal()
++  validateNetworkTarget();
++
+@@ -104,0 +107,17 @@ bool InitiateConnectionCommand::executeInternal()
++    if (isRouteAwareNetworkPolicy()) {
++      if (getRequest()->markRouteResolvedAddressBad(hostname, ipaddr, port)) {
++        A2_LOG_INFO_EX(EX_EXCEPTION_CAUGHT, ex);
++        A2_LOG_INFO(
++            fmt(MSG_CONNECT_FAILED_AND_RETRY, getCuid(), ipaddr.c_str(), port));
++        auto command =
++            InitiateConnectionCommandFactory::createInitiateConnectionCommand(
++                getCuid(), getRequest(), getFileEntry(), getRequestGroup(),
++                getDownloadEngine());
++        getDownloadEngine()->setNoWait(true);
++        getDownloadEngine()->addCommand(std::move(command));
++        return true;
++      }
++      getRequest()->clearRouteResolvedAddresses();
++      throw;
++    }
++
+@@ -133,2 +152,2 @@ InitiateConnectionCommand::createBackupIPv4ConnectCommand(
+-    const std::string& hostname, const std::string& ipaddr, uint16_t port,
+-    Command* mainCommand)
++    const std::vector<std::string>& resolvedAddresses,
++    const std::string& ipaddr, uint16_t port, Command* mainCommand)
+@@ -144,5 +163,2 @@ InitiateConnectionCommand::createBackupIPv4ConnectCommand(
+-  std::vector<std::string> addrs;
+-  getDownloadEngine()->findAllCachedIPAddresses(std::back_inserter(addrs),
+-                                                hostname, port);
+-  for (std::vector<std::string>::const_iterator i = addrs.begin(),
+-                                                eoi = addrs.end();
++  for (std::vector<std::string>::const_iterator i = resolvedAddresses.begin(),
++                                                eoi = resolvedAddresses.end();
+@@ -166,2 +182,2 @@ void InitiateConnectionCommand::setupBackupConnection(
+-    const std::string& hostname, const std::string& addr, uint16_t port,
+-    ConnectCommand* c)
++    const std::vector<std::string>& resolvedAddresses,
++    const std::string& addr, uint16_t port, ConnectCommand* c)
+@@ -170 +186 @@ void InitiateConnectionCommand::setupBackupConnection(
+-      createBackupIPv4ConnectCommand(hostname, addr, port, c);
++      createBackupIPv4ConnectCommand(resolvedAddresses, addr, port, c);
+diff --git a/src/InitiateConnectionCommand.h b/src/InitiateConnectionCommand.h
+index 12bf5d12..271b11a9 100644
+--- a/src/InitiateConnectionCommand.h
++++ b/src/InitiateConnectionCommand.h
+@@ -72,3 +72,3 @@ protected:
+-  createBackupIPv4ConnectCommand(const std::string& hostname,
+-                                 const std::string& ipaddr, uint16_t port,
+-                                 Command* mainCommand);
++  createBackupIPv4ConnectCommand(
++      const std::vector<std::string>& resolvedAddresses,
++      const std::string& ipaddr, uint16_t port, Command* mainCommand);
+@@ -76,3 +76,3 @@ protected:
+-  void setupBackupConnection(const std::string& hostname,
+-                             const std::string& addr, uint16_t port,
+-                             ConnectCommand* c);
++  void setupBackupConnection(
++      const std::vector<std::string>& resolvedAddresses,
++      const std::string& addr, uint16_t port, ConnectCommand* c);
+diff --git a/src/Makefile.am b/src/Makefile.am
+index cb6e3b7c..498890ca 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -423,0 +424,4 @@ endif # HAVE_LIBSSH2
++SRCS += \
++	FirelinkCapabilities.cc FirelinkCapabilities.h \
++	NetworkTargetPolicy.cc NetworkTargetPolicy.h
++
+@@ -426 +430,2 @@ SRCS += \
+-	AsyncNameResolver.cc AsyncNameResolver.h\
++	AsyncNameResolver.cc AsyncNameResolver.h \
++	NativeAsyncResolver.cc NativeAsyncResolver.h \
+@@ -755 +759,0 @@ AM_CXXFLAGS = @WARNCXXFLAGS@ @CXX1XCXXFLAGS@ @EXTRACXXFLAGS@
+-
+diff --git a/src/NameResolveCommand.cc b/src/NameResolveCommand.cc
+index f2c5d01c..8b82bc65 100644
+--- a/src/NameResolveCommand.cc
++++ b/src/NameResolveCommand.cc
+@@ -48,0 +49 @@
++#include "NetworkTargetPolicy.h"
+@@ -90,0 +92,9 @@ bool NameResolveCommand::execute()
++  if (network::isFirelinkPolicyEnabled(e_->getOption())) {
++    std::string reason;
++    if (!network::validateHost(hostname, &reason)) {
++      A2_LOG_INFO(fmt("UDP tracker target rejected by policy: %s",
++                      reason.c_str()));
++      onFailure();
++      return true;
++    }
++  }
+diff --git a/src/NativeAsyncResolver.cc b/src/NativeAsyncResolver.cc
+new file mode 100644
+index 00000000..afd4c945
+--- /dev/null
++++ b/src/NativeAsyncResolver.cc
+@@ -0,0 +1,801 @@
++/* <!-- copyright */
++/*
++ * aria2 - The high speed download utility
++ *
++ * Copyright (C) 2006 Tatsuhiro Tsujikawa
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ *
++ * In addition, as a special exception, the copyright holders give
++ * permission to link the code of portions of this program with the
++ * OpenSSL library under certain conditions as described in each
++ * individual source file, and distribute linked combinations
++ * including the two.
++ * You must obey the GNU General Public License in all respects
++ * for all of the code used other than OpenSSL.  If you modify
++ * file(s) with this exception, you may extend this exception to
++ * your version of the file(s), but you are not obligated to do so.
++ * If you do not wish to do so, delete this exception statement from
++ * your version.  If you delete this exception statement from all
++ * source files in the program, then also delete it here.
++ */
++/* copyright --> */
++#include "NativeAsyncResolver.h"
++
++#include <algorithm>
++#include <cctype>
++#include <cerrno>
++#include <condition_variable>
++#include <cstring>
++#include <deque>
++#include <fcntl.h>
++#include <functional>
++#include <map>
++#include <mutex>
++#include <stdexcept>
++#include <thread>
++#include <utility>
++
++#ifndef __MINGW32__
++#  include <sys/socket.h>
++#  include <unistd.h>
++#else
++#  include <winsock2.h>
++#endif
++
++#include "SocketCore.h"
++#include "util.h"
++
++namespace aria2 {
++
++namespace {
++
++const sock_t INVALID_SOCKET_FD = static_cast<sock_t>(-1);
++
++#ifdef __MINGW32__
++int socketError()
++{
++  return WSAGetLastError();
++}
++#else
++int socketError() { return errno; }
++#endif
++
++void closeSocket(sock_t socket)
++{
++  if (socket == INVALID_SOCKET_FD) {
++    return;
++  }
++#ifdef __MINGW32__
++  closesocket(socket);
++#else
++  close(socket);
++#endif
++}
++
++bool setNonBlocking(sock_t socket)
++{
++#ifdef __MINGW32__
++  u_long mode = 1;
++  return ioctlsocket(socket, FIONBIO, &mode) == 0;
++#else
++  int flags;
++  do {
++    flags = fcntl(socket, F_GETFL, 0);
++  } while (flags == -1 && errno == EINTR);
++  if (flags == -1) {
++    return false;
++  }
++  int rv;
++  do {
++    rv = fcntl(socket, F_SETFL, flags | O_NONBLOCK);
++  } while (rv == -1 && errno == EINTR);
++  return rv == 0;
++#endif
++}
++
++struct WakePair {
++  sock_t readSocket = INVALID_SOCKET_FD;
++  sock_t writeSocket = INVALID_SOCKET_FD;
++};
++
++bool createWakePair(WakePair& pair)
++{
++#ifdef __MINGW32__
++  sock_t listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
++  if (listener == INVALID_SOCKET_FD) {
++    return false;
++  }
++
++  sockaddr_in address;
++  std::memset(&address, 0, sizeof(address));
++  address.sin_family = AF_INET;
++  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++  address.sin_port = 0;
++  if (bind(listener, reinterpret_cast<const sockaddr*>(&address),
++           sizeof(address)) == SOCKET_ERROR ||
++      listen(listener, 1) == SOCKET_ERROR) {
++    closeSocket(listener);
++    return false;
++  }
++
++  int addressLength = sizeof(address);
++  if (getsockname(listener, reinterpret_cast<sockaddr*>(&address),
++                  &addressLength) == SOCKET_ERROR) {
++    closeSocket(listener);
++    return false;
++  }
++
++  sock_t writer = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
++  if (writer == INVALID_SOCKET_FD) {
++    closeSocket(listener);
++    return false;
++  }
++  if (connect(writer, reinterpret_cast<const sockaddr*>(&address),
++              sizeof(address)) == SOCKET_ERROR) {
++    closeSocket(writer);
++    closeSocket(listener);
++    return false;
++  }
++
++  sock_t reader = accept(listener, nullptr, nullptr);
++  closeSocket(listener);
++  if (reader == INVALID_SOCKET_FD) {
++    closeSocket(writer);
++    return false;
++  }
++  pair.readSocket = reader;
++  pair.writeSocket = writer;
++#else
++  int sockets[2];
++  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == -1) {
++    return false;
++  }
++  pair.readSocket = sockets[0];
++  pair.writeSocket = sockets[1];
++#endif
++
++  if (!setNonBlocking(pair.readSocket) ||
++      !setNonBlocking(pair.writeSocket)) {
++    closeSocket(pair.readSocket);
++    closeSocket(pair.writeSocket);
++    pair.readSocket = INVALID_SOCKET_FD;
++    pair.writeSocket = INVALID_SOCKET_FD;
++    return false;
++  }
++
++#ifndef __MINGW32__
++  util::make_fd_cloexec(pair.readSocket);
++  util::make_fd_cloexec(pair.writeSocket);
++#endif
++  return true;
++}
++
++void closeWakePair(WakePair& pair)
++{
++  closeSocket(pair.readSocket);
++  closeSocket(pair.writeSocket);
++  pair.readSocket = INVALID_SOCKET_FD;
++  pair.writeSocket = INVALID_SOCKET_FD;
++}
++
++void drainSocket(sock_t socket)
++{
++  if (socket == INVALID_SOCKET_FD) {
++    return;
++  }
++  char buffer[128];
++  for (;;) {
++    int result = recv(socket, buffer, sizeof(buffer), 0);
++    if (result > 0) {
++      continue;
++    }
++    if (result == 0) {
++      return;
++    }
++    const int error = socketError();
++#ifdef __MINGW32__
++    if (error == WSAEINTR) {
++      continue;
++    }
++    if (error == WSAEWOULDBLOCK) {
++      return;
++    }
++#else
++    if (error == EINTR) {
++      continue;
++    }
++    if (error == EAGAIN || error == EWOULDBLOCK) {
++      return;
++    }
++#endif
++    return;
++  }
++}
++
++void notifySocket(sock_t socket)
++{
++  if (socket == INVALID_SOCKET_FD) {
++    return;
++  }
++  const char notification = 1;
++  int flags = 0;
++#ifdef MSG_NOSIGNAL
++  flags |= MSG_NOSIGNAL;
++#endif
++  for (;;) {
++    int result = send(socket, &notification, 1, flags);
++    if (result >= 0) {
++      return;
++    }
++    const int error = socketError();
++#ifdef __MINGW32__
++    if (error == WSAEINTR) {
++      continue;
++    }
++#else
++    if (error == EINTR) {
++      continue;
++    }
++#endif
++    // A full non-blocking socket already has a notification waiting.  Any
++    // other failure means the owning resolver has gone away, so there is no
++    // event-loop consumer left to wake.
++    return;
++  }
++}
++
++using ResolutionResult = NativeAsyncResolver::ResolutionResult;
++
++struct QueryKey {
++  const NativeAsyncResolver::Backend* backend;
++  std::string hostname;
++  int family;
++
++  bool operator<(const QueryKey& rhs) const
++  {
++    if (backend != rhs.backend) {
++      return std::less<const NativeAsyncResolver::Backend*>()(backend,
++                                                               rhs.backend);
++    }
++    if (hostname != rhs.hostname) {
++      return hostname < rhs.hostname;
++    }
++    return family < rhs.family;
++  }
++};
++
++std::string normalizeHostname(const std::string& hostname)
++{
++  std::string normalized = hostname;
++  for (char& c : normalized) {
++    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
++  }
++  return normalized;
++}
++
++struct ResolverState {
++  ResolverState()
++      : generation(0),
++        pending(false),
++        ready(false),
++        deadline(std::chrono::steady_clock::time_point::max())
++  {
++  }
++
++  std::mutex mutex;
++  uint64_t generation;
++  bool pending;
++  bool ready;
++  std::chrono::steady_clock::time_point deadline;
++  ResolutionResult result;
++};
++
++struct Subscriber {
++  std::weak_ptr<ResolverState> state;
++  uint64_t generation;
++  std::chrono::steady_clock::time_point deadline;
++};
++
++struct Job {
++  Job(const QueryKey& queryKey,
++      const std::shared_ptr<NativeAsyncResolver::Backend>& resolverBackend)
++      : key(queryKey), backend(resolverBackend), started(false)
++  {
++  }
++
++  QueryKey key;
++  std::shared_ptr<NativeAsyncResolver::Backend> backend;
++  bool started;
++  std::vector<Subscriber> subscribers;
++};
++
++struct ResolverPoolState {
++  ResolverPoolState()
++  {
++    if (!createWakePair(wakePair)) {
++      throw std::runtime_error("creating native resolver wake socket failed");
++    }
++  }
++
++  ~ResolverPoolState() { closeWakePair(wakePair); }
++
++  std::mutex mutex;
++  std::condition_variable condition;
++  std::condition_variable stoppedCondition;
++  bool stopping = false;
++  size_t workersAlive = 0;
++  std::deque<std::shared_ptr<Job>> pending;
++  std::map<QueryKey, std::shared_ptr<Job>> jobs;
++  size_t pendingSubscribers = 0;
++  WakePair wakePair;
++};
++
++class SystemResolverBackend : public NativeAsyncResolver::Backend {
++public:
++  ResolutionResult resolve(const std::string& hostname, int family) override
++  {
++    ResolutionResult result;
++    addrinfo* addresses = nullptr;
++    const int status = callGetaddrinfo(
++        &addresses, hostname.c_str(), nullptr, family, SOCK_STREAM, 0, 0);
++    if (status != 0) {
++      result.error = gai_strerror(status);
++      return result;
++    }
++
++    std::unique_ptr<addrinfo, decltype(&freeaddrinfo)> deleter(addresses,
++                                                                freeaddrinfo);
++    for (addrinfo* address = addresses; address; address = address->ai_next) {
++      char numericAddress[NI_MAXHOST];
++      const int nameStatus = getnameinfo(
++          address->ai_addr, address->ai_addrlen, numericAddress,
++          sizeof(numericAddress), nullptr, 0, NI_NUMERICHOST);
++      if (nameStatus == 0) {
++        result.addresses.emplace_back(numericAddress);
++      }
++    }
++    if (result.addresses.empty()) {
++      result.error = "no address returned or address conversion failed";
++    }
++    return result;
++  }
++};
++
++std::shared_ptr<NativeAsyncResolver::Backend> defaultBackend()
++{
++  static const std::shared_ptr<NativeAsyncResolver::Backend> backend =
++      std::make_shared<SystemResolverBackend>();
++  return backend;
++}
++
++/*
++ * Kept as a separate helper so the worker loop has no system resolver logic
++ * and an injected backend follows exactly the same completion path.
++ */
++ResolutionResult resolveWithBackend(
++    const std::shared_ptr<NativeAsyncResolver::Backend>& backend,
++    const QueryKey& key)
++{
++  try {
++    return backend->resolve(key.hostname, key.family);
++  }
++  catch (...) {
++    ResolutionResult result;
++    result.error = "native resolver backend failure";
++    return result;
++  }
++}
++
++class ResolverPool {
++public:
++  static std::shared_ptr<ResolverPool> acquire()
++  {
++    static std::mutex mutex;
++    // Keep one pool for the lifetime of the process.  In particular, do not
++    // create a replacement pool while an old worker is still inside a
++    // non-cancellable getaddrinfo() call; that would defeat the eight-worker
++    // bound during shutdown/restart races.
++    static std::shared_ptr<ResolverPool> pool;
++    std::lock_guard<std::mutex> lock(mutex);
++    if (!pool) {
++      pool = std::shared_ptr<ResolverPool>(new ResolverPool());
++    }
++    return pool;
++  }
++
++  ~ResolverPool()
++  {
++    {
++      std::lock_guard<std::mutex> lock(state_->mutex);
++      state_->stopping = true;
++      state_->pending.clear();
++      state_->jobs.clear();
++      state_->pendingSubscribers = 0;
++    }
++    state_->condition.notify_all();
++
++    bool stopped;
++    {
++      std::unique_lock<std::mutex> lock(state_->mutex);
++      stopped = state_->stoppedCondition.wait_for(
++          lock, std::chrono::seconds(1),
++          [this]() { return state_->workersAlive == 0; });
++    }
++    for (auto& worker : workers_) {
++      if (worker.joinable()) {
++        if (stopped) {
++          worker.join();
++        }
++        else {
++          // getaddrinfo() has no portable cancellation API.  The worker only
++          // captures ResolverPoolState, so detaching it after the bounded
++          // drain cannot leave it dereferencing this object.
++          worker.detach();
++        }
++      }
++    }
++  }
++
++  bool submit(const std::shared_ptr<ResolverState>& resolver,
++              const std::shared_ptr<NativeAsyncResolver::Backend>& backend,
++              uint64_t generation, const QueryKey& key,
++              std::chrono::steady_clock::time_point deadline)
++  {
++    std::lock_guard<std::mutex> lock(state_->mutex);
++    if (state_->stopping || state_->pendingSubscribers >=
++                               NativeAsyncResolver::MAX_PENDING_SUBSCRIBERS) {
++      return false;
++    }
++    auto itr = state_->jobs.find(key);
++    if (itr != state_->jobs.end()) {
++      itr->second->subscribers.push_back({resolver, generation, deadline});
++      ++state_->pendingSubscribers;
++      return true;
++    }
++    if (state_->jobs.size() >= NativeAsyncResolver::MAX_PENDING_JOBS) {
++      return false;
++    }
++    auto job = std::make_shared<Job>(key, backend);
++    job->subscribers.push_back({resolver, generation, deadline});
++    ++state_->pendingSubscribers;
++    state_->pending.push_back(job);
++    state_->jobs.emplace(key, job);
++    state_->condition.notify_one();
++    return true;
++  }
++
++  void cancel(const std::shared_ptr<ResolverState>& resolver,
++              uint64_t generation)
++  {
++    std::lock_guard<std::mutex> lock(state_->mutex);
++    for (auto itr = state_->jobs.begin(); itr != state_->jobs.end();) {
++      auto& subscribers = itr->second->subscribers;
++      const size_t subscriberCount = subscribers.size();
++      subscribers.erase(
++          std::remove_if(subscribers.begin(), subscribers.end(),
++                         [&resolver, generation](const Subscriber& subscriber) {
++                           auto state = subscriber.state.lock();
++                           return state && state.get() == resolver.get() &&
++                                  subscriber.generation == generation;
++                         }),
++          subscribers.end());
++      state_->pendingSubscribers -=
++          subscriberCount - subscribers.size();
++      if (subscribers.empty()) {
++        if (!itr->second->started) {
++          const auto abandoned = itr->second;
++          state_->pending.erase(
++              std::remove(state_->pending.begin(), state_->pending.end(),
++                          abandoned),
++              state_->pending.end());
++        }
++        // A started getaddrinfo() cannot be cancelled portably, but a later
++        // request must not coalesce with work whose last owner has gone away.
++        // Detach the old job from the key; complete() will discard its result.
++        itr = state_->jobs.erase(itr);
++      }
++      else {
++        ++itr;
++      }
++    }
++  }
++
++  sock_t getSocket() const { return state_->wakePair.readSocket; }
++
++  void notify() const { notifySocket(state_->wakePair.writeSocket); }
++
++private:
++  ResolverPool() : state_(std::make_shared<ResolverPoolState>())
++  {
++    for (size_t i = 0; i < NativeAsyncResolver::WORKER_COUNT; ++i) {
++      {
++        std::lock_guard<std::mutex> lock(state_->mutex);
++        ++state_->workersAlive;
++      }
++      try {
++        auto state = state_;
++        workers_.emplace_back([state]() { workerMain(state); });
++      }
++      catch (...) {
++        {
++          std::lock_guard<std::mutex> lock(state_->mutex);
++          --state_->workersAlive;
++          state_->stopping = true;
++        }
++        state_->condition.notify_all();
++        for (auto& worker : workers_) {
++          if (worker.joinable()) {
++            worker.join();
++          }
++        }
++        throw;
++      }
++    }
++  }
++
++  static void workerMain(const std::shared_ptr<ResolverPoolState>& state)
++  {
++    for (;;) {
++      std::shared_ptr<Job> job;
++      {
++        std::unique_lock<std::mutex> lock(state->mutex);
++        state->condition.wait(lock, [&state]() {
++          return state->stopping || !state->pending.empty();
++        });
++        if (state->stopping) {
++          break;
++        }
++        job = state->pending.front();
++        state->pending.pop_front();
++        auto itr = state->jobs.find(job->key);
++        if (itr == state->jobs.end() || itr->second.get() != job.get()) {
++          continue;
++        }
++        job->started = true;
++      }
++
++      ResolutionResult result;
++      std::vector<Subscriber> abandonedSubscribers;
++      bool hasLiveSubscriber = false;
++      {
++        std::lock_guard<std::mutex> lock(state->mutex);
++        auto itr = state->jobs.find(job->key);
++        if (itr == state->jobs.end() || itr->second.get() != job.get()) {
++          continue;
++        }
++        const auto now = std::chrono::steady_clock::now();
++        for (const auto& subscriber : job->subscribers) {
++          if (subscriber.state.expired() || now >= subscriber.deadline) {
++            continue;
++          }
++          hasLiveSubscriber = true;
++          break;
++        }
++        if (!hasLiveSubscriber) {
++          // Detach an expired job while holding the same lock used by
++          // submit(). A new lookup must create fresh work instead of joining
++          // a job whose worker has already decided not to call getaddrinfo().
++          abandonedSubscribers = std::move(job->subscribers);
++          state->pendingSubscribers -= abandonedSubscribers.size();
++          state->jobs.erase(itr);
++        }
++      }
++      if (hasLiveSubscriber) {
++        result = resolveWithBackend(job->backend, job->key);
++      }
++      else {
++        result.error = "native resolver deadline exceeded";
++        deliver(state, abandonedSubscribers, std::move(result));
++        continue;
++      }
++
++      complete(state, job, std::move(result));
++    }
++
++    {
++      std::lock_guard<std::mutex> lock(state->mutex);
++      --state->workersAlive;
++    }
++    state->stoppedCondition.notify_all();
++  }
++
++  static void deliver(const std::shared_ptr<ResolverPoolState>& state,
++                      const std::vector<Subscriber>& subscribers,
++                      ResolutionResult result)
++  {
++    const auto now = std::chrono::steady_clock::now();
++    for (const auto& subscriber : subscribers) {
++      auto resolver = subscriber.state.lock();
++      if (!resolver) {
++        continue;
++      }
++      std::lock_guard<std::mutex> lock(resolver->mutex);
++      if (resolver->generation != subscriber.generation ||
++          !resolver->pending) {
++        continue;
++      }
++      if (now >= subscriber.deadline) {
++        resolver->result.addresses.clear();
++        resolver->result.error = "native resolver deadline exceeded";
++      }
++      else {
++        resolver->result = result;
++      }
++      resolver->pending = false;
++      resolver->ready = true;
++      notifySocket(state->wakePair.writeSocket);
++    }
++  }
++
++  static void complete(const std::shared_ptr<ResolverPoolState>& state,
++                       const std::shared_ptr<Job>& job,
++                       ResolutionResult result)
++  {
++    std::vector<Subscriber> subscribers;
++    {
++      std::lock_guard<std::mutex> lock(state->mutex);
++      auto itr = state->jobs.find(job->key);
++      if (itr == state->jobs.end() || itr->second.get() != job.get()) {
++        return;
++      }
++      subscribers = std::move(job->subscribers);
++      state->pendingSubscribers -= subscribers.size();
++      state->jobs.erase(itr);
++    }
++    deliver(state, subscribers, std::move(result));
++  }
++
++  std::shared_ptr<ResolverPoolState> state_;
++  std::vector<std::thread> workers_;
++};
++
++} // namespace
++
++struct NativeAsyncResolver::Impl {
++  explicit Impl(int family, const std::shared_ptr<Backend>& resolverBackend)
++      : pool(ResolverPool::acquire()),
++        state(std::make_shared<ResolverState>()),
++        family(family),
++        backend(resolverBackend ? resolverBackend : defaultBackend())
++  {
++  }
++
++  std::shared_ptr<ResolverPool> pool;
++  std::shared_ptr<ResolverState> state;
++  int family;
++  std::shared_ptr<Backend> backend;
++};
++
++NativeAsyncResolver::NativeAsyncResolver(
++    int family, const std::shared_ptr<Backend>& backend)
++    : impl_(make_unique<Impl>(family, backend)),
++      status_(STATUS_READY),
++      family_(family)
++{
++}
++
++NativeAsyncResolver::~NativeAsyncResolver() { cancel(); }
++
++void NativeAsyncResolver::resolve(
++    const std::string& name, std::chrono::steady_clock::time_point deadline)
++{
++  cancel();
++  hostname_ = name;
++  resolvedAddresses_.clear();
++  error_.clear();
++  status_ = STATUS_QUERYING;
++
++  uint64_t generation;
++  {
++    std::lock_guard<std::mutex> lock(impl_->state->mutex);
++    generation = ++impl_->state->generation;
++    impl_->state->pending = true;
++    impl_->state->ready = false;
++    impl_->state->deadline = deadline;
++    impl_->state->result = ResolutionResult();
++  }
++
++  QueryKey key{impl_->backend.get(), normalizeHostname(name), family_};
++  if (!impl_->pool->submit(impl_->state, impl_->backend, generation, key,
++                           deadline)) {
++    std::lock_guard<std::mutex> lock(impl_->state->mutex);
++    impl_->state->result.error = "native resolver queue is full";
++    impl_->state->pending = false;
++    impl_->state->ready = true;
++    impl_->pool->notify();
++  }
++}
++
++void NativeAsyncResolver::cancel()
++{
++  if (!impl_) {
++    return;
++  }
++  uint64_t generation;
++  {
++    std::lock_guard<std::mutex> lock(impl_->state->mutex);
++    generation = impl_->state->generation++;
++    impl_->state->pending = false;
++    impl_->state->ready = false;
++    impl_->state->deadline = std::chrono::steady_clock::time_point::max();
++  }
++  impl_->pool->cancel(impl_->state, generation);
++  status_ = STATUS_READY;
++}
++
++void NativeAsyncResolver::reset()
++{
++  cancel();
++  hostname_.clear();
++  resolvedAddresses_.clear();
++  error_.clear();
++  status_ = STATUS_READY;
++}
++
++sock_t NativeAsyncResolver::getSocket() const
++{
++  return impl_->pool->getSocket();
++}
++
++void NativeAsyncResolver::process(sock_t readfd, sock_t /*writefd*/)
++{
++  if (readfd != INVALID_SOCKET_FD && readfd != getSocket()) {
++    return;
++  }
++  drainSocket(getSocket());
++
++  uint64_t expiredGeneration = 0;
++  bool expired = false;
++  {
++    std::lock_guard<std::mutex> lock(impl_->state->mutex);
++    if (impl_->state->pending &&
++        std::chrono::steady_clock::now() >= impl_->state->deadline) {
++      expiredGeneration = impl_->state->generation++;
++      impl_->state->pending = false;
++      impl_->state->ready = true;
++      impl_->state->result.addresses.clear();
++      impl_->state->result.error = "native resolver deadline exceeded";
++      expired = true;
++    }
++  }
++  if (expired) {
++    impl_->pool->cancel(impl_->state, expiredGeneration);
++  }
++
++  ResolutionResult result;
++  bool ready = false;
++  {
++    std::lock_guard<std::mutex> lock(impl_->state->mutex);
++    if (impl_->state->ready) {
++      result = impl_->state->result;
++      impl_->state->ready = false;
++      ready = true;
++    }
++  }
++  if (!ready) {
++    return;
++  }
++  if (result.addresses.empty()) {
++    error_ = result.error;
++    status_ = STATUS_ERROR;
++  }
++  else {
++    resolvedAddresses_ = std::move(result.addresses);
++    error_.clear();
++    status_ = STATUS_SUCCESS;
++  }
++}
++
++} // namespace aria2
+diff --git a/src/NativeAsyncResolver.h b/src/NativeAsyncResolver.h
+new file mode 100644
+index 00000000..67ddf872
+--- /dev/null
++++ b/src/NativeAsyncResolver.h
+@@ -0,0 +1,140 @@
++/* <!-- copyright */
++/*
++ * aria2 - The high speed download utility
++ *
++ * Copyright (C) 2006 Tatsuhiro Tsujikawa
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ *
++ * In addition, as a special exception, the copyright holders give
++ * permission to link the code of portions of this program with the
++ * OpenSSL library under certain conditions as described in each
++ * individual source file, and distribute linked combinations
++ * including the two.
++ * You must obey the GNU General Public License in all respects
++ * for all of the code used other than OpenSSL.  If you modify
++ * file(s) with this exception, you may extend this exception to
++ * your version of the file(s), but you are not obligated to do so.
++ * If you do not wish to do so, delete this exception statement from
++ * your version.  If you delete this exception statement from all
++ * source files in the program, then also delete it here.
++ */
++/* copyright --> */
++#ifndef D_NATIVE_ASYNC_RESOLVER_H
++#define D_NATIVE_ASYNC_RESOLVER_H
++
++#include "common.h"
++
++#include <chrono>
++#include <memory>
++#include <string>
++#include <vector>
++
++#include "a2netcompat.h"
++
++namespace aria2 {
++
++/**
++ * Asynchronous resolver backed by the operating system's getaddrinfo().
++ *
++ * The resolver owns a small socket pair.  Worker threads publish completion
++ * by writing to the pair, allowing every EventPoll implementation to receive
++ * completion on its normal event-loop thread.  Results are deliberately not
++ * cached: a later attempt must observe the resolver state selected by the
++ * operating system (including a changed VPN/TUN route).
++ */
++class NativeAsyncResolver {
++public:
++  enum STATUS {
++    STATUS_READY,
++    STATUS_QUERYING,
++    STATUS_SUCCESS,
++    STATUS_ERROR,
++  };
++
++  static const size_t WORKER_COUNT = 8;
++  static const size_t MAX_PENDING_JOBS = 1024;
++  static const size_t MAX_PENDING_SUBSCRIBERS = 1024;
++
++  struct ResolutionResult {
++    std::vector<std::string> addresses;
++    std::string error;
++  };
++
++  /**
++   * Resolver backends run only on the bounded worker pool.  The default
++   * backend calls the operating system's getaddrinfo().  The interface is
++   * also used by tests to make stalled resolution and completion fencing
++   * deterministic without depending on the host's DNS configuration.
++   */
++  class Backend {
++  public:
++    virtual ~Backend() = default;
++
++    virtual ResolutionResult resolve(const std::string& hostname,
++                                     int family) = 0;
++  };
++
++  explicit NativeAsyncResolver(
++      int family, const std::shared_ptr<Backend>& backend = nullptr);
++  ~NativeAsyncResolver();
++
++  NativeAsyncResolver(const NativeAsyncResolver&) = delete;
++  NativeAsyncResolver& operator=(const NativeAsyncResolver&) = delete;
++
++  /** Start a query with a deadline on the shared resolver pool. */
++  void resolve(const std::string& name,
++               std::chrono::steady_clock::time_point deadline);
++
++  /** Invalidate the current query without waiting for getaddrinfo(). */
++  void cancel();
++
++  /** Reset the resolver to STATUS_READY and discard pending notifications. */
++  void reset();
++
++  STATUS getStatus() const { return status_; }
++
++  const std::vector<std::string>& getResolvedAddresses() const
++  {
++    return resolvedAddresses_;
++  }
++
++  const std::string& getError() const { return error_; }
++
++  const std::string& getHostname() const { return hostname_; }
++
++  /** Returns the read side used to wake the EventPoll implementation. */
++  sock_t getSocket() const;
++
++  /** Process a readable completion notification on the event-loop thread. */
++  void process(sock_t readfd, sock_t writefd);
++
++  static size_t workerCount() { return WORKER_COUNT; }
++  static size_t maxPendingJobs() { return MAX_PENDING_JOBS; }
++  static size_t maxPendingSubscribers() { return MAX_PENDING_SUBSCRIBERS; }
++
++private:
++  struct Impl;
++  std::unique_ptr<Impl> impl_;
++
++  STATUS status_;
++  int family_;
++  std::vector<std::string> resolvedAddresses_;
++  std::string error_;
++  std::string hostname_;
++};
++
++} // namespace aria2
++
++#endif // D_NATIVE_ASYNC_RESOLVER_H
+diff --git a/src/NetworkTargetPolicy.cc b/src/NetworkTargetPolicy.cc
+new file mode 100644
+index 00000000..6f060b3e
+--- /dev/null
++++ b/src/NetworkTargetPolicy.cc
+@@ -0,0 +1,369 @@
++/* <!-- copyright */
++/*
++ * aria2 - The high speed download utility
++ *
++ * Copyright (C) 2006 Tatsuhiro Tsujikawa
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ */
++/* copyright --> */
++#include "NetworkTargetPolicy.h"
++
++#include <algorithm>
++#include <cctype>
++#include <cstring>
++#include <limits>
++#include <vector>
++
++#include "FeatureConfig.h"
++#include "Option.h"
++#include "SocketCore.h"
++#include "prefs.h"
++#include "uri.h"
++
++namespace aria2 {
++namespace network {
++
++namespace {
++
++void setReason(std::string* reason, const char* value)
++{
++  if (reason) {
++    *reason = value;
++  }
++}
++
++std::string normalizeHost(const std::string& host)
++{
++  std::string normalized = host;
++  while (!normalized.empty() && normalized.back() == '.') {
++    normalized.pop_back();
++  }
++  for (char& c : normalized) {
++    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
++  }
++  return normalized;
++}
++
++bool isLocalName(const std::string& host)
++{
++  if (host == "localhost" || host == "local" || host == "broadcasthost" ||
++      host == "localhost.localdomain" || host == "localhost6" ||
++      host == "localhost6.localdomain6" || host == "ip6-localhost" ||
++      host == "ip6-loopback" || host == "ip6-allnodes" ||
++      host == "ip6-allrouters") {
++    return true;
++  }
++  return host.size() >= 10 &&
++         host.compare(host.size() - 10, 10, ".localhost") == 0;
++}
++
++bool isLocalDomain(const std::string& host)
++{
++  return host.size() >= 6 && host.compare(host.size() - 6, 6, ".local") == 0;
++}
++
++bool isIPv4Special(const in_addr& address)
++{
++  const uint32_t value = ntohl(address.s_addr);
++  const auto inCidr = [value](uint32_t network, uint32_t mask) {
++    return (value & mask) == network;
++  };
++
++  // Match Firelink's literal local/private policy. Documentation and other
++  // globally routed special-purpose ranges are not local targets and remain
++  // usable; hostname answers are never inspected here.
++  return inCidr(0x00000000u, 0xff000000u) ||
++         inCidr(0x0a000000u, 0xff000000u) ||
++         inCidr(0x64400000u, 0xffc00000u) ||
++         inCidr(0x7f000000u, 0xff000000u) ||
++         inCidr(0xa9fe0000u, 0xffff0000u) ||
++         inCidr(0xac100000u, 0xfff00000u) ||
++         inCidr(0xc0a80000u, 0xffff0000u) ||
++         inCidr(0xe0000000u, 0xf0000000u) ||
++         value == 0xffffffffu;
++}
++
++bool allBytesZero(const unsigned char* address)
++{
++  for (size_t i = 0; i < 16; ++i) {
++    if (address[i] != 0) {
++      return false;
++    }
++  }
++  return true;
++}
++
++bool isIPv6Special(const in6_addr& address)
++{
++  const unsigned char* bytes = address.s6_addr;
++  if (allBytesZero(bytes) ||
++      (bytes[0] == 0 && bytes[1] == 0 && bytes[2] == 0 && bytes[3] == 0 &&
++       bytes[4] == 0 && bytes[5] == 0 && bytes[6] == 0 && bytes[7] == 0 &&
++       bytes[8] == 0 && bytes[9] == 0 && bytes[10] == 0 && bytes[11] == 0 &&
++       bytes[12] == 0 && bytes[13] == 0 && bytes[14] == 0 && bytes[15] == 1) ||
++      (bytes[0] & 0xfeu) == 0xfcu ||
++      (bytes[0] == 0xfeu && (bytes[1] & 0xc0u) == 0x80u) ||
++      (bytes[0] == 0xfeu && (bytes[1] & 0xc0u) == 0xc0u) ||
++      bytes[0] == 0xffu) {
++    return true;
++  }
++
++  const bool zero96 = std::all_of(bytes, bytes + 12,
++                                  [](unsigned char byte) { return byte == 0; });
++  const bool mapped =
++      std::all_of(bytes, bytes + 10,
++                  [](unsigned char byte) { return byte == 0; }) &&
++      bytes[10] == 0xffu && bytes[11] == 0xffu;
++  if (zero96 || mapped) {
++    in_addr embedded;
++    std::memcpy(&embedded, bytes + 12, sizeof(embedded));
++    return isIPv4Special(embedded);
++  }
++  return false;
++}
++
++bool validCredential(const std::string& credential)
++{
++  for (unsigned char c : credential) {
++    if (c < 0x20u || c == 0x7fu) {
++      return false;
++    }
++  }
++  return true;
++}
++
++bool parseLegacyIPv4Number(const std::string& component, uint32_t* value)
++{
++  if (component.empty()) {
++    return false;
++  }
++  size_t offset = 0;
++  unsigned int base = 10;
++  if (component.size() > 2 && component[0] == '0' &&
++      (component[1] == 'x' || component[1] == 'X')) {
++    base = 16;
++    offset = 2;
++  }
++  else if (component.size() > 1 && component[0] == '0') {
++    base = 8;
++    offset = 1;
++  }
++  if (offset == component.size()) {
++    return false;
++  }
++
++  uint64_t parsed = 0;
++  for (; offset < component.size(); ++offset) {
++    const unsigned char character = component[offset];
++    unsigned int digit;
++    if (character >= '0' && character <= '9') {
++      digit = character - '0';
++    }
++    else if (character >= 'a' && character <= 'f') {
++      digit = character - 'a' + 10;
++    }
++    else if (character >= 'A' && character <= 'F') {
++      digit = character - 'A' + 10;
++    }
++    else {
++      return false;
++    }
++    if (digit >= base || parsed >
++                             (std::numeric_limits<uint32_t>::max() - digit) /
++                                 base) {
++      return false;
++    }
++    parsed = parsed * base + digit;
++  }
++  *value = static_cast<uint32_t>(parsed);
++  return true;
++}
++
++bool parseLegacyIPv4(const std::string& host, in_addr* address)
++{
++  std::vector<uint32_t> parts;
++  size_t begin = 0;
++  for (;;) {
++    const size_t end = host.find('.', begin);
++    uint32_t value;
++    if (!parseLegacyIPv4Number(
++            host.substr(begin, end == std::string::npos ? end : end - begin),
++            &value)) {
++      return false;
++    }
++    parts.push_back(value);
++    if (end == std::string::npos) {
++      break;
++    }
++    if (parts.size() == 4) {
++      return false;
++    }
++    begin = end + 1;
++  }
++
++  uint32_t value;
++  switch (parts.size()) {
++  case 1:
++    value = parts[0];
++    break;
++  case 2:
++    if (parts[0] > 0xffu || parts[1] > 0xffffffu) {
++      return false;
++    }
++    value = (parts[0] << 24) | parts[1];
++    break;
++  case 3:
++    if (parts[0] > 0xffu || parts[1] > 0xffu || parts[2] > 0xffffu) {
++      return false;
++    }
++    value = (parts[0] << 24) | (parts[1] << 16) | parts[2];
++    break;
++  case 4:
++    if (std::any_of(parts.begin(), parts.end(),
++                    [](uint32_t part) { return part > 0xffu; })) {
++      return false;
++    }
++    value = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) |
++            parts[3];
++    break;
++  default:
++    return false;
++  }
++  address->s_addr = htonl(value);
++  return true;
++}
++
++} // namespace
++
++bool isFirelinkPolicy(const std::string& value)
++{
++  return value == "firelink-v1";
++}
++
++bool validateHost(const std::string& host, std::string* reason)
++{
++  if (host.empty()) {
++    setReason(reason, "destination host is empty");
++    return false;
++  }
++  for (unsigned char c : host) {
++    if (c < 0x21u || c == 0x7fu) {
++      setReason(reason, "destination host contains control characters");
++      return false;
++    }
++  }
++
++  const std::string normalized = normalizeHost(host);
++  if (normalized.empty()) {
++    setReason(reason, "destination host is empty");
++    return false;
++  }
++  if (isLocalName(normalized) || isLocalDomain(normalized)) {
++    setReason(reason, "localhost or local domain is not allowed");
++    return false;
++  }
++
++  // A scoped IPv6 literal is interface-local and is not a DNS hostname.
++  // Reject it before numeric parsing so platform-specific getaddrinfo
++  // extensions cannot turn it into an unclassified literal.
++  if (normalized.find('%') != std::string::npos) {
++    setReason(reason, "scoped IP literal is not allowed");
++    return false;
++  }
++
++  unsigned char binaryAddress[16] = {};
++  std::string numericHost = normalized;
++  bool bracketed = false;
++  if (numericHost.front() == '[' || numericHost.back() == ']') {
++    if (numericHost.size() < 2 || numericHost.front() != '[' ||
++        numericHost.back() != ']') {
++      setReason(reason, "malformed bracketed destination host");
++      return false;
++    }
++    bracketed = true;
++    numericHost = numericHost.substr(1, numericHost.size() - 2);
++    if (numericHost.empty()) {
++      setReason(reason, "destination host is empty");
++      return false;
++    }
++  }
++
++  // inet_pton-style helpers are not required to preserve inet_aton base
++  // rules. Classify legacy numeric spellings first so octal and hexadecimal
++  // loopback forms cannot be reinterpreted as unrelated decimal addresses.
++  in_addr legacyAddress;
++  if (parseLegacyIPv4(numericHost, &legacyAddress)) {
++    if (isIPv4Special(legacyAddress)) {
++      setReason(reason, "local or private IPv4 address is not allowed");
++      return false;
++    }
++    return true;
++  }
++
++  // Parse the normalized form so trailing-dot spellings of numeric literals
++  // cannot bypass the literal-address policy.
++  const size_t length = net::getBinAddr(binaryAddress, numericHost);
++  if (length == sizeof(in_addr)) {
++    in_addr address;
++    std::memcpy(&address, binaryAddress, sizeof(address));
++    if (isIPv4Special(address)) {
++      setReason(reason, "local or private IPv4 address is not allowed");
++      return false;
++    }
++    return true;
++  }
++  if (length == sizeof(in6_addr)) {
++    in6_addr address;
++    std::memcpy(&address, binaryAddress, sizeof(address));
++    if (isIPv6Special(address)) {
++      setReason(reason, "local or private IPv6 address is not allowed");
++      return false;
++    }
++    return true;
++  }
++
++  if (bracketed) {
++    setReason(reason, "bracketed destination host is not an IP literal");
++    return false;
++  }
++
++  // A hostname is intentionally not resolved here.  This branch also keeps
++  // private-looking DNS answers usable through a TUN or proxy route.
++  return true;
++}
++
++bool validateUri(const std::string& value, std::string* reason)
++{
++  uri::UriStruct parsed;
++  if (!uri::parse(parsed, value)) {
++    setReason(reason, "invalid download URI");
++    return false;
++  }
++  if (parsed.protocol != "http" && parsed.protocol != "https" &&
++      parsed.protocol != "ftp" && parsed.protocol != "sftp") {
++    setReason(reason, "unsupported download URI scheme");
++    return false;
++  }
++  if (parsed.host.empty()) {
++    setReason(reason, "download URI has no destination host");
++    return false;
++  }
++  if (!validCredential(parsed.username) || !validCredential(parsed.password)) {
++    setReason(reason, "download URI credentials contain control characters");
++    return false;
++  }
++  return validateHost(parsed.host, reason);
++}
++
++bool isFirelinkPolicyEnabled(const Option* option)
++{
++  return option && option->defined(PREF_NETWORK_TARGET_POLICY) &&
++         isFirelinkPolicy(option->get(PREF_NETWORK_TARGET_POLICY));
++}
++
++} // namespace network
++} // namespace aria2
+diff --git a/src/NetworkTargetPolicy.h b/src/NetworkTargetPolicy.h
+new file mode 100644
+index 00000000..bbabe9e6
+--- /dev/null
++++ b/src/NetworkTargetPolicy.h
+@@ -0,0 +1,43 @@
++/* <!-- copyright */
++/*
++ * aria2 - The high speed download utility
++ *
++ * Copyright (C) 2006 Tatsuhiro Tsujikawa
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ */
++/* copyright --> */
++#ifndef D_NETWORK_TARGET_POLICY_H
++#define D_NETWORK_TARGET_POLICY_H
++
++#include <string>
++
++namespace aria2 {
++
++class Option;
++
++namespace network {
++
++/** Returns true when |value| selects the versioned Firelink policy. */
++bool isFirelinkPolicy(const std::string& value);
++
++/** Returns true only when the supplied runtime option explicitly enables it. */
++bool isFirelinkPolicyEnabled(const Option* option);
++
++/**
++ * Validate a network destination without resolving hostnames.  Hostnames are
++ * deliberately accepted based on their spelling; their answers belong to the
++ * selected OS/proxy/TUN route and are not inspected here.
++ */
++bool validateHost(const std::string& host, std::string* reason = nullptr);
++
++/** Validate a supported download URI and its destination host. */
++bool validateUri(const std::string& value, std::string* reason = nullptr);
++
++} // namespace network
++} // namespace aria2
++
++#endif // D_NETWORK_TARGET_POLICY_H
+diff --git a/src/OptionHandlerFactory.cc b/src/OptionHandlerFactory.cc
+index 2cd2c43e..ef146ff6 100644
+--- a/src/OptionHandlerFactory.cc
++++ b/src/OptionHandlerFactory.cc
+@@ -99,0 +100,25 @@ std::vector<OptionHandler*> OptionHandlerFactory::createOptionHandlers()
++    handlers.push_back(op);
++  }
++  {
++    OptionHandler* op(new ParameterOptionHandler(
++        PREF_DNS_RESOLVER, TEXT_DNS_RESOLVER, V_NATIVE_ASYNC,
++#  ifdef HAVE_LIBCARES
++        {V_NATIVE_ASYNC, V_CARES}
++#  else
++        {V_NATIVE_ASYNC}
++#  endif
++        ));
++    op->addTag(TAG_ADVANCED);
++    op->setInitialOption(true);
++    op->setChangeGlobalOption(true);
++    op->setChangeOptionForReserved(true);
++    handlers.push_back(op);
++  }
++  {
++    OptionHandler* op(new ParameterOptionHandler(
++        PREF_NETWORK_TARGET_POLICY, TEXT_NETWORK_TARGET_POLICY, V_FIRELINK_V1,
++        {V_NONE, V_FIRELINK_V1}));
++    op->addTag(TAG_ADVANCED);
++    op->setInitialOption(true);
++    op->setChangeGlobalOption(true);
++    op->setChangeOptionForReserved(true);
+diff --git a/src/PeerInitiateConnectionCommand.cc b/src/PeerInitiateConnectionCommand.cc
+index af8206a4..f0f9d19e 100644
+--- a/src/PeerInitiateConnectionCommand.cc
++++ b/src/PeerInitiateConnectionCommand.cc
+@@ -39,0 +40 @@
++#include "DlRetryEx.h"
+@@ -52,0 +54 @@
++#include "NetworkTargetPolicy.h"
+@@ -76,0 +79,7 @@ bool PeerInitiateConnectionCommand::executeInternal()
++  if (network::isFirelinkPolicyEnabled(getDownloadEngine()->getOption())) {
++    std::string reason;
++    if (!network::validateHost(getPeer()->getIPAddress(), &reason)) {
++      throw DL_RETRY_EX(fmt("BitTorrent peer target rejected by policy: %s",
++                            reason.c_str()));
++    }
++  }
+diff --git a/src/Platform.cc b/src/Platform.cc
+index 9f3ddb25..76943701 100644
+--- a/src/Platform.cc
++++ b/src/Platform.cc
+@@ -56 +56 @@
+-#ifdef ENABLE_ASYNC_DNS
++#ifdef HAVE_LIBCARES
+@@ -58 +58 @@
+-#endif // ENABLE_ASYNC_DNS
++#endif // HAVE_LIBCARES
+diff --git a/src/Request.cc b/src/Request.cc
+index 9fea2224..16e4cec8 100644
+--- a/src/Request.cc
++++ b/src/Request.cc
+@@ -36,0 +37 @@
++#include <algorithm>
+@@ -64,0 +66 @@ Request::Request()
++      routeResolvedPort_(0),
+@@ -86,0 +89 @@ bool Request::setUri(const std::string& uri)
++  clearRouteResolvedAddresses();
+@@ -93,0 +97 @@ bool Request::resetUri()
++  clearRouteResolvedAddresses();
+@@ -105,0 +110 @@ bool Request::redirectUri(const std::string& uri)
++  clearRouteResolvedAddresses();
+@@ -201,0 +207,57 @@ void Request::setConnectedAddrInfo(const std::string& hostname,
++void Request::setRouteResolvedAddresses(
++    const std::string& hostname, uint16_t port,
++    const std::vector<std::string>& addresses)
++{
++  routeResolvedHostname_ = hostname;
++  routeResolvedPort_ = port;
++  routeResolvedAddresses_.clear();
++  for (const auto& address : addresses) {
++    if (std::find(routeResolvedAddresses_.begin(),
++                  routeResolvedAddresses_.end(),
++                  address) == routeResolvedAddresses_.end()) {
++      routeResolvedAddresses_.push_back(address);
++    }
++  }
++}
++
++bool Request::getRouteResolvedAddresses(
++    const std::string& hostname, uint16_t port,
++    std::vector<std::string>& addresses) const
++{
++  if (routeResolvedHostname_ != hostname || routeResolvedPort_ != port ||
++      routeResolvedAddresses_.empty()) {
++    return false;
++  }
++  addresses.insert(addresses.end(), routeResolvedAddresses_.begin(),
++                   routeResolvedAddresses_.end());
++  return true;
++}
++
++bool Request::markRouteResolvedAddressBad(const std::string& hostname,
++                                          const std::string& addr,
++                                          uint16_t port)
++{
++  if (routeResolvedHostname_ != hostname || routeResolvedPort_ != port) {
++    return false;
++  }
++
++  auto i = std::find(routeResolvedAddresses_.begin(),
++                     routeResolvedAddresses_.end(), addr);
++  if (i == routeResolvedAddresses_.end()) {
++    return false;
++  }
++  routeResolvedAddresses_.erase(i);
++  if (routeResolvedAddresses_.empty()) {
++    clearRouteResolvedAddresses();
++    return false;
++  }
++  return true;
++}
++
++void Request::clearRouteResolvedAddresses()
++{
++  routeResolvedHostname_.clear();
++  routeResolvedPort_ = 0;
++  routeResolvedAddresses_.clear();
++}
++
+diff --git a/src/Request.h b/src/Request.h
+index cd28efb4..43388d12 100644
+--- a/src/Request.h
++++ b/src/Request.h
+@@ -40,0 +41 @@
++#include <vector>
+@@ -61,0 +63,8 @@ private:
++  // Addresses resolved for the current route-aware connection attempt.
++  // Unlike DNSCache, this state belongs to one Request and is discarded
++  // when the attempt succeeds, is retried, or changes URI. This preserves
++  // address failover without pinning a hostname to an old TUN/proxy route.
++  std::string routeResolvedHostname_;
++  uint16_t routeResolvedPort_;
++  std::vector<std::string> routeResolvedAddresses_;
++
+@@ -161,0 +171,14 @@ public:
++  void setRouteResolvedAddresses(
++      const std::string& hostname, uint16_t port,
++      const std::vector<std::string>& addresses);
++
++  bool getRouteResolvedAddresses(const std::string& hostname, uint16_t port,
++                                 std::vector<std::string>& addresses) const;
++
++  // Removes a failed address from the current route-aware attempt. Returns
++  // true if another address remains available for the same endpoint.
++  bool markRouteResolvedAddressBad(const std::string& hostname,
++                                   const std::string& addr, uint16_t port);
++
++  void clearRouteResolvedAddresses();
++
+diff --git a/src/RequestGroup.cc b/src/RequestGroup.cc
+index fd6801fc..44826793 100644
+--- a/src/RequestGroup.cc
++++ b/src/RequestGroup.cc
+@@ -383,0 +384 @@ void RequestGroup::createInitialCommand(
++          command->setMessageDispatcher(data.messageDispatcher.get());
+@@ -394,0 +396 @@ void RequestGroup::createInitialCommand(
++          command->setMessageDispatcher(data.messageDispatcher.get());
+diff --git a/src/RpcMethodImpl.cc b/src/RpcMethodImpl.cc
+index c2249202..e9983c9c 100644
+--- a/src/RpcMethodImpl.cc
++++ b/src/RpcMethodImpl.cc
+@@ -80,0 +81,4 @@
++#include "FileAllocationMan.h"
++#include "FileAllocationEntry.h"
++#include "FirelinkCapabilities.h"
++#include "NetworkTargetPolicy.h"
+@@ -129,0 +134,11 @@ const char KEY_ENABLED_FEATURES[] = "enabledFeatures";
++const char KEY_FIRELINK_REVISION[] = "firelinkRevision";
++const char KEY_FIRELINK_DNS_RESOLVER[] = "firelinkDnsResolver";
++const char KEY_FIRELINK_DNS_RESOLVERS[] = "firelinkDnsResolvers";
++const char KEY_FIRELINK_NETWORK_TARGET_POLICY[] =
++    "firelinkNetworkTargetPolicy";
++const char KEY_FIRELINK_NETWORK_TARGET_POLICIES[] =
++    "firelinkNetworkTargetPolicies";
++const char KEY_FIRELINK_NETWORK_TARGET_POLICY_DIGEST[] =
++    "firelinkNetworkTargetPolicyDigest";
++const char KEY_FIRELINK_NETWORK_TARGET_POLICY_ENFORCED[] =
++    "firelinkNetworkTargetPolicyEnforced";
+@@ -791,0 +807,9 @@ void gatherProgress(Dict* entryDict, const std::shared_ptr<RequestGroup>& group,
++  if (requested_key(keys, "fileAllocationPending")) {
++    const auto matches = [&group](const FileAllocationEntry& entry) {
++      return entry.getRequestGroup() == group.get();
++    };
++    const auto& manager = e->getFileAllocationMan();
++    const bool pending = manager &&
++        (manager->isPicked(matches) || manager->isQueued(matches));
++    entryDict->put("fileAllocationPending", pending ? Bool::gTrue() : Bool::gFalse());
++  }
+@@ -823,0 +848,3 @@ void gatherStoppedDownload(Dict* entryDict,
++  if (requested_key(keys, "fileAllocationPending")) {
++    entryDict->put("fileAllocationPending", Bool::gFalse());
++  }
+@@ -1169,0 +1197,57 @@ std::unique_ptr<ValueBase> GetVersionRpcMethod::process(const RpcRequest& req,
++
++  const auto& option = e->getOption();
++  std::string selectedResolver = "disabled";
++  if (option && option->defined(PREF_ASYNC_DNS) &&
++      option->getAsBool(PREF_ASYNC_DNS)) {
++    const std::string configuredResolver =
++        option->defined(PREF_DNS_RESOLVER)
++            ? option->get(PREF_DNS_RESOLVER)
++            : firelink::DNS_RESOLVER;
++    if (configuredResolver == V_CARES) {
++#ifdef HAVE_LIBCARES
++      selectedResolver = V_CARES;
++#else
++      selectedResolver = "unavailable";
++#endif // HAVE_LIBCARES
++    }
++    else if (configuredResolver == V_NATIVE_ASYNC) {
++      selectedResolver = V_NATIVE_ASYNC;
++    }
++    else {
++      selectedResolver = "unsupported";
++    }
++  }
++  auto resolverCapabilities = List::g();
++  resolverCapabilities->append(V_NATIVE_ASYNC);
++#ifdef HAVE_LIBCARES
++  resolverCapabilities->append(V_CARES);
++#endif // HAVE_LIBCARES
++
++  std::string selectedPolicy = V_NONE;
++  if (option && option->defined(PREF_NETWORK_TARGET_POLICY)) {
++    const std::string& configuredPolicy =
++        option->get(PREF_NETWORK_TARGET_POLICY);
++    if (configuredPolicy == V_NONE ||
++        network::isFirelinkPolicy(configuredPolicy)) {
++      selectedPolicy = configuredPolicy;
++    }
++    else {
++      selectedPolicy = "unsupported";
++    }
++  }
++  auto policyCapabilities = List::g();
++  policyCapabilities->append(V_NONE);
++  policyCapabilities->append(V_FIRELINK_V1);
++
++  result->put("firelinkAllocationTelemetry", Bool::gTrue());
++  result->put(KEY_FIRELINK_REVISION, firelink::REVISION);
++  result->put(KEY_FIRELINK_DNS_RESOLVER, selectedResolver);
++  result->put(KEY_FIRELINK_DNS_RESOLVERS, std::move(resolverCapabilities));
++  result->put(KEY_FIRELINK_NETWORK_TARGET_POLICY, selectedPolicy);
++  result->put(KEY_FIRELINK_NETWORK_TARGET_POLICIES,
++              std::move(policyCapabilities));
++  result->put(KEY_FIRELINK_NETWORK_TARGET_POLICY_DIGEST,
++              firelink::NETWORK_TARGET_POLICY_DIGEST);
++  result->put(KEY_FIRELINK_NETWORK_TARGET_POLICY_ENFORCED,
++              network::isFirelinkPolicy(selectedPolicy) ? Bool::gTrue()
++                                                         : Bool::gFalse());
+diff --git a/src/UDPTrackerClient.cc b/src/UDPTrackerClient.cc
+index 2adae9e1..25b5d522 100644
+--- a/src/UDPTrackerClient.cc
++++ b/src/UDPTrackerClient.cc
+@@ -116 +116,3 @@ struct CollectAddrPortMatch {
+-    if (req->remoteAddr == remoteAddr && req->remotePort == remotePort) {
++    if ((req->remoteAddr == remoteAddr && req->remotePort == remotePort) ||
++        (!altRemoteAddr.empty() && req->remoteAddr == altRemoteAddr &&
++         req->remotePort == altRemotePort)) {
+@@ -126,0 +129,2 @@ struct CollectAddrPortMatch {
++  std::string altRemoteAddr;
++  uint16_t altRemotePort;
+@@ -128,2 +132,8 @@ struct CollectAddrPortMatch {
+-                       std::string remoteAddr, uint16_t remotePort)
+-      : dest(dest), remoteAddr(std::move(remoteAddr)), remotePort(remotePort)
++                       std::string remoteAddr, uint16_t remotePort,
++                       std::string altRemoteAddr = "",
++                       uint16_t altRemotePort = 0)
++      : dest(dest),
++        remoteAddr(std::move(remoteAddr)),
++        remotePort(remotePort),
++        altRemoteAddr(std::move(altRemoteAddr)),
++        altRemotePort(altRemotePort)
+@@ -161,0 +172,5 @@ int UDPTrackerClient::receiveReply(std::shared_ptr<UDPTrackerRequest>& recvReq,
++    const std::string originalAddr = req->remoteAddr;
++    const uint16_t originalPort = req->remotePort;
++    if (originalAddr != remoteAddr || originalPort != remotePort) {
++      connectionIdCache_[std::make_pair(originalAddr, originalPort)] = c;
++    }
+@@ -166,2 +181,4 @@ int UDPTrackerClient::receiveReply(std::shared_ptr<UDPTrackerRequest>& recvReq,
+-        std::remove_if(connectRequests_.begin(), connectRequests_.end(),
+-                       CollectAddrPortMatch(reqs, remoteAddr, remotePort)),
++        std::remove_if(
++            connectRequests_.begin(), connectRequests_.end(),
++            CollectAddrPortMatch(reqs, remoteAddr, remotePort, originalAddr,
++                                 originalPort)),
+@@ -384 +401 @@ struct TimeoutCheck {
+-      if (t >= 5_s) {
++      if (t >= 3_s) {
+@@ -412 +429 @@ struct TimeoutCheck {
+-      if (t >= 10_s) {
++      if (t >= 5_s) {
+@@ -478 +495 @@ UDPTrackerClient::findInflightRequest(const std::string& remoteAddr,
+-      break;
++      return res;
+@@ -480,0 +498,35 @@ UDPTrackerClient::findInflightRequest(const std::string& remoteAddr,
++
++  // Fallback for TUN / Fake-IP / NAT translated replies: match by unique transactionId
++  // Prefer matching port + transactionId first
++  for (auto i = inflightRequests_.begin(), eoi = inflightRequests_.end();
++       i != eoi; ++i) {
++    if ((*i)->remotePort == remotePort &&
++        (*i)->transactionId == transactionId) {
++      A2_LOG_INFO(fmt("UDPT matched inflight request by transactionId=%08x and port=%u "
++                      "across address translation (expected %s:%u, got %s:%u)",
++                      transactionId, remotePort, (*i)->remoteAddr.c_str(),
++                      (*i)->remotePort, remoteAddr.c_str(), remotePort));
++      res = *i;
++      if (remove) {
++        inflightRequests_.erase(i);
++      }
++      return res;
++    }
++  }
++
++  // Fallback to matching transactionId alone if port was also rewritten
++  for (auto i = inflightRequests_.begin(), eoi = inflightRequests_.end();
++       i != eoi; ++i) {
++    if ((*i)->transactionId == transactionId) {
++      A2_LOG_INFO(fmt("UDPT matched inflight request by transactionId=%08x "
++                      "across address translation (expected %s:%u, got %s:%u)",
++                      transactionId, (*i)->remoteAddr.c_str(),
++                      (*i)->remotePort, remoteAddr.c_str(), remotePort));
++      res = *i;
++      if (remove) {
++        inflightRequests_.erase(i);
++      }
++      return res;
++    }
++  }
++
+diff --git a/src/download_helper.cc b/src/download_helper.cc
+index 6118aa14..58d99e8d 100644
+--- a/src/download_helper.cc
++++ b/src/download_helper.cc
+@@ -49,0 +50 @@
++#include "error_code.h"
+@@ -62,0 +64 @@
++#include "NetworkTargetPolicy.h"
+@@ -65,0 +68 @@
++#include "uri.h"
+@@ -461,0 +465,8 @@ namespace {
++bool hasNetworkSchemePrefix(const std::string& value)
++{
++  return util::istartsWith(value, "http:") ||
++         util::istartsWith(value, "https:") ||
++         util::istartsWith(value, "ftp:") ||
++         util::istartsWith(value, "sftp:");
++}
++
+@@ -485,0 +497,30 @@ void createRequestGroupForUri(
++
++  if (network::isFirelinkPolicyEnabled(option.get())) {
++    std::vector<std::string> accepted;
++    accepted.reserve(nargs.size());
++    for (const auto& value : nargs) {
++      uri::UriStruct parsed;
++      const bool parsedUri = uri::parse(parsed, value);
++      // Magnet links and local torrent/metalink paths are handled by their
++      // dedicated parsers.  Parsed network URIs are checked before entering
++      // a RequestGroup and checked again at connection time after redirects.
++      if (!parsedUri && !hasNetworkSchemePrefix(value)) {
++        accepted.push_back(value);
++        continue;
++      }
++      std::string reason;
++      if (parsedUri && network::validateUri(value, &reason)) {
++        accepted.push_back(value);
++        continue;
++      }
++      if (reason.empty()) {
++        reason = "invalid download URI";
++      }
++      if (throwOnError) {
++        throw DL_ABORT_EX2(fmt("Network target rejected: %s", reason.c_str()),
++                           error_code::NAME_RESOLVE_ERROR);
++      }
++      A2_LOG_ERROR(fmt("Network target rejected: %s", reason.c_str()));
++    }
++    nargs.swap(accepted);
++  }
+diff --git a/src/prefs.cc b/src/prefs.cc
+index 2591b9f0..f113a2eb 100644
+--- a/src/prefs.cc
++++ b/src/prefs.cc
+@@ -152,0 +153,3 @@ const std::string V_FTP("ftp");
++const std::string V_NATIVE_ASYNC("native-async");
++const std::string V_CARES("c-ares");
++const std::string V_FIRELINK_V1("firelink-v1");
+@@ -246,0 +250,4 @@ PrefPtr PREF_ASYNC_DNS = makePref("async-dns");
++// value: native-async | c-ares
++PrefPtr PREF_DNS_RESOLVER = makePref("dns-resolver");
++// value: none | firelink-v1
++PrefPtr PREF_NETWORK_TARGET_POLICY = makePref("network-target-policy");
+diff --git a/src/prefs.h b/src/prefs.h
+index 338fd6e6..e2d29193 100644
+--- a/src/prefs.h
++++ b/src/prefs.h
+@@ -109,0 +110,3 @@ extern const std::string V_FTP;
++extern const std::string V_NATIVE_ASYNC;
++extern const std::string V_CARES;
++extern const std::string V_FIRELINK_V1;
+@@ -199,0 +203,4 @@ extern PrefPtr PREF_ASYNC_DNS;
++// value: native-async | c-ares
++extern PrefPtr PREF_DNS_RESOLVER;
++// value: none | firelink-v1
++extern PrefPtr PREF_NETWORK_TARGET_POLICY;
+diff --git a/src/usage_text.h b/src/usage_text.h
+index 48684565..f8837ffb 100644
+--- a/src/usage_text.h
++++ b/src/usage_text.h
+@@ -453,0 +454,6 @@
++#define TEXT_DNS_RESOLVER                                      \
++  _(" --dns-resolver=MODE         Select asynchronous DNS resolver (native-async\n" \
++    "                              or c-ares).")
++#define TEXT_NETWORK_TARGET_POLICY                             \
++  _(" --network-target-policy=POLICY Select network target policy (none or\n" \
++    "                              firelink-v1).")
+diff --git a/test/AllTest.cc b/test/AllTest.cc
+index f869e55c..517de998 100644
+--- a/test/AllTest.cc
++++ b/test/AllTest.cc
+@@ -50 +50,5 @@ int main(int argc, char* argv[])
+-  bool successfull = runner.run();
++  std::string testPath = "";
++  if (argc > 1) {
++    testPath = argv[1];
++  }
++  bool successfull = runner.run(testPath);
+diff --git a/test/AsyncNameResolverTest.cc b/test/AsyncNameResolverTest.cc
+index 0c793bc8..c7a9cc37 100644
+--- a/test/AsyncNameResolverTest.cc
++++ b/test/AsyncNameResolverTest.cc
+@@ -2,0 +3,2 @@
++#include <chrono>
++#include <condition_variable>
+@@ -3,0 +6,4 @@
++#include <mutex>
++#include <string>
++#include <thread>
++#include <vector>
+@@ -7,0 +14,4 @@
++#include "Option.h"
++#include "OptionHandler.h"
++#include "OptionParser.h"
++#include "prefs.h"
+@@ -14,0 +25,5 @@ class AsyncNameResolverTest : public CppUnit::TestFixture {
++  CPPUNIT_TEST(testNativeResolver);
++  CPPUNIT_TEST(testNativeResolverCancellation);
++  CPPUNIT_TEST(testNativeResolverWorkerBoundAndDeadline);
++  CPPUNIT_TEST(testNativeResolverCoalescing);
++  CPPUNIT_TEST(testResolverOption);
+@@ -22,0 +38,5 @@ public:
++  void testNativeResolver();
++  void testNativeResolverCancellation();
++  void testNativeResolverWorkerBoundAndDeadline();
++  void testNativeResolverCoalescing();
++  void testResolverOption();
+@@ -52,0 +73,297 @@ void AsyncNameResolverTest::testParseAsyncDNSServers()
++namespace {
++bool waitForNativeResolver(NativeAsyncResolver& resolver)
++{
++  const auto deadline =
++      std::chrono::steady_clock::now() + std::chrono::seconds(5);
++  while (resolver.getStatus() == NativeAsyncResolver::STATUS_QUERYING) {
++    const auto now = std::chrono::steady_clock::now();
++    if (now >= deadline) {
++      return false;
++    }
++
++    fd_set rfds;
++    FD_ZERO(&rfds);
++    const sock_t socket = resolver.getSocket();
++    FD_SET(socket, &rfds);
++    auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(
++        deadline - now);
++    timeval timeout;
++    timeout.tv_sec = static_cast<long>(remaining.count() / 1000000);
++    timeout.tv_usec = static_cast<long>(remaining.count() % 1000000);
++#ifdef __MINGW32__
++    const int nfds = 0;
++#else
++    const int nfds = static_cast<int>(socket) + 1;
++#endif // __MINGW32__
++    const int rv = select(nfds, &rfds, nullptr, nullptr, &timeout);
++    if (rv < 0) {
++      continue;
++    }
++    if (rv > 0 && FD_ISSET(socket, &rfds)) {
++      resolver.process(socket, static_cast<sock_t>(-1));
++    }
++  }
++  return true;
++}
++
++class BlockingResolverBackend : public NativeAsyncResolver::Backend {
++public:
++  NativeAsyncResolver::ResolutionResult resolve(const std::string&, int) override
++  {
++    std::unique_lock<std::mutex> lock(mutex_);
++    ++started_;
++    ++active_;
++    if (active_ > maxActive_) {
++      maxActive_ = active_;
++    }
++    condition_.notify_all();
++    condition_.wait(lock, [this]() { return released_; });
++    --active_;
++    condition_.notify_all();
++
++    NativeAsyncResolver::ResolutionResult result;
++    result.addresses.push_back("198.51.100.7");
++    return result;
++  }
++
++  bool waitForStarted(size_t count, std::chrono::milliseconds timeout)
++  {
++    std::unique_lock<std::mutex> lock(mutex_);
++    return condition_.wait_for(lock, timeout,
++                               [this, count]() { return started_ >= count; });
++  }
++
++  void waitUntil(std::chrono::steady_clock::time_point deadline)
++  {
++    std::unique_lock<std::mutex> lock(mutex_);
++    condition_.wait_until(lock, deadline);
++  }
++
++  void release()
++  {
++    std::lock_guard<std::mutex> lock(mutex_);
++    released_ = true;
++    condition_.notify_all();
++  }
++
++  size_t started() const
++  {
++    std::lock_guard<std::mutex> lock(mutex_);
++    return started_;
++  }
++
++  size_t maxActive() const
++  {
++    std::lock_guard<std::mutex> lock(mutex_);
++    return maxActive_;
++  }
++
++private:
++  mutable std::mutex mutex_;
++  std::condition_variable condition_;
++  size_t started_ = 0;
++  size_t active_ = 0;
++  size_t maxActive_ = 0;
++  bool released_ = false;
++};
++
++bool waitForNativeResolvers(
++    const std::vector<NativeAsyncResolver*>& resolvers,
++    std::chrono::milliseconds timeout)
++{
++  const auto deadline = std::chrono::steady_clock::now() + timeout;
++  for (;;) {
++    bool complete = true;
++    fd_set rfds;
++    FD_ZERO(&rfds);
++    sock_t maxSocket = static_cast<sock_t>(-1);
++    for (auto resolver : resolvers) {
++      if (resolver->getStatus() == NativeAsyncResolver::STATUS_QUERYING) {
++        complete = false;
++        const sock_t socket = resolver->getSocket();
++        FD_SET(socket, &rfds);
++        if (socket > maxSocket) {
++          maxSocket = socket;
++        }
++      }
++    }
++    if (complete) {
++      return true;
++    }
++    const auto now = std::chrono::steady_clock::now();
++    if (now >= deadline) {
++      return false;
++    }
++    const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(
++        deadline - now);
++    timeval wait;
++    wait.tv_sec = static_cast<long>(remaining.count() / 1000000);
++    wait.tv_usec = static_cast<long>(remaining.count() % 1000000);
++#ifdef __MINGW32__
++    const int nfds = 0;
++#else
++    const int nfds = static_cast<int>(maxSocket) + 1;
++#endif // __MINGW32__
++    const int rv = select(nfds, &rfds, nullptr, nullptr, &wait);
++    if (rv < 0) {
++      continue;
++    }
++    if (rv == 0) {
++      return false;
++    }
++    for (auto resolver : resolvers) {
++      const sock_t socket = resolver->getSocket();
++      if (FD_ISSET(socket, &rfds)) {
++        resolver->process(socket, static_cast<sock_t>(-1));
++      }
++    }
++  }
++}
++} // namespace
++
++void AsyncNameResolverTest::testNativeResolver()
++{
++  NativeAsyncResolver resolver(AF_INET);
++  CPPUNIT_ASSERT_EQUAL((size_t)8, NativeAsyncResolver::workerCount());
++  CPPUNIT_ASSERT_EQUAL((size_t)1024, NativeAsyncResolver::maxPendingJobs());
++
++  resolver.resolve("localhost",
++                   std::chrono::steady_clock::now() + std::chrono::seconds(5));
++  CPPUNIT_ASSERT(waitForNativeResolver(resolver));
++  CPPUNIT_ASSERT_EQUAL(NativeAsyncResolver::STATUS_SUCCESS,
++                       resolver.getStatus());
++  CPPUNIT_ASSERT(!resolver.getResolvedAddresses().empty());
++}
++
++void AsyncNameResolverTest::testNativeResolverCancellation()
++{
++  NativeAsyncResolver resolver(AF_INET);
++  resolver.resolve("localhost",
++                   std::chrono::steady_clock::now() + std::chrono::seconds(5));
++  resolver.cancel();
++  CPPUNIT_ASSERT_EQUAL(NativeAsyncResolver::STATUS_READY,
++                       resolver.getStatus());
++  CPPUNIT_ASSERT(resolver.getResolvedAddresses().empty());
++
++  resolver.resolve("LOCALHOST",
++                   std::chrono::steady_clock::now() + std::chrono::seconds(5));
++  CPPUNIT_ASSERT(waitForNativeResolver(resolver));
++  CPPUNIT_ASSERT_EQUAL(NativeAsyncResolver::STATUS_SUCCESS,
++                       resolver.getStatus());
++}
++
++void AsyncNameResolverTest::testNativeResolverWorkerBoundAndDeadline()
++{
++  auto backend = std::make_shared<BlockingResolverBackend>();
++  std::vector<std::unique_ptr<NativeAsyncResolver>> owned;
++  std::vector<NativeAsyncResolver*> resolvers;
++  owned.reserve(10);
++  resolvers.reserve(10);
++
++  const auto firstDeadline =
++      std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
++  for (size_t i = 0; i < 9; ++i) {
++    owned.emplace_back(
++        std::unique_ptr<NativeAsyncResolver>(
++            new NativeAsyncResolver(AF_INET, backend)));
++    resolvers.push_back(owned.back().get());
++    const auto deadline = i == 0
++                              ? firstDeadline
++                              : std::chrono::steady_clock::now() +
++                                    std::chrono::seconds(5);
++    owned.back()->resolve("stalled-" + std::to_string(i) + ".example",
++                          deadline);
++  }
++
++  CPPUNIT_ASSERT(backend->waitForStarted(8, std::chrono::seconds(2)));
++  CPPUNIT_ASSERT_EQUAL((size_t)8, backend->maxActive());
++  CPPUNIT_ASSERT_EQUAL((size_t)8, backend->started());
++  CPPUNIT_ASSERT_EQUAL(NativeAsyncResolver::STATUS_QUERYING,
++                       owned.back()->getStatus());
++
++  backend->waitUntil(firstDeadline + std::chrono::milliseconds(20));
++  owned.front()->process(static_cast<sock_t>(-1), static_cast<sock_t>(-1));
++  CPPUNIT_ASSERT_EQUAL(NativeAsyncResolver::STATUS_ERROR,
++                       owned.front()->getStatus());
++  CPPUNIT_ASSERT_EQUAL(std::string("native resolver deadline exceeded"),
++                       owned.front()->getError());
++
++  // The expired request must release its coalescing key even though the
++  // underlying getaddrinfo() worker is still blocked.  A lookup after a route
++  // change owns fresh work and cannot adopt the stale result.
++  owned.emplace_back(std::unique_ptr<NativeAsyncResolver>(
++      new NativeAsyncResolver(AF_INET, backend)));
++  resolvers.push_back(owned.back().get());
++  owned.back()->resolve("stalled-0.example",
++                        std::chrono::steady_clock::now() +
++                            std::chrono::seconds(5));
++  backend->release();
++  CPPUNIT_ASSERT(waitForNativeResolvers(resolvers, std::chrono::seconds(5)));
++  CPPUNIT_ASSERT_EQUAL(NativeAsyncResolver::STATUS_ERROR,
++                       owned.front()->getStatus());
++  CPPUNIT_ASSERT_EQUAL((size_t)0,
++                       owned.front()->getResolvedAddresses().size());
++  CPPUNIT_ASSERT_EQUAL((size_t)10, backend->started());
++  CPPUNIT_ASSERT(backend->maxActive() <= NativeAsyncResolver::WORKER_COUNT);
++}
++
++void AsyncNameResolverTest::testNativeResolverCoalescing()
++{
++  auto backend = std::make_shared<BlockingResolverBackend>();
++  NativeAsyncResolver first(AF_INET, backend);
++  NativeAsyncResolver second(AF_INET, backend);
++  CPPUNIT_ASSERT_EQUAL(first.getSocket(), second.getSocket());
++  const auto deadline =
++      std::chrono::steady_clock::now() + std::chrono::seconds(5);
++  first.resolve("COALESCED.example", deadline);
++  second.resolve("coalesced.example", deadline);
++
++  CPPUNIT_ASSERT(backend->waitForStarted(1, std::chrono::seconds(2)));
++  backend->release();
++  std::vector<NativeAsyncResolver*> resolvers = {&first, &second};
++  CPPUNIT_ASSERT(waitForNativeResolvers(resolvers, std::chrono::seconds(5)));
++  CPPUNIT_ASSERT_EQUAL((size_t)1, backend->started());
++  CPPUNIT_ASSERT_EQUAL(NativeAsyncResolver::STATUS_SUCCESS,
++                       first.getStatus());
++  CPPUNIT_ASSERT_EQUAL(NativeAsyncResolver::STATUS_SUCCESS,
++                       second.getStatus());
++  CPPUNIT_ASSERT_EQUAL((size_t)1024,
++                       NativeAsyncResolver::maxPendingSubscribers());
++}
++
++void AsyncNameResolverTest::testResolverOption()
++{
++  const auto& optionParser = OptionParser::getInstance();
++  const OptionHandler* handler = optionParser->find(PREF_DNS_RESOLVER);
++  CPPUNIT_ASSERT(handler);
++  CPPUNIT_ASSERT_EQUAL(std::string("native-async"),
++                       handler->getDefaultValue());
++
++  Option option;
++  optionParser->parseDefaultValues(option);
++  CPPUNIT_ASSERT_EQUAL(V_NATIVE_ASYNC, option.get(PREF_DNS_RESOLVER));
++  const OptionHandler* policyHandler =
++      optionParser->find(PREF_NETWORK_TARGET_POLICY);
++  CPPUNIT_ASSERT(policyHandler);
++  CPPUNIT_ASSERT_EQUAL(std::string("firelink-v1"),
++                       policyHandler->getDefaultValue());
++  CPPUNIT_ASSERT_EQUAL(V_FIRELINK_V1,
++                       option.get(PREF_NETWORK_TARGET_POLICY));
++
++  KeyVals values;
++  values.emplace_back(PREF_DNS_RESOLVER->k, V_NATIVE_ASYNC);
++  optionParser->parse(option, values);
++  CPPUNIT_ASSERT_EQUAL(V_NATIVE_ASYNC, option.get(PREF_DNS_RESOLVER));
++
++#ifdef HAVE_LIBCARES
++  values.front().second = V_CARES;
++  optionParser->parse(option, values);
++  CPPUNIT_ASSERT_EQUAL(V_CARES, option.get(PREF_DNS_RESOLVER));
++#endif // HAVE_LIBCARES
++
++  values.front().first = PREF_NETWORK_TARGET_POLICY->k;
++  values.front().second = V_NONE;
++  optionParser->parse(option, values);
++  CPPUNIT_ASSERT_EQUAL(V_NONE, option.get(PREF_NETWORK_TARGET_POLICY));
++}
++
+diff --git a/test/DHTMessageDispatcherImplTest.cc b/test/DHTMessageDispatcherImplTest.cc
+new file mode 100644
+index 00000000..7b6f9da5
+--- /dev/null
++++ b/test/DHTMessageDispatcherImplTest.cc
+@@ -0,0 +1,69 @@
++#include "DHTMessageDispatcherImpl.h"
++
++#include <cppunit/extensions/HelperMacros.h>
++
++#include "DHTMessageTracker.h"
++#include "DHTMessageTrackerEntry.h"
++#include "DHTMessageEntry.h"
++#include "DHTMessageCallback.h"
++#include "DHTNode.h"
++#include "MockDHTMessage.h"
++
++namespace aria2 {
++
++namespace {
++class CountingDHTMessage : public MockDHTMessage {
++public:
++  CountingDHTMessage(const std::shared_ptr<DHTNode>& localNode,
++                     const std::shared_ptr<DHTNode>& remoteNode,
++                     size_t* sends)
++      : MockDHTMessage(localNode, remoteNode), sends_(sends)
++  {
++  }
++
++  bool send() CXX11_OVERRIDE
++  {
++    ++*sends_;
++    return true;
++  }
++
++private:
++  size_t* sends_;
++};
++} // namespace
++
++class DHTMessageDispatcherImplTest : public CppUnit::TestFixture {
++  CPPUNIT_TEST_SUITE(DHTMessageDispatcherImplTest);
++  CPPUNIT_TEST(testRouteOwnedPrivateBootstrapGrant);
++  CPPUNIT_TEST_SUITE_END();
++
++public:
++  void testRouteOwnedPrivateBootstrapGrant();
++};
++
++CPPUNIT_TEST_SUITE_REGISTRATION(DHTMessageDispatcherImplTest);
++
++void DHTMessageDispatcherImplTest::testRouteOwnedPrivateBootstrapGrant()
++{
++  auto tracker = std::make_shared<DHTMessageTracker>();
++  DHTMessageDispatcherImpl dispatcher(tracker, true);
++  auto localNode = std::make_shared<DHTNode>();
++  auto remoteNode = std::make_shared<DHTNode>();
++  remoteNode->setIPAddress("10.0.0.7");
++  remoteNode->setPort(6881);
++
++  size_t blockedSends = 0;
++  dispatcher.addMessageToQueue(make_unique<CountingDHTMessage>(
++      localNode, remoteNode, &blockedSends));
++  dispatcher.sendMessages();
++  CPPUNIT_ASSERT_EQUAL((size_t)0, blockedSends);
++
++  dispatcher.allowRouteOwnedAddress("10.0.0.7");
++  size_t allowedSends = 0;
++  dispatcher.addMessageToQueue(make_unique<CountingDHTMessage>(
++      localNode, remoteNode, &allowedSends));
++  dispatcher.sendMessages();
++  CPPUNIT_ASSERT_EQUAL((size_t)1, allowedSends);
++}
++
++} // namespace aria2
+diff --git a/test/DHTMessageTrackerEntryTest.cc b/test/DHTMessageTrackerEntryTest.cc
+index 9459f548..5c7760b5 100644
+--- a/test/DHTMessageTrackerEntryTest.cc
++++ b/test/DHTMessageTrackerEntryTest.cc
+@@ -52,0 +53,13 @@ void DHTMessageTrackerEntryTest::testMatch()
++
++    // Test translated IP match under TUN / Fake-IP / NAT rewrites
++    auto node3 = std::make_shared<DHTNode>();
++    node3->setIPAddress("198.18.0.5");
++    node3->setPort(6881);
++    auto msg3 = make_unique<MockDHTMessage>(localNode, node3);
++    DHTMessageTrackerEntry entryTun(msg3->getRemoteNode(),
++                                    msg3->getTransactionID(),
++                                    msg3->getMessageType(), 30_s);
++    // Response arrives from upstream real IP 185.125.190.1 on the same port with same transactionID
++    CPPUNIT_ASSERT(entryTun.match(msg3->getTransactionID(),
++                                  "185.125.190.1", 6881));
++    CPPUNIT_ASSERT_EQUAL(std::string("185.125.190.1"), node3->getIPAddress());
+diff --git a/test/DownloadHelperTest.cc b/test/DownloadHelperTest.cc
+index 6a8ab8d2..93ea148e 100644
+--- a/test/DownloadHelperTest.cc
++++ b/test/DownloadHelperTest.cc
+@@ -26,0 +27 @@ class DownloadHelperTest : public CppUnit::TestFixture {
++  CPPUNIT_TEST(testCreateRequestGroupForUriRejectsMalformedNetworkTarget);
+@@ -50,0 +52 @@ public:
++  void testCreateRequestGroupForUriRejectsMalformedNetworkTarget();
+@@ -133,0 +136,11 @@ void DownloadHelperTest::testCreateRequestGroupForUri()
++void DownloadHelperTest::testCreateRequestGroupForUriRejectsMalformedNetworkTarget()
++{
++  option_->put(PREF_NETWORK_TARGET_POLICY, V_FIRELINK_V1);
++  std::vector<std::shared_ptr<RequestGroup>> result;
++  const std::vector<std::string> uris{"https://[invalid"};
++  CPPUNIT_ASSERT_THROW(
++      createRequestGroupForUri(result, option_, uris, false, false, true),
++                       DlAbortEx);
++  CPPUNIT_ASSERT(result.empty());
++}
++
+diff --git a/test/Makefile.am b/test/Makefile.am
+index 49c6211f..664caa1f 100644
+--- a/test/Makefile.am
++++ b/test/Makefile.am
+@@ -172,0 +173 @@ aria2c_SOURCES += BtAllowedFastMessageTest.cc\
++	DHTMessageDispatcherImplTest.cc\
+@@ -233,0 +235 @@ aria2c_SOURCES += AsyncNameResolverTest.cc
++aria2c_SOURCES += NetworkTargetPolicyTest.cc
+diff --git a/test/NetworkTargetPolicyTest.cc b/test/NetworkTargetPolicyTest.cc
+new file mode 100644
+index 00000000..79939c3c
+--- /dev/null
++++ b/test/NetworkTargetPolicyTest.cc
+@@ -0,0 +1,148 @@
++#include "NetworkTargetPolicy.h"
++
++#include <cppunit/extensions/HelperMacros.h>
++
++#include "Request.h"
++
++namespace aria2 {
++namespace network {
++
++class NetworkTargetPolicyTest : public CppUnit::TestFixture {
++  CPPUNIT_TEST_SUITE(NetworkTargetPolicyTest);
++  CPPUNIT_TEST(testPolicyName);
++  CPPUNIT_TEST(testLocalNames);
++  CPPUNIT_TEST(testSpecialIpv4Literals);
++  CPPUNIT_TEST(testSpecialIpv6Literals);
++  CPPUNIT_TEST(testHostnamesAndGlobalLiterals);
++  CPPUNIT_TEST(testMalformedBracketedHosts);
++  CPPUNIT_TEST(testUriAndRedirectVectors);
++  CPPUNIT_TEST_SUITE_END();
++
++public:
++  void testPolicyName();
++  void testLocalNames();
++  void testSpecialIpv4Literals();
++  void testSpecialIpv6Literals();
++  void testHostnamesAndGlobalLiterals();
++  void testMalformedBracketedHosts();
++  void testUriAndRedirectVectors();
++};
++
++CPPUNIT_TEST_SUITE_REGISTRATION(NetworkTargetPolicyTest);
++
++namespace {
++void assertRejected(const std::string& value)
++{
++  std::string reason;
++  CPPUNIT_ASSERT_MESSAGE(value, !validateHost(value, &reason));
++  CPPUNIT_ASSERT(!reason.empty());
++}
++
++void assertAccepted(const std::string& value)
++{
++  std::string reason;
++  CPPUNIT_ASSERT_MESSAGE(reason, validateHost(value, &reason));
++}
++} // namespace
++
++void NetworkTargetPolicyTest::testPolicyName()
++{
++  CPPUNIT_ASSERT(isFirelinkPolicy("firelink-v1"));
++  CPPUNIT_ASSERT(!isFirelinkPolicy("none"));
++  CPPUNIT_ASSERT(!isFirelinkPolicy("firelink-v2"));
++}
++
++void NetworkTargetPolicyTest::testLocalNames()
++{
++  assertRejected("localhost");
++  assertRejected("LOCALHOST.");
++  assertRejected("localhost.localdomain");
++  assertRejected("localhost6");
++  assertRejected("ip6-loopback");
++  assertRejected("ip6-allnodes");
++  assertRejected("download.localhost");
++  assertRejected("printer.local");
++  assertRejected("broadcasthost");
++  assertRejected("local");
++  assertRejected("127.0.0.1.");
++  assertRejected("127.1");
++  assertRejected("2130706433");
++  assertRejected("0x7f000001");
++  assertRejected("0177.0.0.1");
++  assertRejected("0");
++  assertRejected("fe80::1%lo0");
++}
++
++void NetworkTargetPolicyTest::testSpecialIpv4Literals()
++{
++  const char* addresses[] = {
++      "0.0.0.0",       "0.0.0.1",       "10.0.0.1",      "100.64.0.1",
++      "127.0.0.1",
++      "169.254.1.1",   "172.16.0.1",    "192.168.1.1",   "224.0.0.1",
++      "255.255.255.255"};
++  for (const char* address : addresses) {
++    assertRejected(address);
++  }
++}
++
++void NetworkTargetPolicyTest::testMalformedBracketedHosts()
++{
++  assertRejected("[not-an-ip]");
++  assertRejected("[2001:db8::1");
++  assertRejected("2001:db8::1]");
++  assertRejected(".localhost");
++  assertRejected(".local");
++}
++
++void NetworkTargetPolicyTest::testSpecialIpv6Literals()
++{
++  const char* addresses[] = {
++      "::",                 "::1",              "::ffff:127.0.0.1",
++      "::ffff:192.168.1.1", "fc00::1",           "fe80::1",
++      "fec0::1",             "ff02::1"};
++  for (const char* address : addresses) {
++    assertRejected(address);
++  }
++}
++
++void NetworkTargetPolicyTest::testHostnamesAndGlobalLiterals()
++{
++  // This must not perform DNS or inspect a potentially synthetic/private
++  // answer supplied by the active OS, TUN, or proxy route.
++  assertAccepted("private-looking-host.example");
++  assertAccepted("service.internal");
++  assertAccepted("192.0.1.1");
++  assertAccepted("192.0.2.1");
++  assertAccepted("198.51.1.1");
++  assertAccepted("198.51.100.1");
++  assertAccepted("8.8.8.8");
++  assertAccepted("::ffff:8.8.8.8");
++  assertAccepted("::8.8.8.8");
++  assertAccepted("2001:db8::1");
++  assertAccepted("2001:4860:4860::8888");
++}
++
++void NetworkTargetPolicyTest::testUriAndRedirectVectors()
++{
++  std::string reason;
++  CPPUNIT_ASSERT(validateUri("https://user:password@service.example/file",
++                             &reason));
++  CPPUNIT_ASSERT(validateUri("ftp://service.example/file", &reason));
++  CPPUNIT_ASSERT(validateUri("sftp://service.example/file", &reason));
++  CPPUNIT_ASSERT(!validateUri("file://service.example/file", &reason));
++  CPPUNIT_ASSERT(!validateUri("https://127.0.0.1/file", &reason));
++  CPPUNIT_ASSERT(!validateUri("https://0.0.0.1/file", &reason));
++  CPPUNIT_ASSERT(!validateUri("https://[::ffff:127.0.0.1]/file", &reason));
++  CPPUNIT_ASSERT(!validateUri("https://[fe80::1%25lo0]/file", &reason));
++
++  CPPUNIT_ASSERT(validateUri("https://service.example/redirect", &reason));
++  CPPUNIT_ASSERT(!validateUri("https://localhost/redirect", &reason));
++
++  Request request;
++  CPPUNIT_ASSERT(request.setUri("https://service.example/start"));
++  CPPUNIT_ASSERT(request.redirectUri("https://127.0.0.1/private"));
++  CPPUNIT_ASSERT(!validateUri(request.getCurrentUri(), &reason));
++}
++
++} // namespace network
++} // namespace aria2
+diff --git a/test/RequestTest.cc b/test/RequestTest.cc
+index 24abf91f..f62a1557 100644
+--- a/test/RequestTest.cc
++++ b/test/RequestTest.cc
+@@ -27,0 +28 @@ class RequestTest : public CppUnit::TestFixture {
++  CPPUNIT_TEST(testRouteResolvedAddresses);
+@@ -43,0 +45 @@ public:
++  void testRouteResolvedAddresses();
+@@ -272,0 +275,39 @@ void RequestTest::testGetURIHost()
++void RequestTest::testRouteResolvedAddresses()
++{
++  Request req;
++  std::vector<std::string> resolved{"2001:db8::1", "198.51.100.1"};
++  std::vector<std::string> remaining;
++
++  req.setRouteResolvedAddresses("example.test", 443, resolved);
++  CPPUNIT_ASSERT(
++      req.getRouteResolvedAddresses("example.test", 443, remaining));
++  CPPUNIT_ASSERT(remaining == resolved);
++
++  remaining.clear();
++  CPPUNIT_ASSERT(!req.markRouteResolvedAddressBad("other.test", "2001:db8::1",
++                                                   443));
++  CPPUNIT_ASSERT(
++      req.getRouteResolvedAddresses("example.test", 443, remaining));
++  CPPUNIT_ASSERT(remaining == resolved);
++
++  remaining.clear();
++  CPPUNIT_ASSERT(
++      req.markRouteResolvedAddressBad("example.test", "2001:db8::1", 443));
++  CPPUNIT_ASSERT(
++      req.getRouteResolvedAddresses("example.test", 443, remaining));
++  CPPUNIT_ASSERT(remaining.size() == 1);
++  CPPUNIT_ASSERT_EQUAL(std::string("198.51.100.1"), remaining.front());
++
++  CPPUNIT_ASSERT(!req.markRouteResolvedAddressBad("example.test",
++                                                  "198.51.100.1", 443));
++  remaining.clear();
++  CPPUNIT_ASSERT(!req.getRouteResolvedAddresses("example.test", 443,
++                                                remaining));
++
++  req.setRouteResolvedAddresses("example.test", 443, resolved);
++  req.redirectUri("http://new.example.test/file");
++  remaining.clear();
++  CPPUNIT_ASSERT(!req.getRouteResolvedAddresses("example.test", 443,
++                                                remaining));
++}
++
+diff --git a/test/RpcMethodTest.cc b/test/RpcMethodTest.cc
+index 44bae5fe..d4dbd499 100644
+--- a/test/RpcMethodTest.cc
++++ b/test/RpcMethodTest.cc
+@@ -23,0 +24,3 @@
++#include "FirelinkCapabilities.h"
++#include "FileAllocationMan.h"
++#include "StreamFileAllocationEntry.h"
+@@ -64,0 +68 @@ class RpcMethodTest : public CppUnit::TestFixture {
++  CPPUNIT_TEST(testAllocationTelemetry);
+@@ -134,0 +139 @@ public:
++  void testAllocationTelemetry();
+@@ -780,0 +786,35 @@ void addTorrent(const std::string& torrentFile,
++void RpcMethodTest::testAllocationTelemetry()
++{
++  e_->setFileAllocationMan(make_unique<FileAllocationMan>());
++  addUri("http://1/", e_);
++  const auto group = getReservedGroup(e_->getRequestGroupMan().get(), 0);
++  group->setDownloadContext(std::make_shared<DownloadContext>(1024, 4096, A2_TEST_OUT_DIR "/allocation"));
++  group->initPieceStorage();
++  auto read = [&](bool requestKey) {
++    TellStatusRpcMethod method;
++    auto req = createReq(TellStatusRpcMethod::getMethodName());
++    req.params->append(GroupId::toHex(group->getGID()));
++    auto keys = List::g();
++    keys->append(requestKey ? "fileAllocationPending" : "gid");
++    req.params->append(std::move(keys));
++    return method.execute(std::move(req), e_.get());
++  };
++  auto pending = [&]() {
++    auto result = read(true);
++    CPPUNIT_ASSERT_EQUAL(0, result.code);
++    const auto value = downcast<Bool>(downcast<Dict>(result.param)->get("fileAllocationPending"));
++    CPPUNIT_ASSERT(value);
++    return value->val();
++  };
++  CPPUNIT_ASSERT(!pending());
++  auto& manager = e_->getFileAllocationMan();
++  manager->pushEntry(make_unique<StreamFileAllocationEntry>(group.get()));
++  CPPUNIT_ASSERT(pending());
++  manager->pickNext();
++  CPPUNIT_ASSERT(pending());
++  auto filtered = read(false);
++  CPPUNIT_ASSERT(!downcast<Dict>(filtered.param)->get("fileAllocationPending"));
++  manager->dropPickedEntry();
++  CPPUNIT_ASSERT(!pending());
++}
++
+@@ -905,0 +946,3 @@ void RpcMethodTest::testGetVersion()
++  e_->getOption()->put(PREF_ASYNC_DNS, A2_V_TRUE);
++  e_->getOption()->put(PREF_DNS_RESOLVER, V_NATIVE_ASYNC);
++  e_->getOption()->put(PREF_NETWORK_TARGET_POLICY, V_FIRELINK_V1);
+@@ -912,0 +956,26 @@ void RpcMethodTest::testGetVersion()
++  CPPUNIT_ASSERT_EQUAL(std::string(firelink::REVISION),
++                       getString(resParams, "firelinkRevision"));
++  CPPUNIT_ASSERT_EQUAL(std::string("native-async"),
++                       getString(resParams, "firelinkDnsResolver"));
++  CPPUNIT_ASSERT_EQUAL(std::string("firelink-v1"),
++                       getString(resParams, "firelinkNetworkTargetPolicy"));
++  CPPUNIT_ASSERT_EQUAL(std::string(firelink::NETWORK_TARGET_POLICY_DIGEST),
++                       getString(resParams,
++                                 "firelinkNetworkTargetPolicyDigest"));
++  CPPUNIT_ASSERT(downcast<Bool>(
++                     resParams->get("firelinkNetworkTargetPolicyEnforced"))
++                     ->val());
++  const List* resolverCapabilities =
++      downcast<List>(resParams->get("firelinkDnsResolvers"));
++  CPPUNIT_ASSERT(resolverCapabilities);
++  CPPUNIT_ASSERT_EQUAL((size_t)1 +
++#ifdef HAVE_LIBCARES
++                           1,
++#else
++                           0,
++#endif // HAVE_LIBCARES
++                       resolverCapabilities->size());
++  const List* policyCapabilities =
++      downcast<List>(resParams->get("firelinkNetworkTargetPolicies"));
++  CPPUNIT_ASSERT(policyCapabilities);
++  CPPUNIT_ASSERT_EQUAL((size_t)2, policyCapabilities->size());
+@@ -942,0 +1012 @@ void RpcMethodTest::testGatherStoppedDownload()
++  CPPUNIT_ASSERT(!downcast<Bool>(entry->get("fileAllocationPending"))->val());
+diff --git a/test/UDPTrackerClientTest.cc b/test/UDPTrackerClientTest.cc
+index fc2f34e6..472defab 100644
+--- a/test/UDPTrackerClientTest.cc
++++ b/test/UDPTrackerClientTest.cc
+@@ -21,0 +22 @@ class UDPTrackerClientTest : public CppUnit::TestFixture {
++  CPPUNIT_TEST(testTranslatedAddressResponse);
+@@ -31,0 +33 @@ public:
++  void testTranslatedAddressResponse();
+@@ -470,0 +473,51 @@ void UDPTrackerClientTest::testTimeout()
++void UDPTrackerClientTest::testTranslatedAddressResponse()
++{
++  ssize_t rv;
++  unsigned char data[100];
++  std::string remoteAddr;
++  uint16_t remotePort;
++  Timer now;
++  UDPTrackerClient tr;
++  std::shared_ptr<UDPTrackerRequest> recvReq;
++
++  // Simulate request sent to proxy/fake-IP address: 198.18.0.5:6969
++  std::shared_ptr<UDPTrackerRequest> req =
++      createAnnounce("198.18.0.5", 6969, 0);
++  tr.addRequest(req);
++
++  rv = tr.createRequest(data, sizeof(data), remoteAddr, remotePort, now);
++  CPPUNIT_ASSERT_EQUAL((ssize_t)16, rv);
++  CPPUNIT_ASSERT_EQUAL(std::string("198.18.0.5"), remoteAddr);
++  CPPUNIT_ASSERT_EQUAL((uint16_t)6969, remotePort);
++  CPPUNIT_ASSERT_EQUAL((int)UDPT_ACT_CONNECT,
++                       (int)bittorrent::getIntParam(data, 8));
++  uint32_t connectTxId = bittorrent::getIntParam(data, 12);
++  tr.requestSent(now);
++
++  // Tracker reply arrives from upstream real IP (185.125.190.1:6969) under TUN translation
++  uint64_t connectionId = 0x1122334455667788ULL;
++  rv = createConnectReply(data, sizeof(data), connectionId, connectTxId);
++  rv = tr.receiveReply(recvReq, data, rv, "185.125.190.1", 6969, now);
++  CPPUNIT_ASSERT_EQUAL(0, (int)rv);
++  CPPUNIT_ASSERT(recvReq != nullptr);
++  CPPUNIT_ASSERT_EQUAL(std::string("198.18.0.5"), recvReq->remoteAddr);
++
++  // Next, createRequest generates ANNOUNCE to 198.18.0.5 using cached connectionId
++  rv = tr.createRequest(data, sizeof(data), remoteAddr, remotePort, now);
++  CPPUNIT_ASSERT(rv > 0);
++  CPPUNIT_ASSERT_EQUAL(std::string("198.18.0.5"), remoteAddr);
++  CPPUNIT_ASSERT_EQUAL((uint16_t)6969, remotePort);
++  CPPUNIT_ASSERT_EQUAL((int)UDPT_ACT_ANNOUNCE,
++                       (int)bittorrent::getIntParam(data, 8));
++  uint32_t announceTxId = bittorrent::getIntParam(data, 12);
++  tr.requestSent(now);
++
++  // Announce reply arrives with translated IP 185.125.190.1:6969
++  rv = createAnnounceReply(data, sizeof(data), announceTxId, 2);
++  rv = tr.receiveReply(recvReq, data, rv, "185.125.190.1", 6969, now);
++  CPPUNIT_ASSERT_EQUAL(0, (int)rv);
++  CPPUNIT_ASSERT(recvReq != nullptr);
++  CPPUNIT_ASSERT_EQUAL((int)UDPT_STA_COMPLETE, recvReq->state);
++  CPPUNIT_ASSERT_EQUAL((size_t)2, recvReq->reply->peers.size());
++}
++

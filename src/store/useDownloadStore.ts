@@ -1,3 +1,5 @@
+import type { DownloadRemovalJob } from "../bindings/DownloadRemovalJob";
+import { listenEvent } from "../ipc";
 import { create } from 'zustand';
 import { info } from '../utils/logger';
 import { invokeCommand as invoke } from '../ipc';
@@ -25,6 +27,7 @@ import i18n from '../i18n';
 
 export type { DownloadCategory } from '../utils/downloads';
 
+let removalListener: (() => void) | undefined;
 const backendDispatchPromises = new Map<string, Promise<boolean>>();
 const downloadLifecycleGenerations = new Map<string, bigint>();
 const queueReorderPromises = new Map<string, Promise<void>>();
@@ -75,14 +78,23 @@ const runDownloadLifecycleOperation = <T>(
   coalesce = true,
   preemptKinds: readonly string[] = []
 ): Promise<T> => {
+  if (kind !== 'background-remove' && useDownloadStore.getState().removalJobs[id]) {
+    return Promise.reject(new Error(i18n.t($ => $.downloads.removal.pending)));
+  }
   const current = downloadLifecycleOperations.get(id);
   if (coalesce && current?.kind === kind) {
     return current.promise as Promise<T>;
   }
 
+  const guardedOperation = () => {
+    if (kind !== 'background-remove' && useDownloadStore.getState().removalJobs[id]) {
+      return Promise.reject(new Error(i18n.t($ => $.downloads.removal.pending)));
+    }
+    return operation();
+  };
   const operationPromise = current && !preemptKinds.includes(current.kind)
-    ? current.promise.catch(() => undefined).then(operation)
-    : operation();
+    ? current.promise.catch(() => undefined).then(guardedOperation)
+    : guardedOperation();
   const trackedOperation = operationPromise.finally(() => {
     if (downloadLifecycleOperations.get(id)?.promise === trackedOperation) {
       downloadLifecycleOperations.delete(id);
@@ -372,6 +384,7 @@ async function dispatchItemInternal(
   options: DispatchOptions = {}
 ): Promise<boolean> {
   await waitForPendingStartupResume();
+  if (useDownloadStore.getState().removalJobs[id]) return false;
   if (backendDispatchPromises.has(id)) return backendDispatchPromises.get(id)!;
 
   const promise = (async () => {
@@ -1117,6 +1130,10 @@ export type DeleteModalState = {
 };
 
 interface DownloadState {
+  removalJobs: Record<string, DownloadRemovalJob>;
+  requestRemovals: (ids: string[], deleteAssets: boolean) => Promise<void>;
+  applyRemovalJob: (job: DownloadRemovalJob) => void;
+  retryRemoval: (id: string) => Promise<void>;
   downloads: DownloadItem[];
   queues: Queue[];
   pendingOrder: string[];
@@ -1762,6 +1779,63 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       console.error("Failed to remove item from queue:", e);
     }
   },
+  removalJobs: {},
+  applyRemovalJob: (job) => {
+    if (!job || typeof job.id !== 'string' || !Number.isSafeInteger(job.revision)
+      || job.revision < 0 || !['pending', 'running', 'failed', 'completed'].includes(job.phase)) return;
+    if ((get().removalJobs[job.id]?.revision ?? -1) > job.revision) return;
+    set(state => ({
+      removalJobs: { ...state.removalJobs, [job.id]: job },
+      downloads: job.phase === 'completed'
+        ? state.downloads.filter(item => item.id !== job.id)
+        : job.phase === 'failed' && job.revision > 0
+          ? state.downloads.map(item => item.id === job.id ? { ...item, status: 'failed' as const, speed: '-', eta: '-' } : item)
+          : state.downloads,
+      pendingOrder: state.pendingOrder.filter(id => id !== job.id),
+      allocationPendingIds: new Set([...state.allocationPendingIds].filter(id => id !== job.id)),
+      backendRegisteredIds: job.phase === 'completed'
+        ? new Set([...state.backendRegisteredIds].filter(id => id !== job.id))
+        : state.backendRegisteredIds,
+    }));
+    if (job.phase === 'completed') useDownloadProgressStore.getState().resetDownloadProgress(job.id);
+    syncSystemIntegrations();
+  },
+  requestRemovals: async (ids, deleteAssets) => {
+    const selected = [...new Set(ids)].filter(id => !get().removalJobs[id]);
+    for (const id of selected) {
+      get().applyRemovalJob({ id, revision: 0, deleteAssets, phase: 'pending', error: null });
+    }
+    // Close before any persistence, RPC, or filesystem work is awaited.
+    get().closeDeleteModal();
+    await Promise.all(selected.map(id => runDownloadLifecycleOperation(id, 'background-remove', async () => {
+      try {
+        await waitForPendingStartupResume();
+        await invalidateAndWaitForDispatch(id);
+        await flushDownloadPersistence();
+        await invoke('submit_download_removals', { ids: [id], deleteAssets });
+      } catch {
+        get().applyRemovalJob({ id, revision: 0, deleteAssets, phase: 'failed', error: i18n.t($ => $.downloads.removal.failed) });
+      }
+    })));
+  },
+  retryRemoval: async (id) => {
+    const job = get().removalJobs[id];
+    if (!job || job.phase !== 'failed') return;
+    try {
+      const durable = await invoke('list_download_removals');
+      const current = durable.find(entry => entry.id === id);
+      if (current) {
+        get().applyRemovalJob(current);
+        if (current.phase === 'failed') await invoke('retry_download_removal', { id });
+        else if (current.phase !== 'completed') await invoke('resume_download_removals');
+      } else {
+        await flushDownloadPersistence();
+        await invoke('submit_download_removals', { ids: [id], deleteAssets: job.deleteAssets });
+      }
+    } catch {
+      get().applyRemovalJob({ ...job, phase: 'failed', error: i18n.t($ => $.downloads.removal.failed) });
+    }
+  },
   backendRegisteredIds: new Set(),
   allocationPendingIds: new Set(),
   registerBackendIds: (ids) => set((state) => {
@@ -2041,6 +2115,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     preemptDispatch
   ),
   updateDownload: (id, updates) => {
+    if (get().removalJobs[id] && updates.status !== 'completed') return;
     set((state) => {
       const current = state.downloads.find(download => download.id === id);
       if (!current) return { downloads: state.downloads };
@@ -2326,7 +2401,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       await waitForPendingStartupResume();
       const runnable = get().downloads
         .filter(item =>
-          (item.queueId || MAIN_QUEUE_ID) === queueId &&
+          !get().removalJobs[item.id] && (item.queueId || MAIN_QUEUE_ID) === queueId &&
           (item.status === 'queued' || canStartDownload(item.status))
         )
         .sort(queuePositionComparator);
@@ -2462,7 +2537,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     advanceQueueControlGeneration(queueId);
     const activeIds = get().downloads
       .filter(item =>
-        (item.queueId || MAIN_QUEUE_ID) === queueId &&
+        !get().removalJobs[item.id] && (item.queueId || MAIN_QUEUE_ID) === queueId &&
         (canPauseDownload(item.status) || backendDispatchPromises.has(item.id))
       )
       .map(item => item.id);
@@ -2777,7 +2852,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       // queued Torrent using its persisted remaining seed budget, then let
       // the normal backend admission path assign a fresh lifecycle/GID.
       const waitingToSeedIds = get().downloads
-        .filter(download => download.status === 'waitingToSeed')
+        .filter(download => !get().removalJobs[download.id] && download.status === 'waitingToSeed')
         .map(download => download.id);
       if (waitingToSeedIds.length > 0) {
         set(state => ({
@@ -2791,7 +2866,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       // crash during enqueue_many cannot lose the restartable row.
       await commitDownloadState();
       const active = get().downloads
-        .filter(d => d.status === 'queued')
+        .filter(d => !get().removalJobs[d.id] && d.status === 'queued')
         .sort((a, b) => (a.queuePosition ?? 0) - (b.queuePosition ?? 0));
       if (active.length === 0) return;
 
@@ -2992,6 +3067,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         let dispatchableItems = itemsToEnqueue.filter(item => {
           const current = currentItems.get(item.id);
           return current &&
+            !get().removalJobs[item.id] &&
             current.status === 'queued' &&
             !get().backendRegisteredIds.has(item.id) &&
             !backendDispatchPromises.has(item.id) &&
@@ -3007,6 +3083,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         dispatchableItems = dispatchableItems.filter(item => {
           const current = latestItems.get(item.id);
           return current &&
+            !get().removalJobs[item.id] &&
             current.status === 'queued' &&
             !get().backendRegisteredIds.has(item.id) &&
             !backendDispatchPromises.has(item.id) &&
@@ -3139,6 +3216,10 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
   },
   initDB: async () => {
     try {
+      // Register before recovery starts; no worker runs until snapshots hydrate.
+      if (!removalListener) removalListener = await listenEvent('download-removal', event => get().applyRemovalJob(event.payload));
+      const removalJobs = await invoke('list_download_removals');
+      for (const job of removalJobs) get().applyRemovalJob(job);
       const persistedQueues = (await invoke('db_get_all_queues')).flatMap(value => {
         try {
           return [JSON.parse(value) as PersistedQueue];
@@ -3168,10 +3249,16 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         return normalizePersistedDownloadProgress({ ...download, queueId });
       });
       
-      set(() => ({
+      set(state => ({
         queues,
-        downloads: normalizeQueuePositions(downloads)
+        downloads: normalizeQueuePositions(downloads.filter(download =>
+          state.removalJobs[download.id]?.phase !== 'completed'
+        ).map(download => state.removalJobs[download.id]?.phase === 'failed'
+          ? { ...download, status: 'failed' as const, speed: '-', eta: '-' }
+          : download))
       }));
+
+      await invoke('resume_download_removals');
 
       // A process can die after Aria2 has removed the unselected files but
       // before the terminal event clears Firelink's reservation. Reclaim
@@ -3191,7 +3278,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       // Reset interrupted active downloads to queued.
       set((state) => ({
         downloads: normalizeQueuePositions(state.downloads.map(d =>
-          isActiveDownloadStatus(d.status) && d.status !== 'queued'
+          !state.removalJobs[d.id] && isActiveDownloadStatus(d.status) && d.status !== 'queued'
             ? { ...d, status: 'queued' as const }
             : d
         ))
@@ -3345,6 +3432,9 @@ export const flushDownloadPersistence = async (): Promise<void> => {
 let downloadPersistenceUnsubscribe: (() => void) | null = null;
 
 export const resetDownloadStoreModuleStateForTests = (): void => {
+  removalListener?.();
+  removalListener = undefined;
+  useDownloadStore.setState({ removalJobs: {} });
   downloadPersistenceUnsubscribe?.();
   downloadPersistenceUnsubscribe = null;
   backendDispatchPromises.clear();

@@ -2,6 +2,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 
 function argValue(name) {
   const index = process.argv.indexOf(name);
@@ -24,12 +25,16 @@ const stabilityMs = Number.isFinite(stabilityMsValue) && stabilityMsValue >= 0
   ? Math.min(stabilityMsValue, MAX_STABILITY_MS)
   : 5000;
 const READY_PORT_TIMEOUT_MS = 500;
+// Portable-package checks intentionally inspect their disposable bundle's
+// data directory. Every other smoke run gets its own disposable profile.
+const smokeStorageRoot = assertPortableData ? null : fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'firelink-smoke-')));
 const child = spawn(executable, [], {
   cwd: process.env.RUNNER_TEMP || process.env.TMPDIR || process.cwd(),
   detached: process.platform !== 'win32',
   env: {
     ...process.env,
     FIRELINK_SMOKE_TEST: '1',
+    FIRELINK_SMOKE_STORAGE_ROOT: smokeStorageRoot || '',
     WEBKIT_DISABLE_COMPOSITING_MODE: '1',
     GDK_BACKEND: 'x11',
   },
@@ -401,5 +406,7 @@ try {
   if (!await terminateChild()) {
     console.error('Packaged Firelink could not be terminated cleanly; refusing to report smoke success.');
     process.exitCode = 1;
+  } else if (smokeStorageRoot) {
+    fs.rmSync(smokeStorageRoot, { recursive: true, force: true });
   }
 }

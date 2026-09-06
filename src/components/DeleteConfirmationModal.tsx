@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect } from 'react';
 import { useDownloadStore } from '../store/useDownloadStore';
 import { AlertTriangle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -6,20 +6,11 @@ import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
 
 export const DeleteConfirmationModal: React.FC = () => {
   const { t } = useTranslation();
-  const { deleteModalState, closeDeleteModal, removeDownload, downloads } = useDownloadStore();
-  const [errorMessage, setErrorMessage] = useState('');
-  const [isRemoving, setIsRemoving] = useState(false);
+  const { deleteModalState, closeDeleteModal, requestRemovals, downloads } = useDownloadStore();
   const modalRef = useModalFocus(deleteModalState.isOpen);
 
   useEffect(() => {
-    if (deleteModalState.isOpen) {
-      setIsRemoving(false);
-      setErrorMessage('');
-    }
-  }, [deleteModalState.isOpen]);
-
-  useEffect(() => {
-    if (!deleteModalState.isOpen || isRemoving) return;
+    if (!deleteModalState.isOpen) return;
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && isTopmostModal(modalRef.current)) {
         event.preventDefault();
@@ -28,7 +19,7 @@ export const DeleteConfirmationModal: React.FC = () => {
     };
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
-  }, [closeDeleteModal, deleteModalState.isOpen, isRemoving]);
+  }, [closeDeleteModal, deleteModalState.isOpen]);
 
   if (!deleteModalState.isOpen) return null;
 
@@ -43,35 +34,7 @@ export const DeleteConfirmationModal: React.FC = () => {
       return;
     }
 
-    setIsRemoving(true);
-    setErrorMessage('');
-    let succeeded = 0;
-    const failures: string[] = [];
-    for (const id of ids) {
-      try {
-        await removeDownload(
-          id,
-          deleteFile,
-          false,
-          deleteFile ? 'permanentIfUnfinished' : undefined
-        );
-        succeeded += 1;
-      } catch (error) {
-        failures.push(String(error));
-      }
-    }
-
-    if (failures.length > 0) {
-      setErrorMessage(t($ => $.dialogs.removeDownload.errorSummary, {
-        succeeded,
-        failed: failures.length,
-        detail: failures[0],
-      }));
-      setIsRemoving(false);
-      return;
-    }
-    setIsRemoving(false);
-    closeDeleteModal();
+    await requestRemovals(ids, deleteFile);
   };
 
   const handleRemoveFromList = () => removeMany(false);
@@ -87,7 +50,7 @@ export const DeleteConfirmationModal: React.FC = () => {
     <div
       className="app-modal-backdrop fixed inset-0 z-50 flex items-center justify-center"
       onClick={(event) => {
-        if (event.target === event.currentTarget && !isRemoving) handleCancel();
+        if (event.target === event.currentTarget) handleCancel();
       }}
       role="dialog"
       aria-modal="true"
@@ -116,27 +79,23 @@ export const DeleteConfirmationModal: React.FC = () => {
               {t($ => $.dialogs.removeDownload.mixedRemovalPolicy)}
             </div>
           )}
-          {errorMessage && <div className="mt-3 text-xs text-red-400">{errorMessage}</div>}
         </div>
 
         <div className="px-5 py-4 border-t border-border-modal flex justify-end gap-3 bg-bg-modal-accent">
           <button
             onClick={handleCancel}
-            disabled={isRemoving}
             className="app-button px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
           >
             {t($ => $.actions.cancel)}
           </button>
           <button
             onClick={handleRemoveFromList}
-            disabled={isRemoving}
             className="px-4 py-2 rounded-lg text-sm font-medium transition-colors bg-border-modal hover:bg-border-modal/80 text-text-primary disabled:opacity-50"
           >
             {t($ => $.dialogs.removeDownload.remove)}
           </button>
           <button
             onClick={handleDeleteFile}
-            disabled={isRemoving}
             className="px-4 py-2 rounded-lg text-sm font-medium transition-colors bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50"
           >
             {t($ => $.dialogs.removeDownload.deleteFile)}
