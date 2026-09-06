@@ -29,6 +29,8 @@
   --shadow-color: 220 10% 20% / 0.1;
   --window-frame-active: 220 12% 30% / 0.22;
   --window-frame-inactive: 220 10% 30% / 0.08;
+  --window-frame-windows-active: 220 12% 30% / 0.60;
+  --window-frame-windows-inactive: 220 10% 30% / 0.18;
   --sidebar-shell-bg: 0 0% 92%;
   --sidebar-panel-bg: 0 0% 96%;
   --workspace-bg: 0 0% 98%;
@@ -77,6 +79,8 @@
   --shadow-color: 220 10% 20% / 0.1;
   --window-frame-active: 220 12% 30% / 0.22;
   --window-frame-inactive: 220 10% 30% / 0.08;
+  --window-frame-windows-active: 220 12% 30% / 0.60;
+  --window-frame-windows-inactive: 220 10% 30% / 0.18;
   --sidebar-shell-bg: 0 0% 92%;
   --sidebar-panel-bg: 0 0% 96%;
   --workspace-bg: 0 0% 98%;
@@ -109,6 +113,8 @@
   --shadow-color: 0 0% 0% / 0.30;
   --window-frame-active: 0 0% 100% / 0.14;
   --window-frame-inactive: 0 0% 100% / 0.06;
+  --window-frame-windows-active: 0 0% 100% / 0.35;
+  --window-frame-windows-inactive: 0 0% 100% / 0.14;
   --status-completed: 136 62% 48%;
   --status-paused: 0 0% 56%;
   --status-downloading: 211 100% 56%;
@@ -158,6 +164,8 @@
   --shadow-color: 231 20% 8% / 0.35;
   --window-frame-active: 228 14% 84% / 0.18;
   --window-frame-inactive: 228 14% 84% / 0.08;
+  --window-frame-windows-active: 228 14% 84% / 0.45;
+  --window-frame-windows-inactive: 228 14% 84% / 0.18;
   --status-completed: 135 94% 65%;
   --status-paused: 65 92% 76%;
   --status-downloading: 191 97% 77%;
@@ -207,6 +215,8 @@
   --shadow-color: 220 25% 10% / 0.34;
   --window-frame-active: 218 27% 88% / 0.18;
   --window-frame-inactive: 218 27% 88% / 0.08;
+  --window-frame-windows-active: 218 27% 88% / 0.45;
+  --window-frame-windows-inactive: 218 27% 88% / 0.18;
   --status-completed: 92 28% 65%;
   --status-paused: 40 71% 73%;
   --status-downloading: 193 43% 67%;
@@ -230,6 +240,14 @@
   --add-keyline: 218 17% 75% / 0.15;
   --add-keyline-strong: 218 17% 75% / 0.23;
   --add-shadow: 220 28% 10% / 0.30;
+}
+
+/* Windows cannot safely combine Tao's native undecorated shadow with this
+   per-pixel-transparent rounded surface. Select the stronger renderer-owned
+   contour tokens without increasing the macOS or Linux frame contrast. */
+html[data-platform="windows"] {
+  --window-frame-active: var(--window-frame-windows-active);
+  --window-frame-inactive: var(--window-frame-windows-inactive);
 }
 
 @theme {
