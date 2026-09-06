@@ -21,7 +21,7 @@
           },
           "sha256": "c8fccb159db7cc23ddf9eab0d3eb4fdfb599b462b21b41074e07201afbba1ca7",
           "allocationTelemetry": true,
-          "patchSha256": "b696988effe116fab40b52df61dab8af8042c65894a492e490d109f410a8ade6"
+          "patchSha256": "1210eeeb0c82a2fee1ef5d28521569259c18a122d3b439135bba57ee39c5f61d"
         },
         "ffmpeg": {
           "version": "9.0.1",

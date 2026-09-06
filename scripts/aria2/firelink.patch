@@ -627,12 +627,14 @@ index 3e131833..ad8b6251 100644
 +
 +  void setMessageDispatcher(DHTMessageDispatcher* messageDispatcher);
 diff --git a/src/DHTMessageDispatcher.h b/src/DHTMessageDispatcher.h
-index 72617876..02f54be2 100644
+index 72617876..eb7ff362 100644
 --- a/src/DHTMessageDispatcher.h
 +++ b/src/DHTMessageDispatcher.h
 @@ -40,0 +41 @@
 +#include <string>
-@@ -64,0 +66,5 @@ public:
+@@ -42,0 +44 @@
++#include "DHTMessageCallback.h"
+@@ -64,0 +67,5 @@ public:
 +
 +  // A hostname-resolved bootstrap address belongs to the active OS/TUN route,
 +  // even when it is represented by a synthetic private IP. Implementations
