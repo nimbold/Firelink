@@ -365,7 +365,7 @@ mod tests {
         std::fs::remove_file(&a).unwrap();
         assert!(validate_manifest(&manifest, &snapshot_assets(&roots).unwrap()).is_ok());
         let replacement = root.join("replacement");
-        std::fs::write(&replacement, b"original").unwrap();
+        std::fs::write(&replacement, b"replacement").unwrap();
         std::fs::rename(&replacement, &a).unwrap();
         assert!(validate_manifest(&manifest, &snapshot_assets(&roots).unwrap()).is_err());
         std::fs::remove_file(&a).unwrap();
