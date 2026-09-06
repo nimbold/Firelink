@@ -214,6 +214,13 @@ try {
     timeout: 30 * 60 * 1000,
   });
   copyExecutable(path.join(sourceRoot, 'firelink-build', 'src', `aria2c${executableSuffix}`), 'aria2c');
+  const aria2Runtime = path.join(sourceRoot, 'aria2-libs');
+  if (fs.existsSync(aria2Runtime)) {
+    fs.cpSync(aria2Runtime, path.join(payloadDestination, 'aria2-libs'), {
+      recursive: true,
+      preserveTimestamps: true,
+    });
+  }
 
   writePayloadManifest();
   throwIfProvisioningAborted();
