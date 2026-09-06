@@ -262,9 +262,15 @@ async function listen(server) {
 
 function daemonEnvironment() {
   const libraries = path.join(path.dirname(binaryPath), 'aria2-libs');
-  return fs.existsSync(libraries)
-    ? { ...process.env, OPENSSL_MODULES: libraries }
-    : process.env;
+  if (!fs.existsSync(libraries)) return process.env;
+  const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path') || 'PATH';
+  return {
+    ...process.env,
+    OPENSSL_MODULES: libraries,
+    ...(process.platform === 'win32'
+      ? { [pathKey]: `${libraries}${path.delimiter}${process.env[pathKey] || ''}` }
+      : {}),
+  };
 }
 
 async function rpc(port, secret, method, params = [], { signal = runtimeAbortController.signal } = {}) {

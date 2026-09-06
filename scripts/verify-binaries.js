@@ -160,9 +160,13 @@ function engineEnv(engine) {
     return process.env;
   }
 
+  const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path') || 'PATH';
   return {
     ...process.env,
     OPENSSL_MODULES: modulesDir,
+    ...(process.platform === 'win32'
+      ? { [pathKey]: `${modulesDir}${path.delimiter}${process.env[pathKey] || ''}` }
+      : {}),
   };
 }
 

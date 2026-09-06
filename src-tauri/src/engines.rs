@@ -160,19 +160,49 @@ pub fn ytdlp_internal_dir(binary_path: &Path) -> Option<PathBuf> {
 }
 
 pub fn apply_aria2_environment(command: &mut std::process::Command, binary_path: &Path) {
-    if let Some(modules_dir) = aria2_openssl_modules_dir(binary_path) {
-        command.env("OPENSSL_MODULES", modules_dir);
-    }
+    apply_aria2_runtime_environment(command, binary_path);
 }
 
 pub fn apply_aria2_tokio_environment(command: &mut tokio::process::Command, binary_path: &Path) {
+    apply_aria2_runtime_environment(command, binary_path);
+}
+
+fn apply_aria2_runtime_environment<C>(command: &mut C, binary_path: &Path)
+where
+    C: Aria2CommandEnvironment,
+{
     if let Some(modules_dir) = aria2_openssl_modules_dir(binary_path) {
-        command.env("OPENSSL_MODULES", modules_dir);
+        command.set_env("OPENSSL_MODULES", &modules_dir);
+        #[cfg(target_os = "windows")]
+        {
+            let mut path = modules_dir.as_os_str().to_os_string();
+            path.push(";");
+            if let Some(existing) = std::env::var_os("PATH") {
+                path.push(existing);
+            }
+            command.set_env("PATH", path);
+        }
+    }
+}
+
+trait Aria2CommandEnvironment {
+    fn set_env(&mut self, key: &str, value: impl AsRef<std::ffi::OsStr>);
+}
+
+impl Aria2CommandEnvironment for std::process::Command {
+    fn set_env(&mut self, key: &str, value: impl AsRef<std::ffi::OsStr>) {
+        self.env(key, value);
+    }
+}
+
+impl Aria2CommandEnvironment for tokio::process::Command {
+    fn set_env(&mut self, key: &str, value: impl AsRef<std::ffi::OsStr>) {
+        self.env(key, value);
     }
 }
 
 fn aria2_openssl_modules_dir(binary_path: &Path) -> Option<PathBuf> {
-    if !cfg!(target_os = "macos") {
+    if !cfg!(any(target_os = "macos", target_os = "windows")) {
         return None;
     }
 

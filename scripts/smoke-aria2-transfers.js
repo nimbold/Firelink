@@ -315,11 +315,15 @@ const secret = `firelink-transfers-${crypto.randomUUID()}`;
 const configPath = path.join(tempRoot, 'aria2.conf');
 fs.writeFileSync(configPath, `rpc-secret=${secret}\n`, { mode: 0o600 });
 const libraryPath = path.join(path.dirname(binaryPath), 'aria2-libs');
+const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path') || 'PATH';
 const environment = fs.existsSync(libraryPath)
   ? {
       ...process.env,
       OPENSSL_MODULES: libraryPath,
       ...(process.platform === 'darwin' ? { DYLD_LIBRARY_PATH: libraryPath } : {}),
+      ...(process.platform === 'win32'
+        ? { [pathKey]: `${libraryPath}${path.delimiter}${process.env[pathKey] || ''}` }
+        : {}),
     }
   : process.env;
 const child = spawn(binaryPath, [
