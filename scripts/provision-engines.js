@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { collectRegularFiles, sha256 } from './engine-payload-integrity.js';
+import { buildPayloadProvenance } from './engine-payload-manifest.js';
 import { downloadEngineArchive } from './engine-download.js';
 import {
   promoteDirectory,
@@ -138,20 +139,7 @@ function writePayloadManifest() {
   const manifest = {
     schemaVersion: 1,
     target,
-    generatedFrom: Object.fromEntries(
-      Object.entries(targetSources).map(([name, source]) => [
-        name,
-        {
-          version: source.version,
-          url: source.url || source.sourceUrl,
-          sha256: source.sha256 || source.sourceSha256,
-          ...(source.buildFromSource ? { patchSha256: source.patchSha256, allocationTelemetry: true } : {}),
-          ...(name === 'aria2c' && source.firelinkRouteContract
-            ? { firelinkRouteContract: source.firelinkRouteContract }
-            : {})
-        }
-      ])
-    ),
+    generatedFrom: buildPayloadProvenance(targetSources),
     files: Object.fromEntries(
       files.map(file => [
         path.relative(payloadDestination, file).split(path.sep).join('/'),

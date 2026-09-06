@@ -2,7 +2,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { collectRegularFiles, sha256, treeDigest } from './engine-payload-integrity.js';
+import { sha256, treeDigest } from './engine-payload-integrity.js';
+import { readAndValidatePayloadManifest } from './engine-payload-manifest.js';
 import { promoteDirectory, removePathWithRetry } from './engine-payload-promotion.js';
 import {
   assertSafeOutputRoot,
@@ -15,6 +16,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
 const binariesRoot = path.join(repoRoot, 'src-tauri', 'binaries');
 const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, 'engines.lock.json'), 'utf8'));
+const sourceLock = JSON.parse(fs.readFileSync(path.join(repoRoot, 'engine-sources.lock.json'), 'utf8'));
 
 const target = resolveTargetTriple();
 const outputRoot = assertSafeOutputRoot(resolveOutputRoot(), [
@@ -78,38 +80,18 @@ if (targetLock) {
     }
   }
 } else {
-  const manifestPath = path.join(source, 'payload-manifest.json');
-  if (!fs.existsSync(manifestPath)) {
-    console.error(`No committed lock or payload manifest exists for ${target}.`);
+  const sourceTargetLock = sourceLock.targets?.[target];
+  if (!sourceTargetLock) {
+    console.error(`No source lock exists for the provisioned engine target ${target}.`);
     process.exit(1);
   }
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-  if (manifest.target !== target) {
-    console.error(`Payload manifest target mismatch: ${manifest.target}`);
-    process.exit(1);
-  }
-  if (manifest.generatedFrom?.aria2c?.firelinkRouteContract) {
-    try {
+  try {
+    const manifest = readAndValidatePayloadManifest(source, sourceTargetLock, target);
+    if (manifest.generatedFrom?.aria2c?.firelinkRouteContract) {
       assertAria2RouteSource(manifest.generatedFrom.aria2c, target);
-    } catch (error) {
-      console.error(error.message);
-      process.exit(1);
     }
-  }
-  for (const [relative, expected] of Object.entries(manifest.files || {})) {
-    const file = path.join(source, relative);
-    if (!fs.existsSync(file) || sha256(file) !== expected) {
-      console.error(`Payload manifest mismatch: ${relative}`);
-      process.exit(1);
-    }
-  }
-  const actualFiles = collectRegularFiles(source, {
-    ignoredNames: ['payload-manifest.json'],
-  }).map(file => path.relative(source, file).split(path.sep).join('/'));
-  const expectedFiles = Object.keys(manifest.files || {}).sort();
-  actualFiles.sort();
-  if (JSON.stringify(actualFiles) !== JSON.stringify(expectedFiles)) {
-    console.error(`Payload contains files not covered by manifest for ${target}.`);
+  } catch (error) {
+    console.error(error.message);
     process.exit(1);
   }
 }

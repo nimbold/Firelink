@@ -13,7 +13,9 @@ import {
   ARIA2_SYSTEM_RESOLVER_DAEMON_ARGS,
   assertAria2Baseline,
   assertAria2AllocationCapabilities,
+  assertAria2RouteSource,
 } from './aria2-route-contract.js';
+import { readAndValidatePayloadManifest } from './engine-payload-manifest.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -48,6 +50,10 @@ const ext = isWindows ? '.exe' : '';
 const suffix = `-${targetTriple}${ext}`;
 
 const scriptsDir = __dirname;
+const repoRoot = path.resolve(__dirname, '..');
+const sourceLock = JSON.parse(
+  fs.readFileSync(path.join(repoRoot, 'engine-sources.lock.json'), 'utf8')
+);
 const searchRoot = argValue('--search-root');
 function findEngineRoot(root) {
   const expected = `yt-dlp-${targetTriple}${ext}`;
@@ -97,6 +103,7 @@ const binariesDir = configuredRoot
   : path.join(scriptsDir, '..', 'src-tauri', 'binaries');
 const requiredEngines = ['yt-dlp', 'aria2c', 'ffmpeg', 'deno'];
 const stagedVerification = process.argv.includes('--staged');
+const sourceTargetLock = sourceLock.targets?.[targetTriple];
 
 const FORBIDDEN_OTOOL_PATHS = ['/opt/homebrew', '/usr/local/Cellar'];
 const FORBIDDEN_STDERR = [
@@ -115,6 +122,23 @@ function fail(msg) {
 
 function ok(msg) {
   console.log(`[OK] ${msg}`);
+}
+
+if (sourceTargetLock) {
+  try {
+    const manifest = readAndValidatePayloadManifest(binariesDir, sourceTargetLock, targetTriple);
+    if (manifest.generatedFrom?.aria2c?.firelinkRouteContract) {
+      assertAria2RouteSource(manifest.generatedFrom.aria2c, targetTriple);
+    }
+    ok('Payload manifest provenance and checksums');
+  } catch (error) {
+    fail(error.message);
+  }
+}
+
+if (exitCode !== 0) {
+  console.error('\nAborting: engine payload integrity checks failed.');
+  process.exit(1);
 }
 
 function rejectSymlinks(root, label) {

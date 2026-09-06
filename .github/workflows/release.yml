@@ -115,8 +115,37 @@ jobs:
             mingw-w64-x86_64-openssl mingw-w64-x86_64-libssh2
             mingw-w64-x86_64-c-ares mingw-w64-x86_64-expat
             mingw-w64-x86_64-sqlite3 mingw-w64-x86_64-zlib
-      - name: Provision locked engines
+      - name: Fingerprint engine toolchain
+        id: engine-toolchain
         if: runner.os != 'macOS'
+        env:
+          FIRELINK_MSYS2_ROOT: ${{ steps.aria2-msys.outputs.msys2-location }}
+          FIRELINK_TARGET_TRIPLE: ${{ matrix.target }}
+        run: node scripts/engine-toolchain-fingerprint.js
+      - name: Restore verified engine payload cache
+        id: engine-cache
+        if: runner.os != 'macOS'
+        # v4.2.0 pinned to an immutable commit; release jobs never write cache
+        # entries, so only trusted CI pushes can populate the shared payload.
+        uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: src-tauri/provisioned-engines/${{ matrix.target }}
+          key: firelink-engine-payload-v1-${{ matrix.target }}-${{ steps.engine-toolchain.outputs.fingerprint }}-${{ hashFiles('engine-sources.lock.json', 'engines.lock.json', 'scripts/aria2/**', 'scripts/engine-*.js', 'scripts/provision-engines.js', 'scripts/stage-engines.js', 'scripts/verify-binaries.js', 'scripts/aria2-route-contract.js', '.github/workflows/ci.yml', '.github/workflows/release.yml') }}
+      - name: Validate restored engine payload
+        id: engine-cache-validation
+        if: runner.os != 'macOS' && steps.engine-cache.outputs.cache-hit == 'true'
+        continue-on-error: true
+        env:
+          FIRELINK_TARGET_TRIPLE: ${{ matrix.target }}
+          FIRELINK_ENGINE_OUTPUT_ROOT: ${{ runner.temp }}/firelink-engine-cache-validation/${{ matrix.target }}
+        run: |
+          node scripts/stage-engines.js
+          node scripts/verify-binaries.js --staged
+      - name: Provision locked engines
+        if: >-
+          runner.os != 'macOS' &&
+          (steps.engine-cache.outputs.cache-hit != 'true' ||
+           steps.engine-cache-validation.outcome != 'success')
         env:
           FIRELINK_MSYS2_ROOT: ${{ steps.aria2-msys.outputs.msys2-location }}
         run: node scripts/provision-engines.js --target ${{ matrix.target }}
@@ -338,8 +367,12 @@ jobs:
           rename_asset '*.zip' "Firelink_${VERSION}_Windows-x64-portable.zip"
       - name: Generate checksums
         run: |
+          set -euo pipefail
           cd release-assets
-          find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          checksum_tmp="$RUNNER_TEMP/Firelink-SHA256SUMS"
+          trap 'rm -f "$checksum_tmp"' EXIT
+          find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > "$checksum_tmp"
+          mv "$checksum_tmp" SHA256SUMS
       - uses: softprops/action-gh-release@v3
         with:
           files: release-assets/**
