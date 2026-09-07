@@ -172,6 +172,137 @@ describe('useDownloadStore', () => {
     expect(useDownloadStore.getState().downloads).toEqual([]);
   });
 
+  it('does not trigger persistence or wipe existing downloads when initDB hydrates with completed removal jobs', async () => {
+    const disposePersistence = initializeDownloadPersistence('main');
+    const commitCalls: unknown[] = [];
+    const completed = { id: 'tombstoned-1', revision: 2, deleteAssets: true, phase: 'completed' as const, error: null };
+    const keepDownload = {
+      id: 'keep-1',
+      url: 'https://example.com/file.bin',
+      fileName: 'file.bin',
+      status: 'completed' as const,
+      category: 'Other',
+      dateAdded: ''
+    };
+
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
+      if (command === 'list_download_removals') {
+        return [completed] as never;
+      }
+      if (command === 'db_get_all_queues') return [] as never;
+      if (command === 'db_get_all_downloads') {
+        return [JSON.stringify(keepDownload)] as never;
+      }
+      if (command === 'db_commit_download_state') {
+        commitCalls.push(command);
+        return undefined as never;
+      }
+      return undefined as never;
+    });
+
+    try {
+      await useDownloadStore.getState().initDB();
+      expect(commitCalls).toHaveLength(0);
+      expect(useDownloadStore.getState().downloads).toHaveLength(1);
+      expect(useDownloadStore.getState().downloads[0].id).toBe('keep-1');
+    } finally {
+      disposePersistence();
+    }
+  });
+
+  it('preserves store collection reference equality in applyRemovalJob when the job ID is not present', () => {
+    const stateBefore = useDownloadStore.getState();
+    stateBefore.applyRemovalJob({
+      id: 'non-existent-job',
+      revision: 1,
+      deleteAssets: true,
+      phase: 'completed',
+      error: null
+    });
+    const stateAfter = useDownloadStore.getState();
+    expect(stateAfter.downloads).toBe(stateBefore.downloads);
+    expect(stateAfter.pendingOrder).toBe(stateBefore.pendingOrder);
+    expect(stateAfter.allocationPendingIds).toBe(stateBefore.allocationPendingIds);
+    expect(stateAfter.backendRegisteredIds).toBe(stateBefore.backendRegisteredIds);
+  });
+
+  it('ignores premature flushDownloadPersistence before hydration completes', async () => {
+    let commitCalled = false;
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
+      if (command === 'db_commit_download_state') {
+        commitCalled = true;
+      }
+      return undefined as never;
+    });
+
+    await flushDownloadPersistence();
+    expect(commitCalled).toBe(false);
+  });
+
+  it('ignores duplicate identical removal jobs and stale revisions without mutating state', () => {
+    const job = {
+      id: 'job-1',
+      revision: 2,
+      deleteAssets: true,
+      phase: 'failed' as const,
+      error: 'disk error'
+    };
+    useDownloadStore.getState().applyRemovalJob(job);
+    const stateAfterFirst = useDownloadStore.getState();
+
+    // Identical duplicate should be a no-op
+    useDownloadStore.getState().applyRemovalJob(job);
+    const stateAfterDuplicate = useDownloadStore.getState();
+    expect(stateAfterDuplicate.removalJobs).toBe(stateAfterFirst.removalJobs);
+
+    // Stale revision should be ignored
+    useDownloadStore.getState().applyRemovalJob({
+      id: 'job-1',
+      revision: 1,
+      deleteAssets: true,
+      phase: 'running' as const,
+      error: null
+    });
+    const stateAfterStale = useDownloadStore.getState();
+    expect(stateAfterStale.removalJobs).toBe(stateAfterFirst.removalJobs);
+    expect(stateAfterStale.removalJobs['job-1'].revision).toBe(2);
+  });
+
+  it('preserves newer in-memory removal jobs during initDB', async () => {
+    useDownloadStore.setState({
+      removalJobs: {
+        'concurrent-1': {
+          id: 'concurrent-1',
+          revision: 3,
+          deleteAssets: true,
+          phase: 'completed',
+          error: null
+        }
+      }
+    });
+
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
+      if (command === 'list_download_removals') {
+        return [
+          {
+            id: 'concurrent-1',
+            revision: 1,
+            deleteAssets: true,
+            phase: 'running',
+            error: null
+          }
+        ] as never;
+      }
+      if (command === 'db_get_all_queues') return [] as never;
+      if (command === 'db_get_all_downloads') return [] as never;
+      return undefined as never;
+    });
+
+    await useDownloadStore.getState().initDB();
+    expect(useDownloadStore.getState().removalJobs['concurrent-1'].revision).toBe(3);
+    expect(useDownloadStore.getState().removalJobs['concurrent-1'].phase).toBe('completed');
+  });
+
   it('invalidates in-flight Add-modal handoffs when the modal is toggled', () => {
     const initialVersion = useDownloadStore.getState().pendingAddRequestVersion;
 

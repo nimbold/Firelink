@@ -1783,20 +1783,37 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
   applyRemovalJob: (job) => {
     if (!job || typeof job.id !== 'string' || !Number.isSafeInteger(job.revision)
       || job.revision < 0 || !['pending', 'running', 'failed', 'completed'].includes(job.phase)) return;
-    if ((get().removalJobs[job.id]?.revision ?? -1) > job.revision) return;
-    set(state => ({
-      removalJobs: { ...state.removalJobs, [job.id]: job },
-      downloads: job.phase === 'completed'
-        ? state.downloads.filter(item => item.id !== job.id)
+    const currentJob = get().removalJobs[job.id];
+    if (currentJob) {
+      if (currentJob.revision > job.revision) return;
+      if (currentJob.revision === job.revision && currentJob.phase === job.phase && currentJob.error === job.error) return;
+    }
+    set(state => {
+      const hasDownload = state.downloads.some(item => item.id === job.id);
+      const nextDownloads = job.phase === 'completed'
+        ? (hasDownload ? state.downloads.filter(item => item.id !== job.id) : state.downloads)
         : job.phase === 'failed' && job.revision > 0
-          ? state.downloads.map(item => item.id === job.id ? { ...item, status: 'failed' as const, speed: '-', eta: '-' } : item)
-          : state.downloads,
-      pendingOrder: state.pendingOrder.filter(id => id !== job.id),
-      allocationPendingIds: new Set([...state.allocationPendingIds].filter(id => id !== job.id)),
-      backendRegisteredIds: job.phase === 'completed'
+          ? (hasDownload ? state.downloads.map(item => item.id === job.id ? { ...item, status: 'failed' as const, speed: '-', eta: '-' } : item) : state.downloads)
+          : state.downloads;
+      const hasPending = state.pendingOrder.includes(job.id);
+      const nextPendingOrder = hasPending ? state.pendingOrder.filter(id => id !== job.id) : state.pendingOrder;
+      const hasAllocation = state.allocationPendingIds.has(job.id);
+      const nextAllocationPendingIds = hasAllocation
+        ? new Set([...state.allocationPendingIds].filter(id => id !== job.id))
+        : state.allocationPendingIds;
+      const hasRegistered = job.phase === 'completed' && state.backendRegisteredIds.has(job.id);
+      const nextBackendRegisteredIds = hasRegistered
         ? new Set([...state.backendRegisteredIds].filter(id => id !== job.id))
-        : state.backendRegisteredIds,
-    }));
+        : state.backendRegisteredIds;
+
+      return {
+        removalJobs: { ...state.removalJobs, [job.id]: job },
+        downloads: nextDownloads,
+        pendingOrder: nextPendingOrder,
+        allocationPendingIds: nextAllocationPendingIds,
+        backendRegisteredIds: nextBackendRegisteredIds,
+      };
+    });
     if (job.phase === 'completed') useDownloadProgressStore.getState().resetDownloadProgress(job.id);
     syncSystemIntegrations();
   },
@@ -3216,10 +3233,20 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
   },
   initDB: async () => {
     try {
+      downloadPersistenceReady = false;
       // Register before recovery starts; no worker runs until snapshots hydrate.
       if (!removalListener) removalListener = await listenEvent('download-removal', event => get().applyRemovalJob(event.payload));
       const removalJobs = await invoke('list_download_removals');
-      for (const job of removalJobs) get().applyRemovalJob(job);
+      set(state => {
+        const merged: Record<string, DownloadRemovalJob> = { ...state.removalJobs };
+        for (const job of removalJobs) {
+          const existing = merged[job.id];
+          if (!existing || job.revision >= existing.revision) {
+            merged[job.id] = job;
+          }
+        }
+        return { removalJobs: merged };
+      });
       const persistedQueues = (await invoke('db_get_all_queues')).flatMap(value => {
         try {
           return [JSON.parse(value) as PersistedQueue];
@@ -3283,6 +3310,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             : d
         ))
       }));
+      if (downloadPersistenceUnsubscribe) {
+        downloadPersistenceReady = true;
+      }
 
     } catch (e) {
       console.error("Failed to init DB", e);
@@ -3465,6 +3495,7 @@ export const initializeDownloadPersistence = (windowLabel: string): (() => void)
   if (windowLabel !== 'main' || downloadPersistenceUnsubscribe) return () => undefined;
 
   downloadPersistenceUnsubscribe = useDownloadStore.subscribe((state, prevState) => {
+    if (!downloadPersistenceReady) return;
     if (state.queues !== prevState.queues || state.downloads !== prevState.downloads) {
       void queuePersistenceSnapshot(persistenceSnapshotForState(state)).catch(error => {
         console.error('Failed to persist download state:', error);

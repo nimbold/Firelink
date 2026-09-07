@@ -105,6 +105,7 @@ fn init_at_path_internal(
     migrate_schema(&mut connection, version)?;
 
     import_legacy_data(&mut connection, app_data_dir, portable)?;
+    recover_downloads_from_migration_backup(&mut connection, app_data_dir, portable)?;
     if portable {
         sanitize_persisted_downloads(&mut connection)?;
     }
@@ -228,10 +229,13 @@ fn migrate_schema(connection: &mut Connection, from_version: i64) -> Result<(), 
     }
 
     if from_version < 4 {
-        transaction.execute_batch("CREATE TABLE download_removal_jobs (
-            id TEXT PRIMARY KEY, data TEXT NOT NULL
-        );
-        CREATE TABLE download_removal_assets (id TEXT PRIMARY KEY, data TEXT NOT NULL);").map_err(|error| format!("failed to migrate removal jobs: {error}"))?;
+        transaction.execute_batch("
+            CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS download_removal_jobs (
+                id TEXT PRIMARY KEY, data TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS download_removal_assets (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+        ").map_err(|error| format!("failed to migrate removal jobs: {error}"))?;
     }
 
     transaction
@@ -313,6 +317,213 @@ fn import_legacy_data(
             )
             .map_err(|error| format!("failed to record legacy import: {error}"))?;
     }
+    Ok(())
+}
+
+fn recover_downloads_from_migration_backup(
+    connection: &mut Connection,
+    app_data_dir: &Path,
+    portable: bool,
+) -> Result<(), String> {
+    const RECOVERY_MARKER: &str = "migration-backup-recovered:schema-v3";
+    if !table_exists(connection, "metadata")? {
+        return Ok(());
+    }
+    if metadata_exists(connection, RECOVERY_MARKER)? {
+        return Ok(());
+    }
+
+    if !table_exists(connection, "downloads")? {
+        return Ok(());
+    }
+
+    let current_downloads_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM downloads", [], |row| row.get(0))
+        .map_err(|error| format!("failed to count downloads for recovery: {error}"))?;
+    if current_downloads_count > 0 {
+        connection
+            .execute(
+                "INSERT INTO metadata (key, value) VALUES (?1, 'skipped')
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![RECOVERY_MARKER],
+            )
+            .map_err(|error| format!("failed to record recovery status: {error}"))?;
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(app_data_dir)
+        .map_err(|error| format!("failed to read app data directory for recovery: {error}"))?;
+    let mut backup_candidates: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+            if file_name.starts_with(&format!("{DATABASE_NAME}.backup-schema-v3")) {
+                if let Ok(metadata) = fs::symlink_metadata(&path) {
+                    if metadata.is_file() && !metadata.file_type().is_symlink() {
+                        backup_candidates.push(path);
+                    }
+                }
+            }
+        }
+    }
+    backup_candidates.sort_by(|a, b| b.cmp(a));
+
+    for candidate in backup_candidates {
+        let Ok(backup_conn) = Connection::open(&candidate) else {
+            continue;
+        };
+        if !table_exists(&backup_conn, "downloads").unwrap_or(false) {
+            continue;
+        }
+        let backup_count: i64 = backup_conn
+            .query_row("SELECT COUNT(*) FROM downloads", [], |row| row.get(0))
+            .unwrap_or(0);
+        if backup_count == 0 {
+            continue;
+        }
+
+        let Ok(mut backup_downloads) =
+            query_string_column(&backup_conn, "SELECT data FROM downloads ORDER BY rowid")
+        else {
+            log::warn!(
+                "Failed to read downloads from migration backup candidate '{}'",
+                candidate.display()
+            );
+            continue;
+        };
+        if portable {
+            if let Err(error) = sanitize_download_strings(&mut backup_downloads) {
+                log::warn!(
+                    "Failed to sanitize migration backup downloads from '{}': {error}",
+                    candidate.display()
+                );
+                continue;
+            }
+        }
+
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("failed to begin recovery transaction: {error}"))?;
+
+        let has_removal_jobs_table = table_exists(&transaction, "download_removal_jobs").unwrap_or(false);
+        let mut restored_ids = std::collections::HashSet::new();
+        let mut restored_count = 0;
+        for data in &backup_downloads {
+            let Ok(value) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
+            let Some(id) = value.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if has_removal_jobs_table
+                && transaction
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM download_removal_jobs WHERE id = ?1)",
+                        [id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+
+            let status = value.get("status").and_then(Value::as_str).unwrap_or("completed");
+            let queue_id = value.get("queueId").and_then(Value::as_str);
+            let inserted = transaction
+                .execute(
+                    "INSERT INTO downloads (id, status, queue_id, data) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(id) DO NOTHING",
+                    params![id, status, queue_id, data],
+                )
+                .map_err(|error| format!("failed to restore download '{id}': {error}"))?;
+            if inserted > 0 {
+                restored_ids.insert(id.to_string());
+                restored_count += 1;
+            }
+        }
+
+        if table_exists(&backup_conn, "download_ownership").unwrap_or(false)
+            && table_exists(&transaction, "download_ownership").unwrap_or(false)
+        {
+            if let Ok(mut stmt) = backup_conn.prepare("SELECT id, primary_path FROM download_ownership") {
+                if let Ok(rows) = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))) {
+                    for (id, primary_path) in rows.flatten() {
+                        if restored_ids.contains(&id) {
+                            let _ = transaction.execute(
+                                "INSERT INTO download_ownership (id, primary_path) VALUES (?1, ?2) ON CONFLICT(id) DO NOTHING",
+                                params![id, primary_path],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if table_exists(&backup_conn, "download_owned_paths").unwrap_or(false)
+            && table_exists(&transaction, "download_owned_paths").unwrap_or(false)
+        {
+            if let Ok(mut stmt) = backup_conn.prepare("SELECT id, paths FROM download_owned_paths") {
+                if let Ok(rows) = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))) {
+                    for (id, paths) in rows.flatten() {
+                        if restored_ids.contains(&id) {
+                            let _ = transaction.execute(
+                                "INSERT INTO download_owned_paths (id, paths) VALUES (?1, ?2) ON CONFLICT(id) DO NOTHING",
+                                params![id, paths],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if table_exists(&backup_conn, "download_removal_paths").unwrap_or(false)
+            && table_exists(&transaction, "download_removal_paths").unwrap_or(false)
+        {
+            if let Ok(mut stmt) = backup_conn.prepare("SELECT id, paths FROM download_removal_paths") {
+                if let Ok(rows) = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))) {
+                    for (id, paths) in rows.flatten() {
+                        if restored_ids.contains(&id) {
+                            let _ = transaction.execute(
+                                "INSERT INTO download_removal_paths (id, paths) VALUES (?1, ?2) ON CONFLICT(id) DO NOTHING",
+                                params![id, paths],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if table_exists(&backup_conn, "queues").unwrap_or(false)
+            && table_exists(&transaction, "queues").unwrap_or(false)
+        {
+            if let Ok(mut stmt) = backup_conn.prepare("SELECT id, data FROM queues") {
+                if let Ok(rows) = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))) {
+                    for (id, data) in rows.flatten() {
+                        let _ = transaction.execute(
+                            "INSERT INTO queues (id, data) VALUES (?1, ?2) ON CONFLICT(id) DO NOTHING",
+                            params![id, data],
+                        );
+                    }
+                }
+            }
+        }
+
+        transaction
+            .execute(
+                "INSERT INTO metadata (key, value) VALUES (?1, 'complete')
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![RECOVERY_MARKER],
+            )
+            .map_err(|error| format!("failed to record recovery completion: {error}"))?;
+
+        transaction
+            .commit()
+            .map_err(|error| format!("failed to commit recovery: {error}"))?;
+
+        log::info!(
+            "Restored {restored_count} download(s) from migration backup '{}'",
+            candidate.display()
+        );
+        break;
+    }
+
     Ok(())
 }
 
@@ -3895,6 +4106,148 @@ mod tests {
                 )
                 .unwrap(),
             3
+        );
+    }
+
+    #[test]
+    fn recover_downloads_from_migration_backup_restores_empty_downloads_and_excludes_tombstones() {
+        let root = TempDir::new().unwrap();
+        let db = init_at_path(root.path()).unwrap();
+        let mut connection = db.lock().unwrap();
+
+        let backup_path = root.path().join("firelink.sqlite.backup-schema-v3-20260907T120000Z-unit");
+        {
+            let backup_conn = Connection::open(&backup_path).unwrap();
+            backup_conn.execute_batch("
+                CREATE TABLE downloads (id TEXT PRIMARY KEY, status TEXT NOT NULL, queue_id TEXT, data TEXT NOT NULL);
+                INSERT INTO downloads VALUES ('keep-1', 'completed', 'main', '{\"id\":\"keep-1\",\"fileName\":\"keep1.bin\",\"status\":\"completed\"}');
+                INSERT INTO downloads VALUES ('keep-2', 'completed', 'main', '{\"id\":\"keep-2\",\"fileName\":\"keep2.bin\",\"status\":\"completed\"}');
+                INSERT INTO downloads VALUES ('deleted-tombstone', 'completed', 'main', '{\"id\":\"deleted-tombstone\",\"fileName\":\"deleted.bin\",\"status\":\"completed\"}');
+                CREATE TABLE download_ownership (id TEXT PRIMARY KEY, primary_path TEXT NOT NULL);
+                INSERT INTO download_ownership VALUES ('keep-1', '/path/to/keep1.bin');
+                INSERT INTO download_ownership VALUES ('deleted-tombstone', '/path/to/deleted.bin');
+                CREATE TABLE queues (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+                INSERT INTO queues VALUES ('custom-queue', '{\"id\":\"custom-queue\",\"name\":\"Custom\"}');
+            ").unwrap();
+        }
+
+        // Simulate that a removal job already exists in download_removal_jobs
+        connection.execute(
+            "INSERT INTO download_removal_jobs (id, data) VALUES (?1, ?2)",
+            params![
+                "deleted-tombstone",
+                r#"{"id":"deleted-tombstone","revision":1,"deleteAssets":true,"phase":"completed","error":null}"#
+            ],
+        ).unwrap();
+
+        recover_downloads_from_migration_backup(&mut connection, root.path(), false).unwrap();
+
+        let loaded = load_downloads(&connection).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded.iter().any(|d| d.contains("keep-1")));
+        assert!(loaded.iter().any(|d| d.contains("keep-2")));
+        assert!(!loaded.iter().any(|d| d.contains("deleted-tombstone")));
+
+        // Ownership should be restored for keep-1 but not for deleted-tombstone
+        assert_eq!(
+            connection.query_row::<String, _, _>(
+                "SELECT primary_path FROM download_ownership WHERE id = 'keep-1'",
+                [],
+                |r| r.get(0)
+            ).unwrap(),
+            "/path/to/keep1.bin"
+        );
+        assert_eq!(
+            connection.query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM download_ownership WHERE id = 'deleted-tombstone'",
+                [],
+                |r| r.get(0)
+            ).unwrap(),
+            0
+        );
+
+        // Custom queue should be restored
+        assert!(load_queues(&connection).unwrap().iter().any(|q| q.contains("custom-queue")));
+
+        assert_eq!(
+            connection.query_row::<String, _, _>(
+                "SELECT value FROM metadata WHERE key = 'migration-backup-recovered:schema-v3'",
+                [],
+                |r| r.get(0)
+            ).unwrap(),
+            "complete"
+        );
+    }
+
+    #[test]
+    fn recover_downloads_from_migration_backup_skips_when_downloads_exist() {
+        let root = TempDir::new().unwrap();
+        let db = init_at_path(root.path()).unwrap();
+        let mut connection = db.lock().unwrap();
+
+        let backup_path = root.path().join("firelink.sqlite.backup-schema-v3-20260907T120000Z-unit");
+        {
+            let backup_conn = Connection::open(&backup_path).unwrap();
+            backup_conn.execute_batch("
+                CREATE TABLE downloads (id TEXT PRIMARY KEY, status TEXT NOT NULL, queue_id TEXT, data TEXT NOT NULL);
+                INSERT INTO downloads VALUES ('from-backup', 'completed', 'main', '{\"id\":\"from-backup\"}');
+            ").unwrap();
+        }
+
+        connection.execute(
+            "INSERT INTO downloads (id, status, queue_id, data) VALUES ('existing', 'completed', 'main', '{\"id\":\"existing\"}')",
+            []
+        ).unwrap();
+        connection.execute("DELETE FROM metadata WHERE key = 'migration-backup-recovered:schema-v3'", []).unwrap();
+
+        recover_downloads_from_migration_backup(&mut connection, root.path(), false).unwrap();
+
+        let loaded = load_downloads(&connection).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].contains("existing"));
+        assert_eq!(
+            connection.query_row::<String, _, _>(
+                "SELECT value FROM metadata WHERE key = 'migration-backup-recovered:schema-v3'",
+                [],
+                |r| r.get(0)
+            ).unwrap(),
+            "skipped"
+        );
+    }
+
+    #[test]
+    fn recover_downloads_from_migration_backup_skips_corrupt_candidate_and_continues_to_valid() {
+        let root = TempDir::new().unwrap();
+        let corrupt_path = root.path().join("firelink.sqlite.backup-schema-v3-20260907T130000Z-corrupt");
+        fs::write(&corrupt_path, b"not a valid sqlite file").unwrap();
+
+        let valid_path = root.path().join("firelink.sqlite.backup-schema-v3-20260907T110000Z-valid");
+        {
+            let valid_conn = Connection::open(&valid_path).unwrap();
+            valid_conn.execute_batch("
+                CREATE TABLE downloads (id TEXT PRIMARY KEY, status TEXT NOT NULL, queue_id TEXT, data TEXT NOT NULL);
+                INSERT INTO downloads VALUES ('valid-1', 'completed', 'main', '{\"id\":\"valid-1\"}');
+            ").unwrap();
+        }
+
+        let db = init_at_path(root.path()).unwrap();
+        let mut connection = db.lock().unwrap();
+
+        connection.execute("DELETE FROM downloads", []).unwrap();
+        connection.execute("DELETE FROM metadata WHERE key = 'migration-backup-recovered:schema-v3'", []).unwrap();
+
+        recover_downloads_from_migration_backup(&mut connection, root.path(), false).unwrap();
+
+        let loaded = load_downloads(&connection).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].contains("valid-1"));
+        assert_eq!(
+            connection.query_row::<String, _, _>(
+                "SELECT value FROM metadata WHERE key = 'migration-backup-recovered:schema-v3'",
+                [],
+                |r| r.get(0)
+            ).unwrap(),
+            "complete"
         );
     }
 }

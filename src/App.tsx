@@ -540,7 +540,7 @@ function App() {
   }, [sidebarWidth]);
 
   useEffect(() => {
-    const disposePersistence = initializeDownloadPersistence(getCurrentWindow().label);
+    let disposePersistence: (() => void) | null = null;
     let active = true;
     let exitRequested = false;
     let exiting = false;
@@ -779,6 +779,7 @@ function App() {
       try {
         await initializeDownloadState();
         if (!active) return;
+        disposePersistence = initializeDownloadPersistence(getCurrentWindow().label);
       } catch (error) {
         disposeListeners();
         cleanupListeners = null;
@@ -806,7 +807,8 @@ function App() {
       unlistenExit = null;
       unlistenSettingsHydration?.();
       mainWindowSizePersistence.dispose();
-      disposePersistence();
+      disposePersistence?.();
+      disposePersistence = null;
     };
   }, [addToast, enqueueAddInput, processExtensionDownload, queueFrontendReadyUpdate]);
 
