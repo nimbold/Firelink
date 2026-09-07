@@ -1035,6 +1035,19 @@ fn drain_media_output_lines(buffer: &mut String, chunk: &str) -> Vec<String> {
     lines
 }
 
+fn append_bounded_stderr_tail(tail: &mut String, chunk: &str, max_bytes: usize) {
+    tail.push_str(chunk);
+    if tail.len() <= max_bytes {
+        return;
+    }
+
+    let start = tail.len() - max_bytes;
+    let boundary = (start..tail.len())
+        .find(|&index| tail.is_char_boundary(index))
+        .unwrap_or(tail.len());
+    tail.drain(..boundary);
+}
+
 fn flush_media_output_line(buffer: &mut String) -> Option<String> {
     let line = std::mem::take(buffer);
     (!line.trim().is_empty()).then_some(line)
@@ -5052,10 +5065,7 @@ pub(crate) async fn start_media_download_internal(
                         }
                         Some(tauri_plugin_shell::process::CommandEvent::Stderr(line_bytes)) => {
                             let chunk = String::from_utf8_lossy(&line_bytes);
-                            stderr_tail.push_str(&chunk);
-                            if stderr_tail.len() > STDERR_TAIL {
-                                stderr_tail = stderr_tail.split_off(stderr_tail.len() - STDERR_TAIL);
-                            }
+                            append_bounded_stderr_tail(&mut stderr_tail, &chunk, STDERR_TAIL);
                             for line in drain_media_output_lines(&mut stderr_buffer, &chunk) {
                                 if let Some(progress) = parse_media_progress_line(&line) {
                                     emit_media_progress(
@@ -14249,7 +14259,7 @@ mod tests {
 
     use super::{
         aggregate_media_byte_progress, aggregate_media_fraction, append_ytdlp_config_option,
-        append_ytdlp_http_headers,
+        append_bounded_stderr_tail, append_ytdlp_http_headers,
         build_media_format_options,
         collect_download_uris, drain_media_output_lines, filename_from_content_disposition,
         filename_from_url_disposition_query, filename_from_url_path, is_excluded_yt_dlp_format,
@@ -18033,6 +18043,24 @@ mod tests {
             Some(0.5)
         );
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn bounds_stderr_tail_without_splitting_utf8_across_appends() {
+        const MAX_BYTES: usize = 7;
+        let mut tail = String::new();
+
+        for chunk in ["a", "🙂", "é", "🙂", "b", "🙂", "c", "🙂"] {
+            append_bounded_stderr_tail(&mut tail, chunk, MAX_BYTES);
+            assert!(tail.len() <= MAX_BYTES);
+        }
+
+        for _ in 0..32 {
+            append_bounded_stderr_tail(&mut tail, "🙂", MAX_BYTES);
+            assert!(tail.len() <= MAX_BYTES);
+        }
+
+        assert_eq!(tail, "🙂");
     }
 
     #[test]
