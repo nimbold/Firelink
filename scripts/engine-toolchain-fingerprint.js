@@ -4,6 +4,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { getAria2BuildScriptSha256 } from './engine-aria2-cache.js';
 
 const WINDOWS_PACKAGES = [
   'autoconf',
@@ -99,6 +101,42 @@ function main() {
 
   const fingerprint = crypto.createHash('sha256').update(records.join('\n')).digest('hex');
   writeOutput('fingerprint', fingerprint);
+
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const sourceLockPath = path.join(repoRoot, 'engine-sources.lock.json');
+  if (fs.existsSync(sourceLockPath)) {
+    const sourceLock = JSON.parse(fs.readFileSync(sourceLockPath, 'utf8'));
+    const aria2Source = sourceLock.targets?.[target]?.aria2c;
+    if (aria2Source) {
+      const canonicalize = val => {
+        if (Array.isArray(val)) return val.map(canonicalize);
+        if (val && typeof val === 'object') {
+          return Object.fromEntries(
+            Object.keys(val).sort().map(k => [k, canonicalize(val[k])])
+          );
+        }
+        return val;
+      };
+
+      const patchPath = path.join(repoRoot, aria2Source.patch || 'scripts/aria2/firelink.patch');
+      const buildShPath = path.join(repoRoot, 'scripts/aria2/build.sh');
+      const patchSha = fs.existsSync(patchPath)
+        ? crypto.createHash('sha256').update(fs.readFileSync(patchPath, 'utf8').replaceAll('\r\n', '\n')).digest('hex')
+        : (aria2Source.patchSha256 || '');
+      const buildShSha = fs.existsSync(buildShPath)
+        ? getAria2BuildScriptSha256(repoRoot)
+        : '';
+
+      const aria2Records = [
+        ...records,
+        `aria2-source=${JSON.stringify(canonicalize(aria2Source))}`,
+        `aria2-patch-sha256=${patchSha}`,
+        `aria2-build-sh-sha256=${buildShSha}`,
+      ];
+      const aria2Fingerprint = crypto.createHash('sha256').update(aria2Records.join('\n')).digest('hex');
+      writeOutput('aria2-fingerprint', aria2Fingerprint);
+    }
+  }
 }
 
 try {

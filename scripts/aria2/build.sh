@@ -45,7 +45,21 @@ export PKG_CONFIG="pkg-config --static"
   --without-gnutls --with-openssl --without-libxml2 --with-libexpat \
   --without-libgmp --without-libnettle --without-libgcrypt \
   --with-libssh2 --with-libcares
-make -j2
+if command -v nproc >/dev/null 2>&1; then
+  JOBS="$(nproc 2>/dev/null || echo 4)"
+elif [[ -n "${NUMBER_OF_PROCESSORS:-}" ]]; then
+  JOBS="$NUMBER_OF_PROCESSORS"
+elif command -v sysctl >/dev/null 2>&1; then
+  JOBS="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+else
+  JOBS=4
+fi
+JOBS="${JOBS//$'\r'/}"
+JOBS="${JOBS// /}"
+if ! [[ "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
+  JOBS=4
+fi
+make -j"$JOBS"
 
 if command -v cygpath >/dev/null 2>&1; then
   command -v objdump >/dev/null 2>&1 || {

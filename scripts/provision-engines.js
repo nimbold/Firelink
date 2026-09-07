@@ -14,6 +14,12 @@ import {
   removePathWithRetry,
 } from './engine-payload-promotion.js';
 import { assertAria2RouteSource } from './aria2-route-contract.js';
+import {
+  getAria2BuildScriptSha256,
+  restoreAria2Cache,
+  saveAria2Cache,
+  validateAria2Cache,
+} from './engine-aria2-cache.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -182,32 +188,75 @@ try {
   const ffmpeg = await download('ffmpeg', targetSources.ffmpeg);
   copyExecutable(findFile(ffmpeg, isWindows ? ['ffmpeg.exe'] : ['ffmpeg']), 'ffmpeg');
 
-  const aria2 = await download('aria2c', targetSources.aria2c);
   const aria2Source = targetSources.aria2c;
   if (aria2Source.buildFromSource !== true || aria2Source.allocationTelemetry !== true) {
     throw new Error('Aria2 provisioning requires the allocation telemetry source build.');
   }
   const patchFile = path.join(repoRoot, aria2Source.patch);
   if (sha256(patchFile) !== aria2Source.patchSha256) throw new Error('Aria2 source patch checksum mismatch');
-  const sourceRoots = fs.readdirSync(aria2, { withFileTypes: true })
-    .filter(entry => entry.isDirectory() && fs.existsSync(path.join(aria2, entry.name, 'configure.ac')))
-    .map(entry => path.join(aria2, entry.name));
-  if (sourceRoots.length !== 1) throw new Error('Aria2 archive must contain exactly one source root');
-  const [sourceRoot] = sourceRoots;
-  const bash = isWindows ? path.join(process.env.FIRELINK_MSYS2_ROOT || 'C:/msys64', 'usr/bin/bash.exe') : 'bash';
-  await execFileAsync(bash, [path.join(repoRoot, 'scripts/aria2/build.sh').replaceAll('\\', '/'), sourceRoot, patchFile], {
-    signal: provisioningAbortController.signal,
-    env: { ...process.env, ...(isWindows ? { MSYSTEM: 'MINGW64' } : {}) },
-    maxBuffer: 32 * 1024 * 1024,
-    timeout: 30 * 60 * 1000,
+
+  const aria2CacheRoot = process.env.FIRELINK_ARIA2_CACHE_DIR
+    || path.join(destinationParent, '.aria2-cache', target);
+  const buildScriptSha256 = getAria2BuildScriptSha256(repoRoot);
+  const toolchainFingerprint = process.env.FIRELINK_TOOLCHAIN_FINGERPRINT || null;
+
+  const cacheValidation = validateAria2Cache({
+    aria2CacheRoot,
+    target,
+    aria2Source,
+    buildScriptSha256,
+    toolchainFingerprint,
+    executableSuffix,
   });
-  copyExecutable(path.join(sourceRoot, 'firelink-build', 'src', `aria2c${executableSuffix}`), 'aria2c');
-  const aria2Runtime = path.join(sourceRoot, 'aria2-libs');
-  if (fs.existsSync(aria2Runtime)) {
-    fs.cpSync(aria2Runtime, path.join(payloadDestination, 'aria2-libs'), {
-      recursive: true,
-      preserveTimestamps: true,
+
+  if (cacheValidation.valid) {
+    restoreAria2Cache({
+      aria2CacheRoot,
+      payloadDestination,
+      target,
+      executableSuffix,
+      isWindows,
     });
+    console.log(`Reused cached Aria2 build from ${aria2CacheRoot}`);
+  } else {
+    const aria2 = await download('aria2c', targetSources.aria2c);
+    const sourceRoots = fs.readdirSync(aria2, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && fs.existsSync(path.join(aria2, entry.name, 'configure.ac')))
+      .map(entry => path.join(aria2, entry.name));
+    if (sourceRoots.length !== 1) throw new Error('Aria2 archive must contain exactly one source root');
+    const [sourceRoot] = sourceRoots;
+    const bash = isWindows ? path.join(process.env.FIRELINK_MSYS2_ROOT || 'C:/msys64', 'usr/bin/bash.exe') : 'bash';
+    await execFileAsync(bash, [path.join(repoRoot, 'scripts/aria2/build.sh').replaceAll('\\', '/'), sourceRoot, patchFile], {
+      signal: provisioningAbortController.signal,
+      env: { ...process.env, ...(isWindows ? { MSYSTEM: 'MINGW64' } : {}) },
+      maxBuffer: 32 * 1024 * 1024,
+      timeout: 30 * 60 * 1000,
+    });
+    copyExecutable(path.join(sourceRoot, 'firelink-build', 'src', `aria2c${executableSuffix}`), 'aria2c');
+    const aria2Runtime = path.join(sourceRoot, 'aria2-libs');
+    if (fs.existsSync(aria2Runtime)) {
+      fs.cpSync(aria2Runtime, path.join(payloadDestination, 'aria2-libs'), {
+        recursive: true,
+        preserveTimestamps: true,
+      });
+    }
+
+    try {
+      await saveAria2Cache({
+        aria2CacheRoot,
+        payloadDestination,
+        target,
+        aria2Source,
+        buildScriptSha256,
+        toolchainFingerprint,
+        executableSuffix,
+        aria2Runtime,
+        isWindows,
+      });
+      console.log(`Saved built Aria2 cache to ${aria2CacheRoot}`);
+    } catch (cacheError) {
+      console.warn(`Could not save Aria2 build cache: ${cacheError.message}`);
+    }
   }
 
   writePayloadManifest();
@@ -215,7 +264,17 @@ try {
   await promoteDirectory(payloadDestination, destination);
   console.log(`Provisioned locked engine payload at ${destination}`);
 } finally {
-  if (temporary) await removePathWithRetry(temporary);
+  if (temporary) {
+    try {
+      await removePathWithRetry(temporary);
+    } catch (cleanupError) {
+      if (provisioningAbortController.signal.aborted) {
+        console.warn(`Could not remove temporary directory during abort: ${cleanupError.message}`);
+      } else {
+        throw cleanupError;
+      }
+    }
+  }
   for (const [signalName, handler] of signalHandlers) {
     process.removeListener(signalName, handler);
   }

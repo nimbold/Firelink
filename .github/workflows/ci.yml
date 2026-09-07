@@ -39,7 +39,7 @@ jobs:
 
   desktop:
     name: Desktop checks (${{ matrix.target }})
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -62,6 +62,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: Cache Rust dependencies and build targets
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -169,6 +173,16 @@ jobs:
         run: |
           node scripts/stage-engines.js
           node scripts/verify-binaries.js --staged
+      - name: Restore verified Aria2 build cache
+        id: aria2-cache
+        if: >-
+          runner.os != 'macOS' &&
+          (steps.engine-cache.outputs.cache-hit != 'true' ||
+           steps.engine-cache-validation.outcome != 'success')
+        uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: src-tauri/provisioned-engines/.aria2-cache/${{ matrix.target }}
+          key: firelink-aria2-build-v1-${{ matrix.target }}-${{ steps.engine-toolchain.outputs.aria2-fingerprint }}
       - name: Provision locked engines
         if: >-
           runner.os != 'macOS' &&
@@ -176,6 +190,7 @@ jobs:
            steps.engine-cache-validation.outcome != 'success')
         env:
           FIRELINK_MSYS2_ROOT: ${{ steps.aria2-msys.outputs.msys2-location }}
+          FIRELINK_TOOLCHAIN_FINGERPRINT: ${{ steps.engine-toolchain.outputs.fingerprint }}
         run: node scripts/provision-engines.js --target ${{ matrix.target }}
       - name: Stage and verify engines
         env:
@@ -195,6 +210,16 @@ jobs:
         env:
           FIRELINK_ENGINE_OUTPUT_ROOT: ${{ runner.temp }}/firelink-engine-workspace/${{ matrix.target }}/engine-dist
         run: node scripts/smoke-aria2-transfers.js
+      - name: Save verified Aria2 build cache
+        if: >-
+          runner.os != 'macOS' &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.aria2-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: src-tauri/provisioned-engines/.aria2-cache/${{ matrix.target }}
+          key: firelink-aria2-build-v1-${{ matrix.target }}-${{ steps.engine-toolchain.outputs.aria2-fingerprint }}
       - name: Save verified engine payload cache
         if: >-
           runner.os != 'macOS' &&
