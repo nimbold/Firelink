@@ -5,75 +5,56 @@ All notable changes to Firelink will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.4.1] - 2026-09-03
+## [1.4.2] - 2026-09-08
 
-This release resolves Windows WebView2 startup crashes and focus deadlocks, adds route-aware transfers and native asynchronous DNS resolution for TUN proxies, isolates engine staging workspaces, and prepares Firelink Companion 2.2.1 for Microsoft Edge Add-ons.
-
-### Fixes
-
-- Prevent Windows WebView2 startup crashes and focus recursion by deferring window activation, isolating AppData junctions, and gating renderer IPC behind post-load event ticks, addressing [#37](https://github.com/nimbold/Firelink/issues/37).
-- Prevent Properties window deadlocks on Windows by serializing child WebViews and excluding custom caption rails from drag hit-testing, addressing [#37](https://github.com/nimbold/Firelink/issues/37).
-- Restore immediate credential recovery for edited downloads without stale keychain password conflicts.
-- Implement route-aware transfers with native asynchronous DNS resolution (`firelink-native-dns-v1`) to prevent Aria2 loop freezes under TUN/VPN proxies (such as Shadowrocket or Sing-box), while preserving fallback for stock Aria2 daemons, addressing [#38](https://github.com/nimbold/Firelink/issues/38).
-- Harden route-aware Torrent metadata resolution and magnet probe cleanup on active proxy routes.
-
-### Improvements
-
-- Isolate engine staging per build invocation with atomic workspaces (`FIRELINK_ENGINE_OUTPUT_ROOT`), avoiding shared staging locks.
-- Update locked engine sources: BtbN FFmpeg autobuild to 2026-09-02, yt-dlp to 2026.08.19, Deno to 2.9.6, and Aria2 to 1.37.0.
-- Stabilize cross-platform CI replacement fingerprints and Linux Torrent probe test harnesses.
-- Advance Firelink Companion submodule to `2.2.1` with localization metadata and Edge Add-ons support, addressing [#39](https://github.com/nimbold/Firelink/issues/39).
-
-### Compatibility
-
-- Use [Firelink Companion `2.2.1`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.1), or the [latest Companion release](https://github.com/nimbold/Firelink-Extension/releases/latest), with Firelink `1.4.1`.
-
-## [1.4.0] - 2026-08-27
-
-This release adds built-in Torrent downloads and a dedicated Properties window, while making regular downloads, browser handoffs, and cross-platform packages more dependable.
+This is the stable follow-up to the 1.4.0 pre-release and includes all work since 1.3.1. It is a major release focused on built-in Torrents, clearer transfer controls, safer recovery, and better browser and VPN support.
 
 ### New features
 
-- **Torrent downloads**
+- **BitTorrent downloads and browser handoff**
   - Add `.torrent` files and magnet links from the Add window, file associations, `magnet:` links, and Firelink Companion.
-  - Resolve remote metadata before enqueueing and safely reuse validated Torrent metadata.
-  - Select files, prioritize pieces, preallocate or allocate as needed, verify existing data, remove unselected files safely, and add per-file web seeds.
-  - Manage trackers and exclusions, tracker timing, DHT/IPv6/PEX/LPD discovery, encryption, peer limits, network identity, and resource limits.
-  - View file progress, piece availability, connected and listed peers, seeders, upload totals and speed, and the info hash.
-  - Set upload limits, seed time or ratio, stop timeout, concurrent seed slots, and move Torrent data to a new location.
-  - Use a dedicated Torrents category with pause, resume, retry, redownload, and safe cleanup.
+  - Review remote metadata before queueing; choose files and priorities, allocate or preallocate data, verify existing files, remove unselected files safely, and add per-file web seeds.
+  - Configure trackers and exclusions, tracker timing, DHT/IPv6/PEX/LPD discovery, encryption, peer limits, network identity, and resource limits.
+  - See per-file and piece progress, availability, peers, seeders, info hash, and upload activity.
+  - Set upload and seeding limits, seed time or ratio, stop timeout, concurrent seed slots, and move Torrent data.
+  - Manage Torrents in a dedicated category with pause, resume, retry, redownload, and safe cleanup.
+  - Send browser magnets, direct `.torrent` links, and browser-local Torrent attachments to the Add window for review.
 - **Download and Torrent Properties windows**
   - Open a selected download in its own window with overview, transfer, and advanced controls.
   - Use Torrent tabs for file selection, trackers, peers, options, and live diagnostics.
-  - Edit supported settings while a transfer is active, including speed, connections, Torrent upload and peer limits, seeding, verification, allocation, and encryption.
-  - Inspect allocation, exact progress, resume failures, destinations, and current diagnostics; copy long URLs or paths and export magnet links where available.
-  - Keep the window size during the app session while the window follows the current theme and locale.
+  - Change supported transfer, Torrent, seeding, verification, allocation, and encryption settings while work is active.
+  - Inspect exact progress, allocation, destinations, resume failures, and diagnostics; copy long URLs or paths and export magnet links.
+  - Keep the Properties window size during the session while theme and locale follow the app.
 - **Adaptive mirror selection**
-  - Optionally use recent transfer performance to choose among multiple mirrors. Mirror statistics stay private on this device.
+  - Optionally choose among mirrors using recent transfer performance; history remains private on this device.
 - **Transfer and layout visibility**
-  - Show the file-allocation phase while a normal download prepares its destination.
+  - See when a normal download is allocating its destination.
   - Remember the main-window size and position and the Folders collapse preference between launches.
 
 ### Improvements
 
-- Improve normal-download recovery across restarts, stale transfers, redirects, mirrors, connection-pool slowdowns, retries, and resume operations without saved credentials.
-- Improve media recovery and resume messaging, preserve exact progress at the end of a transfer, and restore adaptive YouTube formats. This responds to the interrupted-YouTube-download report in [#36](https://github.com/nimbold/Firelink/issues/36).
-- Make browser and deep-link inputs arrive in order, keep magnet clipboard handoffs usable, and make Add-window destination and metadata validation clearer.
-- Improve the download table, sidebar, Add window, Settings, RTL keyboard navigation, and accessibility behavior at narrow window sizes.
-- Add clear guidance for the macOS first-launch security warning and safe approval steps, responding to [#34](https://github.com/nimbold/Firelink/issues/34).
-- Refresh bundled engines and dependencies, resume interrupted engine downloads safely, and strengthen package, release, and cross-platform verification.
+- Make normal downloads recover more reliably across restarts, redirects, retries, resumed transfers, missing credentials, and connection slowdowns.
+- Improve media recovery and resume behavior, preserve exact final progress, and restore adaptive YouTube formats after interruptions, addressing [#36](https://github.com/nimbold/Firelink/issues/36).
+- Keep browser and deep-link inputs in order; make magnet clipboard handoffs and Add-window destination and metadata validation clearer.
+- Make the download table, sidebar, Add window, Settings, RTL keyboard navigation, and accessibility behavior more usable at narrow window sizes.
+- Document the macOS first-launch security warning and safe approval steps after the report in [#34](https://github.com/nimbold/Firelink/issues/34).
+- Refresh bundled engines and dependencies, resume interrupted engine downloads safely, and strengthen cross-platform package and release verification.
 
 ### Fixes
 
-- Retry affected transfers through the system resolver when a VPN or network tunnel leaves aria2 unable to resolve a host, addressing [#35](https://github.com/nimbold/Firelink/issues/35).
-- Prevent late or duplicate lifecycle events from reviving, removing, or misreporting a download after a newer action has already won.
-- Keep replacement, removal, and pre-admission cleanup from leaving stale queue entries, partial files, or misleading progress behind.
-- Keep completed, paused, failed, and retrying downloads authoritative while allocation and progress updates arrive asynchronously.
-- Make scheduled actions, speed limits, logs, persisted settings, and browser credentials safer when several changes happen close together.
+- Fix the Windows 1.4.0 startup failure, focus recursion, and Properties-window deadlock reported in [#37](https://github.com/nimbold/Firelink/issues/37) and [#41](https://github.com/nimbold/Firelink/issues/41).
+- Fix immediate download failures after the Add window showed **Ready** when a VPN or TUN's DNS path could not reach its servers; retry through the system resolver for affected transfers, addressing [#35](https://github.com/nimbold/Firelink/issues/35).
+- Fix false **Unsafe URL** failures under V2RayN, Proxifier, and other TUN or proxy setups by letting hostname lookups follow the active network route while continuing to block literal local and private targets, addressing [#38](https://github.com/nimbold/Firelink/issues/38).
+- Protect persisted downloads during startup and recover schema-v3 records instead of wiping or losing them.
+- Prevent stale or duplicate pause, resume, retry, completion, and removal actions from reviving items, misreporting progress, or leaving queue ownership behind.
+- Make replacements and cleanup safe when downloads are queued, retried, canceled, paused, completed, or removed, including multi-file assets.
+- Prevent browser capture races from duplicating a download, resuming it too early, or applying cleanup to the wrong item.
+- Fix network and Settings panel overlap plus Windows frame, shadow, focus, and cross-platform control issues.
+- Restore edited-download credentials without stale keychain conflicts.
 
 ### Compatibility
 
-- Use [Firelink Companion `2.2.0`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.0), or the [latest Companion release](https://github.com/nimbold/Firelink-Extension/releases/latest), with Firelink `1.4.0`.
+- Use [Firelink Companion `2.2.2`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.2), or the [latest Companion release](https://github.com/nimbold/Firelink-Extension/releases/latest), with Firelink `1.4.2`. The Companion includes the shared Chromium package and localized Edge Add-ons submission material requested in [#39](https://github.com/nimbold/Firelink/issues/39); the public Edge listing still requires Microsoft's certification.
 
 ## [1.3.1] - 2026-07-30
 
