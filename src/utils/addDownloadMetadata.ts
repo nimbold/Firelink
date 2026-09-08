@@ -272,7 +272,9 @@ export const reconcileDownloadRows = (
   requestContextVersions: Readonly<Record<string, number>> = {},
   playlistExpansions: PlaylistExpansions = {},
   selectedBySourceUrl: Readonly<Record<string, boolean>> = {},
-  forceTorrentUrls: ReadonlySet<string> = new Set()
+  forceTorrentUrls: ReadonlySet<string> = new Set(),
+  requestTorrentPaths: Readonly<Record<string, string>> = {},
+  requestTorrentCacheIds: Readonly<Record<string, string>> = {}
 ): AddDownloadDraftRow[] => {
   const inputs = parseInputLines(
     rawText,
@@ -331,8 +333,9 @@ export const reconcileDownloadRows = (
           playlistEntryTitle: input.playlistEntryTitle,
           playlistError: undefined,
           metadataBlockedReason: undefined,
-          torrentPath: undefined,
-          torrentCacheId: input.isTorrent || forcedTorrent ? `${preserved.id}-${nextGeneration}` : undefined,
+          torrentPath: requestTorrentPaths[input.sourceUrl],
+          torrentCacheId: requestTorrentCacheIds[input.sourceUrl]
+            || (input.isTorrent || forcedTorrent ? `${preserved.id}-${nextGeneration}` : undefined),
           torrentInfoHash: undefined,
           torrentFiles: undefined,
           selectedTorrentFileIndices: undefined
@@ -400,9 +403,11 @@ export const reconcileDownloadRows = (
       playlistCount: input.playlistCount,
       playlistEntryTitle: input.playlistEntryTitle,
       metadataBlockedReason: undefined,
-      torrentCacheId: input.valid && (input.isTorrent || forceTorrentUrls.has(input.sourceUrl))
-        ? `${id}-${generation}`
-        : undefined,
+      torrentPath: requestTorrentPaths[input.sourceUrl],
+      torrentCacheId: requestTorrentCacheIds[input.sourceUrl]
+        || (input.valid && (input.isTorrent || forceTorrentUrls.has(input.sourceUrl))
+          ? `${id}-${generation}`
+          : undefined),
       torrentMetadataStatus: input.valid && input.isTorrent && isMagnetUrl(input.sourceUrl)
         ? 'loading'
         : undefined,

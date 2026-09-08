@@ -215,11 +215,18 @@ export const AddDownloadsModal = () => {
       if (!row.isTorrent) continue;
       activeDraftIds.add(row.torrentCacheId || row.id);
       activeDraftIds.add(`${row.id}-${row.generation}`);
+      const requestContext = pendingAddRequestContexts[normalizeComparableUrl(row.sourceUrl)];
+      if (requestContext?.torrentPath
+        && requestContext.torrentCacheId
+        && requestContext.torrentPath === row.torrentPath
+        && requestContext?.torrentCacheId === row.torrentCacheId) {
+        cachedTorrentDraftIdsRef.current.add(requestContext.torrentCacheId);
+      }
     }
     const staleDraftIds = Array.from(cachedTorrentDraftIdsRef.current)
       .filter(id => !activeDraftIds.has(id));
     if (staleDraftIds.length > 0) cleanupDraftTorrentCache(staleDraftIds);
-  }, [cleanupDraftTorrentCache, parsedItems]);
+  }, [cleanupDraftTorrentCache, parsedItems, pendingAddRequestContexts]);
 
   useEffect(() => cleanupDraftTorrentCache, [cleanupDraftTorrentCache]);
 
@@ -579,6 +586,16 @@ export const AddDownloadsModal = () => {
       Object.entries(pendingAddRequestContexts)
         .map(([url, context]) => [url, context.version])
     );
+    const requestTorrentPaths = Object.fromEntries(
+      Object.entries(pendingAddRequestContexts)
+        .filter(([, context]) => Boolean(context.torrentPath))
+        .map(([url, context]) => [url, context.torrentPath as string])
+    );
+    const requestTorrentCacheIds = Object.fromEntries(
+      Object.entries(pendingAddRequestContexts)
+        .filter(([, context]) => Boolean(context.torrentCacheId))
+        .map(([url, context]) => [url, context.torrentCacheId as string])
+    );
     setParsedItems(current => {
       const selectedBySourceUrl = Object.fromEntries(
         current.map(row => [row.sourceUrl, row.selected !== false])
@@ -598,7 +615,9 @@ export const AddDownloadsModal = () => {
         requestContextVersions,
         playlistExpansions,
         selectedBySourceUrl,
-        forcedTorrentUrls
+        forcedTorrentUrls,
+        requestTorrentPaths,
+        requestTorrentCacheIds
       );
     });
   }, [

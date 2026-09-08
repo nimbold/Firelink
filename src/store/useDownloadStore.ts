@@ -1122,6 +1122,8 @@ export type PendingAddRequestContext = {
   cookieScopes?: ExtensionCookieScope[];
   media: boolean;
   torrent?: boolean;
+  torrentPath?: string;
+  torrentCacheId?: string;
 };
 
 export type DeleteModalState = {
@@ -1178,7 +1180,9 @@ interface DownloadState {
     cookieScopes?: ExtensionCookieScope[] | null,
     batch?: boolean,
     batchName?: string | null,
-    torrent?: boolean
+    torrent?: boolean,
+    torrentPath?: string,
+    torrentCacheId?: string
   ) => void;
   handleExtensionDownload: (request: ExtensionDownloadRequest) => Promise<void>;
   deleteModalState: DeleteModalState;
@@ -1928,7 +1932,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     cookieScopes,
     batch = false,
     batchName,
-    torrent = false
+    torrent = false,
+    torrentPath,
+    torrentCacheId
   ) => set((state) => {
     const isAppending = state.isAddModalOpen && Boolean(state.pendingAddUrls);
     const existingUrls = isAppending ? state.pendingAddUrls : '';
@@ -1967,10 +1973,13 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       const trimmedUrl = rawUrl.trim();
       if (!trimmedUrl) continue;
       let key = trimmedUrl;
-      try {
-        key = new URL(trimmedUrl).href;
-      } catch {
-        // The Add modal will mark malformed input invalid; retain its original key here.
+      const isLocalPath = trimmedUrl.startsWith('/') || /^[a-z]:[\\/]/i.test(trimmedUrl);
+      if (!isLocalPath) {
+        try {
+          key = new URL(trimmedUrl).href;
+        } catch {
+          // The Add modal will mark malformed input invalid; retain its original key here.
+        }
       }
       const isItemMedia = isExplicitMedia || isMediaUrl(trimmedUrl);
       pendingAddRequestContexts[key] = {
@@ -1981,7 +1990,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         cookies: isItemMedia ? '' : cleanCookies,
         ...(cleanCookieScopes?.length && !isItemMedia ? { cookieScopes: cleanCookieScopes } : {}),
         media: isItemMedia,
-        ...(torrent ? { torrent: true } : {})
+        ...(torrent ? { torrent: true } : {}),
+        ...(torrentPath ? { torrentPath } : {}),
+        ...(torrentCacheId ? { torrentCacheId } : {})
       };
     }
     const pendingAddMediaUrls = Object.entries(pendingAddRequestContexts)
@@ -2027,7 +2038,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       request.media === true ? undefined : request.cookie_scopes,
       request.batch === true && urls.length >= 2,
       request.batch_name,
-      request.torrent === true
+      request.torrent === true,
+      request.torrent_path || undefined,
+      request.request_id || undefined
     );
   },
   setSelectedPropertiesDownloadId: (id) => set({ selectedPropertiesDownloadId: id }),

@@ -4591,6 +4591,61 @@ describe('useDownloadStore', () => {
     expect(state.pendingAddMediaUrls).toEqual([]);
 	 });
 
+  it('routes a browser-local torrent handoff with its managed cache identity', async () => {
+    const torrentPath = '/Users/test/Library/Application Support/Firelink/torrents/request-id.torrent';
+    await useDownloadStore.getState().handleExtensionDownload({
+      request_id: 'request-id',
+      urls: [torrentPath],
+      torrent_path: torrentPath,
+      referer: 'https://example.com/page',
+      silent: true,
+      filename: 'sample.torrent',
+      headers: null,
+      cookies: null,
+      cookie_scopes: null,
+      media: false,
+      torrent: true,
+      batch: false,
+      batch_name: null
+    });
+
+    const state = useDownloadStore.getState();
+    expect(state.pendingAddUrls).toBe(torrentPath);
+    expect(state.pendingAddTorrentUrls).toEqual([torrentPath]);
+    expect(state.pendingAddRequestContexts[torrentPath]).toMatchObject({
+      media: false,
+      torrent: true,
+      torrentPath,
+      torrentCacheId: 'request-id'
+    });
+  });
+
+  it('retains a Windows managed torrent path as the request context key', async () => {
+    const torrentPath = 'C:\\Users\\test\\AppData\\Roaming\\Firelink\\torrents\\request-id.torrent';
+    await useDownloadStore.getState().handleExtensionDownload({
+      request_id: 'request-id',
+      urls: [torrentPath],
+      torrent_path: torrentPath,
+      referer: 'https://example.com/page',
+      silent: true,
+      filename: 'sample.torrent',
+      headers: null,
+      cookies: null,
+      cookie_scopes: null,
+      media: false,
+      torrent: true,
+      batch: false,
+      batch_name: null
+    });
+
+    const state = useDownloadStore.getState();
+    expect(state.pendingAddRequestContexts[torrentPath]).toMatchObject({
+      torrentPath,
+      torrentCacheId: 'request-id'
+    });
+    expect(state.pendingAddRequestContexts).not.toHaveProperty(`c:${torrentPath.slice(1)}`);
+  });
+
  it('does not reuse stale extension metadata for a later single-link handoff', async () => {
   useDownloadStore.setState({
    isAddModalOpen: true,

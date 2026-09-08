@@ -7,6 +7,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use base64::Engine as _;
 use hmac::{Hmac, KeyInit, Mac};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -27,7 +28,11 @@ use ts_rs::TS;
 pub const EXTENSION_SERVER_PORT: u16 = 6412;
 pub const EXTENSION_SERVER_PORT_RANGE: std::ops::RangeInclusive<u16> = EXTENSION_SERVER_PORT..=6422;
 const MAX_URL_COUNT: usize = 200;
-const MAX_REQUEST_BODY_BYTES: usize = 256 * 1024;
+const MAX_NON_TORRENT_REQUEST_BODY_BYTES: usize = 256 * 1024;
+const MAX_ENCODED_TORRENT_BYTES: usize =
+    ((crate::torrent::MAX_TORRENT_BYTES + 2) / 3) * 4;
+const MAX_REQUEST_BODY_BYTES: usize =
+    MAX_ENCODED_TORRENT_BYTES + MAX_NON_TORRENT_REQUEST_BODY_BYTES;
 const SIGNATURE_MAX_AGE_MS: u64 = 60_000;
 const SERVER_HEADER: &str = "x-firelink-server";
 const PROTOCOL_VERSION_HEADER: &str = "x-firelink-protocol-version";
@@ -36,7 +41,7 @@ const SERVER_PROOF_HEADER: &str = "x-firelink-server-proof";
 const SERVER_PORT_HEADER: &str = "x-firelink-server-port";
 const SMOKE_PROCESS_ID_HEADER: &str = "x-firelink-smoke-process-id";
 const SERVER_PROOF_PREFIX: &[u8] = b"firelink-server-proof\n";
-const PROTOCOL_VERSION: &str = "5";
+const PROTOCOL_VERSION: &str = "6";
 const MAX_PENDING_EXTENSION_ACKS: usize = 64;
 const EXTENSION_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -80,6 +85,8 @@ struct ExtensionRequest {
     batch: bool,
     #[serde(default)]
     batch_name: Option<String>,
+    #[serde(default)]
+    torrent_bytes_base64: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize, TS)]
@@ -105,6 +112,11 @@ pub struct ExtensionDownload {
     torrent: bool,
     batch: bool,
     batch_name: Option<String>,
+    #[ts(optional)]
+    torrent_path: Option<String>,
+    #[serde(skip)]
+    #[ts(skip)]
+    torrent_bytes: Option<Vec<u8>>,
 }
 
 pub async fn start_server(
@@ -303,10 +315,24 @@ async fn download_handler(
         Err(_) => return Err(StatusCode::BAD_REQUEST),
     };
 
-    let download = match normalize_download(payload) {
+    let mut download = match normalize_download(payload) {
         Some(v) => v,
         None => return Err(StatusCode::BAD_REQUEST),
     };
+
+    let request_id = uuid::Uuid::new_v4().simple().to_string();
+    if let Some(torrent_bytes) = download.torrent_bytes.take() {
+        let torrent_path = crate::torrent::cache_torrent_bytes(
+            &state.app_handle,
+            &request_id,
+            &torrent_bytes,
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        download.urls = vec![torrent_path.clone()];
+        download.torrent_path = Some(torrent_path);
+    }
+    let cached_torrent = download.torrent_path.is_some();
 
     let is_hidden = state
         .app_handle
@@ -321,13 +347,19 @@ async fn download_handler(
     }
 
     if !wait_for_frontend(&state.frontend_ready).await {
+        if cached_torrent {
+            crate::torrent::remove_managed_torrent(&state.app_handle, &request_id).await;
+        }
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    let request_id = uuid::Uuid::new_v4().simple().to_string();
-    let ack_receiver = register_extension_ack(&state.extension_acks, request_id.clone())
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let mut download = download;
+    let Some(ack_receiver) = register_extension_ack(&state.extension_acks, request_id.clone())
+    else {
+        if cached_torrent {
+            crate::torrent::remove_managed_torrent(&state.app_handle, &request_id).await;
+        }
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
     download.request_id = Some(request_id.clone());
 
     if state
@@ -336,6 +368,9 @@ async fn download_handler(
         .is_err()
     {
         remove_extension_ack(&state.extension_acks, &request_id);
+        if cached_torrent {
+            crate::torrent::remove_managed_torrent(&state.app_handle, &request_id).await;
+        }
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
@@ -405,10 +440,32 @@ fn remove_extension_ack(registry: &SharedExtensionAcks, request_id: &str) {
     }
 }
 
+fn decode_torrent_bytes(encoded: &str) -> Option<Vec<u8>> {
+    if encoded.is_empty()
+        || encoded.len() > MAX_ENCODED_TORRENT_BYTES
+        || encoded.len() % 4 != 0
+    {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    if bytes.is_empty() || bytes.len() > crate::torrent::MAX_TORRENT_BYTES {
+        return None;
+    }
+    crate::torrent::parse_torrent_bytes(&bytes).ok()?;
+    Some(bytes)
+}
+
 fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload> {
     if payload.urls.len() > MAX_URL_COUNT {
         return None;
     }
+
+    let torrent_bytes = match payload.torrent_bytes_base64.as_deref() {
+        Some(encoded) => Some(decode_torrent_bytes(encoded)?),
+        None => None,
+    };
 
     let mut seen = HashSet::new();
     let urls = payload
@@ -418,6 +475,16 @@ fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload
         .filter(|url| seen.insert(url.clone()))
         .collect::<Vec<_>>();
     if urls.is_empty() {
+        return None;
+    }
+    if torrent_bytes.is_some()
+        && (payload.media
+            || !payload.torrent
+            || urls.len() != 1
+            || Url::parse(&urls[0])
+                .ok()
+                .is_none_or(|url| !matches!(url.scheme(), "http" | "https")))
+    {
         return None;
     }
     if payload.media
@@ -437,6 +504,7 @@ fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload
             }
             matches!(url.scheme(), "http" | "https")
                 && (payload.torrent
+                    || torrent_bytes.is_some()
                     || filename_is_torrent(payload.filename.as_deref())
                     || url.path().to_ascii_lowercase().ends_with(".torrent"))
         });
@@ -500,6 +568,8 @@ fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload
         torrent,
         batch,
         batch_name,
+        torrent_path: None,
+        torrent_bytes,
     })
 }
 
@@ -730,7 +800,7 @@ fn is_allowed_origin(origin: &str) -> bool {
 mod tests {
     use super::{
         acknowledge_extension_download, add_server_identity, claim_request_at,
-        has_allowed_request_origin, is_valid_client_nonce, normalize_download,
+        decode_torrent_bytes, has_allowed_request_origin, is_valid_client_nonce, normalize_download,
         normalize_url, required_client_nonce, same_origin_url, sanitize_filename,
         sign_server_proof, ExtensionCookieScope, ExtensionRequest, MAX_URL_COUNT,
         PROTOCOL_VERSION_HEADER, SERVER_HEADER,
@@ -741,6 +811,7 @@ mod tests {
         routing::get,
         Router,
     };
+    use base64::Engine as _;
     use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
     use std::collections::HashMap;
@@ -767,7 +838,7 @@ mod tests {
         assert_eq!(response.headers().get(SERVER_HEADER).unwrap(), "1");
         assert_eq!(
             response.headers().get(PROTOCOL_VERSION_HEADER).unwrap(),
-            "5"
+            "6"
         );
 
         server.abort();
@@ -834,6 +905,7 @@ mod tests {
             torrent: false,
             batch: false,
             batch_name: None,
+            torrent_bytes_base64: None,
         });
 
         assert!(download.is_none());
@@ -855,6 +927,7 @@ mod tests {
             torrent: false,
             batch: false,
             batch_name: None,
+            torrent_bytes_base64: None,
         });
 
         assert!(download.is_none());
@@ -917,6 +990,7 @@ mod tests {
             torrent: false,
             batch: false,
             batch_name: None,
+            torrent_bytes_base64: None,
         })
         .expect("valid media handoff");
 
@@ -942,6 +1016,7 @@ mod tests {
             torrent: false,
             batch: false,
             batch_name: None,
+            torrent_bytes_base64: None,
         })
         .expect("valid download handoff");
 
@@ -972,6 +1047,7 @@ mod tests {
             torrent: false,
             batch: true,
             batch_name: Some("batch".to_string()),
+            torrent_bytes_base64: None,
         })
         .expect("valid multi-url handoff");
 
@@ -999,6 +1075,7 @@ mod tests {
             torrent: true,
             batch: false,
             batch_name: None,
+            torrent_bytes_base64: None,
         })
         .expect("valid magnet torrent handoff");
 
@@ -1017,6 +1094,7 @@ mod tests {
             torrent: true,
             batch: false,
             batch_name: None,
+            torrent_bytes_base64: None,
         })
         .expect("explicit opaque torrent handoff");
         assert!(opaque.torrent);
@@ -1035,9 +1113,76 @@ mod tests {
             torrent: false,
             batch: false,
             batch_name: None,
+            torrent_bytes_base64: None,
         })
         .expect("legacy magnet handoff");
         assert!(legacy_magnet.torrent);
+    }
+
+    #[test]
+    fn browser_local_torrent_bytes_are_normalized_as_a_single_http_sourced_torrent() {
+        let bytes = b"d4:infod6:lengthi5e4:name4:testee".to_vec();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let download = normalize_download(ExtensionRequest {
+            urls: vec!["https://privatebin.example/paste".to_string()],
+            referer: Some("https://privatebin.example/paste".to_string()),
+            silent: true,
+            filename: Some("TerraScape.TORRENT".to_string()),
+            headers: None,
+            cookies: None,
+            cookie_scopes: None,
+            media: false,
+            torrent: true,
+            batch: false,
+            batch_name: None,
+            torrent_bytes_base64: Some(encoded),
+        })
+        .expect("browser-local torrent bytes should be accepted");
+
+        assert!(download.torrent);
+        assert_eq!(download.urls, vec!["https://privatebin.example/paste"]);
+        assert_eq!(download.filename.as_deref(), Some("TerraScape.TORRENT"));
+        assert_eq!(download.torrent_bytes.as_deref(), Some(bytes.as_slice()));
+        assert!(download.torrent_path.is_none());
+    }
+
+    #[test]
+    fn browser_local_torrent_bytes_require_valid_bencoded_metadata_and_http_source() {
+        let valid = base64::engine::general_purpose::STANDARD
+            .encode(b"d4:infod6:lengthi5e4:name4:testee");
+        let invalid = base64::engine::general_purpose::STANDARD.encode(b"not a torrent");
+
+        assert!(decode_torrent_bytes(&invalid).is_none());
+        assert!(normalize_download(ExtensionRequest {
+            urls: vec!["blob:https://privatebin.example/attachment".to_string()],
+            referer: None,
+            silent: true,
+            filename: Some("download.torrent".to_string()),
+            headers: None,
+            cookies: None,
+            cookie_scopes: None,
+            media: false,
+            torrent: true,
+            batch: false,
+            batch_name: None,
+            torrent_bytes_base64: Some(valid.clone()),
+        })
+        .is_none());
+        assert!(normalize_download(ExtensionRequest {
+            urls: vec!["https://privatebin.example/paste".to_string()],
+            referer: None,
+            silent: true,
+            filename: Some("download.torrent".to_string()),
+            headers: None,
+            cookies: None,
+            cookie_scopes: None,
+            media: true,
+            torrent: true,
+            batch: false,
+            batch_name: None,
+            torrent_bytes_base64: Some(valid),
+        })
+        .is_none());
     }
 
     #[test]
@@ -1067,6 +1212,7 @@ mod tests {
             torrent: false,
             batch: false,
             batch_name: None,
+            torrent_bytes_base64: None,
         })
         .expect("valid download handoff");
 
@@ -1098,6 +1244,7 @@ mod tests {
             torrent: false,
             batch: false,
             batch_name: None,
+            torrent_bytes_base64: None,
         })
         .expect("valid multi-url handoff");
 
@@ -1122,6 +1269,7 @@ mod tests {
             torrent: false,
             batch: true,
             batch_name: Some("Example Gallery / Chapter: 1".to_string()),
+            torrent_bytes_base64: None,
         })
         .expect("valid selected-link batch");
 
@@ -1146,6 +1294,7 @@ mod tests {
             torrent: false,
             batch: true,
             batch_name: Some("Example Gallery".to_string()),
+            torrent_bytes_base64: None,
         })
         .expect("valid single-link handoff");
 

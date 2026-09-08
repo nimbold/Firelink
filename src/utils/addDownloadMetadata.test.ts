@@ -152,6 +152,32 @@ describe('add download metadata workflow', () => {
     });
   });
 
+  it('retains the native-managed path and cache identity for a browser-local torrent', () => {
+    const source = '/Users/test/Library/Application Support/Firelink/torrents/request-id.torrent';
+    const rows = reconcileDownloadRows(
+      source,
+      [],
+      undefined,
+      new Set(),
+      undefined,
+      {},
+      { [source]: 1 },
+      {},
+      {},
+      new Set(),
+      { [source]: source },
+      { [source]: 'request-id' }
+    );
+
+    expect(rows[0]).toMatchObject({
+      sourceUrl: source,
+      isTorrent: true,
+      status: 'loading',
+      torrentPath: source,
+      torrentCacheId: 'request-id'
+    });
+  });
+
   it('gives refreshed torrent metadata a new cache identity', () => {
     const existing = row({
       id: 'torrent-row',
