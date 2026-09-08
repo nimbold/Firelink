@@ -3516,6 +3516,13 @@ impl Aria2DaemonGuard {
             .store(available, Ordering::Release);
     }
 
+    fn startup_error_message(&self) -> Option<String> {
+        self.startup_error
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
     fn exit_allowed(&self) -> bool {
         self.shutdown_state.load(Ordering::SeqCst) == 2
     }
@@ -12494,7 +12501,22 @@ fn apply_aria2_torrent_peer_identity_options(
 }
 
 fn aria2_rpc_port_is_occupied(port: u16) -> bool {
-    std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
+    let addresses = [
+        std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        std::net::SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)),
+    ];
+    addresses.into_iter().any(|address| {
+        std::net::TcpListener::bind(address)
+            .map(|_| false)
+            .unwrap_or_else(|error| error.kind() == std::io::ErrorKind::AddrInUse)
+    })
+}
+
+fn aria2_rpc_startup_reports_port_conflict(stderr: &str, port: u16) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("rpc")
+        && lower.contains("failed to bind")
+        && lower.contains(&format!("port {port}"))
 }
 
 fn apply_aria2_torrent_global_options(
@@ -14280,6 +14302,7 @@ mod tests {
         apply_aria2_torrent_dht_options,
         apply_aria2_server_stat_options,
         aria2_rpc_port_is_occupied,
+        aria2_rpc_startup_reports_port_conflict,
         parse_firelink_deep_link, parse_ffmpeg_version, parse_media_progress_line,
         collect_opened_torrent_paths,
         normalize_opened_torrent_argument,
@@ -15190,6 +15213,36 @@ mod tests {
         assert!(aria2_rpc_port_is_occupied(port));
         drop(listener);
         assert!(!aria2_rpc_port_is_occupied(port));
+
+        // Aria2's loopback RPC listener can be claimed through either address
+        // family. If IPv6 loopback is available, the launcher must not reuse
+        // a port that is already occupied there either.
+        if let Ok(ipv6_listener) = std::net::TcpListener::bind(("::1", 0)) {
+            let ipv6_port = ipv6_listener.local_addr().unwrap().port();
+            assert!(aria2_rpc_port_is_occupied(ipv6_port));
+            drop(ipv6_listener);
+            assert!(!aria2_rpc_port_is_occupied(ipv6_port));
+        }
+    }
+
+    #[test]
+    fn aria2_rpc_startup_port_conflicts_are_distinguished_from_other_failures() {
+        assert!(aria2_rpc_startup_reports_port_conflict(
+            "IPv4 RPC: failed to bind TCP port 6800",
+            6800
+        ));
+        assert!(aria2_rpc_startup_reports_port_conflict(
+            "IPv6 RPC: failed to bind TCP port 6800: Address already in use",
+            6800
+        ));
+        assert!(!aria2_rpc_startup_reports_port_conflict(
+            "Exception caught: unrecognized option --bad-option",
+            6800
+        ));
+        assert!(!aria2_rpc_startup_reports_port_conflict(
+            "IPv4 RPC: failed to bind TCP port 6800",
+            6801
+        ));
     }
 
     #[test]
@@ -19296,7 +19349,12 @@ pub fn run() {
                                             let _ = pipe.take(4096).read_to_string(&mut stderr);
                                         }
                                         let stderr = stderr.trim().to_string();
-                                        if aria2_rpc_port_is_occupied(attempt_port) {
+                                        if aria2_rpc_port_is_occupied(attempt_port)
+                                            || aria2_rpc_startup_reports_port_conflict(
+                                                &stderr,
+                                                attempt_port,
+                                            )
+                                        {
                                             // The RPC port is occupied by another process; retry
                                             // with the next candidate. A configured Torrent port
                                             // cannot cause this branch because overlapping RPC

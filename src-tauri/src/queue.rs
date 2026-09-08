@@ -6650,6 +6650,18 @@ fn is_aria2_rpc_unavailable(error: &str) -> bool {
         || lower.contains("connection reset")
 }
 
+fn aria2_startup_failure_for_port(port: u16, startup_error: Option<&str>) -> Option<String> {
+    if port != 0 {
+        return None;
+    }
+    startup_error.map(|error| {
+        format!(
+            "aria2 daemon unavailable: {}",
+            crate::redact_sensitive_text(error)
+        )
+    })
+}
+
 fn is_aria2_range_mode_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     lower.contains("invalid range header")
@@ -8340,14 +8352,27 @@ impl ProductionSpawner {
     ) -> Result<serde_json::Value, String> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
-            match crate::rpc_call(
-                state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
-                &state.aria2_secret,
-                method,
-                params.clone(),
-            )
-            .await
-            {
+            let port = state
+                .aria2_port
+                .load(std::sync::atomic::Ordering::Acquire);
+            if port == 0 {
+                let startup_error = self
+                    .app_handle
+                    .state::<crate::Aria2DaemonGuard>()
+                    .startup_error_message();
+                if let Some(error) =
+                    aria2_startup_failure_for_port(port, startup_error.as_deref())
+                {
+                    return Err(error);
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err("aria2 daemon did not become ready within 15 seconds".to_string());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+
+            match crate::rpc_call(port, &state.aria2_secret, method, params.clone()).await {
                 Ok(result) => return Ok(result),
                 Err(error) => {
                     if !is_aria2_rpc_unavailable(&error) || std::time::Instant::now() >= deadline {
@@ -8406,6 +8431,18 @@ impl ProductionSpawner {
 impl SidecarSpawner for ProductionSpawner {
     async fn add_uri(&self, id: &str, payload: &SpawnPayload) -> Result<String, String> {
         let state = self.app_handle.state::<crate::AppState>();
+        let startup_error = self
+            .app_handle
+            .state::<crate::Aria2DaemonGuard>()
+            .startup_error_message();
+        if let Some(error) = aria2_startup_failure_for_port(
+            state
+                .aria2_port
+                .load(std::sync::atomic::Ordering::Acquire),
+            startup_error.as_deref(),
+        ) {
+            return Err(error);
+        }
         let attempt_epoch = state.queue_manager.current_aria2_control_epoch(id).await;
         let admission_started = Instant::now();
         let mut options = serde_json::Map::new();
@@ -12306,6 +12343,22 @@ mod tests {
         assert!(!is_aria2_rpc_unavailable(
             "aria2 error code 3: Resource not found"
         ));
+    }
+
+    #[test]
+    fn known_aria2_startup_failure_is_returned_without_rpc_retry() {
+        assert_eq!(
+            aria2_startup_failure_for_port(
+                0,
+                Some("aria2 exited before startup with token=secret")
+            ),
+            Some(
+                "aria2 daemon unavailable: aria2 exited before startup with token=[redacted]"
+                    .to_string()
+            )
+        );
+        assert!(aria2_startup_failure_for_port(6800, Some("daemon unavailable")).is_none());
+        assert!(aria2_startup_failure_for_port(0, None).is_none());
     }
 
     #[test]
