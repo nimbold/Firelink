@@ -1595,7 +1595,7 @@ export const PropertiesWindowApp = () => {
               <PropertiesField
                 label={t($ => $.properties.torrentPeerSpeedLimit)}
                 controlId="properties-options-peer-speed-limit"
-                hint={t($ => $.properties.torrentPeerOptionsSavedHint)}
+                hint={t($ => $.properties.torrentPeerSpeedLimitHint)}
                 meta={peerSpeedLimit.trim() ? t($ => $.properties.customPerDownload) : t($ => $.properties.usingDefault)}
                 format={t($ => $.properties.inputFormat, { format: t($ => $.properties.inputFormatSpeedLimit) })}
               >
