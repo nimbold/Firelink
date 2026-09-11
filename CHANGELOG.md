@@ -54,7 +54,7 @@ This is the stable follow-up to the 1.4.0 pre-release and includes all work sinc
 
 ### Compatibility
 
-- Use [Firelink Companion `2.2.2`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.2), or the [latest Companion release](https://github.com/nimbold/Firelink-Extension/releases/latest), with Firelink `1.4.2`. The Companion includes the shared Chromium package and localized Edge Add-ons submission material requested in [#39](https://github.com/nimbold/Firelink/issues/39); the public Edge listing still requires Microsoft's certification.
+- Use [Firelink Companion `2.2.2`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.2), or the [latest Companion release](https://github.com/nimbold/Firelink-Extension/releases/latest), with Firelink `1.4.2`. Install it directly from [Microsoft Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/firelink-companion/kflenjkpdoamjkalhfcllhflgahledbc); the public listing completes the Edge distribution work requested in [#39](https://github.com/nimbold/Firelink/issues/39).
 
 ## [1.3.1] - 2026-07-30
 
