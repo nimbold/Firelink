@@ -61,22 +61,22 @@
     "@tauri-apps/plugin-notification": "^2.4.0",
     "@tauri-apps/plugin-opener": "^2.5.5",
     "i18next": "^26.4.2",
-    "lucide-react": "^1.42.0",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8",
-    "react-i18next": "^17.0.13",
+    "lucide-react": "^1.46.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-i18next": "^17.0.14",
     "zustand": "^5.0.15"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4",
-    "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.7",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
-    "autoprefixer": "^10.5.5",
+    "autoprefixer": "^10.6.0",
     "postcss": "^8.5.28",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
-    "vite": "^8.2.2",
+    "vite": "^8.3.0",
     "vitest": "^5.0.0"
   }
 }

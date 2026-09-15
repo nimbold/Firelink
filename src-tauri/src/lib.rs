@@ -1495,60 +1495,145 @@ fn emit_media_progress(
     }
 }
 
-async fn cleanup_media_processing_artifacts(out_path: &std::path::Path) {
-    cleanup_media_artifacts(out_path, true).await;
+async fn cleanup_media_processing_artifacts<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    expected_owner: &str,
+    out_path: &std::path::Path,
+) {
+    let _ = cleanup_media_artifacts(app_handle, Some(expected_owner), out_path, true).await;
 }
 
-async fn remove_file_best_effort_with_retry(path: &std::path::Path) {
+async fn remove_file_best_effort_with_retry<R: tauri::Runtime>(
+    path: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+    expected_owner: Option<&str>,
+) -> Result<(), String> {
+    validate_cleanup_target_owner(app_handle, path, expected_owner)?;
+    let Some(snapshot) = capture_regular_file_snapshot(path, app_handle).await? else {
+        return Ok(());
+    };
+
     for attempt in 0..=5 {
-        match tokio::fs::remove_file(path).await {
-            Ok(()) => return,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        if !validate_regular_file_snapshot(path, app_handle, &snapshot)? {
+            return Err(format!(
+                "download cleanup target '{}' disappeared during cleanup; preserving ownership",
+                path.display()
+            ));
+        }
+        match run_trash_operation(|| std::fs::remove_file(path)) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "download cleanup target '{}' disappeared during cleanup; preserving ownership",
+                    path.display()
+                ));
+            }
             Err(error) if attempt == 5 => {
-                log::warn!(
-                    "failed to remove media artifact '{}' after retries: {}",
-                    path.display(),
-                    error
-                );
+                return Err(format!(
+                    "failed to remove media artifact '{}' after retries: {error}",
+                    path.display()
+                ));
             }
             Err(_) => {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
         }
     }
+    Ok(())
 }
 
-async fn cleanup_media_artifacts(out_path: &std::path::Path, remove_primary: bool) {
+async fn collect_media_processing_artifact_paths<R: tauri::Runtime>(
+    out_path: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    if !is_safe_path(out_path, app_handle) {
+        return Err("download media artifact path is outside an allowed location".to_string());
+    }
     let Some(parent) = out_path.parent() else {
-        return;
+        return Ok(Vec::new());
+    };
+    if !is_safe_path(parent, app_handle) {
+        return Err("download media artifact directory is outside an allowed location".to_string());
     };
     let Some(base_name) = out_path.file_name().and_then(|name| name.to_str()) else {
-        return;
+        return Ok(Vec::new());
     };
     let base_stem = out_path
         .file_stem()
         .and_then(|name| name.to_str())
         .unwrap_or(base_name);
 
-    if remove_primary {
-        remove_file_best_effort_with_retry(out_path).await;
-    }
-
-    let Ok(mut entries) = tokio::fs::read_dir(parent).await else {
-        return;
+    let mut entries = match tokio::fs::read_dir(parent).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("could not inspect media artifacts: {error}")),
     };
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    let mut artifacts = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| format!("could not inspect media artifacts: {error}"))?
+    {
         let path = entry.path();
-        if path == out_path {
+        if crate::platform::paths_equal(&path, out_path) {
             continue;
         }
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
         if is_media_artifact_name(name, base_name, base_stem) {
-            remove_file_best_effort_with_retry(&path).await;
+            artifacts.push(path);
         }
     }
+    Ok(artifacts)
+}
+
+async fn cleanup_media_artifacts<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    expected_owner: Option<&str>,
+    out_path: &std::path::Path,
+    remove_primary: bool,
+) -> Result<(), String> {
+    let mut targets = collect_media_processing_artifact_paths(out_path, app_handle).await?;
+    if remove_primary {
+        targets.push(out_path.to_path_buf());
+    }
+    let _target_guards = lock_download_targets(&mut targets).await;
+    cleanup_media_artifacts_locked(app_handle, expected_owner, out_path, remove_primary).await
+}
+
+async fn cleanup_media_artifacts_locked<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    expected_owner: Option<&str>,
+    out_path: &std::path::Path,
+    remove_primary: bool,
+) -> Result<(), String> {
+    let artifacts = validate_media_artifact_targets(app_handle, expected_owner, out_path).await?;
+    if remove_primary {
+        validate_cleanup_target_owner(app_handle, out_path, expected_owner)?;
+        let _ = capture_regular_file_snapshot(out_path, app_handle).await?;
+    }
+
+    if remove_primary {
+        remove_file_best_effort_with_retry(out_path, app_handle, expected_owner).await?;
+    }
+    for path in artifacts {
+        remove_file_best_effort_with_retry(&path, app_handle, expected_owner).await?;
+    }
+    Ok(())
+}
+
+async fn validate_media_artifact_targets<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    expected_owner: Option<&str>,
+    out_path: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let artifacts = collect_media_processing_artifact_paths(out_path, app_handle).await?;
+    for artifact in &artifacts {
+        validate_cleanup_target_owner(app_handle, artifact, expected_owner)?;
+        let _ = capture_regular_file_snapshot(artifact, app_handle).await?;
+    }
+    Ok(artifacts)
 }
 
 fn is_media_artifact_name(name: &str, base_name: &str, base_stem: &str) -> bool {
@@ -2403,6 +2488,8 @@ async fn fetch_metadata(
 fn reqwest_error_code(error: &reqwest::Error) -> &'static str {
     if error.is_timeout() {
         "timeout"
+    } else if error.is_dns() {
+        "dns"
     } else if error.is_connect() {
         "connect"
     } else if error.is_request() {
@@ -2568,6 +2655,51 @@ async fn download_target_lock(path: &std::path::Path) -> std::sync::Arc<tokio::s
     let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     guard.insert(key, std::sync::Arc::downgrade(&lock));
     lock
+}
+
+async fn lock_download_targets(
+    paths: &mut Vec<std::path::PathBuf>,
+) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+    lock_download_targets_excluding(paths, &[]).await
+}
+
+async fn lock_download_targets_excluding(
+    paths: &mut Vec<std::path::PathBuf>,
+    excluded: &[std::path::PathBuf],
+) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+    // Media processing artifacts share the output directory namespace with
+    // the primary file. Lock each target's immediate parent as well as the
+    // exact target so a concurrent enqueue cannot claim a newly-discovered
+    // artifact between directory enumeration and validation/unlink.
+    let initial_paths = paths.clone();
+    for path in initial_paths {
+        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            paths.push(parent.to_path_buf());
+        }
+    }
+    paths.retain(|path| {
+        !excluded
+            .iter()
+            .any(|excluded| crate::platform::paths_equal(path, excluded))
+    });
+    paths.sort_by_key(|path| crate::platform::path_identity(path));
+    paths.dedup_by(|left, right| crate::platform::paths_equal(left, right));
+    let mut guards = Vec::with_capacity(paths.len());
+    for path in paths.iter() {
+        guards.push(download_target_lock(path).await.lock_owned().await);
+    }
+    guards
+}
+
+fn download_sidecar_paths(primary: &std::path::Path) -> Vec<std::path::PathBuf> {
+    [".aria2", ".part", ".ytdl"]
+        .into_iter()
+        .map(|suffix| {
+            let mut candidate = primary.as_os_str().to_os_string();
+            candidate.push(suffix);
+            candidate.into()
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)] // Hash every user-controlled yt-dlp input explicitly.
@@ -5042,7 +5174,7 @@ pub(crate) async fn start_media_download_internal(
                 _ = cancel_rx.changed() => {
                     terminate_shell_process_tree(child);
                     if processing_started {
-                        cleanup_media_processing_artifacts(&out_path).await;
+                        cleanup_media_processing_artifacts(&app_handle, id, &out_path).await;
                     }
                     return Err(crate::queue::MEDIA_RUN_CANCELLED.to_string());
                 }
@@ -5220,7 +5352,7 @@ pub(crate) async fn start_media_download_internal(
         let transient = is_transient_network_error(&failure_reason);
         let strikes_left = strike < max_retries;
         if should_cleanup_media_artifacts_after_failure(&failure_reason, strike, max_retries) {
-            cleanup_media_artifacts(&out_path, false).await;
+            let _ = cleanup_media_artifacts(&app_handle, Some(id), &out_path, false).await;
         }
         if should_retry_without_browser_cookies(
             effective_cookie_source.as_deref(),
@@ -6550,22 +6682,30 @@ async fn remove_download_inner(
     // record is removed, so another download cannot claim a path between
     // deleting its payload/sidecars and releasing Firelink ownership.
     let mut cleanup_target_guards = Vec::new();
+    let mut cleanup_target_paths = Vec::new();
     if should_delete_assets {
         let mut cleanup_targets = owned_paths.clone();
+        for path in &owned_paths {
+            cleanup_targets.extend(download_sidecar_paths(path));
+            cleanup_targets.extend(
+                collect_media_processing_artifact_paths(path, &app_handle).await?,
+            );
+        }
         if let Some(primary) = primary_path
             .as_ref()
             .filter(|primary| primary_path_needs_container_cleanup(primary, &owned_paths))
         {
             cleanup_targets.push(primary.clone());
+            cleanup_targets.extend(download_sidecar_paths(primary));
+            cleanup_targets.extend(
+                collect_media_processing_artifact_paths(primary, &app_handle).await?,
+            );
         }
         if let Some(replacement) = unowned_replacement_target.as_ref() {
             cleanup_targets.push(replacement.target.clone());
         }
-        cleanup_targets.sort_by_key(|path| crate::platform::path_identity(path));
-        cleanup_targets.dedup_by(|left, right| crate::platform::paths_equal(left, right));
-        for target in cleanup_targets {
-            cleanup_target_guards.push(download_target_lock(&target).await.lock_owned().await);
-        }
+        cleanup_target_guards = lock_download_targets(&mut cleanup_targets).await;
+        cleanup_target_paths = cleanup_targets;
     }
 
     if durable_removal_job {
@@ -6591,9 +6731,9 @@ async fn remove_download_inner(
         if should_delete_assets {
             for path in &owned_paths {
                 if permanent_asset_removal {
-                    remove_download_assets_permanently(path, &app_handle).await?;
+                    remove_download_assets_permanently_locked(path, &app_handle).await?;
                 } else {
-                    remove_download_assets(path, &app_handle).await?;
+                    remove_download_assets_locked(path, &app_handle).await?;
                 }
             }
             if let Some(primary) = primary_path
@@ -6601,9 +6741,15 @@ async fn remove_download_inner(
                 .filter(|primary| primary_path_needs_container_cleanup(primary, &owned_paths))
             {
                 if permanent_asset_removal {
-                    remove_download_container_assets_permanently(primary, &app_handle).await?;
+                    remove_download_container_assets_permanently_locked(
+                        primary,
+                        &app_handle,
+                        &cleanup_target_paths,
+                    )
+                    .await?;
                 } else {
-                    remove_download_container_assets(primary, &app_handle).await?;
+                    remove_download_container_assets_locked(primary, &app_handle, &cleanup_target_paths)
+                        .await?;
                 }
             }
             if let Some(replacement) = unowned_replacement_target.as_ref() {
@@ -6686,10 +6832,9 @@ struct UnownedReplacementTarget {
     fingerprint: String,
 }
 
-async fn validate_unowned_replacement_target<R: tauri::Runtime>(
+fn validate_unowned_replacement_target_shape<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     target: &std::path::Path,
-    expected_fingerprint: &str,
     metadata: &std::fs::Metadata,
     allowed_legacy_owner_id: &str,
 ) -> Result<(), String> {
@@ -6723,7 +6868,45 @@ async fn validate_unowned_replacement_target<R: tauri::Runtime>(
             ));
         }
     }
+    Ok(())
+}
+
+async fn validate_unowned_replacement_target<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    target: &std::path::Path,
+    expected_fingerprint: &str,
+    metadata: &std::fs::Metadata,
+    allowed_legacy_owner_id: &str,
+) -> Result<(), String> {
+    validate_unowned_replacement_target_shape(
+        app_handle,
+        target,
+        metadata,
+        allowed_legacy_owner_id,
+    )?;
     if !target_fingerprint_matches_async(target, metadata, expected_fingerprint).await? {
+        return Err(
+            "The replacement target changed after duplicate resolution. Reopen the conflict and choose Replace again."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_unowned_replacement_target_sync<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    target: &std::path::Path,
+    expected_fingerprint: &str,
+    metadata: &std::fs::Metadata,
+    allowed_legacy_owner_id: &str,
+) -> Result<(), String> {
+    validate_unowned_replacement_target_shape(
+        app_handle,
+        target,
+        metadata,
+        allowed_legacy_owner_id,
+    )?;
+    if !target_fingerprint_matches(target, metadata, expected_fingerprint)? {
         return Err(
             "The replacement target changed after duplicate resolution. Reopen the conflict and choose Replace again."
                 .to_string(),
@@ -6801,6 +6984,336 @@ async fn inspect_unowned_replacement_target<R: tauri::Runtime>(
     }))
 }
 
+#[derive(Debug, Clone)]
+enum TrashTargetSnapshot {
+    File {
+        identity: String,
+        len: u64,
+        modified: String,
+        changed: String,
+    },
+    Directory {
+        identity: String,
+        modified: String,
+        changed: String,
+    },
+}
+
+#[derive(Debug)]
+enum TrashAttemptError {
+    Validation(String),
+    Operation { kind: &'static str },
+}
+
+fn trash_failure_message(label: &str) -> String {
+    format!(
+        "Could not move the {label} to Trash after retries; permanent deletion was not attempted"
+    )
+}
+
+fn trash_error_kind(error: &trash::Error) -> &'static str {
+    match error {
+        trash::Error::Unknown { .. } => "unknown",
+        trash::Error::Os { .. } => "os",
+        #[cfg(all(
+            unix,
+            not(target_os = "macos"),
+            not(target_os = "ios"),
+            not(target_os = "android")
+        ))]
+        trash::Error::FileSystem { .. } => "filesystem",
+        trash::Error::TargetedRoot => "targeted_root",
+        trash::Error::CouldNotAccess { .. } => "could_not_access",
+        trash::Error::CanonicalizePath { .. } => "canonicalize",
+        trash::Error::ConvertOsString { .. } => "path_conversion",
+        trash::Error::RestoreCollision { .. } => "restore_collision",
+        trash::Error::RestoreTwins { .. } => "restore_twins",
+    }
+}
+
+#[cfg(test)]
+static TEST_TRASH_FAILURES: OnceLock<std::sync::Mutex<HashMap<std::path::PathBuf, usize>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+fn set_test_trash_failures(path: &std::path::Path, count: usize) {
+    let failures = TEST_TRASH_FAILURES.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut failures = failures.lock().unwrap();
+    if count == 0 {
+        failures.remove(path);
+    } else {
+        failures.insert(path.to_path_buf(), count);
+    }
+}
+
+fn delete_to_trash(path: &std::path::Path) -> Result<(), trash::Error> {
+    #[cfg(test)]
+    {
+        let failures = TEST_TRASH_FAILURES.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        let mut failures = failures.lock().unwrap();
+        if let Some(remaining) = failures.get_mut(path) {
+            if *remaining > 0 {
+                *remaining -= 1;
+                return Err(trash::Error::Unknown {
+                    description: "injected Trash failure".to_string(),
+                });
+            }
+        }
+    }
+
+    trash::delete(path)
+}
+
+/// Run a synchronous Trash operation without yielding while its caller's
+/// lifecycle and target guards remain held. Dropping a `spawn_blocking`
+/// JoinHandle on cancellation would release those guards while the
+/// cross-volume copy/delete continued. The production Tauri runtime is
+/// multi-threaded; current-thread tests and the already blocking durable
+/// worker use the direct path.
+fn run_trash_operation<T>(operation: impl FnOnce() -> T) -> T {
+    let use_blocking_runtime = tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+        matches!(
+            handle.runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        )
+    });
+    if use_blocking_runtime {
+        tokio::task::block_in_place(operation)
+    } else {
+        operation()
+    }
+}
+
+fn trash_target_identity(
+    path: &std::path::Path,
+    metadata: &std::fs::Metadata,
+) -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        let _ = metadata;
+        let identity = crate::platform::file_identity(path)
+            .ok_or_else(|| "Could not establish download asset identity".to_string())?;
+        Ok(format!("windows:{identity}"))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(target_identity(path, metadata))
+    }
+}
+
+fn trash_target_snapshot_from_metadata(
+    path: &std::path::Path,
+    metadata: &std::fs::Metadata,
+) -> Result<TrashTargetSnapshot, String> {
+    if metadata_is_link_or_reparse(metadata) || path_has_symlink_component(path) {
+        return Err("Download asset is a symbolic link or reparse point".to_string());
+    }
+    let identity = trash_target_identity(path, metadata)?;
+    if metadata.is_file() {
+        return Ok(TrashTargetSnapshot::File {
+            identity,
+            len: metadata.len(),
+            modified: target_modified(metadata),
+            changed: target_changed(metadata),
+        });
+    }
+    if metadata.is_dir() {
+        return Ok(TrashTargetSnapshot::Directory {
+            identity,
+            modified: target_modified(metadata),
+            changed: target_changed(metadata),
+        });
+    }
+    Err("Download asset is not a regular file or directory".to_string())
+}
+
+async fn capture_trash_target_snapshot<R: tauri::Runtime>(
+    path: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<Option<TrashTargetSnapshot>, String> {
+    if !is_safe_path(path, app_handle) {
+        return Err("Download asset path is outside an allowed download location".to_string());
+    }
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Could not inspect download asset before Trash cleanup".to_string()),
+    };
+    trash_target_snapshot_from_metadata(path, &metadata)
+        .map(Some)
+        .map_err(|_| "Could not verify download asset before Trash cleanup".to_string())
+}
+
+fn validate_trash_target_snapshot<R: tauri::Runtime>(
+    path: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+    expected: &TrashTargetSnapshot,
+) -> Result<bool, TrashAttemptError> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => {
+            return Err(TrashAttemptError::Validation(
+                "Could not inspect download asset before moving it to Trash".to_string(),
+            ))
+        }
+    };
+    if !is_safe_path(path, app_handle) {
+        return Err(TrashAttemptError::Validation(
+            "Download asset path is outside an allowed download location".to_string(),
+        ));
+    }
+    if metadata_is_link_or_reparse(&metadata) || path_has_symlink_component(path) {
+        return Err(TrashAttemptError::Validation(
+            "Download asset changed to a symbolic link or reparse point".to_string(),
+        ));
+    }
+    let identity = trash_target_identity(path, &metadata).map_err(TrashAttemptError::Validation)?;
+
+    match expected {
+        TrashTargetSnapshot::File {
+            identity: expected_identity,
+            len,
+            modified,
+            changed,
+        } => {
+            if !metadata.is_file()
+                || identity != *expected_identity
+                || metadata.len() != *len
+                || target_modified(&metadata) != *modified
+                || target_changed(&metadata) != *changed
+            {
+                return Err(TrashAttemptError::Validation(
+                    "Download asset changed during Trash cleanup; preserving it".to_string(),
+                ));
+            }
+        }
+        TrashTargetSnapshot::Directory {
+            identity: expected_identity,
+            modified,
+            changed,
+        } => {
+            if !metadata.is_dir()
+                || identity != *expected_identity
+                || target_modified(&metadata) != *modified
+                || target_changed(&metadata) != *changed
+            {
+                return Err(TrashAttemptError::Validation(
+                    "Download directory changed during Trash cleanup; preserving it".to_string(),
+                ));
+            }
+            if directory_has_non_metadata_entries_sync(path).map_err(|_| {
+                TrashAttemptError::Validation(
+                    "Could not inspect download directory before moving it to Trash".to_string(),
+                )
+            })? {
+                return Err(TrashAttemptError::Validation(
+                    "refusing to move a non-empty download directory to Trash without explicit ownership"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn validate_cleanup_target_owner<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    path: &std::path::Path,
+    expected_owner: Option<&str>,
+) -> Result<(), String> {
+    if let Some(owner) = crate::download_ownership::owner_for_path(app_handle, path)? {
+        if expected_owner != Some(owner.as_str()) {
+            return Err(format!(
+                "Cannot remove download asset '{}' because it is owned by Firelink download {owner}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn capture_regular_file_snapshot<R: tauri::Runtime>(
+    path: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<Option<TrashTargetSnapshot>, String> {
+    let snapshot = capture_trash_target_snapshot(path, app_handle).await?;
+    match snapshot {
+        Some(TrashTargetSnapshot::File { .. }) => Ok(snapshot),
+        Some(TrashTargetSnapshot::Directory { .. }) => Err(format!(
+            "Download cleanup target '{}' is a directory",
+            path.display()
+        )),
+        None => Ok(None),
+    }
+}
+
+fn validate_regular_file_snapshot<R: tauri::Runtime>(
+    path: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+    expected: &TrashTargetSnapshot,
+) -> Result<bool, String> {
+    match expected {
+        TrashTargetSnapshot::File { .. } => {
+            validate_trash_target_snapshot(path, app_handle, expected)
+                .map_err(|error| match error {
+                    TrashAttemptError::Validation(message) => message,
+                    TrashAttemptError::Operation { .. } => {
+                        "Download cleanup target validation failed".to_string()
+                    }
+                })
+        }
+        TrashTargetSnapshot::Directory { .. } => {
+            Err("Download cleanup target is a directory".to_string())
+        }
+    }
+}
+
+fn trash_delete_with_snapshot<R: tauri::Runtime>(
+    path: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+    expected: &TrashTargetSnapshot,
+) -> Result<(), TrashAttemptError> {
+    run_trash_operation(|| match validate_trash_target_snapshot(path, app_handle, expected) {
+        Ok(false) => Ok(()),
+        Ok(true) => delete_to_trash(path).map_err(|error| TrashAttemptError::Operation {
+            kind: trash_error_kind(&error),
+        }),
+        Err(error) => Err(error),
+    })
+}
+
+fn trash_delete_replacement_target<R: tauri::Runtime>(
+    target: &std::path::Path,
+    expected_fingerprint: &str,
+    allowed_legacy_owner_id: &str,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<(), TrashAttemptError> {
+    run_trash_operation(|| {
+        let metadata = match std::fs::symlink_metadata(target) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => {
+                return Err(TrashAttemptError::Validation(
+                    "Could not inspect replacement target before moving it to Trash".to_string(),
+                ))
+            }
+        };
+        if let Err(error) = validate_unowned_replacement_target_sync(
+            app_handle,
+            target,
+            expected_fingerprint,
+            &metadata,
+            allowed_legacy_owner_id,
+        ) {
+            return Err(TrashAttemptError::Validation(error));
+        }
+        delete_to_trash(target).map_err(|error| TrashAttemptError::Operation {
+            kind: trash_error_kind(&error),
+        })
+    })
+}
+
 async fn remove_unowned_replacement_target<R: tauri::Runtime>(
     target: &std::path::Path,
     expected_fingerprint: &str,
@@ -6819,16 +7332,15 @@ async fn remove_unowned_replacement_target<R: tauri::Runtime>(
                 ));
             }
         };
-        validate_unowned_replacement_target(
-            app_handle,
-            target,
-            expected_fingerprint,
-            &metadata,
-            allowed_legacy_owner_id,
-        )
-        .await?;
-
         if permanent {
+            validate_unowned_replacement_target(
+                app_handle,
+                target,
+                expected_fingerprint,
+                &metadata,
+                allowed_legacy_owner_id,
+            )
+            .await?;
             match tokio::fs::remove_file(target).await {
                 Ok(()) => return Ok(()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -6841,47 +7353,29 @@ async fn remove_unowned_replacement_target<R: tauri::Runtime>(
                 Err(_) => {}
             }
         } else {
-            let remove_result = match trash::delete(target) {
-                Ok(()) => Ok(()),
-                Err(error) => {
-                    log::warn!(
-                        "failed to move authorized replacement target to Trash, attempting hard delete: {}",
-                        error
-                    );
-                    let current_metadata = match std::fs::symlink_metadata(target) {
-                        Ok(metadata) => metadata,
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                        Err(error) => {
-                            return Err(format!(
-                                "Could not inspect replacement target '{}': {error}",
-                                target.display()
-                            ));
-                        }
-                    };
-                    validate_unowned_replacement_target(
-                        app_handle,
-                        target,
-                        expected_fingerprint,
-                        &current_metadata,
-                        allowed_legacy_owner_id,
-                    )
-                    .await?;
-                    match std::fs::remove_file(target) {
-                        Ok(()) => Ok(()),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                        Err(error) => Err(error.to_string()),
-                    }
-                }
-            };
-            match remove_result {
+            match trash_delete_replacement_target(
+                target,
+                expected_fingerprint,
+                allowed_legacy_owner_id,
+                app_handle,
+            ) {
                 Ok(()) => return Ok(()),
-                Err(error) if attempt == 5 => {
-                    return Err(format!(
-                        "Could not remove replacement target '{}' after retries: {error}",
-                        target.display()
-                    ));
+                Err(TrashAttemptError::Validation(error)) => return Err(error),
+                Err(TrashAttemptError::Operation { kind }) if attempt == 5 => {
+                    log::warn!(
+                        "replacement Trash operation failed [attempt={} error_kind={}]",
+                        attempt + 1,
+                        kind
+                    );
+                    return Err(trash_failure_message("replacement target"));
                 }
-                Err(_) => {}
+                Err(TrashAttemptError::Operation { kind }) => {
+                    log::warn!(
+                        "replacement Trash operation failed [attempt={} error_kind={}]",
+                        attempt + 1,
+                        kind
+                    );
+                }
             }
         }
 
@@ -7036,70 +7530,98 @@ pub(crate) async fn remove_download_assets<R: tauri::Runtime>(
     primary: &std::path::Path,
     app_handle: &tauri::AppHandle<R>,
 ) -> Result<(), String> {
-    if !is_safe_path(primary, app_handle) {
-        return Err("Download asset path is outside an allowed download location".to_string());
-    }
-
-    if primary.exists() {
-        let mut retries = 5;
-        loop {
-            let res = if primary.is_dir() {
-                if directory_has_non_metadata_entries(primary).await? {
-                    return Err(format!(
-                        "refusing to move non-empty download directory '{}' to Trash without explicit ownership",
-                        primary.display()
-                    ));
-                }
-                // Download directories must follow the same Trash contract as
-                // files. Do not fall back to recursive permanent deletion.
-                trash::delete(primary).map_err(|e| e.to_string())
-            } else {
-                if let Err(e) = trash::delete(primary) {
-                    log::warn!("failed to move downloaded file to Trash, attempting hard delete: {}", e);
-                    std::fs::remove_file(primary).map_err(|e| e.to_string())
-                } else {
-                    Ok(())
-                }
-            };
-            match res {
-                Ok(_) => break,
-                Err(e) => {
-                    if retries == 0 {
-                        return Err(e);
-                    }
-                    retries -= 1;
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                }
-            }
-        }
-    }
-
-    remove_download_sidecars(primary, app_handle).await?;
-
-    cleanup_media_processing_artifacts(primary).await;
-    Ok(())
+    let mut cleanup_targets = vec![primary.to_path_buf()];
+    cleanup_targets.extend(download_sidecar_paths(primary));
+    cleanup_targets.extend(collect_media_processing_artifact_paths(primary, app_handle).await?);
+    let _target_guards = lock_download_targets(&mut cleanup_targets).await;
+    remove_download_assets_locked(primary, app_handle).await
 }
 
-async fn remove_download_sidecars<R: tauri::Runtime>(
+async fn remove_download_assets_locked<R: tauri::Runtime>(
     primary: &std::path::Path,
     app_handle: &tauri::AppHandle<R>,
 ) -> Result<(), String> {
-    for suffix in [".aria2", ".part", ".ytdl"] {
-        let mut candidate_os = primary.as_os_str().to_os_string();
-        candidate_os.push(suffix);
-        let candidate = std::path::PathBuf::from(candidate_os);
-        if candidate.exists() && is_safe_path(&candidate, app_handle) {
-            let mut retries = 5;
-            loop {
-                match tokio::fs::remove_file(&candidate).await {
-                    Ok(_) => break,
-                    Err(_) if retries == 0 => {
-                        return Err(format!("failed to remove '{}' after retries", candidate.display()));
-                    }
-                    Err(_) => {
-                        retries -= 1;
-                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    }
+    let snapshot = capture_trash_target_snapshot(primary, app_handle).await?;
+    let expected_owner = crate::download_ownership::owner_for_path(app_handle, primary)?;
+    let sidecars = download_sidecar_paths(primary);
+    let artifacts = validate_media_artifact_targets(app_handle, expected_owner.as_deref(), primary).await?;
+    let mut protected_targets = sidecars.clone();
+    protected_targets.extend(artifacts.clone());
+    protected_targets.push(primary.to_path_buf());
+    for target in &protected_targets {
+        validate_cleanup_target_owner(app_handle, target, expected_owner.as_deref())?;
+    }
+
+    if let Some(snapshot) = snapshot {
+        let mut retries = 5;
+        loop {
+            match trash_delete_with_snapshot(primary, app_handle, &snapshot) {
+                Ok(()) => break,
+                Err(TrashAttemptError::Validation(error)) => return Err(error),
+                Err(TrashAttemptError::Operation { kind }) if retries == 0 => {
+                    log::warn!(
+                        "download asset Trash operation failed [attempt=6 error_kind={}]",
+                        kind
+                    );
+                    return Err(trash_failure_message("download asset"));
+                }
+                Err(TrashAttemptError::Operation { kind }) => {
+                    log::warn!(
+                        "download asset Trash operation failed [attempt={} error_kind={}]",
+                        6 - retries,
+                        kind
+                    );
+                    retries -= 1;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    remove_download_sidecars_locked(primary, app_handle, expected_owner.as_deref()).await?;
+    cleanup_media_artifacts_locked(
+        app_handle,
+        expected_owner.as_deref(),
+        primary,
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn remove_download_sidecars_locked<R: tauri::Runtime>(
+    primary: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+    expected_owner: Option<&str>,
+) -> Result<(), String> {
+    for candidate in download_sidecar_paths(primary) {
+        validate_cleanup_target_owner(app_handle, &candidate, expected_owner)?;
+        let Some(snapshot) = capture_regular_file_snapshot(&candidate, app_handle).await? else {
+            continue;
+        };
+        for attempt in 0..=5 {
+            if !validate_regular_file_snapshot(&candidate, app_handle, &snapshot)? {
+                return Err(format!(
+                    "download sidecar '{}' disappeared during cleanup; preserving ownership",
+                    candidate.display()
+                ));
+            }
+            match run_trash_operation(|| std::fs::remove_file(&candidate)) {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(format!(
+                        "download sidecar '{}' disappeared during cleanup; preserving ownership",
+                        candidate.display()
+                    ));
+                }
+                Err(error) if attempt == 5 => {
+                    return Err(format!(
+                        "failed to remove '{}' after retries: {error}",
+                        candidate.display()
+                    ));
+                }
+                Err(_) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 }
             }
         }
@@ -7124,11 +7646,21 @@ async fn remove_exact_file_permanently<R: tauri::Runtime>(
                     path.display()
                 ));
             }
-            None => return Ok(()),
+            None => {
+                return Err(format!(
+                    "refusing to permanently remove '{}' because it disappeared during cleanup",
+                    path.display()
+                ));
+            }
         }
-        match tokio::fs::remove_file(path).await {
+        match run_trash_operation(|| std::fs::remove_file(path)) {
             Ok(()) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "refusing to permanently remove '{}' because it disappeared during cleanup",
+                    path.display()
+                ));
+            }
             Err(error) if attempt == 5 => {
                 return Err(format!(
                     "could not permanently remove '{}' after retries: {error}",
@@ -7186,6 +7718,10 @@ async fn remove_download_sidecars_permanently<R: tauri::Runtime>(
     primary: &std::path::Path,
     app_handle: &tauri::AppHandle<R>,
 ) -> Result<(), String> {
+    let expected_owner = crate::download_ownership::owner_for_path(app_handle, primary)?;
+    for sidecar in download_sidecar_paths(primary) {
+        validate_cleanup_target_owner(app_handle, &sidecar, expected_owner.as_deref())?;
+    }
     validate_download_sidecars_permanently(primary, app_handle).await?;
     for suffix in [".aria2", ".part", ".ytdl"] {
         let mut candidate_os = primary.as_os_str().to_os_string();
@@ -7215,56 +7751,44 @@ async fn collect_media_processing_artifacts_for_permanent_removal<R: tauri::Runt
     primary: &std::path::Path,
     app_handle: &tauri::AppHandle<R>,
 ) -> Result<Vec<std::path::PathBuf>, String> {
-    let Some(parent) = primary.parent() else {
-        return Ok(Vec::new());
-    };
-    if !is_safe_path(parent, app_handle) {
-        return Err("download media artifact directory is outside an allowed location".to_string());
+    let candidates = collect_media_processing_artifact_paths(primary, app_handle).await?;
+    for path in &candidates {
+        validate_exact_file_for_permanent_removal(path, app_handle).await?;
     }
-    let Some(base_name) = primary.file_name().and_then(|name| name.to_str()) else {
-        return Ok(Vec::new());
-    };
-    let base_stem = primary
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or(base_name);
-    let mut entries = match tokio::fs::read_dir(parent).await {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("could not inspect media artifacts: {error}")),
-    };
-    let mut artifacts = Vec::new();
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|error| format!("could not inspect media artifacts: {error}"))?
-    {
-        let path = entry.path();
-        if crate::platform::paths_equal(&path, primary) {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !is_media_artifact_name(name, base_name, base_stem) {
-            continue;
-        }
-        validate_exact_file_for_permanent_removal(&path, app_handle).await?;
-        artifacts.push(path);
-    }
-    Ok(artifacts)
+    Ok(candidates)
 }
 
+#[cfg(test)]
 async fn remove_download_assets_permanently<R: tauri::Runtime>(
     primary: &std::path::Path,
     app_handle: &tauri::AppHandle<R>,
 ) -> Result<(), String> {
+    let mut initial_targets = vec![primary.to_path_buf()];
+    initial_targets.extend(download_sidecar_paths(primary));
+    let _target_guards = lock_download_targets(&mut initial_targets).await;
+    remove_download_assets_permanently_locked(primary, app_handle).await
+}
+
+async fn remove_download_assets_permanently_locked<R: tauri::Runtime>(
+    primary: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<(), String> {
+    // Reject links, special files, and unsafe paths before consulting the
+    // ownership registry, whose canonical-path lookup intentionally follows
+    // only trusted paths.
+    validate_exact_file_for_permanent_removal(primary, app_handle).await?;
+    validate_download_sidecars_permanently(primary, app_handle).await?;
     let artifacts = collect_media_processing_artifacts_for_permanent_removal(primary, app_handle).await?;
+    let expected_owner = crate::download_ownership::owner_for_path(app_handle, primary)?;
+    let mut protected_targets = download_sidecar_paths(primary);
+    protected_targets.extend(artifacts.iter().cloned());
+    protected_targets.push(primary.to_path_buf());
+    for target in &protected_targets {
+        validate_cleanup_target_owner(app_handle, target, expected_owner.as_deref())?;
+    }
     // Validate every exact sidecar before deleting the primary payload. A
     // symlink or special-file substitution must leave the row/ownership
     // intact rather than producing a partially-cleaned download silently.
-    validate_download_sidecars_permanently(primary, app_handle).await?;
-    validate_exact_file_for_permanent_removal(primary, app_handle).await?;
     remove_exact_file_permanently(primary, app_handle).await?;
     remove_download_sidecars_permanently(primary, app_handle).await?;
     for artifact in artifacts {
@@ -7273,18 +7797,20 @@ async fn remove_download_assets_permanently<R: tauri::Runtime>(
     Ok(())
 }
 
-async fn remove_download_container_assets_permanently<R: tauri::Runtime>(
+#[derive(Debug, Default)]
+struct TorrentContainerCleanupTargets {
+    metadata_files: Vec<std::path::PathBuf>,
+    empty_directories: Vec<std::path::PathBuf>,
+    has_unrelated_entries: bool,
+}
+
+async fn collect_torrent_container_cleanup_targets<R: tauri::Runtime>(
     primary: &std::path::Path,
     app_handle: &tauri::AppHandle<R>,
-) -> Result<(), String> {
+) -> Result<Option<TorrentContainerCleanupTargets>, String> {
     let metadata = match tokio::fs::symlink_metadata(primary).await {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            // The output directory may already be gone while Aria2's exact
-            // sidecars remain. They are still safe to remove by name.
-            remove_download_sidecars_permanently(primary, app_handle).await?;
-            return Ok(());
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("could not inspect Torrent output directory: {error}")),
     };
     if metadata_is_link_or_reparse(&metadata) || path_has_symlink_component(primary) {
@@ -7303,29 +7829,16 @@ async fn remove_download_container_assets_permanently<R: tauri::Runtime>(
         return Err("Torrent output directory is outside an allowed download location".to_string());
     }
 
-    // Validate sidecars before any exact entry is removed. The removal helper
-    // revalidates again under the lifecycle/target lock immediately before
-    // unlinking, so a later substitution still fails closed.
-    validate_download_sidecars_permanently(primary, app_handle).await?;
-
-    // Inspect the complete tree without following links. If a real unowned
-    // entry is found, stop before deleting anything in the container. This
-    // preserves the whole user-owned subtree rather than trying to clean
-    // around it.
     let mut pending = vec![(primary.to_path_buf(), false)];
-    let mut empty_directories = Vec::new();
-    let mut metadata_files = Vec::new();
-    let mut has_unrelated_entries = false;
+    let mut targets = TorrentContainerCleanupTargets::default();
     'inspect: while let Some((directory, visited)) = pending.pop() {
         if visited {
-            empty_directories.push(directory);
+            targets.empty_directories.push(directory);
             continue;
         }
         let mut entries = match tokio::fs::read_dir(&directory).await {
             Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                continue;
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
                 return Err(format!(
                     "could not inspect Torrent output directory '{}': {error}",
@@ -7365,10 +7878,9 @@ async fn remove_download_container_assets_permanently<R: tauri::Runtime>(
                         path.display()
                     ));
                 }
-                validate_exact_file_for_permanent_removal(&path, app_handle).await?;
-                metadata_files.push(path);
+                targets.metadata_files.push(path);
             } else {
-                has_unrelated_entries = true;
+                targets.has_unrelated_entries = true;
                 break 'inspect;
             }
         }
@@ -7381,11 +7893,66 @@ async fn remove_download_container_assets_permanently<R: tauri::Runtime>(
                 .map(|child| (child, false)),
         );
     }
+    Ok(Some(targets))
+}
 
-    // Sidecars are still exact, independently owned assets, so remove them
-    // even when an unrelated entry means that the output container remains.
+fn torrent_container_descendant_paths(
+    targets: &TorrentContainerCleanupTargets,
+) -> Vec<std::path::PathBuf> {
+    targets
+        .metadata_files
+        .iter()
+        .chain(targets.empty_directories.iter())
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+async fn remove_download_container_assets_permanently<R: tauri::Runtime>(
+    primary: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let mut initial_targets = vec![primary.to_path_buf()];
+    initial_targets.extend(download_sidecar_paths(primary));
+    let _target_guards = lock_download_targets(&mut initial_targets).await;
+    remove_download_container_assets_permanently_locked(primary, app_handle, &initial_targets).await
+}
+
+async fn remove_download_container_assets_permanently_locked<R: tauri::Runtime>(
+    primary: &std::path::Path,
+    app_handle: &tauri::AppHandle<R>,
+    held_paths: &[std::path::PathBuf],
+) -> Result<(), String> {
+    let Some(targets) = collect_torrent_container_cleanup_targets(primary, app_handle).await?
+    else {
+        // The output directory may already be gone while Aria2's exact
+        // sidecars remain. They are still safe to remove by name.
+        remove_download_sidecars_permanently(primary, app_handle).await?;
+        return Ok(());
+    };
+
+    let expected_owner = crate::download_ownership::owner_for_path(app_handle, primary)?;
+    for sidecar in download_sidecar_paths(primary) {
+        validate_cleanup_target_owner(app_handle, &sidecar, expected_owner.as_deref())?;
+    }
+
+    let mut descendant_paths = torrent_container_descendant_paths(&targets);
+    let _descendant_guards =
+        lock_download_targets_excluding(&mut descendant_paths, held_paths).await;
+
+    for path in torrent_container_descendant_paths(&targets) {
+        validate_cleanup_target_owner(app_handle, &path, expected_owner.as_deref())?;
+    }
+    for path in &targets.metadata_files {
+        validate_exact_file_for_permanent_removal(path, app_handle).await?;
+    }
+
+    // Validate sidecars before any exact entry is removed. The removal helper
+    // revalidates again under the lifecycle/target lock immediately before
+    // unlinking, so a later substitution still fails closed.
+    validate_download_sidecars_permanently(primary, app_handle).await?;
     remove_download_sidecars_permanently(primary, app_handle).await?;
-    if has_unrelated_entries {
+    if targets.has_unrelated_entries {
         log::debug!(
             "keeping Torrent output directory '{}': unrelated entries remain",
             primary.display()
@@ -7393,7 +7960,7 @@ async fn remove_download_container_assets_permanently<R: tauri::Runtime>(
         return Ok(());
     }
 
-    for path in metadata_files {
+    for path in targets.metadata_files {
         remove_exact_file_permanently(&path, app_handle).await?;
     }
 
@@ -7401,7 +7968,7 @@ async fn remove_download_container_assets_permanently<R: tauri::Runtime>(
     // directories before their parents, so a file or directory added after
     // inspection makes that directory (and then its parents) fail closed
     // without deleting newly-created unowned content.
-    for directory in &empty_directories {
+    for directory in &targets.empty_directories {
         let removed = remove_empty_directory_permanently(directory).await?;
         if crate::platform::paths_equal(directory, primary) && !removed {
             log::debug!(
@@ -7411,7 +7978,8 @@ async fn remove_download_container_assets_permanently<R: tauri::Runtime>(
         }
     }
 
-    if !empty_directories
+    if !targets
+        .empty_directories
         .iter()
         .any(|directory| crate::platform::paths_equal(directory, primary))
     {
@@ -7491,46 +8059,34 @@ fn is_os_directory_metadata(name: &std::ffi::OsStr) -> bool {
 }
 
 async fn directory_has_non_metadata_entries(path: &std::path::Path) -> Result<bool, String> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || directory_has_non_metadata_entries_sync(&path))
+        .await
+        .map_err(|_| "could not inspect download directory".to_string())?
+        .map_err(|_| "could not inspect download directory".to_string())
+}
+
+fn directory_has_non_metadata_entries_sync(path: &std::path::Path) -> Result<bool, std::io::Error> {
     let mut directories = vec![path.to_path_buf()];
     while let Some(directory) = directories.pop() {
-        let mut entries = match tokio::fs::read_dir(&directory).await {
+        let entries = match std::fs::read_dir(&directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(format!(
-                    "could not inspect directory '{}': {}",
-                    directory.display(),
-                    error
-                ));
-            }
+            Err(error) => return Err(error),
         };
-        while let Some(entry) = entries.next_entry().await.map_err(|error| {
-            format!(
-                "could not inspect directory '{}': {}",
-                directory.display(),
-                error
-            )
-        })? {
-            let metadata = match tokio::fs::symlink_metadata(entry.path()).await {
+        for entry in entries {
+            let entry = entry?;
+            let metadata = match std::fs::symlink_metadata(entry.path()) {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    return Err(format!(
-                        "could not inspect directory entry '{}': {}",
-                        entry.path().display(),
-                        error
-                    ));
-                }
+                Err(error) => return Err(error),
             };
             if metadata_is_link_or_reparse(&metadata) {
                 return Ok(true);
             }
             if metadata.is_dir() {
                 directories.push(entry.path());
-            } else if is_os_directory_metadata(&entry.file_name()) {
-                // These names are ignorable only for regular OS metadata
-                // files. A directory with a metadata-like name may contain
-                // real user content and must be inspected normally.
+            } else if is_os_directory_metadata(&entry.file_name()) && metadata.is_file() {
                 continue;
             } else {
                 return Ok(true);
@@ -7542,7 +8098,7 @@ async fn directory_has_non_metadata_entries(path: &std::path::Path) -> Result<bo
 
 async fn remove_empty_directory_permanently(path: &std::path::Path) -> Result<bool, String> {
     for attempt in 0..=5 {
-        match tokio::fs::remove_dir(path).await {
+        match run_trash_operation(|| std::fs::remove_dir(path)) {
             Ok(()) => return Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
@@ -7560,61 +8116,73 @@ async fn remove_empty_directory_permanently(path: &std::path::Path) -> Result<bo
     Ok(false)
 }
 
-async fn remove_download_container_assets<R: tauri::Runtime>(
+async fn remove_download_container_assets_locked<R: tauri::Runtime>(
     primary: &std::path::Path,
     app_handle: &tauri::AppHandle<R>,
+    held_paths: &[std::path::PathBuf],
 ) -> Result<(), String> {
-    if !is_safe_path(primary, app_handle) {
-        return Err("Download asset path is outside an allowed download location".to_string());
-    }
-
     // The primary path of a multi-file Torrent is its output directory, while
-    // owned_paths contains only the selected files. Remove the directory's
-    // Aria2 sidecars, then move the directory itself to Trash only when no
-    // unowned files remain inside it.
-    remove_download_sidecars(primary, app_handle).await?;
-    let is_directory = std::fs::symlink_metadata(primary)
-        .map(|metadata| metadata.file_type().is_dir())
-        .unwrap_or(false);
-    if !is_directory {
+    // owned_paths contains only the selected files. Move the directory itself
+    // to Trash only when no unowned files remain inside it. Sidecars are
+    // removed after a successful Trash move so a failure preserves the full
+    // recoverable asset set.
+    let snapshot = capture_trash_target_snapshot(primary, app_handle).await?;
+    let expected_owner = crate::download_ownership::owner_for_path(app_handle, primary)?;
+    for sidecar in download_sidecar_paths(primary) {
+        validate_cleanup_target_owner(app_handle, &sidecar, expected_owner.as_deref())?;
+    }
+    let Some(snapshot) = snapshot else {
+        remove_download_sidecars_locked(primary, app_handle, expected_owner.as_deref()).await?;
+        return Ok(());
+    };
+    if !matches!(&snapshot, TrashTargetSnapshot::Directory { .. }) {
+        remove_download_sidecars_locked(primary, app_handle, expected_owner.as_deref()).await?;
         return Ok(());
     }
-    if directory_has_non_metadata_entries(primary).await? {
+
+    let targets = collect_torrent_container_cleanup_targets(primary, app_handle)
+        .await?
+        .ok_or_else(|| "Torrent output directory disappeared during cleanup".to_string())?;
+    let mut descendant_paths = torrent_container_descendant_paths(&targets);
+    let _descendant_guards =
+        lock_download_targets_excluding(&mut descendant_paths, held_paths).await;
+    for path in torrent_container_descendant_paths(&targets) {
+        validate_cleanup_target_owner(app_handle, &path, expected_owner.as_deref())?;
+    }
+
+    if targets.has_unrelated_entries || directory_has_non_metadata_entries(primary).await? {
         log::debug!(
-            "keeping non-empty Torrent output directory '{}': it contains files outside the selected ownership set",
-            primary.display()
+            "keeping non-empty Torrent output directory because it contains files outside the selected ownership set"
         );
+        remove_download_sidecars_locked(primary, app_handle, expected_owner.as_deref()).await?;
         return Ok(());
     }
 
     let mut retries = 5;
     loop {
-        match trash::delete(primary) {
+        match trash_delete_with_snapshot(primary, app_handle, &snapshot) {
             Ok(()) => break,
-            Err(error) => {
-                if directory_has_non_metadata_entries(primary).await? {
-                    log::debug!(
-                        "keeping non-empty Torrent output directory '{}': {}",
-                        primary.display(),
-                        error
-                    );
-                    break;
-                }
-                if !primary.exists() {
-                    return Ok(());
-                }
-                if retries == 0 {
-                    return Err(format!(
-                        "failed to move Torrent output directory '{}' to Trash: {}",
-                        primary.display(),
-                        error
-                    ));
-                }
+            Err(TrashAttemptError::Validation(error)) => return Err(error),
+            Err(TrashAttemptError::Operation { kind }) if retries == 0 => {
+                log::warn!(
+                    "Torrent output Trash operation failed [attempt=6 error_kind={}]",
+                    kind
+                );
+                return Err(trash_failure_message("Torrent output directory"));
+            }
+            Err(TrashAttemptError::Operation { kind }) => {
+                log::warn!(
+                    "Torrent output Trash operation failed [attempt={} error_kind={}]",
+                    6 - retries,
+                    kind
+                );
                 retries -= 1;
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
         }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
+
+    remove_download_sidecars_locked(primary, app_handle, expected_owner.as_deref()).await?;
     Ok(())
 }
 
@@ -9771,7 +10339,8 @@ async fn enqueue_download_locked(
     };
     let target_lock_path = enqueue_output_lock_path(app_handle, &item)
         .map_err(AppError::Internal)?;
-    let _target_guard = Some(download_target_lock(&target_lock_path).await.lock_owned().await);
+    let mut target_lock_paths = vec![target_lock_path];
+    let _target_guards = lock_download_targets(&mut target_lock_paths).await;
     let lifecycle_generation = enqueue_lifecycle_generation(&item).map_err(AppError::Internal)?;
     let previous_generation = state
         .queue_manager
@@ -9998,7 +10567,8 @@ async fn enqueue_many(
                 continue;
             }
         };
-        let _target_guard = download_target_lock(&target_lock_path).await.lock_owned().await;
+        let mut target_lock_paths = vec![target_lock_path];
+        let _target_guards = lock_download_targets(&mut target_lock_paths).await;
         let lifecycle_generation = match enqueue_lifecycle_generation(&item) {
             Ok(generation) => generation,
             Err(error) => {
@@ -14291,6 +14861,7 @@ mod tests {
         cookie_scope_for_url, metadata_authentication_error, metadata_cookie_header_present,
         metadata_headers, metadata_response_error,
         metadata_error_code,
+        reqwest_error_code,
         is_remote_torrent_source,
         normalize_speed_limit_for_aria2,
         normalize_torrent_overall_upload_limit,
@@ -14308,7 +14879,8 @@ mod tests {
         normalize_opened_torrent_argument,
         redact_log_line, redact_log_line_for_output, sanitize_ytdlp_config_value,
         has_resumable_download_assets, is_media_artifact_name,
-        directory_has_non_metadata_entries, primary_path_needs_container_cleanup,
+        directory_has_non_metadata_entries, directory_has_non_metadata_entries_sync,
+        primary_path_needs_container_cleanup,
         should_cleanup_media_artifacts_after_failure,
         should_retry_without_browser_cookies,
         retry_metadata_with_cookies, should_retry_metadata_with_cookies,
@@ -14337,7 +14909,10 @@ mod tests {
         download_asset_or_sidecar_exists,
         classify_download_target, download_target_lock, inspect_unowned_replacement_target,
         remove_unowned_replacement_target,
-        remove_download_assets_permanently, remove_download_container_assets_permanently,
+        capture_trash_target_snapshot, trash_delete_with_snapshot,
+        remove_download_assets, remove_download_assets_permanently,
+        remove_download_container_assets_permanently, run_trash_operation,
+        set_test_trash_failures,
         restore_download_replacement, legacy_target_fingerprint, target_fingerprint,
         target_fingerprint_matches, DownloadReplacementReservation,
     };
@@ -14362,6 +14937,69 @@ mod tests {
         ));
         assert!(!aria2_gid_not_found("error trying to connect: connection refused"));
         assert!(!aria2_gid_not_found("aria2 error code 3: Resource not found"));
+    }
+
+    #[tokio::test]
+    async fn reqwest_dns_failures_use_the_typed_dns_error_classification() {
+        struct FailingResolver;
+
+        impl reqwest::dns::Resolve for FailingResolver {
+            fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+                Box::pin(async {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "injected DNS failure",
+                    )
+                    .into())
+                })
+            }
+        }
+
+        super::ensure_reqwest_crypto_provider();
+        let client = reqwest::Client::builder()
+            .dns_resolver(FailingResolver)
+            .build()
+            .expect("client with injected resolver should build");
+        let error = client
+            .get("http://dns-classification.invalid/")
+            .send()
+            .await
+            .expect_err("the injected resolver must fail");
+
+        assert!(error.is_dns());
+        assert_eq!(reqwest_error_code(&error), "dns");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn trash_operation_keeps_lifecycle_guard_through_cancellation_attempt() {
+        use std::sync::{mpsc, Arc, Mutex};
+
+        let lifecycle_lock = Arc::new(Mutex::new(()));
+        let lock_for_task = Arc::clone(&lifecycle_lock);
+        let lock_for_operation = Arc::clone(&lifecycle_lock);
+        let (started_sender, started_receiver) = mpsc::sync_channel(0);
+        let (release_sender, release_receiver) = mpsc::sync_channel(0);
+        let (finished_sender, finished_receiver) = mpsc::sync_channel(0);
+
+        let task = tokio::spawn(async move {
+            let _lifecycle_guard = lock_for_task.lock().unwrap();
+            run_trash_operation(move || {
+                started_sender.send(()).unwrap();
+                release_receiver.recv().unwrap();
+                assert!(lock_for_operation.try_lock().is_err());
+                finished_sender.send(()).unwrap();
+            });
+        });
+
+        started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("Trash operation should start");
+        task.abort();
+        release_sender.send(()).unwrap();
+        finished_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the blocking operation must finish after cancellation is attempted");
+        assert!(task.await.is_ok());
     }
 
     #[test]
@@ -14715,6 +15353,222 @@ mod tests {
         .expect_err("a replacement target with a new fingerprint must be preserved");
         assert!(error.contains("changed after duplicate resolution"));
         assert_eq!(std::fs::read(&target).unwrap(), b"new file");
+    }
+
+    #[tokio::test]
+    async fn trash_failure_preserves_payload_sidecars_and_ownership() {
+        use tauri::Manager;
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let storage_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let storage_layout = crate::storage::StorageLayout::resolve(
+            app.handle(),
+            crate::storage::StorageMode::Portable {
+                root: storage_root.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        app.manage(crate::db::init(&storage_layout).unwrap());
+        let download_root =
+            configure_test_download_root(app.handle(), &storage_root.path().join("downloads"));
+        let directory = tempfile::tempdir_in(&download_root).unwrap();
+        let primary = directory.path().join("owned.bin");
+        std::fs::write(&primary, b"payload").unwrap();
+        for suffix in [".aria2", ".part", ".ytdl"] {
+            let mut path = primary.as_os_str().to_os_string();
+            path.push(suffix);
+            std::fs::write(path, b"sidecar").unwrap();
+        }
+        crate::download_ownership::set_primary_path(app.handle(), "trash-owner", &primary)
+            .unwrap();
+        set_test_trash_failures(&primary, 6);
+
+        let error = remove_download_assets(&primary, app.handle())
+            .await
+            .expect_err("repeated Trash failures must stop without permanent deletion");
+
+        assert!(error.contains("permanent deletion was not attempted"));
+        assert!(primary.exists());
+        for suffix in [".aria2", ".part", ".ytdl"] {
+            let mut path = primary.as_os_str().to_os_string();
+            path.push(suffix);
+            assert!(std::path::PathBuf::from(path).exists());
+        }
+        assert_eq!(
+            crate::download_ownership::owner_for_path(app.handle(), &primary)
+                .unwrap()
+                .as_deref(),
+            Some("trash-owner")
+        );
+
+        set_test_trash_failures(&primary, 0);
+        crate::download_ownership::remove(app.handle(), "trash-owner").unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_preserves_a_sidecar_owned_by_another_download() {
+        use tauri::Manager;
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let storage_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let storage_layout = crate::storage::StorageLayout::resolve(
+            app.handle(),
+            crate::storage::StorageMode::Portable {
+                root: storage_root.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        app.manage(crate::db::init(&storage_layout).unwrap());
+        let download_root =
+            configure_test_download_root(app.handle(), &storage_root.path().join("downloads"));
+        let primary = download_root.join("owned.bin");
+        let sidecar = download_root.join("owned.bin.aria2");
+        std::fs::write(&primary, b"payload").unwrap();
+        std::fs::write(&sidecar, b"sidecar").unwrap();
+        crate::download_ownership::set_primary_path(app.handle(), "primary-owner", &primary)
+            .unwrap();
+        crate::download_ownership::set_primary_path(app.handle(), "sidecar-owner", &sidecar)
+            .unwrap();
+
+        let error = remove_download_assets(&primary, app.handle())
+            .await
+            .expect_err("cleanup must stop before deleting an owned sidecar");
+        assert!(error.contains("owned by Firelink download sidecar-owner"));
+        assert!(primary.exists());
+        assert!(sidecar.exists());
+
+        crate::download_ownership::remove(app.handle(), "primary-owner").unwrap();
+        crate::download_ownership::remove(app.handle(), "sidecar-owner").unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_preserves_a_media_artifact_owned_by_another_download() {
+        use tauri::Manager;
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let storage_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let storage_layout = crate::storage::StorageLayout::resolve(
+            app.handle(),
+            crate::storage::StorageMode::Portable {
+                root: storage_root.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        app.manage(crate::db::init(&storage_layout).unwrap());
+        let download_root =
+            configure_test_download_root(app.handle(), &storage_root.path().join("downloads"));
+        let primary = download_root.join("video.mp4");
+        let artifact = download_root.join("video.f137.mp4");
+        std::fs::write(&primary, b"payload").unwrap();
+        std::fs::write(&artifact, b"artifact").unwrap();
+        crate::download_ownership::set_primary_path(app.handle(), "primary-owner", &primary)
+            .unwrap();
+        crate::download_ownership::set_primary_path(app.handle(), "artifact-owner", &artifact)
+            .unwrap();
+
+        let error = remove_download_assets(&primary, app.handle())
+            .await
+            .expect_err("cleanup must stop before deleting an owned media artifact");
+        assert!(error.contains("owned by Firelink download artifact-owner"));
+        assert!(primary.exists());
+        assert!(artifact.exists());
+
+        crate::download_ownership::remove(app.handle(), "primary-owner").unwrap();
+        crate::download_ownership::remove(app.handle(), "artifact-owner").unwrap();
+    }
+
+    #[tokio::test]
+    async fn replacement_trash_failure_preserves_file_and_rejects_identity_change() {
+        use tauri::Manager;
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let storage_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let storage_layout = crate::storage::StorageLayout::resolve(
+            app.handle(),
+            crate::storage::StorageMode::Portable {
+                root: storage_root.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        app.manage(crate::db::init(&storage_layout).unwrap());
+        let download_root =
+            configure_test_download_root(app.handle(), &storage_root.path().join("downloads"));
+        let target = download_root.join("replacement.bin");
+        std::fs::write(&target, b"original").unwrap();
+        let fingerprint =
+            target_fingerprint(&target, &std::fs::symlink_metadata(&target).unwrap()).unwrap();
+
+        set_test_trash_failures(&target, 6);
+        let error = remove_unowned_replacement_target(
+            &target,
+            &fingerprint,
+            "staged-replacement",
+            false,
+            app.handle(),
+        )
+        .await
+        .expect_err("repeated replacement Trash failures must preserve the target");
+        assert!(error.contains("permanent deletion was not attempted"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+
+        set_test_trash_failures(&target, 0);
+        std::fs::write(&target, b"changed").unwrap();
+        let error = remove_unowned_replacement_target(
+            &target,
+            &fingerprint,
+            "staged-replacement",
+            false,
+            app.handle(),
+        )
+        .await
+        .expect_err("a changed replacement must fail closed before Trash");
+        assert!(error.contains("changed after duplicate resolution"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"changed");
+    }
+
+    #[tokio::test]
+    async fn ordinary_trash_snapshot_rejects_a_replaced_file_before_trash() {
+        use tauri::Manager;
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let storage_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let storage_layout = crate::storage::StorageLayout::resolve(
+            app.handle(),
+            crate::storage::StorageMode::Portable {
+                root: storage_root.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        app.manage(crate::db::init(&storage_layout).unwrap());
+        let download_root =
+            configure_test_download_root(app.handle(), &storage_root.path().join("downloads"));
+        let directory = tempfile::tempdir_in(&download_root).unwrap();
+        let target = directory.path().join("download.bin");
+        let original = directory.path().join("download.old");
+        std::fs::write(&target, b"original").unwrap();
+        let snapshot = capture_trash_target_snapshot(&target, app.handle())
+            .await
+            .unwrap()
+            .expect("existing regular file should have a Trash snapshot");
+
+        std::fs::rename(&target, &original).unwrap();
+        std::fs::write(&target, b"replaced").unwrap();
+        let error = trash_delete_with_snapshot(&target, app.handle(), &snapshot)
+            .expect_err("a replacement must fail snapshot validation before Trash");
+
+        assert!(matches!(error, super::TrashAttemptError::Validation(_)));
+        assert_eq!(std::fs::read(&target).unwrap(), b"replaced");
+        assert_eq!(std::fs::read(&original).unwrap(), b"original");
     }
 
     #[test]
@@ -16858,6 +17712,20 @@ mod tests {
         assert!(!directory_has_non_metadata_entries(directory.path())
             .await
             .unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::net::UnixListener;
+
+            std::fs::remove_file(directory.path().join(".DS_Store")).unwrap();
+            let socket_path = directory.path().join(".DS_Store");
+            let socket = UnixListener::bind(&socket_path).unwrap();
+            assert!(directory_has_non_metadata_entries(directory.path())
+                .await
+                .unwrap());
+            assert!(directory_has_non_metadata_entries_sync(directory.path()).unwrap());
+            drop(socket);
+            std::fs::remove_file(socket_path).unwrap();
+        }
         let empty_nested = directory.path().join("MD5").join("nested");
         std::fs::create_dir_all(&empty_nested).unwrap();
         assert!(!directory_has_non_metadata_entries(directory.path())
@@ -17349,6 +18217,70 @@ mod tests {
 
         assert!(container.is_dir());
         assert!(unrelated.exists());
+        drop(directory);
+    }
+
+    #[tokio::test]
+    async fn permanent_torrent_container_preserves_owned_descendants() {
+        use tauri::Manager;
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let storage_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let storage_layout = crate::storage::StorageLayout::resolve(
+            app.handle(),
+            crate::storage::StorageMode::Portable {
+                root: storage_root.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        app.manage(crate::db::init(&storage_layout).unwrap());
+        let download_root =
+            configure_test_download_root(app.handle(), &storage_root.path().join("downloads"));
+        let directory = tempfile::tempdir_in(&download_root).unwrap();
+        let container = directory.path().join("torrent-output");
+        let nested = container.join("nested");
+        let metadata = container.join(".DS_Store");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(&metadata, b"metadata").unwrap();
+        crate::download_ownership::set_owned_paths_with_primary_and_removal(
+            app.handle(),
+            "container-owner",
+            &container,
+            &[container.join("owned.bin")],
+            &[],
+        )
+        .unwrap();
+        crate::download_ownership::set_primary_path(app.handle(), "metadata-owner", &metadata)
+            .unwrap();
+
+        let error = remove_download_container_assets_permanently(&container, app.handle())
+            .await
+            .expect_err("owned metadata must block container cleanup");
+        assert!(error.contains("metadata-owner"));
+        assert!(container.is_dir());
+        assert!(metadata.exists());
+        assert!(nested.is_dir());
+
+        crate::download_ownership::remove(app.handle(), "metadata-owner").unwrap();
+        crate::download_ownership::set_owned_paths_with_primary_and_removal(
+            app.handle(),
+            "nested-owner",
+            &nested,
+            &[nested.join("owned.bin")],
+            &[],
+        )
+        .unwrap();
+        let error = remove_download_container_assets_permanently(&container, app.handle())
+            .await
+            .expect_err("owned empty descendant directories must block cleanup");
+        assert!(error.contains("nested-owner"));
+        assert!(container.is_dir());
+        assert!(nested.is_dir());
+
+        crate::download_ownership::remove(app.handle(), "container-owner").unwrap();
+        crate::download_ownership::remove(app.handle(), "nested-owner").unwrap();
         drop(directory);
     }
 
