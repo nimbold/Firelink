@@ -195,6 +195,17 @@ async fn add_server_identity(request: Request<Body>, next: Next) -> Response {
     response
 }
 
+fn require_frontend_ready(frontend_ready: &SharedFrontendReady) -> Result<(), StatusCode> {
+    // Startup intentionally seeds the server with a per-launch token while
+    // the frontend decides whether credential-store access is allowed. Do
+    // not expose that temporary token as an authentication failure.
+    if frontend_ready.load(Ordering::Acquire) {
+        Ok(())
+    } else {
+        Err(StatusCode::SERVICE_UNAVAILABLE)
+    }
+}
+
 async fn bind_extension_listener() -> Result<(u16, tokio::net::TcpListener), String> {
     let mut errors = Vec::new();
     for port in EXTENSION_SERVER_PORT_RANGE {
@@ -221,6 +232,7 @@ async fn ping_handler(
     if !has_allowed_request_origin(&headers) {
         return Err(StatusCode::FORBIDDEN);
     }
+    require_frontend_ready(&state.frontend_ready)?;
 
     let signature = match headers
         .get("x-firelink-signature")
@@ -280,10 +292,12 @@ async fn download_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, StatusCode> {
-    let nonce = match required_client_nonce(&headers) {
-        Some(nonce) if has_allowed_request_origin(&headers) => nonce,
-        _ => return Err(StatusCode::FORBIDDEN),
-    };
+    if !has_allowed_request_origin(&headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    require_frontend_ready(&state.frontend_ready)?;
+
+    let nonce = required_client_nonce(&headers).ok_or(StatusCode::FORBIDDEN)?;
 
     let signature = match headers
         .get("x-firelink-signature")
@@ -801,7 +815,8 @@ mod tests {
     use super::{
         acknowledge_extension_download, add_server_identity, claim_request_at,
         decode_torrent_bytes, has_allowed_request_origin, is_valid_client_nonce, normalize_download,
-        normalize_url, required_client_nonce, same_origin_url, sanitize_filename,
+        normalize_url, require_frontend_ready, required_client_nonce, same_origin_url,
+        sanitize_filename,
         sign_server_proof, ExtensionCookieScope, ExtensionRequest, MAX_URL_COUNT,
         PROTOCOL_VERSION_HEADER, SERVER_HEADER,
     };
@@ -815,6 +830,7 @@ mod tests {
     use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, RwLock};
 
     #[tokio::test]
@@ -842,6 +858,18 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[test]
+    fn reports_startup_as_retryable_until_the_frontend_is_ready() {
+        let frontend_ready = Arc::new(AtomicBool::new(false));
+        assert_eq!(
+            require_frontend_ready(&frontend_ready),
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        );
+
+        frontend_ready.store(true, Ordering::Release);
+        assert_eq!(require_frontend_ready(&frontend_ready), Ok(()));
     }
 
     #[test]
