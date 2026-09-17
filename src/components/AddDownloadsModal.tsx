@@ -14,7 +14,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import { invokeCommand as invoke } from '../ipc';
 import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResolutionModal';
-import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, headerNameHasCredentialMaterial, isMediaUrl, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, MAX_TORRENT_TRACKER_INTERVAL, MAX_TORRENT_TRACKER_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentWebSeedDrafts, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, serializeTorrentPreviewPriority, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type TorrentEncryptionPolicy, type TorrentFileAllocation } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, headerNameHasCredentialMaterial, isDirectMediaManifestUrl, isHttpMediaRouteUrl, isMediaUrl, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, MAX_TORRENT_TRACKER_INTERVAL, MAX_TORRENT_TRACKER_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentWebSeedDrafts, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, serializeTorrentPreviewPriority, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type MediaMode, type TorrentEncryptionPolicy, type TorrentFileAllocation } from '../utils/downloads';
 import { fetchMediaMetadataDeduped, fetchMediaPlaylistMetadataDeduped } from '../utils/mediaMetadata';
 import {
   expandTilde,
@@ -33,6 +33,7 @@ import { useTranslation } from 'react-i18next';
 import { localeDirection, localePluralVariant, resolveAppLocale } from '../i18n/locales';
 import {
   canSubmitMetadataRows,
+  applyMediaModeToRow,
   appendRequestUrlsAfterVersion,
   commonMediaFormatsForRows,
   commonMediaQualitiesForRows,
@@ -59,6 +60,10 @@ import {
 import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
 import { TorrentWebSeedEditor } from './TorrentWebSeedEditor';
 import { copyTorrentFilePath as writeTorrentFilePath } from '../utils/torrentFilePath';
+import {
+  duplicateDownloadIdentityMatches,
+  unmanagedReplacementFingerprintMatches
+} from '../utils/duplicateResolution';
 
 const formatBytes = (bytes: number) => {
   const k = 1024;
@@ -124,17 +129,18 @@ const isGoogleAuthenticatedCaptureUrl = (rawUrl: string) => {
   }
 };
 
-const extensionHeaders = (context: PendingAddRequestContext | undefined) => [
+const mediaHeadersWithoutCredentialMaterial = (rawHeaders: string): string => rawHeaders
+  .split(/\r?\n/)
+  .filter(line => {
+    const separator = line.indexOf(':');
+    return separator > 0 && !headerNameHasCredentialMaterial(line.slice(0, separator));
+  })
+  .join('\n')
+  .trim();
+
+const extensionHeaders = (context: PendingAddRequestContext | undefined, media = context?.media === true) => [
   context?.referer ? `Referer: ${context.referer.replace(/[\r\n]/g, '')}` : '',
-  context?.media
-    ? (context.headers || '')
-      .split(/\r?\n/)
-      .filter(line => {
-        const separator = line.indexOf(':');
-        return separator > 0 && !headerNameHasCredentialMaterial(line.slice(0, separator));
-      })
-      .join('\n')
-    : context?.headers
+  media ? mediaHeadersWithoutCredentialMaterial(context?.headers || '') : context?.headers
 ].filter(Boolean).join('\n');
 
 export const AddDownloadsModal = () => {
@@ -154,6 +160,8 @@ export const AddDownloadsModal = () => {
     pendingAddRequestContexts,
     pendingAddRequestVersion,
     toggleAddModal,
+    setPendingAddModalBusy,
+    releasePendingAddHandoffs,
     addDownload,
     queues
   } = useDownloadStore();
@@ -329,37 +337,53 @@ export const AddDownloadsModal = () => {
   const requestContextForUrl = (url: string) =>
     pendingAddRequestContexts[normalizeComparableUrl(url)];
   const hasExtensionRequestContext = Object.keys(pendingAddRequestContexts).length > 0;
-  const headersForRow = (sourceUrl: string, isMedia = false) => {
+  const headersForRow = (
+    sourceUrl: string,
+    isMedia = false,
+    mediaMode?: MediaMode,
+    contextUrl = sourceUrl
+  ) => {
     if (headersManuallyEditedRef.current) return headers.trim();
-    const context = requestContextForUrl(sourceUrl);
-    const media = isMedia || context?.media === true || isMediaUrl(sourceUrl);
-    if (media) {
-      const raw = context ? extensionHeaders(context) : (hasExtensionRequestContext ? '' : headers.trim());
-      return raw
-        .split(/\r?\n/)
-        .filter(line => {
-          const separator = line.indexOf(':');
-          return separator > 0 && !headerNameHasCredentialMaterial(line.slice(0, separator));
-        })
-        .join('\n')
-        .trim();
+    const context = requestContextForUrl(contextUrl);
+    const automaticallyMedia = isMediaUrl(sourceUrl) || isDirectMediaManifestUrl(sourceUrl);
+    // A captured media context remains a hard browser-cookie boundary even if
+    // the user routes that row as a file. The row mode still controls the
+    // downloader route for automatic/provider classification.
+    const mediaRequestContext = context?.media === true
+      || mediaMode === 'media'
+      || (mediaMode !== 'file' && (isMedia || automaticallyMedia));
+    if (mediaRequestContext) {
+      const raw = context
+        ? extensionHeaders(context, true)
+        : (hasExtensionRequestContext ? '' : headers.trim());
+      return mediaHeadersWithoutCredentialMaterial(raw);
     }
     if (context) return extensionHeaders(context).trim();
     return hasExtensionRequestContext ? '' : headers.trim();
   };
-  const cookiesForRow = (sourceUrl: string, targetUrl = sourceUrl, isMedia = false) => {
+  const cookiesForRow = (
+    sourceUrl: string,
+    targetUrl = sourceUrl,
+    isMedia = false,
+    mediaMode?: MediaMode,
+    contextUrl = sourceUrl,
+  ) => {
     if (cookiesManuallyEditedRef.current) return cookies.trim();
-    const context = requestContextForUrl(sourceUrl);
-    if (isMedia || context?.media === true || isMediaUrl(sourceUrl)) return '';
+    const context = requestContextForUrl(contextUrl);
+    const automaticallyMedia = isMediaUrl(sourceUrl) || isDirectMediaManifestUrl(sourceUrl);
+    const mediaRequestContext = context?.media === true
+      || mediaMode === 'media'
+      || (mediaMode !== 'file' && (isMedia || automaticallyMedia));
+    if (mediaRequestContext) return '';
     const scopedCookies = cookieScopeForUrl(context, targetUrl);
     if (scopedCookies) return scopedCookies;
     if (context && urlsHaveDifferentOrigins(sourceUrl, targetUrl)) return '';
     if (context) return context.cookies.trim();
     return hasExtensionRequestContext ? '' : cookies.trim();
   };
-  const shouldDeferCookiesForRow = (sourceUrl: string) =>
+  const shouldDeferCookiesForRow = (sourceUrl: string, contextUrl = sourceUrl) =>
     !cookiesManuallyEditedRef.current
-      && Boolean(requestContextForUrl(sourceUrl))
+      && Boolean(requestContextForUrl(contextUrl))
       && !isGoogleAuthenticatedCaptureUrl(sourceUrl);
   const suggestedFilenameForRow = (sourceUrl: string) => {
     const context = requestContextForUrl(sourceUrl);
@@ -368,6 +392,24 @@ export const AddDownloadsModal = () => {
   };
   const requestContextUrlForRow = (row: AddDownloadDraftRow) =>
     row.playlistSourceUrl || row.sourceUrl;
+
+  const flushQueuedExtensionHandoffs = useCallback((closeModal = false) => {
+    const queued = releasePendingAddHandoffs();
+    if (closeModal) {
+      // The next handoff may reopen the modal before React renders the closed
+      // state. Reset the local session fence synchronously so that reopen is
+      // initialized as a new review session instead of appending to stale
+      // parsed rows.
+      modalSessionRef.current = false;
+      toggleAddModal(false);
+    }
+    // Run these after the busy flag is cleared. The first queued handoff opens
+    // a fresh modal after a completed submission, while later handoffs append
+    // to that same review session.
+    for (const request of queued) {
+      void useDownloadStore.getState().handleExtensionDownload(request);
+    }
+  }, [releasePendingAddHandoffs, toggleAddModal]);
 
   const closeModalFromDismissAction = useCallback(() => {
     if (isSubmitting || isSubmittingRef.current || showKeychainModal) return;
@@ -455,13 +497,18 @@ export const AddDownloadsModal = () => {
     setChecksumEnabled(false);
     setChecksumAlgo('SHA-256');
     setChecksumValue('');
-    setHeaders(initialContext ? extensionHeaders(initialContext) : [
+    const isSingleInitialMedia = initialContext?.media === true
+      || (initialUrlLines.length === 1 && (isMediaUrl(initialUrlLines[0]) || isDirectMediaManifestUrl(initialUrlLines[0])));
+    const initialHeaders = initialContext
+      ? extensionHeaders(initialContext, isSingleInitialMedia)
+      : [
       pendingAddReferer ? `Referer: ${pendingAddReferer.replace(/[\r\n]/g, '')}` : '',
       pendingAddHeaders
-    ].filter(Boolean).join('\n'));
+    ].filter(Boolean).join('\n');
+    setHeaders(isSingleInitialMedia
+      ? mediaHeadersWithoutCredentialMaterial(initialHeaders)
+      : initialHeaders);
     headersManuallyEditedRef.current = false;
-    const isSingleInitialMedia = initialContext?.media === true
-      || (initialUrlLines.length === 1 && isMediaUrl(initialUrlLines[0]));
     setCookies(isSingleInitialMedia ? '' : (initialContext?.cookies || pendingAddCookies));
     cookiesManuallyEditedRef.current = false;
     setMirrors('');
@@ -597,6 +644,14 @@ export const AddDownloadsModal = () => {
         .map(([url, context]) => [url, context.torrentCacheId as string])
     );
     setParsedItems(current => {
+      const mediaModesBySourceUrl: Record<string, MediaMode> = {};
+      for (const row of current) {
+        // Auto is the absence of an override. Do not let a stale default-Auto
+        // row mask a newer explicit media handoff for the same URL.
+        if (row.mediaMode && row.mediaMode !== 'auto') {
+          mediaModesBySourceUrl[normalizeComparableUrl(row.sourceUrl)] = row.mediaMode;
+        }
+      }
       const selectedBySourceUrl = Object.fromEntries(
         current.map(row => [row.sourceUrl, row.selected !== false])
       );
@@ -617,7 +672,8 @@ export const AddDownloadsModal = () => {
         selectedBySourceUrl,
         forcedTorrentUrls,
         requestTorrentPaths,
-        requestTorrentCacheIds
+        requestTorrentCacheIds,
+        mediaModesBySourceUrl
       );
     });
   }, [
@@ -679,8 +735,8 @@ export const AddDownloadsModal = () => {
               id: torrentCacheId,
               cache: true,
               proxy: proxy ?? undefined,
-              headers: headersForRow(contextUrl) || undefined,
-              cookies: cookiesForRow(contextUrl, row.sourceUrl) || undefined,
+              headers: headersForRow(row.sourceUrl, false, undefined, contextUrl) || undefined,
+              cookies: cookiesForRow(row.sourceUrl, row.sourceUrl, false, undefined, contextUrl) || undefined,
               cookieScopes: requestContext?.cookieScopes || undefined,
               torrent: true
             });
@@ -751,8 +807,13 @@ export const AddDownloadsModal = () => {
               }
             }
 
-            const rowHeaders = headersForRow(contextUrl);
-            const rowCookies = cookiesForRow(contextUrl, row.sourceUrl);
+            // The effective route, rather than only the original request
+            // context, owns the media credential boundary. An opaque URL can
+            // become media after the user selects Treat as media, so metadata
+            // probing must suppress ordinary browser cookies just like the
+            // final enqueue path does.
+            const rowHeaders = headersForRow(row.sourceUrl, row.isMedia, row.mediaMode, contextUrl);
+            const rowCookies = cookiesForRow(row.sourceUrl, row.sourceUrl, row.isMedia, row.mediaMode, contextUrl);
             const mediaMetadataArgs = {
               url: row.sourceUrl,
               cookieBrowser: browserArg,
@@ -871,11 +932,11 @@ export const AddDownloadsModal = () => {
                   ? login?.username || null
                   : null,
               password: useAuth ? password || null : keychainPassword,
-              headers: headersForRow(contextUrl) || null,
-              cookies: cookiesForRow(contextUrl, row.sourceUrl) || null,
+              headers: headersForRow(row.sourceUrl, row.isMedia, row.mediaMode, contextUrl) || null,
+              cookies: cookiesForRow(row.sourceUrl, row.sourceUrl, row.isMedia, row.mediaMode, contextUrl) || null,
               cookieScopes: requestContext?.cookieScopes || null,
               proxy,
-              deferCookies: shouldDeferCookiesForRow(row.sourceUrl)
+              deferCookies: shouldDeferCookiesForRow(row.sourceUrl, contextUrl)
             });
             // Persist the stable source URL, not the resolved redirect. A
             // redirect target may be a short-lived signed URL (for example,
@@ -1214,6 +1275,7 @@ export const AddDownloadsModal = () => {
     }
     isSubmittingRef.current = true;
     setIsSubmitting(true);
+    setPendingAddModalBusy(true);
     ++folderPickerRequestRef.current;
     let finalLocation = saveLocation;
     let useSharedDestination = isSaveLocationManual;
@@ -1249,6 +1311,7 @@ export const AddDownloadsModal = () => {
             pendingLastUsedDownloadDirectoryRef.current = null;
             isSubmittingRef.current = false;
             setIsSubmitting(false);
+            flushQueuedExtensionHandoffs();
             return;
           }
         } catch (e) {
@@ -1261,18 +1324,20 @@ export const AddDownloadsModal = () => {
           pendingLastUsedDownloadDirectoryRef.current = null;
           isSubmittingRef.current = false;
           setIsSubmitting(false);
+          flushQueuedExtensionHandoffs();
           return;
         }
       }
     }
 
     setResolvedLocation(finalLocation);
-    const store = useDownloadStore.getState();
     const newConflicts: DuplicateConflict[] = [];
     const plannedTargets: Array<{ location: string; fileName: string }> = [];
     const reservedFilenameMatchIds = new Set<string>();
 
-    for (let i = 0; i < parsedItems.length; i++) {
+    try {
+      const store = useDownloadStore.getState();
+      for (let i = 0; i < parsedItems.length; i++) {
       const item = parsedItems[i];
       if (item.selected === false) continue;
       let finalFile = item.isMedia
@@ -1301,13 +1366,19 @@ export const AddDownloadsModal = () => {
         )
       );
       if (urlMatch) {
+        const urlMatchDestination = urlMatch.destination ||
+          await resolveCategoryDestination(settings, urlMatch.category);
         newConflicts.push({
           id: item.id,
           fileName: finalFile,
           reason: { type: 'url', msg: t($ => $.addDownloads.urlAlreadyQueued) },
           resolution: 'rename',
           replaceAllowed: !isTransferLocked(urlMatch.status),
-          existingDownloadId: urlMatch.id
+          existingDownloadId: urlMatch.id,
+          existingDownloadUrl: urlMatch.url,
+          existingDownloadFileName: urlMatch.fileName,
+          existingDownloadDestination: urlMatchDestination,
+          existingDownloadIsMedia: Boolean(urlMatch.isMedia)
         });
       } else if (hasBatchConflict) {
         newConflicts.push({
@@ -1321,6 +1392,7 @@ export const AddDownloadsModal = () => {
         const filenameCandidates: Array<{
           download: DownloadItem;
           sameDestination: boolean;
+          destination: string;
         }> = [];
         for (const download of store.downloads) {
           if (
@@ -1340,7 +1412,8 @@ export const AddDownloadsModal = () => {
               itemLocation,
               finalFile,
               platform.os
-            )
+            ),
+            destination
           });
         }
         filenameCandidates.sort((left, right) =>
@@ -1350,9 +1423,10 @@ export const AddDownloadsModal = () => {
           || (right.download.fraction ?? 0) - (left.download.fraction ?? 0)
           || left.download.dateAdded.localeCompare(right.download.dateAdded)
         );
-        const filenameMatch = filenameCandidates.find(candidate =>
+        const filenameMatchCandidate = filenameCandidates.find(candidate =>
           !reservedFilenameMatchIds.has(candidate.download.id)
-        )?.download || filenameCandidates[0]?.download;
+        ) || filenameCandidates[0];
+        const filenameMatch = filenameMatchCandidate?.download;
 
         if (filenameMatch) {
           const canReplace = !reservedFilenameMatchIds.has(filenameMatch.id)
@@ -1363,7 +1437,11 @@ export const AddDownloadsModal = () => {
             reason: { type: 'file', msg: t($ => $.addDownloads.matchingDownloadFilename) },
             resolution: canReplace ? 'replace' : 'rename',
             replaceAllowed: canReplace,
-            existingDownloadId: filenameMatch.id
+            existingDownloadId: filenameMatch.id,
+            existingDownloadUrl: filenameMatch.url,
+            existingDownloadFileName: filenameMatch.fileName,
+            existingDownloadDestination: filenameMatchCandidate.destination,
+            existingDownloadIsMedia: Boolean(filenameMatch.isMedia)
           });
           reservedFilenameMatchIds.add(filenameMatch.id);
           plannedTargets.push({ location: itemLocation, fileName: finalFile });
@@ -1371,6 +1449,7 @@ export const AddDownloadsModal = () => {
         }
 
         let existingDownload;
+        let existingDownloadDestination: string | undefined;
         for (const download of store.downloads) {
           const destination = download.destination ||
             await resolveCategoryDestination(settings, download.category);
@@ -1384,6 +1463,7 @@ export const AddDownloadsModal = () => {
             )
           ) {
             existingDownload = download;
+            existingDownloadDestination = destination;
             break;
           }
         }
@@ -1400,6 +1480,7 @@ export const AddDownloadsModal = () => {
           diskTargetOwner = targetInfo.ownedBy;
         } catch (e) {
           console.error("Failed to check if file exists on disk:", e);
+          throw e;
         }
 
         const fileExistsOnDisk = diskTargetKind !== null && diskTargetKind !== 'missing';
@@ -1426,11 +1507,33 @@ export const AddDownloadsModal = () => {
             ...(existingDownload ? {} : diskReplaceAllowed
               ? { replaceFingerprint: diskTargetFingerprint }
               : {}),
-            existingDownloadId: existingDownload?.id
+            ...(existingDownload ? {
+              existingDownloadId: existingDownload.id,
+              existingDownloadUrl: existingDownload.url,
+              existingDownloadFileName: existingDownload.fileName,
+              existingDownloadDestination,
+              existingDownloadIsMedia: Boolean(existingDownload.isMedia)
+            } : {})
           });
         }
       }
       plannedTargets.push({ location: itemLocation, fileName: finalFile });
+      }
+    } catch (error) {
+      // Conflict review is part of the submission transaction. If destination
+      // resolution or target inspection fails, release queued browser
+      // handoffs and leave the draft reviewable instead of wedging the Add
+      // window in a permanently busy state or silently skipping a conflict.
+      console.error("Failed to review download conflicts:", error);
+      addToast({
+        message: t($ => $.addDownloads.destinationCheckFailed),
+        variant: 'error',
+        isActionable: true
+      });
+      flushQueuedExtensionHandoffs();
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
+      return;
     }
 
     if (newConflicts.length > 0) {
@@ -1447,6 +1550,7 @@ export const AddDownloadsModal = () => {
     try {
       await executeAddDownloads(action, finalLocation, useSharedDestination, undefined, destinationOverrides);
     } finally {
+      flushQueuedExtensionHandoffs();
       isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
@@ -1498,6 +1602,7 @@ export const AddDownloadsModal = () => {
                  let count = 1;
                  let newName = finalFile;
                  let exists = true;
+                 let diskInspectionFailed = false;
                  const batchTargets: Array<{ location: string; fileName: string }> = [];
                  for (const [candidateIndex, candidate] of itemsToAdd.entries()) {
                    if (!candidate || candidateIndex === idx) continue;
@@ -1542,7 +1647,11 @@ export const AddDownloadsModal = () => {
                          path: await resolveDownloadFilePath(itemLocation, newName)
                        });
                        diskHas = targetInfo.kind !== 'missing';
-                     } catch(e) {}
+                     } catch (error) {
+                       console.error("Failed to check renamed download target:", error);
+                       diskInspectionFailed = true;
+                       break;
+                     }
                      const batchHas = batchTargets.some(target => downloadLocationEquals(
                          target.location,
                          target.fileName,
@@ -1552,6 +1661,9 @@ export const AddDownloadsModal = () => {
                        ));
                      exists = storeHas || diskHas || batchHas;
                      count++;
+                 }
+                 if (diskInspectionFailed) {
+                   throw new Error(t($ => $.addDownloads.destinationCheckFailed));
                  }
                  if (exists) {
                    throw new Error(t($ => $.addDownloads.noAvailableName, { file: finalFile }));
@@ -1576,26 +1688,37 @@ export const AddDownloadsModal = () => {
           item.isTorrent === true
         );
         const store = useDownloadStore.getState();
-        let existingItem = conflict?.existingDownloadId
-          ? store.downloads.find(download => download.id === conflict.existingDownloadId)
-          : undefined;
-        const currentSettings = useSettingsStore.getState();
-        if (!existingItem) {
-          for (const download of store.downloads) {
-            const destination = download.destination ||
-              await resolveCategoryDestination(currentSettings, download.category);
-            if (
-              downloadLocationEquals(
-                destination,
-                download.fileName,
-                itemLocation,
-                finalFile,
-                platform.os
-              )
-            ) {
-              existingItem = download;
-              break;
-            }
+        let existingItem: DownloadItem | undefined;
+        if (conflict?.existingDownloadId) {
+          existingItem = store.downloads.find(download => download.id === conflict.existingDownloadId);
+          if (!existingItem) {
+            throw new Error(t($ => $.addDownloads.cannotReplace, { file: finalFile }));
+          }
+
+          const currentSettings = useSettingsStore.getState();
+          const currentDestination = existingItem.destination ||
+            await resolveCategoryDestination(currentSettings, existingItem.category);
+          const identityMatches = typeof conflict.existingDownloadUrl === 'string'
+            && typeof conflict.existingDownloadFileName === 'string'
+            && typeof conflict.existingDownloadDestination === 'string'
+            && conflict.existingDownloadIsMedia !== undefined
+            && duplicateDownloadIdentityMatches(
+              {
+                url: existingItem.url,
+                fileName: existingItem.fileName,
+                destination: currentDestination,
+                isMedia: Boolean(existingItem.isMedia)
+              },
+              {
+                url: conflict.existingDownloadUrl,
+                fileName: conflict.existingDownloadFileName,
+                destination: conflict.existingDownloadDestination,
+                isMedia: conflict.existingDownloadIsMedia
+              },
+              platform.os
+            );
+          if (!identityMatches) {
+            throw new Error(t($ => $.addDownloads.cannotReplace, { file: finalFile }));
           }
         }
 
@@ -1607,6 +1730,7 @@ export const AddDownloadsModal = () => {
           let diskTargetKind: string | null = null;
           let diskTargetFingerprint: string | undefined;
           let diskTargetOwner: string | undefined;
+          let diskTargetInspectionFailed = false;
           try {
             const targetInfo = await invoke('inspect_download_target', {
               path: await resolveDownloadFilePath(itemLocation, finalFile)
@@ -1616,9 +1740,22 @@ export const AddDownloadsModal = () => {
             diskTargetOwner = targetInfo.ownedBy;
           } catch (e) {
             console.error("Failed to check if file exists on disk:", e);
+            diskTargetInspectionFailed = true;
+          }
+
+          if (diskTargetInspectionFailed) {
+            throw new Error(t($ => $.addDownloads.destinationCheckFailed));
           }
 
           if (diskTargetKind === 'regularFile' && diskTargetFingerprint && !diskTargetOwner) {
+            if (!unmanagedReplacementFingerprintMatches(
+              diskTargetKind,
+              diskTargetFingerprint,
+              diskTargetOwner,
+              res.replaceFingerprint
+            )) {
+              throw new Error(t($ => $.addDownloads.cannotReplace, { file: finalFile }));
+            }
             itemsToAdd[idx] = {
               ...item,
               replaceExistingFingerprint: diskTargetFingerprint
@@ -1626,18 +1763,10 @@ export const AddDownloadsModal = () => {
             continue;
           }
 
-          if (diskTargetKind === 'missing' || !diskTargetKind) {
+          if (diskTargetKind === 'missing') {
             itemsToAdd[idx] = {
               ...item,
               replaceExistingFingerprint: undefined
-            };
-            continue;
-          }
-
-          if (res.replaceFingerprint && diskTargetFingerprint === res.replaceFingerprint) {
-            itemsToAdd[idx] = {
-              ...item,
-              replaceExistingFingerprint: res.replaceFingerprint
             };
             continue;
           }
@@ -1647,15 +1776,19 @@ export const AddDownloadsModal = () => {
         const incomingMediaFormat = mediaFormatSelectorForRow(item);
         const mediaFormatChanged = item.isMedia
           && existingItem.mediaFormatSelector !== incomingMediaFormat;
+        const mediaRouteChanged = Boolean(existingItem.isMedia) !== Boolean(item.isMedia);
         const torrentReplacement = Boolean(item.isTorrent) || Boolean(existingItem.isTorrent);
-        if (existingItem.status === 'completed' || mediaFormatChanged || torrentReplacement) {
+        if (existingItem.status === 'completed' || mediaFormatChanged || mediaRouteChanged || torrentReplacement) {
           // Completed replacements must remove the old file so the
           // new transfer cannot be treated as an already-complete
-          // aria2 target. A torrent replacement also needs a fresh
-          // identity because its cached metadata is keyed by the
-          // new row ID and its output contract differs from a normal
-          // file transfer. Unfinished ordinary rows use the in-place
-          // path to preserve their resumable assets and progress.
+          // aria2 target. A media-route or format replacement must also
+          // remove the old output: partial yt-dlp and Aria2 payloads are
+          // different transfer contracts and cannot safely share progress.
+          // A torrent replacement needs a fresh identity because its cached
+          // metadata is keyed by the new row ID and its output contract
+          // differs from a normal file transfer. Unfinished ordinary rows
+          // use the in-place path to preserve their resumable assets and
+          // progress.
           await store.removeDownload(existingItem.id, true, false);
          } else {
            const contextUrl = requestContextUrlForRow(item);
@@ -1663,8 +1796,8 @@ export const AddDownloadsModal = () => {
              url: item.downloadUrl,
              username: useAuth ? username.trim() : undefined,
              password: useAuth ? password.trim() : undefined,
-             headers: headersForRow(contextUrl, item.isMedia) || undefined,
-             cookies: cookiesForRow(contextUrl, item.downloadUrl, item.isMedia) || undefined,
+             headers: headersForRow(item.sourceUrl, item.isMedia, item.mediaMode, contextUrl) || undefined,
+             cookies: cookiesForRow(item.sourceUrl, item.downloadUrl, item.isMedia, item.mediaMode, contextUrl) || undefined,
              mirrors: mirrors.trim() || undefined,
              lastError: undefined
            }, pendingAction);
@@ -1710,8 +1843,8 @@ export const AddDownloadsModal = () => {
                 id,
                 cache: true,
                 proxy: proxy ?? undefined,
-                headers: headersForRow(contextUrl, item.isMedia) || undefined,
-                cookies: cookiesForRow(contextUrl, item.sourceUrl, item.isMedia) || undefined,
+                headers: headersForRow(item.sourceUrl, item.isMedia, undefined, contextUrl) || undefined,
+                cookies: cookiesForRow(item.sourceUrl, item.sourceUrl, item.isMedia, undefined, contextUrl) || undefined,
                 cookieScopes: requestContextForUrl(contextUrl)?.cookieScopes || undefined,
                 torrent: true
               });
@@ -1740,11 +1873,11 @@ export const AddDownloadsModal = () => {
           sftpHostKeyMd: !item.isTorrent && item.sourceUrl.trim().toLowerCase().startsWith('sftp:')
             ? sftpHostKeyMd.trim() || undefined
             : undefined,
-          headers: item.isTorrent ? undefined : headersForRow(contextUrl, item.isMedia) || undefined,
+          headers: item.isTorrent ? undefined : headersForRow(item.sourceUrl, item.isMedia, item.mediaMode, contextUrl) || undefined,
           checksum: checksumEnabled && checksumValue.trim()
             ? `${checksumAlgo}=${checksumValue.trim()}`
             : undefined,
-          cookies: item.isTorrent ? undefined : cookiesForRow(contextUrl, item.downloadUrl, item.isMedia) || undefined,
+          cookies: item.isTorrent ? undefined : cookiesForRow(item.sourceUrl, item.downloadUrl, item.isMedia, item.mediaMode, contextUrl) || undefined,
           mirrors: mirrors.trim() || undefined,
           destination: useSharedDestination || saveInDedicatedFolder || itemOverride
             ? await destinationForFile(
@@ -1824,7 +1957,7 @@ export const AddDownloadsModal = () => {
         );
       }
       pendingLastUsedDownloadDirectoryRef.current = null;
-      toggleAddModal(false);
+      flushQueuedExtensionHandoffs(true);
       if (failures.length > 0) {
         addToast({
           message: t($ => $.addDownloads.addedWithFailures, { added: addedCount, failed: failures.length, detail: failures[0] }),
@@ -1874,6 +2007,17 @@ export const AddDownloadsModal = () => {
       const shouldSelect = items.some(item => item.selected === false);
       return items.map(item => ({ ...item, selected: shouldSelect }));
     });
+  };
+
+  const updateMediaModeForRow = (index: number, mediaMode: MediaMode) => {
+    setParsedItems(items => items.map((item, itemIndex) =>
+      itemIndex === index ? applyMediaModeToRow(item, mediaMode) : item
+    ));
+  };
+
+  const updateSelectedMediaMode = (mediaMode: MediaMode) => {
+    if (selectedItemIndex === null) return;
+    updateMediaModeForRow(selectedItemIndex, mediaMode);
   };
 
   const clearPlaylistMediaSelection = (sourceUrl: string | undefined) => {
@@ -1934,6 +2078,7 @@ export const AddDownloadsModal = () => {
     return Boolean(selected && selected.length > 0 && selected.length < item.torrentFiles.length);
   };
   const selectedItem = selectedItemIndex === null ? undefined : parsedItems[selectedItemIndex];
+  const selectedMediaRouteEligible = isHttpMediaRouteUrl(selectedItem?.sourceUrl || '');
   const selectedItemIsTorrent = selectedItem?.isTorrent === true;
   const hasSftpRows = parsedItems.some(item => item.selected !== false
     && !item.isTorrent
@@ -2184,11 +2329,15 @@ export const AddDownloadsModal = () => {
                 });
               })
               .finally(() => {
+                flushQueuedExtensionHandoffs();
                 isSubmittingRef.current = false;
                 setIsSubmitting(false);
               });
+          }}
+          onCancel={() => {
+            setShowingDuplicates(false);
+            flushQueuedExtensionHandoffs();
           }} 
-          onCancel={() => setShowingDuplicates(false)} 
         />
       )}
     <div
@@ -2380,9 +2529,27 @@ export const AddDownloadsModal = () => {
                                     : t($ => $.addDownloads.metadataFailed)
                                   : item.status === 'invalid'
                                     ? t($ => $.addDownloads.invalid)
-                                    : t($ => $.addDownloads.ready)
+                                  : t($ => $.addDownloads.ready)
                               )}
                             </div>
+                            {!item.isTorrent && (
+                              <button
+                                type="button"
+                                className={`app-icon-button h-6 w-6 shrink-0 ${item.mediaMode === 'media' ? 'text-blue-500' : ''}`}
+                                aria-label={t($ => $.addDownloads.treatAsMedia)}
+                                aria-pressed={item.mediaMode === 'media'}
+                                title={t($ => $.addDownloads.treatAsMedia)}
+                                disabled={!isHttpMediaRouteUrl(item.sourceUrl) || item.status === 'invalid'}
+                                onClick={event => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  updateMediaModeForRow(i, 'media');
+                                }}
+                                onKeyDown={event => event.stopPropagation()}
+                              >
+                                <Video size={13} aria-hidden="true" />
+                              </button>
+                            )}
                           </div>
                         </div>
                       ))
@@ -2397,6 +2564,55 @@ export const AddDownloadsModal = () => {
           {/* Right Column: Settings */}
           <div className="add-download-settings w-[45%] flex flex-col overflow-y-auto">
             <div className="p-6 space-y-5">
+
+              {selectedItemIndex !== null
+                && parsedItems[selectedItemIndex]
+                && !parsedItems[selectedItemIndex].isTorrent
+                && parsedItems[selectedItemIndex].status !== 'invalid' && (
+                <section className="add-download-section relative overflow-hidden p-4">
+                  <div className="add-download-section-title flex items-center gap-2 mb-3">
+                    <Video size={16} className="text-blue-500" /> {t($ => $.addDownloads.mediaHandling)}
+                  </div>
+                  <div
+                    className="flex flex-wrap gap-1.5"
+                    role="group"
+                    aria-label={t($ => $.addDownloads.mediaHandling)}
+                    aria-describedby={!selectedMediaRouteEligible ? 'add-download-media-mode-note' : undefined}
+                  >
+                    <button
+                      type="button"
+                      aria-pressed={(parsedItems[selectedItemIndex].mediaMode || 'auto') === 'auto'}
+                      onClick={() => updateSelectedMediaMode('auto')}
+                      className={`add-download-button add-download-button-secondary px-2.5 py-1 text-[11px] font-medium ${(parsedItems[selectedItemIndex].mediaMode || 'auto') === 'auto' ? 'border-blue-500 text-blue-500' : ''}`}
+                    >
+                      {t($ => $.addDownloads.mediaModeAuto)}
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={parsedItems[selectedItemIndex].mediaMode === 'media'}
+                      aria-disabled={!selectedMediaRouteEligible}
+                      disabled={!selectedMediaRouteEligible}
+                      onClick={() => updateSelectedMediaMode('media')}
+                      className={`add-download-button add-download-button-secondary px-2.5 py-1 text-[11px] font-medium ${parsedItems[selectedItemIndex].mediaMode === 'media' ? 'border-blue-500 text-blue-500' : ''}`}
+                    >
+                      {t($ => $.addDownloads.treatAsMedia)}
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={parsedItems[selectedItemIndex].mediaMode === 'file'}
+                      onClick={() => updateSelectedMediaMode('file')}
+                      className={`add-download-button add-download-button-secondary px-2.5 py-1 text-[11px] font-medium ${parsedItems[selectedItemIndex].mediaMode === 'file' ? 'border-blue-500 text-blue-500' : ''}`}
+                    >
+                      {t($ => $.addDownloads.treatAsFile)}
+                    </button>
+                  </div>
+                  {!selectedMediaRouteEligible && (
+                    <p id="add-download-media-mode-note" className="mt-2 text-[10px] text-text-muted">
+                      {t($ => $.addDownloads.mediaModeUnavailable)}
+                    </p>
+                  )}
+                </section>
+              )}
 
               {selectedItemIndex !== null && parsedItems[selectedItemIndex]?.isTorrent && (
                 <section className="add-download-section relative overflow-hidden p-4">

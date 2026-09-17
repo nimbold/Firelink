@@ -9,6 +9,7 @@ import {
   canonicalizeDownloadFileName,
   categoryForDownload,
   categoryForFileName,
+  isDirectMediaManifestUrl,
   isMediaUrl,
   isAllocationPhaseVisible,
   isAllocationPhaseEligible,
@@ -57,6 +58,20 @@ describe('download category detection', () => {
     expect(isMediaUrl('ftp://youtube.com/video.mp4')).toBe(false);
     expect(isMediaUrl('sftp://youtube.com/video.mp4')).toBe(false);
     expect(isMediaUrl('magnet://youtube.com/video')).toBe(false);
+  });
+
+  it('recognizes only exact HTTP(S) direct media manifest suffixes', () => {
+    expect(isDirectMediaManifestUrl('https://cdn.example/live/stream.m3u8?token=abc#now')).toBe(true);
+    expect(isDirectMediaManifestUrl('http://cdn.example/live/STREAM.MPD')).toBe(true);
+    expect(isDirectMediaManifestUrl('https://cdn.example/channel.ism')).toBe(true);
+    expect(isDirectMediaManifestUrl('https://cdn.example/channel.ism/manifest?sig=abc')).toBe(true);
+    expect(isDirectMediaManifestUrl('ftp://cdn.example/live/stream.m3u8')).toBe(false);
+    expect(isDirectMediaManifestUrl('magnet:?xt=urn:btih:stream.m3u8')).toBe(false);
+    expect(isDirectMediaManifestUrl('https://cdn.example/live/stream.m3u8.txt')).toBe(false);
+    expect(isDirectMediaManifestUrl('https://cdn.example/live/stream.m3u8/segment')).toBe(false);
+    expect(isDirectMediaManifestUrl('https://cdn.example/live/stream.mpdx')).toBe(false);
+    expect(isDirectMediaManifestUrl('https://cdn.example/live/stream.txt?manifest=.mpd')).toBe(false);
+    expect(isDirectMediaManifestUrl('https://user:secret@cdn.example/live/stream.m3u8')).toBe(false);
   });
 });
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   appendRequestUrlsAfterVersion,
+  applyMediaModeToRow,
   commonMediaFormatsForRows,
   canSubmitMetadataRows,
   commonMediaQualitiesForRows,
@@ -79,6 +80,138 @@ describe('add download metadata workflow', () => {
     );
 
     expect(rows.map(item => item.status)).toEqual(['loading', 'invalid', 'invalid']);
+  });
+
+  it('applies Auto, Media, and File routing precedence to draft rows', () => {
+    const opaqueUrl = 'https://media.example/watch/123';
+    const manifestUrl = 'https://cdn.example/live/stream.m3u8?token=abc';
+    const providerRows = reconcileDownloadRows('https://www.youtube.com/watch?v=video', []);
+    const manifestRows = reconcileDownloadRows(manifestUrl, []);
+    const opaqueRows = reconcileDownloadRows(opaqueUrl, []);
+    const explicitlyMedia = reconcileDownloadRows(
+      opaqueUrl,
+      [],
+      undefined,
+      new Set(),
+      undefined,
+      {},
+      {},
+      {},
+      {},
+      new Set(),
+      {},
+      {},
+      { [opaqueUrl]: 'media' }
+    );
+    const explicitlyFile = reconcileDownloadRows(
+      'https://www.youtube.com/watch?v=video',
+      [],
+      undefined,
+      new Set(),
+      undefined,
+      {},
+      {},
+      {},
+      {},
+      new Set(),
+      {},
+      {},
+      { 'https://www.youtube.com/watch?v=video': 'file' }
+    );
+
+    expect(providerRows[0]).toMatchObject({ mediaMode: 'auto', isMedia: true });
+    expect(manifestRows[0]).toMatchObject({ mediaMode: 'auto', isMedia: true });
+    expect(opaqueRows[0]).toMatchObject({ mediaMode: 'auto', isMedia: false });
+    expect(explicitlyMedia[0]).toMatchObject({ mediaMode: 'media', isMedia: true });
+    expect(explicitlyFile[0]).toMatchObject({ mediaMode: 'file', isMedia: false });
+  });
+
+  it('keeps a row-level File choice ahead of a later forced media handoff', () => {
+    const sourceUrl = 'https://www.youtube.com/watch?v=video';
+    const existing = row({
+      sourceUrl,
+      downloadUrl: sourceUrl,
+      isMedia: false,
+      mediaMode: 'file',
+      status: 'ready'
+    });
+
+    const reconciled = reconcileDownloadRows(
+      sourceUrl,
+      [existing],
+      undefined,
+      new Set([sourceUrl])
+    );
+
+    expect(reconciled[0]).toBe(existing);
+    expect(reconciled[0]).toMatchObject({ mediaMode: 'file', isMedia: false });
+  });
+
+  it('invalidates metadata when changing the effective media route', () => {
+    const normal = row({
+      status: 'ready',
+      generation: 3,
+      size: '10 MB',
+      sizeBytes: 10,
+      resumable: true
+    });
+
+    const media = applyMediaModeToRow(normal, 'media');
+    expect(media).toMatchObject({
+      mediaMode: 'media',
+      isMedia: true,
+      status: 'loading',
+      generation: 4,
+      size: undefined,
+      formats: undefined
+    });
+
+    const file = applyMediaModeToRow(media, 'file');
+    expect(file).toMatchObject({
+      mediaMode: 'file',
+      isMedia: false,
+      status: 'loading',
+      generation: 5
+    });
+  });
+
+  it('clears stale media metadata when reconciliation changes media to file', () => {
+    const sourceUrl = 'https://www.youtube.com/watch?v=video';
+    const existing = row({
+      sourceUrl,
+      downloadUrl: sourceUrl,
+      isMedia: true,
+      mediaMode: 'auto',
+      status: 'ready',
+      generation: 3,
+      formats: [],
+      selectedFormat: 0
+    });
+
+    const reconciled = reconcileDownloadRows(
+      sourceUrl,
+      [existing],
+      undefined,
+      new Set(),
+      () => 'unused',
+      {},
+      {},
+      {},
+      {},
+      new Set(),
+      {},
+      {},
+      { [sourceUrl]: 'file' }
+    );
+
+    expect(reconciled[0]).toMatchObject({
+      isMedia: false,
+      mediaMode: 'file',
+      status: 'loading',
+      generation: 4,
+      formats: undefined,
+      selectedFormat: undefined
+    });
   });
 
   it('recognizes pure YouTube playlist URLs without changing video-plus-playlist behavior', () => {
@@ -572,6 +705,47 @@ describe('add download metadata workflow', () => {
     });
   });
 
+  it('lets a newer explicit media handoff win over a preserved default-Auto row', () => {
+    const sourceUrl = 'https://adult.example/watch/123';
+    const existing = row({
+      sourceUrl,
+      downloadUrl: sourceUrl,
+      status: 'ready',
+      mediaMode: 'auto',
+      isMedia: false
+    });
+
+    const rows = reconcileDownloadRows(
+      sourceUrl,
+      [existing],
+      undefined,
+      new Set([sourceUrl])
+    );
+
+    expect(rows[0]).toMatchObject({
+      mediaMode: 'media',
+      isMedia: true,
+      status: 'loading',
+      generation: 2
+    });
+  });
+
+  it('keeps automatic media rows in Auto mode during reconciliation', () => {
+    const sourceUrl = 'https://www.youtube.com/watch?v=video';
+    const existing = row({
+      sourceUrl,
+      downloadUrl: sourceUrl,
+      status: 'ready',
+      mediaMode: 'auto',
+      isMedia: true
+    });
+
+    const rows = reconcileDownloadRows(sourceUrl, [existing]);
+
+    expect(rows[0]).toBe(existing);
+    expect(rows[0]).toMatchObject({ mediaMode: 'auto', isMedia: true });
+  });
+
   it('refreshes only failed metadata and preserves successful format selection', () => {
     const ready = row({
       id: 'ready',
@@ -585,14 +759,15 @@ describe('add download metadata workflow', () => {
         type: 'Video',
         bytes: 10
       }],
-      selectedFormat: 0
+      selectedFormat: 0,
+      mediaMode: 'media'
     });
-    const failed = row({ id: 'failed', status: 'metadata-error', generation: 4 });
+    const failed = row({ id: 'failed', status: 'metadata-error', generation: 4, mediaMode: 'media', isMedia: true });
 
     const refreshed = refreshFailedMetadataRows([ready, failed]);
 
     expect(refreshed[0]).toBe(ready);
-    expect(refreshed[1]).toMatchObject({ status: 'loading', generation: 5 });
+    expect(refreshed[1]).toMatchObject({ status: 'loading', generation: 5, mediaMode: 'media', isMedia: true });
   });
 
   it('does not duplicate an in-flight magnet probe and refreshes it after failure', () => {

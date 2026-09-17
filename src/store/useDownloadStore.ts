@@ -13,7 +13,8 @@ import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
 import type { Queue } from '../bindings/Queue';
 import { useSettingsStore } from './useSettingsStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
-import { canonicalizeDownloadFileName, categoryForDownload, categoryForFileName, hasCredentialBearingHeaders, headerNameHasCredentialMaterial, headersWithoutCredentialMaterial, isActiveDownloadStatus, isMediaUrl, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
+import { canonicalizeDownloadFileName, categoryForDownload, categoryForFileName, hasCredentialBearingHeaders, headerNameHasCredentialMaterial, headersWithoutCredentialMaterial, isActiveDownloadStatus, isDirectMediaManifestUrl, isMediaUrl, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
+import type { MediaMode } from '../utils/downloads';
 import {
   resolveCategoryDestination
 } from '../utils/downloadLocations';
@@ -42,6 +43,27 @@ const downloadLifecycleOperations = new Map<string, DownloadLifecycleOperation>(
 const preemptDispatch = ['dispatch'] as const;
 const preemptStartSelected = ['dispatch', 'start-selected'] as const;
 let pendingStartupResume: Promise<void> | null = null;
+type PendingAddHandoffWaiter = () => void;
+const pendingAddHandoffWaiters = new Map<string, PendingAddHandoffWaiter[]>();
+
+const waitForPendingAddHandoff = (requestId?: string): Promise<void> => {
+  const key = requestId?.trim();
+  if (!key) return Promise.resolve();
+  return new Promise(resolve => {
+    const waiters = pendingAddHandoffWaiters.get(key) || [];
+    waiters.push(resolve);
+    pendingAddHandoffWaiters.set(key, waiters);
+  });
+};
+
+const resolvePendingAddHandoff = (requestId?: string): void => {
+  const key = requestId?.trim();
+  if (!key) return;
+  const waiters = pendingAddHandoffWaiters.get(key);
+  if (!waiters) return;
+  pendingAddHandoffWaiters.delete(key);
+  waiters.forEach(resolve => resolve());
+};
 
 type DownloadControlIntent = 'pause' | 'resume';
 const downloadControlIntents = new Map<string, DownloadControlIntent>();
@@ -1121,6 +1143,8 @@ export type PendingAddRequestContext = {
   cookies: string;
   cookieScopes?: ExtensionCookieScope[];
   media: boolean;
+  /** Explicit media mode is present only for a user/extension media handoff. */
+  mediaMode?: MediaMode;
   torrent?: boolean;
   torrentPath?: string;
   torrentCacheId?: string;
@@ -1168,8 +1192,13 @@ interface DownloadState {
   pendingAddBatchName: string;
   pendingAddRequestContexts: Record<string, PendingAddRequestContext>;
   pendingAddRequestVersion: number;
+  /** Extension handoffs received while the Add window is mutating its rows. */
+  pendingAddHandoffs: ExtensionDownloadRequest[];
+  pendingAddModalBusy: boolean;
   selectedPropertiesDownloadId: string | null;
   toggleAddModal: (isOpen: boolean) => void;
+  setPendingAddModalBusy: (busy: boolean) => void;
+  releasePendingAddHandoffs: () => ExtensionDownloadRequest[];
   openAddModalWithUrls: (
     urls: string,
     referer?: string | null,
@@ -1897,6 +1926,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
   pendingAddBatchName: '',
   pendingAddRequestContexts: {},
   pendingAddRequestVersion: 0,
+  pendingAddHandoffs: [],
+  pendingAddModalBusy: false,
   selectedPropertiesDownloadId: null,
   deleteModalState: { isOpen: false },
   openDeleteModal: (downloadIds) => set({ 
@@ -1922,6 +1953,18 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     // opened or closed without URLs.
     pendingAddRequestVersion: state.pendingAddRequestVersion + 1
   })),
+  setPendingAddModalBusy: (busy) => set({ pendingAddModalBusy: busy }),
+  releasePendingAddHandoffs: () => {
+    let handoffs: ExtensionDownloadRequest[] = [];
+    set(state => {
+      handoffs = state.pendingAddHandoffs;
+      return {
+        pendingAddHandoffs: [],
+        pendingAddModalBusy: false
+      };
+    });
+    return handoffs;
+  },
   openAddModalWithUrls: (
     urls,
     referer,
@@ -1965,6 +2008,16 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     const pendingAddRequestContexts = isAppending
       ? { ...state.pendingAddRequestContexts }
       : {};
+    const requestUrls = urls.split('\n').map(url => url.trim()).filter(Boolean);
+    const allRequestUrlsMedia = requestUrls.length > 0 && requestUrls.every(url => {
+      try {
+        const normalizedUrl = new URL(url).href;
+        const context = pendingAddRequestContexts[normalizedUrl];
+        return isMediaUrl(normalizedUrl) || isDirectMediaManifestUrl(normalizedUrl) || context?.media === true;
+      } catch {
+        return false;
+      }
+    });
     // Every handoff gets a versioned row context, including an intentionally
     // empty one. Otherwise a later request for the same URL cannot clear stale
     // cookies/headers from an earlier capture, and batched React renders can
@@ -1981,7 +2034,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
           // The Add modal will mark malformed input invalid; retain its original key here.
         }
       }
-      const isItemMedia = isExplicitMedia || isMediaUrl(trimmedUrl);
+      const isAutomaticMedia = isMediaUrl(trimmedUrl) || isDirectMediaManifestUrl(trimmedUrl);
+      const isItemMedia = isExplicitMedia || isAutomaticMedia;
       pendingAddRequestContexts[key] = {
         version: requestVersion,
         referer: cleanReferer,
@@ -1990,13 +2044,14 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         cookies: isItemMedia ? '' : cleanCookies,
         ...(cleanCookieScopes?.length && !isItemMedia ? { cookieScopes: cleanCookieScopes } : {}),
         media: isItemMedia,
+        ...(isExplicitMedia ? { mediaMode: 'media' } : {}),
         ...(torrent ? { torrent: true } : {}),
         ...(torrentPath ? { torrentPath } : {}),
         ...(torrentCacheId ? { torrentCacheId } : {})
       };
     }
     const pendingAddMediaUrls = Object.entries(pendingAddRequestContexts)
-      .filter(([, context]) => context.media)
+      .filter(([, context]) => context.mediaMode === 'media')
       .map(([url]) => url);
     const pendingAddTorrentUrls = Object.entries(pendingAddRequestContexts)
       .filter(([, context]) => context.torrent)
@@ -2006,8 +2061,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       pendingAddUrls: mergedUrls,
       pendingAddReferer: cleanReferer,
       pendingAddFilename: cleanFilename,
-      pendingAddHeaders: cleanHeaders,
-      pendingAddCookies: isExplicitMedia ? '' : cleanCookies,
+      pendingAddHeaders: allRequestUrlsMedia ? stripSensitiveMediaHeaders(cleanHeaders) : cleanHeaders,
+      pendingAddCookies: isExplicitMedia || allRequestUrlsMedia ? '' : cleanCookies,
       pendingAddMediaUrls,
       pendingAddTorrentUrls,
       pendingAddBatch: nextBatch,
@@ -2019,6 +2074,26 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
   handleExtensionDownload: async (request) => {
     const urls = [...new Set(request.urls.map(url => url.trim()).filter(Boolean))];
     if (urls.length === 0) return;
+
+    // Add-window submission and duplicate resolution are asynchronous. Keep
+    // incoming browser handoffs behind that mutation instead of appending to
+    // rows that the submitter already snapshotted and will later clear.
+    if (get().pendingAddModalBusy) {
+      const delivery = waitForPendingAddHandoff(request.request_id);
+      set(state => {
+        const requestId = request.request_id?.trim();
+        if (requestId && state.pendingAddHandoffs.some(item => item.request_id === requestId)) {
+          return state;
+        }
+        return {
+          pendingAddHandoffs: [
+            ...state.pendingAddHandoffs,
+            { ...request, urls }
+          ]
+        };
+      });
+      return delivery;
+    }
 
     // Explicit media authentication belongs to yt-dlp's configured browser
     // cookie source. Keep this frontend guard for events from older desktop or
@@ -2042,6 +2117,11 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       request.torrent_path || undefined,
       request.request_id || undefined
     );
+    // App-level acknowledgement is intentionally delayed until a queued
+    // handoff has reached the reviewable Add window. A process exit or stalled
+    // duplicate-resolution flow therefore leaves the extension request
+    // ambiguous instead of acknowledging an item that only existed in memory.
+    resolvePendingAddHandoff(request.request_id);
   },
   setSelectedPropertiesDownloadId: (id) => set({ selectedPropertiesDownloadId: id }),
   addDownload: async (item, action) => {
@@ -3488,6 +3568,7 @@ export const resetDownloadStoreModuleStateForTests = (): void => {
   queueConfigurationQueue = Promise.resolve();
   downloadLifecycleOperations.clear();
   pendingStartupResume = null;
+  pendingAddHandoffWaiters.clear();
   downloadControlIntents.clear();
   persistenceRevision = 0;
   committedPersistenceRevision = 0;

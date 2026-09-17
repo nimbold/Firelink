@@ -39,7 +39,8 @@ Translations are available for English, Simplified Chinese, Hebrew, Persian, Ukr
 ## Features
 
 - Segmented HTTP and HTTPS downloads with retries, speed limits, and connection controls.
-- Media and playlist downloads through yt-dlp, FFmpeg, and Deno.
+- Media and playlist downloads through the bundled yt-dlp, FFmpeg, and Deno
+  path, including direct HTTP(S) HLS, DASH, and Smooth Streaming manifest URLs.
 - BitTorrent downloads from `.torrent` files, magnet links, and browser handoff, with file selection, web seeds, seeding, and live diagnostics.
 - Standalone Download and Torrent Properties windows with live controls, transfer details, and safe Torrent relocation.
 - Adaptive mirror selection for multi-source downloads.
@@ -102,6 +103,13 @@ Only use these steps for Firelink downloaded from the [official GitHub release p
 [Firelink Companion `2.2.2`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.2) connects browser downloads, links, media pages, magnets, and Torrent metadata to Firelink. Use the [latest Companion release](https://github.com/nimbold/Firelink-Extension/releases/latest) with the [latest Firelink release](https://github.com/nimbold/Firelink/releases/latest).
 
 Captured links open Firelink's Add window for review before they are started or queued.
+
+The Add window can recognize direct `.m3u8`, `.mpd`, `.ism`, and
+`.ism/manifest` URLs and lets you review or override their media routing. Media
+format selection remains yt-dlp-owned: subtitle and multiple-audio-track
+selection are not exposed in this phase. Clear or non-DRM encrypted HLS such as
+AES-128 may work when its manifest and key are legitimately accessible; DRM,
+CDM, license-server, and other protected-key workflows are unsupported.
 
 <p>
   <a href="https://microsoftedge.microsoft.com/addons/detail/firelink-companion/kflenjkpdoamjkalhfcllhflgahledbc"><img src="https://img.shields.io/badge/Install%20from-Microsoft%20Edge%20Add--ons-0078D7?style=for-the-badge&logo=microsoftedge&logoColor=white" alt="Install from Microsoft Edge Add-ons" height="24" /></a>&nbsp;&nbsp;

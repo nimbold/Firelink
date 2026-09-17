@@ -591,6 +591,43 @@ export const downloadFileNamesMatch = (left: string, right: string): boolean => 
     && normalizedLeft === normalizedRight;
 };
 
+export type MediaMode = 'auto' | 'media' | 'file';
+
+export const isHttpMediaRouteUrl = (rawUrl: string): boolean => {
+  try {
+    const url = new URL(rawUrl);
+    return (url.protocol === 'http:' || url.protocol === 'https:')
+      && Boolean(url.hostname)
+      && !url.username
+      && !url.password;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Direct HLS, DASH, and Smooth Streaming manifests are media inputs even when
+ * their host is not one of the provider domains returned by the native parity
+ * API. Keep this classifier frontend-only so the provider-domain IPC contract
+ * remains unchanged.
+ */
+export const isDirectMediaManifestUrl = (rawUrl: string): boolean => {
+  try {
+    const url = new URL(rawUrl);
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:')
+      || !url.hostname
+      || url.username
+      || url.password) return false;
+    const path = url.pathname.toLowerCase();
+    return path.endsWith('.m3u8')
+      || path.endsWith('.mpd')
+      || path.endsWith('.ism')
+      || path.endsWith('.ism/manifest');
+  } catch {
+    return false;
+  }
+};
+
 export const isMediaUrl = (rawUrl: string): boolean => {
   try {
     const url = new URL(rawUrl);

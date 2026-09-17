@@ -13,6 +13,10 @@ export interface DuplicateConflict {
   replaceAllowed?: boolean;
   replaceFingerprint?: string;
   existingDownloadId?: string;
+  existingDownloadUrl?: string;
+  existingDownloadFileName?: string;
+  existingDownloadDestination?: string;
+  existingDownloadIsMedia?: boolean;
 }
 
 interface Props {

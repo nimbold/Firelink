@@ -109,6 +109,8 @@ describe('useDownloadStore', () => {
       pendingAddBatchName: '',
       pendingAddRequestContexts: {},
       pendingAddRequestVersion: 0,
+      pendingAddHandoffs: [],
+      pendingAddModalBusy: false,
       queues: [{ id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true }],
     });
     useDownloadProgressStore.setState({ progressMap: {}, retainedProgressMap: {}, moveProgressMap: {} });
@@ -4807,6 +4809,30 @@ describe('useDownloadStore', () => {
     expect(state.pendingAddHeaders).toBe('User-Agent: Firefox Test');
   });
 
+  it('routes direct manifests through media header and cookie suppression without forcing the mode', () => {
+    const url = 'https://cdn.example/live/stream.m3u8?token=abc';
+    useDownloadStore.getState().openAddModalWithUrls(
+      url,
+      'https://player.example/watch/123',
+      null,
+      'Authorization: Bearer stale\nAccept: application/vnd.apple.mpegurl\nX-Session: stale\nUser-Agent: Firefox Test',
+      'session=secret',
+      false
+    );
+
+    const state = useDownloadStore.getState();
+    const context = state.pendingAddRequestContexts[url];
+    expect(context).toMatchObject({
+      media: true,
+      headers: 'Accept: application/vnd.apple.mpegurl\nUser-Agent: Firefox Test',
+      cookies: ''
+    });
+    expect(context?.mediaMode).toBeUndefined();
+    expect(state.pendingAddMediaUrls).toEqual([]);
+    expect(state.pendingAddHeaders).toBe('Accept: application/vnd.apple.mpegurl\nUser-Agent: Firefox Test');
+    expect(state.pendingAddCookies).toBe('');
+  });
+
   it('preserves extension cookies for ordinary captured downloads', async () => {
     await useDownloadStore.getState().handleExtensionDownload({
       urls: ['https://example.com/private.zip'],
@@ -4844,6 +4870,50 @@ describe('useDownloadStore', () => {
 
     expect(useDownloadStore.getState().pendingAddRequestContexts['https://media.example/watch/123']?.cookieScopes)
       .toBeUndefined();
+  });
+
+  it('queues extension handoffs while Add submission is busy and drains them exactly once', async () => {
+    const request = {
+      request_id: 'busy-handoff-1',
+      urls: ['https://example.com/queued.zip'],
+      referer: 'https://example.com/page',
+      silent: true,
+      filename: 'queued.zip',
+      headers: 'User-Agent: Firefox Test',
+      cookies: 'session=secret',
+      cookie_scopes: null,
+      media: false,
+      torrent: false,
+      batch: false,
+      batch_name: null
+    };
+    useDownloadStore.getState().setPendingAddModalBusy(true);
+
+    const firstDelivery = useDownloadStore.getState().handleExtensionDownload(request);
+    const duplicateDelivery = useDownloadStore.getState().handleExtensionDownload(request);
+    await Promise.resolve();
+
+    expect(useDownloadStore.getState().pendingAddUrls).toBe('');
+    expect(useDownloadStore.getState().pendingAddHandoffs).toHaveLength(1);
+    let firstResolved = false;
+    let duplicateResolved = false;
+    void firstDelivery.then(() => { firstResolved = true; });
+    void duplicateDelivery.then(() => { duplicateResolved = true; });
+    await Promise.resolve();
+    expect(firstResolved).toBe(false);
+    expect(duplicateResolved).toBe(false);
+
+    const queued = useDownloadStore.getState().releasePendingAddHandoffs();
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject({ request_id: 'busy-handoff-1' });
+    expect(useDownloadStore.getState().pendingAddHandoffs).toEqual([]);
+    expect(useDownloadStore.getState().pendingAddModalBusy).toBe(false);
+
+    await useDownloadStore.getState().handleExtensionDownload(queued[0]);
+    await Promise.all([firstDelivery, duplicateDelivery]);
+    expect(firstResolved).toBe(true);
+    expect(duplicateResolved).toBe(true);
+    expect(useDownloadStore.getState().pendingAddUrls).toBe('https://example.com/queued.zip');
   });
 
   it('clears stale request context when the same URL is captured without it later', async () => {

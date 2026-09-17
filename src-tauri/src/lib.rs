@@ -1801,10 +1801,12 @@ fn should_cleanup_media_artifacts_after_failure(
 const MAX_REMOTE_TORRENT_REDIRECTS: usize = 5;
 
 fn validate_http_url_route(url: &str) -> Result<reqwest::Url, String> {
-    crate::network::parse_and_validate_url(
+    let mut parsed = crate::network::parse_and_validate_url(
         url,
         &["http", "https"],
-        crate::network::CredentialPolicy::Allow,
+        crate::network::CredentialPolicy::Reject(
+            "Media URL must use HTTP or HTTPS without embedded credentials",
+        ),
     )
     .map_err(|error| {
         if error == "Unsupported URL scheme" {
@@ -1812,7 +1814,12 @@ fn validate_http_url_route(url: &str) -> Result<reqwest::Url, String> {
         } else {
             error
         }
-    })
+    })?;
+    // Fragments are document-local and are never part of an HTTP request.
+    // Remove them before the URL enters metadata or yt-dlp routing so a
+    // browser-local fragment cannot affect the native media identity.
+    parsed.set_fragment(None);
+    Ok(parsed)
 }
 
 fn is_remote_torrent_source(source: &str, explicitly_torrent: bool) -> bool {
@@ -2785,7 +2792,7 @@ async fn fetch_media_metadata(
     proxy: Option<String>,
 ) -> Result<MediaMetadata, String> {
     properties_window::ensure_main_window(&caller)?;
-    validate_http_url_route(&url)?;
+    let url = validate_http_url_route(&url)?.to_string();
     let cookie_browser = normalize_media_cookie_source(cookie_browser.as_deref())?;
     let user_agent = user_agent.map(|ua| ua.trim().to_string()).filter(|ua| !ua.is_empty());
     let username = username.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
@@ -2929,7 +2936,7 @@ async fn fetch_media_playlist_metadata(
     proxy: Option<String>,
 ) -> Result<MediaPlaylistMetadata, String> {
     properties_window::ensure_main_window(&caller)?;
-    validate_http_url_route(&url)?;
+    let url = validate_http_url_route(&url)?.to_string();
     let cookie_browser = normalize_media_cookie_source(cookie_browser.as_deref())?;
     let user_agent = user_agent.map(|ua| ua.trim().to_string()).filter(|ua| !ua.is_empty());
     let username = username.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
@@ -4987,7 +4994,7 @@ pub(crate) async fn start_media_download_internal(
     max_tries: Option<i32>,
     cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<std::path::PathBuf, String> {
-    validate_http_url_route(&url)?;
+    let url = validate_http_url_route(&url)?.to_string();
     let cookie_source = normalize_media_cookie_source(cookie_source.as_deref())?;
     let safe_filename = crate::download_ownership::canonical_download_filename(&filename);
 
@@ -14898,6 +14905,7 @@ mod tests {
         media_format_and_container_args,
         ytdlp_cookie_browser_arg,
         validate_enqueue_url, validate_enqueue_uris, validate_keychain_grant_request_id,
+        validate_http_url_route,
         validate_torrent_metadata_network_policy,
         aria2_gid_not_found,
         aria2_download_state_progress, preflight_download_destination_access,
@@ -16289,6 +16297,17 @@ mod tests {
             .await,
             Err("Torrent metadata URLs must not contain credentials".to_string())
         );
+    }
+
+    #[test]
+    fn media_url_route_rejects_credentials_and_strips_fragments() {
+        assert_eq!(
+            validate_http_url_route("https://cdn.example/live/stream.m3u8?sig=short#player")
+                .expect("valid media URL")
+                .fragment(),
+            None
+        );
+        assert!(validate_http_url_route("https://user:secret@cdn.example/live/stream.m3u8").is_err());
     }
 
     #[tokio::test]

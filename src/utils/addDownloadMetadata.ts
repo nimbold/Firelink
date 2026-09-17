@@ -1,7 +1,10 @@
 import {
   canonicalizeDownloadFileName,
   fileNameFromUrl,
-  isMediaUrl
+  isDirectMediaManifestUrl,
+  isHttpMediaRouteUrl,
+  isMediaUrl,
+  type MediaMode
 } from './downloads';
 import type { MediaPlaylistMetadata } from '../bindings/MediaPlaylistMetadata';
 import type { TorrentFile } from '../bindings/TorrentFile';
@@ -42,6 +45,8 @@ export interface AddDownloadDraftRow {
   generation: number;
   requestContextVersion?: number;
   isMedia: boolean;
+  /** Explicit Add-window routing choice; absent means legacy Auto behavior. */
+  mediaMode?: MediaMode;
   resumable?: boolean;
   formats?: AddMediaFormat[];
   selectedFormat?: number;
@@ -274,7 +279,8 @@ export const reconcileDownloadRows = (
   selectedBySourceUrl: Readonly<Record<string, boolean>> = {},
   forceTorrentUrls: ReadonlySet<string> = new Set(),
   requestTorrentPaths: Readonly<Record<string, string>> = {},
-  requestTorrentCacheIds: Readonly<Record<string, string>> = {}
+  requestTorrentCacheIds: Readonly<Record<string, string>> = {},
+  mediaModesBySourceUrl: Readonly<Record<string, MediaMode>> = {}
 ): AddDownloadDraftRow[] => {
   const inputs = parseInputLines(
     rawText,
@@ -286,8 +292,30 @@ export const reconcileDownloadRows = (
 
   return inputs.map(input => {
     const preserved = existing.get(input.sourceUrl);
+    const preservedExplicitMode = preserved?.mediaMode && preserved.mediaMode !== 'auto'
+      ? preserved.mediaMode
+      : undefined;
+    const preservedLegacyMediaMode = preserved?.mediaMode === undefined && Boolean(preserved?.isMedia)
+      ? 'media'
+      : undefined;
+    const requestedMediaMode = mediaModesBySourceUrl[input.sourceUrl]
+      || preservedExplicitMode
+      || preservedLegacyMediaMode
+      || (input.valid && forceMediaUrls.has(input.sourceUrl) ? 'media' : 'auto');
+    const mediaMode = requestedMediaMode === 'media' && !isHttpMediaRouteUrl(input.sourceUrl)
+      ? 'file'
+      : requestedMediaMode;
+    const automaticallyMedia = input.valid
+      && !input.isTorrent
+      && isHttpMediaRouteUrl(input.sourceUrl)
+      && (Boolean(input.isPlaylist)
+        || Boolean(input.playlistSourceUrl)
+        || isMediaUrl(input.sourceUrl)
+        || isDirectMediaManifestUrl(input.sourceUrl));
+    const isMedia = input.valid
+      && !input.isTorrent
+      && (mediaMode === 'media' || (mediaMode === 'auto' && automaticallyMedia));
     if (preserved) {
-      const forcedMedia = input.valid && forceMediaUrls.has(input.sourceUrl);
       const forcedTorrent = input.valid && forceTorrentUrls.has(input.sourceUrl);
       const requestContextVersion = input.requestContextVersion;
       const contextChanged = requestContextVersion !== undefined
@@ -297,7 +325,9 @@ export const reconcileDownloadRows = (
         || preserved.playlistIndex !== input.playlistIndex
         || preserved.playlistCount !== input.playlistCount
         || preserved.playlistEntryTitle !== input.playlistEntryTitle;
-      if ((forcedMedia && !preserved.isMedia)
+      const mediaRoutingChanged = isMedia !== preserved.isMedia;
+      const mediaModeChanged = mediaMode !== (preserved.mediaMode || 'auto');
+      if (mediaRoutingChanged
         || (forcedTorrent && !preserved.isTorrent)
         || contextChanged
         || playlistContextChanged) {
@@ -314,17 +344,17 @@ export const reconcileDownloadRows = (
           torrentMetadataStatus: input.isTorrent && isMagnetUrl(input.sourceUrl) ? 'loading' : undefined,
           generation: nextGeneration,
           requestContextVersion,
-          isMedia: preserved.isMedia || forcedMedia || Boolean(input.playlistSourceUrl),
+          isMedia,
+          mediaMode,
           isTorrent: input.isTorrent || forcedTorrent,
           size: undefined,
           sizeBytes: undefined,
           resumable: undefined,
-          formats: preserved.isMedia || forcedMedia || Boolean(input.playlistSourceUrl)
-            ? undefined
-            : preserved.formats,
-          selectedFormat: preserved.isMedia || forcedMedia || Boolean(input.playlistSourceUrl)
-            ? undefined
-            : preserved.selectedFormat,
+          // Any routing/context invalidation makes the prior media metadata
+          // stale, regardless of the new route. Keeping it on a media -> file
+          // transition lets a later refresh resurrect an old format choice.
+          formats: undefined,
+          selectedFormat: undefined,
           isPlaylist: input.isPlaylist,
           playlistSourceUrl: input.playlistSourceUrl,
           playlistTitle: input.playlistTitle,
@@ -340,6 +370,9 @@ export const reconcileDownloadRows = (
           torrentFiles: undefined,
           selectedTorrentFileIndices: undefined
         };
+      }
+      if (mediaModeChanged) {
+        return { ...preserved, mediaMode };
       }
       // Direct magnets are admission-ready even when their optional metadata
       // preview was never requested. Migrate drafts created by the old
@@ -389,12 +422,8 @@ export const reconcileDownloadRows = (
         : 'invalid',
       generation,
       requestContextVersion: input.requestContextVersion,
-      isMedia: input.valid && (
-        Boolean(input.isPlaylist)
-        || Boolean(input.playlistSourceUrl)
-        || forceMediaUrls.has(input.sourceUrl)
-        || isMediaUrl(input.sourceUrl)
-      ),
+      isMedia,
+      mediaMode,
       isTorrent: input.valid && (Boolean(input.isTorrent) || forceTorrentUrls.has(input.sourceUrl)),
       isPlaylist: input.isPlaylist,
       playlistSourceUrl: input.playlistSourceUrl,
@@ -414,6 +443,53 @@ export const reconcileDownloadRows = (
       selected: input.selected !== false
     };
   });
+};
+
+const automaticallyMediaRow = (
+  row: Pick<AddDownloadDraftRow, 'sourceUrl' | 'isTorrent' | 'isPlaylist' | 'playlistSourceUrl'>
+): boolean => !row.isTorrent
+  && isHttpMediaRouteUrl(row.sourceUrl)
+  && (Boolean(row.isPlaylist)
+    || Boolean(row.playlistSourceUrl)
+    || isMediaUrl(row.sourceUrl)
+    || isDirectMediaManifestUrl(row.sourceUrl));
+
+/**
+ * Apply a user-selected media mode to a draft row. Switching the effective
+ * route invalidates metadata and increments the generation so a late probe
+ * from the previous route cannot update the row.
+ */
+export const applyMediaModeToRow = (
+  row: AddDownloadDraftRow,
+  mediaMode: MediaMode
+): AddDownloadDraftRow => {
+  if (row.isTorrent) return { ...row, mediaMode: 'auto', isMedia: false };
+
+  const effectiveMediaMode = mediaMode === 'media' && !isHttpMediaRouteUrl(row.sourceUrl)
+    ? 'file'
+    : mediaMode;
+
+  const isMedia = row.status !== 'invalid'
+    && (effectiveMediaMode === 'media' || (effectiveMediaMode === 'auto' && automaticallyMediaRow(row)));
+  if ((row.mediaMode || 'auto') === effectiveMediaMode && row.isMedia === isMedia) return row;
+  if (row.isMedia === isMedia) return { ...row, mediaMode: effectiveMediaMode };
+
+  const generation = row.generation + 1;
+  return {
+    ...row,
+    mediaMode: effectiveMediaMode,
+    isMedia,
+    downloadUrl: row.sourceUrl,
+    status: row.status === 'invalid' ? 'invalid' : 'loading',
+    generation,
+    size: undefined,
+    sizeBytes: undefined,
+    resumable: undefined,
+    formats: undefined,
+    selectedFormat: undefined,
+    playlistError: undefined,
+    metadataBlockedReason: undefined
+  };
 };
 
 const comparableUrl = (rawUrl: string): string => {

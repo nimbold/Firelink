@@ -1,7 +1,7 @@
 use axum::{
     body::{Body, Bytes},
     extract::State,
-    http::{HeaderMap, HeaderValue, Method, Request, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header::HeaderName},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
@@ -29,6 +29,11 @@ pub const EXTENSION_SERVER_PORT: u16 = 6412;
 pub const EXTENSION_SERVER_PORT_RANGE: std::ops::RangeInclusive<u16> = EXTENSION_SERVER_PORT..=6422;
 const MAX_URL_COUNT: usize = 200;
 const MAX_NON_TORRENT_REQUEST_BODY_BYTES: usize = 256 * 1024;
+const MAX_MEDIA_HEADER_LINES: usize = 32;
+const MAX_MEDIA_HEADER_NAME_BYTES: usize = 128;
+const MAX_MEDIA_HEADER_VALUE_BYTES: usize = 8 * 1024;
+const MAX_MEDIA_HEADERS_BYTES: usize = 16 * 1024;
+const MAX_MEDIA_REFERER_BYTES: usize = 4 * 1024;
 const MAX_ENCODED_TORRENT_BYTES: usize =
     ((crate::torrent::MAX_TORRENT_BYTES + 2) / 3) * 4;
 const MAX_REQUEST_BODY_BYTES: usize =
@@ -37,6 +42,8 @@ const SIGNATURE_MAX_AGE_MS: u64 = 60_000;
 const SERVER_HEADER: &str = "x-firelink-server";
 const PROTOCOL_VERSION_HEADER: &str = "x-firelink-protocol-version";
 const CLIENT_NONCE_HEADER: &str = "x-firelink-client-nonce";
+const SERVER_SESSION_HEADER: &str = "x-firelink-server-session";
+const SESSION_BINDING_HEADER: &str = "x-firelink-session-binding";
 const SERVER_PROOF_HEADER: &str = "x-firelink-server-proof";
 const SERVER_PORT_HEADER: &str = "x-firelink-server-port";
 const SMOKE_PROCESS_ID_HEADER: &str = "x-firelink-smoke-process-id";
@@ -59,6 +66,7 @@ pub struct ServerState {
     pub frontend_ready: SharedFrontendReady,
     pub extension_acks: SharedExtensionAcks,
     pub replay_cache: ReplayCache,
+    pub server_session: String,
     pub bound_port: u16,
 }
 
@@ -134,6 +142,7 @@ pub async fn start_server(
         frontend_ready,
         extension_acks,
         replay_cache: Arc::new(Mutex::new(HashMap::new())),
+        server_session: uuid::Uuid::new_v4().simple().to_string(),
         bound_port: port,
     };
 
@@ -259,7 +268,7 @@ async fn ping_handler(
         None => return Err(StatusCode::FORBIDDEN),
     };
 
-    let timestamp = match verify_signature(signature, timestamp_str, &body, &state.pairing_token) {
+    let timestamp = match verify_signature(signature, timestamp_str, &body, &state.pairing_token, None) {
         Ok(timestamp) => timestamp,
         Err(_) => return Err(StatusCode::FORBIDDEN),
     };
@@ -282,6 +291,11 @@ async fn ping_handler(
     response.headers_mut().insert(
         SERVER_PORT_HEADER,
         HeaderValue::from_str(&state.bound_port.to_string())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
+    response.headers_mut().insert(
+        SERVER_SESSION_HEADER,
+        HeaderValue::from_str(&state.server_session)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     );
     Ok(response)
@@ -315,7 +329,25 @@ async fn download_handler(
         None => return Err(StatusCode::FORBIDDEN),
     };
 
-    let timestamp = match verify_signature(signature, timestamp_str, &body, &state.pairing_token) {
+    let session_binding = match session_binding_requested(&headers) {
+        Ok(value) => value,
+        Err(_) => return Err(StatusCode::FORBIDDEN),
+    };
+    let server_session = match server_session_for_request(&headers, &state.server_session) {
+        Ok(value) => value,
+        Err(_) => return Err(StatusCode::FORBIDDEN),
+    };
+    if session_binding && server_session.is_none() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let timestamp = match verify_signature(
+        signature,
+        timestamp_str,
+        &body,
+        &state.pairing_token,
+        server_session,
+    ) {
         Ok(v) => v,
         Err(_) => return Err(StatusCode::FORBIDDEN),
     };
@@ -411,6 +443,11 @@ async fn download_handler(
         HeaderValue::from_str(&state.bound_port.to_string())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     );
+    response.headers_mut().insert(
+        SERVER_SESSION_HEADER,
+        HeaderValue::from_str(&state.server_session)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
     Ok(response)
 }
 
@@ -485,7 +522,13 @@ fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload
     let urls = payload
         .urls
         .into_iter()
-        .filter_map(|raw_url| normalize_url(&raw_url))
+        .filter_map(|raw_url| {
+            if payload.media {
+                normalize_media_url(&raw_url)
+            } else {
+                normalize_url(&raw_url)
+            }
+        })
         .filter(|url| seen.insert(url.clone()))
         .collect::<Vec<_>>();
     if urls.is_empty() {
@@ -526,10 +569,7 @@ fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload
         return None;
     }
 
-    let referer = payload.referer.and_then(|value| {
-        let url = Url::parse(value.trim()).ok()?;
-        matches!(url.scheme(), "http" | "https").then(|| url.to_string())
-    });
+    let referer = normalize_referer(payload.referer);
     let filename = payload.filename.and_then(|value| sanitize_filename(&value));
     let batch = payload.batch && urls.len() >= 2;
     let batch_name = batch
@@ -539,10 +579,18 @@ fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload
             let value = value.trim().to_string();
             (!value.is_empty() && value.chars().count() <= 512).then_some(value)
         });
-    // A multi-URL handoff has no per-URL cookie scope. Keep ordinary
-    // request headers, but drop credential-bearing headers and the dedicated cookie field
-    // so a legacy or untrusted caller cannot reuse one session across hosts.
-    let headers = normalize_headers(payload.headers, payload.media || urls.len() > 1);
+    // A multi-URL handoff has no per-URL cookie scope. Keep ordinary request
+    // headers, but drop credential-bearing headers and the dedicated cookie
+    // field so a legacy or untrusted caller cannot reuse one session across
+    // hosts. Explicit media handoffs have a narrower, browser-context header
+    // contract and are normalized separately below.
+    let headers = if payload.media {
+        normalize_headers(payload.headers, true)
+    } else if urls.len() > 1 {
+        normalize_shared_capture_headers(payload.headers)
+    } else {
+        normalize_headers(payload.headers, false)
+    };
     let cookie_scopes = if !payload.media && urls.len() == 1 {
         let mut scopes = payload.cookie_scopes.take().unwrap_or_default();
         if let Some(cookies) = payload.cookies.take() {
@@ -638,12 +686,96 @@ fn same_origin_url(left: &str, right: &str) -> bool {
         && left.port_or_known_default() == right.port_or_known_default()
 }
 
+fn normalize_referer(value: Option<String>) -> Option<String> {
+    let value = value?;
+    if value.len() > MAX_MEDIA_REFERER_BYTES || value.chars().any(char::is_control) {
+        return None;
+    }
+
+    let trimmed = value.trim();
+    let mut url = Url::parse(trimmed).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none_or(str::is_empty)
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
+
+    // Fragments are not sent in HTTP requests. Preserve the validated query
+    // string because media servers may use page-session or signed referer
+    // parameters as part of authorization; it remains in the dedicated
+    // referer field and is never promoted into the forwarded header allowlist.
+    url.set_fragment(None);
+    Some(url.to_string())
+}
+
 fn normalize_headers(headers: Option<String>, media: bool) -> Option<String> {
     let headers = headers?;
     if !media {
         return (!headers.trim().is_empty()).then_some(headers);
     }
 
+    let mut normalized = Vec::new();
+    let mut seen = HashSet::new();
+    let mut normalized_bytes = 0_usize;
+
+    for line in headers.lines().take(MAX_MEDIA_HEADER_LINES) {
+        let Some((raw_name, raw_value)) = line.split_once(':') else {
+            continue;
+        };
+        if raw_name.is_empty()
+            || raw_name.len() > MAX_MEDIA_HEADER_NAME_BYTES
+            || raw_name
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace())
+        {
+            continue;
+        }
+
+        let Ok(parsed_name) = HeaderName::from_bytes(raw_name.as_bytes()) else {
+            continue;
+        };
+        if crate::queue::header_name_has_credential_material(parsed_name.as_str()) {
+            continue;
+        }
+
+        let Some(canonical_name) = canonical_media_header_name(parsed_name.as_str()) else {
+            // Referer intentionally travels only through the dedicated,
+            // validated field. All other browser-captured names are outside
+            // the media handoff contract, including custom token headers.
+            continue;
+        };
+        let value = raw_value.trim();
+        if value.is_empty()
+            || value.len() > MAX_MEDIA_HEADER_VALUE_BYTES
+            || value.chars().any(char::is_control)
+            || HeaderValue::from_str(value).is_err()
+            || !seen.insert(canonical_name)
+        {
+            continue;
+        }
+
+        let line = format!("{canonical_name}: {value}");
+        let separator_bytes = usize::from(!normalized.is_empty());
+        if normalized_bytes
+            .saturating_add(separator_bytes)
+            .saturating_add(line.len())
+            > MAX_MEDIA_HEADERS_BYTES
+        {
+            continue;
+        }
+        normalized_bytes = normalized_bytes
+            .saturating_add(separator_bytes)
+            .saturating_add(line.len());
+        normalized.push(line);
+    }
+
+    (!normalized.is_empty()).then(|| normalized.join("\n"))
+}
+
+fn normalize_shared_capture_headers(headers: Option<String>) -> Option<String> {
+    let headers = headers?;
     let filtered = headers
         .lines()
         .filter(|line| {
@@ -656,10 +788,37 @@ fn normalize_headers(headers: Option<String>, media: bool) -> Option<String> {
     (!filtered.trim().is_empty()).then_some(filtered)
 }
 
+fn canonical_media_header_name(name: &str) -> Option<&'static str> {
+    if name.eq_ignore_ascii_case("accept") {
+        Some("Accept")
+    } else if name.eq_ignore_ascii_case("accept-language") {
+        Some("Accept-Language")
+    } else if name.eq_ignore_ascii_case("origin") {
+        Some("Origin")
+    } else if name.eq_ignore_ascii_case("user-agent") {
+        Some("User-Agent")
+    } else {
+        None
+    }
+}
+
 fn normalize_url(raw_url: &str) -> Option<String> {
     let url = Url::parse(raw_url.trim()).ok()?;
     matches!(url.scheme(), "http" | "https" | "ftp" | "sftp" | "magnet")
         .then(|| url.to_string())
+}
+
+fn normalize_media_url(raw_url: &str) -> Option<String> {
+    let mut url = Url::parse(raw_url.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none_or(str::is_empty)
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
+    url.set_fragment(None);
+    Some(url.to_string())
 }
 
 fn filename_is_torrent(filename: Option<&str>) -> bool {
@@ -683,6 +842,7 @@ fn verify_signature(
     timestamp_text: &str,
     body: &[u8],
     pairing_token: &SharedExtensionToken,
+    server_session: Option<&str>,
 ) -> Result<u64, ()> {
     let signature = decode_hex(signature_hex)?;
     let timestamp = timestamp_text.parse::<u64>().map_err(|_| ())?;
@@ -698,6 +858,11 @@ fn verify_signature(
 
     let mut mac = HmacSha256::new_from_slice(token.as_bytes()).map_err(|_| ())?;
     mac.update(timestamp_text.as_bytes());
+    if let Some(server_session) = server_session {
+        mac.update(b"\n");
+        mac.update(server_session.as_bytes());
+        mac.update(b"\n");
+    }
     mac.update(body);
     mac.verify_slice(&signature).map_err(|_| ())?;
     Ok(timestamp)
@@ -719,6 +884,34 @@ fn required_client_nonce(headers: &HeaderMap) -> Option<&str> {
         .get(CLIENT_NONCE_HEADER)
         .and_then(|nonce| nonce.to_str().ok())
         .filter(|nonce| is_valid_client_nonce(nonce))
+}
+
+fn is_valid_server_session(value: &str) -> bool {
+    value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn server_session_for_request<'a>(
+    headers: &'a HeaderMap,
+    expected: &str,
+) -> Result<Option<&'a str>, ()> {
+    let Some(value) = headers.get(SERVER_SESSION_HEADER) else {
+        // The session binding is an optional upgrade so existing paired
+        // Companion releases continue to use the established HMAC contract.
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_| ())?;
+    if !is_valid_server_session(value) || value != expected {
+        return Err(());
+    }
+    Ok(Some(value))
+}
+
+fn session_binding_requested(headers: &HeaderMap) -> Result<bool, ()> {
+    match headers.get(SESSION_BINDING_HEADER) {
+        None => Ok(false),
+        Some(value) if value.to_str().ok() == Some("1") => Ok(true),
+        Some(_) => Err(()),
+    }
 }
 
 fn sign_server_proof(
@@ -815,10 +1008,14 @@ mod tests {
     use super::{
         acknowledge_extension_download, add_server_identity, claim_request_at,
         decode_torrent_bytes, has_allowed_request_origin, is_valid_client_nonce, normalize_download,
-        normalize_url, require_frontend_ready, required_client_nonce, same_origin_url,
-        sanitize_filename,
-        sign_server_proof, ExtensionCookieScope, ExtensionRequest, MAX_URL_COUNT,
-        PROTOCOL_VERSION_HEADER, SERVER_HEADER,
+        normalize_headers, normalize_media_url, normalize_referer, normalize_url, require_frontend_ready,
+        required_client_nonce, same_origin_url, sanitize_filename, server_session_for_request,
+        session_binding_requested,
+        sign_server_proof,
+        ExtensionCookieScope, ExtensionRequest, MAX_MEDIA_HEADER_VALUE_BYTES,
+        MAX_MEDIA_REFERER_BYTES, MAX_URL_COUNT,
+        PROTOCOL_VERSION_HEADER, SERVER_HEADER, SERVER_SESSION_HEADER,
+        SESSION_BINDING_HEADER,
     };
     use axum::{
         http::{HeaderMap, HeaderValue, StatusCode},
@@ -920,6 +1117,28 @@ mod tests {
     }
 
     #[test]
+    fn validates_optional_server_session_binding_for_downloads() {
+        let mut headers = HeaderMap::new();
+        let current = "0123456789abcdef0123456789abcdef";
+        assert_eq!(server_session_for_request(&headers, current), Ok(None));
+
+        headers.insert(
+            SERVER_SESSION_HEADER,
+            HeaderValue::from_static("stale-session"),
+        );
+        assert!(server_session_for_request(&headers, current).is_err());
+
+        headers.insert(
+            SERVER_SESSION_HEADER,
+            HeaderValue::from_static(current),
+        );
+        assert_eq!(server_session_for_request(&headers, current), Ok(Some(current)));
+
+        headers.insert(SESSION_BINDING_HEADER, HeaderValue::from_static("1"));
+        assert_eq!(session_binding_requested(&headers), Ok(true));
+    }
+
+    #[test]
     fn media_handoffs_reject_non_http_page_urls() {
         let download = normalize_download(ExtensionRequest {
             urls: vec!["ftp://example.com/audio.mp3".to_string()],
@@ -987,6 +1206,39 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn download_signatures_bind_to_the_server_session() {
+        let token = Arc::new(RwLock::new("pairing-token".to_string()));
+        let timestamp = super::current_time_millis().unwrap().to_string();
+        let body = br#"{"media":true}"#;
+        let session = "0123456789abcdef0123456789abcdef";
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"pairing-token").unwrap();
+        mac.update(timestamp.as_bytes());
+        mac.update(b"\n");
+        mac.update(session.as_bytes());
+        mac.update(b"\n");
+        mac.update(body);
+        let signature = super::encode_hex(mac.finalize().into_bytes().as_slice());
+
+        assert!(super::verify_signature(
+            &signature,
+            &timestamp,
+            body,
+            &token,
+            Some(session)
+        )
+        .is_ok());
+        assert!(super::verify_signature(&signature, &timestamp, body, &token, None).is_err());
+        assert!(super::verify_signature(
+            &signature,
+            &timestamp,
+            body,
+            &token,
+            Some("fedcba9876543210fedcba9876543210")
+        )
+        .is_err());
+    }
+
     #[tokio::test]
     async fn acknowledges_and_removes_pending_extension_event() {
         let registry = Arc::new(Mutex::new(HashMap::new()));
@@ -1009,7 +1261,7 @@ mod tests {
             silent: false,
             filename: None,
             headers: Some(format!(
-                "Cookie: stale={};\nCookie2: stale=1\nAuthorization: Bearer stale\nProxy-Authorization: Basic stale\nSet-Cookie: stale=1\nSet-Cookie2: stale=1\nX-Api-Key: stale\nX-Auth-Token: stale\nX-Access-Token: stale\nX-Request-Signature: stale\nX-Session: stale\n: malformed\nUser-Agent: Firefox\nX-Trace: safe",
+                "Cookie: stale={};\nCookie2: stale=1\nAuthorization: Bearer stale\nProxy-Authorization: Basic stale\nSet-Cookie: stale=1\nSet-Cookie2: stale=1\nSet-Cookie3: stale=1\nX-Api-Key: stale\nX-Auth-Token: stale\nX-Access-Token: stale\nX-Request-Signature: stale\nX-Session: stale\n: malformed\nUser-Agent: Firefox\nX-Trace: safe",
                 "x".repeat(64 * 1024)
             )),
             cookies: Some(format!("large={}", "x".repeat(64 * 1024))),
@@ -1026,8 +1278,166 @@ mod tests {
         assert!(download.cookies.is_none());
         assert_eq!(
             download.headers.as_deref(),
-            Some("User-Agent: Firefox\nX-Trace: safe")
+            Some("User-Agent: Firefox")
         );
+    }
+
+    #[test]
+    fn media_headers_allow_only_safe_context_headers_and_canonicalize_names() {
+        let headers = normalize_headers(
+            Some(
+                "aCcEpT: application/vnd.apple.mpegurl\nACCEPT: second\naccept-language: en-US\nORIGIN: https://media.example\nuser-agent: Firefox\nReferer: https://page.example\nX-Trace: safe"
+                    .to_string(),
+            ),
+            true,
+        );
+
+        assert_eq!(
+            headers.as_deref(),
+            Some(
+                "Accept: application/vnd.apple.mpegurl\nAccept-Language: en-US\nOrigin: https://media.example\nUser-Agent: Firefox"
+            )
+        );
+    }
+
+    #[test]
+    fn media_headers_drop_malformed_values_and_enforce_bounds() {
+        let headers = normalize_headers(
+            Some(format!(
+                "Accept: valid\nOrigin: https://example.com\u{0}injected\nAccept-Language: en-US\tbad\nUser-Agent : malformed\nUser-Agent: {}\nUser-Agent: Firefox",
+                "x".repeat(MAX_MEDIA_HEADER_VALUE_BYTES + 1)
+            )),
+            true,
+        );
+
+        assert_eq!(headers.as_deref(), Some("Accept: valid\nUser-Agent: Firefox"));
+    }
+
+    #[test]
+    fn media_referer_accepts_bounded_http_urls_and_preserves_valid_queries() {
+        assert_eq!(
+            normalize_referer(
+                Some("  https://media.example/watch?token=short  ".to_string()),
+            ),
+            Some("https://media.example/watch?token=short".to_string())
+        );
+
+        for invalid in [
+            "ftp://media.example/watch",
+            "https://user:password@media.example/watch",
+            "https://media.example/watch\nX-Injected: yes",
+        ] {
+            assert_eq!(normalize_referer(Some(invalid.to_string())), None);
+        }
+
+        assert_eq!(
+            normalize_referer(Some("https://media.example/watch#fragment".to_string())),
+            Some("https://media.example/watch".to_string())
+        );
+
+        let oversized = format!(
+            "https://media.example/{}",
+            "x".repeat(MAX_MEDIA_REFERER_BYTES)
+        );
+        assert_eq!(normalize_referer(Some(oversized)), None);
+    }
+
+    #[test]
+    fn media_handoffs_keep_referer_dedicated_and_accept_direct_manifests() {
+        for url in [
+            "https://cdn.example/live/stream.m3u8?signature=short",
+            "https://cdn.example/live/manifest.MPD#ignored-by-request",
+            "https://cdn.example/live/video.ism/manifest",
+        ] {
+            let download = normalize_download(ExtensionRequest {
+                urls: vec![url.to_string()],
+                referer: Some("https://player.example/watch".to_string()),
+                silent: false,
+                filename: None,
+                headers: Some(
+                    "Referer: https://wrong.example\nUser-Agent: Firefox".to_string(),
+                ),
+                cookies: None,
+                cookie_scopes: None,
+                media: true,
+                torrent: false,
+                batch: false,
+                batch_name: None,
+                torrent_bytes_base64: None,
+            })
+            .expect("direct manifest media handoff");
+
+            assert!(download.media);
+            let expected_url = url.split('#').next().unwrap_or(url);
+            assert_eq!(download.urls, vec![expected_url.to_string()]);
+            assert_eq!(
+                download.referer.as_deref(),
+                Some("https://player.example/watch")
+            );
+            assert_eq!(download.headers.as_deref(), Some("User-Agent: Firefox"));
+        }
+    }
+
+    #[test]
+    fn media_urls_reject_embedded_credentials_and_fragments() {
+        assert_eq!(
+            normalize_media_url("https://cdn.example/live/stream.m3u8?sig=short#player"),
+            Some("https://cdn.example/live/stream.m3u8?sig=short".to_string())
+        );
+        assert!(normalize_media_url("https://user:secret@cdn.example/live/stream.m3u8").is_none());
+        assert!(normalize_media_url("https://[invalid/live/stream.m3u8").is_none());
+        assert!(normalize_media_url("ftp://cdn.example/live/stream.m3u8").is_none());
+    }
+
+    #[test]
+    fn regular_single_url_capture_preserves_valid_headers_and_referer() {
+        let download = normalize_download(ExtensionRequest {
+            urls: vec!["https://example.com/private.zip".to_string()],
+            referer: Some("https://example.com/folder".to_string()),
+            silent: true,
+            filename: None,
+            headers: Some("Authorization: Bearer test\nX-Trace: safe".to_string()),
+            cookies: Some("session=browser-cookie-header".to_string()),
+            cookie_scopes: None,
+            media: false,
+            torrent: false,
+            batch: false,
+            batch_name: None,
+            torrent_bytes_base64: None,
+        })
+        .expect("valid ordinary download handoff");
+
+        assert_eq!(
+            download.headers.as_deref(),
+            Some("Authorization: Bearer test\nX-Trace: safe")
+        );
+        assert_eq!(download.referer.as_deref(), Some("https://example.com/folder"));
+        assert_eq!(download.cookies.as_deref(), Some("session=browser-cookie-header"));
+    }
+
+    #[test]
+    fn regular_referers_reject_credentials_and_strip_fragments() {
+        assert_eq!(
+            normalize_referer(
+                Some("https://example.com/folder?session=short#local-only".to_string()),
+            ),
+            Some("https://example.com/folder?session=short".to_string())
+        );
+
+        for invalid in [
+            "ftp://example.com/folder",
+            "https://user:password@example.com/folder",
+            "https://",
+            "https://example.com/folder\nX-Injected: yes",
+        ] {
+            assert_eq!(normalize_referer(Some(invalid.to_string())), None);
+        }
+
+        let oversized = format!(
+            "https://example.com/{}",
+            "x".repeat(MAX_MEDIA_REFERER_BYTES)
+        );
+        assert_eq!(normalize_referer(Some(oversized)), None);
     }
 
     #[test]
