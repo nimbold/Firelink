@@ -1767,10 +1767,15 @@ fn append_ytdlp_http_headers(
 
 fn is_browser_cookie_extraction_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    lower.contains("could not copy") && lower.contains("cookie database")
+    let missing_cookie_database =
+        (lower.contains("could not find") || lower.contains("database not found"))
+            && (lower.contains("cookies database") || lower.contains("cookie database"));
+
+    (lower.contains("could not copy") && lower.contains("cookie database"))
         || lower.contains("could not access browser cookie database")
         || lower.contains("failed to read browser cookie")
         || lower.contains("failed to decrypt with dpapi")
+        || missing_cookie_database
 }
 
 fn should_retry_without_browser_cookies(
@@ -18822,26 +18827,55 @@ mod tests {
         assert!(is_browser_cookie_extraction_error(
             "failed to read browser cookie data"
         ));
+        assert!(is_browser_cookie_extraction_error(
+            "yt-dlp failed while fetching media metadata: ERROR: could not find firefox cookies database in '<HOME>/Library/Application Support/Firefox/Profiles'"
+        ));
+        assert!(is_browser_cookie_extraction_error(
+            "ERROR: could not find Firefox cookies database in 'C:\\Users\\user\\AppData\\Roaming\\Firefox\\Profiles'"
+        ));
+        assert!(is_browser_cookie_extraction_error(
+            "ERROR: could not find firefox cookies database in '/home/user/.mozilla/firefox', '/home/user/snap/firefox/common/.mozilla/firefox'"
+        ));
+        assert!(is_browser_cookie_extraction_error(
+            "ERROR: could not find chrome cookies database in '/home/user/.config/google-chrome'"
+        ));
+        assert!(is_browser_cookie_extraction_error(
+            "ERROR: could not find safari cookies database"
+        ));
+        assert!(is_browser_cookie_extraction_error(
+            "ERROR: custom safari cookies database not found"
+        ));
+        assert!(!is_browser_cookie_extraction_error(
+            "WARNING: find-generic-password failed\nERROR: Sign in to confirm you are not a bot"
+        ));
+        assert!(!is_browser_cookie_extraction_error(
+            "ERROR: could not find requested format in the browser database"
+        ));
+        assert!(!is_browser_cookie_extraction_error(
+            "ERROR: could not find firefox profile directory"
+        ));
         assert!(!is_browser_cookie_extraction_error(
             "ERROR: Sign in to confirm you are not a bot"
         ));
         assert!(!is_browser_cookie_extraction_error(
             "ERROR: requested format is not available"
         ));
+        assert!(!is_browser_cookie_extraction_error(
+            "ERROR: unable to connect to the proxy server"
+        ));
     }
 
     #[test]
     fn retries_once_without_browser_cookies_only_for_cookie_database_failures() {
-        let cookie_database_error =
-            "ERROR: Could not copy Chrome cookie database. See https://github.com/yt-dlp/yt-dlp/issues/7271";
+        let cookie_database_error = "yt-dlp failed while fetching media metadata: ERROR: could not find firefox cookies database in '<HOME>/Library/Application Support/Firefox/Profiles'";
 
         assert!(should_retry_without_browser_cookies(
-            Some("chrome"),
+            Some("firefox"),
             cookie_database_error,
             false
         ));
         assert!(!should_retry_without_browser_cookies(
-            Some("chrome"),
+            Some("firefox"),
             cookie_database_error,
             true
         ));
@@ -18856,7 +18890,7 @@ mod tests {
             false
         ));
         assert!(!should_retry_without_browser_cookies(
-            Some("chrome"),
+            Some("firefox"),
             "ERROR: Sign in to confirm you are not a bot",
             false
         ));
