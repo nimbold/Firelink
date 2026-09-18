@@ -539,6 +539,46 @@ const engineRunId = useRef(0);
 
   // Toast notifications
   const { addToast } = useToast();
+  const syncStartAtLogin = settings.syncStartAtLogin;
+
+  useEffect(() => {
+    if (settings.activeView !== 'settings' || activeTab !== 'lookandfeel') return;
+
+    void syncStartAtLogin().catch(error => {
+      addToast({
+        message: t($ => $.settings.lookAndFeel.startAtLoginCheckFailed, {
+          detail: error instanceof Error ? error.message : String(error)
+        }),
+        variant: 'error',
+        isActionable: true
+      });
+    });
+  }, [settings.activeView, activeTab, syncStartAtLogin, addToast, t]);
+
+  const handleStartAtLoginChange = (enabled: boolean) => {
+    void settings.setStartAtLogin(enabled).catch(error => {
+      addToast({
+        message: t($ => $.settings.lookAndFeel.startAtLoginUpdateFailed, {
+          detail: error instanceof Error ? error.message : String(error)
+        }),
+        variant: 'error',
+        isActionable: true
+      });
+    });
+  };
+
+  const handleOpenLoginItemsSettings = () => {
+    void settings.openLoginItemsSettings().catch(error => {
+      addToast({
+        message: t($ => $.settings.lookAndFeel.startAtLoginSettingsFailed, {
+          detail: error instanceof Error ? error.message : String(error)
+        }),
+        variant: 'error',
+        isActionable: true
+      });
+    });
+  };
+
   const showTorrentNetworkInputError = (error: unknown) => {
     addToast({
       message: t($ => $.settings.network.torrentNetworkInputInvalid, {
@@ -1371,15 +1411,58 @@ runEngineChecks(false);
                     />
                   </label>
                 )}
+                <div className="mac-settings-row">
+                  <div className="settings-row-label">
+                    <span id="start-at-login-label">{t($ => $.settings.lookAndFeel.startAtLogin)}</span>
+                    <small id="start-at-login-description">
+                      {settings.startAtLoginSupported
+                        ? t($ => $.settings.lookAndFeel.startAtLoginDescription)
+                        : t($ => $.settings.lookAndFeel.startAtLoginUnsupported)}
+                    </small>
+                    {settings.startAtLoginRequiresApproval && (
+                      <small id="start-at-login-approval" className="text-yellow-500">
+                        {t($ => $.settings.lookAndFeel.startAtLoginRequiresApproval)}
+                      </small>
+                    )}
+                  </div>
+                  <div className="flex flex-col items-end gap-1">
+                    <input
+                      type="checkbox"
+                      checked={settings.startAtLogin}
+                      onChange={(e) => handleStartAtLoginChange(e.target.checked)}
+                      disabled={!settings.startAtLoginSupported || settings.startAtLoginSyncState === 'syncing'}
+                      aria-labelledby="start-at-login-label"
+                      aria-describedby="start-at-login-description"
+                      aria-busy={settings.startAtLoginSyncState === 'syncing'}
+                      className="mac-switch"
+                    />
+                    {settings.startAtLoginRequiresApproval && (
+                      <button
+                        type="button"
+                        onClick={handleOpenLoginItemsSettings}
+                        disabled={!settings.startAtLoginSupported || settings.startAtLoginSyncState === 'syncing'}
+                        className="app-button px-2 py-1 text-[11px] text-text-secondary hover:text-text-primary disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {t($ => $.settings.lookAndFeel.openLoginItemsSettings)}
+                      </button>
+                    )}
+                  </div>
+                </div>
                 <label className="mac-settings-row cursor-default">
                   <div className="settings-row-label">
                     <span>{trayIconLabel}</span>
-                    <small>{trayIconDescription}</small>
+                    <small>
+                      {trayIconDescription}
+                      {settings.startAtLogin
+                        ? ` ${t($ => $.settings.lookAndFeel.trayRequiredForStartAtLogin)}`
+                        : ''}
+                    </small>
                   </div>
                   <input
                     type="checkbox"
-                    checked={settings.showMenuBarIcon}
+                    checked={settings.showMenuBarIcon || settings.startAtLogin}
                     onChange={(e) => settings.setShowMenuBarIcon(e.target.checked)}
+                    disabled={settings.startAtLogin}
                     className="mac-switch"
                   />
                 </label>

@@ -3747,6 +3747,7 @@ mod network;
 mod parity;
 mod power;
 mod platform;
+mod login_start;
 #[doc(hidden)]
 pub use platform::atomic_write_replace;
 mod properties_window;
@@ -3795,6 +3796,7 @@ pub struct AppState {
 struct MainWindowRestoreState {
     requested: AtomicBool,
     startup_complete: AtomicBool,
+    started_at_login: AtomicBool,
 }
 
 #[cfg(target_os = "macos")]
@@ -4118,6 +4120,10 @@ pub(crate) fn restore_main_window(app_handle: &tauri::AppHandle) {
     };
 
     let _ = window.unminimize();
+    #[cfg(target_os = "windows")]
+    if let Err(error) = window.set_focusable(true) {
+        log::warn!("Could not make the main window focusable: {error}");
+    }
     let _ = window.show();
     let _ = window.set_focus();
 }
@@ -14698,11 +14704,67 @@ fn toggle_tray_icon(
     if show {
         build_main_tray(&app_handle)
     } else {
+        if login_start::status()?.enabled {
+            return Err(
+                "The tray icon is required while Firelink starts automatically at system login"
+                    .to_string(),
+            );
+        }
         if app_handle.tray_by_id("main").is_some() {
             let _ = app_handle.remove_tray_by_id("main");
         }
         Ok(())
     }
+}
+
+#[tauri::command]
+fn get_start_at_login(
+    caller: tauri::WebviewWindow,
+) -> Result<login_start::LoginStartStatus, String> {
+    properties_window::ensure_main_window(&caller)?;
+    login_start::status()
+}
+
+#[tauri::command]
+fn set_start_at_login(
+    caller: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+    enabled: bool,
+) -> Result<login_start::LoginStartStatus, String> {
+    properties_window::ensure_main_window(&caller)?;
+
+    let tray_created_for_start = enabled && app_handle.tray_by_id("main").is_none();
+    if tray_created_for_start {
+        build_main_tray(&app_handle).map_err(|error| {
+            format!(
+                "Cannot enable system-login startup because the tray icon is unavailable: {error}"
+            )
+        })?;
+    }
+
+    let result = if enabled {
+        login_start::enable()
+    } else {
+        login_start::disable()
+    };
+
+    if tray_created_for_start && result.is_err() {
+        // Preserve the user's tray preference when registration fails. Keep
+        // the tray if the OS reports that startup is actually enabled or its
+        // status is unavailable; in either case it remains the only safe
+        // discoverability surface.
+        if login_start::status().is_ok_and(|status| !status.enabled) {
+            let _ = app_handle.remove_tray_by_id("main");
+        }
+    }
+
+    result
+}
+
+#[tauri::command]
+fn open_login_items_settings(caller: tauri::WebviewWindow) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
+    login_start::open_login_items_settings()
 }
 
 fn build_main_tray(app_handle: &tauri::AppHandle) -> Result<(), String> {
@@ -19804,6 +19866,7 @@ type FirelinkInvokeHandler =
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     ensure_reqwest_crypto_provider();
+    crate::login_start::install_macos_login_launch_detector();
 
     let storage_mode = crate::storage::StorageMode::detect();
     let setup_storage_mode = storage_mode.clone();
@@ -19841,13 +19904,25 @@ pub fn run() {
         .manage(MainWindowRestoreState::default())
         .manage(properties_window::PropertiesWindowRegistry::default())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            restore_main_window(app);
+            let is_autostart = crate::login_start::has_autostart_argument(args.iter());
             let paths = collect_opened_torrent_paths(args);
+            if !is_autostart || !paths.is_empty() {
+                restore_main_window(app);
+            }
             dispatch_opened_torrent_paths(app.clone(), paths);
         }))
         .plugin(tauri_plugin_deep_link::init())
         .manage(Aria2DaemonGuard::new())
         .setup(move |app| {
+            let started_at_login = crate::login_start::is_login_launch(
+                std::env::args_os().skip(1),
+            );
+            if let Some(state) = app.try_state::<MainWindowRestoreState>() {
+                state
+                    .started_at_login
+                    .store(started_at_login, Ordering::Release);
+            }
+
             let storage_layout = crate::storage::StorageLayout::resolve(
                 app.handle(),
                 setup_storage_mode.clone(),
@@ -19880,8 +19955,25 @@ pub fn run() {
             log::info!("Memory: {} MB total", sys.total_memory() / 1024 / 1024);
             log::info!("App Version: {}", env!("CARGO_PKG_VERSION"));
             log::info!("==========================");
-            build_main_tray(app.handle())
-                .map_err(|error| format!("failed to create tray menu: {error}"))?;
+            let tray_available = match build_main_tray(app.handle()) {
+                Ok(()) => true,
+                Err(error) if started_at_login => {
+                    // A login-started process must never remain hidden when
+                    // its discoverability surface cannot be created.
+                    log::error!(
+                        "tray unavailable during system-login startup; showing the main window: {error}"
+                    );
+                    false
+                }
+                Err(error) => {
+                    return Err(format!("failed to create tray menu: {error}").into());
+                }
+            };
+            if started_at_login && !tray_available {
+                if let Some(state) = app.try_state::<MainWindowRestoreState>() {
+                    state.requested.store(true, Ordering::Release);
+                }
+            }
             #[cfg(target_os = "macos")]
             {
                 use tauri::menu::{MenuItem, WINDOW_SUBMENU_ID};
@@ -20137,6 +20229,9 @@ pub fn run() {
             main_window_builder = main_window_builder
                 .inner_size(startup_size.width as f64, startup_size.height as f64)
                 .prevent_overflow();
+            if started_at_login {
+                main_window_builder = main_window_builder.visible(false).focused(false);
+            }
             #[cfg(target_os = "windows")]
             {
                 // Wry installs its parent WM_SETFOCUS handler while WebView2
@@ -21549,6 +21644,9 @@ pub fn run() {
         check_automation_permission,
         request_automation_permission,
         open_automation_settings,
+        get_start_at_login,
+        set_start_at_login,
+        open_login_items_settings,
     ]);
     let keychain_handler: FirelinkInvokeHandler = Box::new(tauri::generate_handler![
         set_keychain_password,
@@ -21695,7 +21793,10 @@ pub fn run() {
                 | "ack_schedule_trigger"
                 | "check_automation_permission"
                 | "request_automation_permission"
-                | "open_automation_settings" => system_handler(invoke),
+                | "open_automation_settings"
+                | "get_start_at_login"
+                | "set_start_at_login"
+                | "open_login_items_settings" => system_handler(invoke),
                 "set_keychain_password"
                 | "get_keychain_password"
                 | "delete_keychain_password"
@@ -21795,8 +21896,13 @@ pub fn run() {
         .run(|app_handle, event| match event {
             tauri::RunEvent::Ready => {
                 mark_main_window_startup_complete(app_handle);
-                #[cfg(target_os = "windows")]
-                reveal_main_window(app_handle);
+                let started_at_login = app_handle
+                    .try_state::<MainWindowRestoreState>()
+                    .is_some_and(|state| state.started_at_login.load(Ordering::Acquire));
+                if !started_at_login {
+                    #[cfg(target_os = "windows")]
+                    reveal_main_window(app_handle);
+                }
                 restore_pending_main_window(app_handle);
             }
             #[cfg(target_os = "macos")]

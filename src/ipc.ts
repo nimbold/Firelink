@@ -30,6 +30,9 @@ import type { TorrentWebSeed } from './bindings/TorrentWebSeed';
 import type { TorrentDetails } from './bindings/TorrentDetails';
 import type { TorrentFileSelectionSnapshot } from './bindings/TorrentFileSelectionSnapshot';
 import type { TorrentAvailabilitySnapshot } from './bindings/TorrentAvailabilitySnapshot';
+import type { LoginStartStatus } from './bindings/LoginStartStatus';
+
+export type { LoginStartStatus } from './bindings/LoginStartStatus';
 
 type CommandMap = {
   fetch_metadata: {
@@ -141,6 +144,9 @@ type CommandMap = {
   delete_site_login: { args: { id: string }; result: void };
   inspect_download_target: { args: { path: string }; result: DownloadTargetInfo };
   toggle_tray_icon: { args: { show: boolean }; result: void };
+  get_start_at_login: { args: undefined; result: LoginStartStatus };
+  set_start_at_login: { args: { enabled: boolean }; result: LoginStartStatus };
+  open_login_items_settings: { args: undefined; result: void };
   set_extension_pairing_token: { args: { token: string }; result: void };
   get_extension_server_port: { args: undefined; result: number | null };
   hydrate_extension_pairing_token: { args: undefined; result: PairingTokenHydration };

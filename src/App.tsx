@@ -251,6 +251,8 @@ function App() {
   const showDockBadge = useSettingsStore(state => state.showDockBadge);
   const dockBadgeSyncVersion = useSettingsStore(state => state.dockBadgeSyncVersion);
   const showMenuBarIcon = useSettingsStore(state => state.showMenuBarIcon);
+  const startAtLogin = useSettingsStore(state => state.startAtLogin);
+  const syncStartAtLogin = useSettingsStore(state => state.syncStartAtLogin);
   const extensionPairingToken = useSettingsStore(state => state.extensionPairingToken);
   const showKeychainModal = useSettingsStore(state => state.showKeychainModal);
   const isAddModalOpen = useDownloadStore(state => state.isAddModalOpen);
@@ -917,6 +919,31 @@ function App() {
 
   useEffect(() => {
     const sync = () => {
+      if (document.visibilityState === 'hidden') return;
+      void syncStartAtLogin().catch(error => {
+        console.error('Failed to synchronize start-at-login state:', error);
+      });
+    };
+
+    window.addEventListener('focus', sync);
+    document.addEventListener('visibilitychange', sync);
+
+    let unsubscribeHydration: (() => void) | undefined;
+    if (useSettingsStore.persist.hasHydrated()) {
+      sync();
+    } else {
+      unsubscribeHydration = useSettingsStore.persist.onFinishHydration(sync);
+    }
+
+    return () => {
+      window.removeEventListener('focus', sync);
+      document.removeEventListener('visibilitychange', sync);
+      unsubscribeHydration?.();
+    };
+  }, [syncStartAtLogin]);
+
+  useEffect(() => {
+    const sync = () => {
       powerPreferencesSync = powerPreferencesSync
         .catch(() => undefined)
         .then(() => invoke('set_power_preferences', {
@@ -946,8 +973,8 @@ function App() {
   ]);
 
   useEffect(() => {
-    invoke('toggle_tray_icon', { show: showMenuBarIcon }).catch(console.error);
-  }, [showMenuBarIcon]);
+    invoke('toggle_tray_icon', { show: showMenuBarIcon || startAtLogin }).catch(console.error);
+  }, [showMenuBarIcon, startAtLogin]);
 
   useEffect(() => {
     if (activeView !== 'logs') {

@@ -25,6 +25,159 @@ describe('last used download directory preference', () => {
   });
 });
 
+describe('start at login preference', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useSettingsStore.setState({
+      showMenuBarIcon: false,
+      startAtLogin: false,
+      startAtLoginSupported: false,
+      startAtLoginRequiresApproval: false,
+      startAtLoginSyncState: 'idle'
+    });
+  });
+
+  it('is off by default and remains transient', () => {
+    expect(useSettingsStore.getState().startAtLogin).toBe(false);
+
+    const partialize = useSettingsStore.persist.getOptions().partialize;
+    const snapshot = partialize?.(useSettingsStore.getState());
+
+    expect(snapshot).not.toHaveProperty('startAtLogin');
+    expect(snapshot).not.toHaveProperty('startAtLoginSupported');
+    expect(snapshot).not.toHaveProperty('startAtLoginRequiresApproval');
+    expect(snapshot).not.toHaveProperty('startAtLoginSyncState');
+
+    const merge = useSettingsStore.persist.getOptions().merge;
+    const merged = merge?.({
+      startAtLogin: true,
+      startAtLoginRequiresApproval: true,
+      startAtLoginSyncState: 'ready'
+    }, useSettingsStore.getState());
+    expect(merged).toMatchObject({
+      startAtLogin: false,
+      startAtLoginSupported: false,
+      startAtLoginRequiresApproval: false,
+      startAtLoginSyncState: 'idle'
+    });
+  });
+
+  it('deduplicates concurrent OS status checks', async () => {
+    let resolveRequest!: (status: { supported: boolean; enabled: boolean; requiresApproval: boolean }) => void;
+    const request = new Promise<{ supported: boolean; enabled: boolean; requiresApproval: boolean }>(resolve => {
+      resolveRequest = resolve;
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation((command: string) => {
+      if (command === 'get_start_at_login') return request as never;
+      return Promise.resolve(undefined) as never;
+    });
+
+    const first = useSettingsStore.getState().syncStartAtLogin();
+    const second = useSettingsStore.getState().syncStartAtLogin();
+
+    await vi.waitFor(() => {
+      expect(ipc.invokeCommand).toHaveBeenCalledWith('get_start_at_login');
+      expect(vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) => command === 'get_start_at_login')).toHaveLength(1);
+      expect(useSettingsStore.getState().startAtLoginSyncState).toBe('syncing');
+    });
+
+    resolveRequest({ supported: true, enabled: true, requiresApproval: false });
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { supported: true, enabled: true, requiresApproval: false },
+      { supported: true, enabled: true, requiresApproval: false }
+    ]);
+    expect(useSettingsStore.getState()).toMatchObject({
+      startAtLogin: true,
+      startAtLoginSupported: true,
+      startAtLoginRequiresApproval: false,
+      startAtLoginSyncState: 'ready'
+    });
+  });
+
+  it('does not expose unsupported native startup as enabled', async () => {
+    vi.mocked(ipc.invokeCommand).mockImplementation((command: string) => {
+      if (command === 'get_start_at_login') {
+        return Promise.resolve({ supported: false, enabled: true, requiresApproval: false }) as never;
+      }
+      return Promise.resolve(undefined) as never;
+    });
+
+    await useSettingsStore.getState().syncStartAtLogin();
+
+    expect(useSettingsStore.getState()).toMatchObject({
+      startAtLogin: false,
+      startAtLoginSupported: false,
+      startAtLoginRequiresApproval: false,
+      startAtLoginSyncState: 'ready'
+    });
+  });
+
+  it('updates the OS before changing state and preserves the underlying tray preference', async () => {
+    vi.mocked(ipc.invokeCommand).mockImplementation((command: string, args?: unknown) => {
+      if (command === 'set_start_at_login') {
+        const enabled = (args as { enabled: boolean }).enabled;
+        return Promise.resolve(
+          enabled
+            ? { supported: true, enabled: true, requiresApproval: false }
+            : { supported: true, enabled: false, requiresApproval: false }
+        ) as never;
+      }
+      return Promise.resolve(undefined) as never;
+    });
+
+    await useSettingsStore.getState().setStartAtLogin(true);
+    expect(useSettingsStore.getState()).toMatchObject({
+      startAtLogin: true,
+      showMenuBarIcon: false
+    });
+
+    await useSettingsStore.getState().setStartAtLogin(false);
+    expect(useSettingsStore.getState()).toMatchObject({
+      startAtLogin: false,
+      showMenuBarIcon: false
+    });
+    const startupCalls = vi.mocked(ipc.invokeCommand).mock.calls.filter(
+      ([command]) => command === 'set_start_at_login'
+    );
+    expect(startupCalls).toEqual([
+      ['set_start_at_login', { enabled: true }],
+      ['set_start_at_login', { enabled: false }]
+    ]);
+  });
+
+  it('does not claim startup was changed when the native command fails', async () => {
+    vi.mocked(ipc.invokeCommand).mockImplementation((command: string) => {
+      if (command === 'set_start_at_login') return Promise.reject(new Error('registration failed')) as never;
+      return Promise.resolve(undefined) as never;
+    });
+
+    await expect(useSettingsStore.getState().setStartAtLogin(true))
+      .rejects.toThrow('registration failed');
+    expect(useSettingsStore.getState()).toMatchObject({
+      startAtLogin: false,
+      startAtLoginSyncState: 'error'
+    });
+  });
+
+  it('retains pending approval status returned by the OS', async () => {
+    vi.mocked(ipc.invokeCommand).mockImplementation((command: string) => {
+      if (command === 'set_start_at_login') {
+        return Promise.resolve({ supported: true, enabled: true, requiresApproval: true }) as never;
+      }
+      return Promise.resolve(undefined) as never;
+    });
+
+    await useSettingsStore.getState().setStartAtLogin(true);
+
+    expect(useSettingsStore.getState()).toMatchObject({
+      startAtLogin: true,
+      startAtLoginSupported: true,
+      startAtLoginRequiresApproval: true,
+      startAtLoginSyncState: 'ready'
+    });
+  });
+});
+
 describe('durable main-window and sidebar preferences', () => {
   it('uses safe defaults and persists the current values', async () => {
     vi.clearAllMocks();

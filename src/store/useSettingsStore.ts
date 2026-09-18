@@ -38,12 +38,15 @@ import {
   type CalendarPreference
 } from '../utils/dateTime';
 import type { MainWindowSize } from '../bindings/MainWindowSize';
+import type { LoginStartStatus } from '../bindings/LoginStartStatus';
 import { normalizeMainWindowSize } from '../utils/mainWindowState';
 
 let settingsQueue: Promise<void> = Promise.resolve();
 let torrentMaxOpenFilesQueue: Promise<void> = Promise.resolve();
 let torrentOverallUploadLimitQueue: Promise<void> = Promise.resolve();
 let pairingTokenHydrationRequest: Promise<PairingTokenHydration> | null = null;
+let startAtLoginOperationQueue: Promise<void> = Promise.resolve();
+let startAtLoginSyncRequest: Promise<LoginStartStatus> | null = null;
 let shouldPersistLegacyFoldersFallback = false;
 const settingsPersistenceErrorListeners = new Set<() => void>();
 let settingsPersistenceFailed = false;
@@ -83,6 +86,12 @@ const requestPairingTokenHydration = (): Promise<PairingTokenHydration> => {
       });
   }
   return pairingTokenHydrationRequest;
+};
+
+const enqueueStartAtLoginOperation = <T>(operation: () => Promise<T>): Promise<T> => {
+  const result = startAtLoginOperationQueue.then(operation, operation);
+  startAtLoginOperationQueue = result.then(() => undefined, () => undefined);
+  return result;
 };
 
 export const runSettingsPersistenceTransaction = <T>(
@@ -239,6 +248,8 @@ export type {
   WindowControlStyle
 };
 
+export type StartAtLoginSyncState = 'idle' | 'syncing' | 'ready' | 'error';
+
 export type SidebarPosition = 'auto' | 'left' | 'right';
 
 export interface SettingsState {
@@ -289,6 +300,11 @@ export interface SettingsState {
   /** Forces the App-level badge effect to run for every toggle request. */
   dockBadgeSyncVersion: number;
   showMenuBarIcon: boolean;
+  /** Session-only OS-backed startup state; intentionally not persisted. */
+  startAtLogin: boolean;
+  startAtLoginSupported: boolean;
+  startAtLoginRequiresApproval: boolean;
+  startAtLoginSyncState: StartAtLoginSyncState;
   proxyMode: ProxyMode;
   proxyHost: string;
   proxyPort: number;
@@ -366,6 +382,9 @@ export interface SettingsState {
   setListRowDensity: (density: ListRowDensity) => void;
   setShowDockBadge: (show: boolean) => void;
   setShowMenuBarIcon: (show: boolean) => void;
+  syncStartAtLogin: () => Promise<LoginStartStatus>;
+  setStartAtLogin: (enabled: boolean) => Promise<LoginStartStatus>;
+  openLoginItemsSettings: () => Promise<void>;
   setProxyMode: (mode: ProxyMode) => void;
   setProxyHost: (host: string) => void;
   setProxyPort: (port: number) => void;
@@ -468,6 +487,10 @@ export const useSettingsStore = create<SettingsState>()(
       showDockBadge: true,
       dockBadgeSyncVersion: 0,
       showMenuBarIcon: true,
+      startAtLogin: false,
+      startAtLoginSupported: true,
+      startAtLoginRequiresApproval: false,
+      startAtLoginSyncState: 'idle',
       proxyMode: 'none',
       proxyHost: '',
       proxyPort: 8080,
@@ -644,6 +667,50 @@ export const useSettingsStore = create<SettingsState>()(
         }));
       },
       setShowMenuBarIcon: (showMenuBarIcon) => set({ showMenuBarIcon }),
+      syncStartAtLogin: () => {
+        if (startAtLoginSyncRequest) return startAtLoginSyncRequest;
+
+        const request = enqueueStartAtLoginOperation(async () => {
+          set({ startAtLoginSyncState: 'syncing' });
+          const status = await invoke('get_start_at_login');
+          set({
+            startAtLogin: status.supported && status.enabled,
+            startAtLoginSupported: status.supported,
+            startAtLoginRequiresApproval: status.requiresApproval,
+            startAtLoginSyncState: 'ready'
+          });
+          return status;
+        }).catch(error => {
+          set({ startAtLoginSyncState: 'error' });
+          throw error;
+        });
+
+        let trackedRequest: Promise<LoginStartStatus>;
+        trackedRequest = request.finally(() => {
+          if (startAtLoginSyncRequest === trackedRequest) {
+            startAtLoginSyncRequest = null;
+          }
+        });
+        startAtLoginSyncRequest = trackedRequest;
+        return trackedRequest;
+      },
+      setStartAtLogin: (enabled) => enqueueStartAtLoginOperation(async () => {
+        set({ startAtLoginSyncState: 'syncing' });
+        try {
+          const status = await invoke('set_start_at_login', { enabled });
+          set({
+            startAtLogin: status.supported && status.enabled,
+            startAtLoginSupported: status.supported,
+            startAtLoginRequiresApproval: status.requiresApproval,
+            startAtLoginSyncState: 'ready'
+          });
+          return status;
+        } catch (error) {
+          set({ startAtLoginSyncState: 'error' });
+          throw error;
+        }
+      }),
+      openLoginItemsSettings: () => invoke('open_login_items_settings'),
       setProxyMode: (proxyMode) => {
         const safe = isAllowedSetting(PROXY_MODE_VALUES, proxyMode) ? proxyMode : 'none';
         set({ proxyMode: safe });
@@ -981,6 +1048,12 @@ export const useSettingsStore = create<SettingsState>()(
           activeView: currentState.activeView,
           showKeychainModal: currentState.showKeychainModal,
           dockBadgeSyncVersion: currentState.dockBadgeSyncVersion,
+          // Login startup is OS-backed and must never be restored from the
+          // settings database, including data written by a newer build.
+          startAtLogin: currentState.startAtLogin,
+          startAtLoginSupported: currentState.startAtLoginSupported,
+          startAtLoginRequiresApproval: currentState.startAtLoginRequiresApproval,
+          startAtLoginSyncState: currentState.startAtLoginSyncState,
           theme: isAllowedSetting(THEME_VALUES, persisted.theme)
             ? persisted.theme
             : currentState.theme,
