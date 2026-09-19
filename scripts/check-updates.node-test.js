@@ -8,6 +8,7 @@ import {
   fetchText,
   latestBtbnFfmpegStableBuild,
   latestMartinRiedlMacArm64Release,
+  hasUpdateCheckFailures,
   npmExecutable,
   providerAssetHashes,
 } from './check-updates.js';
@@ -50,33 +51,31 @@ test('fetchText does not retry terminal HTTP responses', async () => {
   assert.equal(attempts, 1);
 });
 
-test('checkRows fails closed when a latest version is unavailable', () => {
-  assert.throws(
-    () =>
-      checkRows(
-        [{ target: 'test-target', engine: 'test-engine', version: '1.0.0', url: 'https://example.test/engine' }],
-        {}
-      ),
-    /Latest version is unavailable for test-target test-engine/
+test('checkRows reports an unverified row when a latest version is unavailable', () => {
+  const report = checkRows(
+    [{ target: 'test-target', engine: 'test-engine', version: '1.0.0', url: 'https://example.test/engine' }],
+    {},
   );
+
+  assert.equal(report.rows[0].status, 'unverified');
+  assert.equal(report.counts.unverified, 1);
 });
 
 test('checkRows does not fall back to the generic release for target-specific engines', () => {
-  assert.throws(
-    () =>
-      checkRows(
-        [{ target: 'test-target', engine: 'ffmpeg', version: '8.1.2', url: 'https://example.test/engine' }],
-        { ffmpeg: '9.0.1' },
-        {},
-        {},
-        new Set(['ffmpeg'])
-      ),
-    /Latest provider version is unavailable for test-target ffmpeg/
+  const report = checkRows(
+    [{ target: 'test-target', engine: 'ffmpeg', version: '8.1.2', url: 'https://example.test/engine' }],
+    { ffmpeg: '9.0.1' },
+    {},
+    {},
+    new Set(['ffmpeg']),
   );
+
+  assert.equal(report.rows[0].status, 'unverified');
+  assert.equal(report.counts.unverified, 1);
 });
 
 test('checkRows detects a provider hash change when version and URL are current', () => {
-  const outdated = checkRows(
+  const report = checkRows(
     [{
       target: 'test-target',
       engine: 'test-engine',
@@ -92,11 +91,29 @@ test('checkRows detects a provider hash change when version and URL are current'
     { 'https://example.test/engine': 'b'.repeat(64) },
   );
 
-  assert.equal(outdated, 1);
+  assert.equal(report.rows[0].status, 'hash-mismatch');
+  assert.equal(report.counts['hash-mismatch'], 1);
+});
+
+test('checkRows fails closed when the provider supplies no digest', () => {
+  const report = checkRows(
+    [{
+      target: 'test-target',
+      engine: 'test-engine',
+      version: '1.0.0',
+      url: 'https://example.test/engine',
+      sha256: 'a'.repeat(64),
+    }],
+    { 'test-engine': '1.0.0' },
+  );
+
+  assert.equal(report.rows[0].status, 'unverified');
+  assert.match(report.rows[0].reason, /verifiable SHA-256/);
+  assert.equal(report.counts.unverified, 1);
 });
 
 test('checkRows compares packaged source provenance without confusing the payload digest', () => {
-  const outdated = checkRows(
+  const report = checkRows(
     [{
       target: 'aarch64-apple-darwin',
       engine: 'ffmpeg',
@@ -112,7 +129,8 @@ test('checkRows compares packaged source provenance without confusing the payloa
     { 'aarch64-apple-darwin:ffmpeg': 'a'.repeat(64) },
   );
 
-  assert.equal(outdated, 0);
+  assert.equal(report.rows[0].status, 'current');
+  assert.equal(report.counts.current, 1);
 });
 
 test('checkRows detects an aria2 asset digest change when the provider supplies it', () => {
@@ -122,7 +140,7 @@ test('checkRows detects an aria2 asset digest change when the provider supplies 
     aria2: { assets: [{ browser_download_url: url, digest: `sha256:${digest}` }] },
   });
 
-  const outdated = checkRows(
+  const report = checkRows(
     [{
       target: 'x86_64-pc-windows-msvc',
       engine: 'aria2c',
@@ -138,7 +156,91 @@ test('checkRows detects an aria2 asset digest change when the provider supplies 
     hashes,
   );
 
-  assert.equal(outdated, 1);
+  assert.equal(report.rows[0].status, 'hash-mismatch');
+  assert.equal(report.counts['hash-mismatch'], 1);
+});
+
+test('checkRows preserves independent row results when one provider is unavailable', () => {
+  const report = checkRows(
+    [
+      { target: 'test-target', engine: 'yt-dlp', version: '1.0.0', url: 'https://example.test/yt-dlp' },
+      { target: 'test-target', engine: 'deno', version: '1.0.0', url: 'https://example.test/deno' },
+    ],
+    { 'yt-dlp': '1.0.0', deno: '1.0.0' },
+    {},
+    {},
+    new Set(),
+    {},
+    {},
+    {},
+    { deno: { status: 'unverified', detail: 'GitHub response failed' } },
+  );
+
+  assert.deepEqual(
+    report.rows.map(row => [row.engine, row.status]),
+    [['yt-dlp', 'current'], ['deno', 'unverified']],
+  );
+  assert.equal(report.counts.current, 1);
+  assert.equal(report.counts.unverified, 1);
+});
+
+test('checkRows reports provider-behind instead of using generic FFmpeg data', () => {
+  const report = checkRows(
+    [{ target: 'test-target', engine: 'ffmpeg', version: '9.0.1', url: 'https://example.test/ffmpeg' }],
+    { ffmpeg: '9.0.2' },
+    {},
+    {},
+    new Set(['ffmpeg']),
+    {},
+    {},
+    { 'test-target:ffmpeg': { status: 'provider-behind', detail: 'matching target build is not published' } },
+  );
+
+  assert.equal(report.rows[0].status, 'provider-behind');
+  assert.equal(report.rows[0].latest, undefined);
+  assert.equal(report.counts['provider-behind'], 1);
+});
+
+test('checkRows still reports Deno after an FFmpeg provider failure', () => {
+  const report = checkRows(
+    [
+      { target: 'test-target', engine: 'ffmpeg', version: '9.0.1', url: 'https://example.test/ffmpeg' },
+      { target: 'test-target', engine: 'deno', version: '2.9.6', url: 'https://example.test/deno' },
+    ],
+    { ffmpeg: '9.0.2', deno: '2.9.7' },
+    { 'test-target:deno': '2.9.7' },
+    {},
+    new Set(['ffmpeg']),
+    {},
+    {},
+    { 'test-target:ffmpeg': { status: 'unverified', detail: 'FFmpeg provider request failed' } },
+  );
+
+  assert.deepEqual(
+    report.rows.map(row => [row.engine, row.status]),
+    [['ffmpeg', 'unverified'], ['deno', 'outdated']],
+  );
+  assert.equal(report.rows.length, 2);
+  assert.equal(report.counts.unverified, 1);
+  assert.equal(report.counts.outdated, 1);
+});
+
+test('update checks fail when npm or Cargo rows are outdated', () => {
+  assert.equal(hasUpdateCheckFailures({
+    outdatedCount: 1,
+    engineIssueCount: 0,
+    providerFailures: [],
+    providerBehind: [],
+  }), true);
+});
+
+test('update checks pass only when every blocking count is clear', () => {
+  assert.equal(hasUpdateCheckFailures({
+    outdatedCount: 0,
+    engineIssueCount: 0,
+    providerFailures: [],
+    providerBehind: [],
+  }), false);
 });
 
 test('npm executable selection uses the Windows command shim when needed', () => {

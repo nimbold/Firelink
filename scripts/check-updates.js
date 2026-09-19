@@ -323,6 +323,18 @@ function printCargoReport(updates) {
   return updates.length;
 }
 
+function hasUpdateCheckFailures({
+  outdatedCount,
+  engineIssueCount,
+  providerFailures,
+  providerBehind,
+}) {
+  return outdatedCount > 0
+    || engineIssueCount > 0
+    || providerFailures.length > 0
+    || providerBehind.length > 0;
+}
+
 function printNpmReport(label, outdated) {
   const entries = Object.entries(outdated);
   if (!entries.length) {
@@ -370,14 +382,6 @@ function packagedEngineVersions(engineLock) {
   return rows;
 }
 
-function unavailableLatestVersionError(target, engine, targetSpecific) {
-  const error = new Error(
-    `${targetSpecific ? 'Latest provider version' : 'Latest version'} is unavailable for ${target} ${engine}`
-  );
-  error.code = 'LATEST_VERSION_UNAVAILABLE';
-  return error;
-}
-
 function checkRows(
   rows,
   latestByEngine,
@@ -386,17 +390,74 @@ function checkRows(
   targetSpecificEngines = new Set(),
   latestHashesByTargetEngine = {},
   latestHashesByUrl = {},
+  providerStatusesByTargetEngine = {},
+  providerStatusesByEngine = {},
 ) {
-  let outdated = 0;
+  const report = {
+    rows: [],
+    counts: {
+      current: 0,
+      outdated: 0,
+      'hash-mismatch': 0,
+      'provider-behind': 0,
+      unverified: 0,
+    },
+  };
+
+  const providerStatus = value => {
+    if (!value) return undefined;
+    if (typeof value === 'string') return { status: value };
+    return value;
+  };
+
+  const printRow = rowResult => {
+    const wanted = rowResult.latest || 'unavailable';
+    console.log(`  ${rowResult.target} ${rowResult.engine}: ${rowResult.current} -> ${wanted} ${rowResult.status}`);
+    if (rowResult.reason) console.log(`    reason: ${rowResult.reason}`);
+    if (rowResult.source) console.log(`    source: ${rowResult.source}`);
+    if (rowResult.hash) {
+      console.log(`    source sha256: ${rowResult.hash.current || 'missing'} -> ${rowResult.hash.latest || 'unavailable'}`);
+    }
+  };
+
   for (const row of rows) {
     const targetSpecific = targetSpecificEngines.has(row.engine);
     const targetKey = `${row.target}:${row.engine}`;
+    const provider = providerStatus(
+      providerStatusesByTargetEngine[targetKey] || providerStatusesByEngine[row.engine],
+    );
     const latest = targetSpecific
       ? latestByTargetEngine[targetKey]
       : latestByTargetEngine[targetKey] || latestByEngine[row.engine];
-    if (typeof latest !== 'string' || !latest.trim()) {
-      throw unavailableLatestVersionError(row.target, row.engine, targetSpecific);
+
+    if (provider?.status === 'provider-behind' || provider?.status === 'unverified') {
+      const rowResult = {
+        ...row,
+        current: normalizeVersion(row.version),
+        latest: latest ? normalizeVersion(latest) : undefined,
+        status: provider.status,
+        reason: provider.detail,
+      };
+      report.rows.push(rowResult);
+      report.counts[provider.status] += 1;
+      printRow(rowResult);
+      continue;
     }
+
+    if (typeof latest !== 'string' || !latest.trim()) {
+      const rowResult = {
+        ...row,
+        current: normalizeVersion(row.version),
+        latest: undefined,
+        status: 'unverified',
+        reason: `${targetSpecific ? 'target-specific provider' : 'latest provider'} version is unavailable`,
+      };
+      report.rows.push(rowResult);
+      report.counts.unverified += 1;
+      printRow(rowResult);
+      continue;
+    }
+
     const current = normalizeVersion(row.version);
     const wanted = normalizeVersion(latest);
     const latestUrl = latestUrlsByTargetEngine[targetKey];
@@ -405,20 +466,35 @@ function checkRows(
     const latestHash = latestHashesByTargetEngine[targetKey] || latestHashesByUrl[row.url];
     const checkedHash = row.sourceSha256 || row.sha256;
     const currentHash = typeof checkedHash === 'string' ? checkedHash.toLowerCase() : '';
-    const hashOutdated = Boolean(latestHash && currentHash !== latestHash);
+    const hashMismatch = Boolean(latestHash && currentHash !== latestHash);
+    const hashRequired = Object.hasOwn(row, 'sourceSha256') || Object.hasOwn(row, 'sha256');
+    const hashUnavailable = Boolean(hashRequired && !latestHash);
     const status = versionOutdated
       ? 'outdated'
       : sourceOutdated
-        ? 'source-outdated'
-        : hashOutdated
-          ? 'hash-outdated'
-          : 'current';
-    if (status !== 'current') outdated += 1;
-    console.log(`  ${row.target} ${row.engine}: ${current} -> ${wanted} ${status}`);
-    if (sourceOutdated) console.log(`    source: ${row.url} -> ${latestUrl}`);
-    if (hashOutdated) console.log(`    source sha256: ${checkedHash || 'missing'} -> ${latestHash}`);
+        ? 'outdated'
+        : hashMismatch
+          ? 'hash-mismatch'
+          : hashUnavailable
+            ? 'unverified'
+            : 'current';
+
+    const rowResult = {
+      ...row,
+      current,
+      latest: wanted,
+      status,
+      source: sourceOutdated ? `${row.url} -> ${latestUrl}` : undefined,
+      hash: hashMismatch || hashUnavailable
+        ? { current: checkedHash, latest: latestHash }
+        : undefined,
+      reason: hashUnavailable ? 'provider did not supply a verifiable SHA-256 digest' : undefined,
+    };
+    report.rows.push(rowResult);
+    report.counts[status] += 1;
+    printRow(rowResult);
   }
-  return outdated;
+  return report;
 }
 
 async function main() {
@@ -433,15 +509,24 @@ async function main() {
 
   const ffmpegStablePromise = latestFfmpegStable();
   const providerChecks = [
-    ['yt-dlp latest release', () => githubLatest('yt-dlp/yt-dlp')],
-    ['Deno latest release', () => githubLatest('denoland/deno')],
-    ['aria2 latest release', () => githubLatest('aria2/aria2')],
+    ['yt-dlp latest release', async () => ({
+      status: 'available',
+      value: await githubLatest('yt-dlp/yt-dlp'),
+    })],
+    ['Deno latest release', async () => ({
+      status: 'available',
+      value: await githubLatest('denoland/deno'),
+    })],
+    ['aria2 latest release', async () => ({
+      status: 'available',
+      value: await githubLatest('aria2/aria2'),
+    })],
     [
       'FFmpeg stable release',
       async () => {
         const version = await ffmpegStablePromise;
         if (!version) throw new Error('FFmpeg release provider response has no usable version');
-        return version;
+        return { status: 'available', value: version };
       },
     ],
     [
@@ -455,9 +540,12 @@ async function main() {
           !build.sha256 ||
           compareVersions(build.version, stableVersion) !== 0
         ) {
-          throw new Error('Martin Riedl FFmpeg provider response has no complete matching macOS arm64 stable build');
+          return {
+            status: 'provider-behind',
+            detail: 'no complete matching macOS arm64 stable build is published',
+          };
         }
-        return build;
+        return { status: 'available', value: build };
       },
     ],
     [
@@ -471,24 +559,44 @@ async function main() {
           !build.hashes?.windows ||
           !build.hashes?.linux
         ) {
-          throw new Error('BtbN FFmpeg provider response has no complete Windows/Linux build with SHA-256 digests');
+          return {
+            status: 'provider-behind',
+            detail: 'no complete matching Windows/Linux stable build with SHA-256 digests is published',
+          };
         }
-        return build;
+        return { status: 'available', value: build };
       },
     ],
   ];
   const providerResults = await Promise.allSettled(providerChecks.map(([, check]) => check()));
   const providerFailures = [];
-  for (const [index, [label]] of providerChecks.entries()) {
+  const providerBehind = [];
+  const providerOutcomes = providerChecks.map(([label], index) => {
     const result = providerResults[index];
     if (result.status === 'rejected') {
       const detail = result.reason instanceof Error ? result.reason.message : String(result.reason);
+      return { status: 'unverified', detail, label };
+    }
+    if (
+      !result.value ||
+      !['available', 'provider-behind'].includes(result.value.status)
+    ) {
+      return { status: 'unverified', detail: 'provider returned an invalid result', label };
+    }
+    return { ...result.value, label };
+  });
+  for (const [index, [label]] of providerChecks.entries()) {
+    const outcome = providerOutcomes[index];
+    if (outcome.status === 'unverified') {
       providerFailures.push(label);
-      console.error(`provider unavailable: ${label}: ${detail}`);
+      console.error(`provider unavailable: ${label}: ${outcome.detail}`);
+    } else if (outcome.status === 'provider-behind') {
+      providerBehind.push(label);
+      console.error(`provider behind: ${label}: ${outcome.detail}`);
     }
   }
   const providerValue = index =>
-    providerResults[index].status === 'fulfilled' ? providerResults[index].value : undefined;
+    providerOutcomes[index].status === 'available' ? providerOutcomes[index].value : undefined;
   const ytDlp = providerValue(0);
   const deno = providerValue(1);
   const aria2 = providerValue(2);
@@ -505,6 +613,19 @@ async function main() {
   const latestUrlsByTargetEngine = {};
   const latestHashesByTargetEngine = {};
   const latestHashesByUrl = providerAssetHashes({ ytDlp, deno, aria2 });
+  const providerStatus = outcome => outcome.status === 'available'
+    ? undefined
+    : { status: outcome.status, detail: outcome.detail };
+  const providerStatusesByEngine = {
+    'yt-dlp': providerStatus(providerOutcomes[0]),
+    deno: providerStatus(providerOutcomes[1]),
+    aria2c: providerStatus(providerOutcomes[2]),
+  };
+  const providerStatusesByTargetEngine = {
+    'aarch64-apple-darwin:ffmpeg': providerStatus(providerOutcomes[4]),
+    'x86_64-pc-windows-msvc:ffmpeg': providerStatus(providerOutcomes[5]),
+    'x86_64-unknown-linux-gnu:ffmpeg': providerStatus(providerOutcomes[5]),
+  };
   if (btbnFfmpegStableBuild?.version && btbnFfmpegStableBuild.urls?.windows && btbnFfmpegStableBuild.urls?.linux) {
     latestByTargetEngine['x86_64-pc-windows-msvc:ffmpeg'] = btbnFfmpegStableBuild.version;
     latestByTargetEngine['x86_64-unknown-linux-gnu:ffmpeg'] = btbnFfmpegStableBuild.version;
@@ -529,50 +650,60 @@ async function main() {
   console.log(`  Martin Riedl FFmpeg macOS arm64 stable: ${displayVersion(martinRiedlMacArm64Release?.version)}`);
 
   const targetSpecificEngines = new Set(['ffmpeg']);
-  const engineCheckFailures = [];
+  const engineReports = [];
   const runEngineCheck = (label, rows) => {
-    try {
-      return checkRows(
-        rows,
-        latestByEngine,
-        latestByTargetEngine,
-        latestUrlsByTargetEngine,
-        targetSpecificEngines,
-        latestHashesByTargetEngine,
-        latestHashesByUrl,
-      );
-    } catch (error) {
-      if (error?.code !== 'LATEST_VERSION_UNAVAILABLE') throw error;
-      const detail = error instanceof Error ? error.message : String(error);
-      engineCheckFailures.push(label);
-      console.error(`engine provider unavailable: ${label}: ${detail}`);
-      return 0;
-    }
+    const report = checkRows(
+      rows,
+      latestByEngine,
+      latestByTargetEngine,
+      latestUrlsByTargetEngine,
+      targetSpecificEngines,
+      latestHashesByTargetEngine,
+      latestHashesByUrl,
+      providerStatusesByTargetEngine,
+      providerStatusesByEngine,
+    );
+    engineReports.push({ label, ...report });
+    return report;
   };
 
   console.log('\nengine source lock:');
-  outdatedCount += runEngineCheck(
+  runEngineCheck(
     'engine source lock',
     sourceEngineVersions(parseJsonFile('engine-sources.lock.json')),
   );
 
   console.log('\npackaged engine lock:');
-  outdatedCount += runEngineCheck(
+  runEngineCheck(
     'packaged engine lock',
     packagedEngineVersions(parseJsonFile('engines.lock.json')),
   );
 
+  const engineCounts = engineReports.reduce((totals, report) => {
+    for (const [status, count] of Object.entries(report.counts)) totals[status] += count;
+    return totals;
+  }, { current: 0, outdated: 0, 'hash-mismatch': 0, 'provider-behind': 0, unverified: 0 });
+  const engineIssueCount = Object.entries(engineCounts)
+    .filter(([status]) => status !== 'current')
+    .reduce((total, [, count]) => total + count, 0);
+
+  if (engineIssueCount > 0) {
+    console.error('\nengine row status summary:');
+    for (const [status, count] of Object.entries(engineCounts)) {
+      if (status !== 'current' && count > 0) console.error(`  ${status}: ${count}`);
+    }
+  }
+
   if (outdatedCount > 0) {
     console.error(`\n${outdatedCount} outdated item(s) found.`);
-    process.exit(1);
   }
   if (providerFailures.length > 0) {
     console.error(`\n${providerFailures.length} provider check(s) unavailable; refusing to claim that all updates are current.`);
   }
-  if (engineCheckFailures.length > 0) {
-    console.error(`\n${engineCheckFailures.length} engine lock check(s) unavailable; refusing to claim that all engines are current.`);
+  if (providerBehind.length > 0) {
+    console.error(`\n${providerBehind.length} provider build check(s) are behind the latest stable release; refusing to claim that all updates are current.`);
   }
-  if (providerFailures.length > 0 || engineCheckFailures.length > 0) {
+  if (hasUpdateCheckFailures({ outdatedCount, engineIssueCount, providerFailures, providerBehind })) {
     process.exit(1);
   }
   console.log('\nAll checked packages and engines are current.');
@@ -591,6 +722,7 @@ export {
   fetchJson,
   fetchText,
   fetchWithContext,
+  hasUpdateCheckFailures,
   latestBtbnFfmpegStableBuild,
   latestMartinRiedlMacArm64Release,
   npmExecutable,
