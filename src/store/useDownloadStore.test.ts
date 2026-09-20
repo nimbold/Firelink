@@ -4,6 +4,7 @@ import { useDownloadProgressStore } from './downloadProgressStore';
 import { useSettingsStore } from './useSettingsStore';
 import * as ipc from '../ipc';
 import { MAX_DOWNLOAD_FILENAME_BYTES } from '../utils/downloads';
+import type { ExtensionMediaDiscoveryUpdate } from '../bindings/ExtensionMediaDiscoveryUpdate';
 
 vi.mock('../ipc', () => ({
   invokeCommand: vi.fn(),
@@ -4807,6 +4808,111 @@ describe('useDownloadStore', () => {
     expect(state.pendingAddMediaUrls).toEqual(['https://adult.example/watch/123']);
     expect(state.pendingAddCookies).toBe('');
     expect(state.pendingAddHeaders).toBe('User-Agent: Firefox Test');
+  });
+
+  it('routes a discovered media manifest back to its initial handoff row', async () => {
+    const handoffId = 'm-media-1';
+    const pageUrl = 'https://video.example/watch?id=1';
+    const manifestUrl = 'https://cdn.example/master.m3u8';
+
+    await useDownloadStore.getState().handleExtensionDownload({
+      urls: [pageUrl],
+      referer: pageUrl,
+      silent: false,
+      filename: null,
+      headers: null,
+      cookies: null,
+      cookie_scopes: null,
+      media: true,
+      torrent: false,
+      batch: false,
+      batch_name: null,
+      handoff_id: handoffId,
+      phase: 'initial'
+    });
+
+    const update: ExtensionMediaDiscoveryUpdate = {
+      request_id: 'discovery-request',
+      handoff_id: handoffId,
+      phase: 'discovered',
+      urls: [manifestUrl],
+      referer: pageUrl,
+      headers: 'Origin: https://video.example'
+    };
+    await useDownloadStore.getState().handleExtensionMediaDiscoveryUpdate(update);
+
+    const state = useDownloadStore.getState();
+    expect(state.pendingAddUrls).toBe(manifestUrl);
+    expect(state.pendingAddRequestContexts[pageUrl]).toBeUndefined();
+    expect(state.pendingAddRequestContexts[manifestUrl]).toMatchObject({
+      handoffId,
+      replacesUrl: pageUrl,
+      media: true,
+      mediaMode: 'media',
+      cookies: '',
+      headers: 'Origin: https://video.example'
+    });
+    expect(state.pendingAddMediaUrls).toEqual([manifestUrl]);
+  });
+
+  it('treats a replayed discovery update for the same manifest as a no-op', async () => {
+    const handoffId = 'm-replayed';
+    const pageUrl = 'https://video.example/watch?id=1';
+    const manifestUrl = 'https://cdn.example/master.m3u8';
+    useDownloadStore.getState().openAddModalWithUrls(
+      pageUrl,
+      pageUrl,
+      null,
+      null,
+      null,
+      true,
+      undefined,
+      false,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      handoffId
+    );
+    await useDownloadStore.getState().handleExtensionMediaDiscoveryUpdate({
+      request_id: 'discovery-request-1',
+      handoff_id: handoffId,
+      phase: 'discovered',
+      urls: [manifestUrl],
+      referer: pageUrl,
+      headers: 'Origin: https://video.example'
+    });
+
+    const beforeReplay = useDownloadStore.getState();
+    const beforeVersion = beforeReplay.pendingAddRequestVersion;
+    const beforeContexts = beforeReplay.pendingAddRequestContexts;
+    await useDownloadStore.getState().handleExtensionMediaDiscoveryUpdate({
+      request_id: 'discovery-request-2',
+      handoff_id: handoffId,
+      phase: 'discovered',
+      urls: [manifestUrl],
+      referer: pageUrl,
+      headers: 'Origin: https://video.example'
+    });
+
+    const afterReplay = useDownloadStore.getState();
+    expect(afterReplay.pendingAddRequestVersion).toBe(beforeVersion);
+    expect(afterReplay.pendingAddRequestContexts).toBe(beforeContexts);
+    expect(afterReplay.pendingAddUrls).toBe(manifestUrl);
+  });
+
+  it('ignores a discovered manifest when its initial handoff is no longer reviewable', async () => {
+    await useDownloadStore.getState().handleExtensionMediaDiscoveryUpdate({
+      request_id: 'late-discovery',
+      handoff_id: 'm-missing',
+      phase: 'discovered',
+      urls: ['https://cdn.example/late.m3u8'],
+      referer: null,
+      headers: null
+    });
+
+    expect(useDownloadStore.getState().pendingAddUrls).toBe('');
+    expect(useDownloadStore.getState().pendingAddRequestContexts).toEqual({});
   });
 
   it('routes direct manifests through media header and cookie suppression without forcing the mode', () => {

@@ -678,6 +678,36 @@ describe('add download metadata workflow', () => {
     );
   });
 
+  it('replaces the initial media page when a newer handoff context names it', () => {
+    const merged = appendRequestUrlsAfterVersion(
+      'https://video.example/watch?id=1',
+      {
+        'https://cdn.example/master.m3u8': {
+          version: 2,
+          replacesUrl: 'https://video.example/watch?id=1'
+        }
+      },
+      1
+    );
+
+    expect(merged).toBe('https://cdn.example/master.m3u8');
+  });
+
+  it('drops a delayed media replacement after the original row was edited', () => {
+    const merged = appendRequestUrlsAfterVersion(
+      'https://user.example/edited',
+      {
+        'https://cdn.example/master.m3u8': {
+          version: 2,
+          replacesUrl: 'https://video.example/watch?id=1'
+        }
+      },
+      1
+    );
+
+    expect(merged).toBe('https://user.example/edited');
+  });
+
   it('upgrades an existing normal row when the user explicitly fetches it as media', () => {
     const existing = row({
       sourceUrl: 'https://adult.example/watch/123',

@@ -519,6 +519,7 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
         "globalSpeedLimit",
         "torrentOverallUploadLimit",
         "baseDownloadFolder",
+        "mediaCookieFile",
         "schedulerLastStartKey",
         "schedulerLastStopKey",
     ] {
@@ -1093,6 +1094,7 @@ fn default_settings() -> PersistedSettings {
         prevents_sleep_while_downloading: true,
         prevents_display_sleep_while_downloading: false,
         media_cookie_source: MediaCookieSource::default(),
+        media_cookie_file: String::new(),
         site_logins: Vec::new(),
         auto_check_updates: true,
         keychain_access_granted: false,

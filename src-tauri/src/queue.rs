@@ -1135,6 +1135,7 @@ pub struct SpawnPayload {
     pub proxy: Option<String>,
     pub format_selector: Option<String>,
     pub cookie_source: Option<String>,
+    pub cookie_file: Option<String>,
     pub is_media: bool,
     pub is_torrent: bool,
     pub torrent_path: Option<String>,
@@ -9096,6 +9097,7 @@ impl SidecarSpawner for ProductionSpawner {
                 payload.format_selector.clone(),
                 payload.connections,
                 payload.cookie_source.clone(),
+                payload.cookie_file.clone(),
                 payload.speed_limit.clone(),
                 payload.username.clone(),
                 payload.password.clone(),
@@ -9166,6 +9168,9 @@ pub struct EnqueueItem {
     pub proxy: Option<String>,
     pub format_selector: Option<String>,
     pub cookie_source: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub cookie_file: Option<String>,
     pub is_media: Option<bool>,
     #[serde(default)]
     #[ts(optional)]
@@ -9254,6 +9259,7 @@ impl EnqueueItem {
             self.password = None;
             self.headers = None;
             self.cookies = None;
+            self.cookie_file = None;
         }
     }
 
@@ -9299,6 +9305,7 @@ impl EnqueueItem {
                 proxy: item.proxy,
                 format_selector: item.format_selector,
                 cookie_source: item.cookie_source,
+                cookie_file: item.cookie_file,
                 is_media: media,
                 is_torrent: item.is_torrent.unwrap_or(false),
                 torrent_path: item.torrent_path,

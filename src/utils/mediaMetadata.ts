@@ -4,6 +4,7 @@ import type { MediaPlaylistMetadata } from '../bindings/MediaPlaylistMetadata';
 
 type FetchMediaMetadataArgs = {
   url: string;
+  cookieFile: string | null;
   cookieBrowser: string | null;
   userAgent: string | null;
   username: string | null;
@@ -19,6 +20,7 @@ const inFlightMediaPlaylists = new Map<string, Promise<MediaPlaylistMetadata>>()
 const metadataKey = (args: FetchMediaMetadataArgs) =>
   JSON.stringify([
     args.url,
+    args.cookieFile,
     args.cookieBrowser,
     args.userAgent,
     args.username,

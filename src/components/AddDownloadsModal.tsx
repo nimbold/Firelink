@@ -53,6 +53,7 @@ import {
   isAddDownloadMetadataError,
   isMetadataRefreshableRow,
   selectExactMediaSelection,
+  classifyMediaMetadataError,
   updateRowIfCurrent,
   type AddDownloadDraftRow,
   type MediaSelection
@@ -174,6 +175,17 @@ export const AddDownloadsModal = () => {
     keychainPromptDismissed,
     showKeychainModal
   } = useSettingsStore();
+
+  const mediaMetadataErrorLabel = (reason: AddDownloadDraftRow['metadataBlockedReason']): string => {
+    switch (reason) {
+      case 'cookie-file': return t($ => $.addDownloads.cookieFileInvalid);
+      case 'youtube-bot': return t($ => $.addDownloads.youtubeBotBlocked);
+      case 'youtube-auth': return t($ => $.addDownloads.youtubeAuthenticationRequired);
+      case 'youtube-po-token': return t($ => $.addDownloads.youtubePoTokenRequired);
+      case 'unsafe-url': return t($ => $.addDownloads.unsafeUrl);
+      default: return t($ => $.addDownloads.metadataFailed);
+    }
+  };
 
   const [urls, setUrls] = useState('');
   const [selectedItemIndex, setSelectedItemIndex] = useState<number | null>(null);
@@ -816,6 +828,7 @@ export const AddDownloadsModal = () => {
             const rowCookies = cookiesForRow(row.sourceUrl, row.sourceUrl, row.isMedia, row.mediaMode, contextUrl);
             const mediaMetadataArgs = {
               url: row.sourceUrl,
+              cookieFile: settingsStore.mediaCookieFile?.trim() || null,
               cookieBrowser: browserArg,
               userAgent: settingsStore.customUserAgent.trim() || null,
               username: useAuth
@@ -975,7 +988,7 @@ export const AddDownloadsModal = () => {
             'SSRF blocked: Private/local IP not allowed'
           ].some(prefix => errorMessage.startsWith(prefix))
             ? 'unsafe-url' as const
-            : undefined;
+            : row.isMedia ? classifyMediaMetadataError(errorMessage) : undefined;
           shouldWakeMetadataScheduler = false;
           setParsedItems(current => updateRowIfCurrent(
             current,
@@ -2525,7 +2538,13 @@ export const AddDownloadsModal = () => {
                                   ? t($ => $.addDownloads.fallback)
                                   : isAddDownloadMetadataError(item)
                                   ? item.status === 'metadata-error'
-                                    ? item.metadataBlockedReason === 'unsafe-url' ? t($ => $.addDownloads.unsafeUrl) : item.isPlaylist ? t($ => $.addDownloads.playlistFailed) : item.isMedia ? t($ => $.addDownloads.metadataFailed) : t($ => $.addDownloads.fallback)
+                                    ? item.metadataBlockedReason === 'unsafe-url'
+                                      ? t($ => $.addDownloads.unsafeUrl)
+                                      : item.isPlaylist
+                                        ? t($ => $.addDownloads.playlistFailed)
+                                        : item.isMedia
+                                          ? mediaMetadataErrorLabel(item.metadataBlockedReason)
+                                          : t($ => $.addDownloads.fallback)
                                     : t($ => $.addDownloads.metadataFailed)
                                   : item.status === 'invalid'
                                     ? t($ => $.addDownloads.invalid)

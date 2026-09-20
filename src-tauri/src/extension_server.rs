@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{oneshot, watch};
 use tower_http::{
@@ -48,7 +48,12 @@ const SERVER_PROOF_HEADER: &str = "x-firelink-server-proof";
 const SERVER_PORT_HEADER: &str = "x-firelink-server-port";
 const SMOKE_PROCESS_ID_HEADER: &str = "x-firelink-smoke-process-id";
 const SERVER_PROOF_PREFIX: &[u8] = b"firelink-server-proof\n";
-const PROTOCOL_VERSION: &str = "6";
+const PROTOCOL_VERSION: &str = "7";
+const MEDIA_HANDOFF_PROTOCOL_VERSION: u16 = 7;
+const MAX_MEDIA_HANDOFF_ID_BYTES: usize = 128;
+const MAX_ACTIVE_MEDIA_HANDOFFS: usize = 64;
+const MEDIA_HANDOFF_TTL: Duration = Duration::from_secs(30);
+const MEDIA_DISCOVERY_ATTEMPT_TTL: Duration = Duration::from_secs(10);
 const MAX_PENDING_EXTENSION_ACKS: usize = 64;
 const EXTENSION_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -57,7 +62,48 @@ pub type SharedExtensionToken = Arc<RwLock<String>>;
 pub type SharedFrontendReady = Arc<AtomicBool>;
 pub type SharedServerPort = Arc<RwLock<Option<u16>>>;
 pub type SharedExtensionAcks = Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>;
+pub type SharedMediaHandoffs = Arc<Mutex<HashMap<String, MediaHandoffState>>>;
 type ReplayCache = Arc<Mutex<HashMap<String, u64>>>;
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum MediaHandoffPhase {
+    Initial,
+    Discovered,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MediaDiscoveryContent {
+    urls: Vec<String>,
+    referer: Option<String>,
+    headers: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MediaDiscoveryDeliveryResult {
+    Acknowledged,
+    RetryableFailure,
+}
+
+#[derive(Clone, Debug)]
+enum MediaDiscoveryState {
+    InFlight {
+        content: MediaDiscoveryContent,
+        attempt_id: String,
+        completion: watch::Sender<Option<MediaDiscoveryDeliveryResult>>,
+        attempt_expires_at: Instant,
+    },
+    Acknowledged {
+        content: MediaDiscoveryContent,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct MediaHandoffState {
+    discovery: Option<MediaDiscoveryState>,
+    expires_at: Instant,
+}
 
 #[derive(Clone)]
 pub struct ServerState {
@@ -65,6 +111,7 @@ pub struct ServerState {
     pub pairing_token: SharedExtensionToken,
     pub frontend_ready: SharedFrontendReady,
     pub extension_acks: SharedExtensionAcks,
+    pub media_handoffs: SharedMediaHandoffs,
     pub replay_cache: ReplayCache,
     pub server_session: String,
     pub bound_port: u16,
@@ -95,6 +142,12 @@ struct ExtensionRequest {
     batch_name: Option<String>,
     #[serde(default)]
     torrent_bytes_base64: Option<String>,
+    #[serde(default, alias = "media_handoff_id")]
+    handoff_id: Option<String>,
+    #[serde(default, alias = "media_phase")]
+    phase: Option<MediaHandoffPhase>,
+    #[serde(default)]
+    media_protocol_version: Option<u16>,
 }
 
 #[derive(Clone, Deserialize, Serialize, TS)]
@@ -121,10 +174,38 @@ pub struct ExtensionDownload {
     batch: bool,
     batch_name: Option<String>,
     #[ts(optional)]
+    handoff_id: Option<String>,
+    #[ts(optional)]
+    phase: Option<MediaHandoffPhase>,
+    #[ts(optional)]
     torrent_path: Option<String>,
     #[serde(skip)]
     #[ts(skip)]
     torrent_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct ExtensionMediaDiscoveryUpdate {
+    #[ts(optional)]
+    request_id: Option<String>,
+    handoff_id: String,
+    phase: MediaHandoffPhase,
+    urls: Vec<String>,
+    referer: Option<String>,
+    headers: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExtensionMediaDiscoveryRequest {
+    handoff_id: String,
+    phase: MediaHandoffPhase,
+    media_protocol_version: u16,
+    urls: Vec<String>,
+    #[serde(default)]
+    referer: Option<String>,
+    #[serde(default)]
+    headers: Option<String>,
 }
 
 pub async fn start_server(
@@ -132,6 +213,7 @@ pub async fn start_server(
     pairing_token: SharedExtensionToken,
     frontend_ready: SharedFrontendReady,
     extension_acks: SharedExtensionAcks,
+    media_handoffs: SharedMediaHandoffs,
     server_port: SharedServerPort,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<(), String> {
@@ -141,6 +223,7 @@ pub async fn start_server(
         pairing_token,
         frontend_ready,
         extension_acks,
+        media_handoffs,
         replay_cache: Arc::new(Mutex::new(HashMap::new())),
         server_session: uuid::Uuid::new_v4().simple().to_string(),
         bound_port: port,
@@ -157,6 +240,7 @@ pub async fn start_server(
     let app = Router::new()
         .route("/ping", get(ping_handler))
         .route("/download", post(download_handler))
+        .route("/media-discovery", post(media_discovery_handler))
         .layer(cors)
         .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BODY_BYTES))
         .layer(middleware::from_fn(add_server_identity))
@@ -366,6 +450,22 @@ async fn download_handler(
         None => return Err(StatusCode::BAD_REQUEST),
     };
 
+    if download.phase == Some(MediaHandoffPhase::Discovered) {
+        let update = ExtensionMediaDiscoveryUpdate {
+            request_id: None,
+            handoff_id: download
+                .handoff_id
+                .ok_or(StatusCode::BAD_REQUEST)?,
+            phase: MediaHandoffPhase::Discovered,
+            urls: download.urls,
+            referer: download.referer,
+            headers: download.headers,
+        };
+        return deliver_media_discovery_update(&state, headers, update).await;
+    }
+
+    let media_handoff_id = download.handoff_id.clone();
+
     let request_id = uuid::Uuid::new_v4().simple().to_string();
     if let Some(torrent_bytes) = download.torrent_bytes.take() {
         let torrent_path = crate::torrent::cache_torrent_bytes(
@@ -393,14 +493,29 @@ async fn download_handler(
     }
 
     if !wait_for_frontend(&state.frontend_ready).await {
+        if let Some(handoff_id) = media_handoff_id.as_deref() {
+            remove_media_handoff(&state.media_handoffs, handoff_id);
+        }
         if cached_torrent {
             crate::torrent::remove_managed_torrent(&state.app_handle, &request_id).await;
         }
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
+    if let Some(handoff_id) = media_handoff_id.as_deref() {
+        if !register_media_handoff(&state.media_handoffs, handoff_id) {
+            if cached_torrent {
+                crate::torrent::remove_managed_torrent(&state.app_handle, &request_id).await;
+            }
+            return Err(StatusCode::CONFLICT);
+        }
+    }
+
     let Some(ack_receiver) = register_extension_ack(&state.extension_acks, request_id.clone())
     else {
+        if let Some(handoff_id) = media_handoff_id.as_deref() {
+            remove_media_handoff(&state.media_handoffs, handoff_id);
+        }
         if cached_torrent {
             crate::torrent::remove_managed_torrent(&state.app_handle, &request_id).await;
         }
@@ -414,6 +529,9 @@ async fn download_handler(
         .is_err()
     {
         remove_extension_ack(&state.extension_acks, &request_id);
+        if let Some(handoff_id) = media_handoff_id.as_deref() {
+            remove_media_handoff(&state.media_handoffs, handoff_id);
+        }
         if cached_torrent {
             crate::torrent::remove_managed_torrent(&state.app_handle, &request_id).await;
         }
@@ -431,6 +549,206 @@ async fn download_handler(
         return Err(StatusCode::GATEWAY_TIMEOUT);
     }
 
+    let proof = sign_server_proof(timestamp_str, nonce, state.bound_port, &state.pairing_token)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut response = Response::new(Body::empty());
+    response.headers_mut().insert(
+        SERVER_PROOF_HEADER,
+        HeaderValue::from_str(&proof).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
+    response.headers_mut().insert(
+        SERVER_PORT_HEADER,
+        HeaderValue::from_str(&state.bound_port.to_string())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
+    response.headers_mut().insert(
+        SERVER_SESSION_HEADER,
+        HeaderValue::from_str(&state.server_session)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
+    Ok(response)
+}
+
+async fn media_discovery_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, StatusCode> {
+    if !has_allowed_request_origin(&headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    require_frontend_ready(&state.frontend_ready)?;
+
+    let _nonce = required_client_nonce(&headers).ok_or(StatusCode::FORBIDDEN)?;
+    let signature = headers
+        .get("x-firelink-signature")
+        .and_then(|value| value.to_str().ok())
+        .ok_or(StatusCode::FORBIDDEN)?;
+    let timestamp_str = headers
+        .get("x-firelink-timestamp")
+        .and_then(|value| value.to_str().ok())
+        .ok_or(StatusCode::FORBIDDEN)?;
+    let session_binding = session_binding_requested(&headers).map_err(|_| StatusCode::FORBIDDEN)?;
+    let server_session =
+        server_session_for_request(&headers, &state.server_session).map_err(|_| StatusCode::FORBIDDEN)?;
+    if session_binding && server_session.is_none() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let timestamp = verify_signature(
+        signature,
+        timestamp_str,
+        &body,
+        &state.pairing_token,
+        server_session,
+    )
+    .map_err(|_| StatusCode::FORBIDDEN)?;
+    if !claim_request(signature, timestamp, &state.replay_cache) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let payload: ExtensionMediaDiscoveryRequest =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let update = normalize_media_discovery_update(payload).ok_or(StatusCode::BAD_REQUEST)?;
+    deliver_media_discovery_update(&state, headers, update).await
+}
+
+async fn deliver_media_discovery_update(
+    state: &ServerState,
+    headers: HeaderMap,
+    update: ExtensionMediaDiscoveryUpdate,
+) -> Result<Response, StatusCode> {
+    let nonce = required_client_nonce(&headers).ok_or(StatusCode::FORBIDDEN)?;
+    let timestamp_str = headers
+        .get("x-firelink-timestamp")
+        .and_then(|value| value.to_str().ok())
+        .ok_or(StatusCode::FORBIDDEN)?;
+    let handoff_id = update.handoff_id.clone();
+    let request_id = uuid::Uuid::new_v4().simple().to_string();
+    match admit_media_discovery_update(&state.media_handoffs, &update, request_id.clone()) {
+        MediaDiscoveryAdmission::Missing => return Err(StatusCode::NOT_FOUND),
+        MediaDiscoveryAdmission::Conflict => return Err(StatusCode::CONFLICT),
+        MediaDiscoveryAdmission::RegistryUnavailable => {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        MediaDiscoveryAdmission::Duplicate => {
+            return signed_server_response(timestamp_str, nonce, state);
+        }
+        MediaDiscoveryAdmission::InFlight { completion } => {
+            return match tokio::time::timeout(
+                EXTENSION_ACK_TIMEOUT,
+                wait_for_media_discovery_completion(completion),
+            )
+            .await
+            {
+                Ok(Some(MediaDiscoveryDeliveryResult::Acknowledged)) => {
+                    signed_server_response(timestamp_str, nonce, state)
+                }
+                Ok(Some(MediaDiscoveryDeliveryResult::RetryableFailure))
+                | Ok(None)
+                | Err(_) => {
+                    Err(StatusCode::GATEWAY_TIMEOUT)
+                }
+            };
+        }
+        MediaDiscoveryAdmission::Fresh => {}
+    }
+
+    let is_hidden = state
+        .app_handle
+        .get_webview_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .is_some_and(|is_visible| !is_visible);
+    crate::restore_main_window(&state.app_handle);
+    if is_hidden {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    if !wait_for_frontend(&state.frontend_ready).await {
+        finish_media_discovery_attempt(
+            &state.media_handoffs,
+            &handoff_id,
+            &request_id,
+            &update,
+            MediaDiscoveryDeliveryResult::RetryableFailure,
+        );
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    let Some(ack_receiver) = register_extension_ack(&state.extension_acks, request_id.clone())
+    else {
+        finish_media_discovery_attempt(
+            &state.media_handoffs,
+            &handoff_id,
+            &request_id,
+            &update,
+            MediaDiscoveryDeliveryResult::RetryableFailure,
+        );
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let update_for_cleanup = update.clone();
+    let mut event = update;
+    event.request_id = Some(request_id.clone());
+
+    if state
+        .app_handle
+        .emit("extension-media-discovery", event)
+        .is_err()
+    {
+        remove_extension_ack(&state.extension_acks, &request_id);
+        finish_media_discovery_attempt(
+            &state.media_handoffs,
+            &handoff_id,
+            &request_id,
+            &update_for_cleanup,
+            MediaDiscoveryDeliveryResult::RetryableFailure,
+        );
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    if tokio::time::timeout(EXTENSION_ACK_TIMEOUT, ack_receiver)
+        .await
+        .is_err()
+    {
+        remove_extension_ack(&state.extension_acks, &request_id);
+        finish_media_discovery_attempt(
+            &state.media_handoffs,
+            &handoff_id,
+            &request_id,
+            &update_for_cleanup,
+            MediaDiscoveryDeliveryResult::RetryableFailure,
+        );
+        return Err(StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    if !finish_media_discovery_attempt(
+        &state.media_handoffs,
+        &handoff_id,
+        &request_id,
+        &update_for_cleanup,
+        MediaDiscoveryDeliveryResult::Acknowledged,
+    ) {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    signed_server_response(timestamp_str, nonce, state)
+}
+
+async fn wait_for_media_discovery_completion(
+    mut completion: watch::Receiver<Option<MediaDiscoveryDeliveryResult>>,
+) -> Option<MediaDiscoveryDeliveryResult> {
+    loop {
+        let result = *completion.borrow();
+        if result.is_some() {
+            return result;
+        }
+        completion.changed().await.ok()?;
+    }
+}
+
+fn signed_server_response(
+    timestamp_str: &str,
+    nonce: &str,
+    state: &ServerState,
+) -> Result<Response, StatusCode> {
     let proof = sign_server_proof(timestamp_str, nonce, state.bound_port, &state.pairing_token)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut response = Response::new(Body::empty());
@@ -485,9 +803,254 @@ pub fn acknowledge_extension_download(registry: &SharedExtensionAcks, request_id
     sender.send(()).is_ok()
 }
 
+pub fn reject_extension_download(registry: &SharedExtensionAcks, request_id: &str) -> bool {
+    registry
+        .lock()
+        .ok()
+        .and_then(|mut pending| pending.remove(request_id))
+        .is_some()
+}
+
 fn remove_extension_ack(registry: &SharedExtensionAcks, request_id: &str) {
     if let Ok(mut pending) = registry.lock() {
         pending.remove(request_id);
+    }
+}
+
+fn is_valid_media_handoff_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_MEDIA_HANDOFF_ID_BYTES
+        && value.is_ascii()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn media_protocol_version_is_supported() -> bool {
+    PROTOCOL_VERSION.parse::<u16>().ok() == Some(MEDIA_HANDOFF_PROTOCOL_VERSION)
+}
+
+fn normalize_media_handoff_metadata(
+    media: bool,
+    handoff_id: Option<String>,
+    phase: Option<MediaHandoffPhase>,
+    protocol_version: Option<u16>,
+) -> Option<(Option<String>, Option<MediaHandoffPhase>)> {
+    if !media {
+        return (handoff_id.is_none() && phase.is_none() && protocol_version.is_none())
+            .then_some((None, None));
+    }
+
+    match (handoff_id, phase, protocol_version) {
+        (None, None, None) => Some((None, None)),
+        (
+            Some(value),
+            Some(phase @ (MediaHandoffPhase::Initial | MediaHandoffPhase::Discovered)),
+            Some(protocol_version),
+        )
+            if is_valid_media_handoff_id(&value)
+                && protocol_version == MEDIA_HANDOFF_PROTOCOL_VERSION
+                && media_protocol_version_is_supported() =>
+        {
+            Some((Some(value), Some(phase)))
+        }
+        _ => None,
+    }
+}
+
+fn normalize_media_discovery_update(
+    payload: ExtensionMediaDiscoveryRequest,
+) -> Option<ExtensionMediaDiscoveryUpdate> {
+    if payload.phase != MediaHandoffPhase::Discovered
+        || payload.media_protocol_version != MEDIA_HANDOFF_PROTOCOL_VERSION
+        || !media_protocol_version_is_supported()
+        || !is_valid_media_handoff_id(&payload.handoff_id)
+        || payload.urls.len() != 1
+    {
+        return None;
+    }
+
+    let url = normalize_media_url(payload.urls.into_iter().next()?.as_str())?;
+    Some(ExtensionMediaDiscoveryUpdate {
+        request_id: None,
+        handoff_id: payload.handoff_id,
+        phase: MediaHandoffPhase::Discovered,
+        urls: vec![url],
+        referer: normalize_referer(payload.referer),
+        headers: normalize_headers(payload.headers, true),
+    })
+}
+
+fn media_discovery_content(update: &ExtensionMediaDiscoveryUpdate) -> MediaDiscoveryContent {
+    MediaDiscoveryContent {
+        urls: update.urls.clone(),
+        referer: update.referer.clone(),
+        headers: update.headers.clone(),
+    }
+}
+
+fn prune_media_handoffs(registry: &mut HashMap<String, MediaHandoffState>) {
+    let now = Instant::now();
+    for state in registry.values_mut() {
+        let attempt_expired = matches!(
+            state.discovery.as_ref(),
+            Some(MediaDiscoveryState::InFlight {
+                attempt_expires_at,
+                ..
+            }) if *attempt_expires_at <= now
+        );
+        if attempt_expired {
+            if let Some(MediaDiscoveryState::InFlight { completion, .. }) = state.discovery.take() {
+                let _ = completion.send(Some(MediaDiscoveryDeliveryResult::RetryableFailure));
+            }
+        }
+    }
+    registry.retain(|_, state| state.expires_at > now);
+}
+
+fn register_media_handoff(registry: &SharedMediaHandoffs, handoff_id: &str) -> bool {
+    let Ok(mut registry) = registry.lock() else {
+        return false;
+    };
+    prune_media_handoffs(&mut registry);
+    if registry.contains_key(handoff_id) || registry.len() >= MAX_ACTIVE_MEDIA_HANDOFFS {
+        return false;
+    }
+    registry.insert(
+        handoff_id.to_string(),
+        MediaHandoffState {
+            discovery: None,
+            expires_at: Instant::now() + MEDIA_HANDOFF_TTL,
+        },
+    );
+    true
+}
+
+fn remove_media_handoff(registry: &SharedMediaHandoffs, handoff_id: &str) {
+    if let Ok(mut registry) = registry.lock() {
+        registry.remove(handoff_id);
+    }
+}
+
+#[derive(Debug)]
+enum MediaDiscoveryAdmission {
+    Fresh,
+    InFlight {
+        completion: watch::Receiver<Option<MediaDiscoveryDeliveryResult>>,
+    },
+    Duplicate,
+    Missing,
+    Conflict,
+    RegistryUnavailable,
+}
+
+fn admit_media_discovery_update(
+    registry: &SharedMediaHandoffs,
+    update: &ExtensionMediaDiscoveryUpdate,
+    attempt_id: String,
+) -> MediaDiscoveryAdmission {
+    let Ok(mut registry) = registry.lock() else {
+        return MediaDiscoveryAdmission::RegistryUnavailable;
+    };
+    prune_media_handoffs(&mut registry);
+    let Some(state) = registry.get_mut(&update.handoff_id) else {
+        return MediaDiscoveryAdmission::Missing;
+    };
+    let content = media_discovery_content(update);
+    match state.discovery.take() {
+        None => {
+            let (completion, _waiter) = watch::channel(None);
+            state.discovery = Some(MediaDiscoveryState::InFlight {
+                content,
+                attempt_id,
+                completion,
+                attempt_expires_at: Instant::now() + MEDIA_DISCOVERY_ATTEMPT_TTL,
+            });
+            state.expires_at = Instant::now() + MEDIA_HANDOFF_TTL;
+            MediaDiscoveryAdmission::Fresh
+        }
+        Some(MediaDiscoveryState::InFlight {
+            content: previous,
+            attempt_id: previous_attempt_id,
+            completion,
+            attempt_expires_at,
+        }) => {
+            let same_content = previous == content;
+            state.discovery = Some(MediaDiscoveryState::InFlight {
+                content: previous,
+                attempt_id: previous_attempt_id,
+                completion: completion.clone(),
+                attempt_expires_at,
+            });
+            if same_content {
+                MediaDiscoveryAdmission::InFlight {
+                    completion: completion.subscribe(),
+                }
+            } else {
+                MediaDiscoveryAdmission::Conflict
+            }
+        }
+        Some(MediaDiscoveryState::Acknowledged { content: previous }) => {
+            let same_content = previous == content;
+            state.discovery = Some(MediaDiscoveryState::Acknowledged { content: previous });
+            if same_content {
+                MediaDiscoveryAdmission::Duplicate
+            } else {
+                MediaDiscoveryAdmission::Conflict
+            }
+        }
+    }
+}
+
+fn finish_media_discovery_attempt(
+    registry: &SharedMediaHandoffs,
+    handoff_id: &str,
+    attempt_id: &str,
+    update: &ExtensionMediaDiscoveryUpdate,
+    result: MediaDiscoveryDeliveryResult,
+) -> bool {
+    let completion = {
+        let Ok(mut registry) = registry.lock() else {
+            return false;
+        };
+        let Some(state) = registry.get_mut(handoff_id) else {
+            return false;
+        };
+        let Some(MediaDiscoveryState::InFlight {
+            content,
+            attempt_id: current_attempt_id,
+            completion,
+            attempt_expires_at,
+        }) = state.discovery.take()
+        else {
+            return false;
+        };
+        if current_attempt_id != attempt_id || content != media_discovery_content(update) {
+            state.discovery = Some(MediaDiscoveryState::InFlight {
+                content,
+                attempt_id: current_attempt_id,
+                completion,
+                attempt_expires_at,
+            });
+            return false;
+        }
+
+        if result == MediaDiscoveryDeliveryResult::Acknowledged {
+            state.discovery = Some(MediaDiscoveryState::Acknowledged { content });
+        }
+        completion
+    };
+
+    let _ = completion.send(Some(result));
+    true
+}
+
+#[cfg(test)]
+fn expire_media_handoff(registry: &SharedMediaHandoffs, handoff_id: &str) {
+    if let Ok(mut registry) = registry.lock() {
+        if let Some(state) = registry.get_mut(handoff_id) {
+            state.expires_at = Instant::now() - Duration::from_secs(1);
+        }
     }
 }
 
@@ -513,6 +1076,13 @@ fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload
         return None;
     }
 
+    let (handoff_id, phase) = normalize_media_handoff_metadata(
+        payload.media,
+        payload.handoff_id.take(),
+        payload.phase.take(),
+        payload.media_protocol_version.take(),
+    )?;
+
     let torrent_bytes = match payload.torrent_bytes_base64.as_deref() {
         Some(encoded) => Some(decode_torrent_bytes(encoded)?),
         None => None,
@@ -532,6 +1102,13 @@ fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload
         .filter(|url| seen.insert(url.clone()))
         .collect::<Vec<_>>();
     if urls.is_empty() {
+        return None;
+    }
+    if matches!(
+        phase,
+        Some(MediaHandoffPhase::Initial | MediaHandoffPhase::Discovered)
+    ) && urls.len() != 1
+    {
         return None;
     }
     if torrent_bytes.is_some()
@@ -630,6 +1207,8 @@ fn normalize_download(mut payload: ExtensionRequest) -> Option<ExtensionDownload
         torrent,
         batch,
         batch_name,
+        handoff_id,
+        phase,
         torrent_path: None,
         torrent_bytes,
     })
@@ -1006,14 +1585,22 @@ fn is_allowed_origin(origin: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        acknowledge_extension_download, add_server_identity, claim_request_at,
-        decode_torrent_bytes, has_allowed_request_origin, is_valid_client_nonce, normalize_download,
-        normalize_headers, normalize_media_url, normalize_referer, normalize_url, require_frontend_ready,
-        required_client_nonce, same_origin_url, sanitize_filename, server_session_for_request,
-        session_binding_requested,
+        acknowledge_extension_download, add_server_identity, admit_media_discovery_update,
+        claim_request_at, decode_torrent_bytes, has_allowed_request_origin,
+        is_valid_client_nonce, is_valid_media_handoff_id, normalize_download,
+        normalize_headers, normalize_media_discovery_update, normalize_media_handoff_metadata,
+        normalize_media_url, normalize_referer, normalize_url,
+        expire_media_handoff, finish_media_discovery_attempt, register_media_handoff,
+        reject_extension_download,
+        require_frontend_ready, required_client_nonce, same_origin_url, sanitize_filename,
+        server_session_for_request, session_binding_requested,
         sign_server_proof,
-        ExtensionCookieScope, ExtensionRequest, MAX_MEDIA_HEADER_VALUE_BYTES,
-        MAX_MEDIA_REFERER_BYTES, MAX_URL_COUNT,
+        wait_for_media_discovery_completion,
+        ExtensionCookieScope, ExtensionMediaDiscoveryRequest, ExtensionRequest,
+        MediaDiscoveryAdmission, MediaDiscoveryDeliveryResult, MediaHandoffPhase,
+        MAX_MEDIA_HEADER_VALUE_BYTES, MAX_MEDIA_HANDOFF_ID_BYTES, MAX_MEDIA_REFERER_BYTES,
+        MAX_URL_COUNT,
+        MEDIA_HANDOFF_PROTOCOL_VERSION,
         PROTOCOL_VERSION_HEADER, SERVER_HEADER, SERVER_SESSION_HEADER,
         SESSION_BINDING_HEADER,
     };
@@ -1029,6 +1616,23 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, RwLock};
+
+    fn normalized_discovery_update(
+        handoff_id: &str,
+        url: &str,
+        referer: Option<&str>,
+        headers: Option<&str>,
+    ) -> super::ExtensionMediaDiscoveryUpdate {
+        normalize_media_discovery_update(ExtensionMediaDiscoveryRequest {
+            handoff_id: handoff_id.to_string(),
+            phase: MediaHandoffPhase::Discovered,
+            media_protocol_version: MEDIA_HANDOFF_PROTOCOL_VERSION,
+            urls: vec![url.to_string()],
+            referer: referer.map(str::to_string),
+            headers: headers.map(str::to_string),
+        })
+        .expect("valid discovery payload")
+    }
 
     #[tokio::test]
     async fn identifies_every_extension_server_response() {
@@ -1051,7 +1655,7 @@ mod tests {
         assert_eq!(response.headers().get(SERVER_HEADER).unwrap(), "1");
         assert_eq!(
             response.headers().get(PROTOCOL_VERSION_HEADER).unwrap(),
-            "6"
+            "7"
         );
 
         server.abort();
@@ -1067,6 +1671,267 @@ mod tests {
 
         frontend_ready.store(true, Ordering::Release);
         assert_eq!(require_frontend_ready(&frontend_ready), Ok(()));
+    }
+
+    #[test]
+    fn gates_the_two_phase_media_contract_and_rejects_malformed_ids_or_phases() {
+        assert_eq!(MEDIA_HANDOFF_PROTOCOL_VERSION, 7);
+        assert!(is_valid_media_handoff_id("media-opaque_01"));
+        assert!(!is_valid_media_handoff_id(""));
+        assert!(!is_valid_media_handoff_id("media id"));
+        assert!(!is_valid_media_handoff_id(&"x".repeat(MAX_MEDIA_HANDOFF_ID_BYTES + 1)));
+
+        assert_eq!(
+            normalize_media_handoff_metadata(
+                true,
+                Some("media-opaque".to_string()),
+                Some(MediaHandoffPhase::Initial),
+                Some(MEDIA_HANDOFF_PROTOCOL_VERSION),
+            ),
+            Some((
+                Some("media-opaque".to_string()),
+                Some(MediaHandoffPhase::Initial),
+            ))
+        );
+        assert!(normalize_media_handoff_metadata(
+            true,
+            Some("media-opaque".to_string()),
+            None,
+            Some(MEDIA_HANDOFF_PROTOCOL_VERSION),
+        )
+        .is_none());
+        assert!(normalize_media_handoff_metadata(
+            false,
+            Some("ordinary".to_string()),
+            Some(MediaHandoffPhase::Initial),
+            Some(MEDIA_HANDOFF_PROTOCOL_VERSION),
+        )
+        .is_none());
+        assert!(normalize_media_handoff_metadata(
+            true,
+            Some("media-opaque".to_string()),
+            Some(MediaHandoffPhase::Initial),
+            Some(MEDIA_HANDOFF_PROTOCOL_VERSION - 1),
+        )
+        .is_none());
+        assert!(normalize_media_handoff_metadata(
+            true,
+            None,
+            None,
+            Some(MEDIA_HANDOFF_PROTOCOL_VERSION),
+        )
+        .is_none());
+        assert!(serde_json::from_str::<MediaHandoffPhase>("\"invalid\"").is_err());
+    }
+
+    #[test]
+    fn normalizes_only_versioned_discovery_updates() {
+        let valid = ExtensionMediaDiscoveryRequest {
+            handoff_id: "media-opaque".to_string(),
+            phase: MediaHandoffPhase::Discovered,
+            media_protocol_version: MEDIA_HANDOFF_PROTOCOL_VERSION,
+            urls: vec!["https://cdn.example/master.m3u8#fragment".to_string()],
+            referer: Some("https://video.example/watch".to_string()),
+            headers: Some("Cookie: discarded\nUser-Agent: Firefox".to_string()),
+        };
+        let update = normalize_media_discovery_update(valid).expect("valid discovery update");
+        assert_eq!(update.urls, vec!["https://cdn.example/master.m3u8"]);
+        assert_eq!(update.referer.as_deref(), Some("https://video.example/watch"));
+        assert_eq!(update.headers.as_deref(), Some("User-Agent: Firefox"));
+
+        for invalid in [
+            ExtensionMediaDiscoveryRequest {
+                handoff_id: "media-opaque".to_string(),
+                phase: MediaHandoffPhase::Initial,
+                media_protocol_version: MEDIA_HANDOFF_PROTOCOL_VERSION,
+                urls: vec!["https://cdn.example/master.m3u8".to_string()],
+                referer: None,
+                headers: None,
+            },
+            ExtensionMediaDiscoveryRequest {
+                handoff_id: "media opaque".to_string(),
+                phase: MediaHandoffPhase::Discovered,
+                media_protocol_version: MEDIA_HANDOFF_PROTOCOL_VERSION,
+                urls: vec!["https://cdn.example/master.m3u8".to_string()],
+                referer: None,
+                headers: None,
+            },
+            ExtensionMediaDiscoveryRequest {
+                handoff_id: "media-opaque".to_string(),
+                phase: MediaHandoffPhase::Discovered,
+                media_protocol_version: MEDIA_HANDOFF_PROTOCOL_VERSION - 1,
+                urls: vec!["https://cdn.example/master.m3u8".to_string()],
+                referer: None,
+                headers: None,
+            },
+            ExtensionMediaDiscoveryRequest {
+                handoff_id: "media-opaque".to_string(),
+                phase: MediaHandoffPhase::Discovered,
+                media_protocol_version: MEDIA_HANDOFF_PROTOCOL_VERSION,
+                urls: Vec::new(),
+                referer: None,
+                headers: None,
+            },
+        ] {
+            assert!(normalize_media_discovery_update(invalid).is_none());
+        }
+    }
+
+    #[test]
+    fn normalizes_initial_media_handoff_without_forwarding_cookies() {
+        let download = normalize_download(ExtensionRequest {
+            urls: vec!["https://video.example/watch?id=1".to_string()],
+            referer: Some("https://video.example/watch?id=1".to_string()),
+            silent: false,
+            filename: None,
+            headers: Some("Cookie: browser-secret\nUser-Agent: Firefox".to_string()),
+            cookies: Some("browser-secret".to_string()),
+            cookie_scopes: None,
+            media: true,
+            torrent: false,
+            batch: false,
+            batch_name: None,
+            torrent_bytes_base64: None,
+            handoff_id: Some("media-opaque".to_string()),
+            phase: Some(MediaHandoffPhase::Initial),
+            media_protocol_version: Some(MEDIA_HANDOFF_PROTOCOL_VERSION),
+        })
+        .expect("valid initial media handoff");
+
+        assert_eq!(download.handoff_id.as_deref(), Some("media-opaque"));
+        assert_eq!(download.phase, Some(MediaHandoffPhase::Initial));
+        assert_eq!(download.cookies, None);
+        assert_eq!(download.headers.as_deref(), Some("User-Agent: Firefox"));
+    }
+
+    #[tokio::test]
+    async fn discovery_updates_require_ack_before_deduplication_and_roll_back_on_failure() {
+        let registry = Arc::new(Mutex::new(HashMap::new()));
+        assert!(register_media_handoff(&registry, "media-opaque"));
+
+        let update = normalized_discovery_update(
+            "media-opaque",
+            "https://cdn.example/stream.m3u8#fragment",
+            Some("https://video.example/watch"),
+            Some("Cookie: discarded\nUser-Agent: Firefox"),
+        );
+        assert!(matches!(
+            admit_media_discovery_update(&registry, &update, "attempt-1".to_string()),
+            MediaDiscoveryAdmission::Fresh
+        ));
+        let failure_completion = match admit_media_discovery_update(
+            &registry,
+            &update,
+            "attempt-2".to_string(),
+        ) {
+            MediaDiscoveryAdmission::InFlight { completion } => completion,
+            admission => panic!("expected an in-flight duplicate, got {admission:?}"),
+        };
+        let failure_waiter = tokio::spawn(wait_for_media_discovery_completion(failure_completion));
+
+        assert!(finish_media_discovery_attempt(
+            &registry,
+            "media-opaque",
+            "attempt-1",
+            &update,
+            MediaDiscoveryDeliveryResult::RetryableFailure,
+        ));
+        assert_eq!(
+            failure_waiter.await.unwrap(),
+            Some(MediaDiscoveryDeliveryResult::RetryableFailure)
+        );
+        assert!(matches!(
+            admit_media_discovery_update(&registry, &update, "attempt-3".to_string()),
+            MediaDiscoveryAdmission::Fresh
+        ));
+        let success_completion = match admit_media_discovery_update(
+            &registry,
+            &update,
+            "attempt-4".to_string(),
+        ) {
+            MediaDiscoveryAdmission::InFlight { completion } => completion,
+            admission => panic!("expected an in-flight duplicate, got {admission:?}"),
+        };
+        let success_waiter = tokio::spawn(wait_for_media_discovery_completion(success_completion));
+        assert!(finish_media_discovery_attempt(
+            &registry,
+            "media-opaque",
+            "attempt-3",
+            &update,
+            MediaDiscoveryDeliveryResult::Acknowledged,
+        ));
+        assert_eq!(
+            success_waiter.await.unwrap(),
+            Some(MediaDiscoveryDeliveryResult::Acknowledged)
+        );
+        assert!(matches!(
+            admit_media_discovery_update(&registry, &update, "attempt-5".to_string()),
+            MediaDiscoveryAdmission::Duplicate
+        ));
+
+        let conflicting = normalized_discovery_update(
+            "media-opaque",
+            "https://cdn.example/older.m3u8",
+            None,
+            None,
+        );
+        assert!(matches!(
+            admit_media_discovery_update(&registry, &conflicting, "attempt-6".to_string()),
+            MediaDiscoveryAdmission::Conflict
+        ));
+        assert_eq!(update.urls, vec!["https://cdn.example/stream.m3u8"]);
+        assert_eq!(update.headers.as_deref(), Some("User-Agent: Firefox"));
+    }
+
+    #[test]
+    fn missing_and_expired_discovery_handoffs_are_not_successful_duplicates() {
+        let missing_registry = Arc::new(Mutex::new(HashMap::new()));
+        let update = normalized_discovery_update(
+            "missing-handoff",
+            "https://cdn.example/stream.m3u8",
+            None,
+            None,
+        );
+        assert!(matches!(
+            admit_media_discovery_update(&missing_registry, &update, "attempt-1".to_string()),
+            MediaDiscoveryAdmission::Missing
+        ));
+
+        let expired_registry = Arc::new(Mutex::new(HashMap::new()));
+        assert!(register_media_handoff(&expired_registry, "expired-handoff"));
+        expire_media_handoff(&expired_registry, "expired-handoff");
+        let expired = normalized_discovery_update(
+            "expired-handoff",
+            "https://cdn.example/stream.m3u8",
+            None,
+            None,
+        );
+        assert!(matches!(
+            admit_media_discovery_update(&expired_registry, &expired, "attempt-2".to_string()),
+            MediaDiscoveryAdmission::Missing
+        ));
+    }
+
+    #[test]
+    fn discovery_update_payload_has_a_stable_ipc_shape() {
+        let update = normalized_discovery_update(
+            "media-opaque",
+            "https://cdn.example/stream.m3u8",
+            None,
+            None,
+        );
+        let value = serde_json::to_value(update).expect("serialize discovery update");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "request_id": null,
+                "handoff_id": "media-opaque",
+                "phase": "discovered",
+                "urls": ["https://cdn.example/stream.m3u8"],
+                "referer": null,
+                "headers": null
+            })
+        );
     }
 
     #[test]
@@ -1153,6 +2018,9 @@ mod tests {
             batch: false,
             batch_name: None,
             torrent_bytes_base64: None,
+            handoff_id: None,
+            phase: None,
+            media_protocol_version: None,
         });
 
         assert!(download.is_none());
@@ -1175,6 +2043,9 @@ mod tests {
             batch: false,
             batch_name: None,
             torrent_bytes_base64: None,
+            handoff_id: None,
+            phase: None,
+            media_protocol_version: None,
         });
 
         assert!(download.is_none());
@@ -1253,6 +2124,20 @@ mod tests {
         assert!(receiver.await.is_ok());
     }
 
+    #[tokio::test]
+    async fn rejects_and_removes_pending_extension_event_for_retry() {
+        let registry = Arc::new(Mutex::new(HashMap::new()));
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        registry
+            .lock()
+            .unwrap()
+            .insert("request-2".to_string(), sender);
+
+        assert!(reject_extension_download(&registry, "request-2"));
+        assert!(!reject_extension_download(&registry, "request-2"));
+        assert!(receiver.await.is_err());
+    }
+
     #[test]
     fn explicit_media_drops_the_extension_cookie_header() {
         let download = normalize_download(ExtensionRequest {
@@ -1271,6 +2156,9 @@ mod tests {
             batch: false,
             batch_name: None,
             torrent_bytes_base64: None,
+            handoff_id: None,
+            phase: None,
+            media_protocol_version: None,
         })
         .expect("valid media handoff");
 
@@ -1364,6 +2252,9 @@ mod tests {
                 batch: false,
                 batch_name: None,
                 torrent_bytes_base64: None,
+                handoff_id: None,
+                phase: None,
+                media_protocol_version: None,
             })
             .expect("direct manifest media handoff");
 
@@ -1404,6 +2295,9 @@ mod tests {
             batch: false,
             batch_name: None,
             torrent_bytes_base64: None,
+            handoff_id: None,
+            phase: None,
+            media_protocol_version: None,
         })
         .expect("valid ordinary download handoff");
 
@@ -1455,6 +2349,9 @@ mod tests {
             batch: false,
             batch_name: None,
             torrent_bytes_base64: None,
+            handoff_id: None,
+            phase: None,
+            media_protocol_version: None,
         })
         .expect("valid download handoff");
 
@@ -1486,6 +2383,9 @@ mod tests {
             batch: true,
             batch_name: Some("batch".to_string()),
             torrent_bytes_base64: None,
+            handoff_id: None,
+            phase: None,
+            media_protocol_version: None,
         })
         .expect("valid multi-url handoff");
 
@@ -1514,6 +2414,9 @@ mod tests {
             batch: false,
             batch_name: None,
             torrent_bytes_base64: None,
+            handoff_id: None,
+            phase: None,
+            media_protocol_version: None,
         })
         .expect("valid magnet torrent handoff");
 
@@ -1533,6 +2436,9 @@ mod tests {
             batch: false,
             batch_name: None,
             torrent_bytes_base64: None,
+            handoff_id: None,
+            phase: None,
+            media_protocol_version: None,
         })
         .expect("explicit opaque torrent handoff");
         assert!(opaque.torrent);
@@ -1552,6 +2458,9 @@ mod tests {
             batch: false,
             batch_name: None,
             torrent_bytes_base64: None,
+            handoff_id: None,
+            phase: None,
+            media_protocol_version: None,
         })
         .expect("legacy magnet handoff");
         assert!(legacy_magnet.torrent);
@@ -1574,6 +2483,9 @@ mod tests {
             batch: false,
             batch_name: None,
             torrent_bytes_base64: Some(encoded),
+            handoff_id: None,
+            phase: None,
+            media_protocol_version: None,
         })
         .expect("browser-local torrent bytes should be accepted");
 
@@ -1604,6 +2516,9 @@ mod tests {
             batch: false,
             batch_name: None,
             torrent_bytes_base64: Some(valid.clone()),
+            handoff_id: None,
+            phase: None,
+            media_protocol_version: None,
         })
         .is_none());
         assert!(normalize_download(ExtensionRequest {
@@ -1619,6 +2534,9 @@ mod tests {
             batch: false,
             batch_name: None,
             torrent_bytes_base64: Some(valid),
+            handoff_id: None,
+            phase: None,
+            media_protocol_version: None,
         })
         .is_none());
     }
@@ -1651,6 +2569,9 @@ mod tests {
             batch: false,
             batch_name: None,
             torrent_bytes_base64: None,
+            handoff_id: None,
+            phase: None,
+            media_protocol_version: None,
         })
         .expect("valid download handoff");
 
@@ -1683,6 +2604,9 @@ mod tests {
             batch: false,
             batch_name: None,
             torrent_bytes_base64: None,
+            handoff_id: None,
+            phase: None,
+            media_protocol_version: None,
         })
         .expect("valid multi-url handoff");
 
@@ -1708,6 +2632,9 @@ mod tests {
             batch: true,
             batch_name: Some("Example Gallery / Chapter: 1".to_string()),
             torrent_bytes_base64: None,
+            handoff_id: None,
+            phase: None,
+            media_protocol_version: None,
         })
         .expect("valid selected-link batch");
 
@@ -1733,6 +2660,9 @@ mod tests {
             batch: true,
             batch_name: Some("Example Gallery".to_string()),
             torrent_bytes_base64: None,
+            handoff_id: None,
+            phase: None,
+            media_protocol_version: None,
         })
         .expect("valid single-link handoff");
 

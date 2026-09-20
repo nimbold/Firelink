@@ -11,6 +11,7 @@ import { extractValidDownloadUrls } from './utils/url';
 import { readClipboardDownloadUrls } from './utils/clipboard';
 import { listenEvent as listen, invokeCommand as invoke } from "./ipc";
 import { flushDownloadPersistence, initializeDownloadPersistence, useDownloadStore, MAIN_QUEUE_ID, type ExtensionDownloadRequest } from './store/useDownloadStore';
+import type { ExtensionMediaDiscoveryUpdate } from './bindings/ExtensionMediaDiscoveryUpdate';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { initDownloadListener } from './store/downloadStore';
 import {
@@ -296,6 +297,7 @@ function App() {
   const frontendReadyUpdate = useRef<Promise<void>>(Promise.resolve());
   const pendingStartupInputs = useRef<Array<
     | { type: 'extension'; payload: ExtensionDownloadRequest }
+    | { type: 'extension-media-discovery'; payload: ExtensionMediaDiscoveryUpdate }
     | { type: 'deep-link'; payload: string }
   >>([]);
   const maxConcurrentDownloads = useSettingsStore(state => state.maxConcurrentDownloads);
@@ -367,6 +369,41 @@ function App() {
     await useDownloadStore.getState().handleExtensionDownload(payload);
     await acknowledgeExtensionDownload(payload.request_id);
   }, [acknowledgeExtensionDownload]);
+
+  const acknowledgeExtensionMediaDiscovery = useCallback(async (requestId?: string) => {
+    if (!requestId) return;
+    try {
+      await invoke('ack_extension_media_discovery', { requestId });
+    } catch (error) {
+      console.error('Failed to acknowledge browser media discovery:', error);
+    }
+  }, []);
+
+  const failExtensionMediaDiscovery = useCallback(async (requestId?: string) => {
+    if (!requestId) return;
+    try {
+      await invoke('fail_extension_media_discovery', { requestId });
+    } catch (error) {
+      console.error('Failed to reject browser media discovery:', error);
+    }
+  }, []);
+
+  const processExtensionMediaDiscovery = useCallback(async (payload: ExtensionMediaDiscoveryUpdate) => {
+    let handled = false;
+    try {
+      await useDownloadStore.getState().handleExtensionMediaDiscoveryUpdate(payload);
+      handled = true;
+    } finally {
+      // Only a completed projection is a success ACK. On failure, close the
+      // native waiter as retryable so the extension can safely replay the
+      // bounded discovery update against the native admission state.
+      if (handled) {
+        await acknowledgeExtensionMediaDiscovery(payload.request_id);
+      } else {
+        await failExtensionMediaDiscovery(payload.request_id);
+      }
+    }
+  }, [acknowledgeExtensionMediaDiscovery, failExtensionMediaDiscovery]);
 
   const enqueueAddInput = useCallback((task: () => void | Promise<void>) => {
     return extensionProcessing.current(task);
@@ -597,6 +634,7 @@ function App() {
       let unlistenDownload: (() => void) | null = null;
       let unlistenTerminalState: (() => void) | null = null;
       let unlistenExtension: (() => void) | null = null;
+      let unlistenMediaDiscovery: (() => void) | null = null;
       let unlistenDeepLink: (() => void) | null = null;
       const disposeListeners = () => {
         void queueFrontendReadyUpdate(false).catch(() => {});
@@ -607,6 +645,8 @@ function App() {
         unlistenTerminalState = null;
         unlistenExtension?.();
         unlistenExtension = null;
+        unlistenMediaDiscovery?.();
+        unlistenMediaDiscovery = null;
         unlistenDeepLink?.();
         unlistenDeepLink = null;
         unlistenDownload?.();
@@ -751,6 +791,15 @@ function App() {
             console.error('Failed to handle browser extension download:', error);
           });
         });
+        unlistenMediaDiscovery = await listen('extension-media-discovery', (event) => {
+          if (!startupInputReady.current || useSettingsStore.getState().showKeychainModal) {
+            pendingStartupInputs.current.push({ type: 'extension-media-discovery', payload: event.payload });
+            return;
+          }
+          enqueueAddInput(() => processExtensionMediaDiscovery(event.payload)).catch(error => {
+            console.error('Failed to handle browser media discovery:', error);
+          });
+        });
         unlistenDeepLink = await listen('deep-link-add-download', (event) => {
           if (!startupInputReady.current || useSettingsStore.getState().showKeychainModal) {
             pendingStartupInputs.current.push({ type: 'deep-link', payload: event.payload });
@@ -812,7 +861,7 @@ function App() {
       disposePersistence?.();
       disposePersistence = null;
     };
-  }, [addToast, enqueueAddInput, processExtensionDownload, queueFrontendReadyUpdate]);
+  }, [addToast, enqueueAddInput, processExtensionDownload, processExtensionMediaDiscovery, queueFrontendReadyUpdate]);
 
   useEffect(() => {
     if (!coreReady) return;
@@ -837,11 +886,15 @@ function App() {
         enqueueAddInput(() => processExtensionDownload(input.payload)).catch(error => {
           console.error('Failed to handle queued browser extension download:', error);
         });
+      } else if (input.type === 'extension-media-discovery') {
+        enqueueAddInput(() => processExtensionMediaDiscovery(input.payload)).catch(error => {
+          console.error('Failed to handle queued browser media discovery:', error);
+        });
       } else {
         enqueueAddInput(() => useDownloadStore.getState().openAddModalWithUrls(input.payload));
       }
     }
-  }, [coreReady, enqueueAddInput, processExtensionDownload, showKeychainModal]);
+  }, [coreReady, enqueueAddInput, processExtensionDownload, processExtensionMediaDiscovery, showKeychainModal]);
 
   useEffect(() => {
     if (!coreReady || showKeychainModal || startupResumeStarted.current) return;

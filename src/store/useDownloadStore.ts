@@ -9,6 +9,7 @@ import type { DownloadErrorKind } from '../bindings/DownloadErrorKind';
 import type { DownloadStatus } from '../bindings/DownloadStatus';
 import type { DownloadAssetRemovalPolicy } from '../bindings/DownloadAssetRemovalPolicy';
 import type { ExtensionDownload } from '../bindings/ExtensionDownload';
+import type { ExtensionMediaDiscoveryUpdate } from '../bindings/ExtensionMediaDiscoveryUpdate';
 import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
 import type { Queue } from '../bindings/Queue';
 import { useSettingsStore } from './useSettingsStore';
@@ -167,14 +168,15 @@ const RECOVERABLE_MEDIA_COOKIE_SOURCES = new Set([
 
 const hasConfiguredMediaCookieSource = (
   item: Pick<DownloadItem, 'isMedia'>,
-  settings: Pick<ReturnType<typeof useSettingsStore.getState>, 'mediaCookieSource'>
+  settings: Pick<ReturnType<typeof useSettingsStore.getState>, 'mediaCookieSource' | 'mediaCookieFile'>
 ): boolean => item.isMedia === true
-  && typeof settings.mediaCookieSource === 'string'
-  && RECOVERABLE_MEDIA_COOKIE_SOURCES.has(settings.mediaCookieSource);
+  && ((typeof settings.mediaCookieFile === 'string' && settings.mediaCookieFile.trim().length > 0)
+    || (typeof settings.mediaCookieSource === 'string'
+      && RECOVERABLE_MEDIA_COOKIE_SOURCES.has(settings.mediaCookieSource)));
 
 const credentialsNeedRecovery = (
   item: Pick<DownloadItem, 'isTorrent' | 'isMedia' | 'credentialsRequired' | 'password' | 'cookies' | 'headers'>,
-  settings: Pick<ReturnType<typeof useSettingsStore.getState>, 'mediaCookieSource'>,
+  settings: Pick<ReturnType<typeof useSettingsStore.getState>, 'mediaCookieSource' | 'mediaCookieFile'>,
   keychainPassword?: string | null
 ): boolean => item.isTorrent !== true
   && item.credentialsRequired === true
@@ -509,6 +511,9 @@ async function dispatchItemInternal(
         cookie_source: item.isMedia === true && hasConfiguredMediaCookieSource(item, settings)
           ? settings.mediaCookieSource
           : null,
+        cookie_file: item.isMedia === true && settings.mediaCookieFile?.trim()
+          ? settings.mediaCookieFile.trim()
+          : undefined,
         is_media: item.isMedia || false,
         is_torrent: item.isTorrent || false,
         torrent_path: item.torrentPath || undefined,
@@ -1137,6 +1142,8 @@ export type DownloadDraft = Omit<DownloadItem, 'status' | 'queueId' | 'hasBeenDi
 };
 export type PendingAddRequestContext = {
   version: number;
+  handoffId?: string;
+  replacesUrl?: string;
   referer: string;
   filename: string;
   headers: string;
@@ -1211,9 +1218,11 @@ interface DownloadState {
     batchName?: string | null,
     torrent?: boolean,
     torrentPath?: string,
-    torrentCacheId?: string
+    torrentCacheId?: string,
+    handoffId?: string
   ) => void;
   handleExtensionDownload: (request: ExtensionDownloadRequest) => Promise<void>;
+  handleExtensionMediaDiscoveryUpdate: (update: ExtensionMediaDiscoveryUpdate) => Promise<void>;
   deleteModalState: DeleteModalState;
   openDeleteModal: (downloadIds?: string | string[]) => void;
   closeDeleteModal: () => void;
@@ -1977,7 +1986,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     batchName,
     torrent = false,
     torrentPath,
-    torrentCacheId
+    torrentCacheId,
+    handoffId
   ) => set((state) => {
     const isAppending = state.isAddModalOpen && Boolean(state.pendingAddUrls);
     const existingUrls = isAppending ? state.pendingAddUrls : '';
@@ -2038,6 +2048,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       const isItemMedia = isExplicitMedia || isAutomaticMedia;
       pendingAddRequestContexts[key] = {
         version: requestVersion,
+        ...(handoffId ? { handoffId } : {}),
         referer: cleanReferer,
         filename: cleanFilename,
         headers: isItemMedia ? stripSensitiveMediaHeaders(cleanHeaders) : cleanHeaders,
@@ -2115,13 +2126,88 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       request.batch_name,
       request.torrent === true,
       request.torrent_path || undefined,
-      request.request_id || undefined
+      request.request_id || undefined,
+      request.handoff_id || undefined
     );
     // App-level acknowledgement is intentionally delayed until a queued
     // handoff has reached the reviewable Add window. A process exit or stalled
     // duplicate-resolution flow therefore leaves the extension request
     // ambiguous instead of acknowledging an item that only existed in memory.
     resolvePendingAddHandoff(request.request_id);
+  },
+  handleExtensionMediaDiscoveryUpdate: async (update) => {
+    const handoffId = update.handoff_id?.trim();
+    const discoveredUrl = update.urls?.length === 1 ? update.urls[0]?.trim() : '';
+    if (!handoffId || update.phase !== 'discovered' || !discoveredUrl) return;
+
+    set(state => {
+      if (!state.isAddModalOpen || state.pendingAddModalBusy) return state;
+      const matchingEntry = Object.entries(state.pendingAddRequestContexts)
+        .find(([, context]) => context.handoffId === handoffId && context.media === true);
+      if (!matchingEntry) return state;
+
+      const [currentUrl, currentContext] = matchingEntry;
+      const nextUrl = discoveredUrl;
+      const currentComparable = (() => {
+        try { return new URL(currentUrl).href; } catch { return currentUrl; }
+      })();
+      const nextComparable = (() => {
+        try { return new URL(nextUrl).href; } catch { return nextUrl; }
+      })();
+      // Backend retries are idempotent, so a duplicate delivery of the same
+      // discovered target must not create a new request version or restart
+      // metadata work for an already-upgraded row.
+      if (currentComparable === nextComparable) return state;
+      const existingDifferentContext = Object.entries(state.pendingAddRequestContexts)
+        .some(([url, context]) => url !== currentUrl
+          && context.handoffId !== handoffId
+          && (() => {
+            try { return new URL(url).href === nextComparable; } catch { return url === nextUrl; }
+          })());
+      if (existingDifferentContext) return state;
+
+      const nextVersion = state.pendingAddRequestVersion + 1;
+      const nextContexts = { ...state.pendingAddRequestContexts };
+      delete nextContexts[currentUrl];
+      nextContexts[nextComparable] = {
+        ...currentContext,
+        version: nextVersion,
+        replacesUrl: currentComparable,
+        referer: update.referer?.trim() || currentContext.referer,
+        headers: stripSensitiveMediaHeaders(update.headers) || currentContext.headers,
+        cookies: '',
+        media: true,
+        mediaMode: 'media',
+        handoffId
+      };
+      const pendingAddUrls = state.pendingAddUrls
+        .split('\n')
+        .map(url => url.trim())
+        .filter(Boolean)
+        .map(url => {
+          try {
+            return new URL(url).href === currentComparable ? nextUrl : url;
+          } catch {
+            return url === currentUrl ? nextUrl : url;
+          }
+        })
+        .filter((url, index, urls) => urls.findIndex(candidate => {
+          try { return new URL(candidate).href === new URL(url).href; } catch { return candidate === url; }
+        }) === index)
+        .join('\n');
+      const pendingAddMediaUrls = Object.entries(nextContexts)
+        .filter(([, context]) => context.mediaMode === 'media')
+        .map(([url]) => url);
+      return {
+        pendingAddUrls,
+        pendingAddReferer: nextContexts[nextComparable]?.referer || state.pendingAddReferer,
+        pendingAddHeaders: nextContexts[nextComparable]?.headers || state.pendingAddHeaders,
+        pendingAddCookies: '',
+        pendingAddMediaUrls,
+        pendingAddRequestContexts: nextContexts,
+        pendingAddRequestVersion: nextVersion
+      };
+    });
   },
   setSelectedPropertiesDownloadId: (id) => set({ selectedPropertiesDownloadId: id }),
   addDownload: async (item, action) => {
@@ -3141,6 +3227,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             cookie_source: item.isMedia === true && hasConfiguredMediaCookieSource(item, settings)
               ? settings.mediaCookieSource
               : null,
+            cookie_file: item.isMedia === true && settings.mediaCookieFile?.trim()
+              ? settings.mediaCookieFile.trim()
+              : undefined,
             is_media: item.isMedia || false,
             is_torrent: item.isTorrent || false,
             torrent_path: item.torrentPath || undefined,

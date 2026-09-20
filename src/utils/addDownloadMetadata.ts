@@ -14,6 +14,37 @@ import { localePluralVariant } from '../i18n/locales';
 
 export type MetadataStatus = 'loading' | 'ready' | 'fallback' | 'metadata-error' | 'invalid';
 
+export type MetadataBlockedReason =
+  | 'unsafe-url'
+  | 'cookie-file'
+  | 'youtube-bot'
+  | 'youtube-auth'
+  | 'youtube-po-token';
+
+export const classifyMediaMetadataError = (message: string): Exclude<MetadataBlockedReason, 'unsafe-url'> | undefined => {
+  const lower = message.toLowerCase();
+  if (lower.includes('media_cookie_file_invalid')) return 'cookie-file';
+  if (
+    lower.includes('po token')
+    || lower.includes('po_token')
+    || lower.includes('proof of origin token')
+  ) return 'youtube-po-token';
+  if (
+    lower.includes('sign in to confirm')
+    || lower.includes('not a bot')
+    || lower.includes('automated queries')
+    || lower.includes('bot detection')
+  ) return 'youtube-bot';
+  if (
+    lower.includes('sign in')
+    || lower.includes('authentication')
+    || lower.includes('login required')
+    || lower.includes('private video')
+    || lower.includes('age-restricted')
+  ) return 'youtube-auth';
+  return undefined;
+};
+
 export interface AddMediaFormat {
   name: string;
   quality?: string;
@@ -57,7 +88,7 @@ export interface AddDownloadDraftRow {
   playlistCount?: number;
   playlistEntryTitle?: string;
   playlistError?: string;
-  metadataBlockedReason?: 'unsafe-url';
+  metadataBlockedReason?: MetadataBlockedReason;
   selected?: boolean;
   /** Opaque native fingerprint captured for an exact unmanaged-file replace. */
   replaceExistingFingerprint?: string;
@@ -502,7 +533,7 @@ const comparableUrl = (rawUrl: string): string => {
 
 export const appendRequestUrlsAfterVersion = (
   rawText: string,
-  requestContexts: Readonly<Record<string, { version: number }>>,
+  requestContexts: Readonly<Record<string, { version: number; replacesUrl?: string }>>,
   observedVersion: number
 ): string => {
   const lines = rawText.split('\n').map(line => line.trim()).filter(Boolean);
@@ -511,8 +542,20 @@ export const appendRequestUrlsAfterVersion = (
     .filter(([, context]) => context.version > observedVersion)
     .sort(([, left], [, right]) => left.version - right.version);
 
-  for (const [url] of additions) {
+  for (const [url, context] of additions) {
     const identity = comparableUrl(url);
+    if (context.replacesUrl) {
+      const replacementIdentity = comparableUrl(context.replacesUrl);
+      const replacementIndex = lines.findIndex(line => comparableUrl(line) === replacementIdentity);
+      if (replacementIndex >= 0) {
+        lines[replacementIndex] = url;
+        seen.delete(replacementIdentity);
+        seen.add(identity);
+      }
+      // A user edit, submit, or modal lifecycle reset removed the original
+      // row. Never append a delayed discovery target into that new input.
+      continue;
+    }
     if (seen.has(identity)) continue;
     seen.add(identity);
     lines.push(url);

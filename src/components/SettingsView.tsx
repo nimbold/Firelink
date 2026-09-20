@@ -893,6 +893,22 @@ runEngineChecks(false);
     }
   };
 
+  const handleBrowseMediaCookieFile = async () => {
+    try {
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        defaultPath: settings.mediaCookieFile || undefined,
+        filters: [{ name: 'Netscape cookies', extensions: ['txt', 'cookies', 'cookie'] }]
+      });
+      if (selected && typeof selected === 'string') {
+        settings.setMediaCookieFile(selected);
+      }
+    } catch (e) {
+      console.error('Failed to select media cookie file:', e);
+    }
+  };
+
   const handleAddLogin = async () => {
     if (saveLoginInFlight.current) return;
     const fieldErrors: typeof loginFieldErrors = {};
@@ -2297,7 +2313,34 @@ className="app-button px-3 py-1.5 text-[12px] flex items-center gap-1.5 disabled
                           ))}
                         </select>
                       </div>
-                    <p className="text-text-muted text-xs mt-1">{t($ => $.settings.engine.cookieDescription)}</p>
+                      <p className="text-text-muted text-xs mt-1">{t($ => $.settings.engine.cookieDescription)}</p>
+                      <div className="grid grid-cols-[180px_1fr] items-start gap-4 text-[13px] border-t border-border-modal/50 pt-3 mt-2">
+                        <div>
+                          <label className="text-text-secondary font-semibold">{t($ => $.settings.engine.cookieFile)}</label>
+                          <p className="text-text-muted text-[11px] mt-1">{t($ => $.settings.engine.cookieFileDescription)}</p>
+                        </div>
+                        <div className="min-w-0 flex items-center gap-2">
+                          <span className="font-mono text-xs text-text-muted truncate flex-1" title={settings.mediaCookieFile || undefined}>
+                            {settings.mediaCookieFile || t($ => $.settings.engine.none)}
+                          </span>
+                          <button
+                            type="button"
+                            className="app-button px-2.5 py-1.5 text-xs shrink-0"
+                            onClick={() => void handleBrowseMediaCookieFile()}
+                          >
+                            {t($ => $.settings.engine.chooseCookieFile)}
+                          </button>
+                          {settings.mediaCookieFile && (
+                            <button
+                              type="button"
+                              className="app-button px-2.5 py-1.5 text-xs shrink-0"
+                              onClick={() => settings.setMediaCookieFile('')}
+                            >
+                              {t($ => $.settings.engine.clearCookieFile)}
+                            </button>
+                          )}
+                        </div>
+                      </div>
                     </div>
                   </div>
                 );

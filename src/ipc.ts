@@ -7,6 +7,7 @@ import type { DownloadProgressEvent } from './bindings/DownloadProgressEvent';
 import type { DownloadStateEvent } from './bindings/DownloadStateEvent';
 import type { DownloadAllocationEvent } from './bindings/DownloadAllocationEvent';
 import type { ExtensionDownload } from './bindings/ExtensionDownload';
+import type { ExtensionMediaDiscoveryUpdate } from './bindings/ExtensionMediaDiscoveryUpdate';
 import type { ExtensionCookieScope } from './bindings/ExtensionCookieScope';
 import type { MediaMetadata } from './bindings/MediaMetadata';
 import type { MediaPlaylistMetadata } from './bindings/MediaPlaylistMetadata';
@@ -40,11 +41,11 @@ type CommandMap = {
     result: MetadataResponse;
   };
   fetch_media_metadata: {
-    args: { url: string; cookieBrowser: string | null; userAgent: string | null; username: string | null; password: string | null; headers: string | null; cookies: string | null; proxy: string | null };
+    args: { url: string; cookieFile: string | null; cookieBrowser: string | null; userAgent: string | null; username: string | null; password: string | null; headers: string | null; cookies: string | null; proxy: string | null };
     result: MediaMetadata;
   };
   fetch_media_playlist_metadata: {
-    args: { url: string; cookieBrowser: string | null; userAgent: string | null; username: string | null; password: string | null; headers: string | null; cookies: string | null; proxy: string | null };
+    args: { url: string; cookieFile: string | null; cookieBrowser: string | null; userAgent: string | null; username: string | null; password: string | null; headers: string | null; cookies: string | null; proxy: string | null };
     result: MediaPlaylistMetadata;
   };
   inspect_torrent: {
@@ -161,6 +162,8 @@ type CommandMap = {
   set_extension_frontend_ready: { args: { ready: boolean }; result: void };
   ack_frontend_exit: { args: undefined; result: void };
   ack_extension_download: { args: { requestId: string }; result: void };
+  ack_extension_media_discovery: { args: { requestId: string }; result: void };
+  fail_extension_media_discovery: { args: { requestId: string }; result: void };
   get_system_proxy: { args: undefined; result: string | null };
   get_file_category: { args: { filename: string }; result: DownloadCategory };
   check_for_updates: { args: undefined; result: ReleaseCheckOutcome };
@@ -231,6 +234,7 @@ type EventMap = {
   'download-complete': string;
   'download-failed': string;
   'extension-add-download': ExtensionDownload;
+  'extension-media-discovery': ExtensionMediaDiscoveryUpdate;
   'deep-link-add-download': string;
   'tray-action': 'pause-all' | 'resume-all';
   'app-exit-requested': null;

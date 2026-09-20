@@ -333,6 +333,7 @@ export interface SettingsState {
   preventsSleepWhileDownloading: boolean;
   preventsDisplaySleepWhileDownloading: boolean;
   mediaCookieSource: MediaCookieSource;
+  mediaCookieFile: string;
   siteLogins: SiteLogin[];
   extensionPairingToken: string;
   isPairingTokenPersistent: boolean;
@@ -413,6 +414,7 @@ export interface SettingsState {
   setPreventsSleepWhileDownloading: (prevent: boolean) => void;
   setPreventsDisplaySleepWhileDownloading: (prevent: boolean) => void;
   setMediaCookieSource: (source: MediaCookieSource) => void;
+  setMediaCookieFile: (path: string) => void;
   setRememberLastUsedDownloadDirectory: (enabled: boolean) => void;
   setLastUsedDownloadDirectory: (path: string) => void;
   setCategorySubfoldersEnabled: (enabled: boolean) => void;
@@ -519,6 +521,7 @@ export const useSettingsStore = create<SettingsState>()(
       preventsSleepWhileDownloading: true,
       preventsDisplaySleepWhileDownloading: false,
       mediaCookieSource: 'none',
+      mediaCookieFile: '',
       siteLogins: [],
       extensionPairingToken: '',
       isPairingTokenPersistent: false,
@@ -799,6 +802,10 @@ export const useSettingsStore = create<SettingsState>()(
         info('Settings updated: mediaCookieSource');
         set({ mediaCookieSource: safe });
       },
+      setMediaCookieFile: (mediaCookieFile) => {
+        info('Settings updated: mediaCookieFile');
+        set({ mediaCookieFile: mediaCookieFile.trim() });
+      },
       setRememberLastUsedDownloadDirectory: (rememberLastUsedDownloadDirectory) => {
         info('Settings updated: rememberLastUsedDownloadDirectory');
         set({
@@ -1014,6 +1021,7 @@ export const useSettingsStore = create<SettingsState>()(
         preventsSleepWhileDownloading: state.preventsSleepWhileDownloading,
         preventsDisplaySleepWhileDownloading: state.preventsDisplaySleepWhileDownloading,
         mediaCookieSource: state.mediaCookieSource,
+        mediaCookieFile: state.mediaCookieFile,
         siteLogins: state.siteLogins,
         keychainAccessGranted: state.keychainAccessGranted,
         keychainAccessVersion: state.keychainAccessVersion,
@@ -1150,6 +1158,7 @@ export const useSettingsStore = create<SettingsState>()(
           mediaCookieSource: isAllowedSetting(MEDIA_COOKIE_SOURCE_VALUES, persisted.mediaCookieSource)
             ? persisted.mediaCookieSource
             : 'none',
+          mediaCookieFile: persistedString(persisted.mediaCookieFile, currentState.mediaCookieFile),
           activeSettingsTab: isAllowedSetting(SETTINGS_TAB_VALUES, persisted.activeSettingsTab)
             ? persisted.activeSettingsTab
             : currentState.activeSettingsTab,

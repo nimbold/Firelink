@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
@@ -1779,6 +1779,7 @@ fn is_browser_cookie_extraction_error(message: &str) -> bool {
 }
 
 fn should_retry_without_browser_cookies(
+    cookie_file: Option<&str>,
     cookie_browser: Option<&str>,
     failure_reason: &str,
     fallback_used: bool,
@@ -1787,7 +1788,8 @@ fn should_retry_without_browser_cookies(
     // Windows can deny access to its database independently of whether the
     // requested media needs authentication, so only this narrowly classified
     // extraction failure may downgrade to a public-media attempt.
-    !fallback_used
+    cookie_file.is_none()
+        && !fallback_used
         && cookie_browser.is_some_and(|source| {
             let source = source.trim();
             !source.is_empty() && !source.eq_ignore_ascii_case("none")
@@ -2717,6 +2719,7 @@ fn download_sidecar_paths(primary: &std::path::Path) -> Vec<std::path::PathBuf> 
 #[allow(clippy::too_many_arguments)] // Hash every user-controlled yt-dlp input explicitly.
 fn media_metadata_cache_key(
     url: &str,
+    cookie_file: &Option<String>,
     cookie_browser: &Option<String>,
     user_agent: &Option<String>,
     username: &Option<String>,
@@ -2727,6 +2730,18 @@ fn media_metadata_cache_key(
 ) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     url.hash(&mut hasher);
+    cookie_file.hash(&mut hasher);
+    if let Some(path) = cookie_file.as_deref() {
+        let file_identity = std::fs::metadata(path).ok().map(|metadata| {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| (duration.as_secs(), duration.subsec_nanos()));
+            (metadata.len(), modified)
+        });
+        file_identity.hash(&mut hasher);
+    }
     cookie_browser.hash(&mut hasher);
     user_agent.hash(&mut hasher);
     username.hash(&mut hasher);
@@ -2788,6 +2803,7 @@ async fn fetch_media_metadata(
     caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     url: String,
+    cookie_file: Option<String>,
     cookie_browser: Option<String>,
     user_agent: Option<String>,
     username: Option<String>,
@@ -2798,6 +2814,7 @@ async fn fetch_media_metadata(
 ) -> Result<MediaMetadata, String> {
     properties_window::ensure_main_window(&caller)?;
     let url = validate_http_url_route(&url)?.to_string();
+    let cookie_file = normalize_media_cookie_file(cookie_file.as_deref())?;
     let cookie_browser = normalize_media_cookie_source(cookie_browser.as_deref())?;
     let user_agent = user_agent.map(|ua| ua.trim().to_string()).filter(|ua| !ua.is_empty());
     let username = username.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
@@ -2807,6 +2824,7 @@ async fn fetch_media_metadata(
     let proxy = proxy.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
     let cache_key = media_metadata_cache_key(
         &url,
+        &cookie_file,
         &cookie_browser,
         &user_agent,
         &username,
@@ -2853,6 +2871,7 @@ async fn fetch_media_metadata(
     let result = fetch_media_metadata_uncached(
         app_handle.clone(),
         url.clone(),
+        cookie_file.clone(),
         cookie_browser.clone(),
         user_agent.clone(),
         username.clone(),
@@ -2863,9 +2882,9 @@ async fn fetch_media_metadata(
     )
     .await;
 
-    let result = match (result, cookie_browser.as_deref()) {
-        (Err(error), Some(browser))
-            if should_retry_without_browser_cookies(Some(browser), &error, false) =>
+    let result = match (result, cookie_file.as_deref(), cookie_browser.as_deref()) {
+        (Err(error), None, Some(browser))
+            if should_retry_without_browser_cookies(None, Some(browser), &error, false) =>
         {
             log::warn!(
                 "yt-dlp could not read browser cookies from {}; retrying media metadata without browser cookies",
@@ -2873,6 +2892,7 @@ async fn fetch_media_metadata(
             );
             result_cache_key = media_metadata_cache_key(
                 &url,
+                &None,
                 &None,
                 &user_agent,
                 &username,
@@ -2885,6 +2905,7 @@ async fn fetch_media_metadata(
                 app_handle,
                 url,
                 None,
+                None,
                 user_agent,
                 username,
                 password,
@@ -2894,7 +2915,7 @@ async fn fetch_media_metadata(
             )
             .await
         }
-        (result, _) => result,
+        (result, _, _) => result,
     };
 
     let result = match result {
@@ -2932,6 +2953,7 @@ async fn fetch_media_playlist_metadata(
     caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
     url: String,
+    cookie_file: Option<String>,
     cookie_browser: Option<String>,
     user_agent: Option<String>,
     username: Option<String>,
@@ -2942,6 +2964,7 @@ async fn fetch_media_playlist_metadata(
 ) -> Result<MediaPlaylistMetadata, String> {
     properties_window::ensure_main_window(&caller)?;
     let url = validate_http_url_route(&url)?.to_string();
+    let cookie_file = normalize_media_cookie_file(cookie_file.as_deref())?;
     let cookie_browser = normalize_media_cookie_source(cookie_browser.as_deref())?;
     let user_agent = user_agent.map(|ua| ua.trim().to_string()).filter(|ua| !ua.is_empty());
     let username = username.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
@@ -2953,6 +2976,7 @@ async fn fetch_media_playlist_metadata(
     let result = fetch_media_playlist_metadata_uncached(
         app_handle.clone(),
         url.clone(),
+        cookie_file.clone(),
         cookie_browser.clone(),
         user_agent.clone(),
         username.clone(),
@@ -2963,9 +2987,9 @@ async fn fetch_media_playlist_metadata(
     )
     .await;
 
-    match (result, cookie_browser.as_deref()) {
-        (Err(error), Some(browser))
-            if should_retry_without_browser_cookies(Some(browser), &error, false) =>
+    match (result, cookie_file.as_deref(), cookie_browser.as_deref()) {
+        (Err(error), None, Some(browser))
+            if should_retry_without_browser_cookies(None, Some(browser), &error, false) =>
         {
             log::warn!(
                 "yt-dlp could not read browser cookies from {}; retrying playlist metadata without browser cookies",
@@ -2974,6 +2998,7 @@ async fn fetch_media_playlist_metadata(
             fetch_media_playlist_metadata_uncached(
                 app_handle,
                 url,
+                None,
                 None,
                 user_agent,
                 username,
@@ -2984,7 +3009,7 @@ async fn fetch_media_playlist_metadata(
             )
             .await
         }
-        (result, _) => result,
+        (result, _, _) => result,
     }
 }
 
@@ -2992,6 +3017,7 @@ async fn fetch_media_playlist_metadata(
 async fn fetch_media_playlist_metadata_uncached(
     app_handle: tauri::AppHandle,
     url: String,
+    cookie_file: Option<String>,
     cookie_browser: Option<String>,
     user_agent: Option<String>,
     username: Option<String>,
@@ -3033,11 +3059,9 @@ async fn fetch_media_playlist_metadata_uncached(
         .arg("--compat-options")
         .arg("no-youtube-unavailable-videos");
 
-    if let Some(browser) = cookie_browser.as_deref() {
-        if !browser.is_empty() && browser != "none" {
-            cmd = cmd.arg("--cookies-from-browser").arg(ytdlp_cookie_browser_arg(browser));
-        }
-    }
+    cmd = cmd
+        .args(ytdlp_youtube_extractor_args())
+        .args(ytdlp_cookie_args(cookie_file.as_deref(), cookie_browser.as_deref()));
 
     let route = crate::network::NetworkRoute::from_proxy(proxy.as_deref());
     if let Some(proxy) = route.ytdlp_proxy_value() {
@@ -3081,7 +3105,7 @@ async fn fetch_media_playlist_metadata_uncached(
     .await?;
 
     if output.status_code != Some(0) {
-        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let err = redact_log_line(String::from_utf8_lossy(&output.stderr).trim());
         return Err(if err.is_empty() {
             format!(
                 "yt-dlp failed while fetching playlist metadata (exit status: {:?})",
@@ -3101,6 +3125,7 @@ async fn fetch_media_playlist_metadata_uncached(
 async fn fetch_media_metadata_uncached(
     app_handle: tauri::AppHandle,
     url: String,
+    cookie_file: Option<String>,
     cookie_browser: Option<String>,
     user_agent: Option<String>,
     username: Option<String>,
@@ -3144,11 +3169,10 @@ async fn fetch_media_metadata_uncached(
         .arg("--print")
         .arg("%(.{title,duration,thumbnail,formats})j");
 
-    if let Some(browser) = cookie_browser.as_deref() {
-        if !browser.is_empty() && browser != "none" {
-            cmd = cmd.arg("--cookies-from-browser").arg(ytdlp_cookie_browser_arg(browser));
-        }
-    }
+    cmd = cmd.args(ytdlp_cookie_args(
+        cookie_file.as_deref(),
+        cookie_browser.as_deref(),
+    ));
 
     let route = crate::network::NetworkRoute::from_proxy(proxy.as_deref());
     if let Some(proxy) = route.ytdlp_proxy_value() {
@@ -3219,7 +3243,7 @@ async fn fetch_media_metadata_uncached(
             formats,
         })
     } else {
-        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let err = redact_log_line(String::from_utf8_lossy(&output.stderr).trim());
         if err.is_empty() {
             Err(format!(
                 "yt-dlp failed while fetching media metadata (exit status: {:?})",
@@ -4942,6 +4966,34 @@ fn normalize_media_cookie_source(source: Option<&str>) -> Result<Option<String>,
     Err("Unsupported media browser-cookie source".to_string())
 }
 
+const MEDIA_COOKIE_FILE_INVALID_PREFIX: &str = "MEDIA_COOKIE_FILE_INVALID:";
+
+fn normalize_media_cookie_file(source: Option<&str>) -> Result<Option<String>, String> {
+    let Some(source) = source.map(str::trim).filter(|source| !source.is_empty()) else {
+        return Ok(None);
+    };
+
+    let path = Path::new(source);
+    if !path.is_absolute() || path_has_symlink_component(path) {
+        return Err(format!(
+            "{MEDIA_COOKIE_FILE_INVALID_PREFIX} cookie file must be an absolute regular file"
+        ));
+    }
+
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| {
+        format!(
+            "{MEDIA_COOKIE_FILE_INVALID_PREFIX} cookie file is missing or inaccessible"
+        )
+    })?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err(format!(
+            "{MEDIA_COOKIE_FILE_INVALID_PREFIX} cookie file must be a regular file"
+        ));
+    }
+
+    Ok(Some(source.to_string()))
+}
+
 fn ytdlp_cookie_browser_arg(browser: &str) -> String {
     let trimmed = browser.trim();
     if trimmed.eq_ignore_ascii_case("safari") {
@@ -4949,6 +5001,25 @@ fn ytdlp_cookie_browser_arg(browser: &str) -> String {
     } else {
         trimmed.to_ascii_lowercase()
     }
+}
+
+fn ytdlp_cookie_args(cookie_file: Option<&str>, cookie_browser: Option<&str>) -> Vec<String> {
+    if let Some(cookie_file) = cookie_file.filter(|value| !value.is_empty()) {
+        return vec![
+            "--cookies".to_string(),
+            cookie_file.to_string(),
+            "--no-write-cookies".to_string(),
+        ];
+    }
+    cookie_browser
+        .filter(|value| !value.is_empty() && *value != "none")
+        .map(|browser| {
+            vec![
+                "--cookies-from-browser".to_string(),
+                ytdlp_cookie_browser_arg(browser),
+            ]
+        })
+        .unwrap_or_default()
 }
 
 fn media_format_and_container_args(format: &str, safe_filename: &str) -> Vec<String> {
@@ -4995,6 +5066,7 @@ pub(crate) async fn start_media_download_internal(
     format_selector: Option<String>,
     connections: Option<i32>,
     cookie_source: Option<String>,
+    cookie_file: Option<String>,
     speed_limit: Option<String>,
     username: Option<String>,
     password: Option<String>,
@@ -5007,6 +5079,7 @@ pub(crate) async fn start_media_download_internal(
 ) -> Result<std::path::PathBuf, String> {
     let url = validate_http_url_route(&url)?.to_string();
     let cookie_source = normalize_media_cookie_source(cookie_source.as_deref())?;
+    let cookie_file = normalize_media_cookie_file(cookie_file.as_deref())?;
     let safe_filename = crate::download_ownership::canonical_download_filename(&filename);
 
     let resolved_dest = resolve_path(&destination, &app_handle);
@@ -5140,11 +5213,10 @@ pub(crate) async fn start_media_download_internal(
             cmd = cmd.arg("--proxy").arg(proxy);
         }
 
-        if let Some(cs) = effective_cookie_source.as_ref() {
-            if !cs.is_empty() && cs != "none" {
-                cmd = cmd.arg("--cookies-from-browser").arg(ytdlp_cookie_browser_arg(cs));
-            }
-        }
+        cmd = cmd.args(ytdlp_cookie_args(
+            cookie_file.as_deref(),
+            effective_cookie_source.as_deref(),
+        ));
 
         if let Some(ua) = user_agent.as_ref() {
             if !ua.is_empty() {
@@ -5373,6 +5445,7 @@ pub(crate) async fn start_media_download_internal(
             let _ = cleanup_media_artifacts(&app_handle, Some(id), &out_path, false).await;
         }
         if should_retry_without_browser_cookies(
+            cookie_file.as_deref(),
             effective_cookie_source.as_deref(),
             &failure_reason,
             browser_cookie_fallback_used,
@@ -12582,6 +12655,7 @@ async fn verify_torrent_data(
         proxy: None,
         format_selector: None,
         cookie_source: None,
+        cookie_file: None,
         is_media: Some(false),
         is_torrent: Some(true),
         torrent_path: item.torrent_path.clone(),
@@ -14910,6 +14984,36 @@ fn ack_extension_download(
     Ok(())
 }
 
+#[tauri::command]
+fn ack_extension_media_discovery(
+    caller: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
+    if request_id.len() != 32 || !request_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Invalid extension discovery request id".to_string());
+    }
+
+    extension_server::acknowledge_extension_download(&state.extension_acks, &request_id);
+    Ok(())
+}
+
+#[tauri::command]
+fn fail_extension_media_discovery(
+    caller: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
+    if request_id.len() != 32 || !request_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Invalid extension discovery request id".to_string());
+    }
+
+    extension_server::reject_extension_download(&state.extension_acks, &request_id);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -14971,6 +15075,7 @@ mod tests {
         normalize_media_cookie_source,
         media_format_and_container_args,
         ytdlp_cookie_browser_arg,
+        ytdlp_cookie_args,
         validate_enqueue_url, validate_enqueue_uris, validate_keychain_grant_request_id,
         validate_http_url_route,
         validate_torrent_metadata_network_policy,
@@ -17891,6 +17996,7 @@ mod tests {
     fn media_metadata_cache_key_includes_request_headers_and_cookies() {
         let base = media_metadata_cache_key(
             "https://example.com/watch?v=1",
+            &None,
             &Some("firefox".to_string()),
             &Some("Custom UA A".to_string()),
             &None,
@@ -17901,6 +18007,7 @@ mod tests {
         );
         let changed_headers = media_metadata_cache_key(
             "https://example.com/watch?v=1",
+            &None,
             &Some("firefox".to_string()),
             &Some("Custom UA A".to_string()),
             &None,
@@ -17911,6 +18018,7 @@ mod tests {
         );
         let changed_cookies = media_metadata_cache_key(
             "https://example.com/watch?v=1",
+            &None,
             &Some("firefox".to_string()),
             &Some("Custom UA A".to_string()),
             &None,
@@ -17921,6 +18029,7 @@ mod tests {
         );
         let changed_user_agent = media_metadata_cache_key(
             "https://example.com/watch?v=1",
+            &None,
             &Some("firefox".to_string()),
             &Some("Custom UA B".to_string()),
             &None,
@@ -17931,6 +18040,7 @@ mod tests {
         );
         let without_browser = media_metadata_cache_key(
             "https://example.com/watch?v=1",
+            &None,
             &None,
             &Some("Custom UA A".to_string()),
             &None,
@@ -17944,6 +18054,41 @@ mod tests {
         assert_ne!(base, changed_cookies);
         assert_ne!(base, changed_user_agent);
         assert_ne!(base, without_browser);
+    }
+
+    #[test]
+    fn media_metadata_cache_key_changes_when_cookie_file_is_replaced() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cookies.txt");
+        std::fs::write(&path, b"# Netscape HTTP Cookie File\n").unwrap();
+        let cookie_file = Some(path.to_string_lossy().into_owned());
+
+        let initial = media_metadata_cache_key(
+            "https://example.com/watch?v=1",
+            &cookie_file,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+        );
+
+        std::fs::write(&path, b"# Netscape HTTP Cookie File\nchanged\n").unwrap();
+        let replaced = media_metadata_cache_key(
+            "https://example.com/watch?v=1",
+            &cookie_file,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+        );
+
+        assert_ne!(initial, replaced);
     }
 
     #[test]
@@ -18932,26 +19077,31 @@ mod tests {
         let cookie_database_error = "yt-dlp failed while fetching media metadata: ERROR: could not find firefox cookies database in '<HOME>/Library/Application Support/Firefox/Profiles'";
 
         assert!(should_retry_without_browser_cookies(
+            None,
             Some("firefox"),
             cookie_database_error,
             false
         ));
         assert!(!should_retry_without_browser_cookies(
+            None,
             Some("firefox"),
             cookie_database_error,
             true
         ));
         assert!(!should_retry_without_browser_cookies(
+            None,
             Some("none"),
             cookie_database_error,
             false
         ));
         assert!(!should_retry_without_browser_cookies(
             None,
+            None,
             cookie_database_error,
             false
         ));
         assert!(!should_retry_without_browser_cookies(
+            None,
             Some("firefox"),
             "ERROR: Sign in to confirm you are not a bot",
             false
@@ -18976,6 +19126,22 @@ mod tests {
         assert_eq!(ytdlp_cookie_browser_arg(" Safari "), "safari:");
         assert_eq!(ytdlp_cookie_browser_arg("chrome"), "chrome");
         assert_eq!(ytdlp_cookie_browser_arg(" Firefox "), "firefox");
+    }
+
+    #[test]
+    fn ytdlp_cookie_file_args_are_read_only() {
+        assert_eq!(
+            ytdlp_cookie_args(Some("/tmp/firelink-cookies.txt"), Some("firefox")),
+            vec![
+                "--cookies",
+                "/tmp/firelink-cookies.txt",
+                "--no-write-cookies"
+            ]
+        );
+        assert_eq!(
+            ytdlp_cookie_args(None, Some("firefox")),
+            vec!["--cookies-from-browser", "firefox"]
+        );
     }
 
     #[test]
@@ -19888,6 +20054,8 @@ pub fn run() {
     let server_frontend_ready = extension_frontend_ready.clone();
     let extension_acks = Arc::new(Mutex::new(HashMap::new()));
     let server_extension_acks = extension_acks.clone();
+    let extension_media_handoffs = Arc::new(Mutex::new(HashMap::new()));
+    let server_extension_media_handoffs = extension_media_handoffs.clone();
     let extension_server_port = Arc::new(RwLock::new(None));
     let server_extension_port = extension_server_port.clone();
     let (extension_server_shutdown_tx, extension_server_shutdown_rx) =
@@ -21501,6 +21669,7 @@ pub fn run() {
                     server_pairing_token.clone(),
                     server_frontend_ready.clone(),
                     server_extension_acks.clone(),
+                    server_extension_media_handoffs.clone(),
                     server_extension_port.clone(),
                     extension_server_shutdown_rx.clone(),
                 ).await {
@@ -21674,6 +21843,8 @@ pub fn run() {
         set_extension_frontend_ready,
         ack_frontend_exit,
         ack_extension_download,
+        ack_extension_media_discovery,
+        fail_extension_media_discovery,
     ]);
     let torrent_limits_handler: FirelinkInvokeHandler = Box::new(tauri::generate_handler![
         set_concurrent_limit,
@@ -21817,7 +21988,9 @@ pub fn run() {
                 | "get_extension_server_port"
                 | "set_extension_frontend_ready"
                 | "ack_frontend_exit"
-                | "ack_extension_download" => extension_handler(invoke),
+                | "ack_extension_download"
+                | "ack_extension_media_discovery"
+                | "fail_extension_media_discovery" => extension_handler(invoke),
                 "set_concurrent_limit"
                 | "set_queue_concurrency_limits"
                 | "set_download_speed_limit"

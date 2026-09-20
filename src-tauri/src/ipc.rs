@@ -807,6 +807,8 @@ pub struct PersistedSettings {
     #[serde(default)]
     pub prevents_display_sleep_while_downloading: bool,
     pub media_cookie_source: MediaCookieSource,
+    #[serde(default)]
+    pub media_cookie_file: String,
     pub site_logins: Vec<SiteLogin>,
     pub auto_check_updates: bool,
     #[serde(default)]
