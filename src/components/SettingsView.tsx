@@ -2301,9 +2301,10 @@ className="app-button px-3 py-1.5 text-[12px] flex items-center gap-1.5 disabled
                         </div>
                       ))}
 
-                      <div className="grid grid-cols-[180px_1fr] items-center gap-4 text-[13px] border-t border-border-modal/50 pt-3 mt-2">
-                        <label className="text-text-secondary font-semibold pt-1.5">{t($ => $.settings.engine.browserCookiesSource)}</label>
+                      <div className="grid grid-cols-1 items-start gap-2 text-[13px] border-t border-border-modal/50 pt-3 mt-2 sm:grid-cols-[180px_minmax(0,1fr)] sm:items-center sm:gap-4">
+                        <label htmlFor="media-browser-cookie-source" className="text-text-secondary font-semibold">{t($ => $.settings.engine.browserCookiesSource)}</label>
                         <select
+                          id="media-browser-cookie-source"
                           value={browserCookieSourceOptions.some(option => option.value === settings.mediaCookieSource) ? settings.mediaCookieSource : 'none'}
                           onChange={(e) => settings.setMediaCookieSource(e.target.value)}
                           className="bg-bg-input border border-border-modal rounded-lg p-1.5 text-[13px] text-text-primary focus:outline-none focus:border-accent w-full"
@@ -2314,31 +2315,33 @@ className="app-button px-3 py-1.5 text-[12px] flex items-center gap-1.5 disabled
                         </select>
                       </div>
                       <p className="text-text-muted text-xs mt-1">{t($ => $.settings.engine.cookieDescription)}</p>
-                      <div className="grid grid-cols-[180px_1fr] items-start gap-4 text-[13px] border-t border-border-modal/50 pt-3 mt-2">
-                        <div>
+                      <div className="border-t border-border-modal/50 pt-3 mt-2 space-y-2 text-[13px]">
+                        <div className="min-w-0">
                           <label className="text-text-secondary font-semibold">{t($ => $.settings.engine.cookieFile)}</label>
-                          <p className="text-text-muted text-[11px] mt-1">{t($ => $.settings.engine.cookieFileDescription)}</p>
+                          <p className="text-text-muted text-xs mt-1">{t($ => $.settings.engine.cookieFileDescription)}</p>
                         </div>
-                        <div className="min-w-0 flex items-center gap-2">
-                          <span className="font-mono text-xs text-text-muted truncate flex-1" title={settings.mediaCookieFile || undefined}>
+                        <div className="grid min-w-0 grid-cols-1 items-center gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                          <span className="min-w-0 font-mono text-xs text-text-muted truncate" title={settings.mediaCookieFile || undefined}>
                             {settings.mediaCookieFile || t($ => $.settings.engine.none)}
                           </span>
-                          <button
-                            type="button"
-                            className="app-button px-2.5 py-1.5 text-xs shrink-0"
-                            onClick={() => void handleBrowseMediaCookieFile()}
-                          >
-                            {t($ => $.settings.engine.chooseCookieFile)}
-                          </button>
-                          {settings.mediaCookieFile && (
+                          <div className="flex flex-wrap gap-2 sm:justify-end">
                             <button
                               type="button"
-                              className="app-button px-2.5 py-1.5 text-xs shrink-0"
-                              onClick={() => settings.setMediaCookieFile('')}
+                              className="app-button px-2.5 py-1.5 text-xs"
+                              onClick={() => void handleBrowseMediaCookieFile()}
                             >
-                              {t($ => $.settings.engine.clearCookieFile)}
+                              {t($ => $.settings.engine.chooseCookieFile)}
                             </button>
-                          )}
+                            {settings.mediaCookieFile && (
+                              <button
+                                type="button"
+                                className="app-button px-2.5 py-1.5 text-xs"
+                                onClick={() => settings.setMediaCookieFile('')}
+                              >
+                                {t($ => $.settings.engine.clearCookieFile)}
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </div>
                     </div>

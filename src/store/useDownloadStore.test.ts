@@ -3184,7 +3184,8 @@ describe('useDownloadStore', () => {
     const id = 'startup-media-browser-cookies';
     vi.mocked(useSettingsStore.getState).mockReturnValue({
       ...useSettingsStore.getState(),
-      mediaCookieSource: 'chrome'
+      mediaCookieSource: 'chrome',
+      mediaCookieFile: '/tmp/firelink-cookies.txt'
     } as unknown as ReturnType<typeof useSettingsStore.getState>);
     useDownloadStore.setState({
       downloads: [{
@@ -3220,11 +3221,56 @@ describe('useDownloadStore', () => {
         id,
         is_media: true,
         cookie_source: 'chrome',
+        cookie_file: '/tmp/firelink-cookies.txt',
       });
       expect(useDownloadStore.getState().downloads[0].credentialsRequired).toBe(false);
     } finally {
       disposePersistence();
     }
+  });
+
+  it('uses current browser-cookie settings when a paused media download is re-enqueued', async () => {
+    const id = 'resume-media-browser-cookie-settings';
+    vi.mocked(useSettingsStore.getState).mockReturnValue({
+      ...useSettingsStore.getState(),
+      mediaCookieSource: 'firefox',
+      mediaCookieFile: '/tmp/firelink-cookies.txt'
+    } as unknown as ReturnType<typeof useSettingsStore.getState>);
+    useDownloadStore.setState({
+      downloads: [{
+        id,
+        url: 'https://www.youtube.com/watch?v=resume-browser-cookie-source',
+        fileName: 'video.mp4',
+        destination: '/tmp',
+        status: 'paused',
+        category: 'Movies',
+        dateAdded: '',
+        isMedia: true,
+        credentialsRequired: false,
+        hasBeenDispatched: true,
+        queueId: MAIN_QUEUE_ID,
+      }] as any[],
+      backendRegisteredIds: new Set(),
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'resume_download') return false;
+      if (command === 'enqueue_download') {
+        return { id, filename: 'video.mp4' };
+      }
+      if (command === 'get_pending_order') return [];
+      return undefined;
+    });
+
+    await expect(useDownloadStore.getState().resumeDownload(id)).resolves.toBe(true);
+
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('enqueue_download', expect.objectContaining({
+      item: expect.objectContaining({
+        id,
+        is_media: true,
+        cookie_source: 'firefox',
+        cookie_file: '/tmp/firelink-cookies.txt',
+      })
+    }));
   });
 
   it('does not strip a configured site login during startup without keychain access', async () => {

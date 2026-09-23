@@ -538,10 +538,7 @@ async fn download_handler(
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    if tokio::time::timeout(EXTENSION_ACK_TIMEOUT, ack_receiver)
-        .await
-        .is_err()
-    {
+    if !wait_for_extension_acknowledgement(ack_receiver, EXTENSION_ACK_TIMEOUT).await {
         remove_extension_ack(&state.extension_acks, &request_id);
         // The event may already have reached the frontend even when its
         // acknowledgement was delayed or lost. Do not return 503 here:
@@ -704,10 +701,7 @@ async fn deliver_media_discovery_update(
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    if tokio::time::timeout(EXTENSION_ACK_TIMEOUT, ack_receiver)
-        .await
-        .is_err()
-    {
+    if !wait_for_extension_acknowledgement(ack_receiver, EXTENSION_ACK_TIMEOUT).await {
         remove_extension_ack(&state.extension_acks, &request_id);
         finish_media_discovery_attempt(
             &state.media_handoffs,
@@ -815,6 +809,13 @@ fn remove_extension_ack(registry: &SharedExtensionAcks, request_id: &str) {
     if let Ok(mut pending) = registry.lock() {
         pending.remove(request_id);
     }
+}
+
+async fn wait_for_extension_acknowledgement(
+    receiver: oneshot::Receiver<()>,
+    timeout: Duration,
+) -> bool {
+    matches!(tokio::time::timeout(timeout, receiver).await, Ok(Ok(())))
 }
 
 fn is_valid_media_handoff_id(value: &str) -> bool {
@@ -1591,7 +1592,7 @@ mod tests {
         normalize_headers, normalize_media_discovery_update, normalize_media_handoff_metadata,
         normalize_media_url, normalize_referer, normalize_url,
         expire_media_handoff, finish_media_discovery_attempt, register_media_handoff,
-        reject_extension_download,
+        reject_extension_download, wait_for_extension_acknowledgement,
         require_frontend_ready, required_client_nonce, same_origin_url, sanitize_filename,
         server_session_for_request, session_binding_requested,
         sign_server_proof,
@@ -1616,6 +1617,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, RwLock};
+    use std::time::Duration;
 
     fn normalized_discovery_update(
         handoff_id: &str,
@@ -2135,7 +2137,17 @@ mod tests {
 
         assert!(reject_extension_download(&registry, "request-2"));
         assert!(!reject_extension_download(&registry, "request-2"));
-        assert!(receiver.await.is_err());
+        assert!(!wait_for_extension_acknowledgement(receiver, Duration::from_secs(1)).await);
+    }
+
+    #[tokio::test]
+    async fn only_a_sent_acknowledgement_counts_as_success() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        sender.send(()).unwrap();
+        assert!(wait_for_extension_acknowledgement(receiver, Duration::from_secs(1)).await);
+
+        let (_sender, receiver) = tokio::sync::oneshot::channel::<()>();
+        assert!(!wait_for_extension_acknowledgement(receiver, Duration::ZERO).await);
     }
 
     #[test]

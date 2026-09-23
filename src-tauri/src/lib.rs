@@ -1775,26 +1775,72 @@ fn is_browser_cookie_extraction_error(message: &str) -> bool {
         || lower.contains("could not access browser cookie database")
         || lower.contains("failed to read browser cookie")
         || lower.contains("failed to decrypt with dpapi")
+        // yt-dlp's CookieLoadError deliberately hides the underlying browser
+        // database exception behind this message. This classifier is only
+        // consulted after a browser-cookie attempt has failed.
+        || lower.contains("failed to load cookies")
         || missing_cookie_database
 }
 
-fn should_retry_without_browser_cookies(
-    cookie_file: Option<&str>,
+fn is_netscape_cookie_file_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("does not look like a netscape format cookies file")
+        || lower.contains("http.cookiejar.loaderror")
+        || lower.contains("unable to load cookies file")
+        || lower.contains("failed to load cookies file")
+        || lower.contains("could not load cookies file")
+        || lower.contains("failed to read cookies file")
+        // yt-dlp also wraps Netscape cookie-jar parse/read errors in the same
+        // CookieLoadError used for browser extraction. The caller tracks that
+        // the file attempt was active before using this classifier.
+        || lower.contains("failed to load cookies")
+}
+
+fn media_cookie_browser_is_active(cookie_browser: Option<&str>) -> bool {
+    cookie_browser.is_some_and(|source| {
+        let source = source.trim();
+        !source.is_empty() && !source.eq_ignore_ascii_case("none")
+    })
+}
+
+fn should_fallback_from_browser_cookies(
     cookie_browser: Option<&str>,
     failure_reason: &str,
     fallback_used: bool,
 ) -> bool {
-    // Browser cookies are an optional authentication enhancement. Chromium on
-    // Windows can deny access to its database independently of whether the
-    // requested media needs authentication, so only this narrowly classified
-    // extraction failure may downgrade to a public-media attempt.
-    cookie_file.is_none()
-        && !fallback_used
-        && cookie_browser.is_some_and(|source| {
-            let source = source.trim();
-            !source.is_empty() && !source.eq_ignore_ascii_case("none")
-        })
+    // Browser cookies are optional. A browser database can be missing, locked,
+    // or undecryptable independently of whether the requested media needs
+    // authentication, so only a classified extraction failure may select a
+    // Netscape-file or cookie-free fallback.
+    !fallback_used
+        && media_cookie_browser_is_active(cookie_browser)
         && is_browser_cookie_extraction_error(failure_reason)
+}
+
+fn should_fallback_from_netscape_cookie_file(
+    file_fallback_used: bool,
+    failure_reason: &str,
+) -> bool {
+    file_fallback_used && is_netscape_cookie_file_error(failure_reason)
+}
+
+enum BrowserCookieFallback {
+    NetscapeFile(String),
+    CookieFree,
+}
+
+fn browser_cookie_fallback(
+    cookie_file: Option<&str>,
+    failure_reason: &str,
+) -> Option<BrowserCookieFallback> {
+    if !is_browser_cookie_extraction_error(failure_reason) {
+        return None;
+    }
+
+    match normalize_media_cookie_file(cookie_file).ok().flatten() {
+        Some(cookie_file) => Some(BrowserCookieFallback::NetscapeFile(cookie_file)),
+        None => Some(BrowserCookieFallback::CookieFree),
+    }
 }
 
 fn should_cleanup_media_artifacts_after_failure(
@@ -2752,6 +2798,18 @@ fn media_metadata_cache_key(
     hasher.finish()
 }
 
+fn media_cookie_cache_identity(
+    cookie_file: &Option<String>,
+    cookie_browser: &Option<String>,
+) -> (Option<String>, Option<String>) {
+    if media_cookie_browser_is_active(cookie_browser.as_deref()) {
+        // A fallback file does not affect a successful browser extraction.
+        (None, cookie_browser.clone())
+    } else {
+        (cookie_file.clone(), None)
+    }
+}
+
 async fn release_media_metadata_lock(
     cache_key: u64,
     request_lock: &std::sync::Arc<tokio::sync::Mutex<()>>,
@@ -2814,18 +2872,23 @@ async fn fetch_media_metadata(
 ) -> Result<MediaMetadata, String> {
     properties_window::ensure_main_window(&caller)?;
     let url = validate_http_url_route(&url)?.to_string();
-    let cookie_file = normalize_media_cookie_file(cookie_file.as_deref())?;
     let cookie_browser = normalize_media_cookie_source(cookie_browser.as_deref())?;
+    let cookie_file = normalize_media_cookie_file_for_request(
+        cookie_file.as_deref(),
+        cookie_browser.as_deref(),
+    )?;
     let user_agent = user_agent.map(|ua| ua.trim().to_string()).filter(|ua| !ua.is_empty());
     let username = username.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
     let password = password.filter(|p| !p.is_empty());
     let headers = headers.map(|h| h.trim().to_string()).filter(|h| !h.is_empty());
     let cookies = cookies.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
     let proxy = proxy.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+    let (cache_cookie_file, cache_cookie_browser) =
+        media_cookie_cache_identity(&cookie_file, &cookie_browser);
     let cache_key = media_metadata_cache_key(
         &url,
-        &cookie_file,
-        &cookie_browser,
+        &cache_cookie_file,
+        &cache_cookie_browser,
         &user_agent,
         &username,
         &password,
@@ -2863,10 +2926,8 @@ async fn fetch_media_metadata(
     }
     drop(cache_guard);
 
-    // A fallback result was resolved without the configured browser session;
-    // keep that effective identity separate so a later successful cookie
-    // extraction can refresh authenticated formats instead of hitting stale
-    // public-only metadata.
+    // Cache the result under the source that actually produced it. A later
+    // successful browser read must not reuse public or Netscape-file metadata.
     let mut result_cache_key = cache_key;
     let result = fetch_media_metadata_uncached(
         app_handle.clone(),
@@ -2882,40 +2943,113 @@ async fn fetch_media_metadata(
     )
     .await;
 
-    let result = match (result, cookie_file.as_deref(), cookie_browser.as_deref()) {
-        (Err(error), None, Some(browser))
-            if should_retry_without_browser_cookies(None, Some(browser), &error, false) =>
+    let result = match result {
+        Err(error)
+            if should_fallback_from_browser_cookies(
+                cookie_browser.as_deref(),
+                &error,
+                false,
+            ) =>
         {
             log::warn!(
-                "yt-dlp could not read browser cookies from {}; retrying media metadata without browser cookies",
-                browser
+                "yt-dlp could not read browser cookies from {}; trying the configured cookie fallback",
+                cookie_browser.as_deref().unwrap_or("selected browser")
             );
-            result_cache_key = media_metadata_cache_key(
-                &url,
-                &None,
-                &None,
-                &user_agent,
-                &username,
-                &password,
-                &headers,
-                &cookies,
-                &proxy,
-            );
-            fetch_media_metadata_uncached(
-                app_handle,
-                url,
-                None,
-                None,
-                user_agent,
-                username,
-                password,
-                headers,
-                cookies,
-                proxy,
-            )
-            .await
+            let cookie_file_fallback =
+                match browser_cookie_fallback(cookie_file.as_deref(), &error) {
+                Some(BrowserCookieFallback::NetscapeFile(cookie_file)) => Some(cookie_file),
+                Some(BrowserCookieFallback::CookieFree) | None => None,
+            };
+            if let Some(cookie_file_fallback) = cookie_file_fallback {
+                let file_cache_key = media_metadata_cache_key(
+                    &url,
+                    &Some(cookie_file_fallback.clone()),
+                    &None,
+                    &user_agent,
+                    &username,
+                    &password,
+                    &headers,
+                    &cookies,
+                    &proxy,
+                );
+                match fetch_media_metadata_uncached(
+                    app_handle.clone(),
+                    url.clone(),
+                    Some(cookie_file_fallback.clone()),
+                    None,
+                    user_agent.clone(),
+                    username.clone(),
+                    password.clone(),
+                    headers.clone(),
+                    cookies.clone(),
+                    proxy.clone(),
+                )
+                .await
+                {
+                    Ok(metadata) => {
+                        result_cache_key = file_cache_key;
+                        Ok(metadata)
+                    }
+                    Err(file_error)
+                        if should_fallback_from_netscape_cookie_file(true, &file_error) =>
+                    {
+                        log::warn!("yt-dlp could not use the configured Netscape cookie file; retrying media metadata without cookies");
+                        result_cache_key = media_metadata_cache_key(
+                            &url,
+                            &None,
+                            &None,
+                            &user_agent,
+                            &username,
+                            &password,
+                            &headers,
+                            &cookies,
+                            &proxy,
+                        );
+                        fetch_media_metadata_uncached(
+                            app_handle,
+                            url,
+                            None,
+                            None,
+                            user_agent,
+                            username,
+                            password,
+                            headers,
+                            cookies,
+                            proxy,
+                        )
+                        .await
+                    }
+                    Err(file_error) => Err(file_error),
+                }
+            } else {
+                log::warn!("yt-dlp could not read browser cookies; retrying media metadata without cookies");
+                result_cache_key = media_metadata_cache_key(
+                    &url,
+                    &None,
+                    &None,
+                    &user_agent,
+                    &username,
+                    &password,
+                    &headers,
+                    &cookies,
+                    &proxy,
+                );
+                fetch_media_metadata_uncached(
+                    app_handle,
+                    url,
+                    None,
+                    None,
+                    user_agent,
+                    username,
+                    password,
+                    headers,
+                    cookies,
+                    proxy,
+                )
+                .await
+            }
         }
-        (result, _, _) => result,
+        other => other,
     };
 
     let result = match result {
@@ -2964,8 +3098,11 @@ async fn fetch_media_playlist_metadata(
 ) -> Result<MediaPlaylistMetadata, String> {
     properties_window::ensure_main_window(&caller)?;
     let url = validate_http_url_route(&url)?.to_string();
-    let cookie_file = normalize_media_cookie_file(cookie_file.as_deref())?;
     let cookie_browser = normalize_media_cookie_source(cookie_browser.as_deref())?;
+    let cookie_file = normalize_media_cookie_file_for_request(
+        cookie_file.as_deref(),
+        cookie_browser.as_deref(),
+    )?;
     let user_agent = user_agent.map(|ua| ua.trim().to_string()).filter(|ua| !ua.is_empty());
     let username = username.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
     let password = password.filter(|p| !p.is_empty());
@@ -2987,29 +3124,76 @@ async fn fetch_media_playlist_metadata(
     )
     .await;
 
-    match (result, cookie_file.as_deref(), cookie_browser.as_deref()) {
-        (Err(error), None, Some(browser))
-            if should_retry_without_browser_cookies(None, Some(browser), &error, false) =>
+    match result {
+        Err(error)
+            if should_fallback_from_browser_cookies(
+                cookie_browser.as_deref(),
+                &error,
+                false,
+            ) =>
         {
             log::warn!(
-                "yt-dlp could not read browser cookies from {}; retrying playlist metadata without browser cookies",
-                browser
+                "yt-dlp could not read browser cookies from {}; trying the configured playlist-cookie fallback",
+                cookie_browser.as_deref().unwrap_or("selected browser")
             );
-            fetch_media_playlist_metadata_uncached(
-                app_handle,
-                url,
-                None,
-                None,
-                user_agent,
-                username,
-                password,
-                headers,
-                cookies,
-                proxy,
-            )
-            .await
+            let cookie_file_fallback =
+                match browser_cookie_fallback(cookie_file.as_deref(), &error) {
+                Some(BrowserCookieFallback::NetscapeFile(cookie_file)) => Some(cookie_file),
+                Some(BrowserCookieFallback::CookieFree) | None => None,
+            };
+            if let Some(cookie_file_fallback) = cookie_file_fallback {
+                match fetch_media_playlist_metadata_uncached(
+                    app_handle.clone(),
+                    url.clone(),
+                    Some(cookie_file_fallback),
+                    None,
+                    user_agent.clone(),
+                    username.clone(),
+                    password.clone(),
+                    headers.clone(),
+                    cookies.clone(),
+                    proxy.clone(),
+                )
+                .await
+                {
+                    Err(file_error)
+                        if should_fallback_from_netscape_cookie_file(true, &file_error) =>
+                    {
+                        log::warn!("yt-dlp could not use the configured Netscape cookie file; retrying playlist metadata without cookies");
+                        fetch_media_playlist_metadata_uncached(
+                            app_handle,
+                            url,
+                            None,
+                            None,
+                            user_agent,
+                            username,
+                            password,
+                            headers,
+                            cookies,
+                            proxy,
+                        )
+                        .await
+                    }
+                    result => result,
+                }
+            } else {
+                log::warn!("yt-dlp could not read browser cookies; retrying playlist metadata without cookies");
+                fetch_media_playlist_metadata_uncached(
+                    app_handle,
+                    url,
+                    None,
+                    None,
+                    user_agent,
+                    username,
+                    password,
+                    headers,
+                    cookies,
+                    proxy,
+                )
+                .await
+            }
         }
-        (result, _, _) => result,
+        other => other,
     }
 }
 
@@ -5053,6 +5237,27 @@ fn normalize_media_cookie_file(source: Option<&str>) -> Result<Option<String>, S
     Ok(Some(source.to_string()))
 }
 
+fn media_cookie_file_candidate(source: Option<&str>) -> Option<String> {
+    source
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn normalize_media_cookie_file_for_request(
+    source: Option<&str>,
+    cookie_browser: Option<&str>,
+) -> Result<Option<String>, String> {
+    let candidate = media_cookie_file_candidate(source);
+    if media_cookie_browser_is_active(cookie_browser) {
+        // A configured file is only a fallback when browser-cookie extraction
+        // cannot run. Do not let a stale fallback path block the browser path.
+        Ok(candidate)
+    } else {
+        normalize_media_cookie_file(candidate.as_deref())
+    }
+}
+
 fn ytdlp_cookie_browser_arg(browser: &str) -> String {
     let trimmed = browser.trim();
     if trimmed.eq_ignore_ascii_case("safari") {
@@ -5063,22 +5268,24 @@ fn ytdlp_cookie_browser_arg(browser: &str) -> String {
 }
 
 fn ytdlp_cookie_args(cookie_file: Option<&str>, cookie_browser: Option<&str>) -> Vec<String> {
-    if let Some(cookie_file) = cookie_file.filter(|value| !value.is_empty()) {
-        return vec![
-            "--cookies".to_string(),
-            cookie_file.to_string(),
-            "--no-write-cookies".to_string(),
-        ];
+    if media_cookie_browser_is_active(cookie_browser) {
+        let browser = cookie_browser.unwrap_or_default().trim();
+        vec![
+            "--cookies-from-browser".to_string(),
+            ytdlp_cookie_browser_arg(browser),
+        ]
+    } else {
+        cookie_file
+            .filter(|value| !value.is_empty())
+            .map(|cookie_file| {
+                vec![
+                    "--cookies".to_string(),
+                    cookie_file.to_string(),
+                    "--no-write-cookies".to_string(),
+                ]
+            })
+            .unwrap_or_default()
     }
-    cookie_browser
-        .filter(|value| !value.is_empty() && *value != "none")
-        .map(|browser| {
-            vec![
-                "--cookies-from-browser".to_string(),
-                ytdlp_cookie_browser_arg(browser),
-            ]
-        })
-        .unwrap_or_default()
 }
 
 fn media_format_and_container_args(format: &str, safe_filename: &str) -> Vec<String> {
@@ -5138,7 +5345,10 @@ pub(crate) async fn start_media_download_internal(
 ) -> Result<std::path::PathBuf, String> {
     let url = validate_http_url_route(&url)?.to_string();
     let cookie_source = normalize_media_cookie_source(cookie_source.as_deref())?;
-    let cookie_file = normalize_media_cookie_file(cookie_file.as_deref())?;
+    let cookie_file = normalize_media_cookie_file_for_request(
+        cookie_file.as_deref(),
+        cookie_source.as_deref(),
+    )?;
     let safe_filename = crate::download_ownership::canonical_download_filename(&filename);
 
     let resolved_dest = resolve_path(&destination, &app_handle);
@@ -5213,8 +5423,19 @@ pub(crate) async fn start_media_download_internal(
         .max(0) as usize;
     let concurrent_fragments = normalize_media_connections(connections);
     let mut strike = 0_usize;
-    let mut effective_cookie_source = cookie_source;
+    let browser_cookie_source_active = media_cookie_browser_is_active(cookie_source.as_deref());
+    let mut effective_cookie_source = if browser_cookie_source_active {
+        cookie_source.clone()
+    } else {
+        None
+    };
+    let mut effective_cookie_file = if browser_cookie_source_active {
+        None
+    } else {
+        cookie_file.clone()
+    };
     let mut browser_cookie_fallback_used = false;
+    let mut file_cookie_fallback_used = false;
     let route = crate::network::NetworkRoute::from_proxy(proxy.as_deref());
 
     while strike <= max_retries {
@@ -5273,7 +5494,7 @@ pub(crate) async fn start_media_download_internal(
         }
 
         cmd = cmd.args(ytdlp_cookie_args(
-            cookie_file.as_deref(),
+            effective_cookie_file.as_deref(),
             effective_cookie_source.as_deref(),
         ));
 
@@ -5500,11 +5721,7 @@ pub(crate) async fn start_media_download_internal(
 
         let transient = is_transient_network_error(&failure_reason);
         let strikes_left = strike < max_retries;
-        if should_cleanup_media_artifacts_after_failure(&failure_reason, strike, max_retries) {
-            let _ = cleanup_media_artifacts(&app_handle, Some(id), &out_path, false).await;
-        }
-        if should_retry_without_browser_cookies(
-            cookie_file.as_deref(),
+        if should_fallback_from_browser_cookies(
             effective_cookie_source.as_deref(),
             &failure_reason,
             browser_cookie_fallback_used,
@@ -5512,12 +5729,30 @@ pub(crate) async fn start_media_download_internal(
         {
             let source = effective_cookie_source.clone().unwrap_or_default();
             log::warn!(
-                "yt-dlp could not read browser cookies from {}; retrying media download without browser cookies",
+                "yt-dlp could not read browser cookies from {}; trying the configured media-cookie fallback",
                 source
             );
             effective_cookie_source = None;
             browser_cookie_fallback_used = true;
+            effective_cookie_file =
+                match browser_cookie_fallback(cookie_file.as_deref(), &failure_reason) {
+                Some(BrowserCookieFallback::NetscapeFile(cookie_file)) => Some(cookie_file),
+                Some(BrowserCookieFallback::CookieFree) | None => None,
+            };
+            file_cookie_fallback_used = effective_cookie_file.is_some();
             continue;
+        }
+        if should_fallback_from_netscape_cookie_file(
+            file_cookie_fallback_used,
+            &failure_reason,
+        ) {
+            log::warn!("yt-dlp could not use the configured Netscape cookie file; retrying media download without cookies");
+            effective_cookie_file = None;
+            file_cookie_fallback_used = false;
+            continue;
+        }
+        if should_cleanup_media_artifacts_after_failure(&failure_reason, strike, max_retries) {
+            let _ = cleanup_media_artifacts(&app_handle, Some(id), &out_path, false).await;
         }
         if !(transient && strikes_left) {
             return Err(failure_reason);
@@ -15112,7 +15347,9 @@ mod tests {
         build_media_format_options,
         collect_download_uris, drain_media_output_lines, filename_from_content_disposition,
         filename_from_url_disposition_query, filename_from_url_path, is_excluded_yt_dlp_format,
-        is_browser_cookie_extraction_error, json_lower, media_metadata_cache_key,
+        is_browser_cookie_extraction_error, is_netscape_cookie_file_error,
+        media_cookie_browser_is_active, json_lower,
+        media_cookie_cache_identity, media_metadata_cache_key,
         media_output_template, media_progress_args, media_progress_event_totals,
         media_progress_speed,
         cookie_scope_for_url, metadata_authentication_error, metadata_cookie_header_present,
@@ -15139,7 +15376,8 @@ mod tests {
         directory_has_non_metadata_entries, directory_has_non_metadata_entries_sync,
         primary_path_needs_container_cleanup,
         should_cleanup_media_artifacts_after_failure,
-        should_retry_without_browser_cookies,
+        browser_cookie_fallback, normalize_media_cookie_file_for_request,
+        should_fallback_from_browser_cookies, should_fallback_from_netscape_cookie_file,
         retry_metadata_with_cookies, should_retry_metadata_with_cookies,
         should_send_metadata_credentials, collect_log_files, FirelinkDeepLink,
         ytdlp_youtube_extractor_args, YTDLP_YOUTUBE_PLAYER_CLIENTS,
@@ -15153,6 +15391,7 @@ mod tests {
         normalize_media_connections,
         normalize_media_cookie_source,
         media_format_and_container_args,
+        BrowserCookieFallback,
         ytdlp_cookie_browser_arg,
         ytdlp_cookie_args,
         validate_enqueue_url, validate_enqueue_uris, validate_keychain_grant_request_id,
@@ -19185,6 +19424,9 @@ mod tests {
             "failed to read browser cookie data"
         ));
         assert!(is_browser_cookie_extraction_error(
+            "ERROR: failed to load cookies"
+        ));
+        assert!(is_browser_cookie_extraction_error(
             "yt-dlp failed while fetching media metadata: ERROR: could not find firefox cookies database in '<HOME>/Library/Application Support/Firefox/Profiles'"
         ));
         assert!(is_browser_cookie_extraction_error(
@@ -19223,39 +19465,184 @@ mod tests {
     }
 
     #[test]
-    fn retries_once_without_browser_cookies_only_for_cookie_database_failures() {
+    fn browser_cookie_fallback_uses_a_valid_file_then_preserves_cookie_free_access() {
         let cookie_database_error = "yt-dlp failed while fetching media metadata: ERROR: could not find firefox cookies database in '<HOME>/Library/Application Support/Firefox/Profiles'";
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cookie_path = temp_dir.path().join("cookies.txt");
+        std::fs::write(&cookie_path, "# Netscape HTTP Cookie File\n").unwrap();
+        let cookie_file = std::fs::canonicalize(cookie_path)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
 
-        assert!(should_retry_without_browser_cookies(
-            None,
+        assert!(should_fallback_from_browser_cookies(
             Some("firefox"),
             cookie_database_error,
             false
         ));
-        assert!(!should_retry_without_browser_cookies(
-            None,
+        assert!(!should_fallback_from_browser_cookies(
             Some("firefox"),
             cookie_database_error,
             true
         ));
-        assert!(!should_retry_without_browser_cookies(
-            None,
+        assert!(!should_fallback_from_browser_cookies(
             Some("none"),
             cookie_database_error,
             false
         ));
-        assert!(!should_retry_without_browser_cookies(
-            None,
+        assert!(!should_fallback_from_browser_cookies(
             None,
             cookie_database_error,
             false
         ));
-        assert!(!should_retry_without_browser_cookies(
-            None,
-            Some("firefox"),
-            "ERROR: Sign in to confirm you are not a bot",
-            false
+
+        assert!(matches!(
+            browser_cookie_fallback(Some(&cookie_file), cookie_database_error),
+            Some(BrowserCookieFallback::NetscapeFile(path)) if path == cookie_file
         ));
+        assert!(matches!(
+            browser_cookie_fallback(None, cookie_database_error),
+            Some(BrowserCookieFallback::CookieFree)
+        ));
+
+        let stale_cookie_file = temp_dir.path().join("stale-cookies.txt");
+        let stale_cookie_file = stale_cookie_file.to_string_lossy().into_owned();
+        assert!(matches!(
+            browser_cookie_fallback(Some(&stale_cookie_file), cookie_database_error),
+            Some(BrowserCookieFallback::CookieFree)
+        ));
+
+        for non_cookie_failure in [
+            "ERROR: Sign in to confirm you are not a bot",
+            "ERROR: unable to connect to the proxy server",
+            "ERROR: requested format is not available",
+        ] {
+            assert!(!should_fallback_from_browser_cookies(
+                Some("firefox"),
+                non_cookie_failure,
+                false
+            ));
+            assert!(browser_cookie_fallback(Some(&cookie_file), non_cookie_failure).is_none());
+        }
+    }
+
+    #[test]
+    fn netscape_file_fallback_only_retries_cookie_file_parse_failures() {
+        let malformed_file_error = "ERROR: '/private/tmp/cookies.txt' does not look like a Netscape format cookies file";
+        assert!(is_netscape_cookie_file_error(malformed_file_error));
+        assert!(should_fallback_from_netscape_cookie_file(
+            true,
+            malformed_file_error
+        ));
+        assert!(!should_fallback_from_netscape_cookie_file(
+            false,
+            malformed_file_error
+        ));
+        assert!(is_netscape_cookie_file_error("ERROR: failed to load cookies"));
+        assert!(should_fallback_from_netscape_cookie_file(
+            true,
+            "ERROR: failed to load cookies"
+        ));
+
+        for unrelated_failure in [
+            "ERROR: Sign in to confirm you are not a bot",
+            "ERROR: unable to connect to the proxy server",
+            "ERROR: requested format is not available",
+        ] {
+            assert!(!is_netscape_cookie_file_error(unrelated_failure));
+            assert!(!should_fallback_from_netscape_cookie_file(
+                true,
+                unrelated_failure
+            ));
+        }
+    }
+
+    #[test]
+    fn stale_cookie_file_does_not_block_a_selected_browser_or_cookie_free_retry() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stale_cookie_file = temp_dir.path().join("missing-cookie-file.txt");
+        let stale_cookie_file = stale_cookie_file.to_string_lossy().into_owned();
+
+        assert_eq!(
+            normalize_media_cookie_file_for_request(Some(&stale_cookie_file), Some("chrome"))
+                .unwrap(),
+            Some(stale_cookie_file.clone())
+        );
+        assert!(normalize_media_cookie_file_for_request(Some(&stale_cookie_file), None).is_err());
+        assert!(normalize_media_cookie_file_for_request(
+            Some(&stale_cookie_file),
+            Some(" NONE ")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn inactive_cookie_browser_values_do_not_override_file_sources() {
+        assert!(!media_cookie_browser_is_active(None));
+        assert!(!media_cookie_browser_is_active(Some("")));
+        assert!(!media_cookie_browser_is_active(Some(" none ")));
+        assert!(media_cookie_browser_is_active(Some(" Firefox ")));
+
+        let cookie_file = Some("/private/cookies.txt".to_string());
+        assert_eq!(
+            media_cookie_cache_identity(&cookie_file, &Some(" NONE ".to_string())),
+            (cookie_file.clone(), None)
+        );
+    }
+
+    #[test]
+    fn metadata_cache_identity_separates_browser_file_and_cookie_free_sources() {
+        let browser = Some("chrome".to_string());
+        let first_file = Some("/private/cookies-one.txt".to_string());
+        let second_file = Some("/private/cookies-two.txt".to_string());
+        let (first_browser_file, first_browser) =
+            media_cookie_cache_identity(&first_file, &browser);
+        let (second_browser_file, second_browser) =
+            media_cookie_cache_identity(&second_file, &browser);
+        assert_eq!(first_browser_file, None);
+        assert_eq!(second_browser_file, None);
+        assert_eq!(first_browser, browser);
+        assert_eq!(second_browser, browser);
+
+        let (file_only, no_browser) = media_cookie_cache_identity(&first_file, &None);
+        let (no_file, no_cookie_browser) = media_cookie_cache_identity(&None, &None);
+        let empty = None;
+        let browser_key = media_metadata_cache_key(
+            "https://example.com/media",
+            &first_browser_file,
+            &first_browser,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+        );
+        let file_key = media_metadata_cache_key(
+            "https://example.com/media",
+            &file_only,
+            &no_browser,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+        );
+        let cookie_free_key = media_metadata_cache_key(
+            "https://example.com/media",
+            &no_file,
+            &no_cookie_browser,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+        );
+        assert_ne!(browser_key, file_key);
+        assert_ne!(browser_key, cookie_free_key);
+        assert_ne!(file_key, cookie_free_key);
     }
 
     #[test]
@@ -19279,19 +19666,16 @@ mod tests {
     }
 
     #[test]
-    fn ytdlp_cookie_file_args_are_read_only() {
+    fn ytdlp_cookie_source_prefers_browser_then_uses_read_only_file_fallback() {
         assert_eq!(
             ytdlp_cookie_args(Some("/tmp/firelink-cookies.txt"), Some("firefox")),
-            vec![
-                "--cookies",
-                "/tmp/firelink-cookies.txt",
-                "--no-write-cookies"
-            ]
-        );
-        assert_eq!(
-            ytdlp_cookie_args(None, Some("firefox")),
             vec!["--cookies-from-browser", "firefox"]
         );
+        assert_eq!(
+            ytdlp_cookie_args(Some("/tmp/firelink-cookies.txt"), None),
+            vec!["--cookies", "/tmp/firelink-cookies.txt", "--no-write-cookies"]
+        );
+        assert!(ytdlp_cookie_args(None, None).is_empty());
     }
 
     #[test]
