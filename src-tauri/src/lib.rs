@@ -3821,6 +3821,48 @@ struct MainWindowRestoreState {
     requested: AtomicBool,
     startup_complete: AtomicBool,
     started_at_login: AtomicBool,
+    pending_opened_torrent_paths: std::sync::Mutex<PendingOpenedTorrentPaths>,
+}
+
+#[derive(Default)]
+struct PendingOpenedTorrentPaths {
+    app_state_ready: bool,
+    paths: Vec<String>,
+}
+
+impl MainWindowRestoreState {
+    fn route_opened_torrent_paths(&self, paths: Vec<String>) -> Option<Vec<String>> {
+        let mut pending = match self.pending_opened_torrent_paths.lock() {
+            Ok(pending) => pending,
+            Err(_) => {
+                log::error!("could not access pending opened Torrent paths during startup");
+                return None;
+            }
+        };
+
+        if pending.app_state_ready {
+            return Some(paths);
+        }
+
+        let remaining = MAX_DEEP_LINK_URLS.saturating_sub(pending.paths.len());
+        let dropped = paths.len().saturating_sub(remaining);
+        pending.paths.extend(paths.into_iter().take(remaining));
+        if dropped > 0 {
+            log::warn!(
+                "discarded {dropped} opened Torrent paths because the startup queue reached its capacity"
+            );
+        }
+        None
+    }
+
+    fn mark_app_state_ready_and_take_pending_paths(&self) -> Vec<String> {
+        let Ok(mut pending) = self.pending_opened_torrent_paths.lock() else {
+            log::error!("could not drain pending opened Torrent paths during startup");
+            return Vec::new();
+        };
+        pending.app_state_ready = true;
+        std::mem::take(&mut pending.paths)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -4220,7 +4262,24 @@ fn dispatch_opened_torrent_paths(app_handle: tauri::AppHandle, paths: Vec<String
         return;
     }
     restore_main_window(&app_handle);
-    let coordinator = app_handle.state::<AppState>().download_coordinator.clone();
+    let Some(startup_state) = app_handle.try_state::<MainWindowRestoreState>() else {
+        log::error!("could not route opened Torrent paths because startup state is unavailable");
+        return;
+    };
+    let Some(paths) = startup_state.route_opened_torrent_paths(paths) else {
+        return;
+    };
+    if paths.is_empty() {
+        return;
+    }
+    let Some(app_state) = app_handle.try_state::<AppState>() else {
+        // AppState is published before startup_state is marked ready. Reaching
+        // this branch indicates a broken startup ordering, so fail without
+        // panicking inside the platform's single-instance message callback.
+        log::error!("opened Torrent paths became dispatchable before app state was available");
+        return;
+    };
+    let coordinator = app_state.download_coordinator.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(error) = coordinator
             .send(download::DownloadCmd::CaptureUrls(paths))
@@ -8735,14 +8794,18 @@ fn update_dock_badge(
     properties_window::ensure_main_window(&caller)?;
     #[cfg(target_os = "macos")]
     {
-        use objc::runtime::Object;
-        use objc::{class, msg_send, sel, sel_impl};
-        use std::ffi::CString;
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::NSApplication;
+        use objc2_foundation::NSString;
         use std::sync::{Mutex, OnceLock};
 
         static LAST_DOCK_BADGE_STATE: OnceLock<Mutex<(u64, u64)>> = OnceLock::new();
 
-        let _ = app_handle.run_on_main_thread(move || {
+        if let Err(error) = app_handle.run_on_main_thread(move || {
+            let Some(main_thread) = MainThreadMarker::new() else {
+                log::error!("Tauri dispatched Dock badge update off the macOS main thread");
+                return;
+            };
             let state = LAST_DOCK_BADGE_STATE.get_or_init(|| Mutex::new((0, 0)));
             let Ok(mut state) = state.lock() else {
                 return;
@@ -8752,23 +8815,16 @@ fn update_dock_badge(
             }
             *state = (session, generation);
             drop(state);
-            unsafe {
-            let app_class = class!(NSApplication);
-            let app: *mut Object = msg_send![app_class, sharedApplication];
-            let dock_tile: *mut Object = msg_send![app, dockTile];
-            let label = if count > 0 {
-                count.to_string()
+            let dock_tile = NSApplication::sharedApplication(main_thread).dockTile();
+            if count > 0 {
+                let label = NSString::from_str(&count.to_string());
+                dock_tile.setBadgeLabel(Some(&label));
             } else {
-                "".to_string()
-            };
-            let c_label = CString::new(label).unwrap();
-            let ns_string_class = class!(NSString);
-            let ns_label: *mut Object = msg_send![ns_string_class, alloc];
-            let ns_label: *mut Object = msg_send![ns_label, initWithUTF8String: c_label.as_ptr()];
-            let _: () = msg_send![dock_tile, setBadgeLabel: ns_label];
-            let _: () = msg_send![ns_label, release];
+                dock_tile.setBadgeLabel(None);
             }
-        });
+        }) {
+            log::warn!("could not schedule macOS Dock badge update: {error}");
+        }
     }
     Ok(())
 }
@@ -13271,43 +13327,66 @@ async fn set_global_speed_limit(
     })
 }
 
+#[cfg(target_os = "macos")]
+fn check_automation_permission_on_main_thread(
+    _main_thread: objc2::MainThreadMarker,
+) -> Result<(), String> {
+    use objc2::msg_send;
+    use objc2::rc::{autoreleasepool, Retained};
+    use objc2::runtime::AnyObject;
+    use objc2::AnyThread;
+    use objc2_foundation::{NSAppleEventDescriptor, NSAppleScript, NSDictionary, NSString};
+
+    autoreleasepool(|_| {
+        let script_source = NSString::from_str("tell application \"System Events\" to get name");
+        let Some(script) = NSAppleScript::initWithSource(NSAppleScript::alloc(), &script_source)
+        else {
+            return Err("Automation permission was not granted".to_string());
+        };
+
+        let mut error_info: Option<Retained<NSDictionary<NSString, AnyObject>>> = None;
+        // Apple's SDK documents a nil result on failure, but its header
+        // omits nullable from the return type. Preserve the real failure
+        // contract by decoding the Objective-C object result as optional.
+        // objc2 retains +0 object returns and autoreleased out-parameters when
+        // converting them to Retained, so they remain valid through this pool.
+        let result: Option<Retained<NSAppleEventDescriptor>> =
+            unsafe { msg_send![&*script, executeAndReturnError: &mut error_info] };
+        if result.is_none() || error_info.is_some() {
+            return Err("Automation permission was not granted".to_string());
+        }
+        Ok(())
+    })
+}
+
 #[tauri::command]
-fn check_automation_permission(caller: tauri::WebviewWindow) -> Result<(), String> {
+async fn check_automation_permission(
+    caller: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
     properties_window::ensure_main_window(&caller)?;
     #[cfg(target_os = "macos")]
     {
-        use objc::runtime::Object;
-        use objc::{class, msg_send, sel, sel_impl};
-        use std::ffi::CString;
-        use std::ptr::null_mut;
-
-        unsafe {
-            objc::rc::autoreleasepool(|| {
-                let script = "tell application \"System Events\" to get name";
-                let c_script = CString::new(script).unwrap();
-                let ns_string_class = class!(NSString);
-                let script_str: *mut Object = msg_send![ns_string_class, alloc];
-                let script_str: *mut Object = msg_send![script_str, initWithUTF8String: c_script.as_ptr()];
-
-                let ns_apple_script: *mut Object = msg_send![class!(NSAppleScript), alloc];
-                let ns_apple_script: *mut Object = msg_send![ns_apple_script, initWithSource: script_str];
-
-                let mut error_dict: *mut Object = null_mut();
-                let result: *mut Object = msg_send![ns_apple_script, executeAndReturnError: &mut error_dict];
-
-                let _: () = msg_send![script_str, release];
-                let _: () = msg_send![ns_apple_script, release];
-
-                if result.is_null() {
-                    return Err("Automation permission was not granted".to_string());
-                }
-                Ok(())
+        let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
+        app_handle
+            .run_on_main_thread(move || {
+                let result = match objc2::MainThreadMarker::new() {
+                    Some(main_thread) => check_automation_permission_on_main_thread(main_thread),
+                    None => Err("macOS Automation check did not run on the main thread".to_string()),
+                };
+                let _ = result_sender.send(result);
             })
-        }
+            .map_err(|error| format!("could not schedule macOS Automation check: {error}"))?;
+        result_receiver
+            .await
+            .map_err(|_| "macOS Automation check did not complete".to_string())?
     }
 
     #[cfg(not(target_os = "macos"))]
-    Ok(())
+    {
+        let _ = app_handle;
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -18859,6 +18938,77 @@ mod tests {
     }
 
     #[test]
+    fn buffers_opened_torrent_paths_until_app_state_is_ready() {
+        let state = super::MainWindowRestoreState::default();
+
+        assert_eq!(
+            state.route_opened_torrent_paths(vec!["first.torrent".to_string()]),
+            None
+        );
+        assert_eq!(
+            state.route_opened_torrent_paths(vec!["second.torrent".to_string()]),
+            None
+        );
+        assert_eq!(
+            state.mark_app_state_ready_and_take_pending_paths(),
+            vec!["first.torrent".to_string(), "second.torrent".to_string()]
+        );
+        assert_eq!(
+            state.route_opened_torrent_paths(vec!["third.torrent".to_string()]),
+            Some(vec!["third.torrent".to_string()])
+        );
+    }
+
+    #[test]
+    fn bounds_opened_torrent_paths_buffer_during_startup() {
+        let state = super::MainWindowRestoreState::default();
+        let paths = (0..super::MAX_DEEP_LINK_URLS)
+            .map(|index| format!("{index}.torrent"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(state.route_opened_torrent_paths(paths.clone()), None);
+        assert_eq!(
+            state.route_opened_torrent_paths(vec!["overflow.torrent".to_string()]),
+            None
+        );
+        assert_eq!(state.mark_app_state_ready_and_take_pending_paths(), paths);
+    }
+
+    #[test]
+    fn opened_torrent_paths_racing_startup_are_never_lost() {
+        use std::sync::{Arc, Barrier};
+
+        const PATH_COUNT: usize = 16;
+        let state = Arc::new(super::MainWindowRestoreState::default());
+        let barrier = Arc::new(Barrier::new(PATH_COUNT + 1));
+        let workers = (0..PATH_COUNT)
+            .map(|index| {
+                let state = Arc::clone(&state);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    state.route_opened_torrent_paths(vec![format!("{index}.torrent")])
+                })
+            })
+            .collect::<Vec<_>>();
+
+        barrier.wait();
+        let mut delivered = state.mark_app_state_ready_and_take_pending_paths();
+        for worker in workers {
+            if let Some(paths) = worker.join().expect("path dispatch worker should complete") {
+                delivered.extend(paths);
+            }
+        }
+
+        delivered.sort();
+        let mut expected = (0..PATH_COUNT)
+            .map(|index| format!("{index}.torrent"))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(delivered, expected);
+    }
+
+    #[test]
     fn rejects_launch_variants_and_nested_schemes() {
         let links = [
             url::Url::parse("firelink://open?url=https%3A%2F%2Fexample.com").unwrap(),
@@ -20362,6 +20512,16 @@ pub fn run() {
                 scheduler_settings: Arc::clone(&scheduler_settings),
                 queue_manager,
             });
+
+            let pending_opened_torrent_paths = app
+                .state::<MainWindowRestoreState>()
+                .mark_app_state_ready_and_take_pending_paths();
+            if !pending_opened_torrent_paths.is_empty() {
+                dispatch_opened_torrent_paths(
+                    app.handle().clone(),
+                    pending_opened_torrent_paths,
+                );
+            }
 
             if let Err(error) = power_manager.activate() {
                 log::error!("power: failed to activate backend power management: {error}");

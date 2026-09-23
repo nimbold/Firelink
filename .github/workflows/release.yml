@@ -41,7 +41,7 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22.12
           cache: npm
@@ -125,9 +125,9 @@ jobs:
       - name: Restore verified engine payload cache
         id: engine-cache
         if: runner.os != 'macOS'
-        # v4.2.0 pinned to an immutable commit; release jobs never write cache
+        # v6.1.0 pinned to an immutable commit; release jobs never write cache
         # entries, so only trusted CI pushes can populate the shared payload.
-        uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: src-tauri/provisioned-engines/${{ matrix.target }}
           key: firelink-engine-payload-v1-${{ matrix.target }}-${{ steps.engine-toolchain.outputs.fingerprint }}-${{ hashFiles('engine-sources.lock.json', 'engines.lock.json', 'scripts/aria2/**', 'scripts/engine-*.js', 'scripts/provision-engines.js', 'scripts/stage-engines.js', 'scripts/verify-binaries.js', 'scripts/aria2-route-contract.js', '.github/workflows/ci.yml', '.github/workflows/release.yml') }}
@@ -147,7 +147,7 @@ jobs:
           runner.os != 'macOS' &&
           (steps.engine-cache.outputs.cache-hit != 'true' ||
            steps.engine-cache-validation.outcome != 'success')
-        uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: src-tauri/provisioned-engines/.aria2-cache/${{ matrix.target }}
           key: firelink-aria2-build-v1-${{ matrix.target }}-${{ steps.engine-toolchain.outputs.aria2-fingerprint }}

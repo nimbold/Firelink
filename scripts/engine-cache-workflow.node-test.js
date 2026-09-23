@@ -12,7 +12,15 @@ const releaseWorkflow = fs.readFileSync(
   path.join(repositoryRoot, '.github', 'workflows', 'release.yml'),
   'utf8',
 );
-const cacheActionSha = '1bd1e32a3bdc45362d1e726936510720a7c30a57';
+const cacheActionSha = '55cc8345863c7cc4c66a329aec7e433d2d1c52a9';
+
+test('CI and release use setup-node v7 while installing the supported app Node version', () => {
+  for (const workflow of [ciWorkflow, releaseWorkflow]) {
+    assert.match(workflow, /uses: actions\/setup-node@v7/);
+    assert.match(workflow, /node-version: 22\.12/);
+    assert.doesNotMatch(workflow, /actions\/setup-node@v6/);
+  }
+});
 
 function assertSafeEngineCacheWorkflow(workflow) {
   assert.match(workflow, new RegExp(`actions/cache/restore@${cacheActionSha}`));

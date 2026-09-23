@@ -24,12 +24,12 @@
           "patchSha256": "1210eeeb0c82a2fee1ef5d28521569259c18a122d3b439135bba57ee39c5f61d"
         },
         "ffmpeg": {
-          "version": "9.0.1",
+          "version": "9.0.2",
           "source": "https://ffmpeg.org/",
           "build": "Stable GPLv3 build identified by binary as https://www.martin-riedl.de",
-          "url": "https://ffmpeg.martin-riedl.de/download/macos/arm64/1787073674_9.0.1/ffmpeg.zip",
-          "sourceSha256": "8287a1b2229e05eb41859f073e18e6c52c60a778f2f5e6881070fe51b79407fe",
-          "sha256": "393e4c395020a1cb7cbd77fbe00599ce69d1c6466fee0dbd59d13f86a81a1611"
+          "url": "https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/ffmpeg.zip",
+          "sourceSha256": "c8ed4c4e6978a03c485edbfe4e0a5dc2380f8a30bba5150531b31b094492d924",
+          "sha256": "2e11c6f90993cdb79fff84d3f90044d28316b310e75b3e030cfc9a54f2c9d384"
         },
         "deno": {
           "version": "2.9.7",

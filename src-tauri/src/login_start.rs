@@ -61,112 +61,116 @@ pub fn install_macos_login_launch_detector() {}
 #[cfg(target_os = "macos")]
 mod macos_login_event {
     use super::{AtomicBool, Once, Ordering};
-    use objc::declare::ClassDecl;
-    use objc::runtime::{Object, Sel};
-    use objc::{class, msg_send, sel, sel_impl};
+    use objc2::rc::{Allocated, Retained};
+    use objc2::{define_class, msg_send, sel, ClassType, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSApplicationWillFinishLaunchingNotification};
+    use objc2_core_services::{AEEventClass, AEEventID, AEKeyword};
+    use objc2_foundation::{
+        NSAppleEventDescriptor, NSAppleEventManager, NSNotification, NSNotificationCenter,
+        NSObject, NSObjectProtocol,
+    };
+    use std::sync::OnceLock;
 
     // Core Event / Open Application / property-data / login-item marker.
-    const K_CORE_EVENT_CLASS: u32 = u32::from_be_bytes(*b"aevt");
-    const K_AE_OPEN_APPLICATION: u32 = u32::from_be_bytes(*b"oapp");
-    const KEY_AE_PROP_DATA: u32 = u32::from_be_bytes(*b"prdt");
+    const K_CORE_EVENT_CLASS: AEEventClass = u32::from_be_bytes(*b"aevt");
+    const K_AE_OPEN_APPLICATION: AEEventID = u32::from_be_bytes(*b"oapp");
+    const KEY_AE_PROP_DATA: AEKeyword = u32::from_be_bytes(*b"prdt");
     const KEY_AE_LAUNCHED_AS_LOGIN_ITEM: u32 = u32::from_be_bytes(*b"lgit");
     const TYPE_TYPE: u32 = u32::from_be_bytes(*b"type");
 
     static INSTALL: Once = Once::new();
+    static OBSERVER: OnceLock<Retained<LoginLaunchObserver>> = OnceLock::new();
     static LOGIN_LAUNCH: AtomicBool = AtomicBool::new(false);
     static DECIDED: AtomicBool = AtomicBool::new(false);
 
-    extern "C" fn application_will_finish_launching(
-        this: &Object,
-        _cmd: Sel,
-        _notification: *mut Object,
-    ) {
-        unsafe {
-            let manager: *mut Object =
-                msg_send![class!(NSAppleEventManager), sharedAppleEventManager];
-            if manager.is_null() {
-                return;
+    define_class!(
+        // SAFETY:
+        // - NSObject has no subclassing requirements.
+        // - The observer has no Rust destructor or thread-confined state.
+        #[unsafe(super(NSObject))]
+        #[name = "FirelinkLoginLaunchObserver"]
+        #[ivars = ()]
+        struct LoginLaunchObserver;
+
+        impl LoginLaunchObserver {
+            #[unsafe(method_id(init))]
+            fn init(this: Allocated<Self>) -> Retained<Self> {
+                let this = this.set_ivars(());
+                unsafe { msg_send![super(this), init] }
             }
 
-            let _: () = msg_send![
-                manager,
-                setEventHandler: this as *const Object as *mut Object
-                andSelector: sel!(handleAppleEvent:withReplyEvent:)
-                forEventClass: K_CORE_EVENT_CLASS
-                andEventID: K_AE_OPEN_APPLICATION
-            ];
-        }
-    }
-
-    extern "C" fn handle_apple_event(
-        _this: &Object,
-        _cmd: Sel,
-        event: *mut Object,
-        _reply_event: *mut Object,
-    ) {
-        let is_login_launch = unsafe {
-            if event.is_null() {
-                false
-            } else {
-                let property_data: *mut Object =
-                    msg_send![event, paramDescriptorForKeyword: KEY_AE_PROP_DATA];
-                if property_data.is_null() {
-                    false
-                } else {
-                    let descriptor_type: u32 = msg_send![property_data, descriptorType];
-                    if descriptor_type != TYPE_TYPE {
-                        false
-                    } else {
-                        let value: u32 = msg_send![property_data, typeCodeValue];
-                        value == KEY_AE_LAUNCHED_AS_LOGIN_ITEM
-                    }
+            #[unsafe(method(applicationWillFinishLaunching:))]
+            fn application_will_finish_launching(&self, _notification: &NSNotification) {
+                let manager = NSAppleEventManager::sharedAppleEventManager();
+                // SAFETY: The selector is implemented below with the matching
+                // Apple Event handler signature, and `self` is this observer.
+                unsafe {
+                    manager.setEventHandler_andSelector_forEventClass_andEventID(
+                        self,
+                        sel!(handleAppleEvent:withReplyEvent:),
+                        K_CORE_EVENT_CLASS,
+                        K_AE_OPEN_APPLICATION,
+                    );
                 }
             }
-        };
 
-        if DECIDED
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            LOGIN_LAUNCH.store(is_login_launch, Ordering::Release);
+            #[unsafe(method(handleAppleEvent:withReplyEvent:))]
+            fn handle_apple_event(
+                &self,
+                event: Option<&NSAppleEventDescriptor>,
+                _reply_event: Option<&NSAppleEventDescriptor>,
+            ) {
+                let is_login_launch = event
+                    .and_then(|event| event.paramDescriptorForKeyword(KEY_AE_PROP_DATA))
+                    .is_some_and(|property_data| {
+                        property_data.descriptorType() == TYPE_TYPE
+                            && property_data.typeCodeValue() == KEY_AE_LAUNCHED_AS_LOGIN_ITEM
+                    });
+
+                if DECIDED
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    LOGIN_LAUNCH.store(is_login_launch, Ordering::Release);
+                }
+            }
         }
-    }
+
+        unsafe impl NSObjectProtocol for LoginLaunchObserver {}
+    );
 
     pub fn install() {
-        INSTALL.call_once(|| unsafe {
-            let mut declaration = ClassDecl::new("FirelinkLoginLaunchObserver", class!(NSObject))
-                .expect("could not allocate macOS login-launch observer class");
-            declaration.add_method(
-                sel!(applicationWillFinishLaunching:),
-                application_will_finish_launching as extern "C" fn(&Object, Sel, *mut Object),
-            );
-            declaration.add_method(
-                sel!(handleAppleEvent:withReplyEvent:),
-                handle_apple_event as extern "C" fn(&Object, Sel, *mut Object, *mut Object),
-            );
-            let observer_class = declaration.register();
-            let observer: *mut Object = msg_send![observer_class, new];
-            if observer.is_null() {
-                log::error!("could not create macOS login-launch observer");
+        INSTALL.call_once(|| {
+            let Some(main_thread) = MainThreadMarker::new() else {
+                log::error!("could not install macOS login-launch observer off the main thread");
+                return;
+            };
+
+            let application = NSApplication::sharedApplication(main_thread);
+            let observer: Retained<LoginLaunchObserver> =
+                unsafe { msg_send![LoginLaunchObserver::class(), new] };
+            if OBSERVER.set(observer).is_err() {
+                log::error!("could not retain macOS login-launch observer");
                 return;
             }
 
-            // NotificationCenter does not own selector-based observers. The
-            // object is intentionally retained for the process lifetime.
-            let notification_center: *mut Object =
-                msg_send![class!(NSNotificationCenter), defaultCenter];
-            let application: *mut Object = msg_send![class!(NSApplication), sharedApplication];
-            let notification_name: *mut Object = msg_send![
-                class!(NSString),
-                stringWithUTF8String: b"NSApplicationWillFinishLaunchingNotification\0".as_ptr()
-            ];
-            let _: () = msg_send![
-                notification_center,
-                addObserver: observer
-                selector: sel!(applicationWillFinishLaunching:)
-                name: notification_name
-                object: application
-            ];
+            let Some(observer) = OBSERVER.get() else {
+                log::error!("macOS login-launch observer was not retained");
+                return;
+            };
+            let notification_center = NSNotificationCenter::defaultCenter();
+            // NotificationCenter does not own selector-based observers. Keep
+            // the observer retained in OBSERVER for the process lifetime.
+            // SAFETY: The selector is implemented by LoginLaunchObserver and
+            // the notification name and object are the matching AppKit values.
+            unsafe {
+                notification_center.addObserver_selector_name_object(
+                    observer,
+                    sel!(applicationWillFinishLaunching:),
+                    Some(NSApplicationWillFinishLaunchingNotification),
+                    Some(&application),
+                );
+            }
         });
     }
 
