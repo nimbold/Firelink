@@ -45,7 +45,7 @@ base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 tauri-plugin-deep-link = "2.4.10"
 tauri-plugin-single-instance = { version = "2.4.5", features = ["deep-link"] }
 tempfile = "3"
-thiserror = "2.0.20"
+thiserror = "2.0.21"
 axum = "0.8.9"
 tower-http = { version = "0.7", features = ["cors", "limit"] }
 semver = "1.0.28"
