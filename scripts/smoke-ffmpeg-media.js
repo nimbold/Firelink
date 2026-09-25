@@ -30,6 +30,7 @@ const run = (label, args) => {
       '-y',
       ...args,
     ], {
+      cwd: workspace,
       encoding: 'utf8',
       maxBuffer: 8 * 1024 * 1024,
       timeout: 30_000,
@@ -59,7 +60,7 @@ const assertDecodesAudioAndVideo = (label, input) => {
 const assertNonEmpty = (label, filePath) => {
   let size;
   try {
-    size = fs.statSync(filePath).size;
+    size = fs.statSync(path.join(workspace, filePath)).size;
   } catch {
     throw new Error(`${label} did not produce its expected output.`);
   }
@@ -67,14 +68,10 @@ const assertNonEmpty = (label, filePath) => {
 };
 
 try {
-  const source = path.join(workspace, 'source.mp4');
-  const videoOnly = path.join(workspace, 'video-only.mp4');
-  const audioOnly = path.join(workspace, 'audio-only.m4a');
-  const merged = path.join(workspace, 'merged.mp4');
-  const hlsDirectory = path.join(workspace, 'hls');
-  const dashDirectory = path.join(workspace, 'dash');
-  fs.mkdirSync(hlsDirectory);
-  fs.mkdirSync(dashDirectory);
+  const source = 'source.mp4';
+  const videoOnly = 'video-only.mp4';
+  const audioOnly = 'audio-only.m4a';
+  const merged = 'merged.mp4';
 
   run('Synthetic media generation', [
     '-f', 'lavfi', '-i', 'color=c=blue:s=160x90:r=10:d=3',
@@ -118,7 +115,7 @@ try {
   assertNonEmpty('Audio/video merge', merged);
   assertDecodesAudioAndVideo('Merged media', merged);
 
-  const hlsPlaylist = path.join(hlsDirectory, 'stream.m3u8');
+  const hlsPlaylist = 'stream.m3u8';
   run('HLS packaging', [
     '-i', source,
     '-map', '0:v:0',
@@ -127,15 +124,15 @@ try {
     '-f', 'hls',
     '-hls_time', '1',
     '-hls_playlist_type', 'vod',
-    '-hls_segment_filename', path.join(hlsDirectory, 'segment-%03d.ts'),
+    '-hls_segment_filename', 'segment-%03d.ts',
     hlsPlaylist,
   ]);
   assertNonEmpty('HLS packaging', hlsPlaylist);
-  const hlsSegments = fs.readdirSync(hlsDirectory)
+  const hlsSegments = fs.readdirSync(workspace)
     .filter(name => /^segment-\d+\.ts$/.test(name));
   if (hlsSegments.length === 0) throw new Error('HLS packaging produced no media segments.');
 
-  const hlsRemux = path.join(workspace, 'hls-remux.mkv');
+  const hlsRemux = 'hls-remux.mkv';
   run('HLS input remux', [
     '-i', hlsPlaylist,
     '-map', '0:v:0',
@@ -146,7 +143,7 @@ try {
   assertNonEmpty('HLS input remux', hlsRemux);
   assertDecodesAudioAndVideo('HLS remux', hlsRemux);
 
-  const dashManifest = path.join(dashDirectory, 'stream.mpd');
+  const dashManifest = 'stream.mpd';
   run('DASH packaging', [
     '-i', source,
     '-map', '0:v:0',
@@ -159,11 +156,11 @@ try {
     dashManifest,
   ]);
   assertNonEmpty('DASH packaging', dashManifest);
-  if (!fs.readFileSync(dashManifest, 'utf8').includes('<SegmentTemplate')) {
+  if (!fs.readFileSync(path.join(workspace, dashManifest), 'utf8').includes('<SegmentTemplate')) {
     throw new Error('DASH packaging produced no segment template.');
   }
 
-  const dashRemux = path.join(workspace, 'dash-remux.mkv');
+  const dashRemux = 'dash-remux.mkv';
   run('DASH input remux', [
     '-i', dashManifest,
     '-map', '0:v:0',
