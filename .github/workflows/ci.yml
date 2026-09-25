@@ -198,6 +198,10 @@ jobs:
         run: |
           node scripts/stage-engines.js --target ${{ matrix.target }}
           node scripts/verify-binaries.js --staged --target ${{ matrix.target }}
+      - name: Run FFmpeg media smoke
+        env:
+          FIRELINK_ENGINE_OUTPUT_ROOT: ${{ runner.temp }}/firelink-engine-workspace/${{ matrix.target }}/engine-dist
+        run: node scripts/smoke-ffmpeg-media.js
       - name: Run Torrent process smoke
         env:
           FIRELINK_ENGINE_OUTPUT_ROOT: ${{ runner.temp }}/firelink-engine-workspace/${{ matrix.target }}/engine-dist
