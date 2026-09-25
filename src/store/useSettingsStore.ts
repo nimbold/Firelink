@@ -42,6 +42,8 @@ import type { LoginStartStatus } from '../bindings/LoginStartStatus';
 import { normalizeMainWindowSize } from '../utils/mainWindowState';
 
 let settingsQueue: Promise<void> = Promise.resolve();
+let latestSettingsPersistenceWrite: Promise<void> = Promise.resolve();
+let globalSpeedLimitOperationQueue: Promise<void> = Promise.resolve();
 let torrentMaxOpenFilesQueue: Promise<void> = Promise.resolve();
 let torrentOverallUploadLimitQueue: Promise<void> = Promise.resolve();
 let pairingTokenHydrationRequest: Promise<PairingTokenHydration> | null = null;
@@ -66,6 +68,13 @@ const readLegacyFoldersCollapsed = (): boolean | undefined => {
 
 const initialFoldersCollapsed = readLegacyFoldersCollapsed() ?? false;
 
+export class SettingsPersistenceError extends Error {
+  constructor(readonly reportedToListeners: boolean) {
+    super('Settings could not be saved to the database');
+    this.name = 'SettingsPersistenceError';
+  }
+}
+
 export const subscribeToSettingsPersistenceErrors = (listener: () => void): (() => void) => {
   settingsPersistenceErrorListeners.add(listener);
   if (settingsPersistenceFailed) listener();
@@ -75,6 +84,12 @@ export const subscribeToSettingsPersistenceErrors = (listener: () => void): (() 
 const enqueueSettingsTask = <T>(task: () => Promise<T>): Promise<T> => {
   const result = settingsQueue.then(task, task);
   settingsQueue = result.then(() => undefined, () => undefined);
+  return result;
+};
+
+const enqueueGlobalSpeedLimitOperation = <T>(operation: () => Promise<T>): Promise<T> => {
+  const result = globalSpeedLimitOperationQueue.then(operation, operation);
+  globalSpeedLimitOperationQueue = result.then(() => undefined, () => undefined);
   return result;
 };
 
@@ -100,8 +115,8 @@ export const runSettingsPersistenceTransaction = <T>(
 
 export const waitForSettingsPersistence = (): Promise<void> => settingsQueue;
 
-const notifySettingsPersistenceError = () => {
-  if (settingsPersistenceFailed) return;
+const notifySettingsPersistenceError = (): boolean => {
+  if (settingsPersistenceFailed) return false;
   settingsPersistenceFailed = true;
   for (const listener of settingsPersistenceErrorListeners) {
     try {
@@ -110,6 +125,7 @@ const notifySettingsPersistenceError = () => {
       console.error('Settings persistence error listener failed', error);
     }
   }
+  return settingsPersistenceErrorListeners.size > 0;
 };
 
 const THEME_VALUES = ['system', 'light', 'dark', 'dracula', 'nord'] as const;
@@ -208,15 +224,21 @@ const tauriStorage: StateStorage = {
   },
   setItem: async (name: string, value: string): Promise<void> => {
     if (name === 'firelink-settings') {
-      await enqueueSettingsTask(async () => {
+      const write = enqueueSettingsTask(async () => {
         try {
           await invoke('db_save_settings', { data: value });
           settingsPersistenceFailed = false;
         } catch {
           console.error('Failed to save settings to DB');
-          notifySettingsPersistenceError();
+          const reportedToListeners = notifySettingsPersistenceError();
+          throw new SettingsPersistenceError(reportedToListeners);
         }
       });
+      latestSettingsPersistenceWrite = write;
+      // Zustand does not await storage writes. Keep the rejection observable to
+      // explicit callers while preventing an unhandled rejection for ordinary
+      // settings updates, which report through the persistence error listener.
+      await write.catch(() => undefined);
     }
   },
   removeItem: async (_name: string): Promise<void> => {
@@ -353,6 +375,11 @@ export interface SettingsState {
   approveDownloadRoot: (path: string) => Promise<string>;
   setMaxConcurrentDownloads: (count: number) => void;
   setGlobalSpeedLimit: (limit: string) => Promise<void>;
+  saveGlobalSpeedLimitSettings: (
+    limit: string,
+    lastCustomSpeedLimitKiB: number,
+    lastCustomSpeedLimitUnit: string
+  ) => Promise<void>;
   setTorrentOverallUploadLimit: (limit: string) => Promise<void>;
   setSpeedLimitPresetValues: (values: number[]) => void;
   setLogsEnabled: (enabled: boolean) => void;
@@ -576,16 +603,41 @@ export const useSettingsStore = create<SettingsState>()(
           maxConcurrentDownloads: clampSettingInteger(max, 1, 12, 3)
         });
       },
-      setGlobalSpeedLimit: async (limit) => {
+      setGlobalSpeedLimit: (limit) => {
         const normalized = normalizeSpeedLimitForBackend(limit);
         if (limit.trim() && !normalized) {
           return Promise.reject(new Error('Global speed limit is invalid'));
         }
-        await invoke('set_global_speed_limit', {
-          limit: normalized
+        return enqueueGlobalSpeedLimitOperation(async () => {
+          await waitForSettingsHydration();
+          await invoke('set_global_speed_limit', {
+            limit: normalized
+          });
+          info('Settings updated: globalSpeedLimit');
+          set({ globalSpeedLimit: normalized ?? '' });
+          await latestSettingsPersistenceWrite;
         });
-        info('Settings updated: globalSpeedLimit');
-        set({ globalSpeedLimit: normalized ?? '' });
+      },
+      saveGlobalSpeedLimitSettings: (limit, lastCustomSpeedLimitKiB, lastCustomSpeedLimitUnit) => {
+        const normalized = normalizeSpeedLimitForBackend(limit);
+        if (limit.trim() && !normalized) {
+          return Promise.reject(new Error('Global speed limit is invalid'));
+        }
+        return enqueueGlobalSpeedLimitOperation(async () => {
+          await waitForSettingsHydration();
+          await invoke('set_global_speed_limit', {
+            limit: normalized
+          });
+          info('Settings updated: globalSpeedLimit');
+          set({
+            globalSpeedLimit: normalized ?? '',
+            lastCustomSpeedLimitKiB: clampSettingInteger(lastCustomSpeedLimitKiB, 1, 10_485_760, 1024),
+            lastCustomSpeedLimitUnit: lastCustomSpeedLimitUnit === 'KB/s' || lastCustomSpeedLimitUnit === 'MB/s'
+              ? lastCustomSpeedLimitUnit
+              : 'MB/s'
+          });
+          await latestSettingsPersistenceWrite;
+        });
       },
       setTorrentOverallUploadLimit: (limit) => {
         const normalizedLimit = normalizeSpeedLimitForBackend(limit);
@@ -1292,3 +1344,13 @@ export const useSettingsStore = create<SettingsState>()(
     }
   )
 );
+
+export const waitForSettingsHydration = (): Promise<void> => {
+  if (useSettingsStore.persist.hasHydrated()) return Promise.resolve();
+  return new Promise(resolve => {
+    const unsubscribe = useSettingsStore.persist.onFinishHydration(() => {
+      unsubscribe();
+      resolve();
+    });
+  });
+};

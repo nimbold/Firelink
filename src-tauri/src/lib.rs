@@ -22416,8 +22416,12 @@ pub fn run() {
         set_torrent_web_seeds,
         set_torrent_max_open_files,
         set_torrent_overall_upload_limit,
-        set_global_speed_limit,
     ]);
+    // The reported Speed Limiter crash is a native IPC stack overflow, but its
+    // originating command is unconfirmed. Keep the relevant generated dispatch
+    // group small while preserving the existing command interface.
+    let speed_limit_settings_handler: FirelinkInvokeHandler =
+        Box::new(tauri::generate_handler![set_global_speed_limit, db_save_settings]);
     let download_queue_handler: FirelinkInvokeHandler = Box::new(tauri::generate_handler![
         remove_download,
         removal_jobs::submit_download_removals,
@@ -22456,7 +22460,6 @@ pub fn run() {
         parity::create_category_directories,
     ]);
     let database_handler: FirelinkInvokeHandler = Box::new(tauri::generate_handler![
-        db_save_settings,
         db_load_settings,
         canonicalize_torrent_network_setting,
         db_get_all_downloads,
@@ -22555,8 +22558,10 @@ pub fn run() {
                 | "get_torrent_web_seeds"
                 | "set_torrent_web_seeds"
                 | "set_torrent_max_open_files"
-                | "set_torrent_overall_upload_limit"
-                | "set_global_speed_limit" => torrent_storage_handler(invoke),
+                | "set_torrent_overall_upload_limit" => torrent_storage_handler(invoke),
+                "set_global_speed_limit" | "db_save_settings" => {
+                    speed_limit_settings_handler(invoke)
+                }
                 "remove_download"
                 | "submit_download_removals"
                 | "list_download_removals"
@@ -22589,8 +22594,7 @@ pub fn run() {
                 | "is_supported_media"
                 | "get_supported_media_domains"
                 | "create_category_directories" => parity_handler(invoke),
-                "db_save_settings"
-                | "db_load_settings"
+                "db_load_settings"
                 | "canonicalize_torrent_network_setting"
                 | "db_get_all_downloads"
                 | "db_replace_downloads"

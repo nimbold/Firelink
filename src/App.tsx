@@ -17,6 +17,7 @@ import { initDownloadListener } from './store/downloadStore';
 import {
   subscribeToSettingsPersistenceErrors,
   useSettingsStore,
+  waitForSettingsHydration,
   waitForSettingsPersistence
 } from "./store/useSettingsStore";
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
@@ -124,16 +125,6 @@ const PageLoadingFallback = () => {
 
 let automaticUpdateCheckStarted = false;
 let powerPreferencesSync: Promise<void> = Promise.resolve();
-
-const waitForSettingsHydration = (): Promise<void> => {
-  if (useSettingsStore.persist.hasHydrated()) return Promise.resolve();
-  return new Promise(resolve => {
-    const unsubscribe = useSettingsStore.persist.onFinishHydration(() => {
-      unsubscribe();
-      resolve();
-    });
-  });
-};
 
 let downloadStateInitialization: Promise<void> | null = null;
 const initializeDownloadState = (): Promise<void> => {
@@ -278,6 +269,10 @@ function App() {
   const doneCount = downloads.filter(download => download.status === 'completed').length;
   const handleDownloadTableSummaryChange = useCallback((summary: DownloadTableStatusSummary | null) => {
     setDownloadTableSummary(summary);
+  }, []);
+  const handleSidebarSelectFilter = useCallback((nextFilter: SidebarFilter) => {
+    setFilter(nextFilter);
+    useSettingsStore.getState().setActiveView('downloads');
   }, []);
   const formatStatusSummaryBytes = (value: number | null, isEstimated = false): string => {
     if (value === null) return t($ => $.downloadTable.summary.unknown);
@@ -547,7 +542,7 @@ function App() {
     }
   }, [isSidebarVisible]);
 
-  const handleSidebarToggle = () => {
+  const handleSidebarToggle = useCallback(() => {
     const activeElement = document.activeElement;
     if (isSidebarVisible) {
       restoreSidebarFocusRef.current = shouldRestoreSidebarRevealFocus(
@@ -563,7 +558,7 @@ function App() {
       restoreSidebarFocusRef.current = false;
     }
     toggleSidebar();
-  };
+  }, [isSidebarVisible, toggleSidebar]);
 
   useEffect(() => {
     const unregister = registerPostActionCanceller(clearPendingPostActionTimer);
@@ -1341,10 +1336,7 @@ function App() {
             selectedFilter={filter}
             toggleButtonRef={sidebarToggleRef}
             onToggleSidebar={handleSidebarToggle}
-            onSelectFilter={(f) => {
-              setFilter(f);
-              useSettingsStore.getState().setActiveView('downloads');
-            }}
+            onSelectFilter={handleSidebarSelectFilter}
           />
         </div>
         <div
@@ -1394,24 +1386,29 @@ function App() {
         </div>
         
         {/* Status Bar */}
-        <div className="app-statusbar px-[14px] flex items-center justify-between text-text-muted shrink-0">
-          <span>{t($ => $.status.ready)}</span>
-          {activeView === 'downloads' && downloadTableSummary ? (
-            <div className="app-statusbar-summary" dir="ltr" aria-live="polite">
-              <span className="app-statusbar-summary-metric">
-                <span dir="auto">{t($ => $.downloadTable.summary.downloaded)}</span>
-                <strong dir="auto">{formatStatusSummaryBytes(downloadTableSummary.summary.downloadedBytes)}</strong>
-              </span>
-              <span className="app-statusbar-summary-metric">
-                <span dir="auto">{t($ => $.downloadTable.summary.remaining)}</span>
-                <strong dir="auto">{formatStatusSummaryBytes(
-                  downloadTableSummary.summary.remainingBytes,
-                  downloadTableSummary.summary.remainingIsEstimated
-                )}</strong>
-              </span>
-            </div>
-          ) : null}
-          <div className="flex gap-3 tabular-nums">
+        <div
+          className="app-statusbar px-[14px] text-text-muted shrink-0"
+          data-summary-visible={activeView === 'downloads' && downloadTableSummary ? 'true' : 'false'}
+        >
+          <span className="app-statusbar-ready">{t($ => $.status.ready)}</span>
+          <div className="app-statusbar-summary" dir="ltr" aria-live="polite">
+            {activeView === 'downloads' && downloadTableSummary ? (
+              <>
+                <span className="app-statusbar-summary-metric">
+                  <span dir="auto">{t($ => $.downloadTable.summary.downloaded)}</span>
+                  <strong dir="auto">{formatStatusSummaryBytes(downloadTableSummary.summary.downloadedBytes)}</strong>
+                </span>
+                <span className="app-statusbar-summary-metric">
+                  <span dir="auto">{t($ => $.downloadTable.summary.remaining)}</span>
+                  <strong dir="auto">{formatStatusSummaryBytes(
+                    downloadTableSummary.summary.remainingBytes,
+                    downloadTableSummary.summary.remainingIsEstimated
+                  )}</strong>
+                </span>
+              </>
+            ) : null}
+          </div>
+          <div className="app-statusbar-counters flex gap-3 tabular-nums">
             <span>{t($ => $.status.active, { count: activeDownloadCount })}</span>
             <span>{t($ => $.status.queued, { count: queuedCount })}</span>
             <span>{t($ => $.status.done, { count: doneCount })}</span>

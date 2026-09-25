@@ -2523,6 +2523,8 @@ html[data-list-density="relaxed"] {
   .app-workspace {
     order: 1;
     direction: ltr;
+    container-name: app-workspace;
+    container-type: inline-size;
     background: hsl(var(--workspace-bg));
   }
 
@@ -2569,44 +2571,111 @@ html[data-list-density="relaxed"] {
 
   .app-statusbar {
     position: relative;
-    height: 26px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, min(52%, 560px)) minmax(0, 1fr);
+    align-items: center;
+    column-gap: 12px;
+    min-height: 26px;
     font-size: 10px;
     background: hsl(var(--statusbar-bg));
     border-top: 1px solid hsl(var(--border-color));
     box-shadow: none;
+    padding-block: 4px;
+  }
+
+  .app-statusbar-ready {
+    grid-column: 1;
+    grid-row: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .app-statusbar-summary {
-    position: absolute;
-    left: 50%;
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: center;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
+    justify-content: center;
     gap: 12px;
-    max-width: min(52%, 560px);
-    overflow: hidden;
-    transform: translateX(-50%);
-    white-space: nowrap;
+    min-width: 0;
+    max-width: 100%;
     font-size: 10px;
-    line-height: 1;
+    line-height: 1.2;
     pointer-events: none;
+  }
+
+  .app-statusbar[data-summary-visible="false"] {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .app-statusbar[data-summary-visible="false"] .app-statusbar-summary {
+    display: none;
   }
 
   .app-statusbar-summary-metric {
     display: inline-flex;
+    flex-wrap: wrap;
     align-items: baseline;
     gap: 4px;
     min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
   }
 
   .app-statusbar-summary-metric > span {
     color: hsl(var(--text-muted));
+    overflow-wrap: anywhere;
   }
 
   .app-statusbar-summary-metric > strong {
-    overflow: hidden;
     color: hsl(var(--text-secondary));
     font-variant-numeric: tabular-nums;
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
+  .app-statusbar-counters {
+    grid-column: 3;
+    grid-row: 1;
+    justify-self: end;
+    min-width: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    overflow-wrap: anywhere;
+  }
+
+  .app-statusbar-counters > span {
+    overflow-wrap: anywhere;
+  }
+
+  .app-statusbar[data-summary-visible="false"] .app-statusbar-counters {
+    grid-column: 2;
+  }
+
+  @container app-workspace (max-width: 640px) {
+    .app-statusbar[data-summary-visible="true"] {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      row-gap: 4px;
+    }
+
+    .app-statusbar[data-summary-visible="true"] .app-statusbar-summary {
+      grid-column: 1 / -1;
+      grid-row: 1;
+      width: 100%;
+      max-width: 100%;
+    }
+
+    .app-statusbar[data-summary-visible="true"] .app-statusbar-ready {
+      grid-column: 1;
+      grid-row: 2;
+    }
+
+    .app-statusbar[data-summary-visible="true"] .app-statusbar-counters {
+      grid-column: 2;
+      grid-row: 2;
+    }
   }
 
   .sidebar-nav-item {

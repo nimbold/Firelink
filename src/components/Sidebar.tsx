@@ -7,7 +7,7 @@ import {
   ChevronDown,
   type LucideIcon
 } from 'lucide-react';
-import { useDownloadStore, DownloadCategory, Queue } from '../store/useDownloadStore';
+import { useDownloadStore, type DownloadCategory, type Queue } from '../store/useDownloadStore';
 import { ActiveView, useSettingsStore } from '../store/useSettingsStore';
 import { WindowDragRegion } from './WindowDragRegion';
 import { useToast } from '../contexts/ToastContext';
@@ -24,16 +24,215 @@ interface SidebarProps {
   toggleButtonRef?: React.Ref<HTMLButtonElement>;
 }
 
-export const Sidebar: React.FC<SidebarProps> = (props) => {
+type SidebarDownloads = ReturnType<typeof useDownloadStore.getState>['downloads'];
+
+interface SidebarDownloadCounts {
+  all: number;
+  active: number;
+  completed: number;
+  unfinished: number;
+  categories: Map<DownloadCategory, number>;
+  queues: Map<string, number>;
+}
+
+const sidebarDownloadCounts = new WeakMap<SidebarDownloads, SidebarDownloadCounts>();
+
+const getSidebarDownloadCounts = (downloads: SidebarDownloads): SidebarDownloadCounts => {
+  const cached = sidebarDownloadCounts.get(downloads);
+  if (cached) return cached;
+
+  const counts: SidebarDownloadCounts = {
+    all: downloads.length,
+    active: 0,
+    completed: 0,
+    unfinished: 0,
+    categories: new Map(),
+    queues: new Map(),
+  };
+
+  for (const download of downloads) {
+    const completed = download.status === 'completed';
+    if (isTransferActiveStatus(download.status)) counts.active += 1;
+    if (completed) {
+      counts.completed += 1;
+    } else {
+      counts.unfinished += 1;
+      if (download.queueId) {
+        counts.queues.set(download.queueId, (counts.queues.get(download.queueId) ?? 0) + 1);
+      }
+    }
+    counts.categories.set(
+      download.category,
+      (counts.categories.get(download.category) ?? 0) + 1
+    );
+  }
+
+  sidebarDownloadCounts.set(downloads, counts);
+  return counts;
+};
+
+const getDownloadCount = (downloads: SidebarDownloads, filter: SidebarFilter): number => {
+  const counts = getSidebarDownloadCounts(downloads);
+  if (filter.startsWith('queue:')) {
+    const queueId = filter.slice('queue:'.length);
+    return counts.queues.get(queueId) ?? 0;
+  }
+  switch (filter) {
+    case 'all': return counts.all;
+    case 'active': return counts.active;
+    case 'completed': return counts.completed;
+    case 'unfinished': return counts.unfinished;
+    default: return counts.categories.get(filter as DownloadCategory) ?? 0;
+  }
+};
+
+interface NavItemProps {
+  icon: LucideIcon;
+  label: string;
+  filter: SidebarFilter;
+  selectedFilter: SidebarFilter;
+  onSelectFilter: (filter: SidebarFilter) => void;
+}
+
+const NavItem = React.memo(function NavItem({ icon: Icon, label, filter, selectedFilter, onSelectFilter }: NavItemProps) {
+  const activeView = useSettingsStore(state => state.activeView);
+  const count = useDownloadStore(state => getDownloadCount(state.downloads, filter));
+  const isSelected = activeView === 'downloads' && selectedFilter === filter;
+
+  return (
+    <button
+      type="button"
+      data-active={isSelected}
+      className="sidebar-nav-item group flex w-full items-center text-[13px] text-start cursor-default font-medium"
+      onClick={() => onSelectFilter(filter)}
+    >
+      <Icon className="w-[18px] h-[18px] me-3 shrink-0" strokeWidth={isSelected ? 2.5 : 2} />
+      <span className="sidebar-nav-label truncate">{label}</span>
+      {count > 0 && (
+        <span className="sidebar-count ms-auto min-w-5 px-1.5 py-0.5 rounded-full text-center text-[10px] leading-none font-bold">
+          {count}
+        </span>
+      )}
+    </button>
+  );
+});
+
+interface QueueItemProps {
+  queue: Queue;
+  selectedFilter: SidebarFilter;
+  renamingQueueId: string | null;
+  editingQueueName: string;
+  renameInputRef: React.Ref<HTMLInputElement>;
+  onRenameQueueSubmit: (queueId: string, trigger?: 'submit' | 'blur') => void;
+  onEditingQueueNameChange: (name: string) => void;
+  onCancelRename: (queueId: string) => void;
+  onQueueContextMenu: (event: React.MouseEvent<HTMLButtonElement>, queueId: string) => void;
+  onQueueKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>, queueId: string) => void;
+  onSelectFilter: (filter: SidebarFilter) => void;
+}
+
+const QueueItem = React.memo(function QueueItem({
+  queue,
+  selectedFilter,
+  renamingQueueId,
+  editingQueueName,
+  renameInputRef,
+  onRenameQueueSubmit,
+  onEditingQueueNameChange,
+  onCancelRename,
+  onQueueContextMenu,
+  onQueueKeyDown,
+  onSelectFilter
+}: QueueItemProps) {
+  const activeView = useSettingsStore(state => state.activeView);
+  const filterId = `queue:${queue.id}`;
+  const count = useDownloadStore(state => getDownloadCount(state.downloads, filterId));
+  const isSelected = activeView === 'downloads' && selectedFilter === filterId;
+  const isRenaming = renamingQueueId === queue.id;
+
+  if (isRenaming) {
+    return (
+      <div className="sidebar-queue-editor flex items-center px-2.5 py-1 rounded-lg mb-0.5 bg-item-hover">
+        <List className="w-4 h-4 me-2 text-text-secondary" strokeWidth={2} />
+        <input
+          ref={renameInputRef}
+          type="text"
+          className="flex-1 bg-transparent border border-accent rounded px-1 text-[13px] text-text-primary outline-none min-w-0"
+          value={editingQueueName}
+          onChange={event => onEditingQueueNameChange(event.target.value)}
+          onKeyDown={event => {
+            if (event.key === 'Enter') onRenameQueueSubmit(queue.id);
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              onCancelRename(queue.id);
+            }
+          }}
+          onBlur={() => onRenameQueueSubmit(queue.id, 'blur')}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      data-active={isSelected}
+      data-sidebar-queue-id={queue.id}
+      onContextMenu={event => onQueueContextMenu(event, queue.id)}
+      onKeyDown={event => onQueueKeyDown(event, queue.id)}
+      aria-keyshortcuts="Shift+F10"
+      onClick={() => onSelectFilter(filterId)}
+      className="sidebar-nav-item group flex w-full items-center text-[13px] text-start cursor-default font-medium"
+    >
+      <List className="w-[18px] h-[18px] me-3 shrink-0" strokeWidth={isSelected ? 2.5 : 2} />
+      <span className="sidebar-nav-label truncate">{queue.name}</span>
+      {count > 0 && (
+        <span className="sidebar-count ms-auto min-w-5 px-1.5 py-0.5 rounded-full text-center text-[10px] leading-none font-bold shrink-0">
+          {count}
+        </span>
+      )}
+    </button>
+  );
+});
+
+interface ToolItemProps {
+  icon: LucideIcon;
+  label: string;
+  view: ActiveView;
+}
+
+const ToolItem = React.memo(function ToolItem({ icon: Icon, label, view }: ToolItemProps) {
+  const activeView = useSettingsStore(state => state.activeView);
+  const setActiveView = useSettingsStore(state => state.setActiveView);
+  const isSelected = activeView === view;
+
+  return (
+    <button
+      type="button"
+      data-active={isSelected}
+      onClick={() => setActiveView(view)}
+      className="sidebar-nav-item group flex w-full items-center text-[13px] text-start cursor-default font-medium"
+    >
+      <Icon className="w-[18px] h-[18px] me-3 shrink-0" strokeWidth={isSelected ? 2.5 : 2} />
+      <span className="sidebar-nav-label">{label}</span>
+    </button>
+  );
+});
+
+export const Sidebar = React.memo(function Sidebar(props: SidebarProps) {
   const { selectedFilter, onToggleSidebar, onSelectFilter, toggleButtonRef } = props;
-  const { downloads, queues, addQueue, renameQueue, removeQueue, startQueue, pauseQueue, setQueueConcurrency } = useDownloadStore();
-  const {
-    activeView,
-    setActiveView,
-    toggleSidebar,
-    isFoldersCollapsed: foldersCollapsed,
-    toggleFoldersCollapsed
-  } = useSettingsStore();
+  const queues = useDownloadStore(state => state.queues);
+  const addQueue = useDownloadStore(state => state.addQueue);
+  const renameQueue = useDownloadStore(state => state.renameQueue);
+  const removeQueue = useDownloadStore(state => state.removeQueue);
+  const startQueue = useDownloadStore(state => state.startQueue);
+  const pauseQueue = useDownloadStore(state => state.pauseQueue);
+  const setQueueConcurrency = useDownloadStore(state => state.setQueueConcurrency);
+  const activeView = useSettingsStore(state => state.activeView);
+  const setActiveView = useSettingsStore(state => state.setActiveView);
+  const toggleSidebar = useSettingsStore(state => state.toggleSidebar);
+  const foldersCollapsed = useSettingsStore(state => state.isFoldersCollapsed);
+  const toggleFoldersCollapsed = useSettingsStore(state => state.toggleFoldersCollapsed);
   const { addToast } = useToast();
   const { t, i18n } = useTranslation();
 
@@ -183,41 +382,6 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [addToast, activeView, queues, removeQueue]);
 
-  const getCount = (filter: SidebarFilter) => {
-    if (filter.startsWith('queue:')) {
-      const qid = filter.replace('queue:', '');
-      return downloads.filter(d => d.queueId === qid && d.status !== 'completed').length;
-    }
-    switch (filter) {
-      case 'all': return downloads.length;
-      case 'active': return downloads.filter(d => isTransferActiveStatus(d.status)).length;
-      case 'completed': return downloads.filter(d => d.status === 'completed').length;
-      case 'unfinished': return downloads.filter(d => d.status !== 'completed').length;
-      default: return downloads.filter(d => d.category === filter as DownloadCategory).length;
-    }
-  };
-
-  const NavItem = ({ icon: Icon, label, filter }: { icon: LucideIcon, label: string, filter: SidebarFilter }) => {
-    const isSelected = activeView === 'downloads' && selectedFilter === filter;
-
-    return (
-      <button
-        type="button"
-        data-active={isSelected}
-        className="sidebar-nav-item group flex w-full items-center text-[13px] text-start cursor-default font-medium"
-        onClick={() => onSelectFilter(filter)}
-      >
-        <Icon className="w-[18px] h-[18px] me-3 shrink-0" strokeWidth={isSelected ? 2.5 : 2} />
-        <span className="sidebar-nav-label truncate">{label}</span>
-        {getCount(filter) > 0 && (
-          <span className="sidebar-count ms-auto min-w-5 px-1.5 py-0.5 rounded-full text-center text-[10px] leading-none font-bold">
-            {getCount(filter)}
-          </span>
-        )}
-      </button>
-    );
-  };
-
   const openQueueContextMenu = (id: string, x: number, y: number, trigger?: HTMLButtonElement) => {
     if (trigger) contextMenuTriggerRef.current = trigger;
     setContextMenuPosition(null);
@@ -313,77 +477,18 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
     setRenamingQueueId(null);
   };
 
-  const QueueItem = ({ queue }: { queue: Queue }) => {
-    const filterId = `queue:${queue.id}`;
-    const isSelected = activeView === 'downloads' && selectedFilter === filterId;
-    const isRenaming = renamingQueueId === queue.id;
-
-    if (isRenaming) {
-      return (
-        <div className="sidebar-queue-editor flex items-center px-2.5 py-1 rounded-lg mb-0.5 bg-item-hover">
-          <List className="w-4 h-4 me-2 text-text-secondary" strokeWidth={2} />
-          <input
-            ref={renameInputRef}
-            type="text"
-            className="flex-1 bg-transparent border border-accent rounded px-1 text-[13px] text-text-primary outline-none min-w-0"
-            value={editingQueueName}
-            onChange={e => {
-              editingQueueNameRef.current = e.target.value;
-              rejectedRenameRef.current = null;
-              setEditingQueueName(e.target.value);
-            }}
-            onKeyDown={e => {
-              if (e.key === 'Enter') handleRenameQueueSubmit(queue.id);
-              if (e.key === 'Escape') {
-                e.preventDefault();
-                renameQueueCancelRef.current = queue.id;
-                renamingQueueIdRef.current = null;
-                editingQueueNameRef.current = '';
-                setEditingQueueName('');
-                setRenamingQueueId(null);
-              }
-            }}
-            onBlur={() => handleRenameQueueSubmit(queue.id, 'blur')}
-          />
-        </div>
-      );
-    }
-
-    return (
-      <button
-        type="button"
-        data-active={isSelected}
-        data-sidebar-queue-id={queue.id}
-        onContextMenu={e => handleQueueContextMenu(e, queue.id)}
-        onKeyDown={e => handleQueueKeyDown(e, queue.id)}
-        aria-keyshortcuts="Shift+F10"
-        onClick={() => onSelectFilter(filterId)}
-        className="sidebar-nav-item group flex w-full items-center text-[13px] text-start cursor-default font-medium"
-      >
-        <List className="w-[18px] h-[18px] me-3 shrink-0" strokeWidth={isSelected ? 2.5 : 2} />
-        <span className="sidebar-nav-label truncate">{queue.name}</span>
-        {getCount(filterId) > 0 && (
-          <span className="sidebar-count ms-auto min-w-5 px-1.5 py-0.5 rounded-full text-center text-[10px] leading-none font-bold shrink-0">
-            {getCount(filterId)}
-          </span>
-        )}
-      </button>
-    );
+  const handleEditingQueueNameChange = (name: string) => {
+    editingQueueNameRef.current = name;
+    rejectedRenameRef.current = null;
+    setEditingQueueName(name);
   };
 
-  const ToolItem = ({ icon: Icon, label, view }: { icon: LucideIcon; label: string; view: ActiveView }) => {
-    const isSelected = activeView === view;
-    return (
-      <button
-        type="button"
-        data-active={isSelected}
-        onClick={() => setActiveView(view)}
-        className="sidebar-nav-item group flex w-full items-center text-[13px] text-start cursor-default font-medium"
-      >
-        <Icon className="w-[18px] h-[18px] me-3 shrink-0" strokeWidth={isSelected ? 2.5 : 2} />
-        <span className="sidebar-nav-label">{label}</span>
-      </button>
-    );
+  const handleRenameQueueCancel = (queueId: string) => {
+    renameQueueCancelRef.current = queueId;
+    renamingQueueIdRef.current = null;
+    editingQueueNameRef.current = '';
+    setEditingQueueName('');
+    setRenamingQueueId(null);
   };
 
   return (
@@ -407,10 +512,10 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
       <div className="sidebar-scroll">
         <section className="sidebar-section">
           <div className="sidebar-section-label">{t($ => $.navigation.library)}</div>
-          <NavItem icon={Inbox} label={t($ => $.navigation.filters.all)} filter="all" />
-          <NavItem icon={Zap} label={t($ => $.navigation.filters.active)} filter="active" />
-          <NavItem icon={CheckCircle2} label={t($ => $.navigation.filters.completed)} filter="completed" />
-          <NavItem icon={CircleDashed} label={t($ => $.navigation.filters.unfinished)} filter="unfinished" />
+          <NavItem icon={Inbox} label={t($ => $.navigation.filters.all)} filter="all" selectedFilter={selectedFilter} onSelectFilter={onSelectFilter} />
+          <NavItem icon={Zap} label={t($ => $.navigation.filters.active)} filter="active" selectedFilter={selectedFilter} onSelectFilter={onSelectFilter} />
+          <NavItem icon={CheckCircle2} label={t($ => $.navigation.filters.completed)} filter="completed" selectedFilter={selectedFilter} onSelectFilter={onSelectFilter} />
+          <NavItem icon={CircleDashed} label={t($ => $.navigation.filters.unfinished)} filter="unfinished" selectedFilter={selectedFilter} onSelectFilter={onSelectFilter} />
         </section>
 
         <section className="sidebar-section">
@@ -437,14 +542,14 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             inert={foldersCollapsed}
           >
             <div className="sidebar-collapse-content">
-              <NavItem icon={Music} label={t($ => $.navigation.categories.musics)} filter="Musics" />
-              <NavItem icon={Film} label={t($ => $.navigation.categories.movies)} filter="Movies" />
-              <NavItem icon={Archive} label={t($ => $.navigation.categories.compressed)} filter="Compressed" />
-              <NavItem icon={FileText} label={t($ => $.navigation.categories.documents)} filter="Documents" />
-              <NavItem icon={ImageIcon} label={t($ => $.navigation.categories.pictures)} filter="Pictures" />
-              <NavItem icon={Box} label={t($ => $.navigation.categories.applications)} filter="Applications" />
-              <NavItem icon={Magnet} label={t($ => $.navigation.categories.torrents)} filter="Torrents" />
-              <NavItem icon={FileQuestion} label={t($ => $.navigation.categories.other)} filter="Other" />
+              <NavItem icon={Music} label={t($ => $.navigation.categories.musics)} filter="Musics" selectedFilter={selectedFilter} onSelectFilter={onSelectFilter} />
+              <NavItem icon={Film} label={t($ => $.navigation.categories.movies)} filter="Movies" selectedFilter={selectedFilter} onSelectFilter={onSelectFilter} />
+              <NavItem icon={Archive} label={t($ => $.navigation.categories.compressed)} filter="Compressed" selectedFilter={selectedFilter} onSelectFilter={onSelectFilter} />
+              <NavItem icon={FileText} label={t($ => $.navigation.categories.documents)} filter="Documents" selectedFilter={selectedFilter} onSelectFilter={onSelectFilter} />
+              <NavItem icon={ImageIcon} label={t($ => $.navigation.categories.pictures)} filter="Pictures" selectedFilter={selectedFilter} onSelectFilter={onSelectFilter} />
+              <NavItem icon={Box} label={t($ => $.navigation.categories.applications)} filter="Applications" selectedFilter={selectedFilter} onSelectFilter={onSelectFilter} />
+              <NavItem icon={Magnet} label={t($ => $.navigation.categories.torrents)} filter="Torrents" selectedFilter={selectedFilter} onSelectFilter={onSelectFilter} />
+              <NavItem icon={FileQuestion} label={t($ => $.navigation.categories.other)} filter="Other" selectedFilter={selectedFilter} onSelectFilter={onSelectFilter} />
             </div>
           </div>
         </section>
@@ -452,7 +557,20 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
         <section className="sidebar-section">
           <div className="sidebar-section-label">{t($ => $.navigation.queues)}</div>
           {queues.map(queue => (
-            <QueueItem key={queue.id} queue={queue} />
+            <QueueItem
+              key={queue.id}
+              queue={queue}
+              selectedFilter={selectedFilter}
+              renamingQueueId={renamingQueueId}
+              editingQueueName={editingQueueName}
+              renameInputRef={renameInputRef}
+              onRenameQueueSubmit={handleRenameQueueSubmit}
+              onEditingQueueNameChange={handleEditingQueueNameChange}
+              onCancelRename={handleRenameQueueCancel}
+              onQueueContextMenu={handleQueueContextMenu}
+              onQueueKeyDown={handleQueueKeyDown}
+              onSelectFilter={onSelectFilter}
+            />
           ))}
           {isAddingQueue ? (
             <div className="sidebar-queue-editor flex items-center px-3.5 py-1.5 rounded-lg bg-item-hover mb-1">
@@ -654,4 +772,4 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
       )}
     </aside>
   );
-};
+});

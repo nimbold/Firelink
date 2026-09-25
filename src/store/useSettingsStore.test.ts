@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   runSettingsPersistenceTransaction,
+  SettingsPersistenceError,
   subscribeToSettingsPersistenceErrors,
+  waitForSettingsPersistence,
   useSettingsStore
 } from './useSettingsStore';
 import * as ipc from '../ipc';
@@ -12,7 +14,7 @@ import {
 } from '../utils/downloads';
 
 vi.mock('../ipc', () => ({
-  invokeCommand: vi.fn()
+  invokeCommand: vi.fn(async (command: string) => command === 'db_load_settings' ? null : undefined)
 }));
 
 vi.mock('../utils/logger', () => ({
@@ -544,9 +546,15 @@ describe('calendar preference', () => {
 });
 
 describe('useSettingsStore global speed limit persistence', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
-    useSettingsStore.setState({ globalSpeedLimit: '2M' });
+    useSettingsStore.setState({
+      globalSpeedLimit: '2M',
+      lastCustomSpeedLimitKiB: 2048,
+      lastCustomSpeedLimitUnit: 'MB/s'
+    });
+    await waitForSettingsPersistence();
+    vi.clearAllMocks();
   });
 
   it('keeps the saved value when the backend rejects a limit change', async () => {
@@ -567,6 +575,199 @@ describe('useSettingsStore global speed limit persistence', () => {
       expect.anything()
     );
     expect(useSettingsStore.getState().globalSpeedLimit).toBe('2M');
+  });
+
+  it('persists the active limit and last-used value in one settings write', async () => {
+    const commands: string[] = [];
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      commands.push(command);
+      return undefined as never;
+    });
+
+    await useSettingsStore.getState().saveGlobalSpeedLimitSettings('3M', 1536, 'KB/s');
+    await vi.waitFor(() => {
+      expect(commands).toEqual(['set_global_speed_limit', 'db_save_settings']);
+    });
+
+    expect(useSettingsStore.getState()).toMatchObject({
+      globalSpeedLimit: '3M',
+      lastCustomSpeedLimitKiB: 1536,
+      lastCustomSpeedLimitUnit: 'KB/s'
+    });
+    const save = vi.mocked(ipc.invokeCommand).mock.calls.find(([command]) => command === 'db_save_settings');
+    expect(save).toBeDefined();
+    expect(JSON.parse((save?.[1] as { data: string }).data).state).toMatchObject({
+      globalSpeedLimit: '3M',
+      lastCustomSpeedLimitKiB: 1536,
+      lastCustomSpeedLimitUnit: 'KB/s'
+    });
+  });
+
+  it('persists a disabled limit as a single atomic settings write', async () => {
+    const commands: string[] = [];
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      commands.push(command);
+      return undefined as never;
+    });
+
+    await useSettingsStore.getState().saveGlobalSpeedLimitSettings('', 1, 'KB/s');
+    await vi.waitFor(() => {
+      expect(commands).toEqual(['set_global_speed_limit', 'db_save_settings']);
+    });
+
+    expect(vi.mocked(ipc.invokeCommand)).toHaveBeenCalledWith('set_global_speed_limit', { limit: null });
+    expect(useSettingsStore.getState()).toMatchObject({
+      globalSpeedLimit: '',
+      lastCustomSpeedLimitKiB: 1,
+      lastCustomSpeedLimitUnit: 'KB/s'
+    });
+  });
+
+  it('rejects malformed values before invoking native code or persisting state', async () => {
+    await expect(useSettingsStore.getState().saveGlobalSpeedLimitSettings('not-a-rate', 1536, 'KB/s'))
+      .rejects.toThrow('Global speed limit is invalid');
+
+    expect(ipc.invokeCommand).not.toHaveBeenCalled();
+    expect(useSettingsStore.getState()).toMatchObject({
+      globalSpeedLimit: '2M',
+      lastCustomSpeedLimitKiB: 2048,
+      lastCustomSpeedLimitUnit: 'MB/s'
+    });
+  });
+
+  it('keeps all saved speed settings unchanged when Aria2 rejects the change', async () => {
+    vi.mocked(ipc.invokeCommand).mockRejectedValueOnce(new Error('aria2 unavailable'));
+
+    await expect(useSettingsStore.getState().saveGlobalSpeedLimitSettings('3M', 1536, 'KB/s'))
+      .rejects.toThrow('aria2 unavailable');
+
+    expect(useSettingsStore.getState()).toMatchObject({
+      globalSpeedLimit: '2M',
+      lastCustomSpeedLimitKiB: 2048,
+      lastCustomSpeedLimitUnit: 'MB/s'
+    });
+    expect(vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) => command === 'db_save_settings'))
+      .toHaveLength(0);
+  });
+
+  it('waits for the settings database write before resolving Save', async () => {
+    let releaseDatabaseWrite!: () => void;
+    const databaseWrite = new Promise<void>(resolve => {
+      releaseDatabaseWrite = resolve;
+    });
+    vi.mocked(ipc.invokeCommand).mockResolvedValueOnce(undefined as never);
+    vi.mocked(ipc.invokeCommand).mockImplementationOnce(async (command: string) => {
+      if (command === 'db_save_settings') await databaseWrite;
+      return undefined as never;
+    });
+
+    let saveResolved = false;
+    const save = useSettingsStore.getState()
+      .saveGlobalSpeedLimitSettings('3M', 1536, 'KB/s')
+      .then(() => { saveResolved = true; });
+    await vi.waitFor(() => {
+      expect(ipc.invokeCommand).toHaveBeenCalledWith('db_save_settings', expect.anything());
+    });
+
+    expect(saveResolved).toBe(false);
+    releaseDatabaseWrite();
+    await save;
+    expect(saveResolved).toBe(true);
+  });
+
+  it('surfaces a settings database failure instead of reporting a successful Save', async () => {
+    const onPersistenceError = vi.fn();
+    const unsubscribe = subscribeToSettingsPersistenceErrors(onPersistenceError);
+    vi.mocked(ipc.invokeCommand).mockResolvedValueOnce(undefined as never);
+    vi.mocked(ipc.invokeCommand).mockRejectedValueOnce(new Error('disk full'));
+
+    await expect(useSettingsStore.getState().saveGlobalSpeedLimitSettings('3M', 1536, 'KB/s'))
+      .rejects.toBeInstanceOf(SettingsPersistenceError);
+
+    expect(onPersistenceError).toHaveBeenCalledTimes(1);
+    expect(useSettingsStore.getState()).toMatchObject({
+      globalSpeedLimit: '3M',
+      lastCustomSpeedLimitKiB: 1536,
+      lastCustomSpeedLimitUnit: 'KB/s'
+    });
+    expect(vi.mocked(ipc.invokeCommand).mock.calls.map(([command]) => command))
+      .toEqual(['set_global_speed_limit', 'db_save_settings']);
+    unsubscribe();
+  });
+
+  it('waits for settings hydration before applying and persisting a limit', async () => {
+    let releaseSettingsRead!: (value: string | null) => void;
+    const settingsRead = new Promise<string | null>(resolve => {
+      releaseSettingsRead = resolve;
+    });
+    let persistedSnapshot: string | undefined;
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'db_load_settings') return settingsRead as never;
+      if (command === 'db_save_settings') {
+        persistedSnapshot = (args as { data: string }).data;
+      }
+      return undefined as never;
+    });
+
+    const hydration = useSettingsStore.persist.rehydrate();
+    await vi.waitFor(() => {
+      expect(ipc.invokeCommand).toHaveBeenCalledWith('db_load_settings');
+    });
+    const save = useSettingsStore.getState().saveGlobalSpeedLimitSettings('3M', 1536, 'KB/s');
+    releaseSettingsRead(JSON.stringify({
+      state: {
+        globalSpeedLimit: '1M',
+        lastCustomSpeedLimitKiB: 1024,
+        lastCustomSpeedLimitUnit: 'MB/s'
+      },
+      version: 6
+    }));
+
+    await Promise.all([hydration, save]);
+    expect(useSettingsStore.getState()).toMatchObject({
+      globalSpeedLimit: '3M',
+      lastCustomSpeedLimitKiB: 1536,
+      lastCustomSpeedLimitUnit: 'KB/s'
+    });
+    expect(JSON.parse(persistedSnapshot ?? '').state).toMatchObject({
+      globalSpeedLimit: '3M',
+      lastCustomSpeedLimitKiB: 1536,
+      lastCustomSpeedLimitUnit: 'KB/s'
+    });
+  });
+
+  it('serializes repeated saves so the latest requested limit wins', async () => {
+    let releaseFirstLimit!: () => void;
+    const firstLimit = new Promise<void>(resolve => {
+      releaseFirstLimit = resolve;
+    });
+    const appliedLimits: string[] = [];
+    const persistedLimits: string[] = [];
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'set_global_speed_limit') {
+        const limit = (args as { limit: string | null }).limit;
+        if (limit) appliedLimits.push(limit);
+        if (appliedLimits.length === 1) await firstLimit;
+      }
+      if (command === 'db_save_settings') {
+        persistedLimits.push(JSON.parse((args as { data: string }).data).state.globalSpeedLimit);
+      }
+      return undefined as never;
+    });
+
+    const firstSave = useSettingsStore.getState().saveGlobalSpeedLimitSettings('3M', 3072, 'KB/s');
+    const secondSave = useSettingsStore.getState().saveGlobalSpeedLimitSettings('4M', 4096, 'KB/s');
+    await vi.waitFor(() => expect(appliedLimits).toEqual(['3M']));
+
+    releaseFirstLimit();
+    await Promise.all([firstSave, secondSave]);
+    expect(appliedLimits).toEqual(['3M', '4M']);
+    expect(persistedLimits).toEqual(['3M', '4M']);
+    expect(useSettingsStore.getState()).toMatchObject({
+      globalSpeedLimit: '4M',
+      lastCustomSpeedLimitKiB: 4096,
+      lastCustomSpeedLimitUnit: 'KB/s'
+    });
   });
 });
 

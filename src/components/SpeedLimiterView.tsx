@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Gauge, Plus, Save, X, Zap } from 'lucide-react';
-import { useSettingsStore } from '../store/useSettingsStore';
+import { SettingsPersistenceError, useSettingsStore } from '../store/useSettingsStore';
 import { WindowDragRegion } from './WindowDragRegion';
 import { useToast } from '../contexts/ToastContext';
 import { useTranslation } from 'react-i18next';
@@ -95,9 +95,7 @@ export default function SpeedLimiterView() {
   const lastCustomSpeedLimitKiB = useSettingsStore(state => state.lastCustomSpeedLimitKiB);
   const lastCustomSpeedLimitUnit = useSettingsStore(state => state.lastCustomSpeedLimitUnit);
   const speedLimitPresetValues = useSettingsStore(state => state.speedLimitPresetValues);
-  const setGlobalSpeedLimit = useSettingsStore(state => state.setGlobalSpeedLimit);
-  const setLastCustomSpeedLimitKiB = useSettingsStore(state => state.setLastCustomSpeedLimitKiB);
-  const setLastCustomSpeedLimitUnit = useSettingsStore(state => state.setLastCustomSpeedLimitUnit);
+  const saveGlobalSpeedLimitSettings = useSettingsStore(state => state.saveGlobalSpeedLimitSettings);
   const setSpeedLimitPresetValues = useSettingsStore(state => state.setSpeedLimitPresetValues);
   const fallbackUnit: SpeedUnit = lastCustomSpeedLimitUnit === 'KB/s' ? 'KB/s' : 'MB/s';
   const initial = parseLimit(globalSpeedLimit, lastCustomSpeedLimitKiB, fallbackUnit);
@@ -130,9 +128,11 @@ export default function SpeedLimiterView() {
     const valueKiB = speedValueToKiB(numericValue, unit);
     setIsSaving(true);
     try {
-      await setGlobalSpeedLimit(enabled ? formatSpeedLimitForStorage(numericValue, unit) : '');
-      setLastCustomSpeedLimitKiB(valueKiB);
-      setLastCustomSpeedLimitUnit(unit);
+      await saveGlobalSpeedLimitSettings(
+        enabled ? formatSpeedLimitForStorage(numericValue, unit) : '',
+        valueKiB,
+        unit
+      );
       addToast({
         message: enabled
           ? t($ => $.speedLimiter.globalLimitSaved, { value: numericValue, unit })
@@ -140,11 +140,13 @@ export default function SpeedLimiterView() {
         variant: 'success'
       });
     } catch (error) {
-      addToast({
-        message: t($ => $.speedLimiter.saveFailed, { detail: String(error) }),
-        variant: 'error',
-        isActionable: true
-      });
+      if (!(error instanceof SettingsPersistenceError && error.reportedToListeners)) {
+        addToast({
+          message: t($ => $.speedLimiter.saveFailed, { detail: String(error) }),
+          variant: 'error',
+          isActionable: true
+        });
+      }
     } finally {
       savingRef.current = false;
       setIsSaving(false);
