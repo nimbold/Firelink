@@ -41,6 +41,17 @@ Linux `.deb` and `.rpm` packages are built with the complete verified engine pay
 
 yt-dlp must remain its official PyInstaller **onedir** distribution: launcher plus adjacent `_internal` runtime. Onefile builds are rejected because repeated extraction caused roughly 17-second startup latency.
 
+## Linux compatibility
+
+Linux releases are built on Ubuntu 22.04 with WebKitGTK 4.1, following
+[Tauri's AppImage guidance](https://tauri.app/distribute/appimage/). The current
+AppImage uses host glibc; the AppImage catalog reports a `GLIBC_2.35`
+requirement. Keep Ubuntu 22.04 as the build baseline unless an older supported
+base also provides the required WebKitGTK stack and the final package's symbol
+requirements are checked. Do not bundle a separate glibc to lower the floor;
+[AppImage compatibility guidance](https://docs.appimage.org/introduction/concepts.html)
+assumes libc is provided by the host system.
+
 ## Version update
 
 Keep versions aligned:

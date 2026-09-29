@@ -26,7 +26,7 @@ test('macOS release verification uses the app mounted from the final DMG', () =>
 
 test('release workflow normalizes all 6 distribution target artifacts', () => {
   assert.match(releaseWorkflow, /rename_asset '\*\.dmg' "Firelink_\$\{VERSION\}_macOS-ARM64\.dmg"/);
-  assert.match(releaseWorkflow, /rename_asset '\*\.AppImage' "Firelink_\$\{VERSION\}_Linux-x64\.AppImage"/);
+  assert.match(releaseWorkflow, /rename_asset '\*\.AppImage' "Firelink-\$\{VERSION\}-x86_64\.AppImage"/);
   assert.match(releaseWorkflow, /rename_asset '\*\.deb' "Firelink_\$\{VERSION\}_Linux-x64\.deb"/);
   assert.match(releaseWorkflow, /rename_asset '\*\.rpm' "Firelink_\$\{VERSION\}_Linux-x64\.rpm"/);
   assert.match(releaseWorkflow, /rename_asset '\*\.exe' "Firelink_\$\{VERSION\}_Windows-x64-setup\.exe"/);

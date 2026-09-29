@@ -373,7 +373,7 @@ jobs:
           }
 
           rename_asset '*.dmg' "Firelink_${VERSION}_macOS-ARM64.dmg"
-          rename_asset '*.AppImage' "Firelink_${VERSION}_Linux-x64.AppImage"
+          rename_asset '*.AppImage' "Firelink-${VERSION}-x86_64.AppImage"
           rename_asset '*.deb' "Firelink_${VERSION}_Linux-x64.deb"
           rename_asset '*.rpm' "Firelink_${VERSION}_Linux-x64.rpm"
           rename_asset '*.exe' "Firelink_${VERSION}_Windows-x64-setup.exe"

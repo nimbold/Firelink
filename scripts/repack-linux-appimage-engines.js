@@ -5,6 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { collectRegularFiles, sha256 } from './engine-payload-integrity.js';
+import { normalizeAppRunPermissions, verifyAppRunPermissions } from './appimage-launcher-permissions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -15,8 +16,7 @@ function argValue(name) {
 }
 
 function fail(message) {
-  console.error(message);
-  process.exit(1);
+  throw new Error(message);
 }
 
 function mustBeDirectory(directory, label) {
@@ -102,56 +102,76 @@ function run(command, args, options = {}) {
   }
 }
 
-const target = argValue('--target') || process.env.FIRELINK_TARGET_TRIPLE || process.env.TAURI_ENV_TARGET_TRIPLE;
-if (!target) {
-  fail('Pass --target <triple>.');
-}
+function main() {
+  const target = argValue('--target') || process.env.FIRELINK_TARGET_TRIPLE || process.env.TAURI_ENV_TARGET_TRIPLE;
+  if (!target) {
+    fail('Pass --target <triple>.');
+  }
+  if (target !== 'x86_64-unknown-linux-gnu') {
+    fail(`Unsupported AppImage target: ${target}. Expected x86_64-unknown-linux-gnu.`);
+  }
 
-const bundleDirectory = path.join(repoRoot, 'src-tauri', 'target', target, 'release', 'bundle', 'appimage');
-const appDir = path.resolve(argValue('--appdir') || path.join(bundleDirectory, 'Firelink.AppDir'));
-const appImage = path.resolve(argValue('--appimage') || findSingleAppImage(bundleDirectory));
-const appImageTool = path.resolve(argValue('--appimagetool') || process.env.APPIMAGETOOL || 'appimagetool');
-const source = path.join(repoRoot, 'src-tauri', 'provisioned-engines', target);
-const destination = path.join(appDir, 'usr', 'lib', 'Firelink', 'engine-dist', target);
+  const bundleDirectory = path.join(repoRoot, 'src-tauri', 'target', target, 'release', 'bundle', 'appimage');
+  const appDir = path.resolve(argValue('--appdir') || path.join(bundleDirectory, 'Firelink.AppDir'));
+  const appImage = path.resolve(argValue('--appimage') || findSingleAppImage(bundleDirectory));
+  const appImageTool = path.resolve(argValue('--appimagetool') || process.env.APPIMAGETOOL || 'appimagetool');
+  const source = path.join(repoRoot, 'src-tauri', 'provisioned-engines', target);
+  const destination = path.join(appDir, 'usr', 'lib', 'Firelink', 'engine-dist', target);
 
-mustBeDirectory(appDir, 'Firelink.AppDir');
-mustBeDirectory(source, 'Provisioned engine payload');
-mustBeFile(appImage, 'AppImage');
-mustBeFile(appImageTool, 'appimagetool');
+  mustBeDirectory(appDir, 'Firelink.AppDir');
+  mustBeDirectory(source, 'Provisioned engine payload');
+  mustBeFile(appImage, 'AppImage');
+  mustBeFile(appImageTool, 'appimagetool');
 
-validatePayloadManifest(source, target, 'Provisioned engine');
+  validatePayloadManifest(source, target, 'Provisioned engine');
 
-fs.rmSync(destination, { recursive: true, force: true });
-fs.mkdirSync(path.dirname(destination), { recursive: true });
-fs.cpSync(source, destination, {
-  recursive: true,
-  dereference: false,
-  preserveTimestamps: true,
-});
-validatePayloadManifest(destination, target, 'AppDir engine');
+  fs.rmSync(destination, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.cpSync(source, destination, {
+    recursive: true,
+    dereference: false,
+    preserveTimestamps: true,
+  });
+  validatePayloadManifest(destination, target, 'AppDir engine');
 
-fs.chmodSync(appImageTool, 0o755);
-run(appImageTool, [appDir, appImage], {
-  env: {
-    APPIMAGE_EXTRACT_AND_RUN: '1',
-    ARCH: 'x86_64',
-  },
-});
+  // AppImage tooling maps ownership to root in the final SquashFS. Normalize
+  // every path needed by AppRun so its root-owned read-only mount remains usable
+  // by ordinary users. Reject unknown launcher layouts instead of skipping checks.
+  normalizeAppRunPermissions(appDir, 'AppDir');
 
-const extractRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'firelink-appimage-'));
-try {
-  fs.chmodSync(appImage, 0o755);
-  run(appImage, ['--appimage-extract'], {
-    cwd: extractRoot,
-    env: { APPIMAGE_EXTRACT_AND_RUN: '1' },
-    stdio: 'pipe',
+  fs.chmodSync(appImageTool, 0o755);
+  run(appImageTool, [appDir, appImage], {
+    env: {
+      APPIMAGE_EXTRACT_AND_RUN: '1',
+      ARCH: 'x86_64',
+    },
   });
 
-  const extractedPayload = path.join(extractRoot, 'squashfs-root', 'usr', 'lib', 'Firelink', 'engine-dist', target);
-  mustBeDirectory(extractedPayload, 'Extracted AppImage engine payload');
-  validatePayloadManifest(extractedPayload, target, 'Extracted AppImage engine');
-} finally {
-  fs.rmSync(extractRoot, { recursive: true, force: true });
+  const extractRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'firelink-appimage-'));
+  try {
+    fs.chmodSync(appImage, 0o755);
+    run(appImage, ['--appimage-extract'], {
+      cwd: extractRoot,
+      env: { APPIMAGE_EXTRACT_AND_RUN: '1' },
+      stdio: 'pipe',
+    });
+
+    const squashfsRoot = path.join(extractRoot, 'squashfs-root');
+    verifyAppRunPermissions(squashfsRoot, 'Repacked AppImage');
+
+    const extractedPayload = path.join(squashfsRoot, 'usr', 'lib', 'Firelink', 'engine-dist', target);
+    mustBeDirectory(extractedPayload, 'Extracted AppImage engine payload');
+    validatePayloadManifest(extractedPayload, target, 'Extracted AppImage engine');
+  } finally {
+    fs.rmSync(extractRoot, { recursive: true, force: true });
+  }
+
+  console.log(`Repacked and verified AppImage launcher permissions and engine payload for ${target}.`);
 }
 
-console.log(`Repacked and verified AppImage engine payload for ${target}.`);
+try {
+  main();
+} catch (error) {
+  console.error(`[FAIL] ${error.message}`);
+  process.exitCode = 1;
+}
