@@ -2841,6 +2841,97 @@ mod tests {
     }
 
     #[test]
+    fn cold_reopen_preserves_normal_torrent_media_and_queue_state() {
+        let root = TempDir::new().unwrap();
+        let db = init_at_path(root.path()).unwrap();
+        let downloads = json!([
+            {
+                "id": "normal-paused",
+                "status": "paused",
+                "queueId": "queue-a",
+                "url": "https://example.com/file.bin",
+                "fileName": "file.bin"
+            },
+            {
+                "id": "torrent-paused",
+                "status": "paused",
+                "queueId": "queue-a",
+                "url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                "fileName": "archive.iso",
+                "isTorrent": true
+            },
+            {
+                "id": "media-paused",
+                "status": "paused",
+                "queueId": "queue-a",
+                "url": "https://video.example/watch?id=media",
+                "fileName": "video.mp4",
+                "isMedia": true,
+                "mediaFormatSelector": "bestvideo+bestaudio"
+            },
+            {
+                "id": "normal-interrupted",
+                "status": "downloading",
+                "queueId": "queue-a",
+                "url": "https://example.com/interrupted.bin",
+                "fileName": "interrupted.bin"
+            }
+        ]);
+        let queues = json!([{
+            "id": "queue-a",
+            "name": "Release audit queue",
+            "isMain": false
+        }]);
+        {
+            let mut connection = db.lock().unwrap();
+            replace_downloads_and_queues(
+                &mut connection,
+                &downloads.to_string(),
+                &queues.to_string(),
+                false,
+            )
+            .unwrap();
+        }
+        drop(db);
+
+        let reopened = init_at_path(root.path()).unwrap();
+        let connection = reopened.lock().unwrap();
+        let persisted: Vec<Value> = load_downloads(&connection)
+            .unwrap()
+            .into_iter()
+            .map(|data| serde_json::from_str(&data).unwrap())
+            .collect();
+        assert_eq!(persisted.len(), 4);
+        assert!(persisted.iter().any(|download| {
+            download["id"] == "normal-paused"
+                && download["status"] == "paused"
+                && download["queueId"] == "queue-a"
+        }));
+        assert!(persisted.iter().any(|download| {
+            download["id"] == "torrent-paused"
+                && download["status"] == "paused"
+                && download["isTorrent"] == true
+                && download["queueId"] == "queue-a"
+        }));
+        assert!(persisted.iter().any(|download| {
+            download["id"] == "media-paused"
+                && download["status"] == "paused"
+                && download["isMedia"] == true
+                && download["mediaFormatSelector"] == "bestvideo+bestaudio"
+                && download["queueId"] == "queue-a"
+        }));
+        assert!(persisted.iter().any(|download| {
+            download["id"] == "normal-interrupted"
+                && download["status"] == "downloading"
+                && download["queueId"] == "queue-a"
+        }));
+        assert!(load_queues(&connection)
+            .unwrap()
+            .iter()
+            .any(|queue| queue.contains("Release audit queue")));
+    }
+
+    #[test]
     fn site_login_settings_update_preserves_envelope_without_password() {
         let original = json!({
             "state": {

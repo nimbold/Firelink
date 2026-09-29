@@ -39,6 +39,12 @@ const common = {
     renameQueue: 'Rename Queue',
     deleteQueue: 'Delete Queue',
   },
+  trayMenu: {
+    show: 'Show Firelink',
+    pauseAll: 'Pause All',
+    resumeAll: 'Resume All',
+    quit: 'Quit Firelink',
+  },
   dialogs: {
     errorBoundary: {
       title: 'Something went wrong.',
@@ -520,6 +526,13 @@ const common = {
   app: {
     loading: 'Loading…',
     settingsSaveFailed: 'Could not save settings. Check storage permissions and try again.',
+    exitFlushFailed: 'Firelink could not save all changes before quitting: {{detail}}',
+    exitFlushCancelled: 'Firelink cancelled quitting because it could not confirm that all changes were saved.',
+    trayActionFailed: 'The tray action could not be completed. Review download status in Firelink.',
+    trayPersistenceFailed: 'Firelink could not save this tray action. It remains pending; check storage and try a tray action again.',
+    trayStartupPauseUnverified: 'Firelink could not verify tray actions at startup, so saved downloads were not resumed. You can resume them manually.',
+    trayPausePartial: 'Pause All could not pause {{count}} downloads. Review their status in Firelink.',
+    trayResumePartial: 'Resume All could not start {{count}} downloads. Review their status in Firelink.',
     systemActionCountdown: '{{action}} in 10 seconds.',
     systemActionCancelled: 'System action cancelled because another download is active or queued.',
     systemActionProceedAnyway: 'Proceed anyway',
@@ -820,6 +833,10 @@ const common = {
     removeUnsafeFew: 'Remove {{count}} unsafe URLs before continuing.',
     removeUnsafeMany: 'Remove {{count}} unsafe URLs before continuing.',
     mediaMetadataUnavailableSummaryOne: 'Media metadata is unavailable for {{count}} item. Refresh metadata before adding.',
+    useDefaultMediaFormat: "Use yt-dlp's default format",
+    defaultMediaFormatFallbackDescription: "If metadata cannot be loaded, you can add this media with yt-dlp's default format. The final format, filename, and size will be resolved during download.",
+    defaultMediaFormatSelected: "yt-dlp's default format is selected. Filename and size will be resolved during download.",
+    defaultMediaFormat: 'Default format',
     mediaMetadataUnavailableSummaryFew: 'Media metadata is unavailable for {{count}} items. Refresh metadata before adding.',
     mediaMetadataUnavailableSummaryMany: 'Media metadata is unavailable for {{count}} items. Refresh metadata before adding.',
     metadataUnavailableFallback: 'Metadata is unavailable. Downloads can still be added using fallback details.',

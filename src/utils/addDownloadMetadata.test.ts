@@ -5,6 +5,7 @@ import {
   commonMediaFormatsForRows,
   canSubmitMetadataRows,
   commonMediaQualitiesForRows,
+  canUseYtDlpDefaultMediaFormat,
   durableDownloadUrl,
   mediaFormatSelectorForRow,
   mediaFileNameForSelectedFormat,
@@ -17,12 +18,14 @@ import {
   isAddDownloadMetadataLoading,
   isAddDownloadMetadataError,
   isMetadataRefreshableRow,
+  isYtDlpDefaultMediaFormatSelected,
   isRemoteTorrentUrl,
   playlistFilePrefix,
   reconcileDownloadRows,
   refreshFailedMetadataRows,
   selectExactMediaSelection,
   selectExactMediaQuality,
+  selectYtDlpDefaultMediaFormat,
   updateRowIfCurrent,
   type AddDownloadDraftRow
 } from './addDownloadMetadata';
@@ -933,6 +936,67 @@ describe('add download metadata workflow', () => {
     );
 
     expect(updated[0]).toBe(current);
+  });
+
+  it('keeps unresolved explicit media disabled until the user chooses yt-dlp default', () => {
+    const failedMedia = row({
+      sourceUrl: 'https://youtube.com/watch?v=video',
+      status: 'metadata-error',
+      isMedia: true,
+      mediaMode: 'media',
+      formats: undefined,
+      selectedFormat: undefined
+    });
+
+    expect(canSubmitMetadataRows([failedMedia])).toBe(false);
+    expect(canUseYtDlpDefaultMediaFormat(failedMedia)).toBe(true);
+
+    const optedIn = selectYtDlpDefaultMediaFormat(failedMedia);
+    expect(optedIn).toMatchObject({
+      status: 'metadata-error',
+      isMedia: true,
+      mediaFormatFallback: 'yt-dlp-default'
+    });
+    expect(isYtDlpDefaultMediaFormatSelected(optedIn)).toBe(true);
+    expect(canSubmitMetadataRows([optedIn])).toBe(true);
+    expect(mediaFormatSelectorForRow(optedIn)).toBeUndefined();
+    expect(metadataSummaryMessage([optedIn])).toContain('fallback filename and unknown size');
+  });
+
+  it('does not offer the default-format fallback for unsafe, blocked, or non-HTTP media rows', () => {
+    const failedMedia = row({
+      sourceUrl: 'https://youtube.com/watch?v=video',
+      status: 'metadata-error',
+      isMedia: true,
+      mediaMode: 'media'
+    });
+    const unsafe = { ...failedMedia, metadataBlockedReason: 'unsafe-url' as const };
+    const authBlocked = { ...failedMedia, metadataBlockedReason: 'youtube-auth' as const };
+    const nonHttp = {
+      ...failedMedia,
+      sourceUrl: 'file:///private/video.mp4',
+      mediaFormatFallback: 'yt-dlp-default' as const
+    };
+
+    for (const blocked of [unsafe, authBlocked, nonHttp]) {
+      expect(canUseYtDlpDefaultMediaFormat(blocked)).toBe(false);
+      expect(selectYtDlpDefaultMediaFormat(blocked)).toBe(blocked);
+      expect(canSubmitMetadataRows([blocked])).toBe(false);
+    }
+  });
+
+  it('clears a default-format choice when failed metadata is refreshed', () => {
+    const optedIn = selectYtDlpDefaultMediaFormat(row({
+      sourceUrl: 'https://youtube.com/watch?v=video',
+      status: 'metadata-error',
+      isMedia: true,
+      mediaMode: 'media'
+    }));
+
+    expect(refreshFailedMetadataRows([optedIn])[0]).toMatchObject({
+      status: 'loading',
+      mediaFormatFallback: undefined
+    });
   });
 
   it('allows normal-download fallback but blocks unresolved explicit media', () => {

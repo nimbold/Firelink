@@ -14,6 +14,7 @@ import type { ExtensionCookieScope } from '../bindings/ExtensionCookieScope';
 import type { Queue } from '../bindings/Queue';
 import { useSettingsStore } from './useSettingsStore';
 import { useDownloadProgressStore } from './downloadProgressStore';
+import { waitForPendingDownloadWork } from './downloadWorkBarrier';
 import { canonicalizeDownloadFileName, categoryForDownload, categoryForFileName, hasCredentialBearingHeaders, headerNameHasCredentialMaterial, headersWithoutCredentialMaterial, isActiveDownloadStatus, isDirectMediaManifestUrl, isMediaUrl, isTransferActiveStatus, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentEncryptionPolicy, normalizeTorrentFileAllocation, normalizeTorrentPrioritizePiece, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, redactDownloadForPersistence, resolveDownloadConnections } from '../utils/downloads';
 import type { MediaMode } from '../utils/downloads';
 import {
@@ -149,6 +150,44 @@ const runDownloadLifecycleOperations = <T>(
 const waitForPendingStartupResume = async (): Promise<void> => {
   const pending = pendingStartupResume;
   if (pending) await pending.catch(() => undefined);
+};
+
+export const waitForDownloadLifecycleWork = async (): Promise<void> => {
+  // Add-window preflight can await destination inspection or Torrent metadata
+  // before it creates a row, so it cannot be inferred from queue/lifecycle
+  // maps. Exit closes Add-work admission first, then joins this tracker.
+  await waitForPendingDownloadWork();
+  while (true) {
+    const pending = [
+      ...(pendingStartupResume ? [pendingStartupResume] : []),
+      ...backendDispatchPromises.values(),
+      ...Array.from(downloadLifecycleOperations.values(), operation => operation.promise),
+      ...queueReorderPromises.values(),
+      ...queueStartPromises.values(),
+      queueConfigurationQueue
+    ];
+    if (pending.length === 0) return;
+    await Promise.allSettled(pending);
+    await Promise.resolve();
+    if (
+      !pendingStartupResume
+      && backendDispatchPromises.size === 0
+      && downloadLifecycleOperations.size === 0
+      && queueReorderPromises.size === 0
+      && queueStartPromises.size === 0
+    ) {
+      const configuration = queueConfigurationQueue;
+      await configuration;
+      if (
+        configuration === queueConfigurationQueue
+        && !pendingStartupResume
+        && backendDispatchPromises.size === 0
+        && downloadLifecycleOperations.size === 0
+        && queueReorderPromises.size === 0
+        && queueStartPromises.size === 0
+      ) return;
+    }
+  }
 };
 
 const hasCredentialMaterial = (value: string | null | undefined): boolean =>
@@ -1163,6 +1202,7 @@ export type DeleteModalState = {
 };
 
 interface DownloadState {
+  isInitialized: boolean;
   removalJobs: Record<string, DownloadRemovalJob>;
   requestRemovals: (ids: string[], deleteAssets: boolean) => Promise<void>;
   applyRemovalJob: (job: DownloadRemovalJob) => void;
@@ -1241,6 +1281,8 @@ interface DownloadState {
   resumeDownload: (id: string, options?: ResumeDownloadOptions) => Promise<boolean>;
   startSelected: (ids: string[]) => Promise<number>;
   startQueue: (queueId: string) => Promise<string[]>;
+  /** IDs accepted by the backend queue while starting every download queue. */
+  startAllWithOutcomes: () => Promise<string[]>;
   pauseQueue: (queueId: string) => Promise<number>;
   startAll: () => Promise<number>;
   pauseAll: () => Promise<number>;
@@ -1624,7 +1666,21 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     }
   };
 
+  const prepareStartAllQueueIds = (): string[] => {
+    set(state => ({
+      downloads: state.downloads.map(item =>
+        item.queueId ? item : { ...item, queueId: MAIN_QUEUE_ID }
+      )
+    }));
+    return Array.from(new Set(
+      get().downloads
+        .filter(item => item.status === 'queued' || canStartDownload(item.status))
+        .map(item => item.queueId || MAIN_QUEUE_ID)
+    ));
+  };
+
   return {
+  isInitialized: false,
   downloads: [],
   queues: [{ id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true }],
   pendingOrder: [],
@@ -2419,11 +2475,16 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     preemptDispatch
   ),
   pauseDownload: (id) => runDownloadLifecycleOperation(id, 'pause', async () => {
-    await waitForPendingStartupResume();
     if (!get().downloads.some(download => download.id === id)) return;
     setDownloadControlIntent(id, 'pause');
     const { generation, pendingDispatch } = await invalidateDispatch(id);
     try {
+      // Fence startup's queued batch before joining it. If enqueue_many has
+      // already crossed the IPC boundary, recovery will cancel its stale
+      // lifecycle before this pause reaches the backend.
+      await waitForPendingStartupResume();
+      if (!get().downloads.some(download => download.id === id)) return;
+
       if (pendingDispatch) {
         await pendingDispatch;
       }
@@ -2726,10 +2787,10 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     return trackedOperation;
   },
   pauseQueue: async (queueId) => {
-    await waitForPendingStartupResume();
     // Invalidate queued starts before taking the snapshot. This prevents a
     // start loop that is waiting on metadata/IPC from dispatching later rows
-    // after the user has already requested Pause Queue.
+    // after the user has already requested Pause Queue. Do this before any
+    // startup-resume wait so its batch cannot dispatch past the pause intent.
     advanceQueueControlGeneration(queueId);
     const activeIds = get().downloads
       .filter(item =>
@@ -2750,25 +2811,21 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     syncSystemIntegrations();
     return pausedCount;
   },
+  startAllWithOutcomes: async () => {
+    const queueIds = prepareStartAllQueueIds();
+    const results = await Promise.allSettled(queueIds.map(queueId => get().startQueue(queueId)));
+    return results.flatMap(result => result.status === 'fulfilled' ? result.value : []);
+  },
   startAll: async () => {
-    set(state => ({
-      downloads: state.downloads.map(item =>
-        item.queueId ? item : { ...item, queueId: MAIN_QUEUE_ID }
-      )
-    }));
-    const queueIds = new Set(
-      get().downloads
-        .filter(item => item.status === 'queued' || canStartDownload(item.status))
-        .map(item => item.queueId || MAIN_QUEUE_ID)
-    );
-    const results = await Promise.all(Array.from(queueIds, queueId => get().startQueue(queueId)));
+    const queueIds = prepareStartAllQueueIds();
+    const results = await Promise.all(queueIds.map(queueId => get().startQueue(queueId)));
     return results.reduce((total, ids) => total + ids.length, 0);
   },
   pauseAll: async () => {
-    await waitForPendingStartupResume();
     const queueIds = new Set(
       get().downloads.map(item => item.queueId || MAIN_QUEUE_ID)
     );
+    // Fence every queue before pauseDownload joins an in-flight startup batch.
     for (const queueId of queueIds) {
       advanceQueueControlGeneration(queueId);
     }
@@ -3416,6 +3473,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
   initDB: async () => {
     try {
       downloadPersistenceReady = false;
+      set({ isInitialized: false });
       // Register before recovery starts; no worker runs until snapshots hydrate.
       if (!removalListener) removalListener = await listenEvent('download-removal', event => get().applyRemovalJob(event.payload));
       const removalJobs = await invoke('list_download_removals');
@@ -3495,7 +3553,6 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       if (downloadPersistenceUnsubscribe) {
         downloadPersistenceReady = true;
       }
-
     } catch (e) {
       console.error("Failed to init DB", e);
       throw e;
@@ -3642,6 +3699,7 @@ export const flushDownloadPersistence = async (): Promise<void> => {
 };
 
 let downloadPersistenceUnsubscribe: (() => void) | null = null;
+let downloadPersistenceDisposer: (() => void) | null = null;
 
 export const resetDownloadStoreModuleStateForTests = (): void => {
   removalListener?.();
@@ -3649,6 +3707,7 @@ export const resetDownloadStoreModuleStateForTests = (): void => {
   useDownloadStore.setState({ removalJobs: {} });
   downloadPersistenceUnsubscribe?.();
   downloadPersistenceUnsubscribe = null;
+  downloadPersistenceDisposer = null;
   backendDispatchPromises.clear();
   downloadLifecycleGenerations.clear();
   queueReorderPromises.clear();
@@ -3675,7 +3734,8 @@ export const resetDownloadStoreModuleStateForTests = (): void => {
  * or write whole-store snapshots from a child webview.
  */
 export const initializeDownloadPersistence = (windowLabel: string): (() => void) => {
-  if (windowLabel !== 'main' || downloadPersistenceUnsubscribe) return () => undefined;
+  if (windowLabel !== 'main') return () => undefined;
+  if (downloadPersistenceUnsubscribe) return downloadPersistenceDisposer ?? (() => undefined);
 
   downloadPersistenceUnsubscribe = useDownloadStore.subscribe((state, prevState) => {
     if (!downloadPersistenceReady) return;
@@ -3687,9 +3747,14 @@ export const initializeDownloadPersistence = (windowLabel: string): (() => void)
   });
   downloadPersistenceReady = true;
 
-  return () => {
+  useDownloadStore.setState({ isInitialized: true });
+  const dispose = () => {
     downloadPersistenceUnsubscribe?.();
     downloadPersistenceUnsubscribe = null;
+    downloadPersistenceDisposer = null;
     downloadPersistenceReady = false;
+    useDownloadStore.setState({ isInitialized: false });
   };
+  downloadPersistenceDisposer = dispose;
+  return dispose;
 };

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   runSettingsPersistenceTransaction,
+  flushSettingsPersistence,
   SettingsPersistenceError,
   subscribeToSettingsPersistenceErrors,
   waitForSettingsPersistence,
@@ -525,6 +526,32 @@ describe('Torrent open-file limit preference', () => {
     expect(events).toEqual(['start:256', 'finish:256', 'start:512', 'finish:512']);
     expect(useSettingsStore.getState().torrentMaxOpenFiles).toBe(512);
   });
+
+  it('flushes settings operations that are still waiting on native IPC', async () => {
+    let releaseNative!: () => void;
+    const nativeOperation = new Promise<void>(resolve => {
+      releaseNative = resolve;
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'set_torrent_max_open_files') await nativeOperation;
+      return undefined as never;
+    });
+
+    const update = useSettingsStore.getState().setTorrentMaxOpenFiles(256);
+    await vi.waitFor(() => expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'set_torrent_max_open_files',
+      { max_open_files: 256 }
+    ));
+    let flushed = false;
+    const flush = flushSettingsPersistence().then(() => { flushed = true; });
+    await Promise.resolve();
+    expect(flushed).toBe(false);
+
+    releaseNative();
+    await Promise.all([update, flush]);
+    expect(flushed).toBe(true);
+    expect(useSettingsStore.getState().torrentMaxOpenFiles).toBe(256);
+  });
 });
 
 describe('calendar preference', () => {
@@ -978,5 +1005,105 @@ describe('useSettingsStore persistence failures', () => {
 
     expect(onPersistenceError).toHaveBeenCalledTimes(1);
     unsubscribe();
+  });
+});
+
+describe('scheduled trigger durability', () => {
+  beforeEach(async () => {
+    await waitForSettingsPersistence();
+    vi.mocked(ipc.invokeCommand).mockReset();
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command =>
+      command === 'db_load_settings' ? null : undefined as never
+    );
+    await useSettingsStore.getState().persistSchedulerTracking([]);
+    vi.clearAllMocks();
+  });
+
+  it('waits for the scheduler tracking write to commit before acknowledging the trigger', async () => {
+    let releaseWrite!: () => void;
+    const databaseWrite = new Promise<void>(resolve => {
+      releaseWrite = resolve;
+    });
+    const events: string[] = [];
+    let savedSnapshot: { state: { schedulerRunning: boolean; schedulerActiveDownloadIds: string[] } } | undefined;
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'db_save_settings') {
+        savedSnapshot = JSON.parse((args as { data: string }).data);
+        events.push('settings-write-started');
+        await databaseWrite;
+        events.push('settings-write-committed');
+      } else if (command === 'ack_schedule_trigger') {
+        events.push('trigger-acknowledged');
+      }
+      return undefined as never;
+    });
+
+    // This is the same ordering used by App's schedule-trigger handler.
+    const delivery = (async () => {
+      await useSettingsStore.getState().persistSchedulerTracking(['download-1', 'download-1']);
+      await ipc.invokeCommand('ack_schedule_trigger', { action: 'start', key: 'scheduled-start' });
+    })();
+
+    await vi.waitFor(() => expect(events).toEqual(['settings-write-started']));
+    expect(savedSnapshot?.state).toMatchObject({
+      schedulerRunning: true,
+      schedulerActiveDownloadIds: ['download-1']
+    });
+    expect(events).not.toContain('trigger-acknowledged');
+
+    releaseWrite();
+    await delivery;
+    expect(events).toEqual([
+      'settings-write-started',
+      'settings-write-committed',
+      'trigger-acknowledged'
+    ]);
+  });
+
+  it('retains the trigger after a failed write and safely acknowledges a repeated delivery after retry', async () => {
+    let failNextWrite = true;
+    const events: string[] = [];
+    const snapshots: Array<{ schedulerRunning: boolean; schedulerActiveDownloadIds: string[] }> = [];
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'db_save_settings') {
+        const snapshot = JSON.parse((args as { data: string }).data).state;
+        snapshots.push({
+          schedulerRunning: snapshot.schedulerRunning,
+          schedulerActiveDownloadIds: snapshot.schedulerActiveDownloadIds
+        });
+        if (failNextWrite) {
+          failNextWrite = false;
+          events.push('settings-write-failed');
+          throw new Error('database unavailable');
+        }
+        events.push('settings-write-committed');
+      } else if (command === 'ack_schedule_trigger') {
+        events.push('trigger-acknowledged');
+      }
+      return undefined as never;
+    });
+
+    const deliverStart = async () => {
+      await useSettingsStore.getState().persistSchedulerTracking(['download-1', 'download-1']);
+      await ipc.invokeCommand('ack_schedule_trigger', { action: 'start', key: 'scheduled-start' });
+    };
+
+    await expect(deliverStart()).rejects.toBeInstanceOf(SettingsPersistenceError);
+    expect(events).toEqual(['settings-write-failed']);
+    expect(useSettingsStore.getState()).toMatchObject({
+      schedulerRunning: true,
+      schedulerActiveDownloadIds: ['download-1']
+    });
+
+    await deliverStart();
+    expect(events).toEqual([
+      'settings-write-failed',
+      'settings-write-committed',
+      'trigger-acknowledged'
+    ]);
+    expect(snapshots).toEqual([
+      { schedulerRunning: true, schedulerActiveDownloadIds: ['download-1'] },
+      { schedulerRunning: true, schedulerActiveDownloadIds: ['download-1'] }
+    ]);
   });
 });

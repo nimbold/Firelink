@@ -34,6 +34,38 @@ export const beginSchedulerControl = (runQueueIds?: readonly string[]): number =
 export const isSchedulerControlCurrent = (generation: number): boolean =>
   schedulerControlGeneration === generation;
 
+export const resolveSchedulerStopOutcome = (input: {
+  controlCurrent: boolean;
+  attemptedIds: readonly string[];
+  failedIds: ReadonlySet<string>;
+  activeIds: ReadonlySet<string>;
+  currentTrackedIds: readonly string[];
+}): { trackedIds: string[]; retryIds: string[]; acknowledge: boolean } => {
+  if (!input.controlCurrent) {
+    return {
+      trackedIds: [...new Set(input.currentTrackedIds)],
+      retryIds: [],
+      acknowledge: true
+    };
+  }
+
+  // A rejected pause is not safe to drop just because React already shows a
+  // paused/terminal state: pauseDownload can reject after changing the
+  // in-memory row when its durable download-state commit fails. Keep every
+  // rejected target tracked so the native stop trigger remains retryable
+  // until a later pause commits successfully. Also retain any target that is
+  // still active even if its pause promise resolved without taking ownership
+  // of a newer lifecycle.
+  const trackedIds = [...new Set(input.attemptedIds.filter(id =>
+    input.failedIds.has(id) || input.activeIds.has(id)
+  ))];
+  return {
+    trackedIds,
+    retryIds: trackedIds,
+    acknowledge: trackedIds.length === 0
+  };
+};
+
 /**
  * A superseded start may have admitted work before a newer start reached the
  * same queue. Hand the IDs to that newer start instead of pausing its work.

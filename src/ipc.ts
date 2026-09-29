@@ -35,6 +35,15 @@ import type { LoginStartStatus } from './bindings/LoginStartStatus';
 
 export type { LoginStartStatus } from './bindings/LoginStartStatus';
 
+export type TrayActionName = 'pause-all' | 'resume-all';
+export type PendingTrayAction = { id: string; action: TrayActionName };
+export type TrayActionResult = {
+  action: TrayActionName;
+  failedCount: number;
+  operationFailed: boolean;
+  persistenceFailed: boolean;
+};
+
 type CommandMap = {
   fetch_metadata: {
     args: { url: string; userAgent: string | null; username: string | null; password: string | null; headers: string | null; cookies: string | null; cookieScopes: Array<ExtensionCookieScope> | null; proxy: string | null; deferCookies?: boolean };
@@ -145,6 +154,20 @@ type CommandMap = {
   delete_site_login: { args: { id: string }; result: void };
   inspect_download_target: { args: { path: string }; result: DownloadTargetInfo };
   toggle_tray_icon: { args: { show: boolean }; result: void };
+  take_pending_tray_action: { args: undefined; result: PendingTrayAction | null };
+  acknowledge_tray_action: {
+    args: {
+      id: string;
+      failedCount: number;
+      operationFailed: boolean;
+      persistenceFailed: boolean;
+    };
+    result: void;
+  };
+  set_tray_menu_labels: {
+    args: { show: string; pauseAll: string; resumeAll: string; quit: string };
+    result: void;
+  };
   get_start_at_login: { args: undefined; result: LoginStartStatus };
   set_start_at_login: { args: { enabled: boolean }; result: LoginStartStatus };
   open_login_items_settings: { args: undefined; result: void };
@@ -160,7 +183,9 @@ type CommandMap = {
   abandon_keychain_grant: { args: { requestId: string }; result: PairingTokenHydration | null };
   acknowledge_pairing_token_change: { args: undefined; result: void };
   set_extension_frontend_ready: { args: { ready: boolean }; result: void };
-  ack_frontend_exit: { args: undefined; result: void };
+  ack_frontend_exit: { args: { requestId: string }; result: void };
+  reject_frontend_exit: { args: { requestId: string }; result: void };
+  ack_frontend_exit_finalization: { args: { requestId: string; succeeded: boolean }; result: void };
   ack_extension_download: { args: { requestId: string }; result: void };
   ack_extension_media_discovery: { args: { requestId: string }; result: void };
   fail_extension_media_discovery: { args: { requestId: string }; result: void };
@@ -236,8 +261,11 @@ type EventMap = {
   'extension-add-download': ExtensionDownload;
   'extension-media-discovery': ExtensionMediaDiscoveryUpdate;
   'deep-link-add-download': string;
-  'tray-action': 'pause-all' | 'resume-all';
-  'app-exit-requested': null;
+  'tray-action-available': null;
+  'tray-action-result': TrayActionResult;
+  'app-exit-requested': { requestId: string };
+  'app-exit-cancelled': { requestId: string; reason: 'rejected' | 'timeout' };
+  'app-exit-final-flush-requested': { requestId: string };
 };
 
 export function listenEvent<K extends keyof EventMap>(

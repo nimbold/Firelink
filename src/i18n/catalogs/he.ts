@@ -39,6 +39,12 @@ const he = {
     renameQueue: 'שינוי שם תור',
     deleteQueue: 'מחיקת תור',
   },
+  trayMenu: {
+    show: 'הצגת Firelink',
+    pauseAll: 'השהיית הכל',
+    resumeAll: 'חידוש הכל',
+    quit: 'יציאה מ-Firelink',
+  },
   dialogs: {
     errorBoundary: {
       title: 'משהו השתבש.',
@@ -520,6 +526,13 @@ const he = {
   app: {
     loading: 'טוען…',
     settingsSaveFailed: 'לא ניתן לשמור הגדרות. בדוק הרשאות אחסון ונסה שוב.',
+    exitFlushFailed: 'Firelink לא הצליחה לשמור את כל השינויים לפני היציאה: {{detail}}',
+    exitFlushCancelled: 'היציאה מ-Firelink בוטלה כי לא ניתן היה לאשר שכל השינויים נשמרו.',
+    trayActionFailed: 'לא ניתן היה להשלים את פעולת מגש המערכת. בדוק את מצב ההורדות ב-Firelink.',
+    trayPersistenceFailed: 'Firelink לא הצליחה לשמור את השינויים מפעולת המגש. הפעולה נשארת בתור; בדוק את האחסון ונסה שוב דרך המגש.',
+    trayStartupPauseUnverified: 'Firelink לא הצליחה לאמת פעולות מגש בעת ההפעלה, ולכן ההורדות השמורות לא חודשו. אפשר לחדש אותן ידנית.',
+    trayPausePartial: 'השהיית הכול לא הצליחה להשהות {{count}} הורדות. בדוק את מצבן ב-Firelink.',
+    trayResumePartial: 'חידוש הכול לא הצליח להתחיל {{count}} הורדות. בדוק את מצבן ב-Firelink.',
     systemActionCountdown: '{{action}} בעוד 10 שניות.',
     systemActionCancelled: 'פעולת המערכת בוטלה מכיוון שהורדה אחרת פעילה או בתור.',
     systemActionProceedAnyway: 'להמשיך בכל זאת',
@@ -820,6 +833,10 @@ const he = {
     removeUnsafeFew: 'הסר {{count}} כתובות URL לא בטוחות לפני שתמשיך.',
     removeUnsafeMany: 'הסר {{count}} כתובות URL לא בטוחות לפני שתמשיך.',
     mediaMetadataUnavailableSummaryOne: 'מטא נתונים של מדיה אינם זמינים עבור {{count}} פריט. רענן מטא נתונים לפני ההוספה.',
+    useDefaultMediaFormat: 'שימוש בפורמט ברירת המחדל של yt-dlp',
+    defaultMediaFormatFallbackDescription: 'אם לא ניתן לטעון מטא נתונים, אפשר להוסיף את המדיה בפורמט ברירת המחדל של yt-dlp. הפורמט הסופי, שם הקובץ והגודל ייקבעו במהלך ההורדה.',
+    defaultMediaFormatSelected: 'נבחר פורמט ברירת המחדל של yt-dlp. שם הקובץ והגודל ייקבעו במהלך ההורדה.',
+    defaultMediaFormat: 'פורמט ברירת מחדל',
     mediaMetadataUnavailableSummaryFew: 'מטא נתונים של מדיה אינם זמינים עבור {{count}} פריטים. רענן מטא נתונים לפני ההוספה.',
     mediaMetadataUnavailableSummaryMany: 'מטא נתונים של מדיה אינם זמינים עבור {{count}} פריטים. רענן מטא נתונים לפני ההוספה.',
     metadataUnavailableFallback: 'מטא נתונים אינם זמינים. עדיין ניתן להוסיף הורדות באמצעות פרטי הגיבוי.',

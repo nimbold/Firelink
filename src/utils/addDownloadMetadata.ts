@@ -81,6 +81,8 @@ export interface AddDownloadDraftRow {
   resumable?: boolean;
   formats?: AddMediaFormat[];
   selectedFormat?: number;
+  /** User-approved use of yt-dlp's default format after eligible metadata failure. */
+  mediaFormatFallback?: 'yt-dlp-default';
   isPlaylist?: boolean;
   playlistSourceUrl?: string;
   playlistTitle?: string;
@@ -170,6 +172,27 @@ export const isMetadataRefreshableRow = (row: AddDownloadDraftRow): boolean =>
   row.status !== 'loading'
   && (row.status === 'metadata-error'
     || (isMagnetTorrentRow(row) && row.torrentMetadataStatus !== 'loading'));
+
+export const canUseYtDlpDefaultMediaFormat = (row: AddDownloadDraftRow): boolean =>
+  row.status === 'metadata-error'
+  && row.isMedia === true
+  && row.metadataBlockedReason === undefined
+  && row.mediaFormatFallback !== 'yt-dlp-default'
+  && isHttpMediaRouteUrl(row.sourceUrl);
+
+export const selectYtDlpDefaultMediaFormat = (
+  row: AddDownloadDraftRow
+): AddDownloadDraftRow => canUseYtDlpDefaultMediaFormat(row)
+  ? { ...row, mediaFormatFallback: 'yt-dlp-default' }
+  : row;
+
+export const isYtDlpDefaultMediaFormatSelected = (
+  row: Pick<AddDownloadDraftRow, 'sourceUrl' | 'status' | 'isMedia' | 'mediaFormatFallback' | 'metadataBlockedReason'>
+): boolean => row.status === 'metadata-error'
+  && row.isMedia === true
+  && row.mediaFormatFallback === 'yt-dlp-default'
+  && row.metadataBlockedReason === undefined
+  && isHttpMediaRouteUrl(row.sourceUrl);
 
 type ParsedInput = {
   identity: string;
@@ -386,6 +409,7 @@ export const reconcileDownloadRows = (
           // transition lets a later refresh resurrect an old format choice.
           formats: undefined,
           selectedFormat: undefined,
+          mediaFormatFallback: undefined,
           isPlaylist: input.isPlaylist,
           playlistSourceUrl: input.playlistSourceUrl,
           playlistTitle: input.playlistTitle,
@@ -518,6 +542,7 @@ export const applyMediaModeToRow = (
     resumable: undefined,
     formats: undefined,
     selectedFormat: undefined,
+    mediaFormatFallback: undefined,
     playlistError: undefined,
     metadataBlockedReason: undefined
   };
@@ -587,6 +612,7 @@ export const refreshFailedMetadataRows = (
     status: 'loading',
     generation,
     metadataBlockedReason: undefined,
+    mediaFormatFallback: undefined,
     ...(row.isTorrent
       ? {
         torrentPath: undefined,
@@ -607,6 +633,7 @@ export const canSubmitMetadataRows = (rows: AddDownloadDraftRow[]): boolean => {
     row.status === 'ready'
     || (row.isTorrent === true && row.status === 'fallback')
     || (!row.isMedia && row.status === 'metadata-error' && !row.metadataBlockedReason)
+    || isYtDlpDefaultMediaFormatSelected(row)
   );
 };
 
@@ -805,14 +832,21 @@ export const metadataSummaryState = (rows: AddDownloadDraftRow[]): MetadataSumma
   const loading = selectedRows.filter(row => row.status === 'loading').length;
   if (loading > 0) return { type: 'loading', count: loading };
 
+  const fallbackRows = selectedRows.filter(row => row.status === 'fallback'
+    || (row.status === 'metadata-error'
+      && (!row.isMedia || isYtDlpDefaultMediaFormatSelected(row))));
   const failed = selectedRows.filter(row => row.status === 'metadata-error' || row.status === 'fallback').length;
-  const failedMedia = selectedRows.filter(row => row.status === 'metadata-error' && row.isMedia).length;
+  const failedMedia = selectedRows.filter(row => row.status === 'metadata-error'
+    && row.isMedia
+    && !isYtDlpDefaultMediaFormatSelected(row)).length;
+  const hasFallback = selectedRows.some(row => row.status === 'fallback'
+    || isYtDlpDefaultMediaFormatSelected(row));
   const blocked = selectedRows.filter(row => row.metadataBlockedReason === 'unsafe-url').length;
   const ready = selectedRows.filter(row => row.status === 'ready').length;
   if (blocked > 0) return { type: 'unsafe', count: blocked };
   if (failedMedia > 0) return { type: 'media-error', count: failedMedia };
-  if (failed === selectedRows.length && !selectedRows.some(row => row.status === 'fallback')) return { type: 'all-error' };
-  if (failed > 0) return { type: 'fallback', ready, failed };
+  if (failed === selectedRows.length && !hasFallback) return { type: 'all-error' };
+  if (fallbackRows.length > 0) return { type: 'fallback', ready, failed: fallbackRows.length };
   return { type: 'ready', count: ready };
 };
 
@@ -855,8 +889,15 @@ export const metadataSummaryMessage = (rows: AddDownloadDraftRow[]): string => {
     );
   }
 
+  const fallbackRows = selectedRows.filter(row => row.status === 'fallback'
+    || (row.status === 'metadata-error'
+      && (!row.isMedia || isYtDlpDefaultMediaFormatSelected(row))));
   const failed = selectedRows.filter(row => row.status === 'metadata-error' || row.status === 'fallback').length;
-  const failedMedia = selectedRows.filter(row => row.status === 'metadata-error' && row.isMedia).length;
+  const failedMedia = selectedRows.filter(row => row.status === 'metadata-error'
+    && row.isMedia
+    && !isYtDlpDefaultMediaFormatSelected(row)).length;
+  const hasFallback = selectedRows.some(row => row.status === 'fallback'
+    || isYtDlpDefaultMediaFormatSelected(row));
   const blocked = selectedRows.filter(row => row.metadataBlockedReason === 'unsafe-url').length;
   const ready = selectedRows.filter(row => row.status === 'ready').length;
   if (blocked > 0) {
@@ -875,15 +916,15 @@ export const metadataSummaryMessage = (rows: AddDownloadDraftRow[]): string => {
       () => i18n.t($ => $.addDownloads.mediaMetadataUnavailableSummaryMany, { count: failedMedia })
     );
   }
-  if (failed === selectedRows.length && !selectedRows.some(row => row.status === 'fallback')) {
+  if (failed === selectedRows.length && !hasFallback) {
     return i18n.t($ => $.addDownloads.metadataUnavailableFallback);
   }
-  if (failed > 0) {
+  if (fallbackRows.length > 0) {
     return pluralMessage(
       ready,
-      () => i18n.t($ => $.addDownloads.fallbackReadyOne, { ready, failed }),
-      () => i18n.t($ => $.addDownloads.fallbackReadyFew, { ready, failed }),
-      () => i18n.t($ => $.addDownloads.fallbackReadyMany, { ready, failed })
+      () => i18n.t($ => $.addDownloads.fallbackReadyOne, { ready, failed: fallbackRows.length }),
+      () => i18n.t($ => $.addDownloads.fallbackReadyFew, { ready, failed: fallbackRows.length }),
+      () => i18n.t($ => $.addDownloads.fallbackReadyMany, { ready, failed: fallbackRows.length })
     );
   }
   return pluralMessage(

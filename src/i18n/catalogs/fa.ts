@@ -39,6 +39,12 @@ const fa = {
     renameQueue: 'تغییر نام صف',
     deleteQueue: 'حذف صف',
   },
+  trayMenu: {
+    show: 'نمایش Firelink',
+    pauseAll: 'توقف همه',
+    resumeAll: 'ادامه همه',
+    quit: 'خروج از Firelink',
+  },
   dialogs: {
     errorBoundary: {
       title: 'مشکلی پیش آمد.',
@@ -520,6 +526,13 @@ const fa = {
   app: {
     loading: 'در حال بارگذاری…',
     settingsSaveFailed: 'تنظیمات ذخیره نشدند. دسترسی‌های ذخیره‌سازی را بررسی کرده و دوباره امتحان کنید.',
+    exitFlushFailed: 'Firelink نتوانست همه تغییرات را پیش از خروج ذخیره کند: {{detail}}',
+    exitFlushCancelled: 'خروج از Firelink لغو شد، چون ذخیره شدن همه تغییرات تأیید نشد.',
+    trayActionFailed: 'انجام اقدام منوی سینی ممکن نشد. وضعیت دانلودها را در Firelink بررسی کنید.',
+    trayPersistenceFailed: 'Firelink نتوانست تغییرات این اقدام سینی را ذخیره کند. اقدام در صف می‌ماند؛ فضای ذخیره‌سازی را بررسی کنید و دوباره از منوی سینی اقدام کنید.',
+    trayStartupPauseUnverified: 'Firelink نتوانست اقدام‌های سینی را هنگام راه‌اندازی بررسی کند، بنابراین دانلودهای ذخیره‌شده را ادامه نداد. می‌توانید آن‌ها را دستی ادامه دهید.',
+    trayPausePartial: 'توقف همه نتوانست {{count}} دانلود را متوقف کند. وضعیت آن‌ها را در Firelink بررسی کنید.',
+    trayResumePartial: 'ادامه همه نتوانست {{count}} دانلود را شروع کند. وضعیت آن‌ها را در Firelink بررسی کنید.',
     systemActionCountdown: '{{action}} در ۱۰ ثانیه.',
     systemActionCancelled: 'اقدام سیستم لغو شد زیرا دانلود دیگری فعال یا در صف است.',
     systemActionProceedAnyway: 'ادامه دادن به هر حال',
@@ -820,6 +833,10 @@ const fa = {
     removeUnsafeFew: 'قبل از ادامه، {{count}} URL ناامن را حذف کنید.',
     removeUnsafeMany: 'قبل از ادامه، {{count}} URL ناامن را حذف کنید.',
     mediaMetadataUnavailableSummaryOne: 'متادیتای رسانه برای {{count}} مورد در دسترس نیست. پیش از افزودن، متادیتا را تازه‌سازی کنید.',
+    useDefaultMediaFormat: 'استفاده از قالب پیش‌فرض yt-dlp',
+    defaultMediaFormatFallbackDescription: 'اگر دریافت فراداده ناموفق بود، می‌توانید این رسانه را با قالب پیش‌فرض yt-dlp اضافه کنید. قالب نهایی، نام فایل و اندازه هنگام دانلود مشخص می‌شود.',
+    defaultMediaFormatSelected: 'قالب پیش‌فرض yt-dlp انتخاب شد. نام فایل و اندازه هنگام دانلود مشخص می‌شود.',
+    defaultMediaFormat: 'قالب پیش‌فرض',
     mediaMetadataUnavailableSummaryFew: 'متادیتای رسانه برای {{count}} مورد در دسترس نیست. پیش از افزودن، متادیتا را تازه‌سازی کنید.',
     mediaMetadataUnavailableSummaryMany: 'متادیتای رسانه برای {{count}} مورد در دسترس نیست. پیش از افزودن، متادیتا را تازه‌سازی کنید.',
     metadataUnavailableFallback: 'متادیتا در دسترس نیست. دانلودها همچنان می‌توانند با اطلاعات جایگزین اضافه شوند.',

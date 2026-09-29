@@ -2160,10 +2160,15 @@ describe('useDownloadStore', () => {
       );
     });
 
+    const generationBeforePause = currentDownloadLifecycleGeneration('race-first');
     const pause = useDownloadStore.getState().pauseQueue('race-selected');
     await vi.waitFor(() => {
-      expect(vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) => command === 'cancel_enqueue_generation'))
-        .toHaveLength(2);
+      expect(currentDownloadLifecycleGeneration('race-first'))
+        .toBe((BigInt(generationBeforePause) + 1n).toString());
+      expect(vi.mocked(ipc.invokeCommand)).toHaveBeenCalledWith(
+        'cancel_enqueue_generation',
+        { id: 'race-first', generation: generationBeforePause }
+      );
     });
     releaseEnqueue({ id: 'race-first', filename: 'first' });
 
@@ -3831,6 +3836,67 @@ describe('useDownloadStore', () => {
 
     releaseEnqueue();
     await Promise.all([first, second]);
+  });
+
+  it('fences an in-flight startup batch before pausing its queued download', async () => {
+    const id = 'startup-pause-race';
+    let releaseEnqueue!: (results: Array<{ id: string; success: boolean }>) => void;
+    const enqueue = new Promise<Array<{ id: string; success: boolean }>>(resolve => {
+      releaseEnqueue = resolve;
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'db_get_all_queues') return [];
+      if (cmd === 'list_download_removals') return [];
+      if (cmd === 'db_get_all_downloads') {
+        return [JSON.stringify({
+          id,
+          url: 'https://example.com/startup-pause-race.bin',
+          fileName: 'startup-pause-race.bin',
+          status: 'queued',
+          category: 'Other',
+          dateAdded: '',
+          queueId: MAIN_QUEUE_ID,
+          hasBeenDispatched: true
+        })];
+      }
+      if (cmd === 'enqueue_many') return enqueue;
+      if (cmd === 'get_pending_order') return [];
+      return undefined;
+    });
+
+    await useDownloadStore.getState().initDB();
+    const resume = useDownloadStore.getState().resumePendingDownloads();
+    await vi.waitFor(() => {
+      expect(vi.mocked(ipc.invokeCommand).mock.calls.filter(([cmd]) => cmd === 'enqueue_many'))
+        .toHaveLength(1);
+    });
+
+    const pause = useDownloadStore.getState().pauseQueue(MAIN_QUEUE_ID);
+    await vi.waitFor(() => {
+      expect(currentDownloadLifecycleGeneration(id)).toBe('1');
+      expect(vi.mocked(ipc.invokeCommand)).toHaveBeenCalledWith(
+        'cancel_enqueue_generation',
+        { id, generation: '0' }
+      );
+    });
+    expect(vi.mocked(ipc.invokeCommand)).not.toHaveBeenCalledWith('pause_download', { id });
+
+    releaseEnqueue([{ id, success: true }]);
+    await Promise.all([resume, pause]);
+
+    expect(useDownloadStore.getState().downloads.find(download => download.id === id)?.status)
+      .toBe('paused');
+    expect(useDownloadStore.getState().backendRegisteredIds.has(id)).toBe(false);
+    expect(useDownloadStore.getState().pendingOrder).not.toContain(id);
+    const calls = vi.mocked(ipc.invokeCommand).mock.calls;
+    const enqueueIndex = calls.findIndex(([cmd]) => cmd === 'enqueue_many');
+    const pauseIndex = calls.findIndex(([cmd]) => cmd === 'pause_download');
+    expect(pauseIndex).toBeGreaterThan(enqueueIndex);
+    expect(calls.filter(([cmd, args]) =>
+      cmd === 'cancel_enqueue_generation' &&
+      (args as { id: string; generation: string }).id === id &&
+      (args as { id: string; generation: string }).generation === '0'
+    )).toHaveLength(2);
   });
 
   it('redownloads fallback media without requiring a format selector', async () => {

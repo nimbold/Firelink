@@ -115,6 +115,28 @@ export const runSettingsPersistenceTransaction = <T>(
 
 export const waitForSettingsPersistence = (): Promise<void> => settingsQueue;
 
+export const flushSettingsPersistence = async (): Promise<void> => {
+  while (true) {
+    const latestWrite = latestSettingsPersistenceWrite;
+    const queues = [
+      settingsQueue,
+      globalSpeedLimitOperationQueue,
+      torrentOverallUploadLimitQueue,
+      torrentMaxOpenFilesQueue,
+      startAtLoginOperationQueue
+    ] as const;
+    await Promise.all([latestWrite, ...queues]);
+    if (
+      latestWrite === latestSettingsPersistenceWrite
+      && queues[0] === settingsQueue
+      && queues[1] === globalSpeedLimitOperationQueue
+      && queues[2] === torrentOverallUploadLimitQueue
+      && queues[3] === torrentMaxOpenFilesQueue
+      && queues[4] === startAtLoginOperationQueue
+    ) return;
+  }
+};
+
 const notifySettingsPersistenceError = (): boolean => {
   if (settingsPersistenceFailed) return false;
   settingsPersistenceFailed = true;
@@ -392,6 +414,7 @@ export interface SettingsState {
   setScheduler: (settings: SchedulerSettings) => void;
   setSchedulerRunning: (running: boolean) => void;
   setSchedulerActiveDownloadIds: (ids: string[]) => void;
+  persistSchedulerTracking: (ids: string[]) => Promise<void>;
   setSchedulerLastStartKey: (key: string) => void;
   setSchedulerLastStopKey: (key: string) => void;
   setLastCustomSpeedLimitKiB: (limit: number) => void;
@@ -676,6 +699,19 @@ export const useSettingsStore = create<SettingsState>()(
       setScheduler: (scheduler) => set({ scheduler }),
       setSchedulerRunning: (schedulerRunning) => set({ schedulerRunning }),
       setSchedulerActiveDownloadIds: (schedulerActiveDownloadIds) => set({ schedulerActiveDownloadIds }),
+      persistSchedulerTracking: (ids) => {
+        const schedulerActiveDownloadIds = [...new Set(
+          sanitizeSchedulerActiveDownloadIds(ids, [])
+        )];
+        set({
+          schedulerActiveDownloadIds,
+          schedulerRunning: schedulerActiveDownloadIds.length > 0
+        });
+        // `waitForSettingsPersistence` intentionally observes only the queue's
+        // rejection-swallowing tail. Scheduler ACKs require confirmation from
+        // the actual write triggered by this state update.
+        return latestSettingsPersistenceWrite;
+      },
       setSchedulerLastStartKey: (schedulerLastStartKey) => set({ schedulerLastStartKey }),
       setSchedulerLastStopKey: (schedulerLastStopKey) => set({ schedulerLastStopKey }),
       setLastCustomSpeedLimitKiB: (lastCustomSpeedLimitKiB) => set({

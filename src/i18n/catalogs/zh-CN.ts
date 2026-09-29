@@ -39,6 +39,12 @@ const zhCN = {
     renameQueue: '重命名队列',
     deleteQueue: '删除队列',
   },
+  trayMenu: {
+    show: '显示 Firelink',
+    pauseAll: '全部暂停',
+    resumeAll: '全部恢复',
+    quit: '退出 Firelink',
+  },
   dialogs: {
     errorBoundary: {
       title: '出现了一些问题。',
@@ -520,6 +526,13 @@ const zhCN = {
   app: {
     loading: '加载中…',
     settingsSaveFailed: '无法保存设置。请检查存储权限并重试。',
+    exitFlushFailed: 'Firelink 退出前无法保存所有更改：{{detail}}',
+    exitFlushCancelled: '无法确认所有更改均已保存，因此 Firelink 已取消退出。',
+    trayActionFailed: '无法完成托盘操作。请在 Firelink 中检查下载状态。',
+    trayPersistenceFailed: 'Firelink 无法保存此托盘操作的更改。操作仍在队列中；请检查存储，然后再次使用托盘操作。',
+    trayStartupPauseUnverified: 'Firelink 无法在启动时确认托盘操作，因此没有恢复已保存的下载。你可以手动恢复。',
+    trayPausePartial: '“全部暂停”未能暂停 {{count}} 个下载。请在 Firelink 中检查其状态。',
+    trayResumePartial: '“全部恢复”未能启动 {{count}} 个下载。请在 Firelink 中检查其状态。',
     systemActionCountdown: '10 秒后{{action}}。',
     systemActionCancelled: '系统操作已取消，因为有其他下载正在进行或已排队。',
     systemActionProceedAnyway: '仍然继续',
@@ -820,6 +833,10 @@ const zhCN = {
     removeUnsafeFew: '在继续之前，请移除 {{count}} 个不安全的 URL。',
     removeUnsafeMany: '在继续之前，请移除 {{count}} 个不安全的 URL。',
     mediaMetadataUnavailableSummaryOne: '{{count}} 个项目的媒体元数据不可用。在添加之前请刷新元数据。',
+    useDefaultMediaFormat: '使用 yt-dlp 默认格式',
+    defaultMediaFormatFallbackDescription: '如果无法获取元数据，仍可使用 yt-dlp 默认格式添加此媒体。最终格式、文件名和大小将在下载时确定。',
+    defaultMediaFormatSelected: '已选择 yt-dlp 默认格式。文件名和大小将在下载时确定。',
+    defaultMediaFormat: '默认格式',
     mediaMetadataUnavailableSummaryFew: '{{count}} 个项目的媒体元数据不可用。在添加之前请刷新元数据。',
     mediaMetadataUnavailableSummaryMany: '{{count}} 个项目的媒体元数据不可用。在添加之前请刷新元数据。',
     metadataUnavailableFallback: '元数据不可用。下载仍可以使用后备详细信息添加。',

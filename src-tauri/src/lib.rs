@@ -3816,25 +3816,328 @@ use std::sync::{Arc, Mutex, RwLock};
 
 struct FrontendExitFlush {
     next_request: AtomicU64,
-    completed: tokio::sync::watch::Sender<u64>,
+    completed: tokio::sync::watch::Sender<FrontendExitStatus>,
+    status: Mutex<FrontendExitStatus>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FrontendExitStatus {
+    request: u64,
+    succeeded: Option<bool>,
+    finalized: Option<bool>,
 }
 
 impl FrontendExitFlush {
     fn new() -> Self {
-        let (completed, _) = tokio::sync::watch::channel(0);
+        let (completed, _) = tokio::sync::watch::channel(FrontendExitStatus {
+            request: 0,
+            succeeded: None,
+            finalized: None,
+        });
         Self {
             next_request: AtomicU64::new(0),
             completed,
+            status: Mutex::new(FrontendExitStatus {
+                request: 0,
+                succeeded: None,
+                finalized: None,
+            }),
         }
     }
 
     fn request(&self) -> u64 {
-        self.next_request.fetch_add(1, Ordering::AcqRel) + 1
+        let mut current = self
+            .status
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let request = self.next_request.fetch_add(1, Ordering::AcqRel) + 1;
+        let next = FrontendExitStatus {
+            request,
+            succeeded: None,
+            finalized: None,
+        };
+        *current = next;
+        self.completed.send_replace(next);
+        request
     }
 
-    fn acknowledge(&self) {
-        let request = self.next_request.load(Ordering::Acquire);
-        let _ = self.completed.send(request);
+    fn finish(&self, request: u64, succeeded: bool) -> bool {
+        let mut current = self
+            .status
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if current.request != request || current.succeeded.is_some() {
+            return false;
+        }
+        let next = FrontendExitStatus {
+            request,
+            succeeded: Some(succeeded),
+            finalized: None,
+        };
+        *current = next;
+        self.completed.send_replace(next);
+        true
+    }
+
+    fn finalize(&self, request: u64, succeeded: bool) -> bool {
+        let mut current = self
+            .status
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if current.request != request
+            || current.succeeded != Some(true)
+            || current.finalized.is_some()
+        {
+            return false;
+        }
+        let next = FrontendExitStatus {
+            request,
+            succeeded: current.succeeded,
+            finalized: Some(succeeded),
+        };
+        *current = next;
+        self.completed.send_replace(next);
+        true
+    }
+
+    fn current(&self) -> FrontendExitStatus {
+        *self
+            .status
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingTrayAction {
+    id: String,
+    action: String,
+}
+
+struct PendingTrayActionQueue {
+    pending: Mutex<VecDeque<PendingTrayAction>>,
+    accepting: AtomicBool,
+}
+
+impl Default for PendingTrayActionQueue {
+    fn default() -> Self {
+        Self {
+            pending: Mutex::new(VecDeque::new()),
+            accepting: AtomicBool::new(true),
+        }
+    }
+}
+
+impl PendingTrayActionQueue {
+    fn enqueue(&self, action: &'static str) -> Option<PendingTrayAction> {
+        if !self.accepting.load(Ordering::Acquire) {
+            return None;
+        }
+        let delivery = PendingTrayAction {
+            id: uuid::Uuid::new_v4().to_string(),
+            action: action.to_string(),
+        };
+        let mut pending = self.pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !self.accepting.load(Ordering::Acquire) {
+            return None;
+        }
+        pending.push_back(delivery.clone());
+        Some(delivery)
+    }
+
+    fn peek(&self) -> Option<PendingTrayAction> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .front()
+            .cloned()
+    }
+
+    fn acknowledge(&self, id: &str) -> Option<PendingTrayAction> {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if pending.front().is_some_and(|action| action.id == id) {
+            pending.pop_front()
+        } else {
+            None
+        }
+    }
+
+    fn close_for_exit(&self) -> bool {
+        self.accepting.store(false, Ordering::Release);
+        !self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
+    }
+
+    fn reopen_after_exit_rejected(&self) -> bool {
+        self.accepting.store(true, Ordering::Release);
+        !self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
+    }
+}
+
+#[derive(Clone)]
+struct TrayMenuLabels {
+    show: String,
+    pause_all: String,
+    resume_all: String,
+    quit: String,
+}
+
+impl Default for TrayMenuLabels {
+    fn default() -> Self {
+        Self {
+            show: "Show Firelink".to_string(),
+            pause_all: "Pause All".to_string(),
+            resume_all: "Resume All".to_string(),
+            quit: "Quit Firelink".to_string(),
+        }
+    }
+}
+
+struct TrayMenuLabelState(Mutex<TrayMenuLabels>);
+
+impl Default for TrayMenuLabelState {
+    fn default() -> Self {
+        Self(Mutex::new(TrayMenuLabels::default()))
+    }
+}
+
+impl TrayMenuLabelState {
+    fn current(&self) -> TrayMenuLabels {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn replace(&self, labels: TrayMenuLabels) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = labels;
+    }
+}
+
+fn enqueue_tray_action(app: &tauri::AppHandle, action: &'static str) {
+    let Some(queue) = app.try_state::<PendingTrayActionQueue>() else {
+        log::error!("tray action could not be retained because its queue is unavailable");
+        return;
+    };
+    if queue.enqueue(action).is_none() {
+        log::warn!("tray action was ignored because application shutdown has started");
+        return;
+    }
+    if let Err(error) = app.emit("tray-action-available", ()) {
+        log::warn!("tray action is queued but its availability signal failed: {error}");
+    }
+}
+
+#[tauri::command]
+fn take_pending_tray_action(
+    caller: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+) -> Result<Option<PendingTrayAction>, String> {
+    properties_window::ensure_main_window(&caller)?;
+    Ok(app_handle.state::<PendingTrayActionQueue>().peek())
+}
+
+#[tauri::command]
+fn acknowledge_tray_action(
+    caller: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+    id: String,
+    failed_count: u32,
+    operation_failed: bool,
+    persistence_failed: bool,
+) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
+    let Some(action) = app_handle.state::<PendingTrayActionQueue>().acknowledge(&id) else {
+        return Err("tray action is no longer the pending action".to_string());
+    };
+    emit_tray_action_result(
+        &app_handle,
+        &action,
+        failed_count,
+        operation_failed,
+        persistence_failed,
+    );
+    Ok(())
+}
+
+fn emit_tray_action_result(
+    app_handle: &tauri::AppHandle,
+    action: &PendingTrayAction,
+    failed_count: u32,
+    operation_failed: bool,
+    persistence_failed: bool,
+) {
+    if failed_count == 0 && !operation_failed && !persistence_failed {
+        return;
+    }
+    if let Err(error) = app_handle.emit(
+        "tray-action-result",
+        serde_json::json!({
+            "action": &action.action,
+            "failedCount": failed_count,
+            "operationFailed": operation_failed,
+            "persistenceFailed": persistence_failed
+        }),
+    ) {
+        log::warn!("tray action result signal failed: {error}");
+    }
+}
+
+#[cfg(test)]
+mod pending_tray_action_tests {
+    use super::{validate_tray_menu_label, PendingTrayActionQueue};
+
+    #[test]
+    fn queued_actions_remain_ordered_until_the_front_action_is_acknowledged() {
+        let queue = PendingTrayActionQueue::default();
+        let pause = queue.enqueue("pause-all").unwrap();
+        let resume = queue.enqueue("resume-all").unwrap();
+
+        assert_eq!(queue.peek(), Some(pause.clone()));
+        assert_eq!(queue.acknowledge("a-different-action"), None);
+        assert_eq!(queue.peek(), Some(pause.clone()));
+        assert_eq!(queue.acknowledge(&pause.id), Some(pause));
+        assert_eq!(queue.peek(), Some(resume.clone()));
+        assert_eq!(queue.acknowledge(&resume.id), Some(resume));
+        assert_eq!(queue.peek(), None);
+    }
+
+    #[test]
+    fn exit_barrier_keeps_pending_actions_queued_and_rejects_new_actions() {
+        let queue = PendingTrayActionQueue::default();
+        let pause = queue.enqueue("pause-all").unwrap();
+
+        assert!(queue.close_for_exit());
+        assert_eq!(queue.enqueue("resume-all"), None);
+        assert_eq!(queue.peek(), Some(pause.clone()));
+
+        assert!(queue.reopen_after_exit_rejected());
+        assert_eq!(queue.enqueue("resume-all").unwrap().action, "resume-all");
+        assert_eq!(queue.peek(), Some(pause));
+    }
+
+    #[test]
+    fn tray_menu_labels_are_bounded_and_printable() {
+        assert!(validate_tray_menu_label("Pause All").is_ok());
+        assert!(validate_tray_menu_label("  ").is_err());
+        assert!(validate_tray_menu_label("line\nbreak").is_err());
+        assert!(validate_tray_menu_label(&"x".repeat(97)).is_err());
     }
 }
 
@@ -3885,16 +4188,24 @@ impl Aria2DaemonGuard {
             .is_ok()
     }
 
+    fn cancel_shutdown(&self) -> bool {
+        self.shutdown_state
+            .compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
     fn allow_exit(&self) {
         self.shutdown_state.store(2, Ordering::SeqCst);
     }
 }
 
 async fn shutdown_aria2_daemon(app_handle: tauri::AppHandle) {
+    let shutdown_started = Instant::now();
     let guard = app_handle.state::<Aria2DaemonGuard>();
     if let Some(state) = app_handle.try_state::<AppState>() {
         let port = state.aria2_port.load(Ordering::Relaxed);
         if port != 0 {
+            let rpc_started = Instant::now();
             let shutdown = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 rpc_call(port, &state.aria2_secret, "aria2.shutdown", serde_json::json!([])),
@@ -3905,32 +4216,50 @@ async fn shutdown_aria2_daemon(app_handle: tauri::AppHandle) {
                 Ok(Err(error)) => log::warn!("aria2 graceful shutdown failed: {error}"),
                 Err(_) => log::warn!("aria2 graceful shutdown timed out"),
             }
+            log::info!(
+                "app_shutdown_phase=aria2_rpc elapsed_ms={}",
+                rpc_started.elapsed().as_millis()
+            );
         }
     }
 
     let child = guard.child.lock().ok().and_then(|mut child| child.take());
     if let Some(mut child) = child {
-        let _ = tokio::task::spawn_blocking(move || {
+        let child_wait = tokio::task::spawn_blocking(move || {
             // Aria2 1.37.0 intentionally schedules an RPC-requested shutdown
             // three seconds after replying. Leave a bounded margin for that
             // timer and the subsequent state flush before forcing termination.
+            let child_wait_started = Instant::now();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-            loop {
+            let outcome = loop {
                 match child.try_wait() {
-                    Ok(Some(_)) => return,
+                    Ok(Some(_)) => break "exited",
                     Ok(None) if std::time::Instant::now() < deadline => {
                         std::thread::sleep(std::time::Duration::from_millis(50));
                     }
                     _ => {
                         let _ = child.kill();
                         let _ = child.wait();
-                        return;
+                        break "forced";
                     }
                 }
-            }
+            };
+            (outcome, child_wait_started.elapsed())
         })
         .await;
+        match child_wait {
+            Ok((outcome, elapsed)) => log::info!(
+                "app_shutdown_phase=aria2_child outcome={} elapsed_ms={}",
+                outcome,
+                elapsed.as_millis()
+            ),
+            Err(error) => log::warn!("aria2 child wait task failed: {error}"),
+        }
     }
+    log::info!(
+        "app_shutdown_phase=aria2_total elapsed_ms={}",
+        shutdown_started.elapsed().as_millis()
+    );
 }
 
 impl Drop for Aria2DaemonGuard {
@@ -15105,6 +15434,44 @@ fn toggle_tray_icon(
     }
 }
 
+fn validate_tray_menu_label(label: &str) -> Result<(), String> {
+    let length = label.chars().count();
+    if label.trim().is_empty() || length > 96 || label.chars().any(char::is_control) {
+        return Err("tray menu labels must contain 1 to 96 printable characters".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_tray_menu_labels(
+    caller: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+    show: String,
+    pause_all: String,
+    resume_all: String,
+    quit: String,
+) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
+    for label in [&show, &pause_all, &resume_all, &quit] {
+        validate_tray_menu_label(label)?;
+    }
+    let labels = TrayMenuLabels {
+        show,
+        pause_all,
+        resume_all,
+        quit,
+    };
+
+    if let Some(tray) = app_handle.tray_by_id("main") {
+        let menu = build_tray_menu(&app_handle, &labels)?;
+        tray.set_menu(Some(menu)).map_err(|error| error.to_string())?;
+    }
+    app_handle
+        .state::<TrayMenuLabelState>()
+        .replace(labels);
+    Ok(())
+}
+
 #[tauri::command]
 fn get_start_at_login(
     caller: tauri::WebviewWindow,
@@ -15155,25 +15522,48 @@ fn open_login_items_settings(caller: tauri::WebviewWindow) -> Result<(), String>
     login_start::open_login_items_settings()
 }
 
-fn build_main_tray(app_handle: &tauri::AppHandle) -> Result<(), String> {
+fn build_tray_menu(
+    app_handle: &tauri::AppHandle,
+    labels: &TrayMenuLabels,
+) -> Result<tauri::menu::Menu<tauri::Wry>, String> {
     use tauri::menu::{Menu, MenuItem};
+
+    let show_i = MenuItem::with_id(app_handle, "show", &labels.show, true, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    let pause_all_i = MenuItem::with_id(
+        app_handle,
+        "pause_all",
+        &labels.pause_all,
+        true,
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
+    let resume_all_i = MenuItem::with_id(
+        app_handle,
+        "resume_all",
+        &labels.resume_all,
+        true,
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
+    let quit_i = MenuItem::with_id(app_handle, "quit", &labels.quit, true, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    Menu::with_items(app_handle, &[&show_i, &pause_all_i, &resume_all_i, &quit_i])
+        .map_err(|e| e.to_string())
+}
+
+fn build_main_tray(app_handle: &tauri::AppHandle) -> Result<(), String> {
     use tauri::tray::TrayIconBuilder;
 
     if app_handle.tray_by_id("main").is_some() {
         return Ok(());
     }
 
-    let show_i = MenuItem::with_id(app_handle, "show", "Show Firelink", true, None::<&str>)
-        .map_err(|e| e.to_string())?;
-    let pause_all_i = MenuItem::with_id(app_handle, "pause_all", "Pause All", true, None::<&str>)
-        .map_err(|e| e.to_string())?;
-    let resume_all_i =
-        MenuItem::with_id(app_handle, "resume_all", "Resume All", true, None::<&str>)
-            .map_err(|e| e.to_string())?;
-    let quit_i = MenuItem::with_id(app_handle, "quit", "Quit", true, None::<&str>)
-        .map_err(|e| e.to_string())?;
-    let menu = Menu::with_items(app_handle, &[&show_i, &pause_all_i, &resume_all_i, &quit_i])
-        .map_err(|e| e.to_string())?;
+    let labels = app_handle
+        .try_state::<TrayMenuLabelState>()
+        .map(|state| state.current())
+        .unwrap_or_default();
+    let menu = build_tray_menu(app_handle, &labels)?;
 
     #[cfg(target_os = "macos")]
     let tray_icon_bytes = include_bytes!("../icons/trayTemplate.png").as_slice();
@@ -15188,12 +15578,10 @@ fn build_main_tray(app_handle: &tauri::AppHandle) -> Result<(), String> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => restore_main_window(app),
             "pause_all" => {
-                use tauri::Emitter;
-                let _ = app.emit("tray-action", "pause-all");
+                enqueue_tray_action(app, "pause-all");
             }
             "resume_all" => {
-                use tauri::Emitter;
-                let _ = app.emit("tray-action", "resume-all");
+                enqueue_tray_action(app, "resume-all");
             }
             "quit" => app.exit(0),
             _ => {}
@@ -15277,9 +15665,48 @@ fn set_extension_frontend_ready(
 fn ack_frontend_exit(
     caller: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
+    request_id: String,
 ) -> Result<(), String> {
     properties_window::ensure_main_window(&caller)?;
-    state.frontend_exit_flush.acknowledge();
+    let request = request_id
+        .parse::<u64>()
+        .map_err(|_| "Invalid frontend exit request id".to_string())?;
+    if !state.frontend_exit_flush.finish(request, true) {
+        return Err("Frontend exit request is stale or already completed".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn reject_frontend_exit(
+    caller: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
+    let request = request_id
+        .parse::<u64>()
+        .map_err(|_| "Invalid frontend exit request id".to_string())?;
+    if !state.frontend_exit_flush.finish(request, false) {
+        return Err("Frontend exit request is stale or already completed".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn ack_frontend_exit_finalization(
+    caller: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+    succeeded: bool,
+) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
+    let request = request_id
+        .parse::<u64>()
+        .map_err(|_| "Invalid frontend exit request id".to_string())?;
+    if !state.frontend_exit_flush.finalize(request, succeeded) {
+        return Err("Frontend exit finalization request is stale or already completed".to_string());
+    }
     Ok(())
 }
 
@@ -16412,6 +16839,10 @@ mod tests {
         assert!(!guard.begin_shutdown());
         assert!(!guard.exit_allowed());
 
+        assert!(guard.cancel_shutdown());
+        assert!(!guard.exit_allowed());
+        assert!(guard.begin_shutdown());
+
         guard.allow_exit();
         assert!(guard.exit_allowed());
         assert!(!guard.begin_shutdown());
@@ -16422,11 +16853,54 @@ mod tests {
         let flush = FrontendExitFlush::new();
         let completed = flush.completed.subscribe();
         let request = flush.request();
-        assert_eq!(*completed.borrow(), 0);
+        assert_eq!(completed.borrow().request, request);
+        assert_eq!(completed.borrow().succeeded, None);
+        assert!(flush.finish(request, true));
+        assert_eq!(completed.borrow().succeeded, Some(true));
+        assert!(!flush.finish(request, false));
+        assert_eq!(completed.borrow().finalized, None);
+        assert!(flush.finalize(request, true));
+        assert_eq!(completed.borrow().finalized, Some(true));
+        assert!(!flush.finalize(request, false));
+    }
 
-        flush.acknowledge();
+    #[test]
+    fn frontend_exit_ack_and_timeout_are_linearized() {
+        let flush = std::sync::Arc::new(FrontendExitFlush::new());
+        let request = flush.request();
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(3));
 
-        assert_eq!(*completed.borrow(), request);
+        let ack_flush = flush.clone();
+        let ack_gate = gate.clone();
+        let ack = std::thread::spawn(move || {
+            ack_gate.wait();
+            ack_flush.finish(request, true)
+        });
+        let timeout_flush = flush.clone();
+        let timeout_gate = gate.clone();
+        let timeout = std::thread::spawn(move || {
+            timeout_gate.wait();
+            timeout_flush.finish(request, false)
+        });
+
+        gate.wait();
+        let ack_won = ack.join().unwrap();
+        let timeout_won = timeout.join().unwrap();
+        assert_ne!(ack_won, timeout_won);
+        assert_eq!(flush.current().succeeded, Some(ack_won));
+    }
+
+    #[test]
+    fn stale_frontend_exit_acknowledgements_cannot_complete_a_new_request() {
+        let flush = FrontendExitFlush::new();
+        let first = flush.request();
+        let second = flush.request();
+
+        assert!(!flush.finish(first, true));
+        assert_eq!(flush.completed.borrow().request, second);
+        assert_eq!(flush.completed.borrow().succeeded, None);
+        assert!(flush.finish(second, false));
+        assert_eq!(flush.completed.borrow().succeeded, Some(false));
     }
 
     #[test]
@@ -20605,6 +21079,8 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .manage(MainWindowRestoreState::default())
         .manage(properties_window::PropertiesWindowRegistry::default())
+        .manage(PendingTrayActionQueue::default())
+        .manage(TrayMenuLabelState::default())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             let is_autostart = crate::login_start::has_autostart_argument(args.iter());
             let paths = collect_opened_torrent_paths(args);
@@ -20647,8 +21123,13 @@ pub fn run() {
                     main_window_builder.data_directory(storage_layout.webview_dir().to_path_buf());
             }
 
-            let mut sys = sysinfo::System::new_all();
-            sys.refresh_all();
+            let system_info_started = Instant::now();
+            let mut sys = sysinfo::System::new_with_specifics(
+                sysinfo::RefreshKind::nothing().with_memory(
+                    sysinfo::MemoryRefreshKind::nothing().with_ram(),
+                ),
+            );
+            sys.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
             log::info!("=== System Information ===");
             log::info!("OS: {} {}", sysinfo::System::name().unwrap_or_else(|| "Unknown".to_string()), sysinfo::System::os_version().unwrap_or_else(|| "Unknown".to_string()));
             let arch = sysinfo::System::cpu_arch();
@@ -20657,6 +21138,10 @@ pub fn run() {
             log::info!("Memory: {} MB total", sys.total_memory() / 1024 / 1024);
             log::info!("App Version: {}", env!("CARGO_PKG_VERSION"));
             log::info!("==========================");
+            log::debug!(
+                "app_startup_phase=system_information elapsed_ms={}",
+                system_info_started.elapsed().as_millis()
+            );
             let tray_available = match build_main_tray(app.handle()) {
                 Ok(()) => true,
                 Err(error) if started_at_login => {
@@ -22382,10 +22867,15 @@ pub fn run() {
     let extension_handler: FirelinkInvokeHandler = Box::new(tauri::generate_handler![
         inspect_download_target,
         toggle_tray_icon,
+        take_pending_tray_action,
+        acknowledge_tray_action,
+        set_tray_menu_labels,
         set_extension_pairing_token,
         get_extension_server_port,
         set_extension_frontend_ready,
         ack_frontend_exit,
+        reject_frontend_exit,
+        ack_frontend_exit_finalization,
         ack_extension_download,
         ack_extension_media_discovery,
         fail_extension_media_discovery,
@@ -22531,10 +23021,15 @@ pub fn run() {
                 | "acknowledge_pairing_token_change" => pairing_handler(invoke),
                 "inspect_download_target"
                 | "toggle_tray_icon"
+                | "take_pending_tray_action"
+                | "acknowledge_tray_action"
+                | "set_tray_menu_labels"
                 | "set_extension_pairing_token"
                 | "get_extension_server_port"
                 | "set_extension_frontend_ready"
                 | "ack_frontend_exit"
+                | "reject_frontend_exit"
+                | "ack_frontend_exit_finalization"
                 | "ack_extension_download"
                 | "ack_extension_media_discovery"
                 | "fail_extension_media_discovery" => extension_handler(invoke),
@@ -22649,6 +23144,8 @@ pub fn run() {
                     if guard.begin_shutdown() {
                         let app = app_handle.clone();
                         tauri::async_runtime::spawn(async move {
+                            let exit_started = Instant::now();
+                            app.state::<PendingTrayActionQueue>().close_for_exit();
                             let frontend_exit_flush = app.state::<AppState>().frontend_exit_flush.clone();
                             let extension_server_shutdown = app
                                 .state::<AppState>()
@@ -22656,26 +23153,146 @@ pub fn run() {
                                 .clone();
                             let request = frontend_exit_flush.request();
                             let mut completed = frontend_exit_flush.completed.subscribe();
-                            let _ = app.emit_to("main", "app-exit-requested", ());
+                            let _ = app.emit_to("main", "app-exit-requested", serde_json::json!({
+                                "requestId": request.to_string()
+                            }));
                             let flush_wait = async move {
                                 loop {
-                                    if *completed.borrow() >= request {
-                                        break;
+                                    let status = *completed.borrow_and_update();
+                                    if status.request == request {
+                                        if let Some(succeeded) = status.succeeded {
+                                            break succeeded;
+                                        }
                                     }
                                     if completed.changed().await.is_err() {
-                                        break;
+                                        break false;
                                     }
                                 }
                             };
-                            if tokio::time::timeout(Duration::from_secs(2), flush_wait)
-                                .await
-                                .is_err()
-                            {
-                                log::warn!("frontend persistence flush timed out during exit");
+                            let flush_started = Instant::now();
+                            // Frontend shutdown now waits for accepted lifecycle
+                            // operations and durable writes. Do not cancel a
+                            // normal exit after the old two-second window.
+                            let flush_timeout = Duration::from_secs(60);
+                            let flush_result = tokio::time::timeout(flush_timeout, flush_wait).await;
+                            let timed_out = flush_result.is_err();
+                            let mut flush_succeeded = matches!(&flush_result, Ok(true));
+                            if timed_out && !flush_succeeded {
+                                // Linearize timeout against a just-arriving
+                                // frontend ACK. If the ACK won the status lock,
+                                // preserve the accepted shutdown instead of
+                                // restoring a live window with its persistence
+                                // already sealed.
+                                let timeout_won = frontend_exit_flush.finish(request, false);
+                                if !timeout_won {
+                                    let current = frontend_exit_flush.current();
+                                    flush_succeeded = current.request == request
+                                        && current.succeeded == Some(true);
+                                }
+                            }
+                            if flush_succeeded {
+                                log::info!(
+                                    "app_shutdown_phase=frontend_flush outcome=complete elapsed_ms={}",
+                                    flush_started.elapsed().as_millis()
+                                );
+                            } else if timed_out {
+                                log::warn!(
+                                    "app_shutdown_phase=frontend_flush outcome=timeout elapsed_ms={}",
+                                    flush_started.elapsed().as_millis()
+                                );
+                            } else {
+                                log::warn!(
+                                    "app_shutdown_phase=frontend_flush outcome=rejected elapsed_ms={}",
+                                    flush_started.elapsed().as_millis()
+                                );
+                            }
+                            if !flush_succeeded {
+                                let cancel_reason = if timed_out {
+                                    "timeout"
+                                } else {
+                                    "rejected"
+                                };
+                                app.state::<Aria2DaemonGuard>().cancel_shutdown();
+                                let tray_action_pending = app
+                                    .state::<PendingTrayActionQueue>()
+                                    .reopen_after_exit_rejected();
+                                if tray_action_pending {
+                                    if let Err(error) = app.emit("tray-action-available", ()) {
+                                        log::warn!(
+                                            "pending tray action wakeup failed after exit rejection: {error}"
+                                        );
+                                    }
+                                }
+                                let _ = app.emit_to(
+                                    "main",
+                                    "app-exit-cancelled",
+                                    serde_json::json!({
+                                        "requestId": request.to_string(),
+                                        "reason": cancel_reason
+                                    }),
+                                );
+                                restore_main_window(&app);
+                                log::info!(
+                                    "app_shutdown_phase=total outcome=cancelled elapsed_ms={}",
+                                    exit_started.elapsed().as_millis()
+                                );
+                                return;
                             }
                             let _ = extension_server_shutdown.send(true);
                             shutdown_aria2_daemon(app.clone()).await;
+
+                            let final_flush_started = Instant::now();
+                            let mut final_completed = frontend_exit_flush.completed.subscribe();
+                            let final_flush_emitted = app.emit_to(
+                                "main",
+                                "app-exit-final-flush-requested",
+                                serde_json::json!({
+                                    "requestId": request.to_string()
+                                }),
+                            );
+                            if let Err(error) = final_flush_emitted {
+                                log::warn!("app_shutdown_phase=final_flush signal failed: {error}");
+                            } else {
+                                let final_flush_wait = async move {
+                                    loop {
+                                        let status = *final_completed.borrow_and_update();
+                                        if status.request == request
+                                            && status.succeeded == Some(true)
+                                        {
+                                            if let Some(succeeded) = status.finalized {
+                                                break succeeded;
+                                            }
+                                        }
+                                        if final_completed.changed().await.is_err() {
+                                            break false;
+                                        }
+                                    }
+                                };
+                                match tokio::time::timeout(
+                                    Duration::from_secs(60),
+                                    final_flush_wait,
+                                )
+                                .await
+                                {
+                                    Ok(true) => log::info!(
+                                        "app_shutdown_phase=final_flush outcome=complete elapsed_ms={}",
+                                        final_flush_started.elapsed().as_millis()
+                                    ),
+                                    Ok(false) => log::warn!(
+                                        "app_shutdown_phase=final_flush outcome=failed elapsed_ms={}",
+                                        final_flush_started.elapsed().as_millis()
+                                    ),
+                                    Err(_) => log::warn!(
+                                        "app_shutdown_phase=final_flush outcome=timeout elapsed_ms={}",
+                                        final_flush_started.elapsed().as_millis()
+                                    ),
+                                }
+                            }
                             app.state::<Aria2DaemonGuard>().allow_exit();
+                            log::info!(
+                                "app_shutdown_phase=total elapsed_ms={}",
+                                exit_started.elapsed().as_millis()
+                            );
                             app.exit(code.unwrap_or(0));
                         });
                     }

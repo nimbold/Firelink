@@ -6,6 +6,7 @@ import {
   type AddDownloadAction,
   type PendingAddRequestContext
 } from '../store/useDownloadStore';
+import { beginDownloadWork } from '../store/downloadWorkBarrier';
 import { useSettingsStore } from '../store/useSettingsStore';
 import type { DownloadItem } from '../bindings/DownloadItem';
 import type { MediaPlaylistMetadata } from '../bindings/MediaPlaylistMetadata';
@@ -53,6 +54,9 @@ import {
   isAddDownloadMetadataError,
   isMetadataRefreshableRow,
   selectExactMediaSelection,
+  canUseYtDlpDefaultMediaFormat,
+  isYtDlpDefaultMediaFormatSelected,
+  selectYtDlpDefaultMediaFormat,
   classifyMediaMetadataError,
   updateRowIfCurrent,
   type AddDownloadDraftRow,
@@ -921,7 +925,8 @@ export const AddDownloadsModal = () => {
                   status: 'ready',
                   formats: mappedFormats,
                   selectedFormat: selectedFormatIndex,
-                  playlistError: undefined
+                  playlistError: undefined,
+                  mediaFormatFallback: undefined
                 })
               ));
             } else {
@@ -982,11 +987,7 @@ export const AddDownloadsModal = () => {
         } catch (e) {
           console.error("Meta fetch failed", e);
           const errorMessage = e instanceof Error ? e.message : String(e);
-          const metadataBlockedReason = [
-            'SSRF blocked: Invalid URL',
-            'SSRF blocked: No host',
-            'SSRF blocked: Private/local IP not allowed'
-          ].some(prefix => errorMessage.startsWith(prefix))
+          const metadataBlockedReason = errorMessage.trim().toLowerCase().startsWith('ssrf blocked:')
             ? 'unsafe-url' as const
             : row.isMedia ? classifyMediaMetadataError(errorMessage) : undefined;
           shouldWakeMetadataScheduler = false;
@@ -1286,6 +1287,16 @@ export const AddDownloadsModal = () => {
       });
       return;
     }
+    const releaseDownloadWork = beginDownloadWork();
+    if (!releaseDownloadWork) return;
+    try {
+      await runValidatedAddAction(action);
+    } finally {
+      releaseDownloadWork();
+    }
+  };
+
+  async function runValidatedAddAction(action: AddDownloadAction): Promise<void> {
     isSubmittingRef.current = true;
     setIsSubmitting(true);
     setPendingAddModalBusy(true);
@@ -1567,7 +1578,7 @@ export const AddDownloadsModal = () => {
       isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
-  };
+  }
 
   const executeAddDownloads = async (
     action: AddDownloadAction,
@@ -2222,13 +2233,17 @@ export const AddDownloadsModal = () => {
   const canSubmit = canSubmitMetadataRows(parsedItems);
   const metadataRefreshableCount = selectedItems.filter(isMetadataRefreshableRow).length;
   const failedMediaMetadataCount = selectedItems.filter(
-    item => item.status === 'metadata-error' && item.isMedia
+    item => item.status === 'metadata-error'
+      && item.isMedia
+      && !isYtDlpDefaultMediaFormatSelected(item)
   ).length;
   const blockedMetadataCount = selectedItems.filter(
     item => item.metadataBlockedReason === 'unsafe-url'
   ).length;
   const fallbackMetadataCount = selectedItems.filter(item =>
-    (item.status === 'fallback' || (item.status === 'metadata-error' && !item.isMedia))
+    (item.status === 'fallback'
+      || (item.status === 'metadata-error' && !item.isMedia)
+      || isYtDlpDefaultMediaFormatSelected(item))
     && item.metadataBlockedReason !== 'unsafe-url'
   ).length;
   const readyMetadataCount = selectedItems.filter(item => item.status === 'ready').length;
@@ -2324,6 +2339,8 @@ export const AddDownloadsModal = () => {
           conflicts={conflicts} 
           onConfirm={(resolutions) => {
             if (isSubmittingRef.current) return;
+            const releaseDownloadWork = beginDownloadWork();
+            if (!releaseDownloadWork) return;
             isSubmittingRef.current = true;
             setShowingDuplicates(false);
             setIsSubmitting(true);
@@ -2342,6 +2359,7 @@ export const AddDownloadsModal = () => {
                 });
               })
               .finally(() => {
+                releaseDownloadWork();
                 flushQueuedExtensionHandoffs();
                 isSubmittingRef.current = false;
                 setIsSubmitting(false);
@@ -2528,13 +2546,15 @@ export const AddDownloadsModal = () => {
                               ) : null}
                             </div>
                             <div className={`flex-1 font-mono ${isAddDownloadMetadataLoading(item) ? 'text-text-muted/50' : 'text-text-muted'}`}>{item.size || t($ => $.addDownloads.unknown)}</div>
-                            <div className={`flex-[1.5] font-medium ${isAddDownloadMetadataError(item) || item.status === 'invalid' ? 'text-red-500' : isAddDownloadMetadataLoading(item) ? 'text-orange-400' : 'text-blue-500'}`}>
+                            <div className={`flex-[1.5] font-medium ${((isAddDownloadMetadataError(item) && !isYtDlpDefaultMediaFormatSelected(item)) || item.status === 'invalid') ? 'text-red-500' : isAddDownloadMetadataLoading(item) ? 'text-orange-400' : 'text-blue-500'}`}>
                               {isAddDownloadMetadataLoading(item) ? (
                                 <div className="flex items-center gap-1.5">
                                   <RefreshCw size={12} className="animate-spin" /> {item.isPlaylist ? t($ => $.addDownloads.fetchingPlaylist) : t($ => $.addDownloads.fetching)}
                                 </div>
                               ) : (
-                                item.status === 'fallback'
+                                isYtDlpDefaultMediaFormatSelected(item)
+                                  ? t($ => $.addDownloads.defaultMediaFormat)
+                                  : item.status === 'fallback'
                                   ? t($ => $.addDownloads.fallback)
                                   : isAddDownloadMetadataError(item)
                                   ? item.status === 'metadata-error'
@@ -2629,6 +2649,38 @@ export const AddDownloadsModal = () => {
                     <p id="add-download-media-mode-note" className="mt-2 text-[10px] text-text-muted">
                       {t($ => $.addDownloads.mediaModeUnavailable)}
                     </p>
+                  )}
+                  {selectedItemIndex !== null
+                    && parsedItems[selectedItemIndex]?.isMedia
+                    && isAddDownloadMetadataError(parsedItems[selectedItemIndex])
+                    && (canUseYtDlpDefaultMediaFormat(parsedItems[selectedItemIndex])
+                      || isYtDlpDefaultMediaFormatSelected(parsedItems[selectedItemIndex])) && (
+                    <div className="mt-3 rounded-md border border-blue-500/30 bg-blue-500/5 p-2.5 text-[11px] text-text-secondary">
+                      {isYtDlpDefaultMediaFormatSelected(parsedItems[selectedItemIndex]) ? (
+                        <p role="status">{t($ => $.addDownloads.defaultMediaFormatSelected)}</p>
+                      ) : (
+                        <>
+                          <p className="mb-2">{t($ => $.addDownloads.defaultMediaFormatFallbackDescription)}</p>
+                          <button
+                            type="button"
+                            disabled={isSubmitting}
+                            onClick={() => {
+                              const selectedRow = parsedItems[selectedItemIndex];
+                              setParsedItems(current => updateRowIfCurrent(
+                                current,
+                                selectedRow.id,
+                                selectedRow.sourceUrl,
+                                selectedRow.generation,
+                                selectYtDlpDefaultMediaFormat
+                              ));
+                            }}
+                            className="add-download-button add-download-button-secondary px-2.5 py-1 text-[11px] font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {t($ => $.addDownloads.useDefaultMediaFormat)}
+                          </button>
+                        </>
+                      )}
+                    </div>
                   )}
                 </section>
               )}

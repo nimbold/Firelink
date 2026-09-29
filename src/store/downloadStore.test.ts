@@ -1,8 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { initDownloadListener, useDownloadProgressStore } from './downloadStore';
+import {
+  drainPendingTrayActionsAfterHydration,
+  initDownloadListener,
+  resetTrayActionDrainStateForTests,
+  useDownloadProgressStore
+} from './downloadStore';
 import {
   clearDownloadControlIntents,
   initializeDownloadPersistence,
+  resetDownloadStoreModuleStateForTests,
   downloadControlIntentFor,
   setDownloadControlIntent,
   useDownloadStore
@@ -17,6 +23,7 @@ vi.mock('../ipc', () => ({
 describe('useDownloadProgressStore', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetTrayActionDrainStateForTests();
     vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined);
     useDownloadProgressStore.setState({ progressMap: {}, retainedProgressMap: {}, moveProgressMap: {} });
     clearDownloadControlIntents();
@@ -53,6 +60,341 @@ describe('useDownloadProgressStore', () => {
 
     releaseSecond();
     expect(unlisten).toHaveBeenCalledTimes(5);
+  });
+
+  it('acknowledges a failed tray action attempt and reports the unfinished target', async () => {
+    vi.mocked(ipc.listenEvent).mockImplementation(() => Promise.resolve(vi.fn()));
+    const pauseAll = vi.spyOn(useDownloadStore.getState(), 'pauseAll')
+      .mockRejectedValue(new Error('temporary pause failure'));
+    useDownloadStore.setState({
+      isInitialized: true,
+      downloads: [{
+        id: 'pause-failed',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+    const action = { id: 'tray-action-1', action: 'pause-all' };
+    let actionPending = true;
+    vi.mocked(ipc.invokeCommand).mockImplementation((async (command: string, args?: any) => {
+      if (command === 'take_pending_tray_action') {
+        return (actionPending ? action : null) as any;
+      }
+      if (command === 'acknowledge_tray_action' && args?.id === action.id) {
+        actionPending = false;
+      }
+      return undefined as any;
+    }) as any);
+    const release = await initDownloadListener();
+    await vi.waitFor(() => expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'acknowledge_tray_action',
+      {
+        id: action.id,
+        failedCount: 1,
+        operationFailed: true,
+        persistenceFailed: false
+      }
+    ));
+
+    expect(actionPending).toBe(false);
+    expect(pauseAll).toHaveBeenCalledTimes(1);
+    release();
+    pauseAll.mockRestore();
+  });
+
+  it('does not report a completed tray pause as failed when the paused Aria2 GID stays registered', async () => {
+    vi.mocked(ipc.listenEvent).mockImplementation(() => Promise.resolve(vi.fn()));
+    const action = { id: 'tray-pause-registered-gid', action: 'pause-all' };
+    let actionPending = true;
+    vi.mocked(ipc.invokeCommand).mockImplementation((async (command: string, args?: any) => {
+      if (command === 'take_pending_tray_action') return (actionPending ? action : null) as any;
+      if (command === 'acknowledge_tray_action' && args?.id === action.id) actionPending = false;
+      return undefined as any;
+    }) as any);
+    useDownloadStore.setState({
+      isInitialized: true,
+      downloads: [{
+        id: 'paused-gid',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: ''
+      }],
+      backendRegisteredIds: new Set(['paused-gid'])
+    });
+    const pauseAll = vi.spyOn(useDownloadStore.getState(), 'pauseAll').mockImplementation(async () => {
+      useDownloadStore.getState().updateDownload('paused-gid', { status: 'paused' });
+      // A paused Aria2 GID can remain registered for an in-place resume.
+      return 1;
+    });
+
+    const release = await initDownloadListener();
+    await vi.waitFor(() => expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'acknowledge_tray_action',
+      {
+        id: action.id,
+        failedCount: 0,
+        operationFailed: false,
+        persistenceFailed: false
+      }
+    ));
+    expect(useDownloadStore.getState().downloads[0]?.status).toBe('paused');
+    expect(useDownloadStore.getState().backendRegisteredIds.has('paused-gid')).toBe(true);
+    expect(pauseAll).toHaveBeenCalledTimes(1);
+
+    release();
+    pauseAll.mockRestore();
+  });
+
+  it('consumes a tray command after persistence failure so reload cannot replay stale intent', async () => {
+    resetDownloadStoreModuleStateForTests();
+    vi.mocked(ipc.listenEvent).mockImplementation(() => Promise.resolve(vi.fn()));
+    const action = { id: 'tray-pause-persistence-retry', action: 'pause-all' };
+    let actionPending = true;
+    let failWrites = true;
+    const acknowledgements: unknown[] = [];
+    vi.mocked(ipc.invokeCommand).mockImplementation((async (command: string, args?: any) => {
+      if (command === 'take_pending_tray_action') return (actionPending ? action : null) as any;
+      if (command === 'acknowledge_tray_action' && args?.id === action.id) {
+        acknowledgements.push(args);
+        actionPending = false;
+      }
+      if (command === 'db_commit_download_state') {
+        if (failWrites) throw new Error('database unavailable');
+      }
+      return undefined as any;
+    }) as any);
+    useDownloadStore.setState({
+      isInitialized: false,
+      downloads: [{
+        id: 'manual-resume-after-tray-pause',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: ''
+      }],
+      backendRegisteredIds: new Set(['manual-resume-after-tray-pause'])
+    });
+    const pauseAll = vi.spyOn(useDownloadStore.getState(), 'pauseAll').mockImplementation(async () => {
+      useDownloadStore.getState().updateDownload('manual-resume-after-tray-pause', { status: 'paused' });
+      return 1;
+    });
+
+    const release = await initDownloadListener();
+    const disposePersistence = initializeDownloadPersistence('main');
+    await vi.waitFor(() => expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'acknowledge_tray_action',
+      {
+        id: action.id,
+        failedCount: 0,
+        operationFailed: false,
+        persistenceFailed: true
+      }
+    ));
+    expect(actionPending).toBe(false);
+    expect(acknowledgements).toEqual([{
+      id: action.id,
+      failedCount: 0,
+      operationFailed: false,
+      persistenceFailed: true
+    }]);
+    expect(pauseAll).toHaveBeenCalledTimes(1);
+
+    failWrites = false;
+    useDownloadStore.getState().updateDownload('manual-resume-after-tray-pause', { status: 'downloading' });
+    await vi.waitFor(() => expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'db_commit_download_state',
+      expect.any(Object)
+    ));
+    expect(useDownloadStore.getState().downloads[0]?.status).toBe('downloading');
+
+    disposePersistence();
+    release();
+
+    // A renderer reload loses all module-local caches. The native queue has
+    // already consumed the command, so a new listener must not repeat Pause All.
+    resetDownloadStoreModuleStateForTests();
+    const readsBeforeReload = vi.mocked(ipc.invokeCommand).mock.calls
+      .filter(([command]) => command === 'take_pending_tray_action').length;
+    const reloadedRelease = await initDownloadListener();
+    const reloadedDisposePersistence = initializeDownloadPersistence('main');
+    await vi.waitFor(() => expect(
+      vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) => command === 'take_pending_tray_action').length
+    ).toBeGreaterThan(readsBeforeReload));
+    await Promise.resolve();
+    expect(actionPending).toBe(false);
+    expect(pauseAll).toHaveBeenCalledTimes(1);
+    expect(useDownloadStore.getState().downloads[0]?.status).toBe('downloading');
+
+    reloadedDisposePersistence();
+    reloadedRelease();
+    pauseAll.mockRestore();
+  });
+
+  it('counts a queued but accepted resume as a successful tray action', async () => {
+    vi.mocked(ipc.listenEvent).mockImplementation(() => Promise.resolve(vi.fn()));
+    const action = { id: 'tray-resume-queued', action: 'resume-all' };
+    let actionPending = true;
+    vi.mocked(ipc.invokeCommand).mockImplementation((async (command: string, args?: any) => {
+      if (command === 'take_pending_tray_action') return (actionPending ? action : null) as any;
+      if (command === 'acknowledge_tray_action' && args?.id === action.id) actionPending = false;
+      return undefined as any;
+    }) as any);
+    useDownloadStore.setState({
+      isInitialized: true,
+      downloads: [{
+        id: 'accepted-waiting-for-capacity',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'queued',
+        category: 'Other',
+        dateAdded: ''
+      }],
+      backendRegisteredIds: new Set(['accepted-waiting-for-capacity']),
+      pendingOrder: ['accepted-waiting-for-capacity']
+    });
+    const startAll = vi.spyOn(useDownloadStore.getState(), 'startAllWithOutcomes')
+      .mockResolvedValue(['accepted-waiting-for-capacity']);
+
+    const release = await initDownloadListener();
+    await vi.waitFor(() => expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'acknowledge_tray_action',
+      {
+        id: action.id,
+        failedCount: 0,
+        operationFailed: false,
+        persistenceFailed: false
+      }
+    ));
+    expect(startAll).toHaveBeenCalledTimes(1);
+    expect(actionPending).toBe(false);
+
+    release();
+    startAll.mockRestore();
+  });
+
+  it('waits for persisted downloads to hydrate before applying a queued tray action', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    const action = { id: 'startup-tray-pause', action: 'pause-all' };
+    let actionPending = true;
+    vi.mocked(ipc.invokeCommand).mockImplementation((async (command: string, args?: any) => {
+      if (command === 'take_pending_tray_action') return (actionPending ? action : null) as any;
+      if (command === 'acknowledge_tray_action' && args?.id === action.id) actionPending = false;
+      return undefined as any;
+    }) as any);
+    const pauseAll = vi.spyOn(useDownloadStore.getState(), 'pauseAll').mockImplementation(async () => {
+      expect(useDownloadStore.getState().downloads.map(download => download.id)).toContain('restored-row');
+      useDownloadStore.getState().updateDownload('restored-row', { status: 'paused' });
+      return 1;
+    });
+
+    useDownloadStore.setState({ isInitialized: false, downloads: [] });
+    const release = await initDownloadListener();
+    await Promise.resolve();
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('take_pending_tray_action', undefined);
+    expect(pauseAll).not.toHaveBeenCalled();
+
+    useDownloadStore.setState({
+      isInitialized: true,
+      downloads: [{
+        id: 'restored-row',
+        url: 'https://example.com/restored.bin',
+        fileName: 'restored.bin',
+        status: 'queued',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+    await vi.waitFor(() => expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'acknowledge_tray_action',
+      {
+        id: action.id,
+        failedCount: 0,
+        operationFailed: false,
+        persistenceFailed: false
+      }
+    ));
+    expect(pauseAll).toHaveBeenCalledTimes(1);
+    const startupTrayDrain = await drainPendingTrayActionsAfterHydration();
+    expect(startupTrayDrain).toEqual({
+      pending: null,
+      startupPauseAllSeen: true,
+      startupActionStateUnknown: false
+    });
+
+    release();
+    pauseAll.mockRestore();
+  });
+
+  it('blocks automatic startup resume when the native tray queue cannot be read', async () => {
+    vi.mocked(ipc.listenEvent).mockResolvedValue(vi.fn());
+    vi.mocked(ipc.invokeCommand).mockRejectedValue(new Error('tray queue unavailable'));
+    useDownloadStore.setState({ isInitialized: true, downloads: [] });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const release = await initDownloadListener();
+
+    const result = await drainPendingTrayActionsAfterHydration();
+    expect(result).toEqual({
+      pending: null,
+      startupPauseAllSeen: false,
+      startupActionStateUnknown: true
+    });
+
+    release();
+    consoleError.mockRestore();
+  });
+
+  it('consumes an availability signal received while an empty queue read is in flight', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    let releaseFirstRead!: (value: null) => void;
+    let takeCalls = 0;
+    let actionPending = false;
+    const action = { id: 'tray-action-raced-signal', action: 'resume-all' };
+    vi.mocked(ipc.invokeCommand).mockImplementation((async (command: string, args?: any) => {
+      if (command === 'take_pending_tray_action') {
+        takeCalls += 1;
+        if (takeCalls === 1) return new Promise(resolve => { releaseFirstRead = resolve; });
+        return (actionPending ? action : null) as any;
+      }
+      if (command === 'acknowledge_tray_action' && args?.id === action.id) actionPending = false;
+      return undefined as any;
+    }) as any);
+    useDownloadStore.setState({ isInitialized: true, downloads: [] });
+    const startAll = vi.spyOn(useDownloadStore.getState(), 'startAllWithOutcomes').mockResolvedValue([]);
+
+    const release = await initDownloadListener();
+    await vi.waitFor(() => expect(takeCalls).toBe(1));
+    actionPending = true;
+    handlers['tray-action-available']({ payload: null });
+    releaseFirstRead(null);
+
+    await vi.waitFor(() => expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'acknowledge_tray_action',
+      {
+        id: action.id,
+        failedCount: 0,
+        operationFailed: false,
+        persistenceFailed: false
+      }
+    ));
+    expect(takeCalls).toBeGreaterThanOrEqual(3);
+    expect(startAll).toHaveBeenCalledTimes(1);
+
+    release();
+    startAll.mockRestore();
   });
 
   it('ignores late progress and opposite terminal events from an older lifecycle', async () => {

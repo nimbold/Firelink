@@ -2,17 +2,20 @@ import type { UnlistenFn } from '@tauri-apps/api/event';
 import type { DownloadStatus } from '../bindings/DownloadStatus';
 import type { DownloadStateEvent } from '../bindings/DownloadStateEvent';
 import type { DownloadErrorKind } from '../bindings/DownloadErrorKind';
-import { listenEvent as listen } from '../ipc';
+import { invokeCommand, listenEvent as listen, type PendingTrayAction } from '../ipc';
 import type { DownloadItem } from '../bindings/DownloadItem';
 import type { DownloadProgressEvent } from '../bindings/DownloadProgressEvent';
 import { categoryForDownload, isDownloadStatus } from '../utils/downloads';
+import { canPauseDownload, canStartDownload } from '../utils/downloadActions';
 import { useDownloadProgressStore } from './downloadProgressStore';
+import i18n from '../i18n';
 
 import {
   clearDownloadControlIntent,
   commitDownloadState,
   currentDownloadLifecycleGeneration,
   downloadControlIntentFor,
+  flushDownloadPersistence,
   hasStaleTemporaryMediaEstimate,
   useDownloadStore
 } from './useDownloadStore';
@@ -26,6 +29,228 @@ let unlistenMoveProgress: UnlistenFn | null = null;
 let unlistenTray: UnlistenFn | null = null;
 let listenerSetup: Promise<void> | null = null;
 let listenerConsumers = 0;
+type TrayActionDrainResult = {
+  pending: PendingTrayAction | null;
+  error?: unknown;
+};
+type TrayActionExecution = {
+  failedCount: number;
+  operationFailed: boolean;
+};
+let trayActionDrain: Promise<TrayActionDrainResult> | null = null;
+let trayActionDrainRequested = false;
+let trayLocaleListenerRegistered = false;
+let startupTrayActionWindowOpen = true;
+let startupTrayPauseAllSeen = false;
+const attemptedTrayActions = new Map<string, TrayActionExecution>();
+
+export const resetTrayActionDrainStateForTests = (): void => {
+  trayActionDrain = null;
+  trayActionDrainRequested = false;
+  startupTrayActionWindowOpen = true;
+  startupTrayPauseAllSeen = false;
+  attemptedTrayActions.clear();
+};
+
+const syncTrayMenuLabels = () => {
+  void invokeCommand('set_tray_menu_labels', {
+    show: i18n.t($ => $.trayMenu.show),
+    pauseAll: i18n.t($ => $.trayMenu.pauseAll),
+    resumeAll: i18n.t($ => $.trayMenu.resumeAll),
+    quit: i18n.t($ => $.trayMenu.quit),
+  }).catch((error) => {
+    console.error('Failed to update tray menu language:', error);
+  });
+};
+
+const performPendingTrayAction = async (pending: PendingTrayAction): Promise<TrayActionExecution> => {
+  const initial = useDownloadStore.getState();
+  const targetIds = initial.downloads
+    .filter(download => pending.action === 'pause-all'
+      ? canPauseDownload(download.status)
+    : download.status === 'queued' || canStartDownload(download.status))
+    .map(download => download.id);
+
+  let operationFailed = false;
+  let acceptedIds = new Set<string>();
+  if (pending.action === 'pause-all') {
+    try {
+      await initial.pauseAll();
+    } catch {
+      operationFailed = true;
+    }
+  } else {
+    try {
+      acceptedIds = new Set(await initial.startAllWithOutcomes());
+    } catch {
+      operationFailed = true;
+    }
+  }
+
+  const latest = useDownloadStore.getState();
+  const failedCount = targetIds.filter(id => {
+    const download = latest.downloads.find(item => item.id === id);
+    if (!download || download.status === 'completed') return false;
+    return pending.action === 'pause-all'
+      ? canPauseDownload(download.status)
+      : !acceptedIds.has(id);
+  }).length;
+  return { failedCount, operationFailed };
+};
+
+const drainPendingTrayActions = (): Promise<TrayActionDrainResult> => {
+  trayActionDrainRequested = true;
+  if (!useDownloadStore.getState().isInitialized) {
+    return Promise.resolve({ pending: null });
+  }
+  if (trayActionDrain) return trayActionDrain;
+
+  const draining = (async (): Promise<TrayActionDrainResult> => {
+    let error: unknown;
+    do {
+      trayActionDrainRequested = false;
+      error = undefined;
+      while (true) {
+        const pending = await invokeCommand('take_pending_tray_action');
+        if (!pending) break;
+
+        try {
+          if (startupTrayActionWindowOpen && pending.action === 'pause-all') {
+            // Startup must not auto-resume persisted rows after a tray pause
+            // was accepted, even when this background drain wins the race
+            // with App's explicit post-hydration drain.
+            startupTrayPauseAllSeen = true;
+          }
+          let execution = attemptedTrayActions.get(pending.id);
+          if (!execution) {
+            execution = await performPendingTrayAction(pending);
+            attemptedTrayActions.set(pending.id, execution);
+          }
+          try {
+            await flushDownloadPersistence();
+          } catch {
+            // Tray actions are commands, not durable jobs. The operation has
+            // already run, so consume it even when the resulting snapshot
+            // cannot be saved; retaining it would replay stale bulk intent
+            // after a renderer reload and could reverse a newer user action.
+            // The native acknowledgement reports the persistence failure to
+            // the user, and startup resume remains blocked for this startup.
+            error ??= new Error('Tray action state could not be persisted');
+            await invokeCommand('acknowledge_tray_action', {
+              id: pending.id,
+              failedCount: execution.failedCount,
+              operationFailed: execution.operationFailed,
+              persistenceFailed: true
+            });
+            attemptedTrayActions.delete(pending.id);
+            continue;
+          }
+          // A completed attempt is acknowledged even when some rows failed.
+          // Replaying a bulk command after later manual controls could reverse
+          // the user's newer intent; report the outcome and let them retry.
+          await invokeCommand('acknowledge_tray_action', {
+            id: pending.id,
+            failedCount: execution.failedCount,
+            operationFailed: execution.operationFailed,
+            persistenceFailed: false
+          });
+          attemptedTrayActions.delete(pending.id);
+        } catch (cause) {
+          error = cause;
+          console.error('Failed to handle a queued tray action:', cause);
+          break;
+        }
+      }
+    } while (trayActionDrainRequested && useDownloadStore.getState().isInitialized);
+
+    let pending: PendingTrayAction | null = null;
+    try {
+      pending = await invokeCommand('take_pending_tray_action');
+    } catch (cause) {
+      error ??= cause;
+    }
+    return { pending, ...(error === undefined ? {} : { error }) };
+  })();
+
+  const tracked: Promise<TrayActionDrainResult> = draining
+    .catch((error) => {
+      console.error('Failed to read a queued tray action:', error);
+      return { pending: null, error };
+    })
+    .finally(() => {
+      if (trayActionDrain === tracked) {
+        trayActionDrain = null;
+        // An availability event can race the last empty read. Honor that
+        // wakeup after clearing the single-flight promise.
+        if (trayActionDrainRequested && useDownloadStore.getState().isInitialized) {
+          void drainPendingTrayActions();
+        }
+      }
+    });
+  trayActionDrain = tracked;
+  return tracked;
+};
+
+export const drainPendingTrayActionsAfterHydration = async (): Promise<{
+  pending: PendingTrayAction | null;
+  startupPauseAllSeen: boolean;
+  startupActionStateUnknown: boolean;
+}> => {
+  if (!useDownloadStore.getState().isInitialized) {
+    throw new Error('Download state must be hydrated before handling tray actions');
+  }
+  const result = await drainPendingTrayActions();
+  const startupPauseWasSeen = startupTrayPauseAllSeen;
+  const startupActionStateUnknown = result.error !== undefined;
+  startupTrayPauseAllSeen = false;
+  startupTrayActionWindowOpen = false;
+  return {
+    pending: result.pending,
+    startupPauseAllSeen: startupPauseWasSeen,
+    startupActionStateUnknown
+  };
+};
+
+export const flushPendingTrayActionsForExit = async (): Promise<void> => {
+  while (!useDownloadStore.getState().isInitialized) {
+    await new Promise<void>(resolve => {
+      const unsubscribe = useDownloadStore.subscribe((state) => {
+        if (!state.isInitialized) return;
+        unsubscribe();
+        resolve();
+      });
+      if (useDownloadStore.getState().isInitialized) {
+        unsubscribe();
+        resolve();
+      }
+    });
+  }
+  while (true) {
+    const result = await drainPendingTrayActions();
+    if (result.error) throw result.error;
+
+    // Native tray admission is closed before app-exit-requested is emitted.
+    // Join any follow-up drain that raced the previous drain's final empty
+    // read, then make a final peek to prove the retained queue is empty.
+    const activeDrain = trayActionDrain;
+    if (activeDrain) {
+      const followup = await activeDrain;
+      if (followup.error) throw followup.error;
+      if (followup.pending) continue;
+      continue;
+    }
+    if (trayActionDrainRequested) continue;
+
+    const pending = await invokeCommand('take_pending_tray_action');
+    if (!pending && !trayActionDrain && !trayActionDrainRequested) return;
+  }
+};
+
+useDownloadStore.subscribe((state, previous) => {
+  if (state.isInitialized && !previous.isInitialized) {
+    void drainPendingTrayActions();
+  }
+});
 
 type ProgressFields = {
   fraction?: number;
@@ -194,6 +419,10 @@ const disposeDownloadListeners = () => {
   unlistenMoveProgress = null;
   unlistenTray?.();
   unlistenTray = null;
+  if (trayLocaleListenerRegistered) {
+    i18n.off('languageChanged', syncTrayMenuLabels);
+    trayLocaleListenerRegistered = false;
+  }
   listenerSetup = null;
 };
 
@@ -528,13 +757,8 @@ const startDownloadListeners = async () => {
         useDownloadProgressStore.getState().setMoveProgress(payload.id, payload.fraction);
       }
     }),
-    listen('tray-action', (event) => {
-      const mainStore = useDownloadStore.getState();
-      if (event.payload === 'pause-all') {
-        void mainStore.pauseAll();
-      } else if (event.payload === 'resume-all') {
-        void mainStore.startAll();
-      }
+    listen('tray-action-available', () => {
+      void drainPendingTrayActions();
     }),
   ]);
 
@@ -560,6 +784,12 @@ const startDownloadListeners = async () => {
   unlistenState = state.value;
   unlistenMoveProgress = moveProgress.value;
   unlistenTray = tray.value;
+  i18n.on('languageChanged', syncTrayMenuLabels);
+  trayLocaleListenerRegistered = true;
+  syncTrayMenuLabels();
+  // Native tray items are available before webview hydration. Drain retained
+  // actions after the listener registration race has been closed.
+  void drainPendingTrayActions();
 };
 
 export async function initDownloadListener(): Promise<() => void> {

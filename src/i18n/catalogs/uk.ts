@@ -39,6 +39,12 @@ const uk = {
     renameQueue: 'Перейменувати чергу',
     deleteQueue: 'Видалити чергу',
   },
+  trayMenu: {
+    show: 'Показати Firelink',
+    pauseAll: 'Призупинити всі',
+    resumeAll: 'Відновити всі',
+    quit: 'Вийти з Firelink',
+  },
   dialogs: {
     errorBoundary: {
       title: 'Щось пішло не так.',
@@ -520,6 +526,13 @@ const uk = {
   app: {
     loading: 'Завантаження…',
     settingsSaveFailed: 'Не вдалося зберегти налаштування. Перевірте дозволи сховища та спробуйте ще раз.',
+    exitFlushFailed: 'Firelink не вдалося зберегти всі зміни перед виходом: {{detail}}',
+    exitFlushCancelled: 'Вихід із Firelink скасовано, бо не вдалося підтвердити збереження всіх змін.',
+    trayActionFailed: 'Не вдалося виконати дію з області сповіщень. Перевірте стан завантажень у Firelink.',
+    trayPersistenceFailed: 'Firelink не вдалося зберегти зміни цієї дії з області сповіщень. Дію залишено в черзі; перевірте сховище та повторіть дію з області сповіщень.',
+    trayStartupPauseUnverified: 'Firelink не вдалося перевірити дії з області сповіщень під час запуску, тому збережені завантаження не відновлено. Їх можна відновити вручну.',
+    trayPausePartial: 'Не вдалося призупинити {{count}} завантажень командою «Призупинити всі». Перевірте їхній стан у Firelink.',
+    trayResumePartial: 'Не вдалося запустити {{count}} завантажень командою «Відновити всі». Перевірте їхній стан у Firelink.',
     systemActionCountdown: '{{action}} через 10 секунд.',
     systemActionCancelled: 'Системна дія скасована, оскільки активне або в черзі інше завантаження.',
     systemActionProceedAnyway: 'Продовжити попри це',
@@ -820,6 +833,10 @@ const uk = {
     removeUnsafeFew: 'Видаліть {{count}} небезпечні URL-адреси перед продовженням.',
     removeUnsafeMany: 'Видаліть {{count}} небезпечних URL-адрес перед продовженням.',
     mediaMetadataUnavailableSummaryOne: 'Метадані медіа недоступні для {{count}} елемента. Оновіть метадані перед додаванням.',
+    useDefaultMediaFormat: 'Використати формат yt-dlp за замовчуванням',
+    defaultMediaFormatFallbackDescription: 'Якщо метадані не вдалося завантажити, медіа можна додати у форматі yt-dlp за замовчуванням. Остаточний формат, ім’я файлу та розмір визначаться під час завантаження.',
+    defaultMediaFormatSelected: 'Вибрано формат yt-dlp за замовчуванням. Ім’я файлу та розмір визначаться під час завантаження.',
+    defaultMediaFormat: 'Формат за замовчуванням',
     mediaMetadataUnavailableSummaryFew: 'Метадані медіа недоступні для {{count}} елементів. Оновіть метадані перед додаванням.',
     mediaMetadataUnavailableSummaryMany: 'Метадані медіа недоступні для {{count}} елементів. Оновіть метадані перед додаванням.',
     metadataUnavailableFallback: 'Метадані недоступні. Завантаження все ще можна додати, використовуючи резервні дані.',

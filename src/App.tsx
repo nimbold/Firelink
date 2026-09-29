@@ -10,15 +10,20 @@ import { KeychainPermissionModal } from './components/KeychainPermissionModal';
 import { extractValidDownloadUrls } from './utils/url';
 import { readClipboardDownloadUrls } from './utils/clipboard';
 import { listenEvent as listen, invokeCommand as invoke } from "./ipc";
-import { flushDownloadPersistence, initializeDownloadPersistence, useDownloadStore, MAIN_QUEUE_ID, type ExtensionDownloadRequest } from './store/useDownloadStore';
+import { flushDownloadPersistence, initializeDownloadPersistence, useDownloadStore, waitForDownloadLifecycleWork, MAIN_QUEUE_ID, type ExtensionDownloadRequest } from './store/useDownloadStore';
+import { closeDownloadWorkAdmission, reopenDownloadWorkAdmission } from './store/downloadWorkBarrier';
 import type { ExtensionMediaDiscoveryUpdate } from './bindings/ExtensionMediaDiscoveryUpdate';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { initDownloadListener } from './store/downloadStore';
+import {
+  drainPendingTrayActionsAfterHydration,
+  flushPendingTrayActionsForExit,
+  initDownloadListener
+} from './store/downloadStore';
 import {
   subscribeToSettingsPersistenceErrors,
+  flushSettingsPersistence,
   useSettingsStore,
   waitForSettingsHydration,
-  waitForSettingsPersistence
 } from "./store/useSettingsStore";
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { WindowControls } from "./components/WindowControls";
@@ -55,7 +60,8 @@ import {
   consumeSchedulerHandoffIds,
   handoffSupersededSchedulerIds,
   isSchedulerControlCurrent,
-  registerPostActionCanceller
+  registerPostActionCanceller,
+  resolveSchedulerStopOutcome
 } from './utils/schedulerControl';
 import { createSerialTaskQueue } from './utils/serialTaskQueue';
 import { useWindowFocusState } from './utils/windowFocus';
@@ -125,6 +131,7 @@ const PageLoadingFallback = () => {
 
 let automaticUpdateCheckStarted = false;
 let powerPreferencesSync: Promise<void> = Promise.resolve();
+let frontendExitPreparing = false;
 
 let downloadStateInitialization: Promise<void> | null = null;
 const initializeDownloadState = (): Promise<void> => {
@@ -132,6 +139,7 @@ const initializeDownloadState = (): Promise<void> => {
     downloadStateInitialization = (async () => {
       await waitForSettingsHydration();
       await useDownloadStore.getState().initDB();
+      initializeDownloadPersistence('main');
     })().catch(error => {
       downloadStateInitialization = null;
       throw error;
@@ -186,6 +194,7 @@ function App() {
   const [filter, setFilter] = useState<SidebarFilter>('all');
   const [downloadTableSummary, setDownloadTableSummary] = useState<DownloadTableStatusSummary | null>(null);
   const [coreReady, setCoreReady] = useState(false);
+  const [exitPreparing, setExitPreparing] = useState(false);
   const [keychainConsentVersion, setKeychainConsentVersion] = useState('');
 
   useEffect(() => {
@@ -287,6 +296,7 @@ function App() {
   const pendingPostActionToastId = useRef<string | null>(null);
   const pendingForceActionToastId = useRef<string | null>(null);
   const startupResumeStarted = useRef(false);
+  const pendingScheduledStopIds = useRef(new Set<string>());
   const startupInputReady = useRef(false);
   const extensionProcessing = useRef(createSerialTaskQueue());
   const frontendReadyUpdate = useRef<Promise<void>>(Promise.resolve());
@@ -593,7 +603,7 @@ function App() {
     const mainWindowSizePersistence = createMainWindowSizePersistence({
       appWindow: getCurrentWindow(),
       onSize: size => {
-        if (!active || exiting) return;
+        if (!active || exitRequested || exiting) return;
         if (!settingsHydrated) {
           latestSizeBeforeHydration = size;
           return;
@@ -603,20 +613,113 @@ function App() {
     });
     let cleanupListeners: (() => void) | null = null;
     let unlistenExit: (() => void) | null = null;
-    const exitListener = listen('app-exit-requested', async () => {
+    let unlistenExitCancelled: (() => void) | null = null;
+    let unlistenExitFinalFlush: (() => void) | null = null;
+    let unlistenExitDownload: (() => void) | null = null;
+    let bodyWasInertBeforeExit = false;
+    let activeExitRequestId: string | null = null;
+    let exitPersistenceDisposed = false;
+    const restoreExitAttempt = (requestId: string, showCancelledNotice: boolean) => {
+      if (activeExitRequestId !== requestId) return;
+      activeExitRequestId = null;
+      exitRequested = false;
+      exiting = false;
+      frontendExitPreparing = false;
+      reopenDownloadWorkAdmission();
+      setExitPreparing(false);
+      document.body.inert = bodyWasInertBeforeExit;
+      if (exitPersistenceDisposed) {
+        disposePersistence = initializeDownloadPersistence('main');
+        exitPersistenceDisposed = false;
+      }
+      if (showCancelledNotice) {
+        addToast({
+          message: t($ => $.app.exitFlushCancelled),
+          variant: 'warning',
+          isActionable: true
+        });
+      }
+    };
+    const exitListener = listen('app-exit-requested', async (event) => {
+      if (exitRequested || exiting) return;
+      activeExitRequestId = event.payload.requestId;
       exitRequested = true;
+      frontendExitPreparing = true;
+      closeDownloadWorkAdmission();
+      setExitPreparing(true);
+      bodyWasInertBeforeExit = document.body.inert;
+      document.body.inert = true;
+      clearPendingPostActionTimer();
       try {
+        await queueFrontendReadyUpdate(false);
+        if (activeExitRequestId !== event.payload.requestId) return;
         await mainWindowSizePersistence.flush();
-        await waitForSettingsPersistence();
+        if (activeExitRequestId !== event.payload.requestId) return;
+        unlistenExitDownload ??= await initDownloadListener();
+        await initializeDownloadState();
+        if (activeExitRequestId !== event.payload.requestId) return;
+        disposePersistence ??= initializeDownloadPersistence('main');
+        await flushPendingTrayActionsForExit();
+        if (activeExitRequestId !== event.payload.requestId) return;
+        await waitForDownloadLifecycleWork();
+        if (activeExitRequestId !== event.payload.requestId) return;
+        await flushSettingsPersistence();
         await flushDownloadPersistence();
-      } catch (error) {
-        console.error('Failed to flush download state before exit:', error);
-      } finally {
+        if (activeExitRequestId !== event.payload.requestId) return;
+        // Keep persistence subscribed during Aria2 shutdown because the daemon
+        // can emit its final completion state after this first flush. Native
+        // asks for a final flush once the daemon process has stopped.
         exiting = true;
         latestSizeBeforeHydration = null;
-        await invoke('ack_frontend_exit').catch(error => {
-          console.error('Failed to acknowledge frontend exit flush:', error);
+        await invoke('ack_frontend_exit', { requestId: event.payload.requestId });
+      } catch (error) {
+        console.error('Failed to flush durable state before exit:', error);
+        restoreExitAttempt(event.payload.requestId, false);
+        addToast({
+          message: t($ => $.app.exitFlushFailed, { detail: String(error) }),
+          variant: 'error',
+          isActionable: true
         });
+        await invoke('reject_frontend_exit', { requestId: event.payload.requestId }).catch(rejectError => {
+          console.error('Failed to reject frontend exit flush:', rejectError);
+        });
+      }
+    });
+    const exitCancelledListener = listen('app-exit-cancelled', event => {
+      restoreExitAttempt(event.payload.requestId, true);
+    });
+    const exitFinalFlushListener = listen('app-exit-final-flush-requested', async event => {
+      if (activeExitRequestId !== event.payload.requestId || !exiting) {
+        await invoke('ack_frontend_exit_finalization', {
+          requestId: event.payload.requestId,
+          succeeded: false
+        }).catch(error => {
+          console.error('Failed to reject a stale final exit flush:', error);
+        });
+        return;
+      }
+      let succeeded = false;
+      try {
+        await waitForDownloadLifecycleWork();
+        await flushSettingsPersistence();
+        await flushDownloadPersistence();
+        disposePersistence?.();
+        disposePersistence = null;
+        exitPersistenceDisposed = true;
+        succeeded = true;
+      } catch (error) {
+        // The pre-shutdown snapshot is already durable. Keep persistence
+        // active until process exit and retain that recovery snapshot.
+        console.error('Failed to persist final downloader state before exit:', error);
+      }
+      try {
+        await invoke('ack_frontend_exit_finalization', {
+          requestId: event.payload.requestId,
+          succeeded
+        });
+        activeExitRequestId = null;
+      } catch (error) {
+        console.error('Failed to acknowledge the final exit flush:', error);
       }
     });
     void exitListener.then(unlisten => {
@@ -625,17 +728,36 @@ function App() {
     }).catch(error => {
       console.error('Failed to listen for frontend exit flush:', error);
     });
+    void exitCancelledListener.then(unlisten => {
+      if (active) unlistenExitCancelled = unlisten;
+      else unlisten();
+    }).catch(error => {
+      console.error('Failed to listen for frontend exit cancellation:', error);
+    });
+    void exitFinalFlushListener.then(unlisten => {
+      if (active) unlistenExitFinalFlush = unlisten;
+      else unlisten();
+    }).catch(error => {
+      console.error('Failed to listen for final frontend exit flush:', error);
+    });
     const initialize = async () => {
       let unlistenDownload: (() => void) | null = null;
       let unlistenTerminalState: (() => void) | null = null;
       let unlistenExtension: (() => void) | null = null;
       let unlistenMediaDiscovery: (() => void) | null = null;
       let unlistenDeepLink: (() => void) | null = null;
+      let unlistenTrayActionResult: (() => void) | null = null;
       const disposeListeners = () => {
         void queueFrontendReadyUpdate(false).catch(() => {});
         mainWindowSizePersistence.dispose();
         unlistenExit?.();
         unlistenExit = null;
+        unlistenExitCancelled?.();
+        unlistenExitCancelled = null;
+        unlistenExitFinalFlush?.();
+        unlistenExitFinalFlush = null;
+        unlistenExitDownload?.();
+        unlistenExitDownload = null;
         unlistenTerminalState?.();
         unlistenTerminalState = null;
         unlistenExtension?.();
@@ -644,6 +766,8 @@ function App() {
         unlistenMediaDiscovery = null;
         unlistenDeepLink?.();
         unlistenDeepLink = null;
+        unlistenTrayActionResult?.();
+        unlistenTrayActionResult = null;
         unlistenDownload?.();
         unlistenDownload = null;
       };
@@ -744,6 +868,34 @@ function App() {
       }
 
       try {
+        unlistenTrayActionResult = await listen('tray-action-result', event => {
+          const { action, failedCount, operationFailed, persistenceFailed } = event.payload;
+          if (
+            (action !== 'pause-all' && action !== 'resume-all')
+            || !Number.isSafeInteger(failedCount)
+            || failedCount < 0
+            || typeof operationFailed !== 'boolean'
+            || typeof persistenceFailed !== 'boolean'
+          ) return;
+          if (persistenceFailed) {
+            addToast({
+              message: t($ => $.app.trayPersistenceFailed),
+              variant: 'error',
+              isActionable: true
+            });
+            return;
+          }
+          if (failedCount === 0 && !operationFailed) return;
+          addToast({
+            message: failedCount > 0
+              ? action === 'pause-all'
+                ? t($ => $.app.trayPausePartial, { count: failedCount })
+                : t($ => $.app.trayResumePartial, { count: failedCount })
+              : t($ => $.app.trayActionFailed),
+            variant: 'warning',
+            isActionable: true
+          });
+        });
         unlistenDownload = await initDownloadListener();
         unlistenTerminalState = await listen('download-state', (event) => {
           if (event.payload.status !== 'completed' && event.payload.status !== 'failed') return;
@@ -778,7 +930,11 @@ function App() {
           }
         });
         unlistenExtension = await listen('extension-add-download', (event) => {
-          if (!startupInputReady.current || useSettingsStore.getState().showKeychainModal) {
+          if (
+            !startupInputReady.current
+            || useSettingsStore.getState().showKeychainModal
+            || frontendExitPreparing
+          ) {
             pendingStartupInputs.current.push({ type: 'extension', payload: event.payload });
             return;
           }
@@ -787,7 +943,11 @@ function App() {
           });
         });
         unlistenMediaDiscovery = await listen('extension-media-discovery', (event) => {
-          if (!startupInputReady.current || useSettingsStore.getState().showKeychainModal) {
+          if (
+            !startupInputReady.current
+            || useSettingsStore.getState().showKeychainModal
+            || frontendExitPreparing
+          ) {
             pendingStartupInputs.current.push({ type: 'extension-media-discovery', payload: event.payload });
             return;
           }
@@ -796,7 +956,11 @@ function App() {
           });
         });
         unlistenDeepLink = await listen('deep-link-add-download', (event) => {
-          if (!startupInputReady.current || useSettingsStore.getState().showKeychainModal) {
+          if (
+            !startupInputReady.current
+            || useSettingsStore.getState().showKeychainModal
+            || frontendExitPreparing
+          ) {
             pendingStartupInputs.current.push({ type: 'deep-link', payload: event.payload });
             return;
           }
@@ -825,6 +989,24 @@ function App() {
       try {
         await initializeDownloadState();
         if (!active) return;
+        const trayStartup = await drainPendingTrayActionsAfterHydration();
+        if (
+          trayStartup.startupPauseAllSeen
+          || trayStartup.startupActionStateUnknown
+          || trayStartup.pending?.action === 'pause-all'
+        ) {
+          // Do not auto-resume persisted rows while a queued startup pause
+          // could not be completed and acknowledged, or the tray queue could
+          // not be read safely.
+          startupResumeStarted.current = true;
+        }
+        if (trayStartup.startupActionStateUnknown) {
+          addToast({
+            message: t($ => $.app.trayStartupPauseUnverified),
+            variant: 'warning',
+            isActionable: true
+          });
+        }
         disposePersistence = initializeDownloadPersistence(getCurrentWindow().label);
       } catch (error) {
         disposeListeners();
@@ -839,7 +1021,7 @@ function App() {
         return;
       }
 
-      if (!active) return;
+      if (!active || exitRequested || exiting) return;
       setCoreReady(true);
     };
     void initialize();
@@ -851,6 +1033,12 @@ function App() {
       cleanupListeners = null;
       unlistenExit?.();
       unlistenExit = null;
+      unlistenExitCancelled?.();
+      unlistenExitCancelled = null;
+      unlistenExitFinalFlush?.();
+      unlistenExitFinalFlush = null;
+      unlistenExitDownload?.();
+      unlistenExitDownload = null;
       unlistenSettingsHydration?.();
       mainWindowSizePersistence.dispose();
       disposePersistence?.();
@@ -859,17 +1047,17 @@ function App() {
   }, [addToast, enqueueAddInput, processExtensionDownload, processExtensionMediaDiscovery, queueFrontendReadyUpdate]);
 
   useEffect(() => {
-    if (!coreReady) return;
+    if (!coreReady || exitPreparing) return;
     // The backend must not emit extension/deep-link handoffs while the
     // explanatory Keychain dialog is active. Deep links are buffered by the
     // coordinator, and extension callers receive a retryable 503 instead.
     void queueFrontendReadyUpdate(!showKeychainModal).catch(error => {
       console.error('Failed to update browser extension readiness:', error);
     });
-  }, [coreReady, queueFrontendReadyUpdate, showKeychainModal]);
+  }, [coreReady, exitPreparing, queueFrontendReadyUpdate, showKeychainModal]);
 
   useEffect(() => {
-    if (!coreReady || showKeychainModal) {
+    if (!coreReady || showKeychainModal || exitPreparing) {
       startupInputReady.current = false;
       return;
     }
@@ -889,10 +1077,10 @@ function App() {
         enqueueAddInput(() => useDownloadStore.getState().openAddModalWithUrls(input.payload));
       }
     }
-  }, [coreReady, enqueueAddInput, processExtensionDownload, processExtensionMediaDiscovery, showKeychainModal]);
+  }, [coreReady, enqueueAddInput, exitPreparing, processExtensionDownload, processExtensionMediaDiscovery, showKeychainModal]);
 
   useEffect(() => {
-    if (!coreReady || showKeychainModal || startupResumeStarted.current) return;
+    if (!coreReady || showKeychainModal || startupResumeStarted.current || exitPreparing || frontendExitPreparing) return;
     startupResumeStarted.current = true;
     useDownloadStore.getState().resumePendingDownloads().catch(error => {
       console.error('Failed to resume saved downloads after startup:', error);
@@ -902,7 +1090,7 @@ function App() {
         isActionable: true
       });
     });
-  }, [addToast, coreReady, showKeychainModal]);
+  }, [addToast, coreReady, exitPreparing, showKeychainModal]);
 
   useEffect(() => synchronizeDocumentAppearance(window, {
     theme,
@@ -1044,19 +1232,24 @@ function App() {
     // async handler is still unwinding, causing the replacement listener to
     // drop the only retry for that scheduled action.
     const processingScheduleKeys = new Set<string>();
+    let reportedStopFailureKey: string | null = null;
+    let listenerActive = true;
     const unlisten = listen('schedule-trigger', async (event) => {
+      if (!listenerActive || frontendExitPreparing) return;
       const state = useSettingsStore.getState();
       const payload = event.payload;
       if (processingScheduleKeys.has(payload.key)) return;
       processingScheduleKeys.add(payload.key);
       try {
         if (payload.action === 'start') {
+          reportedStopFailureKey = null;
+          pendingScheduledStopIds.current.clear();
           clearPendingPostActionTimer();
           const scheduledQueueIds = getScheduledQueueIds();
           const generation = beginSchedulerControl(scheduledQueueIds);
           if (scheduledQueueIds.length === 0) {
-            state.setSchedulerActiveDownloadIds([]);
-            state.setSchedulerRunning(false);
+            await state.persistSchedulerTracking([]);
+            if (!listenerActive) return;
             addToast({
               message: t($ => $.app.schedulerNoQueues),
               variant: 'warning',
@@ -1080,6 +1273,11 @@ function App() {
                 .filter(id => !handoffIds.has(id))
                 .map(id => useDownloadStore.getState().pauseDownload(id))
             );
+            const currentSchedulerState = useSettingsStore.getState();
+            await currentSchedulerState.persistSchedulerTracking(
+              currentSchedulerState.schedulerActiveDownloadIds
+            );
+            if (!listenerActive) return;
             await invoke('ack_schedule_trigger', { action: 'start', key: payload.key });
             return;
           }
@@ -1093,8 +1291,8 @@ function App() {
             )
             .map(download => download.id);
           const activeIds = [...new Set([...acceptedIds, ...trackedIds])];
-          state.setSchedulerActiveDownloadIds(activeIds);
-          state.setSchedulerRunning(activeIds.length > 0);
+          await state.persistSchedulerTracking(activeIds);
+          if (!listenerActive) return;
           await invoke('ack_schedule_trigger', { action: 'start', key: payload.key });
         } else if (payload.action === 'stop') {
           const generation = beginSchedulerControl();
@@ -1103,44 +1301,76 @@ function App() {
           // cancel that pending action before applying the stop transition.
           clearPendingPostActionTimer();
           const trackedIds = state.schedulerActiveDownloadIds;
+          pendingScheduledStopIds.current = new Set(trackedIds);
+          const failedIds = new Set<string>();
           if (trackedIds.length > 0) {
             const pauseResults = await Promise.allSettled(
               trackedIds.map(id => useDownloadStore.getState().pauseDownload(id))
             );
-            const failedPauses = pauseResults.filter(result => result.status === 'rejected').length;
-            if (failedPauses > 0 && isSchedulerControlCurrent(generation)) {
+            pauseResults.forEach((result, index) => {
+              if (result.status === 'rejected') failedIds.add(trackedIds[index]);
+            });
+          }
+          const schedulerState = useSettingsStore.getState();
+          const activeIds = new Set(useDownloadStore.getState().downloads
+            .filter(download => isActiveDownloadStatus(download.status))
+            .map(download => download.id));
+          const stopOutcome = resolveSchedulerStopOutcome({
+            controlCurrent: isSchedulerControlCurrent(generation),
+            attemptedIds: trackedIds,
+            failedIds,
+            activeIds,
+            currentTrackedIds: schedulerState.schedulerActiveDownloadIds
+          });
+          // The tracking snapshot may belong to a newer start when this stop
+          // was superseded. Only stop targets that still need a retry should
+          // suppress normal completion reconciliation.
+          pendingScheduledStopIds.current = new Set(stopOutcome.retryIds);
+          await schedulerState.persistSchedulerTracking(stopOutcome.trackedIds);
+          if (!stopOutcome.acknowledge) {
+            if (reportedStopFailureKey !== payload.key) {
+              reportedStopFailureKey = payload.key;
               addToast({
-                message: failedPauses === 1
+                message: stopOutcome.trackedIds.length === 1
                   ? t($ => $.app.schedulerPauseOneFailed)
-                  : t($ => $.app.schedulerPauseManyFailed, { count: failedPauses }),
+                  : t($ => $.app.schedulerPauseManyFailed, { count: stopOutcome.trackedIds.length }),
                 variant: 'error',
                 isActionable: true
               });
             }
+            // Leave the native stop trigger unacknowledged while a failed
+            // target remains active. The scheduler will redeliver it, and the
+            // durable tracking snapshot narrows each retry to unfinished IDs.
+            return;
           }
-          if (isSchedulerControlCurrent(generation)) {
-            state.setSchedulerActiveDownloadIds([]);
-            state.setSchedulerRunning(false);
-          }
+          if (!listenerActive) return;
           await invoke('ack_schedule_trigger', { action: 'stop', key: payload.key });
+          if (reportedStopFailureKey === payload.key) reportedStopFailureKey = null;
         }
+      } catch (error) {
+        // A persistence failure must leave the native trigger unacknowledged so
+        // it can be delivered again. The persistence listener reports the
+        // user-visible error; log here to avoid an unhandled listener promise.
+        console.error('Failed to process scheduler trigger:', error);
       } finally {
         processingScheduleKeys.delete(payload.key);
       }
     });
     
     return () => {
+      listenerActive = false;
       beginSchedulerControl();
       unlisten.then(f => f()).catch(console.error);
     };
   }, [addToast, clearPendingPostActionTimer, coreReady]);
 
   useEffect(() => {
-    if (!coreReady) return;
+    if (!coreReady || frontendExitPreparing) return;
     if (!schedulerRunning) return;
     if (schedulerActiveDownloadIds.length === 0) return;
     clearPendingPostActionTimer();
     const settings = useSettingsStore.getState();
+    if (schedulerActiveDownloadIds.some(id => pendingScheduledStopIds.current.has(id))) return;
     const completionState = schedulerCompletionState(downloads, schedulerActiveDownloadIds);
     if (completionState === 'active') return;
 
