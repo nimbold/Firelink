@@ -20,8 +20,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # GitHub's macOS 27 arm64 public-preview image uses the xcode-27 label.
           - label: macOS-arm64
-            os: macos-26
+            os: xcode-27
             target: aarch64-apple-darwin
             bundles: app,dmg
             artifact: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
@@ -37,13 +38,13 @@ jobs:
             artifact: src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: recursive
           fetch-depth: 0
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.0.0
         with:
-          node-version: 22.12
+          node-version: 24.21.0
           cache: npm
       - name: Verify tagged release version
         if: github.event_name == 'push' || inputs.publish_release
@@ -57,7 +58,7 @@ jobs:
       - name: Verify non-publishing Companion package metadata
         if: github.event_name == 'workflow_dispatch' && !inputs.publish_release
         run: node scripts/verify-companion-release.js --allow-untagged
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable action branch (2026-09-29)
         with:
           targets: ${{ matrix.target }}
       - name: Install Linux dependencies
@@ -106,15 +107,16 @@ jobs:
       - name: Install Aria2 source build dependencies (Windows)
         id: aria2-msys
         if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           install: >-
             base-devel autoconf automake libtool gettext-devel pkgconf
-            mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-openssl mingw-w64-x86_64-libssh2
-            mingw-w64-x86_64-c-ares mingw-w64-x86_64-expat
-            mingw-w64-x86_64-sqlite3 mingw-w64-x86_64-zlib
+            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-libssh2 mingw-w64-ucrt-x86_64-c-ares
+            mingw-w64-ucrt-x86_64-expat mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-zlib
       - name: Fingerprint engine toolchain
         id: engine-toolchain
         if: runner.os != 'macOS'
@@ -127,7 +129,7 @@ jobs:
         if: runner.os != 'macOS'
         # v6.1.0 pinned to an immutable commit; release jobs never write cache
         # entries, so only trusted CI pushes can populate the shared payload.
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: src-tauri/provisioned-engines/${{ matrix.target }}
           key: firelink-engine-payload-v1-${{ matrix.target }}-${{ steps.engine-toolchain.outputs.fingerprint }}-${{ hashFiles('engine-sources.lock.json', 'engines.lock.json', 'scripts/aria2/**', 'scripts/engine-*.js', 'scripts/provision-engines.js', 'scripts/stage-engines.js', 'scripts/verify-binaries.js', 'scripts/aria2-route-contract.js', '.github/workflows/ci.yml', '.github/workflows/release.yml') }}
@@ -147,7 +149,7 @@ jobs:
           runner.os != 'macOS' &&
           (steps.engine-cache.outputs.cache-hit != 'true' ||
            steps.engine-cache-validation.outcome != 'success')
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: src-tauri/provisioned-engines/.aria2-cache/${{ matrix.target }}
           key: firelink-aria2-build-v1-${{ matrix.target }}-${{ steps.engine-toolchain.outputs.aria2-fingerprint }}
@@ -303,27 +305,27 @@ jobs:
           test -n "$ARIA2"
           node scripts/smoke-aria2-transfers.js --binary "$ARIA2"
           xvfb-run -a node scripts/smoke-packaged-app.js --executable "$RUNNER_TEMP/squashfs-root/AppRun"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: Firelink-${{ matrix.label }}-${{ github.ref_name }}
           path: ${{ matrix.artifact }}
           if-no-files-found: error
           retention-days: 3
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.1
         if: runner.os == 'Windows'
         with:
           name: Firelink-Windows-x64-portable-${{ github.ref_name }}
           path: ${{ runner.temp }}/firelink-portable/*.zip
           if-no-files-found: error
           retention-days: 3
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.1
         if: runner.os == 'Linux'
         with:
           name: Firelink-Linux-x64-Deb-${{ github.ref_name }}
           path: ${{ runner.temp }}/firelink-native-packages/deb/*.deb
           if-no-files-found: error
           retention-days: 3
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.1
         if: runner.os == 'Linux'
         with:
           name: Firelink-Linux-x64-RPM-${{ github.ref_name }}
@@ -342,8 +344,8 @@ jobs:
     needs: build
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.1
         with:
           path: release-assets
           merge-multiple: true
@@ -384,7 +386,7 @@ jobs:
           trap 'rm -f "$checksum_tmp"' EXIT
           find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > "$checksum_tmp"
           mv "$checksum_tmp" SHA256SUMS
-      - uses: softprops/action-gh-release@v3
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: release-assets/**
           body_path: release_notes.md

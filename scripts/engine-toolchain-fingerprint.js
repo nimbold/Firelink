@@ -16,15 +16,15 @@ const WINDOWS_PACKAGES = [
   'make',
   'patch',
   'binutils',
-  'mingw-w64-x86_64-gcc',
-  'mingw-w64-x86_64-binutils',
-  'mingw-w64-x86_64-pkgconf',
-  'mingw-w64-x86_64-openssl',
-  'mingw-w64-x86_64-libssh2',
-  'mingw-w64-x86_64-c-ares',
-  'mingw-w64-x86_64-expat',
-  'mingw-w64-x86_64-sqlite3',
-  'mingw-w64-x86_64-zlib',
+  'mingw-w64-ucrt-x86_64-gcc',
+  'mingw-w64-ucrt-x86_64-binutils',
+  'mingw-w64-ucrt-x86_64-pkgconf',
+  'mingw-w64-ucrt-x86_64-openssl',
+  'mingw-w64-ucrt-x86_64-libssh2',
+  'mingw-w64-ucrt-x86_64-c-ares',
+  'mingw-w64-ucrt-x86_64-expat',
+  'mingw-w64-ucrt-x86_64-sqlite3',
+  'mingw-w64-ucrt-x86_64-zlib',
 ];
 
 const LINUX_PACKAGES = [
@@ -79,6 +79,11 @@ function main() {
     if (!msysRoot) throw new Error('FIRELINK_MSYS2_ROOT is required on Windows.');
     const bash = path.join(msysRoot, 'usr', 'bin', 'bash.exe');
     const packages = WINDOWS_PACKAGES.join(' ');
+    const msystem = run(bash, ['-lc', 'printf "%s" "${MSYSTEM:-}"']);
+    if (msystem !== 'UCRT64') {
+      throw new Error(`Expected the MSYS2 UCRT64 environment, got ${msystem || 'unset'}.`);
+    }
+    records.push(`msystem=${msystem}`);
     records.push(`msys2-packages=${run(bash, ['-lc', `pacman -Q ${packages}`])}`);
   } else if (process.platform === 'linux') {
     records.push(`debian-packages=${run('dpkg-query', [

@@ -13,8 +13,8 @@ jobs:
     name: Rust advisory audit
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable action branch (2026-09-29)
       - name: Install locked cargo-audit
         run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Reject vulnerable resolved dependencies
@@ -22,15 +22,19 @@ jobs:
         run: cargo audit
 
   frontend:
-    name: Frontend checks
+    name: Frontend checks (Node ${{ matrix.node }})
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22.23.3, 24.21.0]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: recursive
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.0.0
         with:
-          node-version: 22.12
+          node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
       - run: node --test scripts/*.node-test.js
@@ -44,7 +48,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          # GitHub's macOS 27 arm64 public-preview image uses the xcode-27 label.
+          - os: xcode-27
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -52,18 +57,18 @@ jobs:
             target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: recursive
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.0.0
         with:
-          node-version: 22.12
+          node-version: 24.21.0
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable action branch (2026-09-29)
         with:
           targets: ${{ matrix.target }}
       - name: Cache Rust dependencies and build targets
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri -> target
       - name: Install Linux dependencies
@@ -136,15 +141,16 @@ jobs:
       - name: Install Aria2 source build dependencies (Windows)
         id: aria2-msys
         if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           install: >-
             base-devel autoconf automake libtool gettext-devel pkgconf
-            mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-openssl mingw-w64-x86_64-libssh2
-            mingw-w64-x86_64-c-ares mingw-w64-x86_64-expat
-            mingw-w64-x86_64-sqlite3 mingw-w64-x86_64-zlib
+            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-libssh2 mingw-w64-ucrt-x86_64-c-ares
+            mingw-w64-ucrt-x86_64-expat mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-zlib
       - name: Fingerprint engine toolchain
         id: engine-toolchain
         if: runner.os != 'macOS'
@@ -157,7 +163,7 @@ jobs:
         if: runner.os != 'macOS'
         # v6.1.0 pinned to an immutable commit; this cache is an optimization,
         # and a miss always falls back to source provisioning below.
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: src-tauri/provisioned-engines/${{ matrix.target }}
           # The target, toolchain fingerprint, lockfiles, provisioning code,
@@ -179,7 +185,7 @@ jobs:
           runner.os != 'macOS' &&
           (steps.engine-cache.outputs.cache-hit != 'true' ||
            steps.engine-cache-validation.outcome != 'success')
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: src-tauri/provisioned-engines/.aria2-cache/${{ matrix.target }}
           key: firelink-aria2-build-v1-${{ matrix.target }}-${{ steps.engine-toolchain.outputs.aria2-fingerprint }}
@@ -220,7 +226,7 @@ jobs:
           github.event_name == 'push' &&
           github.ref == 'refs/heads/main' &&
           steps.aria2-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: src-tauri/provisioned-engines/.aria2-cache/${{ matrix.target }}
           key: firelink-aria2-build-v1-${{ matrix.target }}-${{ steps.engine-toolchain.outputs.aria2-fingerprint }}
@@ -230,7 +236,7 @@ jobs:
           github.event_name == 'push' &&
           github.ref == 'refs/heads/main' &&
           steps.engine-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: src-tauri/provisioned-engines/${{ matrix.target }}
           key: firelink-engine-payload-v1-${{ matrix.target }}-${{ steps.engine-toolchain.outputs.fingerprint }}-${{ hashFiles('engine-sources.lock.json', 'engines.lock.json', 'scripts/aria2/**', 'scripts/engine-*.js', 'scripts/provision-engines.js', 'scripts/stage-engines.js', 'scripts/verify-binaries.js', 'scripts/aria2-route-contract.js', '.github/workflows/ci.yml', '.github/workflows/release.yml') }}

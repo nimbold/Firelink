@@ -228,7 +228,7 @@ try {
     const bash = isWindows ? path.join(process.env.FIRELINK_MSYS2_ROOT || 'C:/msys64', 'usr/bin/bash.exe') : 'bash';
     await execFileAsync(bash, [path.join(repoRoot, 'scripts/aria2/build.sh').replaceAll('\\', '/'), sourceRoot, patchFile], {
       signal: provisioningAbortController.signal,
-      env: { ...process.env, ...(isWindows ? { MSYSTEM: 'MINGW64' } : {}) },
+      env: { ...process.env, ...(isWindows ? { MSYSTEM: 'UCRT64' } : {}) },
       maxBuffer: 32 * 1024 * 1024,
       timeout: 30 * 60 * 1000,
     });

@@ -4,11 +4,16 @@ set -euo pipefail
 source_root="$1"
 patch_file="$2"
 if command -v cygpath >/dev/null 2>&1; then
+  if [[ "${MSYSTEM:-}" != "UCRT64" ]]; then
+    echo "Windows Aria2 builds require the MSYS2 UCRT64 environment (MSYSTEM=UCRT64)." >&2
+    exit 1
+  fi
   source_root="$(cygpath -u "$source_root")"
   patch_file="$(cygpath -u "$patch_file")"
-  export PATH="/mingw64/bin:/usr/bin:$PATH"
-  export ACLOCAL_PATH="/mingw64/share/aclocal:/usr/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}"
-  export PKG_CONFIG_PATH=/mingw64/lib/pkgconfig
+  mingw_prefix=/ucrt64
+  export PATH="$mingw_prefix/bin:/usr/bin:$PATH"
+  export ACLOCAL_PATH="$mingw_prefix/share/aclocal:/usr/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}"
+  export PKG_CONFIG_PATH="$mingw_prefix/lib/pkgconfig"
 fi
 
 copy_mingw_runtime_dependencies() {
@@ -20,7 +25,7 @@ copy_mingw_runtime_dependencies() {
 
   while IFS= read -r dependency; do
     [[ -z "$dependency" ]] && continue
-    source="/mingw64/bin/$dependency"
+    source="$mingw_prefix/bin/$dependency"
     if [[ ! -f "$source" ]]; then
       continue
     fi
@@ -69,7 +74,7 @@ if command -v cygpath >/dev/null 2>&1; then
   runtime_dir="$source_root/aria2-libs"
   mkdir -p "$runtime_dir"
   copy_mingw_runtime_dependencies "$source_root/firelink-build/src/aria2c.exe" "$runtime_dir"
-  if [[ -d /mingw64/lib/ossl-modules ]]; then
-    find /mingw64/lib/ossl-modules -maxdepth 1 -type f -iname '*.dll' -exec cp {} "$runtime_dir/" \;
+  if [[ -d "$mingw_prefix/lib/ossl-modules" ]]; then
+    find "$mingw_prefix/lib/ossl-modules" -maxdepth 1 -type f -iname '*.dll' -exec cp {} "$runtime_dir/" \;
   fi
 fi

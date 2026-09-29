@@ -30,8 +30,9 @@ Aria2 allocation telemetry is a required bundle capability. Windows and Linux
 provisioning now builds the checksum-pinned upstream source archive with
 `scripts/aria2/firelink.patch`; this patch also retains Firelink's native DNS,
 network target policy, and Torrent routing changes. CI installs the compiler
-and static-library prerequisites. Windows uses the MSYS2 installation returned
-by the setup action (`FIRELINK_MSYS2_ROOT`, default `C:/msys64` for local builds).
+and static-library prerequisites. Windows uses the MSYS2 UCRT64 environment,
+supported by Firelink's Windows 10+ target and returned by the setup action
+(`FIRELINK_MSYS2_ROOT`, default `C:/msys64` for local builds).
 The patch checksum is recorded in both source and payload provenance. Never
 replace these builds with stock Aria2 archives: package verification requires
 `firelinkAllocationTelemetry: true` from `aria2.getVersion`.
