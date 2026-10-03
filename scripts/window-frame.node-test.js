@@ -5,6 +5,8 @@ import test from 'node:test';
 const windowStyles = fs.readFileSync('src/index.css', 'utf8');
 const propertiesWindowSource = fs.readFileSync('src-tauri/src/properties_window.rs', 'utf8');
 const mainWindowSource = fs.readFileSync('src-tauri/src/lib.rs', 'utf8');
+const cargoManifest = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
+const tauriConfiguration = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
 const windowsConfiguration = JSON.parse(
   fs.readFileSync('src-tauri/tauri.windows.conf.json', 'utf8')
 );
@@ -38,6 +40,22 @@ test('Windows native shadows remain disabled for the main and Properties windows
   assert.match(
     propertiesWindowSource,
     /#\[cfg\(target_os = "windows"\)\]\s*let builder = builder\.transparent\(true\)\.shadow\(false\);/
+  );
+});
+
+test('macOS Properties transparency uses a Tauri baseline that no longer needs the private API feature', () => {
+  const version = cargoManifest.match(/^tauri\s*=\s*\{\s*version\s*=\s*"(\d+)\.(\d+)\.(\d+)"/m);
+  assert.ok(version, 'Tauri dependency must declare a three-part minimum version');
+  const [, major, minor, patch] = version.map(Number);
+  assert.ok(
+    major > 2 || (major === 2 && (minor > 12 || (minor === 12 && patch >= 1))),
+    'macOS transparency without macos-private-api requires Tauri 2.12.1 or newer'
+  );
+  assert.doesNotMatch(cargoManifest, /macos-private-api/);
+  assert.equal(tauriConfiguration.app.macOSPrivateApi, undefined);
+  assert.match(
+    propertiesWindowSource,
+    /#\[cfg\(target_os = "macos"\)\]\s*let builder = builder\.transparent\(true\)/
   );
 });
 
