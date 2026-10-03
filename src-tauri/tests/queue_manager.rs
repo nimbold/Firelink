@@ -39,6 +39,12 @@ struct DelayedAria2Spawner {
     remove_uri_calls: AtomicUsize,
 }
 
+struct GatedAria2Spawner {
+    add_uri_started: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release_add_uri: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    add_uri_calls: AtomicUsize,
+}
+
 struct BlockingAria2Spawner {
     first_started: tokio::sync::Notify,
     second_started: tokio::sync::Notify,
@@ -99,6 +105,19 @@ impl DelayedAria2Spawner {
             gid_tx: tokio::sync::Mutex::new(Some(gid_tx)),
             add_uri_calls: AtomicUsize::new(0),
             remove_uri_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl GatedAria2Spawner {
+    fn new(
+        add_uri_started: tokio::sync::oneshot::Sender<()>,
+        release_add_uri: tokio::sync::oneshot::Receiver<()>,
+    ) -> Self {
+        Self {
+            add_uri_started: tokio::sync::Mutex::new(Some(add_uri_started)),
+            release_add_uri: tokio::sync::Mutex::new(Some(release_add_uri)),
+            add_uri_calls: AtomicUsize::new(0),
         }
     }
 }
@@ -167,6 +186,35 @@ impl SidecarSpawner for DelayedAria2Spawner {
 
     async fn run_media(&self, _id: &str, _payload: &SpawnPayload, _generation: u64) -> Result<(), String> {
         unreachable!("media is not used by delayed aria2 tests")
+    }
+}
+
+#[async_trait::async_trait]
+impl SidecarSpawner for GatedAria2Spawner {
+    async fn add_uri(&self, _id: &str, _payload: &SpawnPayload) -> Result<String, String> {
+        let call = self.add_uri_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(started) = self.add_uri_started.lock().await.take() {
+            let _ = started.send(());
+        }
+        if let Some(release) = self.release_add_uri.lock().await.take() {
+            release
+                .await
+                .map_err(|_| "test did not release the addUri gate".to_string())?;
+        }
+        Ok(format!("gated-gid-{call}"))
+    }
+
+    async fn remove_uri(&self, _gid: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn run_media(
+        &self,
+        _id: &str,
+        _payload: &SpawnPayload,
+        _generation: u64,
+    ) -> Result<(), String> {
+        unreachable!("media is not used by gated aria2 tests")
     }
 }
 
@@ -2445,7 +2493,7 @@ async fn stale_retry_worker_cannot_reenter_after_new_control_epoch() {
 async fn completion_event_for_retrying_gid_cannot_release_new_lifecycle_permit() {
     use firelink_lib::queue::PendingOutcome;
 
-    let (mgr, spawner) = make_manager(1);
+    let (mgr, _spawner) = make_manager(1);
     let manager = Arc::new(mgr);
     let mut task = aria2_task("retry-complete-race");
     task.payload.max_tries = Some(1);
@@ -2455,7 +2503,18 @@ async fn completion_event_for_retrying_gid_cannot_release_new_lifecycle_permit()
         let manager = Arc::clone(&manager);
         tokio::spawn(async move { manager.run_dispatcher().await })
     };
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if manager.aria2_gid_for_download("retry-complete-race").as_deref()
+                == Some("gid-1")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initial transfer should own its GID before terminal events are injected");
     manager
         .handle_aria2_event(
             "gid-1",
@@ -2470,23 +2529,46 @@ async fn completion_event_for_retrying_gid_cannot_release_new_lifecycle_permit()
     assert_eq!(
         manager.available_permits(),
         0,
-        "a duplicate completion for the retrying gid must not free the permit"
+        "a duplicate completion for the retrying GID must not free the permit"
     );
 
     timeout(Duration::from_secs(4), async {
         loop {
-            if spawner.add_uri_calls.load(Ordering::SeqCst) >= 2 {
+            if manager.aria2_gid_for_download("retry-complete-race").as_deref()
+                == Some("gid-2")
+            {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("retry should create the next gid");
+    .expect("retry should install the replacement GID before accepting its completion");
+    manager
+        .handle_aria2_event("gid-1", PendingOutcome::Complete)
+        .await;
+    assert_eq!(
+        manager.available_permits(),
+        0,
+        "a terminal event from the retired GID must not release the replacement lifecycle permit"
+    );
     manager
         .handle_aria2_event("gid-2", PendingOutcome::Complete)
         .await;
-    assert_eq!(manager.available_permits(), 1);
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if manager.available_permits() == 1
+                && manager
+                    .aria2_gid_for_download("retry-complete-race")
+                    .is_none()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("replacement completion should retire its mapping and release the parked permit");
     dispatcher.abort();
 }
 
@@ -2648,37 +2730,58 @@ async fn transient_error_buffered_before_gid_mapping_still_retries() {
 async fn gid_completion_before_store_buffers_and_reconciles() {
     use firelink_lib::queue::PendingOutcome;
 
-    let (mgr, _spawner) = make_manager(1);
-    let mgr_arc = Arc::new(mgr);
-    mgr_arc.push(aria2_task("a")).await.unwrap();
-    let handle = {
-        let mgr_clone = Arc::clone(&mgr_arc);
-        tokio::spawn(async move { mgr_clone.run_dispatcher().await })
+    let app = mock_builder()
+        .build(mock_context(noop_assets()))
+        .expect("mock app");
+    let (add_uri_started_tx, add_uri_started_rx) = tokio::sync::oneshot::channel();
+    let (release_add_uri_tx, release_add_uri_rx) = tokio::sync::oneshot::channel();
+    let spawner = Arc::new(GatedAria2Spawner::new(
+        add_uri_started_tx,
+        release_add_uri_rx,
+    ));
+    let manager = Arc::new(QueueManager::test_new(
+        app.handle().clone(),
+        1,
+        spawner.clone(),
+    ));
+    manager.push(aria2_task("a")).await.unwrap();
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
     };
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    timeout(Duration::from_secs(1), add_uri_started_rx)
+        .await
+        .expect("addUri should be in flight before its GID is stored")
+        .expect("dispatcher should report the addUri start");
 
-    // The dispatcher called add_uri and got "gid-1", then remember_gid stored it.
-    // Simulate a completion arriving for an UNKNOWN gid first:
-    mgr_arc
-        .handle_aria2_event("gid-unknown", PendingOutcome::Complete)
+    // A real completion can arrive after Aria2 accepts the transfer but before
+    // the dispatcher installs its GID mapping. Hold addUri in flight so this
+    // ordering is deterministic and the event targets the eventual GID.
+    manager
+        .handle_aria2_event("gated-gid-1", PendingOutcome::Complete)
         .await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    // Permit still parked (gid-unknown is not ours).
-    assert_eq!(mgr_arc.available_permits(), 0);
+    assert_eq!(manager.available_permits(), 0);
+    assert!(manager.aria2_gid_for_download("a").is_none());
 
-    // Now store gid-1 -> "a" via remember_gid. The buffered gid-unknown stays
-    // buffered (different gid). Release via the real gid:
-    mgr_arc.release_permit("a").await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(mgr_arc.available_permits(), 1);
+    release_add_uri_tx
+        .send(())
+        .expect("release the controlled addUri response");
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if manager.available_permits() == 1
+                && manager.aria2_gid_for_download("a").is_none()
+                && !manager.has_active_permit("a").await
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("buffered completion should be reconciled after the matching GID is stored");
+    assert_eq!(spawner.add_uri_calls.load(Ordering::SeqCst), 1);
 
-    // Push another aria2 task; its gid will be "gid-2".
-    mgr_arc.push(aria2_task("b")).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    mgr_arc.release_permit("b").await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    handle.abort();
+    dispatcher.abort();
 }
 
 #[tokio::test]
