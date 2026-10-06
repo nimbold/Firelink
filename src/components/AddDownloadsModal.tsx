@@ -1353,7 +1353,10 @@ export const AddDownloadsModal = () => {
         }
         ++locationResolutionRequestRef.current;
         const approvedPath = await useSettingsStore.getState().approveDownloadRoot(result.path);
-        if (!isCurrentPromptRequest()) return;
+        if (!isCurrentPromptRequest()) {
+          finishPromptRequest();
+          return;
+        }
         finalLocation = approvedPath;
         useSharedDestination = true;
         setSaveLocation(approvedPath);
@@ -1363,7 +1366,10 @@ export const AddDownloadsModal = () => {
           pendingLastUsedDownloadDirectoryRef.current = approvedPath;
         }
       } catch (e) {
-        if (!isCurrentPromptRequest()) return;
+        if (!isCurrentPromptRequest()) {
+          finishPromptRequest();
+          return;
+        }
         console.error("Failed to select folder:", e);
         addToast({
           message: e instanceof Error ? e.message : String(e),
