@@ -14,10 +14,12 @@ import {
   deriveBatchFolderName,
   formatDerivedCategoryPath,
   normalizeCategorySubfolder,
+  normalizeFolderPickerSelection,
   normalizeDownloadLocationSettings,
   resolveInitialAddWindowLocation,
   resolveAddWindowPromptOptions,
   resolveAddWindowPromptRoot,
+  runAddWindowFolderPrompt,
   resolveCategoryDestination,
   resolveSubfolderDestination,
   sanitizeBatchFolderName,
@@ -307,6 +309,96 @@ describe('download locations', () => {
       });
       expect(root).toBe('/Users/test/Downloads');
       expect(resolveCategory).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('normalizeFolderPickerSelection', () => {
+    it('accepts a selected path without changing legal whitespace in its name', () => {
+      const path = '/Users/test/Downloads/ Folder with trailing space ';
+      expect(normalizeFolderPickerSelection(path)).toBe(path);
+      expect(normalizeFolderPickerSelection([path])).toBe(path);
+    });
+
+    it('treats empty and whitespace-only picker results as cancellation', () => {
+      expect(normalizeFolderPickerSelection(null)).toBeNull();
+      expect(normalizeFolderPickerSelection([])).toBeNull();
+      expect(normalizeFolderPickerSelection('   ')).toBeNull();
+      expect(normalizeFolderPickerSelection(['', ' \t '])).toBeNull();
+    });
+  });
+
+  describe('runAddWindowFolderPrompt', () => {
+    const makeArgs = (
+      overrides: Partial<Parameters<typeof runAddWindowFolderPrompt>[0]> = {}
+    ): Parameters<typeof runAddWindowFolderPrompt>[0] => ({
+      items: [{ file: 'video1.mp4' }, { file: 'video2.mp4' }],
+      saveLocation: '/Users/test/Downloads',
+      isSaveLocationManual: false,
+      isCurrentRequest: () => true,
+      resolveCategoryPath: vi.fn().mockResolvedValue('/Users/test/Downloads/Movies'),
+      expandPath: vi.fn(async path => path),
+      openFolder: vi.fn().mockResolvedValue('/Users/test/Movies'),
+      ...overrides
+    });
+
+    it('opens one shared folder prompt for the selected batch', async () => {
+      const args = makeArgs();
+      const result = await runAddWindowFolderPrompt(args);
+
+      expect(args.openFolder).toHaveBeenCalledTimes(1);
+      expect(args.openFolder).toHaveBeenCalledWith({
+        title: 'Choose download folder',
+        defaultPath: '/Users/test/Downloads'
+      });
+      expect(result).toEqual({ status: 'selected', path: '/Users/test/Movies' });
+    });
+
+    it('does not open a folder picker if the request becomes stale while resolving its root', async () => {
+      let current = true;
+      let resolveCategoryPath!: (path: string) => void;
+      const rootPromise = new Promise<string>(resolve => {
+        resolveCategoryPath = resolve;
+      });
+      const args = makeArgs({
+        items: [{ file: 'video.mp4' }],
+        isCurrentRequest: () => current,
+        resolveCategoryPath: () => rootPromise
+      });
+      const pending = runAddWindowFolderPrompt(args);
+
+      current = false;
+      resolveCategoryPath('/Users/test/Downloads/Movies');
+
+      expect(await pending).toEqual({ status: 'stale' });
+      expect(args.openFolder).not.toHaveBeenCalled();
+    });
+
+    it('does not open a folder picker if the request becomes stale while expanding its default path', async () => {
+      let current = true;
+      const args = makeArgs({
+        isSaveLocationManual: true,
+        isCurrentRequest: () => current,
+        expandPath: async path => {
+          current = false;
+          return path;
+        }
+      });
+
+      expect(await runAddWindowFolderPrompt(args)).toEqual({ status: 'stale' });
+      expect(args.openFolder).not.toHaveBeenCalled();
+    });
+
+    it('discards a folder result when the request becomes stale while the picker is open', async () => {
+      let current = true;
+      const args = makeArgs({
+        isCurrentRequest: () => current,
+        openFolder: async () => {
+          current = false;
+          return '/Users/test/Movies';
+        }
+      });
+
+      expect(await runAddWindowFolderPrompt(args)).toEqual({ status: 'stale' });
     });
   });
 });

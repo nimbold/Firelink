@@ -26,8 +26,7 @@ import {
   sanitizeBatchFolderName,
   downloadLocationEquals,
   resolveInitialAddWindowLocation,
-  resolveAddWindowPromptOptions,
-  resolveAddWindowPromptRoot
+  runAddWindowFolderPrompt
 } from '../utils/downloadLocations';
 import { getPlatformInfo } from '../utils/platform';
 import { isTransferLocked } from '../utils/downloadActions';
@@ -442,6 +441,11 @@ export const AddDownloadsModal = () => {
     if (!isAddModalOpen) {
       modalSessionRef.current = false;
       ++folderPickerRequestRef.current;
+      if (isSubmittingRef.current) {
+        isSubmittingRef.current = false;
+        setIsSubmitting(false);
+        flushQueuedExtensionHandoffs();
+      }
       pendingLastUsedDownloadDirectoryRef.current = null;
       setUrls('');
       setPlaylistExpansions({});
@@ -544,7 +548,8 @@ export const AddDownloadsModal = () => {
     baseDownloadFolder,
     rememberLastUsedDownloadDirectory,
     lastUsedDownloadDirectory,
-    perServerConnections
+    perServerConnections,
+    flushQueuedExtensionHandoffs
   ]);
 
   useEffect(() => {
@@ -1302,77 +1307,70 @@ export const AddDownloadsModal = () => {
     isSubmittingRef.current = true;
     setIsSubmitting(true);
     setPendingAddModalBusy(true);
-    ++folderPickerRequestRef.current;
+    const promptRequestId = ++folderPickerRequestRef.current;
+    const promptRequestVersion = useDownloadStore.getState().pendingAddRequestVersion;
+    const ownsPromptRequest = () => promptRequestId === folderPickerRequestRef.current;
+    const isCurrentPromptRequest = () => {
+      const currentStore = useDownloadStore.getState();
+      return addModalOpenRef.current
+        && currentStore.isAddModalOpen
+        && currentStore.pendingAddRequestVersion === promptRequestVersion
+        && ownsPromptRequest();
+    };
+    const finishPromptRequest = () => {
+      // A stale prompt must not clear the busy state owned by a newer modal
+      // submission. Modal closure performs its own cleanup in the effect above.
+      if (!ownsPromptRequest()) return;
+      pendingLastUsedDownloadDirectoryRef.current = null;
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
+      flushQueuedExtensionHandoffs();
+    };
     let finalLocation = saveLocation;
     let useSharedDestination = isSaveLocationManual;
     const destinationOverrides: Record<string | number, string> = {};
     const settings = useSettingsStore.getState();
     const platform = await getPlatformInfo().catch(() => ({ os: 'unknown' }));
     if (settings.askWhereToSaveEachFile && parsedItems.length > 0) {
-      const promptRequestId = folderPickerRequestRef.current;
       try {
-        const suggestedLocation = await resolveAddWindowPromptRoot({
+        const result = await runAddWindowFolderPrompt({
           items: parsedItems,
           saveLocation: finalLocation,
           isSaveLocationManual,
-          resolveCategoryPath: (fileName, isTorrent) => categoryLocationForFile(fileName, isTorrent)
+          isCurrentRequest: isCurrentPromptRequest,
+          resolveCategoryPath: (fileName, isTorrent) => categoryLocationForFile(fileName, isTorrent),
+          expandPath: expandTilde,
+          openFolder: ({ title, defaultPath }) => open({
+            directory: true,
+            multiple: false,
+            title,
+            defaultPath
+          })
         });
-        const promptOptions = resolveAddWindowPromptOptions(parsedItems);
-        const selected = await open({
-          directory: true,
-          multiple: false,
-          title: promptOptions.title,
-          defaultPath: await expandTilde(suggestedLocation)
-        });
-        if (!addModalOpenRef.current || promptRequestId !== folderPickerRequestRef.current) {
-          pendingLastUsedDownloadDirectoryRef.current = null;
-          isSubmittingRef.current = false;
-          setIsSubmitting(false);
-          flushQueuedExtensionHandoffs();
+        if (result.status !== 'selected') {
+          finishPromptRequest();
           return;
         }
-        const rawSelected: unknown = selected;
-        const chosenPath = typeof rawSelected === 'string'
-          ? rawSelected.trim()
-          : Array.isArray(rawSelected) && typeof rawSelected[0] === 'string'
-            ? rawSelected[0].trim()
-            : null;
-        if (chosenPath) {
-          ++locationResolutionRequestRef.current;
-          const approvedPath = await useSettingsStore.getState().approveDownloadRoot(chosenPath);
-          if (!addModalOpenRef.current || promptRequestId !== folderPickerRequestRef.current) {
-            pendingLastUsedDownloadDirectoryRef.current = null;
-            isSubmittingRef.current = false;
-            setIsSubmitting(false);
-            flushQueuedExtensionHandoffs();
-            return;
-          }
-          finalLocation = approvedPath;
-          useSharedDestination = true;
-          setSaveLocation(approvedPath);
-          setIsSaveLocationManual(true);
-          const currentSettings = useSettingsStore.getState();
-          if (currentSettings.rememberLastUsedDownloadDirectory) {
-            pendingLastUsedDownloadDirectoryRef.current = approvedPath;
-          }
-        } else {
-          pendingLastUsedDownloadDirectoryRef.current = null;
-          isSubmittingRef.current = false;
-          setIsSubmitting(false);
-          flushQueuedExtensionHandoffs();
-          return;
+        ++locationResolutionRequestRef.current;
+        const approvedPath = await useSettingsStore.getState().approveDownloadRoot(result.path);
+        if (!isCurrentPromptRequest()) return;
+        finalLocation = approvedPath;
+        useSharedDestination = true;
+        setSaveLocation(approvedPath);
+        setIsSaveLocationManual(true);
+        const currentSettings = useSettingsStore.getState();
+        if (currentSettings.rememberLastUsedDownloadDirectory) {
+          pendingLastUsedDownloadDirectoryRef.current = approvedPath;
         }
       } catch (e) {
+        if (!isCurrentPromptRequest()) return;
         console.error("Failed to select folder:", e);
         addToast({
           message: e instanceof Error ? e.message : String(e),
           variant: 'error',
           isActionable: true
         });
-        pendingLastUsedDownloadDirectoryRef.current = null;
-        isSubmittingRef.current = false;
-        setIsSubmitting(false);
-        flushQueuedExtensionHandoffs();
+        finishPromptRequest();
         return;
       }
     }

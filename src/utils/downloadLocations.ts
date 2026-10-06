@@ -161,6 +161,15 @@ export interface AddWindowFolderPromptOptions {
   title: string;
 }
 
+export interface AddWindowFolderPickerOptions extends AddWindowFolderPromptOptions {
+  defaultPath: string;
+}
+
+export type AddWindowFolderPromptResult =
+  | { status: 'selected'; path: string }
+  | { status: 'cancelled' }
+  | { status: 'stale' };
+
 export const resolveAddWindowPromptOptions = (
   items: Array<{ file: string; selected?: boolean }>
 ): AddWindowFolderPromptOptions => {
@@ -191,6 +200,58 @@ export const resolveAddWindowPromptRoot = async ({
     return resolveCategoryPath(firstActiveItem.file.trim(), firstActiveItem.isTorrent === true);
   }
   return saveLocation;
+};
+
+export const normalizeFolderPickerSelection = (selection: unknown): string | null => {
+  const candidates = Array.isArray(selection) ? selection : [selection];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim().length > 0) {
+      // Whitespace is useful to distinguish a blank result from a real path,
+      // but it is also legal in directory names and must not be removed.
+      return candidate;
+    }
+  }
+  return null;
+};
+
+export const runAddWindowFolderPrompt = async ({
+  items,
+  saveLocation,
+  isSaveLocationManual,
+  isCurrentRequest,
+  resolveCategoryPath,
+  expandPath,
+  openFolder
+}: {
+  items: Array<{ file: string; selected?: boolean; isTorrent?: boolean }>;
+  saveLocation: string;
+  isSaveLocationManual: boolean;
+  isCurrentRequest: () => boolean;
+  resolveCategoryPath: (fileName: string, isTorrent?: boolean) => Promise<string>;
+  expandPath: (path: string) => Promise<string>;
+  openFolder: (options: AddWindowFolderPickerOptions) => Promise<unknown>;
+}): Promise<AddWindowFolderPromptResult> => {
+  if (!isCurrentRequest()) return { status: 'stale' };
+
+  const suggestedLocation = await resolveAddWindowPromptRoot({
+    items,
+    saveLocation,
+    isSaveLocationManual,
+    resolveCategoryPath
+  });
+  if (!isCurrentRequest()) return { status: 'stale' };
+
+  const defaultPath = await expandPath(suggestedLocation);
+  if (!isCurrentRequest()) return { status: 'stale' };
+
+  const selection = await openFolder({
+    ...resolveAddWindowPromptOptions(items),
+    defaultPath
+  });
+  if (!isCurrentRequest()) return { status: 'stale' };
+
+  const path = normalizeFolderPickerSelection(selection);
+  return path ? { status: 'selected', path } : { status: 'cancelled' };
 };
 
 const stringRecord = (value: unknown): Record<string, string> => {
