@@ -25,7 +25,9 @@ import {
   resolveSubfolderDestination,
   sanitizeBatchFolderName,
   downloadLocationEquals,
-  resolveInitialAddWindowLocation
+  resolveInitialAddWindowLocation,
+  resolveAddWindowPromptOptions,
+  resolveAddWindowPromptRoot
 } from '../utils/downloadLocations';
 import { getPlatformInfo } from '../utils/platform';
 import { isTransferLocked } from '../utils/downloadActions';
@@ -1307,50 +1309,71 @@ export const AddDownloadsModal = () => {
     const settings = useSettingsStore.getState();
     const platform = await getPlatformInfo().catch(() => ({ os: 'unknown' }));
     if (settings.askWhereToSaveEachFile && parsedItems.length > 0) {
-      for (const [index, item] of parsedItems.entries()) {
-        if (item.selected === false) continue;
-        try {
-          const suggestedLocation = await destinationForFile(
-            item.file,
-            finalLocation,
-            isSaveLocationManual,
-            undefined,
-            item.isTorrent === true
-          );
-          const selected = await open({
-            directory: true,
-            multiple: false,
-            title: `Choose a folder for ${item.file}`,
-            defaultPath: await expandTilde(suggestedLocation)
-          });
-          if (selected && typeof selected === 'string') {
-            const approvedPath = await useSettingsStore.getState().approveDownloadRoot(selected);
-            destinationOverrides[index] = approvedPath;
-            destinationOverrides[item.id] = approvedPath;
-            const currentSettings = useSettingsStore.getState();
-            if (currentSettings.rememberLastUsedDownloadDirectory) {
-              pendingLastUsedDownloadDirectoryRef.current = approvedPath;
-            }
-          } else {
-            pendingLastUsedDownloadDirectoryRef.current = null;
-            isSubmittingRef.current = false;
-            setIsSubmitting(false);
-            flushQueuedExtensionHandoffs();
-            return;
-          }
-        } catch (e) {
-          console.error("Failed to select folder:", e);
-          addToast({
-            message: e instanceof Error ? e.message : String(e),
-            variant: 'error',
-            isActionable: true
-          });
+      const promptRequestId = folderPickerRequestRef.current;
+      try {
+        const suggestedLocation = await resolveAddWindowPromptRoot({
+          items: parsedItems,
+          saveLocation: finalLocation,
+          isSaveLocationManual,
+          resolveCategoryPath: (fileName, isTorrent) => categoryLocationForFile(fileName, isTorrent)
+        });
+        const promptOptions = resolveAddWindowPromptOptions(parsedItems);
+        const selected = await open({
+          directory: true,
+          multiple: false,
+          title: promptOptions.title,
+          defaultPath: await expandTilde(suggestedLocation)
+        });
+        if (!addModalOpenRef.current || promptRequestId !== folderPickerRequestRef.current) {
           pendingLastUsedDownloadDirectoryRef.current = null;
           isSubmittingRef.current = false;
           setIsSubmitting(false);
           flushQueuedExtensionHandoffs();
           return;
         }
+        const rawSelected: unknown = selected;
+        const chosenPath = typeof rawSelected === 'string'
+          ? rawSelected.trim()
+          : Array.isArray(rawSelected) && typeof rawSelected[0] === 'string'
+            ? rawSelected[0].trim()
+            : null;
+        if (chosenPath) {
+          ++locationResolutionRequestRef.current;
+          const approvedPath = await useSettingsStore.getState().approveDownloadRoot(chosenPath);
+          if (!addModalOpenRef.current || promptRequestId !== folderPickerRequestRef.current) {
+            pendingLastUsedDownloadDirectoryRef.current = null;
+            isSubmittingRef.current = false;
+            setIsSubmitting(false);
+            flushQueuedExtensionHandoffs();
+            return;
+          }
+          finalLocation = approvedPath;
+          useSharedDestination = true;
+          setSaveLocation(approvedPath);
+          setIsSaveLocationManual(true);
+          const currentSettings = useSettingsStore.getState();
+          if (currentSettings.rememberLastUsedDownloadDirectory) {
+            pendingLastUsedDownloadDirectoryRef.current = approvedPath;
+          }
+        } else {
+          pendingLastUsedDownloadDirectoryRef.current = null;
+          isSubmittingRef.current = false;
+          setIsSubmitting(false);
+          flushQueuedExtensionHandoffs();
+          return;
+        }
+      } catch (e) {
+        console.error("Failed to select folder:", e);
+        addToast({
+          message: e instanceof Error ? e.message : String(e),
+          variant: 'error',
+          isActionable: true
+        });
+        pendingLastUsedDownloadDirectoryRef.current = null;
+        isSubmittingRef.current = false;
+        setIsSubmitting(false);
+        flushQueuedExtensionHandoffs();
+        return;
       }
     }
 

@@ -157,6 +157,42 @@ export const resolveInitialAddWindowLocation = (
   };
 };
 
+export interface AddWindowFolderPromptOptions {
+  title: string;
+}
+
+export const resolveAddWindowPromptOptions = (
+  items: Array<{ file: string; selected?: boolean }>
+): AddWindowFolderPromptOptions => {
+  const activeItems = items.filter(item => item.selected !== false);
+  const firstActiveItem = activeItems[0] ?? items[0];
+  const fileStem = firstActiveItem?.file?.trim();
+  const title = activeItems.length === 1 && fileStem
+    ? `Choose a folder for ${fileStem}`
+    : 'Choose download folder';
+  return { title };
+};
+
+export const resolveAddWindowPromptRoot = async ({
+  items,
+  saveLocation,
+  isSaveLocationManual,
+  resolveCategoryPath
+}: {
+  items: Array<{ file: string; selected?: boolean; isTorrent?: boolean }>;
+  saveLocation: string;
+  isSaveLocationManual: boolean;
+  resolveCategoryPath: (fileName: string, isTorrent?: boolean) => Promise<string>;
+}): Promise<string> => {
+  if (isSaveLocationManual) return saveLocation;
+  const activeItems = items.filter(item => item.selected !== false);
+  const firstActiveItem = activeItems[0] ?? items[0];
+  if (activeItems.length === 1 && firstActiveItem?.file?.trim()) {
+    return resolveCategoryPath(firstActiveItem.file.trim(), firstActiveItem.isTorrent === true);
+  }
+  return saveLocation;
+};
+
 const stringRecord = (value: unknown): Record<string, string> => {
   if (!value || typeof value !== 'object') return {};
   return Object.fromEntries(

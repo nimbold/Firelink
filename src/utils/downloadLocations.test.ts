@@ -16,6 +16,8 @@ import {
   normalizeCategorySubfolder,
   normalizeDownloadLocationSettings,
   resolveInitialAddWindowLocation,
+  resolveAddWindowPromptOptions,
+  resolveAddWindowPromptRoot,
   resolveCategoryDestination,
   resolveSubfolderDestination,
   sanitizeBatchFolderName,
@@ -207,5 +209,104 @@ describe('download locations', () => {
     )).toBe('Video Files');
     expect(subfolderFromDerivedCategoryPath('/Volumes/Media', '/Users/test/Downloads'))
       .toBeNull();
+  });
+
+  describe('resolveAddWindowPromptOptions', () => {
+    it('uses a specific file title when a single item is present and selected', () => {
+      const options = resolveAddWindowPromptOptions([{ file: 'archive.tar.gz' }]);
+      expect(options.title).toBe('Choose a folder for archive.tar.gz');
+    });
+
+    it('uses generic folder title when multiple active items are present', () => {
+      const options = resolveAddWindowPromptOptions([
+        { file: 'video1.mp4' },
+        { file: 'video2.mp4' },
+      ]);
+      expect(options.title).toBe('Choose download folder');
+    });
+
+    it('uses specific file title when only one item remains selected among multiple items', () => {
+      const options = resolveAddWindowPromptOptions([
+        { file: 'video1.mp4', selected: false },
+        { file: 'video2.mp4', selected: true },
+        { file: 'video3.mp4', selected: false },
+      ]);
+      expect(options.title).toBe('Choose a folder for video2.mp4');
+    });
+
+    it('falls back cleanly to generic folder title when no items are active', () => {
+      const options = resolveAddWindowPromptOptions([]);
+      expect(options.title).toBe('Choose download folder');
+    });
+
+    it('falls back to generic folder title when active item file name is empty or whitespace', () => {
+      const options = resolveAddWindowPromptOptions([{ file: '   ' }]);
+      expect(options.title).toBe('Choose download folder');
+    });
+  });
+
+  describe('resolveAddWindowPromptRoot', () => {
+    it('returns saveLocation directly when save location is marked manual', async () => {
+      const resolveCategory = vi.fn().mockResolvedValue('/Users/test/Downloads/Video');
+      const root = await resolveAddWindowPromptRoot({
+        items: [{ file: 'clip.mp4' }],
+        saveLocation: '/Users/test/CustomFolder',
+        isSaveLocationManual: true,
+        resolveCategoryPath: resolveCategory
+      });
+      expect(root).toBe('/Users/test/CustomFolder');
+      expect(resolveCategory).not.toHaveBeenCalled();
+    });
+
+    it('resolves category path for single active item when not manual', async () => {
+      const resolveCategory = vi.fn().mockResolvedValue('/Users/test/Downloads/Video');
+      const root = await resolveAddWindowPromptRoot({
+        items: [{ file: 'clip.mp4', isTorrent: false }],
+        saveLocation: '/Users/test/Downloads',
+        isSaveLocationManual: false,
+        resolveCategoryPath: resolveCategory
+      });
+      expect(root).toBe('/Users/test/Downloads/Video');
+      expect(resolveCategory).toHaveBeenCalledWith('clip.mp4', false);
+    });
+
+    it('resolves category path for single selected item among multiple parsed items', async () => {
+      const resolveCategory = vi.fn().mockResolvedValue('/Users/test/Downloads/Torrents');
+      const root = await resolveAddWindowPromptRoot({
+        items: [
+          { file: 'ignored.mp4', selected: false },
+          { file: 'archive.torrent', selected: true, isTorrent: true }
+        ],
+        saveLocation: '/Users/test/Downloads',
+        isSaveLocationManual: false,
+        resolveCategoryPath: resolveCategory
+      });
+      expect(root).toBe('/Users/test/Downloads/Torrents');
+      expect(resolveCategory).toHaveBeenCalledWith('archive.torrent', true);
+    });
+
+    it('returns base saveLocation when multiple items are active to prevent category scatter', async () => {
+      const resolveCategory = vi.fn().mockResolvedValue('/Users/test/Downloads/Video');
+      const root = await resolveAddWindowPromptRoot({
+        items: [{ file: 'video1.mp4' }, { file: 'video2.mp4' }],
+        saveLocation: '/Users/test/Downloads',
+        isSaveLocationManual: false,
+        resolveCategoryPath: resolveCategory
+      });
+      expect(root).toBe('/Users/test/Downloads');
+      expect(resolveCategory).not.toHaveBeenCalled();
+    });
+
+    it('falls back to saveLocation when single item has empty file name', async () => {
+      const resolveCategory = vi.fn().mockResolvedValue('/Users/test/Downloads/Other');
+      const root = await resolveAddWindowPromptRoot({
+        items: [{ file: '   ' }],
+        saveLocation: '/Users/test/Downloads',
+        isSaveLocationManual: false,
+        resolveCategoryPath: resolveCategory
+      });
+      expect(root).toBe('/Users/test/Downloads');
+      expect(resolveCategory).not.toHaveBeenCalled();
+    });
   });
 });
