@@ -5,7 +5,10 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { collectRegularFiles, sha256 } from './engine-payload-integrity.js';
-import { normalizeAppRunPermissions, verifyAppRunPermissions } from './appimage-launcher-permissions.js';
+import {
+  normalizeAppRunPermissions,
+  verifySquashfsAppRunPermissions,
+} from './appimage-launcher-permissions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -83,6 +86,7 @@ function run(command, args, options = {}) {
     env: { ...process.env, ...options.env },
     stdio: options.stdio ?? 'inherit',
     encoding: options.stdio === 'pipe' ? 'utf8' : undefined,
+    maxBuffer: options.maxBuffer ?? 16 * 1024 * 1024,
   });
 
   if (result.error) {
@@ -100,6 +104,8 @@ function run(command, args, options = {}) {
     }
     fail(`${command} exited with status ${result.status}`);
   }
+
+  return options.stdio === 'pipe' ? result.stdout : undefined;
 }
 
 function main() {
@@ -147,6 +153,12 @@ function main() {
     },
   });
 
+  // The AppImage runtime's --appimage-extract creates directories as 0700 and
+  // does not restore their SquashFS modes. Inspect the image metadata directly
+  // so this check reflects the mounted AppImage rather than extraction policy.
+  const squashfsListing = run('unsquashfs', ['-lln', appImage], { stdio: 'pipe' });
+  verifySquashfsAppRunPermissions(squashfsListing, 'Repacked AppImage');
+
   const extractRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'firelink-appimage-'));
   try {
     fs.chmodSync(appImage, 0o755);
@@ -157,8 +169,6 @@ function main() {
     });
 
     const squashfsRoot = path.join(extractRoot, 'squashfs-root');
-    verifyAppRunPermissions(squashfsRoot, 'Repacked AppImage');
-
     const extractedPayload = path.join(squashfsRoot, 'usr', 'lib', 'Firelink', 'engine-dist', target);
     mustBeDirectory(extractedPayload, 'Extracted AppImage engine payload');
     validatePayloadManifest(extractedPayload, target, 'Extracted AppImage engine');

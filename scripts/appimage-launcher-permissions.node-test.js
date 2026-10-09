@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import {
   normalizeAppRunPermissions,
   verifyAppRunPermissions,
+  verifySquashfsAppRunPermissions,
 } from './appimage-launcher-permissions.js';
 
 function createAppDir() {
@@ -106,6 +107,50 @@ test('post-pack verification rejects an inaccessible AppDir root and AppRun hook
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+function squashfsListing(overrides = {}) {
+  const entries = {
+    'squashfs-root': 'drwxr-xr-x',
+    'squashfs-root/AppRun': '-rwxr-xr-x',
+    'squashfs-root/AppRun.wrapped': '-rwxr-xr-x',
+    'squashfs-root/apprun-hooks': 'drwxr-xr-x',
+    'squashfs-root/apprun-hooks/linuxdeploy-plugin-gtk.sh': '-rw-r--r--',
+    ...overrides,
+  };
+
+  return Object.entries(entries)
+    .filter(([, mode]) => mode !== null)
+    .map(([entry, mode]) => `${mode} 0/0 100 1970-01-01 00:00 ${entry}`)
+    .join('\n');
+}
+
+test('checks launcher permissions from stored SquashFS metadata', () => {
+  assert.equal(verifySquashfsAppRunPermissions(squashfsListing()), true);
+});
+
+test('rejects inaccessible stored directories and launch files', () => {
+  assert.throws(
+    () => verifySquashfsAppRunPermissions(squashfsListing({ 'squashfs-root': 'drwx------' })),
+    /AppDir root.*found mode rwx------/,
+  );
+  assert.throws(
+    () => verifySquashfsAppRunPermissions(squashfsListing({ 'squashfs-root/apprun-hooks': 'drwx------' })),
+    /hook directory.*found mode rwx------/,
+  );
+  assert.throws(
+    () => verifySquashfsAppRunPermissions(squashfsListing({ 'squashfs-root/AppRun.wrapped': '-rwxr-----' })),
+    /AppRun\.wrapped.*found mode rwxr-----/,
+  );
+});
+
+test('fails closed for missing or non-regular SquashFS launcher entries', () => {
+  const listing = squashfsListing({ 'squashfs-root/AppRun.wrapped': 'lrwxrwxrwx' });
+  assert.throws(() => verifySquashfsAppRunPermissions(listing), /AppRun\.wrapped.*wrong SquashFS file type/);
+  assert.throws(
+    () => verifySquashfsAppRunPermissions(squashfsListing({ 'squashfs-root/AppRun': null })),
+    /AppRun .*must appear exactly once/,
+  );
 });
 
 test('rejects an AppRun.wrapped symlink instead of chmodding its target', { skip: process.platform === 'win32' }, () => {

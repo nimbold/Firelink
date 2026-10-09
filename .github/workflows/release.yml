@@ -98,6 +98,7 @@ jobs:
             rpm \
             cpio \
             libarchive-tools \
+            squashfs-tools \
             desktop-file-utils \
             xdg-utils
       - run: npm ci
@@ -190,13 +191,22 @@ jobs:
           # continuous currently targets 854e19e951900cf141245b384d45735942521abe.
           APPIMAGETOOL_URL: https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           APPIMAGETOOL_SHA256: 95cbe7cce9717fce90c484e34052ee7c7f1d7635b33c12525b4776826a7d29b6
+          # appimagetool otherwise downloads this mutable runtime during packaging.
+          # type2-runtime continuous currently targets 8f39b89e2ac31e1640b3d3f7e9a5108e6ce805fa.
+          APPIMAGETOOL_RUNTIME_URL: https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
+          APPIMAGETOOL_RUNTIME_SHA256: 156f4bdbde9c52d01814600013e0a273f0118dc2de98975f3c8c63427ec79074
         run: |
           curl -fsSL "$APPIMAGETOOL_URL" -o "$RUNNER_TEMP/appimagetool"
           echo "$APPIMAGETOOL_SHA256  $RUNNER_TEMP/appimagetool" | sha256sum -c -
           chmod +x "$RUNNER_TEMP/appimagetool"
+          curl -fsSL "$APPIMAGETOOL_RUNTIME_URL" -o "$RUNNER_TEMP/appimage-runtime"
+          echo "$APPIMAGETOOL_RUNTIME_SHA256  $RUNNER_TEMP/appimage-runtime" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/appimage-runtime"
       - name: Repack AppImage with engines (Linux only)
         if: runner.os == 'Linux'
         run: node scripts/repack-linux-appimage-engines.js --target ${{ matrix.target }} --appimagetool "$RUNNER_TEMP/appimagetool"
+        env:
+          APPIMAGETOOL_RUNTIME_FILE: ${{ runner.temp }}/appimage-runtime
       - name: Verify macOS packaged engines and launch
         if: runner.os == 'macOS'
         run: |

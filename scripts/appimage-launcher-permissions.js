@@ -112,3 +112,75 @@ export function normalizeAppRunPermissions(root, label = 'AppDir') {
 export function verifyAppRunPermissions(root, label = 'AppImage') {
   return checkAppRunPermissions(root, label, false);
 }
+
+function squashfsEntryMode(listing, relativePath, label, expectedType) {
+  const matchingLines = listing
+    .split(/\r?\n/)
+    .filter(line => {
+      const columns = line.trim().split(/\s+/);
+      return columns.at(-1)?.replace(/\/$/, '') === relativePath;
+    });
+
+  if (matchingLines.length !== 1) {
+    throw new Error(`${label} ${relativePath} must appear exactly once in the SquashFS permission listing.`);
+  }
+
+  const mode = /^([bcdlps-][rwxStTs-]{9})\s/.exec(matchingLines[0])?.[1];
+  if (!mode) {
+    throw new Error(`${label} ${relativePath} has an invalid SquashFS permission record.`);
+  }
+
+  if (mode[0] !== expectedType) {
+    throw new Error(`${label} ${relativePath} has the wrong SquashFS file type.`);
+  }
+
+  return mode.slice(1);
+}
+
+function assertListedOtherReadableExecutable(mode, label) {
+  if (mode[6] !== 'r' || !['x', 't'].includes(mode[8])) {
+    throw new Error(`${label} must be readable and executable by other users in the SquashFS image; found mode ${mode}.`);
+  }
+}
+
+function assertListedOtherDirectoryAccess(mode, label) {
+  if (mode[6] !== 'r' || !['x', 't'].includes(mode[8])) {
+    throw new Error(`${label} must be readable and traversable by other users in the SquashFS image; found mode ${mode}.`);
+  }
+}
+
+function assertListedOtherReadable(mode, label) {
+  if (mode[6] !== 'r') {
+    throw new Error(`${label} must be readable by other users in the SquashFS image; found mode ${mode}.`);
+  }
+}
+
+export function verifySquashfsAppRunPermissions(listing, label = 'AppImage') {
+  const rootMode = squashfsEntryMode(listing, 'squashfs-root', `${label} AppDir root`, 'd');
+  const appRunMode = squashfsEntryMode(listing, 'squashfs-root/AppRun', `${label} AppRun`, '-');
+  const wrappedMode = squashfsEntryMode(
+    listing,
+    'squashfs-root/AppRun.wrapped',
+    `${label} AppRun.wrapped launcher`,
+    '-',
+  );
+  const hookDirectoryMode = squashfsEntryMode(
+    listing,
+    'squashfs-root/apprun-hooks',
+    `${label} AppRun hook directory`,
+    'd',
+  );
+  const gtkHookMode = squashfsEntryMode(
+    listing,
+    'squashfs-root/apprun-hooks/linuxdeploy-plugin-gtk.sh',
+    `${label} GTK AppRun hook`,
+    '-',
+  );
+
+  assertListedOtherDirectoryAccess(rootMode, `${label} AppDir root`);
+  assertListedOtherReadableExecutable(appRunMode, `${label} AppRun`);
+  assertListedOtherReadableExecutable(wrappedMode, `${label} AppRun.wrapped launcher`);
+  assertListedOtherDirectoryAccess(hookDirectoryMode, `${label} AppRun hook directory`);
+  assertListedOtherReadable(gtkHookMode, `${label} GTK AppRun hook`);
+  return true;
+}

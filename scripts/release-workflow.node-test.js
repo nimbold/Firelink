@@ -33,6 +33,13 @@ test('release workflow normalizes all 6 distribution target artifacts', () => {
   assert.match(releaseWorkflow, /rename_asset '\*\.zip' "Firelink_\$\{VERSION\}_Windows-x64-portable\.zip"/);
 });
 
+test('Linux release pins and verifies appimagetool and its runtime inputs', () => {
+  assert.match(releaseWorkflow, /APPIMAGETOOL_SHA256: 95cbe7cce9717fce90c484e34052ee7c7f1d7635b33c12525b4776826a7d29b6/);
+  assert.match(releaseWorkflow, /APPIMAGETOOL_RUNTIME_SHA256: 156f4bdbde9c52d01814600013e0a273f0118dc2de98975f3c8c63427ec79074/);
+  assert.match(releaseWorkflow, /echo "\$APPIMAGETOOL_RUNTIME_SHA256  \$RUNNER_TEMP\/appimage-runtime" \| sha256sum -c -/);
+  assert.match(releaseWorkflow, /APPIMAGETOOL_RUNTIME_FILE: \$\{\{ runner\.temp \}\}\/appimage-runtime/);
+});
+
 test('Windows release job packages portable ZIP with portable.flag and data cleanup', () => {
   assert.match(releaseWorkflow, /Set-Content -Path \(Join-Path \$portableRoot 'portable\.flag'\) -Value 'portable'/);
   assert.match(releaseWorkflow, /node scripts\/smoke-packaged-app\.js --executable \$portableExe --assert-no-visible-child-windows --assert-portable-data/);
