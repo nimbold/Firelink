@@ -23,10 +23,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.7.1", features = [] }
 
 [dependencies]
-tauri = { version = "2.12.1", features = ["tray-icon", "image-png", "test"] }
+tauri = { version = "2.12.2", features = ["tray-icon", "image-png", "test"] }
 tauri-plugin-opener = "2.7.0"
 tauri-plugin-dialog = "2.8.1"
-tauri-plugin-shell = "2.4.0"
+tauri-plugin-shell = "2.4.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["fs", "process", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time"] }

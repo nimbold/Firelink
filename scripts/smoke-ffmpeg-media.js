@@ -72,6 +72,8 @@ try {
   const videoOnly = 'video-only.mp4';
   const audioOnly = 'audio-only.m4a';
   const merged = 'merged.mp4';
+  const vorbisAudio = 'audio-vorbis.ogg';
+  const vorbisRemux = 'vorbis-remux.mkv';
 
   run('Synthetic media generation', [
     '-f', 'lavfi', '-i', 'color=c=blue:s=160x90:r=10:d=3',
@@ -114,6 +116,26 @@ try {
   ]);
   assertNonEmpty('Audio/video merge', merged);
   assertDecodesAudioAndVideo('Merged media', merged);
+
+  run('Vorbis encoding', [
+    '-i', source,
+    '-map', '0:a:0',
+    '-vn',
+    '-c:a', 'libvorbis',
+    '-q:a', '4',
+    vorbisAudio,
+  ]);
+  assertNonEmpty('Vorbis encoding', vorbisAudio);
+  run('Vorbis remux', [
+    '-i', videoOnly,
+    '-i', vorbisAudio,
+    '-map', '0:v:0',
+    '-map', '1:a:0',
+    '-c', 'copy',
+    vorbisRemux,
+  ]);
+  assertNonEmpty('Vorbis remux', vorbisRemux);
+  assertDecodesAudioAndVideo('Vorbis remux', vorbisRemux);
 
   const hlsPlaylist = 'stream.m3u8';
   run('HLS packaging', [
@@ -171,7 +193,7 @@ try {
   assertNonEmpty('DASH input remux', dashRemux);
   assertDecodesAudioAndVideo('DASH remux', dashRemux);
 
-  console.log(`FFmpeg media smoke passed for ${target} (split/merge, HLS, and DASH).`);
+  console.log(`FFmpeg media smoke passed for ${target} (Vorbis encode/remux, split/merge, HLS, and DASH).`);
 } finally {
   fs.rmSync(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }

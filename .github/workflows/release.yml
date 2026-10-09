@@ -42,7 +42,7 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 24.21.0
           cache: npm
@@ -58,7 +58,7 @@ jobs:
       - name: Verify non-publishing Companion package metadata
         if: github.event_name == 'workflow_dispatch' && !inputs.publish_release
         run: node scripts/verify-companion-release.js --allow-untagged
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable action branch (2026-09-29)
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable action branch (2026-10-09)
         with:
           targets: ${{ matrix.target }}
       - name: Install Linux dependencies
@@ -305,27 +305,27 @@ jobs:
           test -n "$ARIA2"
           node scripts/smoke-aria2-transfers.js --binary "$ARIA2"
           xvfb-run -a node scripts/smoke-packaged-app.js --executable "$RUNNER_TEMP/squashfs-root/AppRun"
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: Firelink-${{ matrix.label }}-${{ github.ref_name }}
           path: ${{ matrix.artifact }}
           if-no-files-found: error
           retention-days: 3
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         if: runner.os == 'Windows'
         with:
           name: Firelink-Windows-x64-portable-${{ github.ref_name }}
           path: ${{ runner.temp }}/firelink-portable/*.zip
           if-no-files-found: error
           retention-days: 3
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         if: runner.os == 'Linux'
         with:
           name: Firelink-Linux-x64-Deb-${{ github.ref_name }}
           path: ${{ runner.temp }}/firelink-native-packages/deb/*.deb
           if-no-files-found: error
           retention-days: 3
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         if: runner.os == 'Linux'
         with:
           name: Firelink-Linux-x64-RPM-${{ github.ref_name }}
@@ -345,7 +345,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/download-artifact@v8.0.1
+      - uses: actions/download-artifact@v8.0.2
         with:
           path: release-assets
           merge-multiple: true

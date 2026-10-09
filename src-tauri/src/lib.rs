@@ -1053,6 +1053,13 @@ fn flush_media_output_line(buffer: &mut String) -> Option<String> {
     (!line.trim().is_empty()).then_some(line)
 }
 
+fn capture_media_output_path(output_path: &mut Option<std::path::PathBuf>, line: &str) {
+    let candidate = std::path::PathBuf::from(line.trim());
+    if candidate.is_absolute() {
+        *output_path = Some(candidate);
+    }
+}
+
 fn parse_media_progress_line(line: &str) -> Option<MediaProgress> {
     if let Some(prefix_index) = line.find(MEDIA_PROGRESS_PREFIX) {
         let progress: serde_json::Value =
@@ -5891,13 +5898,7 @@ pub(crate) async fn start_media_download_internal(
                                         &mut progress_state,
                                     );
                                 } else {
-                                    let candidate = line.trim();
-                                    if !candidate.is_empty() {
-                                        let candidate_path = std::path::PathBuf::from(candidate);
-                                        if candidate_path.is_absolute() {
-                                            final_output_path = Some(candidate_path);
-                                        }
-                                    }
+                                    capture_media_output_path(&mut final_output_path, &line);
                                 }
                             }
                         }
@@ -5968,13 +5969,7 @@ pub(crate) async fn start_media_download_internal(
                                         &mut progress_state,
                                     );
                                 } else {
-                                    let candidate = line.trim();
-                                    if !candidate.is_empty() {
-                                        let candidate_path = std::path::PathBuf::from(candidate);
-                                        if candidate_path.is_absolute() {
-                                            final_output_path = Some(candidate_path);
-                                        }
-                                    }
+                                    capture_media_output_path(&mut final_output_path, &line);
                                 }
                             }
                             if let Some(line) = flush_media_output_line(&mut stderr_buffer) {
@@ -15757,6 +15752,100 @@ fn fail_extension_media_discovery(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shell_fast_exit_output_fixture() {
+        let Some(output_path) = std::env::var_os("FIRELINK_SHELL_TEST_OUTPUT_PATH") else {
+            return;
+        };
+
+        use std::io::Write;
+        let mut stdout = std::io::stdout().lock();
+        stdout
+            .write_all(output_path.to_string_lossy().as_bytes())
+            .expect("write final output path");
+        stdout.flush().expect("flush final output path");
+
+        let mut stderr = std::io::stderr().lock();
+        stderr
+            .write_all(b"firelink-final-stderr")
+            .expect("write final stderr output");
+        stderr.flush().expect("flush final stderr output");
+
+        // Exit without returning through the test harness so the output path
+        // is the final unterminated stdout data emitted by this child.
+        std::process::exit(0);
+    }
+
+    #[tokio::test]
+    async fn shell_fast_exit_preserves_final_output_and_reported_path() {
+        use tauri_plugin_shell::ShellExt;
+
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_shell::init())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let output = tempfile::tempdir().expect("output directory");
+        let output_path = output.path().join("reported media file.mkv");
+        std::fs::write(&output_path, b"completed media payload").expect("create output file");
+        let executable = std::env::current_exe().expect("test executable path");
+
+        // Repeated fast exits exercise the reader/termination race without
+        // timing sleeps. The media consumer intentionally stops at Terminated,
+        // so this asserts the ordering guarantee supplied by shell 2.4.1.
+        for _ in 0..8 {
+            let (mut events, _child) = app
+                .shell()
+                .command(&executable)
+                .args([
+                    "--exact",
+                    "tests::shell_fast_exit_output_fixture",
+                    "--nocapture",
+                ])
+                .env(
+                    "FIRELINK_SHELL_TEST_OUTPUT_PATH",
+                    output_path.as_os_str(),
+                )
+                .spawn()
+                .expect("spawn fast-exiting shell child");
+
+            let mut stdout_buffer = String::new();
+            let mut stderr = Vec::new();
+            let mut reported_path = None;
+            let mut status_code = None;
+            while let Some(event) = events.recv().await {
+                match event {
+                    tauri_plugin_shell::process::CommandEvent::Stdout(bytes) => {
+                        let chunk = String::from_utf8_lossy(&bytes);
+                        for line in super::drain_media_output_lines(&mut stdout_buffer, &chunk) {
+                            super::capture_media_output_path(&mut reported_path, &line);
+                        }
+                    }
+                    tauri_plugin_shell::process::CommandEvent::Stderr(bytes) => {
+                        stderr.extend(bytes);
+                    }
+                    tauri_plugin_shell::process::CommandEvent::Terminated(payload) => {
+                        if let Some(line) = super::flush_media_output_line(&mut stdout_buffer) {
+                            super::capture_media_output_path(&mut reported_path, &line);
+                        }
+                        status_code = payload.code;
+                        break;
+                    }
+                    tauri_plugin_shell::process::CommandEvent::Error(error) => {
+                        panic!("shell child reported an error: {error}");
+                    }
+                    _ => {}
+                }
+            }
+
+            assert_eq!(status_code, Some(0), "fast-exiting child status");
+            assert_eq!(reported_path.as_deref(), Some(output_path.as_path()));
+            assert!(
+                String::from_utf8_lossy(&stderr).contains("firelink-final-stderr"),
+                "final stderr output was lost"
+            );
+        }
+    }
+
     #[test]
     fn removal_recognizes_completed_seeders_without_confusing_downloaders() {
         for status in [serde_json::json!({"status": "complete"}),
