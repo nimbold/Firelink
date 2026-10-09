@@ -333,6 +333,43 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
+  verify-nonpublishing-artifacts:
+    name: Verify non-publishing release artifacts
+    if: github.event_name == 'workflow_dispatch' && !inputs.publish_release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Verify all platform artifacts were downloaded
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d release-assets
+          files=()
+          while IFS= read -r -d '' file; do
+            files+=("$file")
+          done < <(find release-assets -maxdepth 1 -type f -print0)
+          if (( ${#files[@]} != 6 )); then
+            echo "::error::Expected six release artifacts after download, found ${#files[@]}"
+            find release-assets -maxdepth 1 -type f -print
+            exit 1
+          fi
+
+          for pattern in '*.dmg' '*.exe' '*.zip' '*.AppImage' '*.deb' '*.rpm'; do
+            matches=()
+            while IFS= read -r -d '' file; do
+              matches+=("$file")
+            done < <(find release-assets -maxdepth 1 -type f -name "$pattern" -print0)
+            if (( ${#matches[@]} != 1 )) || [[ ! -s "${matches[0]:-}" ]]; then
+              echo "::error::Expected exactly one non-empty downloaded artifact matching $pattern; found ${#matches[@]}"
+              exit 1
+            fi
+            printf 'Verified downloaded artifact: %s\n' "${matches[0]}"
+          done
+
   publish:
     name: Publish GitHub release
     if: >-
