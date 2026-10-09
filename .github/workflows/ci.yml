@@ -119,6 +119,10 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: src-tauri
         run: cargo test --lib --no-run --target ${{ matrix.target }}
+      - name: Test Windows fast-exit shell output ordering
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        run: cargo test --lib tests::shell_fast_exit_preserves_final_output_and_reported_path --target ${{ matrix.target }} -- --exact --nocapture
       - name: Run Windows headless production contracts
         if: runner.os == 'Windows'
         working-directory: src-tauri
