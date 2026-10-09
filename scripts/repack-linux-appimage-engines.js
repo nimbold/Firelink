@@ -5,6 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { collectRegularFiles, sha256 } from './engine-payload-integrity.js';
+import { parseAppImageOffset } from './appimage-offset.js';
 import {
   normalizeAppRunPermissions,
   verifySquashfsAppRunPermissions,
@@ -156,12 +157,13 @@ function main() {
   // The AppImage runtime's --appimage-extract creates directories as 0700 and
   // does not restore their SquashFS modes. Inspect the image metadata directly
   // so this check reflects the mounted AppImage rather than extraction policy.
-  const squashfsListing = run('unsquashfs', ['-lln', appImage], { stdio: 'pipe' });
+  fs.chmodSync(appImage, 0o755);
+  const squashfsOffset = parseAppImageOffset(run(appImage, ['--appimage-offset'], { stdio: 'pipe' }));
+  const squashfsListing = run('unsquashfs', ['-offset', squashfsOffset, '-lln', appImage], { stdio: 'pipe' });
   verifySquashfsAppRunPermissions(squashfsListing, 'Repacked AppImage');
 
   const extractRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'firelink-appimage-'));
   try {
-    fs.chmodSync(appImage, 0o755);
     run(appImage, ['--appimage-extract'], {
       cwd: extractRoot,
       env: { APPIMAGE_EXTRACT_AND_RUN: '1' },
