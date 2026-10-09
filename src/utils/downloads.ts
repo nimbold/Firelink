@@ -73,7 +73,7 @@ export const isTransferActiveStatus = (status: DownloadStatus): boolean =>
 export const isAllocationPhaseVisible = (
   allocationPending: boolean,
   status: DownloadStatus,
-): boolean => allocationPending && ['ready', 'staged', 'queued', 'downloading', 'retrying'].includes(status);
+): boolean => allocationPending && ['ready', 'staged', 'queued', 'downloading', 'retrying', 'failed'].includes(status);
 
 /**
  * Allocation is a transient admission phase. Normal downloads retain the

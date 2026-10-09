@@ -237,14 +237,37 @@ export default function SchedulerView() {
     const counts = await Promise.all(
       targetQueueList.map(queueId => useDownloadStore.getState().pauseQueue(queueId))
     );
-    const directPauseResults = await Promise.allSettled(
+    await Promise.allSettled(
       trackedIdsOutsideQueues.map(id => useDownloadStore.getState().pauseDownload(id))
     );
     if (!isSchedulerControlCurrent(generation)) return;
-    const count = counts.reduce((total, queueCount) => total + queueCount, 0)
-      + directPauseResults.filter(result => result.status === 'fulfilled').length;
-    useSettingsStore.getState().setSchedulerRunning(false);
-    useSettingsStore.getState().setSchedulerActiveDownloadIds([]);
+    const downloadsAfterPause = useDownloadStore.getState().downloads;
+    const directPausedCount = trackedIdsOutsideQueues.filter(id => {
+      const before = downloads.find(download => download.id === id);
+      const after = downloadsAfterPause.find(download => download.id === id);
+      return before && isActiveDownloadStatus(before.status) && after?.status === 'paused';
+    }).length;
+    const stillActiveTrackedIds = trackedDownloadIds.filter(id => {
+      const download = downloadsAfterPause.find(item => item.id === id);
+      return download && isActiveDownloadStatus(download.status);
+    });
+    const remainingTargetCount = downloadsAfterPause.filter(download => {
+      const queueId = download.queueId || MAIN_QUEUE_ID;
+      return (targetQueueSet.has(queueId) || trackedDownloadIds.includes(download.id))
+        && isActiveDownloadStatus(download.status);
+    }).length;
+    await useSettingsStore.getState().persistSchedulerTracking(stillActiveTrackedIds, false);
+    const count = counts.reduce((total, queueCount) => total + queueCount, 0) + directPausedCount;
+    if (remainingTargetCount > 0) {
+      addToast({
+        message: remainingTargetCount === 1
+          ? t($ => $.app.schedulerPauseOneFailed)
+          : t($ => $.app.schedulerPauseManyFailed, { count: remainingTargetCount }),
+        variant: 'error',
+        isActionable: true
+      });
+      return;
+    }
     addToast({
       message: count === 0
         ? t($ => $.scheduler.noActiveDownloads)

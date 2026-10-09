@@ -414,7 +414,7 @@ export interface SettingsState {
   setScheduler: (settings: SchedulerSettings) => void;
   setSchedulerRunning: (running: boolean) => void;
   setSchedulerActiveDownloadIds: (ids: string[]) => void;
-  persistSchedulerTracking: (ids: string[]) => Promise<void>;
+  persistSchedulerTracking: (ids: string[], running?: boolean) => Promise<void>;
   setSchedulerLastStartKey: (key: string) => void;
   setSchedulerLastStopKey: (key: string) => void;
   setLastCustomSpeedLimitKiB: (limit: number) => void;
@@ -699,13 +699,13 @@ export const useSettingsStore = create<SettingsState>()(
       setScheduler: (scheduler) => set({ scheduler }),
       setSchedulerRunning: (schedulerRunning) => set({ schedulerRunning }),
       setSchedulerActiveDownloadIds: (schedulerActiveDownloadIds) => set({ schedulerActiveDownloadIds }),
-      persistSchedulerTracking: (ids) => {
+      persistSchedulerTracking: (ids, running) => {
         const schedulerActiveDownloadIds = [...new Set(
           sanitizeSchedulerActiveDownloadIds(ids, [])
         )];
         set({
           schedulerActiveDownloadIds,
-          schedulerRunning: schedulerActiveDownloadIds.length > 0
+          schedulerRunning: running ?? schedulerActiveDownloadIds.length > 0
         });
         // `waitForSettingsPersistence` intentionally observes only the queue's
         // rejection-swallowing tail. Scheduler ACKs require confirmation from

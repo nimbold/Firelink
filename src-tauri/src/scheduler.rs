@@ -1,4 +1,4 @@
-use chrono::{Datelike, Local, Timelike};
+use chrono::{Datelike, Local, NaiveDate, Timelike};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -71,15 +71,67 @@ fn overnight_stop_is_due(check: OvernightStopCheck<'_>) -> bool {
         && last_stop_key != stop_key
 }
 
+fn scheduler_run_snapshot(
+    start_key: &str,
+    scheduler: &crate::ipc::SchedulerSettings,
+) -> crate::ipc::SchedulerRunSnapshot {
+    let stop = if scheduler.stop_time_enabled {
+        let start_minute = minute_of_day(&scheduler.start_time);
+        let stop_minute = minute_of_day(&scheduler.stop_time);
+        start_minute.zip(stop_minute).and_then(|(start, stop)| {
+            let date = start_key
+                .strip_suffix("-start")
+                .and_then(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())?;
+            let stop_date = if stop < start { date.succ_opt()? } else { date };
+            Some((format!("{}-stop", stop_date.format("%Y-%m-%d")), stop))
+        })
+    } else {
+        None
+    };
+
+    crate::ipc::SchedulerRunSnapshot {
+        start_key: start_key.to_string(),
+        stop_key: stop.as_ref().map(|(key, _)| key.clone()),
+        stop_minute: stop.map(|(_, minute)| minute),
+    }
+}
+
+fn snapshot_stop_is_due(
+    snapshot: &crate::ipc::SchedulerRunSnapshot,
+    current_stop_key: &str,
+    current_minute: u32,
+    last_stop_key: &str,
+) -> bool {
+    snapshot
+        .stop_key
+        .as_deref()
+        .zip(snapshot.stop_minute)
+        .is_some_and(|(stop_key, stop_minute)| {
+            stop_key == current_stop_key
+                && current_minute >= stop_minute
+                && last_stop_key != stop_key
+        })
+}
+
 fn persist_scheduler_start_trigger(
     app_handle: &tauri::AppHandle,
     settings_cache: &Arc<RwLock<Option<crate::ipc::PersistedSettings>>>,
     key: &str,
+    scheduler: &crate::ipc::SchedulerSettings,
 ) {
+    let snapshot = scheduler_run_snapshot(key, scheduler);
     if let Err(error) = crate::settings::update_settings_state(app_handle, |state| {
         state.insert(
             "schedulerTriggeredStartKey".to_string(),
             serde_json::json!(key),
+        );
+        state.insert(
+            "schedulerActiveRunSnapshot".to_string(),
+            serde_json::json!({
+                "startKey": snapshot.start_key,
+                "stopKey": snapshot.stop_key,
+                "stopMinute": snapshot.stop_minute
+            }),
         );
     }) {
         log::warn!("Failed to persist scheduler start trigger: {error}");
@@ -88,6 +140,7 @@ fn persist_scheduler_start_trigger(
     if let Ok(mut settings) = settings_cache.write() {
         if let Some(settings) = settings.as_mut() {
             settings.scheduler_triggered_start_key = Some(key.to_string());
+            settings.scheduler_active_run_snapshot = Some(snapshot);
         }
     }
 }
@@ -117,6 +170,7 @@ pub fn spawn_scheduler(
                             .clone()
                             .unwrap_or_default(),
                         settings.scheduler_last_stop_key.clone(),
+                        settings.scheduler_active_run_snapshot.clone(),
                     )
                 })
             });
@@ -125,6 +179,7 @@ pub fn spawn_scheduler(
                 scheduler_last_start_key,
                 persisted_triggered_start_key,
                 scheduler_last_stop_key,
+                scheduler_active_run_snapshot,
             )) = settings
             {
                 if !scheduler.enabled {
@@ -156,8 +211,11 @@ pub fn spawn_scheduler(
                         .get("start")
                         .is_none_or(|instant| instant.elapsed() >= Duration::from_secs(5))
                 {
-                    if persisted_triggered_start_key != start_key
-                        && triggered_start_key != start_key
+                    if (persisted_triggered_start_key != start_key
+                        && triggered_start_key != start_key)
+                        || scheduler_active_run_snapshot
+                            .as_ref()
+                            .is_none_or(|snapshot| snapshot.start_key != start_key)
                     {
                         // Record the dispatch intent before emitting so a
                         // crash between the native event and renderer ack
@@ -168,6 +226,7 @@ pub fn spawn_scheduler(
                             &app_handle,
                             &settings_cache,
                             &start_key,
+                            &scheduler,
                         );
                     }
                     if app_handle.emit(
@@ -229,7 +288,25 @@ pub fn spawn_scheduler(
                     stop_key: &stop_key,
                 });
 
-                if (same_day_stop_due || overnight_stop_due)
+                let active_snapshot = scheduler_active_run_snapshot.as_ref().filter(|snapshot| {
+                    snapshot.start_key == scheduler_last_start_key
+                        || snapshot.start_key == persisted_triggered_start_key
+                        || snapshot.start_key == triggered_start_key
+                });
+                let snapshot_stop_due = active_snapshot.is_some_and(|snapshot| {
+                    snapshot_stop_is_due(
+                        snapshot,
+                        &stop_key,
+                        current_minute,
+                        &scheduler_last_stop_key,
+                    )
+                });
+                let stop_due = if active_snapshot.is_some() {
+                    snapshot_stop_due
+                } else {
+                    same_day_stop_due || overnight_stop_due
+                };
+                if stop_due
                     && last_emit
                         .get("stop")
                         .is_none_or(|instant| instant.elapsed() >= Duration::from_secs(5))
@@ -238,7 +315,9 @@ pub fn spawn_scheduler(
                         "schedule-trigger",
                         serde_json::json!({
                             "action": "stop",
-                            "key": stop_key
+                            "key": active_snapshot
+                                .and_then(|snapshot| snapshot.stop_key.as_deref())
+                                .unwrap_or(&stop_key)
                         }),
                     );
                     last_emit.insert("stop", std::time::Instant::now());
@@ -250,7 +329,28 @@ pub fn spawn_scheduler(
 
 #[cfg(test)]
 mod tests {
-    use super::{minute_of_day, overnight_stop_is_due, stop_is_due, OvernightStopCheck};
+    use super::{
+        minute_of_day, overnight_stop_is_due, scheduler_run_snapshot, snapshot_stop_is_due,
+        stop_is_due, OvernightStopCheck,
+    };
+    use crate::ipc::{PostQueueAction, SchedulerSettings};
+
+    fn scheduler_settings(
+        start_time: &str,
+        stop_enabled: bool,
+        stop_time: &str,
+    ) -> SchedulerSettings {
+        SchedulerSettings {
+            enabled: true,
+            start_time: start_time.to_string(),
+            stop_time_enabled: stop_enabled,
+            stop_time: stop_time.to_string(),
+            everyday: false,
+            selected_days: vec![1],
+            selected_queue_ids: Vec::new(),
+            post_queue_action: PostQueueAction::None,
+        }
+    }
 
     #[test]
     fn parses_valid_scheduler_times() {
@@ -268,6 +368,46 @@ mod tests {
         assert_eq!(minute_of_day(" 01:02"), None);
         assert_eq!(minute_of_day("01:02 "), None);
         assert_eq!(minute_of_day("bad"), None);
+    }
+
+    #[test]
+    fn snapshots_overnight_stop_boundary_for_started_run() {
+        let snapshot = scheduler_run_snapshot(
+            "2026-06-22-start",
+            &scheduler_settings("22:00", true, "06:00"),
+        );
+
+        assert_eq!(snapshot.start_key, "2026-06-22-start");
+        assert_eq!(snapshot.stop_key.as_deref(), Some("2026-06-23-stop"));
+        assert_eq!(snapshot.stop_minute, Some(360));
+        // Later edits to weekdays or start/stop settings cannot change this
+        // already-started run's stop boundary.
+        assert!(snapshot_stop_is_due(&snapshot, "2026-06-23-stop", 420, ""));
+        assert!(!snapshot_stop_is_due(&snapshot, "2026-06-23-stop", 359, ""));
+        assert!(!snapshot_stop_is_due(
+            &snapshot,
+            "2026-06-23-stop",
+            420,
+            "2026-06-23-stop"
+        ));
+    }
+
+    #[test]
+    fn snapshots_same_day_stop_and_disabled_stop() {
+        let same_day = scheduler_run_snapshot(
+            "2026-06-22-start",
+            &scheduler_settings("08:00", true, "18:30"),
+        );
+        assert_eq!(same_day.stop_key.as_deref(), Some("2026-06-22-stop"));
+        assert_eq!(same_day.stop_minute, Some(1110));
+
+        let no_stop = scheduler_run_snapshot(
+            "2026-06-22-start",
+            &scheduler_settings("08:00", false, "18:30"),
+        );
+        assert_eq!(no_stop.stop_key, None);
+        assert_eq!(no_stop.stop_minute, None);
+        assert!(!snapshot_stop_is_due(&no_stop, "2026-06-22-stop", 1200, ""));
     }
 
     #[test]

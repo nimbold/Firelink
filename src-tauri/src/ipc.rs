@@ -689,6 +689,14 @@ pub struct SchedulerSettings {
     pub post_queue_action: PostQueueAction,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchedulerRunSnapshot {
+    pub start_key: String,
+    pub stop_key: Option<String>,
+    pub stop_minute: Option<u32>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
@@ -738,6 +746,9 @@ pub struct PersistedSettings {
     #[ts(optional)]
     pub scheduler_triggered_start_key: Option<String>,
     pub scheduler_last_stop_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(skip)]
+    pub scheduler_active_run_snapshot: Option<SchedulerRunSnapshot>,
     pub last_custom_speed_limit_ki_b: u32,
     #[serde(default = "default_speed_limit_unit")]
     pub last_custom_speed_limit_unit: String,

@@ -176,6 +176,25 @@ pub fn backoff_for(strike: usize) -> Duration {
         .unwrap_or_else(|| *BACKOFF_SCHEDULE.last().expect("schedule is non-empty"))
 }
 
+/// Resolve the shared retry delay for an error without echoing the error into
+/// diagnostics. Rate limiting gets its longer schedule only when the failure
+/// actually contains an HTTP 429 status, not when an unrelated URL happens to
+/// contain the digits `429`.
+pub fn backoff_for_error(strike: usize, reason: &str) -> Duration {
+    let lower = reason.to_ascii_lowercase();
+    let is_rate_limited = contains_http_status(&lower, "429")
+        || contains_labeled_http_status(&lower, "429")
+        || lower.contains("429 too many requests");
+    if is_rate_limited {
+        BACKOFF_SCHEDULE_429
+            .get(strike)
+            .copied()
+            .unwrap_or_else(|| *BACKOFF_SCHEDULE_429.last().unwrap())
+    } else {
+        backoff_for(strike)
+    }
+}
+
 /// Classify an error string as a transient network condition worth retrying.
 ///
 /// Returns `true` for socket drops, connect/read timeouts, connection resets,
@@ -232,6 +251,16 @@ fn contains_http_status(message: &str, status: &str) -> bool {
         })
 }
 
+fn contains_labeled_http_status(message: &str, status: &str) -> bool {
+    let expected = format!("status={status}");
+    message.split_ascii_whitespace().any(|token| {
+        token
+            .trim_start_matches(|character| matches!(character, '(' | '['))
+            .trim_end_matches(|character: char| matches!(character, ')' | ']' | ',' | '.' | ';'))
+            == expected
+    })
+}
+
 pub fn is_transient_network_error(message: &str) -> bool {
     if is_permanent_network_error(message) {
         return false;
@@ -243,7 +272,7 @@ pub fn is_transient_network_error(message: &str) -> bool {
 
     let m = message.to_ascii_lowercase();
 
-    const TRANSIENT: [&str; 36] = [
+    const TRANSIENT: [&str; 25] = [
         // socket-layer / HTTP-client phrasing surfaced by aria2 and yt-dlp
         "timed out",
         "timeout",
@@ -269,17 +298,6 @@ pub fn is_transient_network_error(message: &str) -> bool {
         "503 service unavailable",
         "429 too many requests",
         // aria2c HTTP error formats
-        "status=408",
-        "status=429",
-        "status=500",
-        "status=502",
-        "status=503",
-        "status=504",
-        "status=520",
-        "status=521",
-        "status=522",
-        "status=523",
-        "status=524",
         // aria2c log phrasing
         "connection was closed",
         "timeout.",
@@ -292,6 +310,9 @@ pub fn is_transient_network_error(message: &str) -> bool {
         .iter()
         .any(|status| contains_http_status(&m, status))
         || TRANSIENT.iter().any(|t| m.contains(t))
+        || TRANSIENT_HTTP_STATUS
+            .iter()
+            .any(|status| contains_labeled_http_status(&m, status))
 }
 
 /// Outcome of a cancel-safe backoff sleep wrapped around a transient retry.
@@ -314,14 +335,7 @@ pub async fn backoff_and_emit(
 ) -> BackoffOutcome {
     let attempt = strike + 1;
     emit(format!("Network drop — retry #{attempt}: {reason}"));
-    let delay = if reason.to_ascii_lowercase().contains("429") {
-        BACKOFF_SCHEDULE_429
-            .get(strike)
-            .copied()
-            .unwrap_or_else(|| *BACKOFF_SCHEDULE_429.last().unwrap())
-    } else {
-        backoff_for(strike)
-    };
+    let delay = backoff_for_error(strike, &reason);
     tokio::select! {
         _ = tokio::time::sleep(delay) => BackoffOutcome::Continue,
         _ = interrupt => BackoffOutcome::Aborted,
@@ -414,6 +428,34 @@ mod tests {
         assert_eq!(backoff_for(usize::MAX), Duration::from_secs(10));
     }
 
+    #[test]
+    fn rate_limit_backoff_requires_an_http_429_status() {
+        assert_eq!(
+            backoff_for_error(0, "HTTP Error 429: Too Many Requests"),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            backoff_for_error(1, "The response status is not successful. status=429"),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            backoff_for_error(2, "HTTP 429 Too Many Requests"),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            backoff_for_error(0, "https://example.test/file/429?token=x timed out"),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            backoff_for_error(0, "https://example.test/file?status=429 connection failed"),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            backoff_for_error(0, "request failed with status=429"),
+            Duration::from_secs(60)
+        );
+    }
+
     // --- transient classification: positive cases -------------------------
 
     #[test]
@@ -452,6 +494,9 @@ mod tests {
         assert!(is_transient_network_error("HTTP Error 429: Too Many Requests"));
         assert!(is_transient_network_error("429 too many requests"));
         assert!(is_transient_network_error("The response status is not successful. status=429"));
+        assert!(!is_transient_network_error(
+            "https://example.test/file?status=429 connection failed"
+        ));
     }
 
     #[test]

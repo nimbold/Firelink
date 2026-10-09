@@ -1106,4 +1106,25 @@ describe('scheduled trigger durability', () => {
       { schedulerRunning: true, schedulerActiveDownloadIds: ['download-1'] }
     ]);
   });
+
+  it('keeps pause-failed downloads tracked without treating a manual pause as a running schedule', async () => {
+    let savedState: { schedulerRunning: boolean; schedulerActiveDownloadIds: string[] } | undefined;
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'db_save_settings') {
+        savedState = JSON.parse((args as { data: string }).data).state;
+      }
+      return undefined as never;
+    });
+
+    await useSettingsStore.getState().persistSchedulerTracking(['still-active'], false);
+
+    expect(useSettingsStore.getState()).toMatchObject({
+      schedulerRunning: false,
+      schedulerActiveDownloadIds: ['still-active']
+    });
+    expect(savedState).toMatchObject({
+      schedulerRunning: false,
+      schedulerActiveDownloadIds: ['still-active']
+    });
+  });
 });

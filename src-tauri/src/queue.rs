@@ -28,6 +28,9 @@ const MAX_PENDING_DOWNLOAD_STARTS: usize = 1024;
 pub const MEDIA_RUN_CANCELLED: &str = "__firelink_media_run_cancelled__";
 pub const DOWNLOAD_CONNECTIONS_MIN: i32 = 1;
 pub const DOWNLOAD_CONNECTIONS_MAX: i32 = 16;
+// The frontend refreshes this lease every 20 seconds. A bounded expiry
+// releases a queue if the renderer disappears before its finally cleanup.
+const QUEUE_START_BATCH_HOLD_LEASE: Duration = Duration::from_secs(90);
 
 fn encode_aria2_torrent_payload(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -1277,6 +1280,10 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
     /// Queue overrides are stored only for queues with an explicit limit.
     /// Missing entries inherit the global target capacity.
     queue_limits: Mutex<HashMap<String, usize>>,
+    /// Queue-scoped leases used while a multi-row start request re-enqueues
+    /// paused downloads. The lease prevents older pending rows from taking a
+    /// newly freed slot before the selected block has been restored to order.
+    queue_dispatch_holds: Mutex<HashMap<String, HashMap<String, Instant>>>,
     /// One entry represents either a queued dispatch reservation or an active
     /// transfer. Keeping both phases in one map makes queue-slot ownership
     /// exactly-once across the async addUri handoff.
@@ -1408,6 +1415,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             active_permit_generations: Mutex::new(HashMap::new()),
             active_kinds: Mutex::new(HashMap::new()),
             queue_limits: Mutex::new(HashMap::new()),
+            queue_dispatch_holds: Mutex::new(HashMap::new()),
             queue_permit_ownership: Mutex::new(HashMap::new()),
             admission_gate: Mutex::new(()),
             system_action_pending: AtomicBool::new(false),
@@ -2385,6 +2393,101 @@ impl<R: tauri::Runtime> QueueManager<R> {
         *self.queue_limits.lock().await = next;
         self.notify.notify_waiters();
         Ok(())
+    }
+
+    /// Begin a bounded queue-scoped dispatch hold for a multi-row start
+    /// operation. Other queues remain eligible while this queue is held.
+    pub async fn begin_queue_dispatch_hold(&self, queue_id: &str) -> Result<String, String> {
+        let queue_id = queue_id.trim();
+        if queue_id.is_empty() {
+            return Err("Queue id cannot be empty".to_string());
+        }
+
+        let _admission_gate = self.admission_gate.lock().await;
+        if self.system_action_pending.load(Ordering::Acquire) {
+            return Err("System action is already being performed".to_string());
+        }
+        let now = Instant::now();
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        let mut holds = self.queue_dispatch_holds.lock().await;
+        let queue_holds = holds.entry(queue_id.to_string()).or_default();
+        queue_holds.retain(|_, expires_at| *expires_at > now);
+        queue_holds.insert(token.clone(), now + QUEUE_START_BATCH_HOLD_LEASE);
+        Ok(token)
+    }
+
+    /// Renew a live start-batch lease. An expired token cannot be resurrected;
+    /// the caller must stop relying on its queue-order guarantee in that case.
+    pub async fn renew_queue_dispatch_hold(&self, queue_id: &str, token: &str) -> bool {
+        let _admission_gate = self.admission_gate.lock().await;
+        let queue_id = queue_id.trim();
+        if queue_id.is_empty() {
+            return false;
+        }
+        let now = Instant::now();
+        let mut holds = self.queue_dispatch_holds.lock().await;
+        let Some(queue_holds) = holds.get_mut(queue_id) else {
+            return false;
+        };
+        let Some(expires_at) = queue_holds.get_mut(token) else {
+            return false;
+        };
+        if *expires_at <= now {
+            queue_holds.remove(token);
+            if queue_holds.is_empty() {
+                holds.remove(queue_id);
+            }
+            return false;
+        }
+        *expires_at = now + QUEUE_START_BATCH_HOLD_LEASE;
+        true
+    }
+
+    /// Release only the lease named by `token`, so late cleanup from an older
+    /// start request cannot release a newer request's hold.
+    pub async fn end_queue_dispatch_hold(&self, queue_id: &str, token: &str) -> bool {
+        let _admission_gate = self.admission_gate.lock().await;
+        let queue_id = queue_id.trim();
+        if queue_id.is_empty() {
+            return false;
+        }
+        let mut holds = self.queue_dispatch_holds.lock().await;
+        let removed = holds
+            .get_mut(queue_id)
+            .is_some_and(|queue_holds| queue_holds.remove(token).is_some());
+        if holds.get(queue_id).is_some_and(HashMap::is_empty) {
+            holds.remove(queue_id);
+        }
+        drop(holds);
+        drop(_admission_gate);
+        if removed {
+            self.notify.notify_one();
+        }
+        removed
+    }
+
+    async fn active_queue_dispatch_holds(&self) -> HashSet<String> {
+        let now = Instant::now();
+        let mut holds = self.queue_dispatch_holds.lock().await;
+        holds.retain(|_, queue_holds| {
+            queue_holds.retain(|_, expires_at| *expires_at > now);
+            !queue_holds.is_empty()
+        });
+        holds.keys().cloned().collect()
+    }
+
+    async fn next_queue_dispatch_hold_delay(&self) -> Option<Duration> {
+        let now = Instant::now();
+        let mut holds = self.queue_dispatch_holds.lock().await;
+        holds.retain(|_, queue_holds| {
+            queue_holds.retain(|_, expires_at| *expires_at > now);
+            !queue_holds.is_empty()
+        });
+        holds
+            .values()
+            .flat_map(HashMap::values)
+            .min()
+            .map(|expires_at| expires_at.saturating_duration_since(now))
     }
 
     pub async fn next_aria2_control_epoch(&self, id: &str) -> u64 {
@@ -3848,11 +3951,15 @@ impl<R: tauri::Runtime> QueueManager<R> {
             return None;
         }
 
+        let held_queues = self.active_queue_dispatch_holds().await;
         let ownership = self.queue_permit_ownership.lock().await;
         let mut queue_ids = Vec::new();
         let mut seen = HashSet::new();
         for task in pending.iter() {
-            if !ownership.contains_key(&task.id) && seen.insert(task.queue_id.clone()) {
+            if !ownership.contains_key(&task.id)
+                && !held_queues.contains(&task.queue_id)
+                && seen.insert(task.queue_id.clone())
+            {
                 queue_ids.push(task.queue_id.clone());
             }
         }
@@ -4441,7 +4548,14 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 // all queue/global capacity is occupied. The notification
                 // future is created before inspection to close the lost-wake
                 // window without polling or sleeping.
-                notified.await;
+                if let Some(hold_delay) = self.next_queue_dispatch_hold_delay().await {
+                    tokio::select! {
+                        _ = notified => {}
+                        _ = tokio::time::sleep(hold_delay) => {}
+                    }
+                } else {
+                    notified.await;
+                }
             }
         }
     }
@@ -6478,11 +6592,6 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 .map(|index| pending[*index].clone())
                 .collect::<Vec<_>>();
             let selected_ids = ids.iter().collect::<HashSet<_>>();
-            let selected_tasks = queue_tasks
-                .iter()
-                .filter(|task| selected_ids.contains(&task.id))
-                .cloned()
-                .collect::<Vec<_>>();
             let unselected_tasks = queue_tasks
                 .iter()
                 .filter(|task| !selected_ids.contains(&task.id))
@@ -6490,12 +6599,13 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 .collect::<Vec<_>>();
 
             let first_selected = *selected_positions.first().unwrap();
-            let last_selected = *selected_positions.last().unwrap();
-            let selected_count = selected_tasks.len();
             let insert_index = match direction {
                 QueueDirection::Up => first_selected.saturating_sub(1),
-                QueueDirection::Down => (last_selected + 1)
-                    .saturating_sub(selected_count)
+                // Move the selected block one slot after its current
+                // insertion point among unselected tasks. Using the last
+                // selected index and selected count collapses sparse
+                // selections too far toward the end.
+                QueueDirection::Down => first_selected
                     .saturating_add(1)
                     .min(unselected_tasks.len()),
             };
@@ -7362,6 +7472,97 @@ fn aria2_add_uri_params(
     options: serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Value {
     serde_json::json!([transfer_uris, options])
+}
+
+fn new_aria2_transfer_gid() -> String {
+    // Aria2 GIDs are 16 hexadecimal characters. A random GID also acts as an
+    // idempotency key when an addUri/addTorrent response is lost: every retry
+    // carries the same value, so Aria2 cannot admit a second transfer.
+    uuid::Uuid::new_v4().simple().to_string()[..16].to_string()
+}
+
+fn apply_aria2_transfer_gid(
+    options: &mut serde_json::Map<String, serde_json::Value>,
+    gid: &str,
+) {
+    options.insert("gid".to_string(), serde_json::json!(gid));
+}
+
+async fn add_transfer_rpc_with_reconciliation<AddCall, AddFuture, StatusCall, StatusFuture>(
+    method: &str,
+    expected_gid: &str,
+    deadline: Instant,
+    mut add_call: AddCall,
+    mut status_call: StatusCall,
+) -> Result<serde_json::Value, String>
+where
+    AddCall: FnMut() -> AddFuture,
+    AddFuture: Future<Output = Result<serde_json::Value, String>>,
+    StatusCall: FnMut() -> StatusFuture,
+    StatusFuture: Future<Output = Result<String, String>>,
+{
+    let mut ambiguous_add = false;
+    let mut status_only = false;
+    loop {
+        if !status_only {
+            match add_call().await {
+                Ok(result) => return Ok(result),
+                Err(error) => {
+                    let transient = is_aria2_rpc_unavailable(&error);
+                    if transient {
+                        ambiguous_add = true;
+                    }
+
+                    if !transient && !ambiguous_add {
+                        return Err(error);
+                    }
+
+                    // A transport timeout/reset does not tell us whether
+                    // Aria2 admitted the transfer before the response was
+                    // lost. Query the stable GID before retrying the add.
+                    // If that status query is itself unavailable, retries
+                    // still use the same GID and remain idempotent.
+                    if status_call().await.is_ok() {
+                        return Ok(serde_json::json!(expected_gid));
+                    }
+                    // Once a retry returns an application error after an
+                    // earlier ambiguous transport failure, keep checking the
+                    // original GID instead of repeatedly issuing an add that
+                    // Aria2 may already have accepted.
+                    if !transient {
+                        status_only = true;
+                    }
+                    if Instant::now() >= deadline {
+                        if ambiguous_add {
+                            log::warn!(
+                                "aria2 {method} for gid {expected_gid} remained ambiguous after retry reconciliation; handing the GID to the queue poller"
+                            );
+                            return Ok(serde_json::json!(expected_gid));
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+        }
+
+        if status_only {
+            if status_call().await.is_ok() {
+                return Ok(serde_json::json!(expected_gid));
+            }
+            if Instant::now() >= deadline {
+                // The first add may have succeeded even though both its
+                // response and subsequent status checks were unavailable.
+                // Returning the stable GID lets normal queue reconciliation
+                // either retain the live transfer or recover a missing one.
+                log::warn!(
+                    "aria2 {method} for gid {expected_gid} could not be verified; handing the GID to the queue poller"
+                );
+                return Ok(serde_json::json!(expected_gid));
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 fn apply_aria2_normal_reliability_options(
@@ -8350,6 +8551,7 @@ impl ProductionSpawner {
         state: &crate::AppState,
         method: &str,
         params: &serde_json::Value,
+        expected_gid: &str,
     ) -> Result<serde_json::Value, String> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
@@ -8373,15 +8575,28 @@ impl ProductionSpawner {
                 continue;
             }
 
-            match crate::rpc_call(port, &state.aria2_secret, method, params.clone()).await {
-                Ok(result) => return Ok(result),
-                Err(error) => {
-                    if !is_aria2_rpc_unavailable(&error) || std::time::Instant::now() >= deadline {
-                        return Err(error);
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                }
-            }
+            let secret = state.aria2_secret.clone();
+            let secret_for_status = secret.clone();
+            let method_for_call = method.to_string();
+            let params_for_call = params.clone();
+            let gid_for_status = expected_gid.to_string();
+            return add_transfer_rpc_with_reconciliation(
+                method,
+                expected_gid,
+                deadline,
+                move || {
+                    let secret = secret.clone();
+                    let method = method_for_call.clone();
+                    let params = params_for_call.clone();
+                    async move { crate::rpc_call(port, &secret, &method, params).await }
+                },
+                move || {
+                    let secret = secret_for_status.clone();
+                    let gid = gid_for_status.clone();
+                    async move { crate::aria2_download_status(port, &secret, &gid).await }
+                },
+            )
+            .await;
         }
     }
 
@@ -8447,6 +8662,8 @@ impl SidecarSpawner for ProductionSpawner {
         let attempt_epoch = state.queue_manager.current_aria2_control_epoch(id).await;
         let admission_started = Instant::now();
         let mut options = serde_json::Map::new();
+        let expected_gid = new_aria2_transfer_gid();
+        apply_aria2_transfer_gid(&mut options, &expected_gid);
         // Keep hostname resolution route-aware and non-blocking for every
         // normal and Torrent transfer. When the Firelink route contract is
         // available, transfers use NativeAsyncResolver on background worker
@@ -8674,7 +8891,10 @@ impl SidecarSpawner for ProductionSpawner {
             return Err("aria2 admission canceled before RPC".to_string());
         }
 
-        match self.add_transfer_rpc(&state, method, &params).await {
+        match self
+            .add_transfer_rpc(&state, method, &params, &expected_gid)
+            .await
+        {
             Ok(result) => {
                 let gid = result.as_str().unwrap_or("").to_string();
                 if gid.is_empty() {
@@ -9449,6 +9669,35 @@ mod tests {
         assert!(manager.media_payload_completed("media-removal", 7).await);
         manager.release_registered_id_for_generation("media-removal", 7).await;
         assert!(!manager.media_payload_completed("media-removal", 7).await);
+    }
+
+    #[tokio::test]
+    async fn expired_queue_dispatch_hold_cannot_be_renewed_and_stale_end_is_scoped() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
+
+        let first = manager.begin_queue_dispatch_hold("queue").await.unwrap();
+        let second = manager.begin_queue_dispatch_hold("queue").await.unwrap();
+        assert!(manager.end_queue_dispatch_hold("queue", &first).await);
+        assert!(manager
+            .active_queue_dispatch_holds()
+            .await
+            .contains("queue"));
+
+        manager
+            .queue_dispatch_holds
+            .lock()
+            .await
+            .get_mut("queue")
+            .unwrap()
+            .insert(second.clone(), Instant::now() - Duration::from_secs(1));
+        assert!(!manager.renew_queue_dispatch_hold("queue", &second).await);
+        assert!(!manager
+            .active_queue_dispatch_holds()
+            .await
+            .contains("queue"));
     }
 
     #[tokio::test]
@@ -12350,6 +12599,107 @@ mod tests {
         assert!(!is_aria2_rpc_unavailable(
             "aria2 error code 3: Resource not found"
         ));
+    }
+
+    #[test]
+    fn aria2_transfer_gid_is_a_stable_16_digit_option() {
+        let gid = new_aria2_transfer_gid();
+        assert_eq!(gid.len(), 16);
+        assert!(gid
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase()));
+
+        let mut options = serde_json::Map::new();
+        apply_aria2_transfer_gid(&mut options, &gid);
+        let params = aria2_add_uri_params(vec!["https://example.test/file".to_string()], options);
+        assert_eq!(params[1]["gid"], serde_json::json!(gid));
+    }
+
+    #[tokio::test]
+    async fn ambiguous_add_rpc_adopts_the_gid_after_a_lost_response() {
+        let gid = "0123456789abcdef";
+        let add_calls = Arc::new(AtomicUsize::new(0));
+        let status_calls = Arc::new(AtomicUsize::new(0));
+        let add_calls_for_rpc = Arc::clone(&add_calls);
+        let status_calls_for_rpc = Arc::clone(&status_calls);
+        let result = add_transfer_rpc_with_reconciliation(
+            "aria2.addUri",
+            gid,
+            Instant::now() + Duration::from_secs(2),
+            move || {
+                let attempt = add_calls_for_rpc.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if attempt == 0 {
+                        // Aria2 accepted the request, but the client lost the
+                        // response and cannot yet query the daemon.
+                        Err("error sending request: connection reset".to_string())
+                    } else {
+                        // The retry has the same GID, so Aria2 rejects a
+                        // duplicate instead of creating a second transfer.
+                        Err(format!("GID#{gid} already exists"))
+                    }
+                }
+            },
+            move || {
+                let attempt = status_calls_for_rpc.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if attempt == 0 {
+                        Err("error trying to connect: connection refused".to_string())
+                    } else {
+                        Ok("active".to_string())
+                    }
+                }
+            },
+        )
+        .await
+        .expect("the accepted GID should be adopted");
+
+        assert_eq!(result, serde_json::json!(gid));
+        assert_eq!(add_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(status_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn nontransient_add_rejection_does_not_adopt_an_existing_gid() {
+        let gid = "0123456789abcdef";
+        let status_calls = Arc::new(AtomicUsize::new(0));
+        let status_calls_for_rpc = Arc::clone(&status_calls);
+        let result = add_transfer_rpc_with_reconciliation(
+            "aria2.addUri",
+            gid,
+            Instant::now() + Duration::from_secs(2),
+            || async { Err("GID#0123456789abcdef is not unique".to_string()) },
+            move || {
+                status_calls_for_rpc.fetch_add(1, Ordering::SeqCst);
+                async { Ok("active".to_string()) }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(status_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn unresolved_ambiguous_add_returns_gid_for_queue_reconciliation() {
+        let gid = "fedcba9876543210";
+        let add_calls = Arc::new(AtomicUsize::new(0));
+        let add_calls_for_rpc = Arc::clone(&add_calls);
+        let result = add_transfer_rpc_with_reconciliation(
+            "aria2.addTorrent",
+            gid,
+            Instant::now(),
+            move || {
+                add_calls_for_rpc.fetch_add(1, Ordering::SeqCst);
+                async { Err("request timed out".to_string()) }
+            },
+            || async { Err("connection reset while checking status".to_string()) },
+        )
+        .await
+        .expect("ambiguous admission remains owned by normal queue reconciliation");
+
+        assert_eq!(result, serde_json::json!(gid));
+        assert_eq!(add_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -84,7 +84,8 @@ type CommandMap = {
  get_deno_engine_status: { args: undefined; result: EngineStatusItem };
   reveal_in_file_manager: { args: { path: string }; result: void };
   open_downloaded_file: { args: { path: string }; result: void };
-  pause_download: { args: { id: string }; result: void };
+  /** True when the pause won; false when a terminal/inactive lifecycle won. */
+  pause_download: { args: { id: string }; result: boolean };
   resume_download: { args: { id: string; queueId: string }; result: boolean };
   submit_download_removals: { args: { ids: string[]; deleteAssets: boolean }; result: void };
   list_download_removals: { args: undefined; result: DownloadRemovalJob[] };
@@ -224,6 +225,9 @@ type CommandMap = {
   enqueue_many: { args: { items: EnqueueItem[] }; result: import('./bindings/EnqueueResult').EnqueueResult[] };
   move_in_queue: { args: { id: string; queueId: string; direction: 'up' | 'down' }; result: string[] };
   move_many_in_queue: { args: { ids: string[]; queueId: string; direction: 'up' | 'down'; targetIndex?: number }; result: string[] };
+  begin_queue_dispatch_hold: { args: { queueId: string }; result: string };
+  renew_queue_dispatch_hold: { args: { queueId: string; token: string }; result: boolean };
+  end_queue_dispatch_hold: { args: { queueId: string; token: string }; result: boolean };
   remove_from_queue: { args: { id: string }; result: boolean };
   open_download_properties_window: { args: { id: string }; result: string };
   get_properties_window_download_id: { args: undefined; result: string };

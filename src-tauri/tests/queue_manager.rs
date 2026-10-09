@@ -1695,6 +1695,73 @@ async fn dispatcher_rotates_eligible_queues_without_starving_later_work() {
 }
 
 #[tokio::test]
+async fn selected_start_hold_keeps_other_queues_eligible_and_preserves_priority() {
+    let (manager, _spawner) = make_manager(1);
+    let manager = Arc::new(manager);
+    let hold = manager
+        .begin_queue_dispatch_hold("selected")
+        .await
+        .expect("selected queue hold should start");
+    manager
+        .push(aria2_task_in_queue("older", "selected"))
+        .await
+        .unwrap();
+    manager
+        .push(aria2_task_in_queue("other-queue", "other"))
+        .await
+        .unwrap();
+
+    let dispatcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.run_dispatcher().await })
+    };
+    timeout(Duration::from_secs(1), async {
+        while manager.aria2_gid_for_download("other-queue").is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a held queue must not block eligible work in another queue");
+    assert!(manager.aria2_gid_for_download("older").is_none());
+
+    // A becomes a newly selected start while older is still ahead in this
+    // queue. Keep the queue held through its atomic order update.
+    manager.release_permit("other-queue").await;
+    manager
+        .push(aria2_task_in_queue("selected", "selected"))
+        .await
+        .unwrap();
+    assert_eq!(
+        manager
+            .move_many_in_queue_to(&["selected".to_string()], "selected", 0)
+            .await,
+        vec!["selected", "older"]
+    );
+    assert!(manager
+        .end_queue_dispatch_hold("selected", &hold)
+        .await);
+
+    timeout(Duration::from_secs(1), async {
+        while manager.aria2_gid_for_download("selected").is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the selected row should take the next available slot");
+    assert!(manager.aria2_gid_for_download("older").is_none());
+
+    manager.release_permit("selected").await;
+    timeout(Duration::from_secs(1), async {
+        while manager.aria2_gid_for_download("older").is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("older work should dispatch after the selected row");
+    dispatcher.abort();
+}
+
+#[tokio::test]
 async fn queue_limit_increase_wakes_waiting_work_and_decrease_keeps_active_tasks() {
     let (manager, spawner) = make_manager(3);
     let manager = Arc::new(manager);
@@ -2880,6 +2947,30 @@ async fn multi_move_reorders_selected_items_as_one_atomic_block() {
         mgr.move_many_in_queue(&selected, "main", QueueDirection::Down)
             .await,
         vec!["a", "b", "d", "c", "e"]
+    );
+}
+
+#[tokio::test]
+async fn multi_move_down_moves_sparse_selection_one_position_and_respects_boundary() {
+    use firelink_lib::ipc::QueueDirection;
+
+    let (mgr, _spawner) = make_manager(3);
+    for id in ["a", "b", "c", "d", "e"] {
+        mgr.push(sample_task(id)).await.unwrap();
+    }
+
+    let selected = vec!["b".to_string(), "d".to_string()];
+    assert_eq!(
+        mgr.move_many_in_queue(&selected, "main", QueueDirection::Down)
+            .await,
+        vec!["a", "c", "b", "d", "e"]
+    );
+
+    let bottom_selection = vec!["d".to_string(), "e".to_string()];
+    assert_eq!(
+        mgr.move_many_in_queue(&bottom_selection, "main", QueueDirection::Down)
+            .await,
+        vec!["a", "c", "b", "d", "e"]
     );
 }
 

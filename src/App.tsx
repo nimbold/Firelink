@@ -1397,6 +1397,25 @@ function App() {
   ]);
 
   useEffect(() => {
+    if (!coreReady || frontendExitPreparing || schedulerRunning) return;
+    if (schedulerActiveDownloadIds.length === 0) return;
+    const activeIds = new Set(downloads
+      .filter(download => isActiveDownloadStatus(download.status))
+      .map(download => download.id));
+    const remainingIds = schedulerActiveDownloadIds.filter(id => activeIds.has(id));
+    if (remainingIds.length === schedulerActiveDownloadIds.length) return;
+    void useSettingsStore.getState().persistSchedulerTracking(remainingIds, false).catch(error => {
+      console.error('Failed to clear inactive scheduler tracking:', error);
+    });
+  }, [
+    coreReady,
+    downloads,
+    frontendExitPreparing,
+    schedulerActiveDownloadIds,
+    schedulerRunning
+  ]);
+
+  useEffect(() => {
     const initNotifications = async () => {
       if (!useSettingsStore.getState().showNotifications) return;
       try {

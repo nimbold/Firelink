@@ -239,7 +239,7 @@ describe('credential-bearing extension header names', () => {
 describe('allocation phase visibility', () => {
   it('does not override paused or completed statuses', () => {
     expect(isAllocationPhaseVisible(true, 'ready')).toBe(true);
-    expect(isAllocationPhaseVisible(true, 'failed')).toBe(false);
+    expect(isAllocationPhaseVisible(true, 'failed')).toBe(true);
     expect(isAllocationPhaseVisible(true, 'verifying')).toBe(false);
     expect(isAllocationPhaseVisible(true, 'seeding')).toBe(false);
     expect(isAllocationPhaseVisible(true, 'waitingToSeed')).toBe(false);

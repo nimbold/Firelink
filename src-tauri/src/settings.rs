@@ -319,6 +319,7 @@ pub fn preserve_scheduler_runtime_keys(
         "schedulerLastStartKey",
         "schedulerTriggeredStartKey",
         "schedulerLastStopKey",
+        "schedulerActiveRunSnapshot",
     ] {
         if let Some(value) = existing_state.get(key) {
             incoming_state.insert(key.to_string(), value.clone());
@@ -1051,6 +1052,7 @@ fn default_settings() -> PersistedSettings {
         scheduler_last_start_key: String::new(),
         scheduler_triggered_start_key: None,
         scheduler_last_stop_key: String::new(),
+        scheduler_active_run_snapshot: None,
         last_custom_speed_limit_ki_b: 1024,
         last_custom_speed_limit_unit: "MB/s".to_string(),
         per_server_connections: 16,
@@ -1118,7 +1120,12 @@ mod tests {
             "state": {
                 "schedulerLastStartKey": "2026-06-22-start",
                 "schedulerTriggeredStartKey": "2026-06-22-start",
-                "schedulerLastStopKey": "2026-06-22-stop"
+                "schedulerLastStopKey": "2026-06-22-stop",
+                "schedulerActiveRunSnapshot": {
+                    "startKey": "2026-06-23-start",
+                    "stopKey": "2026-06-24-stop",
+                    "stopMinute": 360
+                }
             },
             "version": 3
         })
@@ -1142,6 +1149,10 @@ mod tests {
             "2026-06-22-start"
         );
         assert_eq!(merged["state"]["schedulerLastStopKey"], "2026-06-22-stop");
+        assert_eq!(
+            merged["state"]["schedulerActiveRunSnapshot"]["stopKey"],
+            "2026-06-24-stop"
+        );
     }
 
     #[test]

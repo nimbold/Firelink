@@ -1972,6 +1972,9 @@ describe('useDownloadStore', () => {
     });
 
     vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'begin_queue_dispatch_hold') return `hold-${(args as { queueId: string }).queueId}`;
+      if (command === 'renew_queue_dispatch_hold') return true;
+      if (command === 'end_queue_dispatch_hold') return true;
       if (command === 'enqueue_download') {
         const id = (args as { item: { id: string } }).item.id;
         return { id, filename: id };
@@ -1987,6 +1990,12 @@ describe('useDownloadStore', () => {
       .filter(([command]) => command === 'enqueue_download')
       .map(([, args]) => (args as { item: { id: string } }).item.id);
     expect(enqueueIds).toEqual(['selected-b', 'selected-a']);
+    const beginHoldCall = vi.mocked(ipc.invokeCommand).mock.calls
+      .findIndex(([command]) => command === 'begin_queue_dispatch_hold');
+    const enqueueCall = vi.mocked(ipc.invokeCommand).mock.calls
+      .findIndex(([command]) => command === 'enqueue_download');
+    expect(vi.mocked(ipc.invokeCommand).mock.invocationCallOrder[beginHoldCall])
+      .toBeLessThan(vi.mocked(ipc.invokeCommand).mock.invocationCallOrder[enqueueCall]);
     expect(ipc.invokeCommand).toHaveBeenCalledWith('move_many_in_queue', {
       ids: ['selected-b', 'selected-a'],
       queueId: 'selection-queue',
@@ -2011,6 +2020,9 @@ describe('useDownloadStore', () => {
     });
 
     vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'begin_queue_dispatch_hold') return `hold-${(args as { queueId: string }).queueId}`;
+      if (command === 'renew_queue_dispatch_hold') return true;
+      if (command === 'end_queue_dispatch_hold') return true;
       if (command === 'enqueue_download') {
         const id = (args as { item: { id: string } }).item.id;
         return { id, filename: id };
@@ -2062,6 +2074,9 @@ describe('useDownloadStore', () => {
     });
 
     vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'begin_queue_dispatch_hold') return `hold-${(args as { queueId: string }).queueId}`;
+      if (command === 'renew_queue_dispatch_hold') return true;
+      if (command === 'end_queue_dispatch_hold') return true;
       if (command === 'enqueue_download') {
         const item = (args as { item: { id: string; password: string | null } }).item;
         return { id: item.id, filename: item.id };
@@ -2091,6 +2106,28 @@ describe('useDownloadStore', () => {
     ]);
   });
 
+  it('releases the selected queue hold when re-enqueue fails', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'selected-failure', url: 'http://failure', fileName: 'failure', destination: '/tmp', status: 'paused', category: 'Other', dateAdded: '', queueId: 'selected-failure-queue' },
+      ] as any[],
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'begin_queue_dispatch_hold') return 'failure-hold';
+      if (command === 'renew_queue_dispatch_hold') return true;
+      if (command === 'end_queue_dispatch_hold') return true;
+      if (command === 'enqueue_download') throw new Error('queue persistence unavailable');
+      if (command === 'get_pending_order') return [];
+      return undefined;
+    });
+
+    await expect(useDownloadStore.getState().startSelected(['selected-failure'])).resolves.toBe(0);
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('end_queue_dispatch_hold', {
+      queueId: 'selected-failure-queue',
+      token: 'failure-hold',
+    });
+  });
+
   it('pauses queued items through the global pause action', async () => {
     useDownloadStore.setState({
       downloads: [
@@ -2098,14 +2135,39 @@ describe('useDownloadStore', () => {
         { id: 'queued-two', url: 'http://two', fileName: 'two', status: 'queued', category: 'Other', dateAdded: '', queueId: 'pause-queue' },
         { id: 'staged-one', url: 'http://staged', fileName: 'staged', status: 'staged', category: 'Other', dateAdded: '', queueId: 'pause-queue' },
       ] as any[],
+      backendRegisteredIds: new Set(['queued-one', 'queued-two', 'staged-one']),
     });
-    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
+    vi.mocked(ipc.invokeCommand).mockResolvedValue(true as never);
 
     await expect(useDownloadStore.getState().pauseAll()).resolves.toBe(3);
     expect(
       vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) => command === 'pause_download')
     ).toHaveLength(3);
     expect(useDownloadStore.getState().downloads.every(item => item.status === 'paused')).toBe(true);
+  });
+
+  it('locally pauses an unregistered staged row when native owns no lifecycle', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'unregistered-staged', status: 'staged', queueId: 'local-pause', speed: '1 MiB/s', eta: '2s' }
+      ] as any[],
+      backendRegisteredIds: new Set(),
+      pendingOrder: [],
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
+      if (command === 'pause_download') return false as never;
+      return undefined as never;
+    });
+
+    await useDownloadStore.getState().pauseDownload('unregistered-staged');
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'paused',
+      speed: '-',
+      eta: '-',
+    });
+    expect(useDownloadStore.getState().pendingOrder).not.toContain('unregistered-staged');
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('pause_download', { id: 'unregistered-staged' });
   });
 
   it('moves a paused row behind the remaining runnable queue rows', async () => {
@@ -2116,9 +2178,10 @@ describe('useDownloadStore', () => {
         { id: 'pause-target', status: 'queued', queueId: 'ordered-pause', queuePosition: 2 },
         { id: 'queued-two', status: 'queued', queueId: 'ordered-pause', queuePosition: 3 }
       ] as any[],
+      backendRegisteredIds: new Set(['active', 'queued-one', 'pause-target', 'queued-two']),
       pendingOrder: ['queued-one', 'pause-target', 'queued-two']
     });
-    vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
+    vi.mocked(ipc.invokeCommand).mockResolvedValue(true as never);
 
     await useDownloadStore.getState().pauseDownload('pause-target');
 
@@ -2147,6 +2210,9 @@ describe('useDownloadStore', () => {
       releaseEnqueue = resolve;
     });
     vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'begin_queue_dispatch_hold') return 'hold-race-selected';
+      if (command === 'renew_queue_dispatch_hold') return true;
+      if (command === 'end_queue_dispatch_hold') return true;
       if (command === 'enqueue_download') return enqueue;
       if (command === 'get_pending_order') return [];
       return undefined;
@@ -2177,6 +2243,10 @@ describe('useDownloadStore', () => {
     expect(useDownloadStore.getState().downloads.map(item => item.status)).toEqual(['paused', 'paused']);
     expect(vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) => command === 'pause_download'))
       .toHaveLength(1);
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('end_queue_dispatch_hold', {
+      queueId: 'race-selected',
+      token: 'hold-race-selected',
+    });
   });
 
   it('cleans an accepted backend enqueue when queue reconciliation fails', async () => {
@@ -4167,6 +4237,32 @@ describe('useDownloadStore', () => {
     ).toHaveLength(4);
   });
 
+  it('does not turn a completed download into paused when completion wins a queue pause race', async () => {
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'pause-completion-race',
+        url: 'https://example.com/file',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: '',
+        queueId: 'queue-race'
+      }] as any[]
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
+      if (command === 'pause_download') {
+        // Native completion reconciliation happened before pause_download
+        // returned its authoritative "pause did not win" result.
+        useDownloadStore.getState().updateDownload('pause-completion-race', { status: 'completed' });
+        return false as never;
+      }
+      return undefined as never;
+    });
+
+    await expect(useDownloadStore.getState().pauseQueue('queue-race')).resolves.toBe(0);
+    expect(useDownloadStore.getState().downloads[0].status).toBe('completed');
+  });
+
   it('assigns selected unfinished downloads to a queue without moving completed items', async () => {
     useDownloadStore.setState({
       downloads: [
@@ -4265,7 +4361,7 @@ describe('useDownloadStore', () => {
         { id: 'two', status: 'queued', queueId: 'move-queue', queuePosition: 2 },
         { id: 'three', status: 'queued', queueId: 'move-queue', queuePosition: 3 }
       ] as any[],
-      backendRegisteredIds: new Set(['three']),
+      backendRegisteredIds: new Set(['one', 'two', 'three']),
       pendingOrder: ['one', 'two', 'three']
     });
     vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
@@ -4279,13 +4375,76 @@ describe('useDownloadStore', () => {
     expect(vi.mocked(ipc.invokeCommand)).toHaveBeenCalledWith('move_many_in_queue', {
       ids: ['three'],
       queueId: 'move-queue',
-      direction: 'up'
+      direction: 'up',
+      targetIndex: 1,
     });
     expect(vi.mocked(ipc.invokeCommand)).not.toHaveBeenCalledWith('move_in_queue', expect.anything());
     const positions = useDownloadStore.getState().downloads
       .filter(item => item.queueId === 'move-queue')
       .map(item => item.queuePosition);
     expect(new Set(positions).size).toBe(4);
+  });
+
+  it('moves a sparse selection down by one row as a block', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'a', status: 'queued', queueId: 'sparse-down', queuePosition: 0 },
+        { id: 'b', status: 'queued', queueId: 'sparse-down', queuePosition: 1 },
+        { id: 'c', status: 'queued', queueId: 'sparse-down', queuePosition: 2 },
+        { id: 'd', status: 'queued', queueId: 'sparse-down', queuePosition: 3 },
+        { id: 'e', status: 'queued', queueId: 'sparse-down', queuePosition: 4 },
+      ] as any[],
+      backendRegisteredIds: new Set(['a', 'b', 'c', 'd', 'e']),
+      pendingOrder: ['a', 'b', 'c', 'd', 'e'],
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'move_many_in_queue') return ['a', 'c', 'b', 'd', 'e'];
+      if (command === 'get_pending_order') return ['a', 'c', 'b', 'd', 'e'];
+      return undefined;
+    });
+
+    await useDownloadStore.getState().moveInQueue(['b', 'd'], 'down');
+
+    expect(useDownloadStore.getState().downloads
+      .filter(item => item.queueId === 'sparse-down')
+      .sort((left, right) => (left.queuePosition ?? 0) - (right.queuePosition ?? 0))
+      .map(item => item.id)).toEqual(['a', 'c', 'b', 'd', 'e']);
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('move_many_in_queue', {
+      ids: ['b', 'd'],
+      queueId: 'sparse-down',
+      direction: 'up',
+      targetIndex: 2,
+    });
+  });
+
+  it('translates keyboard moves around staged rows before the atomic backend move', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'a', status: 'queued', queueId: 'keyboard-staged', queuePosition: 0 },
+        { id: 'staged', status: 'staged', queueId: 'keyboard-staged', queuePosition: 1 },
+        { id: 'b', status: 'queued', queueId: 'keyboard-staged', queuePosition: 2 },
+      ] as any[],
+      backendRegisteredIds: new Set(['a', 'b']),
+      pendingOrder: ['a', 'b'],
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'move_many_in_queue') return ['b', 'a'];
+      if (command === 'get_pending_order') return ['b', 'a'];
+      return undefined;
+    });
+
+    await useDownloadStore.getState().moveInQueue('b', 'up');
+
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('move_many_in_queue', {
+      ids: ['b'],
+      queueId: 'keyboard-staged',
+      direction: 'up',
+      targetIndex: 1,
+    });
+    expect(useDownloadStore.getState().downloads
+      .filter(item => item.queueId === 'keyboard-staged')
+      .sort((left, right) => (left.queuePosition ?? 0) - (right.queuePosition ?? 0))
+      .map(item => item.id)).toEqual(['a', 'b', 'staged']);
   });
 
   it('rolls back and rejects a failed keyboard or header queue move', async () => {

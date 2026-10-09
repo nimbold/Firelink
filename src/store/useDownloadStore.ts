@@ -274,6 +274,8 @@ const queuePositionComparator = (left: DownloadItem, right: DownloadItem): numbe
   comparableQueuePosition(left) - comparableQueuePosition(right) ||
   left.id.localeCompare(right.id);
 
+const QUEUE_START_BATCH_HOLD_REFRESH_MS = 20_000;
+
 const queueItemsForReordering = (downloads: DownloadItem[], queueId: string): DownloadItem[] =>
   downloads
     .filter(download =>
@@ -1708,14 +1710,13 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       ].map(item => [item.id, item.queuePosition]));
       const unselectedItems = queueItems.filter(item => !ids.includes(item.id));
       const selectedIndices = selectedItems.map(item => queueItems.findIndex(d => d.id === item.id));
+      const firstSelectedIndex = Math.min(...selectedIndices);
 
       let insertIndex = 0;
       if (direction === 'up') {
-        const firstSelectedIndex = Math.min(...selectedIndices);
         insertIndex = Math.max(0, firstSelectedIndex - 1);
       } else {
-        const lastSelectedIndex = Math.max(...selectedIndices);
-        insertIndex = Math.min(unselectedItems.length, lastSelectedIndex - selectedItems.length + 2);
+        insertIndex = Math.min(unselectedItems.length, firstSelectedIndex + 1);
       }
 
       const reordered = [
@@ -1730,11 +1731,25 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         .map(item => item.id);
       if (registeredIdsToMove.length === 0) return;
 
+      // The local queue includes staged rows, but the native pending queue
+      // contains registered rows only. Translate the desired local order to
+      // its registered-only insertion point so keyboard and header moves
+      // cannot leave the UI and dispatcher with different orders.
+      const registeredItems = queueItems.filter(item => get().backendRegisteredIds.has(item.id));
+      const registeredSelectedIds = new Set(registeredIdsToMove);
+      const registeredDesiredOrder = reordered.filter(item => get().backendRegisteredIds.has(item.id));
+      const backendTargetIndex = targetIndexForDesiredOrder(
+        registeredItems,
+        registeredSelectedIds,
+        registeredDesiredOrder
+      );
+
       try {
         const order = await invoke('move_many_in_queue', {
           ids: registeredIdsToMove,
           queueId,
-          direction
+          direction: 'up',
+          targetIndex: backendTargetIndex
         }) as string[];
         if (Array.isArray(order)) {
           const globalOrder = await invoke('get_pending_order', { queueId: null })
@@ -2489,9 +2504,30 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         await pendingDispatch;
       }
 
-      await invoke('pause_download', { id });
+      const pauseApplied = await invoke('pause_download', { id });
 
       if (!isCurrentDownloadLifecycle(id, generation)) return;
+      // Completion can win after the UI snapshots an active row but before
+      // Aria2 processes forcePause. The native command reconciles that
+      // terminal state and reports false so a stale frontend snapshot cannot
+      // overwrite Completed with Paused in memory or durable storage. A row
+      // that is still queued/staged but has no native ownership is different:
+      // it never reached the backend queue, so preserve the user's pause
+      // locally instead of leaving an unstartable-looking row staged.
+      if (pauseApplied === false) {
+        const current = get().downloads.find(download => download.id === id);
+        const hasNativeOwnership = get().backendRegisteredIds.has(id) ||
+          get().pendingOrder.includes(id);
+        if (
+          current &&
+          (current.status === 'queued' || current.status === 'staged') &&
+          !hasNativeOwnership
+        ) {
+          get().updateDownload(id, { status: 'paused', speed: '-', eta: '-' });
+          await commitDownloadState();
+        }
+        return;
+      }
       const current = get().downloads.find(download => download.id === id);
       if (current && current.status !== 'completed' && current.status !== 'failed') {
         get().updateDownload(id, { status: 'paused', speed: '-', eta: '-' });
@@ -2584,71 +2620,118 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         ] as const)
       );
 
-      // Make the selection's order explicit before any capacity becomes
-      // available. This keeps the frontend projection and backend pending
-      // queue aligned even when the selected rows were not adjacent.
-      for (const [queueId, queueIds] of selectedByQueue) {
-        const generation = selectedQueueGenerations.get(queueId);
-        if (generation === undefined || !isCurrentQueueControlGeneration(queueId, generation)) {
-          continue;
-        }
-        await get().moveManyInQueueToPosition(queueIds, queueId, 0, null, queueIds);
-      }
+      const dispatchHolds = new Map<string, string>();
+      const expiredDispatchHolds = new Set<string>();
+      let dispatchHoldRefresh: ReturnType<typeof setInterval> | undefined;
 
-      let startedCount = 0;
-      const startedByQueue = new Map<string, string[]>();
-      for (const id of orderedIds) {
-        const current = get().downloads.find(download => download.id === id);
-        if (!current || !canStartDownload(current.status)) continue;
-        const queueId = current.queueId || MAIN_QUEUE_ID;
-        const generation = selectedQueueGenerations.get(queueId);
-        if (generation === undefined || !isCurrentQueueControlGeneration(queueId, generation)) {
-          continue;
+      const ensureDispatchHold = async (queueId: string): Promise<void> => {
+        const token = dispatchHolds.get(queueId);
+        if (!token || expiredDispatchHolds.has(queueId)) {
+          throw new Error('Selected queue start lost its dispatch-order lease');
         }
-        const resumed = await resumeDownloadInternal(id, {
-          preserveQueuePosition: true,
-          forceRequeue: true
-        });
-        if (resumed && !isCurrentQueueControlGeneration(queueId, generation)) {
-          // A queue pause can win while this item's requeue is in flight. The
-          // pause action is allowed to preempt this bulk-start operation so
-          // this item cannot remain running after the user's pause request.
-          await get().pauseDownload(id);
-          continue;
+        const renewed = await invoke('renew_queue_dispatch_hold', { queueId, token }) as boolean;
+        if (!renewed) {
+          expiredDispatchHolds.add(queueId);
+          throw new Error('Selected queue start lost its dispatch-order lease');
         }
-        if (resumed) {
-          startedCount += 1;
-          const startedIds = startedByQueue.get(queueId) || [];
-          startedIds.push(id);
-          startedByQueue.set(queueId, startedIds);
+      };
 
-          // A requeued paused item is appended by the backend. Move the
-          // started prefix immediately so a newly available slot cannot let
-          // older pending work overtake the remaining selection while it is
-          // still being requeued.
-          if (isCurrentQueueControlGeneration(queueId, generation)) {
-            await get().moveManyInQueueToPosition(
-              startedIds,
-              queueId,
-              0,
-              null,
-              startedIds
-            );
+      try {
+        // Hold each affected queue before changing or re-enqueueing any
+        // selected row. The backend lease is queue-scoped, so unrelated
+        // queues remain eligible while this selection is assembled.
+        for (const queueId of selectedByQueue.keys()) {
+          const token = await invoke('begin_queue_dispatch_hold', { queueId }) as string;
+          if (!token) throw new Error('Could not reserve selected queue order');
+          dispatchHolds.set(queueId, token);
+        }
+
+        dispatchHoldRefresh = setInterval(() => {
+          for (const [queueId, token] of dispatchHolds) {
+            void invoke('renew_queue_dispatch_hold', { queueId, token })
+              .then(active => {
+                if (!active) expiredDispatchHolds.add(queueId);
+              })
+              .catch(error => {
+                console.warn('Could not refresh selected queue dispatch lease:', error);
+              });
+          }
+        }, QUEUE_START_BATCH_HOLD_REFRESH_MS);
+
+        // Make the selection's order explicit before any capacity becomes
+        // available. This keeps the frontend projection and backend pending
+        // queue aligned even when the selected rows were not adjacent.
+        for (const [queueId, queueIds] of selectedByQueue) {
+          const generation = selectedQueueGenerations.get(queueId);
+          if (generation === undefined || !isCurrentQueueControlGeneration(queueId, generation)) {
+            continue;
+          }
+          await get().moveManyInQueueToPosition(queueIds, queueId, 0, null, queueIds);
+        }
+
+        let startedCount = 0;
+        const startedByQueue = new Map<string, string[]>();
+        for (const id of orderedIds) {
+          const current = get().downloads.find(download => download.id === id);
+          if (!current || !canStartDownload(current.status)) continue;
+          const queueId = current.queueId || MAIN_QUEUE_ID;
+          const generation = selectedQueueGenerations.get(queueId);
+          if (generation === undefined || !isCurrentQueueControlGeneration(queueId, generation)) {
+            continue;
+          }
+          await ensureDispatchHold(queueId);
+          const resumed = await resumeDownloadInternal(id, {
+            preserveQueuePosition: true,
+            forceRequeue: true
+          });
+          if (resumed && !isCurrentQueueControlGeneration(queueId, generation)) {
+            // A queue pause can win while this item's requeue is in flight. The
+            // pause action is allowed to preempt this bulk-start operation so
+            // this item cannot remain running after the user's pause request.
+            await get().pauseDownload(id);
+            continue;
+          }
+          if (resumed) {
+            startedCount += 1;
+            const startedIds = startedByQueue.get(queueId) || [];
+            startedIds.push(id);
+            startedByQueue.set(queueId, startedIds);
+
+            // The queue hold prevents a newly enqueued item or older pending
+            // work from consuming capacity before this block is fully ordered.
+            if (isCurrentQueueControlGeneration(queueId, generation)) {
+              await get().moveManyInQueueToPosition(
+                startedIds,
+                queueId,
+                0,
+                null,
+                startedIds
+              );
+            }
           }
         }
-      }
 
-      // Newly dispatched rows are now visible to the backend pending list.
-      // Reapply the same ordered block so existing pending work cannot remain
-      // ahead of a user-selected start request.
-      for (const [queueId, queueIds] of selectedByQueue) {
-        const generation = selectedQueueGenerations.get(queueId);
-        if (generation === undefined || !isCurrentQueueControlGeneration(queueId, generation)) {
-          continue;
+        // Newly dispatched rows are now visible to the backend pending list.
+        // Reapply the same ordered block so existing pending work cannot remain
+        // ahead of a user-selected start request.
+        for (const [queueId, queueIds] of selectedByQueue) {
+          const generation = selectedQueueGenerations.get(queueId);
+          if (generation === undefined || !isCurrentQueueControlGeneration(queueId, generation)) {
+            continue;
+          }
+          await get().moveManyInQueueToPosition(queueIds, queueId, 0, null, queueIds);
         }
-        await get().moveManyInQueueToPosition(queueIds, queueId, 0, null, queueIds);
+        return startedCount;
+      } finally {
+        if (dispatchHoldRefresh !== undefined) clearInterval(dispatchHoldRefresh);
+        await Promise.all(Array.from(dispatchHolds, async ([queueId, token]) => {
+          try {
+            await invoke('end_queue_dispatch_hold', { queueId, token });
+          } catch (error) {
+            console.error('Failed to release selected queue dispatch lease:', error);
+          }
+        }));
       }
-      return startedCount;
     });
   },
   startQueue: (queueId) => {
@@ -2802,8 +2885,10 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     if (activeIds.length === 0) return 0;
 
     const results = await Promise.allSettled(activeIds.map(id => get().pauseDownload(id)));
-    const pausedCount = results.filter(result => result.status === 'fulfilled').length;
-    const failedCount = activeIds.length - pausedCount;
+    const pausedCount = activeIds.filter(id =>
+      get().downloads.some(download => download.id === id && download.status === 'paused')
+    ).length;
+    const failedCount = results.filter(result => result.status === 'rejected').length;
     if (failedCount > 0) {
       console.error(`Failed to pause ${failedCount} downloads in queue ${queueId}`);
     }
@@ -2834,8 +2919,10 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       .map(item => item.id);
     if (activeIds.length === 0) return 0;
 
-    const results = await Promise.allSettled(activeIds.map(id => get().pauseDownload(id)));
-    const pausedCount = results.filter(result => result.status === 'fulfilled').length;
+    await Promise.allSettled(activeIds.map(id => get().pauseDownload(id)));
+    const pausedCount = activeIds.filter(id =>
+      get().downloads.some(download => download.id === id && download.status === 'paused')
+    ).length;
     syncSystemIntegrations();
     return pausedCount;
   },

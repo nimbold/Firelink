@@ -270,6 +270,113 @@ fn retry_metadata_with_cookies(
     true
 }
 
+async fn wait_for_metadata_retry_with<S, Fut>(
+    retry_strike: &mut usize,
+    reason: &str,
+    retryable: bool,
+    mut sleep: S,
+) -> bool
+where
+    S: FnMut(Duration) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    if !retryable || *retry_strike >= crate::retry::MAX_RETRIES {
+        return false;
+    }
+
+    let delay = crate::retry::backoff_for_error(*retry_strike, reason);
+    log::debug!(
+        "metadata retry [retry={} error_class={} delay_ms={}]",
+        *retry_strike + 1,
+        crate::retry::network_error_class(reason),
+        delay.as_millis()
+    );
+    sleep(delay).await;
+    *retry_strike += 1;
+    true
+}
+
+/// Retry idempotent metadata reads after their fallback method has been
+/// selected, sharing one bounded retry budget across ranged GETs, redirects,
+/// and auth retry. HEAD failures still switch promptly to the GET fallback.
+/// Transient HTTP statuses are retried as well as connection failures.
+async fn retry_metadata_request_with<T, E, F, Fut, C, S, SleepFut>(
+    retry_strike: &mut usize,
+    mut send: F,
+    classify_response: C,
+    mut sleep: S,
+) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+    C: Fn(&T) -> String,
+    S: FnMut(Duration) -> SleepFut,
+    SleepFut: std::future::Future<Output = ()>,
+{
+    loop {
+        match send().await {
+            Ok(response) => {
+                let reason = classify_response(&response);
+                if wait_for_metadata_retry_with(
+                    retry_strike,
+                    &reason,
+                    crate::retry::is_transient_network_error(&reason),
+                    &mut sleep,
+                )
+                .await
+                {
+                    drop(response);
+                    continue;
+                }
+                return Ok(response);
+            }
+            Err(error) => {
+                let reason = error.to_string();
+                if !wait_for_metadata_retry_with(
+                    retry_strike,
+                    &reason,
+                    crate::retry::is_transient_network_error(&reason),
+                    &mut sleep,
+                )
+                .await
+                {
+                    return Err(error);
+                }
+            }
+        }
+    }
+}
+
+async fn send_metadata_request_with_retry<F, Fut>(
+    retry_strike: &mut usize,
+    send: F,
+) -> Result<reqwest::Response, reqwest::Error>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
+{
+    retry_metadata_request_with(
+        retry_strike,
+        send,
+        |response: &reqwest::Response| format!("HTTP {}", response.status().as_u16()),
+        tokio::time::sleep,
+    )
+    .await
+}
+
+fn metadata_transport_error_message(operation: &str, error: &reqwest::Error) -> String {
+    let reason = match reqwest_error_code(error) {
+        "timeout" => "request timed out",
+        "dns" => "DNS lookup failed",
+        "connect" => "connection could not be established",
+        "body" => "response could not be read",
+        "request" => "request was invalid",
+        _ => "network error",
+    };
+    format!("{operation} metadata request failed: {reason}")
+}
+
 #[derive(Serialize, TS)]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct MetadataResponse {
@@ -1916,6 +2023,7 @@ async fn fetch_remote_torrent_bytes(
     let cookies_available = metadata_cookie_header_present(headers, cookies, cookie_scopes);
     let mut send_cookies = !cookies_available;
     let mut cookie_retry_attempted = false;
+    let mut network_retry_strike = 0;
 
     let mut redirect_count = 0;
     loop {
@@ -1965,20 +2073,22 @@ async fn fetch_remote_torrent_bytes(
         let client = builder
             .build()
             .map_err(|error| format!("could not create torrent metadata client: {error}"))?;
-        let response = client
-            .get(current.clone())
-            .header(
-                reqwest::header::ACCEPT,
-                "application/x-bittorrent, application/octet-stream",
-            )
-            .send()
-            .await
-            .map_err(|error| {
-                format!(
-                    "remote torrent metadata request failed: {}",
-                    crate::redact_sensitive_text(&error.to_string())
+        let response = send_metadata_request_with_retry(&mut network_retry_strike, || {
+            client
+                .get(current.clone())
+                .header(
+                    reqwest::header::ACCEPT,
+                    "application/x-bittorrent, application/octet-stream",
                 )
-            })?;
+                .send()
+        })
+        .await
+        .map_err(|error| {
+            format!(
+                "remote torrent metadata request failed: {}",
+                crate::redact_sensitive_text(&error.to_string())
+            )
+        })?;
 
         if should_retry_metadata_with_cookies(
             response.status(),
@@ -2027,13 +2137,34 @@ async fn fetch_remote_torrent_bytes(
 
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
+        let mut retry_body = false;
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| {
-                format!(
-                    "remote torrent metadata response failed: {}",
-                    crate::redact_sensitive_text(&error.to_string())
-                )
-            })?;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    let reason = error.to_string();
+                    let retryable_body_error = error.is_timeout()
+                        || error.is_connect()
+                        || error.is_body()
+                        || crate::retry::is_transient_network_error(&reason);
+                    if retryable_body_error
+                        && wait_for_metadata_retry_with(
+                            &mut network_retry_strike,
+                            &reason,
+                            true,
+                            tokio::time::sleep,
+                        )
+                        .await
+                    {
+                        retry_body = true;
+                        break;
+                    }
+                    return Err(format!(
+                        "remote torrent metadata response failed: {}",
+                        crate::redact_sensitive_text(&reason)
+                    ));
+                }
+            };
             if bytes
                 .len()
                 .checked_add(chunk.len())
@@ -2045,6 +2176,9 @@ async fn fetch_remote_torrent_bytes(
                 ));
             }
             bytes.extend_from_slice(&chunk);
+        }
+        if retry_body {
+            continue;
         }
         if bytes.is_empty() {
             return Err("remote torrent metadata response was empty".to_string());
@@ -2128,6 +2262,7 @@ async fn fetch_metadata(
     let mut current_url = url.clone();
     let original_origin = reqwest::Url::parse(&url).ok();
     let mut redirects = 0;
+    let mut network_retry_strike = 0;
     let cookies_available = metadata_cookie_header_present(
         headers.as_deref(),
         cookies.as_deref(),
@@ -2313,7 +2448,11 @@ async fn fetch_metadata(
             Err(head_error) => {
                 let head_elapsed_ms = head_started.elapsed().as_millis();
                 let get_started = Instant::now();
-                match build_get_range().send().await {
+                match send_metadata_request_with_retry(&mut network_retry_strike, || {
+                    build_get_range().send()
+                })
+                .await
+                {
                     Ok(response) => {
                         log::warn!(
                             "metadata [stage=metadata operation=head result=fallback host={} error_code={} head_elapsed_ms={} get_status={} get_elapsed_ms={} total_elapsed_ms={}]",
@@ -2378,7 +2517,11 @@ async fn fetch_metadata(
 
         if needs_fallback {
             let get_started = Instant::now();
-            current_res = match build_get_range().send().await {
+            current_res = match send_metadata_request_with_retry(&mut network_retry_strike, || {
+                build_get_range().send()
+            })
+            .await
+            {
                 Ok(response) => {
                     log::info!(
                         "metadata [stage=metadata operation=get_range host={} result=ok status={} elapsed_ms={} total_elapsed_ms={}]",
@@ -2397,7 +2540,7 @@ async fn fetch_metadata(
                         get_started.elapsed().as_millis(),
                         metadata_started.elapsed().as_millis()
                     );
-                    return Err(error.to_string());
+                    return Err(metadata_transport_error_message("Ranged GET", &error));
                 }
             };
 
@@ -4252,21 +4395,42 @@ async fn shutdown_aria2_daemon(app_handle: tauri::AppHandle) {
                 }
             };
             (outcome, child_wait_started.elapsed())
-        })
-        .await;
-        match child_wait {
-            Ok((outcome, elapsed)) => log::info!(
+        });
+        match tokio::time::timeout(std::time::Duration::from_secs(10), child_wait).await {
+            Ok(Ok((outcome, elapsed))) => log::info!(
                 "app_shutdown_phase=aria2_child outcome={} elapsed_ms={}",
                 outcome,
                 elapsed.as_millis()
             ),
-            Err(error) => log::warn!("aria2 child wait task failed: {error}"),
+            Ok(Err(error)) => log::warn!("aria2 child wait task failed: {error}"),
+            Err(_) => log::warn!("app_shutdown_phase=aria2_child outcome=timeout"),
         }
     }
     log::info!(
         "app_shutdown_phase=aria2_total elapsed_ms={}",
         shutdown_started.elapsed().as_millis()
     );
+}
+
+fn reject_app_exit_request(app: &tauri::AppHandle, request: u64, reason: &str) {
+    app.state::<Aria2DaemonGuard>().cancel_shutdown();
+    let tray_action_pending = app
+        .state::<PendingTrayActionQueue>()
+        .reopen_after_exit_rejected();
+    if tray_action_pending {
+        if let Err(error) = app.emit("tray-action-available", ()) {
+            log::warn!("pending tray action wakeup failed after exit rejection: {error}");
+        }
+    }
+    let _ = app.emit_to(
+        "main",
+        "app-exit-cancelled",
+        serde_json::json!({
+            "requestId": request.to_string(),
+            "reason": reason
+        }),
+    );
+    restore_main_window(app);
 }
 
 impl Drop for Aria2DaemonGuard {
@@ -6107,7 +6271,7 @@ async fn pause_download(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: String,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     properties_window::ensure_main_window(&caller)?;
     log::info!("pause_download called for id: {}", id);
 
@@ -6201,7 +6365,7 @@ async fn pause_download(
                                     progress.or(status_progress.clone()),
                                 )
                                 .await;
-                            return Ok(());
+                            return Ok(false);
                         }
                         Ok((status, progress)) if matches!(status.as_str(), "error" | "removed") => {
                             state.queue_manager.clear_aria2_allocation(&id).await;
@@ -6274,7 +6438,7 @@ async fn pause_download(
                         status_progress.clone(),
                     )
                     .await;
-                return Ok(());
+                return Ok(false);
             }
             terminal => {
                 state.queue_manager.clear_aria2_allocation(&id).await;
@@ -6300,7 +6464,7 @@ async fn pause_download(
                         event = event.with_progress(progress);
                     }
                     let _ = app_handle.emit("download-state", event);
-                    return Ok(());
+                    return Ok(true);
                 }
                 state.queue_manager.release_registered_id(&id).await;
                 return Err(format!(
@@ -6331,14 +6495,14 @@ async fn pause_download(
             event = event.with_progress(progress);
         }
         let _ = app_handle.emit("download-state", event);
-        return Ok(());
+        return Ok(true);
     }
 
     // A terminal runner may have already released its lifecycle while this
     // command was waiting for the per-download control lock. Treat pause as
     // an idempotent no-op instead of emitting a stale Paused state.
     if active_kind.is_none() && !removed_pending && registered_lifecycle_generation.is_none() {
-        return Ok(());
+        return Ok(false);
     }
 
     if matches!(active_kind, Some(crate::queue::TaskKind::Aria2)) {
@@ -6394,7 +6558,7 @@ async fn pause_download(
         "download-state",
         crate::ipc::DownloadStateEvent::paused_with_seed_remaining(id, seed_remaining),
     );
-    Ok(())
+    Ok(true)
 }
 
 #[tauri::command]
@@ -9468,6 +9632,13 @@ fn ack_schedule_trigger(
         }
         "stop" => {
             state.insert("schedulerLastStopKey".to_string(), serde_json::json!(key));
+            let snapshot_stop_key = state
+                .get("schedulerActiveRunSnapshot")
+                .and_then(|snapshot| snapshot.get("stopKey"))
+                .and_then(serde_json::Value::as_str);
+            if snapshot_stop_key == Some(key.as_str()) {
+                state.remove("schedulerActiveRunSnapshot");
+            }
         }
         _ => {}
     })?;
@@ -9479,7 +9650,14 @@ fn ack_schedule_trigger(
                         settings.scheduler_last_start_key = key;
                         settings.scheduler_triggered_start_key = None;
                     } else {
-                        settings.scheduler_last_stop_key = key;
+                        settings.scheduler_last_stop_key = key.clone();
+                        if settings
+                            .scheduler_active_run_snapshot
+                            .as_ref()
+                            .is_some_and(|snapshot| snapshot.stop_key.as_deref() == Some(key.as_str()))
+                        {
+                            settings.scheduler_active_run_snapshot = None;
+                        }
                     }
                 }
             }
@@ -9497,6 +9675,48 @@ async fn get_pending_order(
 ) -> Result<Vec<String>, AppError> {
     properties_window::ensure_main_window(&caller).map_err(AppError::Internal)?;
     Ok(state.queue_manager.pending_order(queue_id.as_deref()).await)
+}
+
+#[tauri::command]
+async fn begin_queue_dispatch_hold(
+    caller: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    queue_id: String,
+) -> Result<String, AppError> {
+    properties_window::ensure_main_window(&caller).map_err(AppError::Internal)?;
+    state
+        .queue_manager
+        .begin_queue_dispatch_hold(&queue_id)
+        .await
+        .map_err(AppError::Internal)
+}
+
+#[tauri::command]
+async fn renew_queue_dispatch_hold(
+    caller: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    queue_id: String,
+    token: String,
+) -> Result<bool, AppError> {
+    properties_window::ensure_main_window(&caller).map_err(AppError::Internal)?;
+    Ok(state
+        .queue_manager
+        .renew_queue_dispatch_hold(&queue_id, &token)
+        .await)
+}
+
+#[tauri::command]
+async fn end_queue_dispatch_hold(
+    caller: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    queue_id: String,
+    token: String,
+) -> Result<bool, AppError> {
+    properties_window::ensure_main_window(&caller).map_err(AppError::Internal)?;
+    Ok(state
+        .queue_manager
+        .end_queue_dispatch_hold(&queue_id, &token)
+        .await)
 }
 
 fn enqueue_lifecycle_generation(item: &queue::EnqueueItem) -> Result<u64, String> {
@@ -15869,7 +16089,7 @@ mod tests {
         media_output_template, media_progress_args, media_progress_event_totals,
         media_progress_speed,
         cookie_scope_for_url, metadata_authentication_error, metadata_cookie_header_present,
-        metadata_headers, metadata_response_error,
+        metadata_headers, metadata_response_error, metadata_transport_error_message,
         metadata_error_code,
         reqwest_error_code,
         is_remote_torrent_source,
@@ -15895,6 +16115,7 @@ mod tests {
         browser_cookie_fallback, normalize_media_cookie_file_for_request,
         should_fallback_from_browser_cookies, should_fallback_from_netscape_cookie_file,
         retry_metadata_with_cookies, should_retry_metadata_with_cookies,
+        retry_metadata_request_with,
         should_send_metadata_credentials, collect_log_files, FirelinkDeepLink,
         ytdlp_youtube_extractor_args, YTDLP_YOUTUBE_PLAYER_CLIENTS,
         percent_decode_metadata_value, MediaProgress,
@@ -15982,6 +16203,85 @@ mod tests {
 
         assert!(error.is_dns());
         assert_eq!(reqwest_error_code(&error), "dns");
+        assert_eq!(
+            metadata_transport_error_message("Ranged GET", &error),
+            "Ranged GET metadata request failed: DNS lookup failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_request_retries_transient_statuses_and_stops_on_permanent_statuses() {
+        let mut retry_strike = 0;
+        let mut attempts = 0;
+        let status = retry_metadata_request_with(
+            &mut retry_strike,
+            || {
+                attempts += 1;
+                std::future::ready(Ok::<u16, String>(if attempts == 1 { 503 } else { 200 }))
+            },
+            |status| format!("HTTP {status}"),
+            |_| std::future::ready(()),
+        )
+        .await
+        .expect("the retry should return the successful response");
+        assert_eq!(status, 200);
+        assert_eq!(attempts, 2);
+        assert_eq!(retry_strike, 1);
+
+        let mut retry_strike = 0;
+        let mut attempts = 0;
+        let status = retry_metadata_request_with(
+            &mut retry_strike,
+            || {
+                attempts += 1;
+                std::future::ready(if attempts == 1 {
+                    Err("operation timed out".to_string())
+                } else {
+                    Ok(200_u16)
+                })
+            },
+            |status| format!("HTTP {status}"),
+            |_| std::future::ready(()),
+        )
+        .await
+        .expect("a transient transport failure should retry");
+        assert_eq!(status, 200);
+        assert_eq!(attempts, 2);
+        assert_eq!(retry_strike, 1);
+
+        let mut retry_strike = 0;
+        let mut attempts = 0;
+        let status = retry_metadata_request_with(
+            &mut retry_strike,
+            || {
+                attempts += 1;
+                std::future::ready(Ok::<u16, String>(404))
+            },
+            |status| format!("HTTP {status}"),
+            |_| std::future::ready(()),
+        )
+        .await
+        .expect("permanent responses are returned to the caller");
+        assert_eq!(status, 404);
+        assert_eq!(attempts, 1);
+        assert_eq!(retry_strike, 0);
+
+        let mut retry_strike = crate::retry::MAX_RETRIES;
+        let mut attempts = 0;
+        let status = retry_metadata_request_with(
+            &mut retry_strike,
+            || {
+                attempts += 1;
+                std::future::ready(Ok::<u16, String>(503))
+            },
+            |status| format!("HTTP {status}"),
+            |_| std::future::ready(()),
+        )
+        .await
+        .expect("exhausted retries leave the final response for normal error handling");
+        assert_eq!(status, 503);
+        assert_eq!(attempts, 1);
+        assert_eq!(retry_strike, crate::retry::MAX_RETRIES);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -23014,6 +23314,9 @@ pub fn run() {
         cancel_enqueue_generation,
         move_in_queue,
         move_many_in_queue,
+        begin_queue_dispatch_hold,
+        renew_queue_dispatch_hold,
+        end_queue_dispatch_hold,
         remove_from_queue,
         get_pending_order,
     ]);
@@ -23158,6 +23461,9 @@ pub fn run() {
                 | "cancel_enqueue_generation"
                 | "move_in_queue"
                 | "move_many_in_queue"
+                | "begin_queue_dispatch_hold"
+                | "renew_queue_dispatch_hold"
+                | "end_queue_dispatch_hold"
                 | "remove_from_queue"
                 | "get_pending_order" => download_queue_handler(invoke),
                 "reveal_in_file_manager"
@@ -23242,9 +23548,18 @@ pub fn run() {
                                 .clone();
                             let request = frontend_exit_flush.request();
                             let mut completed = frontend_exit_flush.completed.subscribe();
-                            let _ = app.emit_to("main", "app-exit-requested", serde_json::json!({
+                            if let Err(error) = app.emit_to("main", "app-exit-requested", serde_json::json!({
                                 "requestId": request.to_string()
-                            }));
+                            })) {
+                                log::warn!("app_shutdown_phase=frontend_flush signal failed: {error}");
+                                frontend_exit_flush.finish(request, false);
+                                reject_app_exit_request(&app, request, "signal-failed");
+                                log::info!(
+                                    "app_shutdown_phase=total outcome=cancelled elapsed_ms={}",
+                                    exit_started.elapsed().as_millis()
+                                );
+                                return;
+                            }
                             let flush_wait = async move {
                                 loop {
                                     let status = *completed.borrow_and_update();
@@ -23301,26 +23616,7 @@ pub fn run() {
                                 } else {
                                     "rejected"
                                 };
-                                app.state::<Aria2DaemonGuard>().cancel_shutdown();
-                                let tray_action_pending = app
-                                    .state::<PendingTrayActionQueue>()
-                                    .reopen_after_exit_rejected();
-                                if tray_action_pending {
-                                    if let Err(error) = app.emit("tray-action-available", ()) {
-                                        log::warn!(
-                                            "pending tray action wakeup failed after exit rejection: {error}"
-                                        );
-                                    }
-                                }
-                                let _ = app.emit_to(
-                                    "main",
-                                    "app-exit-cancelled",
-                                    serde_json::json!({
-                                        "requestId": request.to_string(),
-                                        "reason": cancel_reason
-                                    }),
-                                );
-                                restore_main_window(&app);
+                                reject_app_exit_request(&app, request, cancel_reason);
                                 log::info!(
                                     "app_shutdown_phase=total outcome=cancelled elapsed_ms={}",
                                     exit_started.elapsed().as_millis()
@@ -23358,7 +23654,7 @@ pub fn run() {
                                     }
                                 };
                                 match tokio::time::timeout(
-                                    Duration::from_secs(60),
+                                    Duration::from_secs(5),
                                     final_flush_wait,
                                 )
                                 .await
