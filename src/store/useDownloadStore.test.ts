@@ -3260,6 +3260,7 @@ describe('useDownloadStore', () => {
     vi.mocked(useSettingsStore.getState).mockReturnValue({
       ...useSettingsStore.getState(),
       mediaCookieSource: 'chrome',
+      mediaCookieBrowserProfiles: { chrome: '/profiles/chrome-work' },
       mediaCookieFile: '/tmp/firelink-cookies.txt'
     } as unknown as ReturnType<typeof useSettingsStore.getState>);
     useDownloadStore.setState({
@@ -3296,6 +3297,7 @@ describe('useDownloadStore', () => {
         id,
         is_media: true,
         cookie_source: 'chrome',
+        cookie_browser_profile: '/profiles/chrome-work',
         cookie_file: '/tmp/firelink-cookies.txt',
       });
       expect(useDownloadStore.getState().downloads[0].credentialsRequired).toBe(false);
@@ -3309,6 +3311,7 @@ describe('useDownloadStore', () => {
     vi.mocked(useSettingsStore.getState).mockReturnValue({
       ...useSettingsStore.getState(),
       mediaCookieSource: 'firefox',
+      mediaCookieBrowserProfiles: { firefox: '/profiles/firefox-work' },
       mediaCookieFile: '/tmp/firelink-cookies.txt'
     } as unknown as ReturnType<typeof useSettingsStore.getState>);
     useDownloadStore.setState({
@@ -3343,6 +3346,7 @@ describe('useDownloadStore', () => {
         id,
         is_media: true,
         cookie_source: 'firefox',
+        cookie_browser_profile: '/profiles/firefox-work',
         cookie_file: '/tmp/firelink-cookies.txt',
       })
     }));

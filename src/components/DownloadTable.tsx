@@ -54,6 +54,7 @@ import {
   moveSelectedBlockToIndex
 } from '../utils/queueOrdering';
 import { selectContextMenuTarget, updateDownloadSelection } from '../utils/downloadSelection';
+import { isInvalidMediaCookieBrowserProfileError } from '../utils/downloadErrors';
 import { createColumnResizeSession } from '../utils/columnResize';
 import { clampFloatingPosition } from '../utils/floatingPosition';
 import { FloatingQueueSubmenu } from './FloatingQueueSubmenu';
@@ -1988,7 +1989,11 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
           download => download.id === item.id
         );
         const reason = latest?.lastError?.trim();
-        throw new Error(reason || t($ => $.downloadTable.backendRejectedStart));
+        throw new Error(reason
+          ? isInvalidMediaCookieBrowserProfileError(reason)
+            ? t($ => $.addDownloads.cookieBrowserProfileInvalid)
+            : reason
+          : t($ => $.downloadTable.backendRejectedStart));
       }
     } catch (error) {
       console.error("Failed to resume:", error);

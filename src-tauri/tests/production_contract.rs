@@ -80,6 +80,8 @@ fn headless_enqueue_contract_strips_torrent_credentials_before_task_creation() {
         password: Some("secret".to_string()),
         headers: Some("Cookie: session=secret".to_string()),
         cookies: Some("session=secret".to_string()),
+        cookie_source: Some("opera".to_string()),
+        cookie_browser_profile: Some("/private/opera-profile".to_string()),
         is_torrent: Some(true),
         ..EnqueueItem::default()
     };
@@ -88,6 +90,7 @@ fn headless_enqueue_contract_strips_torrent_credentials_before_task_creation() {
     assert!(task.payload.password.is_none());
     assert!(task.payload.headers.is_none());
     assert!(task.payload.cookies.is_none());
+    assert!(task.payload.cookie_browser_profile.is_none());
 }
 
 #[test]

@@ -55,6 +55,7 @@ import { getPropertiesTabIndex, getPropertiesTabs, PROPERTIES_TABS_OVERFLOW_BREA
 import { getPropertiesConnectionPresentation, getPropertiesProgress } from '../utils/propertiesPresentation';
 import { isTorrentLiveStatus } from '../utils/propertiesTorrentLifecycle';
 import { isTorrentWaitingForPeers } from '../utils/torrentPresentation';
+import { isInvalidMediaCookieBrowserProfileError } from '../utils/downloadErrors';
 import { copyTorrentFilePath } from '../utils/torrentFilePath';
 import { useWindowFocusState } from '../utils/windowFocus';
 import { useWindowMaximizedState } from '../utils/windowMaximized';
@@ -1433,7 +1434,9 @@ export const PropertiesWindowApp = () => {
                       : t($ => $.downloads.errors.nameResolutionFailed)}
                   </p>
                 )}
-                <span>{snapshot.lastError}</span>
+                <span>{isInvalidMediaCookieBrowserProfileError(snapshot.lastError)
+                  ? t($ => $.addDownloads.cookieBrowserProfileInvalid)
+                  : snapshot.lastError}</span>
               </div>
             </>}
           </div>

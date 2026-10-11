@@ -6,6 +6,7 @@ type FetchMediaMetadataArgs = {
   url: string;
   cookieFile: string | null;
   cookieBrowser: string | null;
+  cookieBrowserProfile: string | null;
   userAgent: string | null;
   username: string | null;
   password: string | null;
@@ -22,6 +23,7 @@ const metadataKey = (args: FetchMediaMetadataArgs) =>
     args.url,
     args.cookieFile,
     args.cookieBrowser,
+    args.cookieBrowserProfile,
     args.userAgent,
     args.username,
     args.password,

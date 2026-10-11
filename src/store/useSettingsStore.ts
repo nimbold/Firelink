@@ -213,6 +213,19 @@ const persistedBoolean = (value: unknown, fallback: boolean) =>
 const persistedString = (value: unknown, fallback: string): string =>
   typeof value === 'string' ? value : fallback;
 
+const sanitizeMediaCookieBrowserProfiles = (value: unknown): Record<string, string> => {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(Object.entries(value).flatMap(([browser, profile]) => {
+    if (
+      browser === 'none'
+      || !isAllowedSetting(MEDIA_COOKIE_SOURCE_VALUES, browser)
+      || typeof profile !== 'string'
+      || !profile.trim()
+    ) return [];
+    return [[browser, profile.trim()]];
+  }));
+};
+
 const sanitizeSchedulerActiveDownloadIds = (
   value: unknown,
   fallback: string[]
@@ -377,6 +390,7 @@ export interface SettingsState {
   preventsSleepWhileDownloading: boolean;
   preventsDisplaySleepWhileDownloading: boolean;
   mediaCookieSource: MediaCookieSource;
+  mediaCookieBrowserProfiles: Record<string, string>;
   mediaCookieFile: string;
   siteLogins: SiteLogin[];
   extensionPairingToken: string;
@@ -464,6 +478,7 @@ export interface SettingsState {
   setPreventsSleepWhileDownloading: (prevent: boolean) => void;
   setPreventsDisplaySleepWhileDownloading: (prevent: boolean) => void;
   setMediaCookieSource: (source: MediaCookieSource) => void;
+  setMediaCookieBrowserProfile: (browser: MediaCookieSource, profile: string) => void;
   setMediaCookieFile: (path: string) => void;
   setRememberLastUsedDownloadDirectory: (enabled: boolean) => void;
   setLastUsedDownloadDirectory: (path: string) => void;
@@ -571,6 +586,7 @@ export const useSettingsStore = create<SettingsState>()(
       preventsSleepWhileDownloading: true,
       preventsDisplaySleepWhileDownloading: false,
       mediaCookieSource: 'none',
+      mediaCookieBrowserProfiles: {},
       mediaCookieFile: '',
       siteLogins: [],
       extensionPairingToken: '',
@@ -890,6 +906,17 @@ export const useSettingsStore = create<SettingsState>()(
         info('Settings updated: mediaCookieSource');
         set({ mediaCookieSource: safe });
       },
+      setMediaCookieBrowserProfile: (browser, profile) => {
+        if (browser === 'none' || !isAllowedSetting(MEDIA_COOKIE_SOURCE_VALUES, browser)) return;
+        const trimmedProfile = profile.trim();
+        info('Settings updated: mediaCookieBrowserProfiles');
+        set(state => {
+          const profiles = { ...state.mediaCookieBrowserProfiles };
+          if (trimmedProfile) profiles[browser] = trimmedProfile;
+          else delete profiles[browser];
+          return { mediaCookieBrowserProfiles: profiles };
+        });
+      },
       setMediaCookieFile: (mediaCookieFile) => {
         info('Settings updated: mediaCookieFile');
         set({ mediaCookieFile: mediaCookieFile.trim() });
@@ -1109,6 +1136,7 @@ export const useSettingsStore = create<SettingsState>()(
         preventsSleepWhileDownloading: state.preventsSleepWhileDownloading,
         preventsDisplaySleepWhileDownloading: state.preventsDisplaySleepWhileDownloading,
         mediaCookieSource: state.mediaCookieSource,
+        mediaCookieBrowserProfiles: state.mediaCookieBrowserProfiles,
         mediaCookieFile: state.mediaCookieFile,
         siteLogins: state.siteLogins,
         keychainAccessGranted: state.keychainAccessGranted,
@@ -1246,6 +1274,9 @@ export const useSettingsStore = create<SettingsState>()(
           mediaCookieSource: isAllowedSetting(MEDIA_COOKIE_SOURCE_VALUES, persisted.mediaCookieSource)
             ? persisted.mediaCookieSource
             : 'none',
+          mediaCookieBrowserProfiles: sanitizeMediaCookieBrowserProfiles(
+            persisted.mediaCookieBrowserProfiles
+          ),
           mediaCookieFile: persistedString(persisted.mediaCookieFile, currentState.mediaCookieFile),
           activeSettingsTab: isAllowedSetting(SETTINGS_TAB_VALUES, persisted.activeSettingsTab)
             ? persisted.activeSettingsTab

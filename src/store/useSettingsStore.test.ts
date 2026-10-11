@@ -288,6 +288,52 @@ describe('durable main-window and sidebar preferences', () => {
     expect(fallbackResult?.scheduler.selectedQueueIds).toEqual(current.scheduler.selectedQueueIds);
   });
 
+  it('hydrates legacy browser-cookie settings with no profiles and sanitizes profiles per browser', () => {
+    const merge = useSettingsStore.persist.getOptions().merge;
+    expect(merge).toBeTypeOf('function');
+    const current = {
+      ...useSettingsStore.getState(),
+      mediaCookieBrowserProfiles: { opera: '/stale/current-state-profile' }
+    };
+
+    expect(merge?.({ mediaCookieSource: 'opera' }, current)?.mediaCookieBrowserProfiles).toEqual({});
+    expect(merge?.({
+      mediaCookieBrowserProfiles: {
+        opera: '  C:\\Users\\Nima\\Opera GX  ',
+        firefox: '   ',
+        none: '/ignored/none',
+        'unknown-browser': '/ignored/unknown',
+        chrome: 42
+      }
+    }, current)?.mediaCookieBrowserProfiles).toEqual({
+      opera: 'C:\\Users\\Nima\\Opera GX'
+    });
+  });
+
+  it('remembers and clears browser profile folders independently', () => {
+    const { setMediaCookieBrowserProfile } = useSettingsStore.getState();
+    setMediaCookieBrowserProfile('opera', '  C:\\Users\\Nima\\Opera GX  ');
+    setMediaCookieBrowserProfile('firefox', '/profiles/firefox-work');
+
+    expect(useSettingsStore.getState().mediaCookieBrowserProfiles).toEqual({
+      opera: 'C:\\Users\\Nima\\Opera GX',
+      firefox: '/profiles/firefox-work'
+    });
+
+    const partialize = useSettingsStore.persist.getOptions().partialize;
+    expect(partialize?.(useSettingsStore.getState())).toMatchObject({
+      mediaCookieBrowserProfiles: {
+        opera: 'C:\\Users\\Nima\\Opera GX',
+        firefox: '/profiles/firefox-work'
+      }
+    });
+
+    setMediaCookieBrowserProfile('opera', ' ');
+    expect(useSettingsStore.getState().mediaCookieBrowserProfiles).toEqual({
+      firefox: '/profiles/firefox-work'
+    });
+  });
+
   it('filters empty scheduler active download IDs during hydration', () => {
     const merge = useSettingsStore.persist.getOptions().merge;
     expect(merge).toBeTypeOf('function');

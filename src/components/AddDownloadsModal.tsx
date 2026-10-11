@@ -184,6 +184,7 @@ export const AddDownloadsModal = () => {
   const mediaMetadataErrorLabel = (reason: AddDownloadDraftRow['metadataBlockedReason']): string => {
     switch (reason) {
       case 'cookie-file': return t($ => $.addDownloads.cookieFileInvalid);
+      case 'cookie-profile': return t($ => $.addDownloads.cookieBrowserProfileInvalid);
       case 'youtube-bot': return t($ => $.addDownloads.youtubeBotBlocked);
       case 'youtube-auth': return t($ => $.addDownloads.youtubeAuthenticationRequired);
       case 'youtube-po-token': return t($ => $.addDownloads.youtubePoTokenRequired);
@@ -821,6 +822,9 @@ export const AddDownloadsModal = () => {
           if (row.isMedia) {
             const { mediaCookieSource } = settingsStore;
             const browserArg = mediaCookieSource !== 'none' ? mediaCookieSource : null;
+            const browserProfile = browserArg
+              ? settingsStore.mediaCookieBrowserProfiles?.[browserArg]?.trim() || null
+              : null;
             let keychainPassword = null;
             if (login && !useAuth && keychainAccessReady) {
               try {
@@ -841,6 +845,7 @@ export const AddDownloadsModal = () => {
               url: row.sourceUrl,
               cookieFile: settingsStore.mediaCookieFile?.trim() || null,
               cookieBrowser: browserArg,
+              cookieBrowserProfile: browserProfile,
               userAgent: settingsStore.customUserAgent.trim() || null,
               username: useAuth
                 ? username.trim() || null

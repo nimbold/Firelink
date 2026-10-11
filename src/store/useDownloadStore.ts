@@ -552,6 +552,9 @@ async function dispatchItemInternal(
         cookie_source: item.isMedia === true && hasConfiguredMediaCookieSource(item, settings)
           ? settings.mediaCookieSource
           : null,
+        cookie_browser_profile: item.isMedia === true && settings.mediaCookieSource !== 'none'
+          ? settings.mediaCookieBrowserProfiles?.[settings.mediaCookieSource]?.trim() || undefined
+          : undefined,
         cookie_file: item.isMedia === true && settings.mediaCookieFile?.trim()
           ? settings.mediaCookieFile.trim()
           : undefined,
@@ -3371,6 +3374,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
             cookie_source: item.isMedia === true && hasConfiguredMediaCookieSource(item, settings)
               ? settings.mediaCookieSource
               : null,
+            cookie_browser_profile: item.isMedia === true && settings.mediaCookieSource !== 'none'
+              ? settings.mediaCookieBrowserProfiles?.[settings.mediaCookieSource]?.trim() || undefined
+              : undefined,
             cookie_file: item.isMedia === true && settings.mediaCookieFile?.trim()
               ? settings.mediaCookieFile.trim()
               : undefined,

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   appendRequestUrlsAfterVersion,
   applyMediaModeToRow,
+  classifyMediaMetadataError,
   commonMediaFormatsForRows,
   canSubmitMetadataRows,
   commonMediaQualitiesForRows,
@@ -45,6 +46,12 @@ const row = (
 });
 
 describe('add download metadata workflow', () => {
+  it('classifies invalid browser profile folders for translated metadata feedback', () => {
+    expect(classifyMediaMetadataError(
+      'MEDIA_COOKIE_PROFILE_INVALID: browser profile folder is missing or inaccessible'
+    )).toBe('cookie-profile');
+  });
+
   it('keeps the stable source URL instead of persisting a resolved redirect', () => {
     const sourceUrl = 'https://github.com/example/project/releases/download/v1/file.zip';
     const signedRedirect = 'https://release-assets.githubusercontent.com/github-production-release-asset/asset?se=2099-01-01T00%3A00%3A00Z&sig=redacted';

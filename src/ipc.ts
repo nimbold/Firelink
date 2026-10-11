@@ -50,11 +50,11 @@ type CommandMap = {
     result: MetadataResponse;
   };
   fetch_media_metadata: {
-    args: { url: string; cookieFile: string | null; cookieBrowser: string | null; userAgent: string | null; username: string | null; password: string | null; headers: string | null; cookies: string | null; proxy: string | null };
+    args: { url: string; cookieFile: string | null; cookieBrowser: string | null; cookieBrowserProfile: string | null; userAgent: string | null; username: string | null; password: string | null; headers: string | null; cookies: string | null; proxy: string | null };
     result: MediaMetadata;
   };
   fetch_media_playlist_metadata: {
-    args: { url: string; cookieFile: string | null; cookieBrowser: string | null; userAgent: string | null; username: string | null; password: string | null; headers: string | null; cookies: string | null; proxy: string | null };
+    args: { url: string; cookieFile: string | null; cookieBrowser: string | null; cookieBrowserProfile: string | null; userAgent: string | null; username: string | null; password: string | null; headers: string | null; cookies: string | null; proxy: string | null };
     result: MediaPlaylistMetadata;
   };
   inspect_torrent: {

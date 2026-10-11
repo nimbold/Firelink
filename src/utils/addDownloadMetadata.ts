@@ -17,6 +17,7 @@ export type MetadataStatus = 'loading' | 'ready' | 'fallback' | 'metadata-error'
 export type MetadataBlockedReason =
   | 'unsafe-url'
   | 'cookie-file'
+  | 'cookie-profile'
   | 'youtube-bot'
   | 'youtube-auth'
   | 'youtube-po-token';
@@ -24,6 +25,7 @@ export type MetadataBlockedReason =
 export const classifyMediaMetadataError = (message: string): Exclude<MetadataBlockedReason, 'unsafe-url'> | undefined => {
   const lower = message.toLowerCase();
   if (lower.includes('media_cookie_file_invalid')) return 'cookie-file';
+  if (lower.includes('media_cookie_profile_invalid')) return 'cookie-profile';
   if (
     lower.includes('po token')
     || lower.includes('po_token')

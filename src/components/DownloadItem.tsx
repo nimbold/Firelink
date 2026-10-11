@@ -21,6 +21,7 @@ import {
   resolveDownloadFraction
 } from '../utils/downloadProgress';
 import { isTorrentWaitingForPeers } from '../utils/torrentPresentation';
+import { isInvalidMediaCookieBrowserProfileError } from '../utils/downloadErrors';
 import {
   COLUMN_ALIGNMENT_JUSTIFY,
   getDownloadActionPosition,
@@ -264,6 +265,9 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
         ? t($ => $.downloads.errors.nameResolutionFailed)
         : downloadStatusLabel
     : downloadStatusLabel;
+  const visibleLastError = isInvalidMediaCookieBrowserProfileError(download.lastError)
+    ? t($ => $.addDownloads.cookieBrowserProfileInvalid)
+    : download.lastError;
   const downloadedSizeLabel = sizeDisplay.totalIsEstimate
     ? t($ => $.downloads.size.downloadedOfApproximate, {
       downloaded: sizeDisplay.downloaded ?? '',
@@ -376,7 +380,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                   || download.status === 'retrying'
                   || download.lastErrorKind === 'destinationAccess'
                 )
-                  ? download.lastError
+                  ? visibleLastError
                   : (download.status === 'queued' || download.status === 'staged') && queueIndex !== -1
                   ? `${downloadStatusLabel} #${queueIndex + 1}`
                   : waitingForPeers

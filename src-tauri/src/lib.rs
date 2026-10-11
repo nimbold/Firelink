@@ -2917,6 +2917,7 @@ fn media_metadata_cache_key(
     url: &str,
     cookie_file: &Option<String>,
     cookie_browser: &Option<String>,
+    cookie_browser_profile: &Option<String>,
     user_agent: &Option<String>,
     username: &Option<String>,
     password: &Option<String>,
@@ -2939,6 +2940,7 @@ fn media_metadata_cache_key(
         file_identity.hash(&mut hasher);
     }
     cookie_browser.hash(&mut hasher);
+    cookie_browser_profile.hash(&mut hasher);
     user_agent.hash(&mut hasher);
     username.hash(&mut hasher);
     password.hash(&mut hasher);
@@ -2951,12 +2953,13 @@ fn media_metadata_cache_key(
 fn media_cookie_cache_identity(
     cookie_file: &Option<String>,
     cookie_browser: &Option<String>,
-) -> (Option<String>, Option<String>) {
+    cookie_browser_profile: &Option<String>,
+) -> (Option<String>, Option<String>, Option<String>) {
     if media_cookie_browser_is_active(cookie_browser.as_deref()) {
         // A fallback file does not affect a successful browser extraction.
-        (None, cookie_browser.clone())
+        (None, cookie_browser.clone(), cookie_browser_profile.clone())
     } else {
-        (cookie_file.clone(), None)
+        (cookie_file.clone(), None, None)
     }
 }
 
@@ -3013,6 +3016,7 @@ async fn fetch_media_metadata(
     url: String,
     cookie_file: Option<String>,
     cookie_browser: Option<String>,
+    cookie_browser_profile: Option<String>,
     user_agent: Option<String>,
     username: Option<String>,
     password: Option<String>,
@@ -3023,6 +3027,10 @@ async fn fetch_media_metadata(
     properties_window::ensure_main_window(&caller)?;
     let url = validate_http_url_route(&url)?.to_string();
     let cookie_browser = normalize_media_cookie_source(cookie_browser.as_deref())?;
+    let cookie_browser_profile = normalize_media_cookie_browser_profile(
+        cookie_browser_profile.as_deref(),
+        cookie_browser.as_deref(),
+    )?;
     let cookie_file = normalize_media_cookie_file_for_request(
         cookie_file.as_deref(),
         cookie_browser.as_deref(),
@@ -3033,12 +3041,13 @@ async fn fetch_media_metadata(
     let headers = headers.map(|h| h.trim().to_string()).filter(|h| !h.is_empty());
     let cookies = cookies.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
     let proxy = proxy.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
-    let (cache_cookie_file, cache_cookie_browser) =
-        media_cookie_cache_identity(&cookie_file, &cookie_browser);
+    let (cache_cookie_file, cache_cookie_browser, cache_cookie_browser_profile) =
+        media_cookie_cache_identity(&cookie_file, &cookie_browser, &cookie_browser_profile);
     let cache_key = media_metadata_cache_key(
         &url,
         &cache_cookie_file,
         &cache_cookie_browser,
+        &cache_cookie_browser_profile,
         &user_agent,
         &username,
         &password,
@@ -3084,6 +3093,7 @@ async fn fetch_media_metadata(
         url.clone(),
         cookie_file.clone(),
         cookie_browser.clone(),
+        cookie_browser_profile.clone(),
         user_agent.clone(),
         username.clone(),
         password.clone(),
@@ -3115,6 +3125,7 @@ async fn fetch_media_metadata(
                     &url,
                     &Some(cookie_file_fallback.clone()),
                     &None,
+                    &None,
                     &user_agent,
                     &username,
                     &password,
@@ -3126,6 +3137,7 @@ async fn fetch_media_metadata(
                     app_handle.clone(),
                     url.clone(),
                     Some(cookie_file_fallback.clone()),
+                    None,
                     None,
                     user_agent.clone(),
                     username.clone(),
@@ -3148,6 +3160,7 @@ async fn fetch_media_metadata(
                             &url,
                             &None,
                             &None,
+                            &None,
                             &user_agent,
                             &username,
                             &password,
@@ -3158,6 +3171,7 @@ async fn fetch_media_metadata(
                         fetch_media_metadata_uncached(
                             app_handle,
                             url,
+                            None,
                             None,
                             None,
                             user_agent,
@@ -3177,6 +3191,7 @@ async fn fetch_media_metadata(
                     &url,
                     &None,
                     &None,
+                    &None,
                     &user_agent,
                     &username,
                     &password,
@@ -3187,6 +3202,7 @@ async fn fetch_media_metadata(
                 fetch_media_metadata_uncached(
                     app_handle,
                     url,
+                    None,
                     None,
                     None,
                     user_agent,
@@ -3239,6 +3255,7 @@ async fn fetch_media_playlist_metadata(
     url: String,
     cookie_file: Option<String>,
     cookie_browser: Option<String>,
+    cookie_browser_profile: Option<String>,
     user_agent: Option<String>,
     username: Option<String>,
     password: Option<String>,
@@ -3249,6 +3266,10 @@ async fn fetch_media_playlist_metadata(
     properties_window::ensure_main_window(&caller)?;
     let url = validate_http_url_route(&url)?.to_string();
     let cookie_browser = normalize_media_cookie_source(cookie_browser.as_deref())?;
+    let cookie_browser_profile = normalize_media_cookie_browser_profile(
+        cookie_browser_profile.as_deref(),
+        cookie_browser.as_deref(),
+    )?;
     let cookie_file = normalize_media_cookie_file_for_request(
         cookie_file.as_deref(),
         cookie_browser.as_deref(),
@@ -3265,6 +3286,7 @@ async fn fetch_media_playlist_metadata(
         url.clone(),
         cookie_file.clone(),
         cookie_browser.clone(),
+        cookie_browser_profile.clone(),
         user_agent.clone(),
         username.clone(),
         password.clone(),
@@ -3297,6 +3319,7 @@ async fn fetch_media_playlist_metadata(
                     url.clone(),
                     Some(cookie_file_fallback),
                     None,
+                    None,
                     user_agent.clone(),
                     username.clone(),
                     password.clone(),
@@ -3315,6 +3338,7 @@ async fn fetch_media_playlist_metadata(
                             url,
                             None,
                             None,
+                            None,
                             user_agent,
                             username,
                             password,
@@ -3331,6 +3355,7 @@ async fn fetch_media_playlist_metadata(
                 fetch_media_playlist_metadata_uncached(
                     app_handle,
                     url,
+                    None,
                     None,
                     None,
                     user_agent,
@@ -3353,6 +3378,7 @@ async fn fetch_media_playlist_metadata_uncached(
     url: String,
     cookie_file: Option<String>,
     cookie_browser: Option<String>,
+    cookie_browser_profile: Option<String>,
     user_agent: Option<String>,
     username: Option<String>,
     password: Option<String>,
@@ -3395,7 +3421,11 @@ async fn fetch_media_playlist_metadata_uncached(
 
     cmd = cmd
         .args(ytdlp_youtube_extractor_args())
-        .args(ytdlp_cookie_args(cookie_file.as_deref(), cookie_browser.as_deref()));
+        .args(ytdlp_cookie_args(
+            cookie_file.as_deref(),
+            cookie_browser.as_deref(),
+            cookie_browser_profile.as_deref(),
+        ));
 
     let route = crate::network::NetworkRoute::from_proxy(proxy.as_deref());
     if let Some(proxy) = route.ytdlp_proxy_value() {
@@ -3461,6 +3491,7 @@ async fn fetch_media_metadata_uncached(
     url: String,
     cookie_file: Option<String>,
     cookie_browser: Option<String>,
+    cookie_browser_profile: Option<String>,
     user_agent: Option<String>,
     username: Option<String>,
     password: Option<String>,
@@ -3506,6 +3537,7 @@ async fn fetch_media_metadata_uncached(
     cmd = cmd.args(ytdlp_cookie_args(
         cookie_file.as_deref(),
         cookie_browser.as_deref(),
+        cookie_browser_profile.as_deref(),
     ));
 
     let route = crate::network::NetworkRoute::from_proxy(proxy.as_deref());
@@ -5709,6 +5741,34 @@ fn normalize_media_cookie_source(source: Option<&str>) -> Result<Option<String>,
     Err("Unsupported media browser-cookie source".to_string())
 }
 
+const MEDIA_COOKIE_PROFILE_INVALID_PREFIX: &str = "MEDIA_COOKIE_PROFILE_INVALID:";
+
+fn normalize_media_cookie_browser_profile(
+    profile: Option<&str>,
+    cookie_browser: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(profile) = profile.map(str::trim).filter(|profile| !profile.is_empty()) else {
+        return Ok(None);
+    };
+    if !media_cookie_browser_is_active(cookie_browser) {
+        return Ok(None);
+    }
+
+    let path = Path::new(profile);
+    let browser_profile_is_valid = path.is_absolute()
+        && if cookie_browser.is_some_and(|browser| browser.eq_ignore_ascii_case("safari")) {
+            path.is_file()
+        } else {
+            path.is_dir()
+        };
+    if !browser_profile_is_valid {
+        return Err(format!(
+            "{MEDIA_COOKIE_PROFILE_INVALID_PREFIX} browser profile path is missing or inaccessible"
+        ));
+    }
+    Ok(Some(profile.to_string()))
+}
+
 const MEDIA_COOKIE_FILE_INVALID_PREFIX: &str = "MEDIA_COOKIE_FILE_INVALID:";
 
 fn normalize_media_cookie_file(source: Option<&str>) -> Result<Option<String>, String> {
@@ -5758,21 +5818,32 @@ fn normalize_media_cookie_file_for_request(
     }
 }
 
-fn ytdlp_cookie_browser_arg(browser: &str) -> String {
+fn ytdlp_cookie_browser_arg(browser: &str, profile: Option<&str>) -> String {
     let trimmed = browser.trim();
-    if trimmed.eq_ignore_ascii_case("safari") {
-        "safari:".to_string()
+    let browser = if trimmed.eq_ignore_ascii_case("safari") {
+        "safari".to_string()
     } else {
         trimmed.to_ascii_lowercase()
+    };
+    if let Some(profile) = profile.map(str::trim).filter(|profile| !profile.is_empty()) {
+        format!("{browser}:{profile}")
+    } else if browser == "safari" {
+        "safari:".to_string()
+    } else {
+        browser
     }
 }
 
-fn ytdlp_cookie_args(cookie_file: Option<&str>, cookie_browser: Option<&str>) -> Vec<String> {
+fn ytdlp_cookie_args(
+    cookie_file: Option<&str>,
+    cookie_browser: Option<&str>,
+    cookie_browser_profile: Option<&str>,
+) -> Vec<String> {
     if media_cookie_browser_is_active(cookie_browser) {
         let browser = cookie_browser.unwrap_or_default().trim();
         vec![
             "--cookies-from-browser".to_string(),
-            ytdlp_cookie_browser_arg(browser),
+            ytdlp_cookie_browser_arg(browser, cookie_browser_profile),
         ]
     } else {
         cookie_file
@@ -5832,6 +5903,7 @@ pub(crate) async fn start_media_download_internal(
     format_selector: Option<String>,
     connections: Option<i32>,
     cookie_source: Option<String>,
+    cookie_browser_profile: Option<String>,
     cookie_file: Option<String>,
     speed_limit: Option<String>,
     username: Option<String>,
@@ -5845,6 +5917,10 @@ pub(crate) async fn start_media_download_internal(
 ) -> Result<std::path::PathBuf, String> {
     let url = validate_http_url_route(&url)?.to_string();
     let cookie_source = normalize_media_cookie_source(cookie_source.as_deref())?;
+    let cookie_browser_profile = normalize_media_cookie_browser_profile(
+        cookie_browser_profile.as_deref(),
+        cookie_source.as_deref(),
+    )?;
     let cookie_file = normalize_media_cookie_file_for_request(
         cookie_file.as_deref(),
         cookie_source.as_deref(),
@@ -5934,6 +6010,11 @@ pub(crate) async fn start_media_download_internal(
     } else {
         cookie_file.clone()
     };
+    let mut effective_cookie_browser_profile = if browser_cookie_source_active {
+        cookie_browser_profile.clone()
+    } else {
+        None
+    };
     let mut browser_cookie_fallback_used = false;
     let mut file_cookie_fallback_used = false;
     let route = crate::network::NetworkRoute::from_proxy(proxy.as_deref());
@@ -5996,6 +6077,7 @@ pub(crate) async fn start_media_download_internal(
         cmd = cmd.args(ytdlp_cookie_args(
             effective_cookie_file.as_deref(),
             effective_cookie_source.as_deref(),
+            effective_cookie_browser_profile.as_deref(),
         ));
 
         if let Some(ua) = user_agent.as_ref() {
@@ -6221,6 +6303,7 @@ pub(crate) async fn start_media_download_internal(
                 source
             );
             effective_cookie_source = None;
+            effective_cookie_browser_profile = None;
             browser_cookie_fallback_used = true;
             effective_cookie_file =
                 match browser_cookie_fallback(cookie_file.as_deref(), &failure_reason) {
@@ -13490,6 +13573,7 @@ async fn verify_torrent_data(
         proxy: None,
         format_selector: None,
         cookie_source: None,
+        cookie_browser_profile: None,
         cookie_file: None,
         is_media: Some(false),
         is_torrent: Some(true),
@@ -16086,6 +16170,7 @@ mod tests {
         is_browser_cookie_extraction_error, is_netscape_cookie_file_error,
         media_cookie_browser_is_active, json_lower,
         media_cookie_cache_identity, media_metadata_cache_key,
+        normalize_media_cookie_browser_profile,
         media_output_template, media_progress_args, media_progress_event_totals,
         media_progress_speed,
         cookie_scope_for_url, metadata_authentication_error, metadata_cookie_header_present,
@@ -19179,6 +19264,7 @@ mod tests {
             "https://example.com/watch?v=1",
             &None,
             &Some("firefox".to_string()),
+            &None,
             &Some("Custom UA A".to_string()),
             &None,
             &None,
@@ -19190,6 +19276,7 @@ mod tests {
             "https://example.com/watch?v=1",
             &None,
             &Some("firefox".to_string()),
+            &None,
             &Some("Custom UA A".to_string()),
             &None,
             &None,
@@ -19201,6 +19288,7 @@ mod tests {
             "https://example.com/watch?v=1",
             &None,
             &Some("firefox".to_string()),
+            &None,
             &Some("Custom UA A".to_string()),
             &None,
             &None,
@@ -19212,6 +19300,7 @@ mod tests {
             "https://example.com/watch?v=1",
             &None,
             &Some("firefox".to_string()),
+            &None,
             &Some("Custom UA B".to_string()),
             &None,
             &None,
@@ -19223,6 +19312,19 @@ mod tests {
             "https://example.com/watch?v=1",
             &None,
             &None,
+            &None,
+            &Some("Custom UA A".to_string()),
+            &None,
+            &None,
+            &Some("User-Agent: Browser A".to_string()),
+            &Some("session=one".to_string()),
+            &None,
+        );
+        let changed_profile = media_metadata_cache_key(
+            "https://example.com/watch?v=1",
+            &None,
+            &Some("firefox".to_string()),
+            &Some("/profiles/firefox-work".to_string()),
             &Some("Custom UA A".to_string()),
             &None,
             &None,
@@ -19234,6 +19336,7 @@ mod tests {
         assert_ne!(base, changed_headers);
         assert_ne!(base, changed_cookies);
         assert_ne!(base, changed_user_agent);
+        assert_ne!(base, changed_profile);
         assert_ne!(base, without_browser);
     }
 
@@ -19254,12 +19357,14 @@ mod tests {
             &None,
             &None,
             &None,
+            &None,
         );
 
         std::fs::write(&path, b"# Netscape HTTP Cookie File\nchanged\n").unwrap();
         let replaced = media_metadata_cache_key(
             "https://example.com/watch?v=1",
             &cookie_file,
+            &None,
             &None,
             &None,
             &None,
@@ -20448,8 +20553,8 @@ mod tests {
 
         let cookie_file = Some("/private/cookies.txt".to_string());
         assert_eq!(
-            media_cookie_cache_identity(&cookie_file, &Some(" NONE ".to_string())),
-            (cookie_file.clone(), None)
+            media_cookie_cache_identity(&cookie_file, &Some(" NONE ".to_string()), &None),
+            (cookie_file.clone(), None, None)
         );
     }
 
@@ -20458,22 +20563,29 @@ mod tests {
         let browser = Some("chrome".to_string());
         let first_file = Some("/private/cookies-one.txt".to_string());
         let second_file = Some("/private/cookies-two.txt".to_string());
-        let (first_browser_file, first_browser) =
-            media_cookie_cache_identity(&first_file, &browser);
-        let (second_browser_file, second_browser) =
-            media_cookie_cache_identity(&second_file, &browser);
+        let first_profile = Some("/profiles/chrome-work".to_string());
+        let second_profile = Some("/profiles/chrome-personal".to_string());
+        let (first_browser_file, first_browser, first_browser_profile) =
+            media_cookie_cache_identity(&first_file, &browser, &first_profile);
+        let (second_browser_file, second_browser, second_browser_profile) =
+            media_cookie_cache_identity(&second_file, &browser, &second_profile);
         assert_eq!(first_browser_file, None);
         assert_eq!(second_browser_file, None);
         assert_eq!(first_browser, browser);
         assert_eq!(second_browser, browser);
+        assert_eq!(first_browser_profile, first_profile);
+        assert_eq!(second_browser_profile, second_profile);
 
-        let (file_only, no_browser) = media_cookie_cache_identity(&first_file, &None);
-        let (no_file, no_cookie_browser) = media_cookie_cache_identity(&None, &None);
+        let (file_only, no_browser, no_profile) =
+            media_cookie_cache_identity(&first_file, &None, &first_profile);
+        let (no_file, no_cookie_browser, no_cookie_profile) =
+            media_cookie_cache_identity(&None, &None, &None);
         let empty = None;
         let browser_key = media_metadata_cache_key(
             "https://example.com/media",
             &first_browser_file,
             &first_browser,
+            &first_browser_profile,
             &empty,
             &empty,
             &empty,
@@ -20485,6 +20597,7 @@ mod tests {
             "https://example.com/media",
             &file_only,
             &no_browser,
+            &no_profile,
             &empty,
             &empty,
             &empty,
@@ -20496,6 +20609,7 @@ mod tests {
             "https://example.com/media",
             &no_file,
             &no_cookie_browser,
+            &no_cookie_profile,
             &empty,
             &empty,
             &empty,
@@ -20506,6 +20620,19 @@ mod tests {
         assert_ne!(browser_key, file_key);
         assert_ne!(browser_key, cookie_free_key);
         assert_ne!(file_key, cookie_free_key);
+        let other_profile_key = media_metadata_cache_key(
+            "https://example.com/media",
+            &second_browser_file,
+            &second_browser,
+            &second_browser_profile,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+        );
+        assert_ne!(browser_key, other_profile_key);
     }
 
     #[test]
@@ -20521,24 +20648,99 @@ mod tests {
     }
 
     #[test]
+    fn media_cookie_browser_profile_requires_browser_specific_absolute_paths_without_echoing_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().to_string_lossy().into_owned();
+        assert_eq!(
+            normalize_media_cookie_browser_profile(Some(&profile), Some("opera")).unwrap(),
+            Some(profile.clone())
+        );
+        assert_eq!(
+            normalize_media_cookie_browser_profile(Some("  "), Some("opera")).unwrap(),
+            None
+        );
+        assert_eq!(
+            normalize_media_cookie_browser_profile(Some(&profile), None).unwrap(),
+            None
+        );
+        assert!(normalize_media_cookie_browser_profile(Some(&profile), Some("safari")).is_err());
+
+        let safari_cookie_database = directory.path().join("Cookies.binarycookies");
+        std::fs::write(&safari_cookie_database, b"cookie database fixture").unwrap();
+        let safari_cookie_database = safari_cookie_database.to_string_lossy().into_owned();
+        assert_eq!(
+            normalize_media_cookie_browser_profile(
+                Some(&safari_cookie_database),
+                Some("safari")
+            )
+            .unwrap(),
+            Some(safari_cookie_database)
+        );
+
+        let missing = directory.path().join("private-profile-that-does-not-exist");
+        let missing = missing.to_string_lossy().into_owned();
+        let error = normalize_media_cookie_browser_profile(Some(&missing), Some("opera"))
+            .expect_err("missing browser profile folders must fail closed");
+        assert!(error.starts_with("MEDIA_COOKIE_PROFILE_INVALID:"));
+        assert!(!error.contains(&missing));
+
+        let relative = "private-relative-profile";
+        let error = normalize_media_cookie_browser_profile(Some(relative), Some("opera"))
+            .expect_err("relative profile folders must fail closed");
+        assert!(error.starts_with("MEDIA_COOKIE_PROFILE_INVALID:"));
+        assert!(!error.contains(relative));
+
+        let missing_safari_database = directory.path().join("missing-cookies.binarycookies");
+        let missing_safari_database = missing_safari_database.to_string_lossy().into_owned();
+        let error = normalize_media_cookie_browser_profile(
+            Some(&missing_safari_database),
+            Some("safari"),
+        )
+        .expect_err("missing Safari cookie databases must fail closed");
+        assert!(error.starts_with("MEDIA_COOKIE_PROFILE_INVALID:"));
+        assert!(!error.contains(&missing_safari_database));
+    }
+
+    #[test]
     fn ytdlp_cookie_browser_arg_formats_safari_and_other_browsers() {
-        assert_eq!(ytdlp_cookie_browser_arg("safari"), "safari:");
-        assert_eq!(ytdlp_cookie_browser_arg(" Safari "), "safari:");
-        assert_eq!(ytdlp_cookie_browser_arg("chrome"), "chrome");
-        assert_eq!(ytdlp_cookie_browser_arg(" Firefox "), "firefox");
+        assert_eq!(ytdlp_cookie_browser_arg("safari", None), "safari:");
+        assert_eq!(ytdlp_cookie_browser_arg(" Safari ", None), "safari:");
+        assert_eq!(ytdlp_cookie_browser_arg("chrome", None), "chrome");
+        assert_eq!(ytdlp_cookie_browser_arg(" Firefox ", None), "firefox");
+        assert_eq!(ytdlp_cookie_browser_arg("opera", None), "opera");
+        assert_eq!(
+            ytdlp_cookie_args(None, Some("safari"), Some("/cookies/Cookies.binarycookies")),
+            vec![
+                "--cookies-from-browser",
+                "safari:/cookies/Cookies.binarycookies"
+            ]
+        );
     }
 
     #[test]
     fn ytdlp_cookie_source_prefers_browser_then_uses_read_only_file_fallback() {
         assert_eq!(
-            ytdlp_cookie_args(Some("/tmp/firelink-cookies.txt"), Some("firefox")),
+            ytdlp_cookie_args(Some("/tmp/firelink-cookies.txt"), Some("firefox"), None),
             vec!["--cookies-from-browser", "firefox"]
         );
         assert_eq!(
-            ytdlp_cookie_args(Some("/tmp/firelink-cookies.txt"), None),
+            ytdlp_cookie_args(Some("/tmp/firelink-cookies.txt"), None, None),
             vec!["--cookies", "/tmp/firelink-cookies.txt", "--no-write-cookies"]
         );
-        assert!(ytdlp_cookie_args(None, None).is_empty());
+        assert!(ytdlp_cookie_args(None, None, None).is_empty());
+    }
+
+    #[test]
+    fn ytdlp_cookie_browser_profile_is_a_single_argument_and_preserves_spaces() {
+        let profile = r"C:\Users\Nima\AppData\Roaming\Opera Software\Opera GX Stable";
+        let args = ytdlp_cookie_args(None, Some("opera"), Some(profile));
+        assert_eq!(
+            args,
+            vec![
+                "--cookies-from-browser".to_string(),
+                format!("opera:{profile}")
+            ]
+        );
     }
 
     #[test]

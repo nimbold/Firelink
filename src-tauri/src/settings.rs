@@ -654,6 +654,7 @@ fn sanitize_persisted_setting_values(state: &mut Value) {
             "vivaldi", "whale",
         ],
     );
+    sanitize_media_cookie_browser_profiles(state);
 
     if let Some(scheduler) = state.get_mut("scheduler").and_then(Value::as_object_mut) {
         sanitize_allowed_string(
@@ -723,6 +724,38 @@ fn sanitize_string_setting(state: &mut serde_json::Map<String, Value>, key: &str
     }
 }
 
+fn sanitize_media_cookie_browser_profiles(state: &mut serde_json::Map<String, Value>) {
+    const BROWSERS: &[&str] = &[
+        "safari", "chrome", "chromium", "firefox", "edge", "brave", "opera", "vivaldi",
+        "whale",
+    ];
+
+    if state
+        .get("mediaCookieBrowserProfiles")
+        .is_some_and(|value| !value.is_object())
+    {
+        state.remove("mediaCookieBrowserProfiles");
+        return;
+    }
+
+    if let Some(profiles) = state
+        .get_mut("mediaCookieBrowserProfiles")
+        .and_then(Value::as_object_mut)
+    {
+        profiles.retain(|browser, profile| {
+            BROWSERS.contains(&browser.as_str())
+                && profile
+                    .as_str()
+                    .is_some_and(|path| !path.trim().is_empty())
+        });
+        for profile in profiles.values_mut() {
+            if let Some(path) = profile.as_str().map(str::trim) {
+                *profile = Value::String(path.to_string());
+            }
+        }
+    }
+}
+
 fn sanitize_torrent_network_string(
     state: &mut serde_json::Map<String, Value>,
     key: &str,
@@ -752,6 +785,16 @@ fn sanitize_allowed_string(
 }
 
 fn validate_settings(settings: &mut PersistedSettings) {
+    settings.media_cookie_browser_profiles.retain(|browser, profile| {
+        matches!(
+            browser.as_str(),
+            "safari" | "chrome" | "chromium" | "firefox" | "edge" | "brave" | "opera"
+                | "vivaldi" | "whale"
+        ) && !profile.trim().is_empty()
+    });
+    for profile in settings.media_cookie_browser_profiles.values_mut() {
+        *profile = profile.trim().to_string();
+    }
     settings.main_window_size = crate::window_geometry::normalize_main_window_size(
         settings.main_window_size.as_ref(),
     );
@@ -1096,6 +1139,7 @@ fn default_settings() -> PersistedSettings {
         prevents_sleep_while_downloading: true,
         prevents_display_sleep_while_downloading: false,
         media_cookie_source: MediaCookieSource::default(),
+        media_cookie_browser_profiles: HashMap::new(),
         media_cookie_file: String::new(),
         site_logins: Vec::new(),
         auto_check_updates: true,
@@ -1152,6 +1196,40 @@ mod tests {
         assert_eq!(
             merged["state"]["schedulerActiveRunSnapshot"]["stopKey"],
             "2026-06-24-stop"
+        );
+    }
+
+    #[test]
+    fn legacy_settings_hydrate_browser_cookie_profiles_as_empty_and_sanitize_invalid_entries() {
+        let legacy = json!({
+            "state": {
+                "mediaCookieSource": "opera"
+            }
+        });
+        let settings = decode_stored_settings(&Value::String(legacy.to_string())).unwrap();
+        assert!(settings.media_cookie_browser_profiles.is_empty());
+
+        let malformed = json!({
+            "state": {
+                "mediaCookieSource": "opera",
+                "mediaCookieBrowserProfiles": {
+                    "opera": "  C:\\Users\\Nima\\Opera GX  ",
+                    "chrome": "   ",
+                    "none": "ignored",
+                    "unknown-browser": "ignored",
+                    "firefox": 42
+                }
+            }
+        });
+        let settings = decode_stored_settings(&Value::String(malformed.to_string())).unwrap();
+        assert_eq!(
+            settings.media_cookie_browser_profiles,
+            [(
+                "opera".to_string(),
+                "C:\\Users\\Nima\\Opera GX".to_string()
+            )]
+            .into_iter()
+            .collect()
         );
     }
 

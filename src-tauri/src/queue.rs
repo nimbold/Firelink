@@ -1138,6 +1138,7 @@ pub struct SpawnPayload {
     pub proxy: Option<String>,
     pub format_selector: Option<String>,
     pub cookie_source: Option<String>,
+    pub cookie_browser_profile: Option<String>,
     pub cookie_file: Option<String>,
     pub is_media: bool,
     pub is_torrent: bool,
@@ -9317,6 +9318,7 @@ impl SidecarSpawner for ProductionSpawner {
                 payload.format_selector.clone(),
                 payload.connections,
                 payload.cookie_source.clone(),
+                payload.cookie_browser_profile.clone(),
                 payload.cookie_file.clone(),
                 payload.speed_limit.clone(),
                 payload.username.clone(),
@@ -9388,6 +9390,9 @@ pub struct EnqueueItem {
     pub proxy: Option<String>,
     pub format_selector: Option<String>,
     pub cookie_source: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub cookie_browser_profile: Option<String>,
     #[serde(default)]
     #[ts(optional)]
     pub cookie_file: Option<String>,
@@ -9479,6 +9484,7 @@ impl EnqueueItem {
             self.password = None;
             self.headers = None;
             self.cookies = None;
+            self.cookie_browser_profile = None;
             self.cookie_file = None;
         }
     }
@@ -9525,6 +9531,7 @@ impl EnqueueItem {
                 proxy: item.proxy,
                 format_selector: item.format_selector,
                 cookie_source: item.cookie_source,
+                cookie_browser_profile: item.cookie_browser_profile,
                 cookie_file: item.cookie_file,
                 is_media: media,
                 is_torrent: item.is_torrent.unwrap_or(false),
@@ -10263,6 +10270,26 @@ mod tests {
         assert!(task.payload.password.is_none());
         assert!(task.payload.headers.is_none());
         assert!(task.payload.cookies.is_none());
+    }
+
+    #[test]
+    fn media_enqueue_preserves_browser_cookie_profile_in_spawn_payload() {
+        let task = EnqueueItem {
+            is_media: Some(true),
+            cookie_source: Some("opera".to_string()),
+            cookie_browser_profile: Some(
+                r"C:\Users\Nima\AppData\Roaming\Opera Software\Opera GX Stable".to_string(),
+            ),
+            ..Default::default()
+        }
+        .into_task();
+
+        assert!(matches!(task.kind, TaskKind::Media));
+        assert_eq!(task.payload.cookie_source.as_deref(), Some("opera"));
+        assert_eq!(
+            task.payload.cookie_browser_profile.as_deref(),
+            Some(r"C:\Users\Nima\AppData\Roaming\Opera Software\Opera GX Stable")
+        );
     }
 
     #[test]

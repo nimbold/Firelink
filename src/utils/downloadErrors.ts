@@ -28,3 +28,7 @@ export const classifyDownloadError = (message: unknown): DownloadErrorKind | und
   }
   return undefined;
 };
+
+export const isInvalidMediaCookieBrowserProfileError = (message: unknown): boolean =>
+  typeof message === 'string'
+  && message.toLowerCase().startsWith('media_cookie_profile_invalid:');

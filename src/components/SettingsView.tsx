@@ -909,6 +909,23 @@ runEngineChecks(false);
     }
   };
 
+  const handleBrowseMediaCookieBrowserProfile = async () => {
+    const browser = settings.mediaCookieSource;
+    if (browser === 'none' || !browserCookieSourceOptions.some(option => option.value === browser)) return;
+    try {
+      const selected = await open({
+        directory: browser !== 'safari',
+        multiple: false,
+        defaultPath: settings.mediaCookieBrowserProfiles[browser] || undefined
+      });
+      if (selected && typeof selected === 'string') {
+        settings.setMediaCookieBrowserProfile(browser, selected);
+      }
+    } catch {
+      console.error('Failed to select media browser profile folder.');
+    }
+  };
+
   const handleAddLogin = async () => {
     if (saveLoginInFlight.current) return;
     const fieldErrors: typeof loginFieldErrors = {};
@@ -2315,6 +2332,51 @@ className="app-button px-3 py-1.5 text-[12px] flex items-center gap-1.5 disabled
                         </select>
                       </div>
                       <p className="text-text-muted text-xs mt-1">{t($ => $.settings.engine.cookieDescription)}</p>
+                      <div className="border-t border-border-modal/50 pt-3 mt-2 space-y-2 text-[13px]">
+                        <div className="min-w-0">
+                          <label className="text-text-secondary font-semibold">
+                            {settings.mediaCookieSource === 'safari'
+                              ? t($ => $.settings.engine.safariCookieDatabaseLabel)
+                              : t($ => $.settings.engine.browserProfileFolder)}
+                          </label>
+                          <p className="text-text-muted text-xs mt-1">
+                            {settings.mediaCookieSource === 'safari'
+                              ? t($ => $.settings.engine.safariCookieDatabaseDescription)
+                              : t($ => $.settings.engine.browserProfileFolderDescription)}
+                          </p>
+                        </div>
+                        <div className="grid min-w-0 grid-cols-1 items-center gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                          <span
+                            className="min-w-0 font-mono text-xs text-text-muted truncate"
+                            title={settings.mediaCookieBrowserProfiles[settings.mediaCookieSource] || undefined}
+                          >
+                            {settings.mediaCookieSource === 'none'
+                              ? t($ => $.settings.engine.none)
+                              : settings.mediaCookieBrowserProfiles[settings.mediaCookieSource] || t($ => $.settings.engine.none)}
+                          </span>
+                          <div className="flex flex-wrap gap-2 sm:justify-end">
+                            <button
+                              type="button"
+                              className="app-button px-2.5 py-1.5 text-xs"
+                              onClick={() => void handleBrowseMediaCookieBrowserProfile()}
+                              disabled={settings.mediaCookieSource === 'none'}
+                            >
+                              {settings.mediaCookieSource === 'safari'
+                                ? t($ => $.settings.engine.chooseSafariCookieDatabase)
+                                : t($ => $.settings.engine.chooseBrowserProfileFolder)}
+                            </button>
+                            {settings.mediaCookieSource !== 'none' && settings.mediaCookieBrowserProfiles[settings.mediaCookieSource] && (
+                              <button
+                                type="button"
+                                className="app-button px-2.5 py-1.5 text-xs"
+                                onClick={() => settings.setMediaCookieBrowserProfile(settings.mediaCookieSource, '')}
+                              >
+                                {t($ => $.settings.engine.clearBrowserProfilePath)}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
                       <div className="border-t border-border-modal/50 pt-3 mt-2 space-y-2 text-[13px]">
                         <div className="min-w-0">
                           <label className="text-text-secondary font-semibold">{t($ => $.settings.engine.cookieFile)}</label>
