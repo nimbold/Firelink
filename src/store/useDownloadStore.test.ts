@@ -111,6 +111,7 @@ describe('useDownloadStore', () => {
       pendingAddRequestContexts: {},
       pendingAddRequestVersion: 0,
       pendingAddHandoffs: [],
+      pendingAddMediaDiscoveryUpdates: [],
       pendingAddModalBusy: false,
       queues: [{ id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true }],
     });
@@ -3652,6 +3653,38 @@ describe('useDownloadStore', () => {
     expect(useDownloadStore.getState().backendRegisteredIds.has('startup-destination-access')).toBe(false);
   });
 
+  it('does not requeue a completion recovered from the shutdown journal', async () => {
+    const id = 'shutdown-recovered-completion';
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'list_download_removals') return [];
+      if (command === 'db_get_all_queues') return [];
+      if (command === 'db_get_all_downloads') {
+        return [JSON.stringify({
+          id,
+          url: 'https://example.com/completed.mp4',
+          fileName: 'completed.mp4',
+          status: 'completed',
+          category: 'Movies',
+          dateAdded: '',
+          queueId: MAIN_QUEUE_ID,
+          isMedia: true,
+          hasBeenDispatched: true
+        })];
+      }
+      return undefined;
+    });
+
+    await useDownloadStore.getState().initDB();
+    expect(useDownloadStore.getState().downloads.find(download => download.id === id)?.status)
+      .toBe('completed');
+
+    await useDownloadStore.getState().resumePendingDownloads();
+
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_many', expect.anything());
+    expect(useDownloadStore.getState().downloads.find(download => download.id === id)?.status)
+      .toBe('completed');
+  });
+
   it('does not show allocation for a startup Torrent batch while it is merely queued', async () => {
     let releaseEnqueue!: (value: Array<{ id: string; success: boolean; filename: string }>) => void;
     const enqueue = new Promise<Array<{ id: string; success: boolean; filename: string }>>(resolve => {
@@ -5114,7 +5147,7 @@ describe('useDownloadStore', () => {
       referer: pageUrl,
       headers: 'Origin: https://video.example'
     };
-    await useDownloadStore.getState().handleExtensionMediaDiscoveryUpdate(update);
+    expect(await useDownloadStore.getState().handleExtensionMediaDiscoveryUpdate(update)).toBe('applied');
 
     const state = useDownloadStore.getState();
     expect(state.pendingAddUrls).toBe(manifestUrl);
@@ -5177,17 +5210,85 @@ describe('useDownloadStore', () => {
   });
 
   it('ignores a discovered manifest when its initial handoff is no longer reviewable', async () => {
-    await useDownloadStore.getState().handleExtensionMediaDiscoveryUpdate({
+    expect(await useDownloadStore.getState().handleExtensionMediaDiscoveryUpdate({
       request_id: 'late-discovery',
       handoff_id: 'm-missing',
       phase: 'discovered',
       urls: ['https://cdn.example/late.m3u8'],
       referer: null,
       headers: null
-    });
+    })).toBe('stale');
 
     expect(useDownloadStore.getState().pendingAddUrls).toBe('');
     expect(useDownloadStore.getState().pendingAddRequestContexts).toEqual({});
+  });
+
+  it('queues a discovery update during a busy Add flow and applies it after release', async () => {
+    const handoffId = 'm-busy-discovery';
+    const pageUrl = 'https://video.example/watch?id=busy';
+    const manifestUrl = 'https://cdn.example/busy.m3u8';
+    useDownloadStore.getState().openAddModalWithUrls(
+      pageUrl,
+      pageUrl,
+      null,
+      null,
+      null,
+      true,
+      undefined,
+      false,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      handoffId
+    );
+    useDownloadStore.getState().setPendingAddModalBusy(true);
+
+    const update: ExtensionMediaDiscoveryUpdate = {
+      request_id: 'busy-discovery-request',
+      handoff_id: handoffId,
+      phase: 'discovered',
+      urls: [manifestUrl],
+      referer: pageUrl,
+      headers: null
+    };
+    expect(await useDownloadStore.getState().handleExtensionMediaDiscoveryUpdate(update)).toBe('queued');
+    expect(useDownloadStore.getState().pendingAddUrls).toBe(pageUrl);
+    expect(useDownloadStore.getState().pendingAddMediaDiscoveryUpdates).toEqual([update]);
+
+    const queued = useDownloadStore.getState().releasePendingAddHandoffs();
+    expect(queued).toEqual({ handoffs: [], mediaDiscoveryUpdates: [update] });
+    expect(await useDownloadStore.getState().handleExtensionMediaDiscoveryUpdate(queued.mediaDiscoveryUpdates[0])).toBe('applied');
+    expect(useDownloadStore.getState().pendingAddUrls).toBe(manifestUrl);
+    expect(useDownloadStore.getState().pendingAddRequestContexts[manifestUrl]).toMatchObject({
+      handoffId,
+      replacesUrl: pageUrl
+    });
+  });
+
+  it('returns retryable instead of acknowledging when a busy discovery queue is full', async () => {
+    useDownloadStore.getState().setPendingAddModalBusy(true);
+    const queue = Array.from({ length: 64 }, (_, index): ExtensionMediaDiscoveryUpdate => ({
+      request_id: `queued-${index}`,
+      handoff_id: `handoff-${index}`,
+      phase: 'discovered',
+      urls: [`https://cdn.example/${index}.m3u8`],
+      referer: null,
+      headers: null
+    }));
+    useDownloadStore.setState({ pendingAddMediaDiscoveryUpdates: queue });
+
+    const disposition = await useDownloadStore.getState().handleExtensionMediaDiscoveryUpdate({
+      request_id: 'queue-overflow',
+      handoff_id: 'handoff-overflow',
+      phase: 'discovered',
+      urls: ['https://cdn.example/overflow.m3u8'],
+      referer: null,
+      headers: null
+    });
+
+    expect(disposition).toBe('retryable');
+    expect(useDownloadStore.getState().pendingAddMediaDiscoveryUpdates).toHaveLength(64);
   });
 
   it('routes direct manifests through media header and cookie suppression without forcing the mode', () => {
@@ -5285,12 +5386,13 @@ describe('useDownloadStore', () => {
     expect(duplicateResolved).toBe(false);
 
     const queued = useDownloadStore.getState().releasePendingAddHandoffs();
-    expect(queued).toHaveLength(1);
-    expect(queued[0]).toMatchObject({ request_id: 'busy-handoff-1' });
+    expect(queued.handoffs).toHaveLength(1);
+    expect(queued.handoffs[0]).toMatchObject({ request_id: 'busy-handoff-1' });
+    expect(queued.mediaDiscoveryUpdates).toEqual([]);
     expect(useDownloadStore.getState().pendingAddHandoffs).toEqual([]);
     expect(useDownloadStore.getState().pendingAddModalBusy).toBe(false);
 
-    await useDownloadStore.getState().handleExtensionDownload(queued[0]);
+    await useDownloadStore.getState().handleExtensionDownload(queued.handoffs[0]);
     await Promise.all([firstDelivery, duplicateDelivery]);
     expect(firstResolved).toBe(true);
     expect(duplicateResolved).toBe(true);

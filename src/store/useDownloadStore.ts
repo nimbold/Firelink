@@ -1201,6 +1201,10 @@ export type PendingAddRequestContext = {
   torrentCacheId?: string;
 };
 
+export type MediaDiscoveryDisposition = 'applied' | 'queued' | 'stale' | 'retryable';
+
+const MAX_PENDING_ADD_MEDIA_DISCOVERY_UPDATES = 64;
+
 export type DeleteModalState = {
   isOpen: boolean;
   downloadIds?: string[];
@@ -1246,11 +1250,16 @@ interface DownloadState {
   pendingAddRequestVersion: number;
   /** Extension handoffs received while the Add window is mutating its rows. */
   pendingAddHandoffs: ExtensionDownloadRequest[];
+  /** Accepted media-discovery updates waiting for the current Add mutation. */
+  pendingAddMediaDiscoveryUpdates: ExtensionMediaDiscoveryUpdate[];
   pendingAddModalBusy: boolean;
   selectedPropertiesDownloadId: string | null;
   toggleAddModal: (isOpen: boolean) => void;
   setPendingAddModalBusy: (busy: boolean) => void;
-  releasePendingAddHandoffs: () => ExtensionDownloadRequest[];
+  releasePendingAddHandoffs: () => {
+    handoffs: ExtensionDownloadRequest[];
+    mediaDiscoveryUpdates: ExtensionMediaDiscoveryUpdate[];
+  };
   openAddModalWithUrls: (
     urls: string,
     referer?: string | null,
@@ -1267,7 +1276,9 @@ interface DownloadState {
     handoffId?: string
   ) => void;
   handleExtensionDownload: (request: ExtensionDownloadRequest) => Promise<void>;
-  handleExtensionMediaDiscoveryUpdate: (update: ExtensionMediaDiscoveryUpdate) => Promise<void>;
+  handleExtensionMediaDiscoveryUpdate: (
+    update: ExtensionMediaDiscoveryUpdate
+  ) => Promise<MediaDiscoveryDisposition>;
   deleteModalState: DeleteModalState;
   openDeleteModal: (downloadIds?: string | string[]) => void;
   closeDeleteModal: () => void;
@@ -2010,6 +2021,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
   pendingAddRequestContexts: {},
   pendingAddRequestVersion: 0,
   pendingAddHandoffs: [],
+  pendingAddMediaDiscoveryUpdates: [],
   pendingAddModalBusy: false,
   selectedPropertiesDownloadId: null,
   deleteModalState: { isOpen: false },
@@ -2032,6 +2044,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     pendingAddBatch: false,
     pendingAddBatchName: '',
     pendingAddRequestContexts: {},
+    pendingAddMediaDiscoveryUpdates: [],
     // Invalidate any in-flight Add-modal handoff even when the modal is
     // opened or closed without URLs.
     pendingAddRequestVersion: state.pendingAddRequestVersion + 1
@@ -2039,14 +2052,17 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
   setPendingAddModalBusy: (busy) => set({ pendingAddModalBusy: busy }),
   releasePendingAddHandoffs: () => {
     let handoffs: ExtensionDownloadRequest[] = [];
+    let mediaDiscoveryUpdates: ExtensionMediaDiscoveryUpdate[] = [];
     set(state => {
       handoffs = state.pendingAddHandoffs;
+      mediaDiscoveryUpdates = state.pendingAddMediaDiscoveryUpdates;
       return {
         pendingAddHandoffs: [],
+        pendingAddMediaDiscoveryUpdates: [],
         pendingAddModalBusy: false
       };
     });
-    return handoffs;
+    return { handoffs, mediaDiscoveryUpdates };
   },
   openAddModalWithUrls: (
     urls,
@@ -2212,26 +2228,59 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
   handleExtensionMediaDiscoveryUpdate: async (update) => {
     const handoffId = update.handoff_id?.trim();
     const discoveredUrl = update.urls?.length === 1 ? update.urls[0]?.trim() : '';
-    if (!handoffId || update.phase !== 'discovered' || !discoveredUrl) return;
+    if (!handoffId || update.phase !== 'discovered' || !discoveredUrl) return 'retryable';
+
+    const comparable = (url: string) => {
+      try { return new URL(url).href; } catch { return url; }
+    };
+    const sameQueuedUpdate = (queued: ExtensionMediaDiscoveryUpdate) =>
+      queued.handoff_id?.trim() === handoffId
+      && queued.phase === update.phase
+      && queued.urls?.length === 1
+      && comparable(queued.urls[0]?.trim() || '') === comparable(discoveredUrl)
+      && (queued.referer?.trim() || '') === (update.referer?.trim() || '')
+      && (stripSensitiveMediaHeaders(queued.headers) || '')
+        === (stripSensitiveMediaHeaders(update.headers) || '');
+
+    let disposition: MediaDiscoveryDisposition = 'stale';
 
     set(state => {
-      if (!state.isAddModalOpen || state.pendingAddModalBusy) return state;
+      if (state.pendingAddModalBusy) {
+        const queuedForHandoff = state.pendingAddMediaDiscoveryUpdates.find(
+          candidate => candidate.handoff_id?.trim() === handoffId
+        );
+        if (queuedForHandoff) {
+          disposition = sameQueuedUpdate(queuedForHandoff) ? 'queued' : 'retryable';
+          return state;
+        }
+        if (state.pendingAddMediaDiscoveryUpdates.length >= MAX_PENDING_ADD_MEDIA_DISCOVERY_UPDATES) {
+          disposition = 'retryable';
+          return state;
+        }
+        disposition = 'queued';
+        return {
+          pendingAddMediaDiscoveryUpdates: [
+            ...state.pendingAddMediaDiscoveryUpdates,
+            update
+          ]
+        };
+      }
+      if (!state.isAddModalOpen) return state;
       const matchingEntry = Object.entries(state.pendingAddRequestContexts)
         .find(([, context]) => context.handoffId === handoffId && context.media === true);
       if (!matchingEntry) return state;
 
       const [currentUrl, currentContext] = matchingEntry;
       const nextUrl = discoveredUrl;
-      const currentComparable = (() => {
-        try { return new URL(currentUrl).href; } catch { return currentUrl; }
-      })();
-      const nextComparable = (() => {
-        try { return new URL(nextUrl).href; } catch { return nextUrl; }
-      })();
+      const currentComparable = comparable(currentUrl);
+      const nextComparable = comparable(nextUrl);
       // Backend retries are idempotent, so a duplicate delivery of the same
       // discovered target must not create a new request version or restart
       // metadata work for an already-upgraded row.
-      if (currentComparable === nextComparable) return state;
+      if (currentComparable === nextComparable) {
+        disposition = 'applied';
+        return state;
+      }
       const existingDifferentContext = Object.entries(state.pendingAddRequestContexts)
         .some(([url, context]) => url !== currentUrl
           && context.handoffId !== handoffId
@@ -2272,6 +2321,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       const pendingAddMediaUrls = Object.entries(nextContexts)
         .filter(([, context]) => context.mediaMode === 'media')
         .map(([url]) => url);
+      disposition = 'applied';
       return {
         pendingAddUrls,
         pendingAddReferer: nextContexts[nextComparable]?.referer || state.pendingAddReferer,
@@ -2282,6 +2332,7 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         pendingAddRequestVersion: nextVersion
       };
     });
+    return disposition;
   },
   setSelectedPropertiesDownloadId: (id) => set({ selectedPropertiesDownloadId: id }),
   addDownload: async (item, action) => {

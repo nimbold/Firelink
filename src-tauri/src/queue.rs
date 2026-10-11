@@ -908,6 +908,23 @@ impl Drop for Aria2ControlGuard {
     }
 }
 
+impl Aria2ControlGuard {
+    /// Release this download's control lock while waiting for a worker that
+    /// needs the same lock to publish its terminal result.
+    pub(crate) fn release(&mut self) {
+        self.guard.take();
+    }
+
+    /// Reacquire the same per-download lock after the worker acknowledgement.
+    /// Keeping the original lock Arc prevents a second lock from being
+    /// installed for this download while the guard is temporarily released.
+    pub(crate) async fn reacquire(&mut self) {
+        if self.guard.is_none() {
+            self.guard = Some(self.lock.clone().lock_owned().await);
+        }
+    }
+}
+
 /// Outcome of an aria2 completion that arrived before its gid was stored.
 /// Carries the outcome so the correct state emit survives the race.
 #[derive(Debug, Clone)]
@@ -1065,6 +1082,13 @@ pub enum TaskKind {
     Media,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MediaTerminalOutcome {
+    Completed,
+    Cancelled,
+    Failed,
+}
+
 /// Everything needed to start a sidecar, captured at enqueue time so the
 /// dispatcher can spawn it later without round-tripping back to the frontend.
 #[derive(Debug, Clone)]
@@ -1083,6 +1107,31 @@ struct QueuePermitOwnership {
     queue_id: String,
     lifecycle_generation: u64,
     active: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PendingOrderEntry {
+    queue_id: String,
+    ordinal: u64,
+}
+
+struct DispatchHandoffGuard {
+    count: Arc<AtomicUsize>,
+    notify: Arc<Notify>,
+}
+
+impl DispatchHandoffGuard {
+    fn new(count: Arc<AtomicUsize>, notify: Arc<Notify>) -> Self {
+        count.fetch_add(1, Ordering::AcqRel);
+        Self { count, notify }
+    }
+}
+
+impl Drop for DispatchHandoffGuard {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::AcqRel);
+        self.notify.notify_waiters();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1289,9 +1338,20 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
     /// transfer. Keeping both phases in one map makes queue-slot ownership
     /// exactly-once across the async addUri handoff.
     queue_permit_ownership: Mutex<HashMap<String, QueuePermitOwnership>>,
+    /// Stable logical positions for pending tasks and selected tasks whose
+    /// dispatch has not yet been accepted by the sidecar.
+    pending_order_ordinals: Mutex<HashMap<(String, u64), PendingOrderEntry>>,
+    next_pending_order_ordinal: Mutex<HashMap<String, u64>>,
+    /// Selection-to-dispatch handoffs that shutdown must wait for before
+    /// finalizing Aria2 exit.
+    dispatch_handoff_count: Arc<AtomicUsize>,
+    dispatch_handoff_notify: Arc<Notify>,
     /// Serializes queue-slot selection with global permit acquisition and
     /// ownership transitions.
     admission_gate: Mutex<()>,
+    /// Keeps pending Aria2 work queued while its daemon is offline or being
+    /// recovered. Media work uses a separate runner and remains admissible.
+    aria2_dispatch_hold: AtomicBool,
     /// Prevents new enqueue/admission work after a system action has passed
     /// its final safety check. The flag is set while holding admission_gate so
     /// the check and the fence are one state transition.
@@ -1327,6 +1387,10 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
     /// The generation fences late start/clear events from an older GID.
     aria2_allocation_pending: Mutex<HashMap<String, (u64, u64)>>,
     media_completed_generations: Mutex<HashMap<String, u64>>,
+    /// Last media terminal outcome for each download. Keep it after queue
+    /// ownership is released so a control command that was waiting for the
+    /// worker can distinguish completion, failure, and cancellation.
+    media_terminal_outcomes: Mutex<HashMap<String, (u64, MediaTerminalOutcome)>>,
 
     /// download id -> spawn payload for aria2 transient-error re-addUri retries.
     aria2_payloads: Mutex<HashMap<String, SpawnPayload>>,
@@ -1418,7 +1482,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
             queue_limits: Mutex::new(HashMap::new()),
             queue_dispatch_holds: Mutex::new(HashMap::new()),
             queue_permit_ownership: Mutex::new(HashMap::new()),
+            pending_order_ordinals: Mutex::new(HashMap::new()),
+            next_pending_order_ordinal: Mutex::new(HashMap::new()),
+            dispatch_handoff_count: Arc::new(AtomicUsize::new(0)),
+            dispatch_handoff_notify: Arc::new(Notify::new()),
             admission_gate: Mutex::new(()),
+            aria2_dispatch_hold: AtomicBool::new(false),
             system_action_pending: AtomicBool::new(false),
             dispatch_cursor: Mutex::new(None),
             target_capacity: AtomicUsize::new(capacity),
@@ -1438,6 +1507,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             pending_download_starts: Arc::new(Mutex::new(HashSet::new())),
             aria2_allocation_pending: Mutex::new(HashMap::new()),
             media_completed_generations: Mutex::new(HashMap::new()),
+            media_terminal_outcomes: Mutex::new(HashMap::new()),
             aria2_payloads: Mutex::new(HashMap::new()),
             aria2_connection_options: Mutex::new(HashMap::new()),
             aria2_dispatch_inflight: Mutex::new(HashMap::new()),
@@ -1832,6 +1902,19 @@ impl<R: tauri::Runtime> QueueManager<R> {
         }
     }
 
+    async fn enter_shutdown_terminal_work(
+        &self,
+    ) -> Result<Option<crate::ShutdownTerminalLease>, ()> {
+        let Some(app_state) = self.app_handle.try_state::<crate::AppState>() else {
+            return Ok(None);
+        };
+        Arc::clone(&app_state.shutdown_terminal_barrier)
+            .enter()
+            .await
+            .map(Some)
+            .ok_or(())
+    }
+
     fn emit_waiting_to_seed(&self, id: &str, remaining: Option<f64>) {
         use tauri::Emitter;
         let _ = self.app_handle.emit(
@@ -1841,6 +1924,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
     }
 
     async fn try_start_waiting_seed(self: &Arc<Self>) -> bool {
+        if self.app_handle.try_state::<crate::Aria2DaemonGuard>()
+            .is_some_and(|guard| guard.is_shutting_down())
+        {
+            return false;
+        }
         let Some(waiter) = self.reserve_seed_waiter() else {
             return false;
         };
@@ -1881,6 +1969,15 @@ impl<R: tauri::Runtime> QueueManager<R> {
             return;
         };
         let _control_guard = self.acquire_aria2_control(&id).await;
+        if self.app_handle.try_state::<crate::Aria2DaemonGuard>()
+            .is_some_and(|guard| guard.is_shutting_down())
+        {
+            self.release_aria2_permit_candidate(&id, waiter.lifecycle_generation)
+                .await;
+            self.abandon_seed_start(&id);
+            self.add_seed_waiter(waiter);
+            return;
+        }
         if !self
             .is_registered_generation_or_legacy(&id, waiter.lifecycle_generation)
             .await
@@ -1917,6 +2014,10 @@ impl<R: tauri::Runtime> QueueManager<R> {
             self.abandon_seed_start(&id);
             return;
         }
+        let _terminal_work = match self.enter_shutdown_terminal_work().await {
+            Ok(terminal_work) => terminal_work,
+            Err(()) => return,
+        };
         match self.spawner.resume_for_seed(&gid).await {
             Ok(Aria2SeedControlOutcome::Resumed) => {
                 if !self.is_aria2_control_epoch_current(&id, epoch).await
@@ -1937,7 +2038,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
             }
             Ok(Aria2SeedControlOutcome::Complete) => {
                 self.finish_seed_start(&id);
-                self.apply_completion_locked(&id, PendingOutcome::Complete).await;
+                self.apply_completion_locked_with_progress_unfenced(
+                    &id,
+                    PendingOutcome::Complete,
+                    None,
+                )
+                .await;
             }
             Ok(Aria2SeedControlOutcome::Paused) => {
                 let remaining = self.capture_seed_remaining(&id).await;
@@ -1992,7 +2098,36 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 _ = self.notify.notified() => {}
             }
 
+            if self
+                .app_handle
+                .try_state::<crate::Aria2DaemonGuard>()
+                .is_some_and(|guard| guard.exit_allowed())
+            {
+                return;
+            }
+            if self
+                .app_handle
+                .try_state::<crate::Aria2DaemonGuard>()
+                .is_some_and(|guard| guard.is_shutting_down())
+            {
+                continue;
+            }
+
+            let terminal_work = match self.enter_shutdown_terminal_work().await {
+                Ok(terminal_work) => terminal_work,
+                Err(()) => return,
+            };
+
             let _control_guard = self.acquire_aria2_control(&waiter.id).await;
+            if self
+                .app_handle
+                .try_state::<crate::Aria2DaemonGuard>()
+                .is_some_and(|guard| guard.is_shutting_down())
+            {
+                drop(_control_guard);
+                drop(terminal_work);
+                continue;
+            }
             let lifecycle_current = self
                 .is_registered_generation_or_legacy(&waiter.id, waiter.lifecycle_generation)
                 .await
@@ -2024,7 +2159,6 @@ impl<R: tauri::Runtime> QueueManager<R> {
                         )
                     {
                         let _ = self.spawner.pause_for_seed(&gid).await;
-                        let _ = self.spawner.pause_for_seed(&gid).await;
                         self.release_download_permit_for_seed(&waiter.id).await;
                         self.abandon_seed_start(&waiter.id);
                         return;
@@ -2037,7 +2171,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 }
                 Ok(Aria2SeedControlOutcome::Complete) => {
                     self.finish_seed_start(&waiter.id);
-                    self.apply_completion_locked(&waiter.id, PendingOutcome::Complete)
+                    self.apply_completion_locked_with_progress_unfenced(
+                        &waiter.id,
+                        PendingOutcome::Complete,
+                        None,
+                    )
                         .await;
                     return;
                 }
@@ -2083,6 +2221,107 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .collect()
     }
 
+    async fn ensure_pending_order_ordinal(&self, task: &QueuedTask) -> u64 {
+        let key = (task.id.clone(), task.lifecycle_generation);
+        let mut ordinals = self.pending_order_ordinals.lock().await;
+        if let Some(entry) = ordinals.get(&key) {
+            return entry.ordinal;
+        }
+        let mut next_ordinals = self.next_pending_order_ordinal.lock().await;
+        let next = next_ordinals.entry(task.queue_id.clone()).or_default();
+        *next = next.saturating_add(1);
+        let ordinal = *next;
+        ordinals.insert(
+            key,
+            PendingOrderEntry {
+                queue_id: task.queue_id.clone(),
+                ordinal,
+            },
+        );
+        ordinal
+    }
+
+    async fn forget_pending_order_ordinal(&self, id: &str, lifecycle_generation: u64) {
+        self.pending_order_ordinals
+            .lock()
+            .await
+            .remove(&(id.to_string(), lifecycle_generation));
+    }
+
+    /// Rebuild current pending order into the existing logical slots for this
+    /// queue. Selected dispatches stay in their slots, so a manual reorder
+    /// remains effective when one of those dispatches later returns to pending.
+    async fn refresh_pending_order_ordinals(
+        &self,
+        queue_id: &str,
+        reordered_pending_tasks: &[QueuedTask],
+    ) {
+        let mut ordinals = self.pending_order_ordinals.lock().await;
+        let pending_keys = reordered_pending_tasks
+            .iter()
+            .map(|task| (task.id.clone(), task.lifecycle_generation))
+            .collect::<HashSet<_>>();
+        let mut logical_keys = ordinals
+            .iter()
+            .filter_map(|(key, entry)| {
+                (entry.queue_id == queue_id).then_some((entry.ordinal, key.clone()))
+            })
+            .collect::<Vec<_>>();
+        logical_keys.sort_by_key(|(ordinal, _)| *ordinal);
+
+        let mut reordered = reordered_pending_tasks.iter().map(|task| {
+            (task.id.clone(), task.lifecycle_generation)
+        });
+        let mut next_logical_keys = Vec::with_capacity(logical_keys.len().max(pending_keys.len()));
+        for (_, key) in logical_keys {
+            if pending_keys.contains(&key) {
+                if let Some(reordered_key) = reordered.next() {
+                    next_logical_keys.push(reordered_key);
+                }
+            } else {
+                next_logical_keys.push(key);
+            }
+        }
+        next_logical_keys.extend(reordered);
+
+        let mut next_ordinals = self.next_pending_order_ordinal.lock().await;
+        let next = next_ordinals.entry(queue_id.to_string()).or_default();
+        for key in next_logical_keys {
+            *next = next.saturating_add(1);
+            if let Some(entry) = ordinals.get_mut(&key) {
+                entry.ordinal = *next;
+            }
+        }
+    }
+
+    fn stable_pending_insert_index(
+        pending: &VecDeque<QueuedTask>,
+        task: &QueuedTask,
+        ordinal: u64,
+        fallback_index: usize,
+        order_ordinals: &HashMap<(String, u64), PendingOrderEntry>,
+    ) -> usize {
+        let mut lower_bound = 0;
+        let mut upper_bound = pending.len();
+        for (index, candidate) in pending.iter().enumerate() {
+            if candidate.queue_id != task.queue_id {
+                continue;
+            }
+            let key = (candidate.id.clone(), candidate.lifecycle_generation);
+            let Some(candidate_entry) = order_ordinals.get(&key) else {
+                continue;
+            };
+            if candidate_entry.ordinal <= ordinal {
+                lower_bound = index + 1;
+            } else {
+                upper_bound = index;
+                break;
+            }
+        }
+        let lower_bound = lower_bound.min(upper_bound);
+        fallback_index.clamp(lower_bound, upper_bound)
+    }
+
     /// Temporarily remove one not-yet-admitted task while a caller performs a
     /// lifecycle-safe reconfiguration. The admission gate prevents the
     /// dispatcher from popping the same task between the caller's validation
@@ -2098,17 +2337,40 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// position even when another queue's work was admitted meanwhile.
     pub async fn restore_pending_task(&self, index: usize, task: QueuedTask) {
         let _admission_gate = self.admission_gate.lock().await;
+        let mut ordinals = self.pending_order_ordinals.lock().await;
+        let key = (task.id.clone(), task.lifecycle_generation);
+        let ordinal = if let Some(entry) = ordinals.get(&key) {
+            entry.ordinal
+        } else {
+            let mut next_ordinals = self.next_pending_order_ordinal.lock().await;
+            let next = next_ordinals.entry(task.queue_id.clone()).or_default();
+            *next = (*next).saturating_add(1);
+            let ordinal = *next;
+            ordinals.insert(
+                key,
+                PendingOrderEntry {
+                    queue_id: task.queue_id.clone(),
+                    ordinal,
+                },
+            );
+            ordinal
+        };
         let mut pending = self.pending.lock().await;
-        let insert_at = index.min(pending.len());
+        let insert_at = Self::stable_pending_insert_index(&pending, &task, ordinal, index, &ordinals);
         pending.insert(insert_at, task);
+        drop(pending);
+        drop(ordinals);
         self.notify.notify_one();
     }
 
     /// Explicitly release a backend registry id (e.g. on un-resumable false paths, removals, or detach).
     pub async fn release_registered_id(&self, id: &str) {
-        self.media_completed_generations.lock().await.remove(id);
         self.registered_ids.lock().await.remove(id);
         self.registered_lifecycle_generations.lock().await.remove(id);
+        self.pending_order_ordinals
+            .lock()
+            .await
+            .retain(|(download_id, _), _| download_id != id);
         // A released lifecycle cannot be resumed by a delayed retry worker.
         // Epoch checks remain the authoritative guard; removing this marker
         // prevents terminal downloads from accumulating cancellation entries.
@@ -2158,7 +2420,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             }
         };
         if released {
-            self.media_completed_generations.lock().await.remove(id);
+            self.forget_pending_order_ordinal(id, generation).await;
             self.aria2_retry_cancelled.lock().await.remove(id);
             self.release_seed_tracking(id);
             self.notify.notify_waiters();
@@ -2197,6 +2459,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
         id: &str,
         generation: u64,
     ) -> Result<Option<u64>, String> {
+        if self.app_handle.try_state::<crate::Aria2DaemonGuard>()
+            .is_some_and(|guard| guard.is_shutting_down())
+        {
+            return Err("Firelink is preparing to exit".to_string());
+        }
         let cancellations = self.enqueue_cancellations.lock().await;
         if cancellations
             .get(id)
@@ -2220,6 +2487,14 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .await
             .insert(id.to_string(), generation);
         generations.insert(id.to_string(), generation);
+        drop(registered);
+        drop(generations);
+        drop(cancellations);
+        if let Err(error) = self.clear_shutdown_completion_journal(id) {
+            self.rollback_enqueue_reservation(id, generation, previous_generation)
+                .await;
+            return Err(error);
+        }
         Ok(previous_generation)
     }
 
@@ -2276,6 +2551,13 @@ impl<R: tauri::Runtime> QueueManager<R> {
     {
         let id = task.id.clone();
         let _admission_gate = self.admission_gate.lock().await;
+        if self.app_handle.try_state::<crate::Aria2DaemonGuard>()
+            .is_some_and(|guard| guard.is_shutting_down())
+        {
+            self.rollback_enqueue_reservation(&id, generation, previous_generation)
+                .await;
+            return Err("Firelink is preparing to exit".to_string());
+        }
         if self.system_action_pending.load(Ordering::Acquire) {
             self.rollback_enqueue_reservation(&id, generation, previous_generation)
                 .await;
@@ -2302,6 +2584,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             }
         }
         task.lifecycle_generation = generation;
+        self.ensure_pending_order_ordinal(&task).await;
         self.pending.lock().await.push_back(task);
 
         if let Err(error) = finalizer().await {
@@ -2309,6 +2592,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
             pending.retain(|candidate| {
                 !(candidate.id == id && candidate.lifecycle_generation == generation)
             });
+            drop(pending);
+            self.forget_pending_order_ordinal(&id, generation).await;
             self.rollback_enqueue_reservation(&id, generation, previous_generation)
                 .await;
             return Err(error);
@@ -2328,12 +2613,18 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 pending.retain(|candidate| {
                     !(candidate.id == id && candidate.lifecycle_generation == generation)
                 });
+                drop(pending);
+                self.forget_pending_order_ordinal(&id, generation).await;
                 self.rollback_enqueue_reservation(&id, generation, previous_generation)
                     .await;
                 return Err("Download enqueue was superseded by a newer user action".to_string());
             }
         }
 
+        // A committed replacement owns a new lifecycle. Retire terminal
+        // evidence from the prior generation only after admission can no
+        // longer roll back.
+        self.clear_media_terminal_state(&id).await;
         self.emit_state(id, DownloadStatus::Queued);
         self.notify.notify_one();
         Ok(())
@@ -3734,7 +4025,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// Pop the next task, or None if empty.
     pub async fn pop_front(&self) -> Option<QueuedTask> {
         let _admission_gate = self.admission_gate.lock().await;
-        self.pending.lock().await.pop_front()
+        let task = self.pending.lock().await.pop_front();
+        if let Some(task) = &task {
+            self.forget_pending_order_ordinal(&task.id, task.lifecycle_generation)
+                .await;
+        }
+        task
     }
 
     /// Acquire a permit from the semaphore (blocks until one is available).
@@ -3895,6 +4191,121 @@ impl<R: tauri::Runtime> QueueManager<R> {
         }
     }
 
+    /// Return a dispatched task to its original pending position while
+    /// releasing the queue reservation and global permit. A stale lifecycle
+    /// still relinquishes its ownership, but is never reinserted into pending.
+    async fn restore_dispatch_task_to_pending(
+        &self,
+        index: usize,
+        selected_ordinal: u64,
+        task: QueuedTask,
+        previous_cursor: Option<String>,
+        unparked_permit: Option<OwnedSemaphorePermit>,
+    ) -> bool {
+        let id = task.id.clone();
+        let generation = task.lifecycle_generation;
+        let removal_requested = self.removal_requested(&id);
+        let _admission_gate = self.admission_gate.lock().await;
+
+        let mut ownership = self.queue_permit_ownership.lock().await;
+        let Some(owned) = ownership
+            .get(&id)
+            .filter(|owned| owned.lifecycle_generation == generation)
+            .cloned()
+        else {
+            self.pending_order_ordinals
+                .lock()
+                .await
+                .remove(&(id.clone(), generation));
+            drop(ownership);
+            drop(_admission_gate);
+            drop(unparked_permit);
+            return false;
+        };
+
+        let registered_generation = self
+            .registered_lifecycle_generations
+            .lock()
+            .await
+            .get(&id)
+            .copied();
+        let registered = registered_generation == Some(generation)
+            || (generation == 0
+                && registered_generation.is_none()
+                && self.registered_ids.lock().await.contains(&id));
+        let cancelled = self
+            .enqueue_cancellations
+            .lock()
+            .await
+            .get(&id)
+            .is_some_and(|cancelled| *cancelled >= generation);
+        let should_restore = registered && !cancelled && !removal_requested;
+
+        ownership.remove(&id);
+        drop(ownership);
+
+        let active_generation = self
+            .active_permit_generations
+            .lock()
+            .await
+            .get(&id)
+            .copied();
+        let remove_active_permit = active_generation == Some(generation)
+            || (owned.active && active_generation.is_none());
+        let active_permit = if remove_active_permit {
+            if active_generation == Some(generation) {
+                self.active_permit_generations.lock().await.remove(&id);
+            }
+            self.active_permits.lock().await.remove(&id)
+        } else {
+            None
+        };
+        if remove_active_permit {
+            self.active_kinds.lock().await.remove(&id);
+        }
+
+        let order_key = (id.clone(), generation);
+        let mut pending_ordinals = self.pending_order_ordinals.lock().await;
+        if should_restore {
+            let ordinal = pending_ordinals
+                .get(&order_key)
+                .filter(|entry| entry.queue_id == owned.queue_id)
+                .map_or(selected_ordinal, |entry| entry.ordinal);
+            pending_ordinals.insert(
+                order_key,
+                PendingOrderEntry {
+                    queue_id: owned.queue_id.clone(),
+                    ordinal,
+                },
+            );
+            let mut pending = self.pending.lock().await;
+            let insert_at = Self::stable_pending_insert_index(
+                &pending,
+                &task,
+                ordinal,
+                index,
+                &pending_ordinals,
+            );
+            pending.insert(insert_at, task);
+            let mut cursor = self.dispatch_cursor.lock().await;
+            if cursor.as_deref() == Some(owned.queue_id.as_str()) {
+                *cursor = previous_cursor;
+            }
+        } else {
+            pending_ordinals.remove(&order_key);
+        }
+        drop(pending_ordinals);
+
+        drop(active_permit);
+        drop(unparked_permit);
+        drop(_admission_gate);
+        self.notify.notify_waiters();
+        if remove_active_permit {
+            self.sync_power_activity().await;
+        }
+        should_restore
+    }
+
     async fn activate_admitted_permit(
         &self,
         id: &str,
@@ -3942,8 +4353,22 @@ impl<R: tauri::Runtime> QueueManager<R> {
         true
     }
 
-    async fn try_admit_next_task(&self) -> Option<(OwnedSemaphorePermit, QueuedTask)> {
+    async fn try_admit_next_task(
+        &self,
+    ) -> Option<(
+        OwnedSemaphorePermit,
+        QueuedTask,
+        usize,
+        Option<String>,
+        u64,
+        DispatchHandoffGuard,
+    )> {
         let _admission_gate = self.admission_gate.lock().await;
+        if self.app_handle.try_state::<crate::Aria2DaemonGuard>()
+            .is_some_and(|guard| guard.is_shutting_down())
+        {
+            return None;
+        }
         if self.system_action_pending.load(Ordering::Acquire) {
             return None;
         }
@@ -3956,8 +4381,10 @@ impl<R: tauri::Runtime> QueueManager<R> {
         let ownership = self.queue_permit_ownership.lock().await;
         let mut queue_ids = Vec::new();
         let mut seen = HashSet::new();
+        let aria2_dispatch_held = self.aria2_dispatch_held();
         for task in pending.iter() {
-            if !ownership.contains_key(&task.id)
+            if (!aria2_dispatch_held || !matches!(&task.kind, TaskKind::Aria2))
+                && !ownership.contains_key(&task.id)
                 && !held_queues.contains(&task.queue_id)
                 && seen.insert(task.queue_id.clone())
             {
@@ -3990,11 +4417,16 @@ impl<R: tauri::Runtime> QueueManager<R> {
         })?;
         let task_index = pending
             .iter()
-            .position(|task| task.queue_id == selected_queue && !ownership.contains_key(&task.id))?;
+            .position(|task| {
+                task.queue_id == selected_queue
+                    && (!aria2_dispatch_held || !matches!(&task.kind, TaskKind::Aria2))
+                    && !ownership.contains_key(&task.id)
+            })?;
         drop(queue_limits);
         drop(ownership);
 
         let permit = self.try_acquire_permit_after_retirement()?;
+        let previous_cursor = cursor;
         let task = pending.remove(task_index)?;
         self.queue_permit_ownership.lock().await.insert(
             task.id.clone(),
@@ -4005,7 +4437,19 @@ impl<R: tauri::Runtime> QueueManager<R> {
             },
         );
         *self.dispatch_cursor.lock().await = Some(selected_queue);
-        Some((permit, task))
+        let pending_ordinal = self.ensure_pending_order_ordinal(&task).await;
+        let handoff_guard = DispatchHandoffGuard::new(
+            Arc::clone(&self.dispatch_handoff_count),
+            Arc::clone(&self.dispatch_handoff_notify),
+        );
+        Some((
+            permit,
+            task,
+            task_index,
+            previous_cursor,
+            pending_ordinal,
+            handoff_guard,
+        ))
     }
 
     /// Park an already-acquired permit under `id`.
@@ -4296,6 +4740,19 @@ impl<R: tauri::Runtime> QueueManager<R> {
         self.semaphore.available_permits()
     }
 
+    /// Hold only queued Aria2 work while its daemon is offline or recovering.
+    /// The dispatcher is woken for both transitions so Media work can keep
+    /// flowing during a hold and Aria2 work resumes promptly after it clears.
+    pub fn set_aria2_dispatch_hold(&self, held: bool) {
+        self.aria2_dispatch_hold.store(held, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    /// Whether the Aria2 queue is currently held for daemon recovery.
+    pub fn aria2_dispatch_held(&self) -> bool {
+        self.aria2_dispatch_hold.load(Ordering::Acquire)
+    }
+
     pub(crate) fn emit_state(&self, id: impl Into<String>, status: DownloadStatus) {
         use tauri::Emitter;
         let _ = self
@@ -4534,7 +4991,15 @@ impl<R: tauri::Runtime> QueueManager<R> {
             if self.try_start_waiting_seed().await {
                 continue;
             }
-            if let Some((permit, task)) = self.try_admit_next_task().await {
+            if let Some((
+                permit,
+                task,
+                pending_index,
+                previous_cursor,
+                pending_ordinal,
+                handoff_guard,
+            )) = self.try_admit_next_task().await
+            {
                 // Admission owns the global and per-queue reservation before
                 // this task is spawned. Keep the dispatcher free to admit
                 // other work while an Aria2 addUri call is retrying or a
@@ -4542,7 +5007,16 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 // until that lifecycle reaches its own terminal path.
                 let manager = Arc::clone(&self);
                 tauri::async_runtime::spawn(async move {
-                    manager.dispatch_one(permit, task).await;
+                    manager
+                        .dispatch_one(
+                            permit,
+                            task,
+                            pending_index,
+                            previous_cursor,
+                            pending_ordinal,
+                            handoff_guard,
+                        )
+                        .await;
                 });
             } else {
                 // This covers both an empty pending list and the case where
@@ -4561,18 +5035,84 @@ impl<R: tauri::Runtime> QueueManager<R> {
         }
     }
 
-    async fn dispatch_one(self: Arc<Self>, permit: OwnedSemaphorePermit, task: QueuedTask) {
+    pub(crate) fn wake_after_exit_rejected(&self) {
+        self.notify.notify_waiters();
+    }
+
+    pub(crate) async fn wait_for_dispatch_handoffs(&self) -> bool {
+        loop {
+            let notified = self.dispatch_handoff_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            let admission_gate = self.admission_gate.lock().await;
+            if self.dispatch_handoff_count.load(Ordering::Acquire) == 0 {
+                return true;
+            }
+            drop(admission_gate);
+            notified.await;
+        }
+    }
+
+    async fn dispatch_one(
+        self: Arc<Self>,
+        permit: OwnedSemaphorePermit,
+        task: QueuedTask,
+        pending_index: usize,
+        previous_cursor: Option<String>,
+        pending_ordinal: u64,
+        _handoff_guard: DispatchHandoffGuard,
+    ) {
         let id = task.id.clone();
         let lifecycle_generation = task.lifecycle_generation;
+        if matches!(&task.kind, TaskKind::Aria2) && self.aria2_dispatch_held() {
+            self.restore_dispatch_task_to_pending(
+                pending_index,
+                pending_ordinal,
+                task,
+                previous_cursor,
+                Some(permit),
+            )
+            .await;
+            return;
+        }
         // Serialize activation with pause/remove/detach. The dispatcher can
         // pop a task just as a control command arrives; registering the
         // permit and active kind under the same guard prevents that command
         // from observing a half-started lifecycle.
         let control_guard = self.acquire_aria2_control(&id).await;
+        if matches!(&task.kind, TaskKind::Aria2) && self.aria2_dispatch_held() {
+            drop(control_guard);
+            self.restore_dispatch_task_to_pending(
+                pending_index,
+                pending_ordinal,
+                task,
+                previous_cursor,
+                Some(permit),
+            )
+            .await;
+            return;
+        }
+        if self.app_handle.try_state::<crate::Aria2DaemonGuard>()
+            .is_some_and(|guard| guard.is_shutting_down())
+        {
+            drop(control_guard);
+            self.restore_dispatch_task_to_pending(
+                pending_index,
+                pending_ordinal,
+                task,
+                previous_cursor,
+                Some(permit),
+            )
+                .await;
+            return;
+        }
         if self.removal_requested(&id) || !self
             .is_registered_generation(&id, lifecycle_generation)
             .await
         {
+            self.forget_pending_order_ordinal(&id, lifecycle_generation)
+                .await;
             self.release_queue_reservation_for_generation(&id, lifecycle_generation)
                 .await;
             drop(control_guard);
@@ -4587,6 +5127,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .activate_admitted_permit(&id, lifecycle_generation, permit)
             .await
         {
+            self.forget_pending_order_ordinal(&id, lifecycle_generation)
+                .await;
             drop(control_guard);
             return;
         }
@@ -4634,10 +5176,25 @@ impl<R: tauri::Runtime> QueueManager<R> {
             self.emit_state(&id, DownloadStatus::Downloading);
         }
 
-        match task.kind {
+        match &task.kind {
             TaskKind::Aria2 => {
                 let lifecycle_epoch = aria2_lifecycle_epoch
                     .expect("aria2 dispatch must initialize a control epoch");
+                if self.aria2_dispatch_held() {
+                    let _control_guard = self.acquire_aria2_control(&id).await;
+                    self.clear_aria2_allocation_for_epoch(&id, lifecycle_epoch)
+                        .await;
+                    self.finish_aria2_dispatch(&id, lifecycle_epoch).await;
+                    self.restore_dispatch_task_to_pending(
+                        pending_index,
+                        pending_ordinal,
+                        task,
+                        previous_cursor,
+                        None,
+                    )
+                    .await;
+                    return;
+                }
                 let add_result = self.spawner.add_uri(&id, &task.payload).await;
                 match add_result {
                     Ok(gid) => {
@@ -4648,6 +5205,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
                             .await
                             && self.is_registered(&id).await;
                         if cancelled || !current_lifecycle {
+                            self.forget_pending_order_ordinal(&id, lifecycle_generation)
+                                .await;
                             drop(control_guard);
                             log::info!(
                                 "aria2 dispatch cancellation [{}]: removing late gid {}",
@@ -4695,6 +5254,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
                         // lets the UI (and a concurrent Properties pause)
                         // act on a lifecycle that does not yet exist.
                         let buffered_outcome = self.remember_gid(id.clone(), gid.clone()).await;
+                        self.forget_pending_order_ordinal(&id, lifecycle_generation)
+                            .await;
                         if buffered_outcome.is_none() {
                             self.emit_state(&id, DownloadStatus::Downloading);
                         }
@@ -4757,6 +5318,13 @@ impl<R: tauri::Runtime> QueueManager<R> {
                         }
                     }
                     Err(error) => {
+                        let daemon_unavailable = is_aria2_daemon_recovery_required(&error);
+                        if daemon_unavailable {
+                            // An unavailable daemon is a recoverable queue
+                            // condition. Hold later Aria2 work before restoring
+                            // this task so the dispatcher cannot spin on it.
+                            self.set_aria2_dispatch_hold(true);
+                        }
                         self.clear_aria2_allocation_for_epoch(&id, lifecycle_epoch)
                             .await;
                         let _control_guard = self.acquire_aria2_control(&id).await;
@@ -4765,6 +5333,20 @@ impl<R: tauri::Runtime> QueueManager<R> {
                             .await
                             && self.is_registered(&id).await;
                         if current_lifecycle {
+                            if daemon_unavailable {
+                                self.finish_aria2_dispatch(&id, lifecycle_epoch).await;
+                                self.restore_dispatch_task_to_pending(
+                                    pending_index,
+                                    pending_ordinal,
+                                    task,
+                                    previous_cursor,
+                                    None,
+                                )
+                                .await;
+                                return;
+                            }
+                            self.forget_pending_order_ordinal(&id, lifecycle_generation)
+                                .await;
                             self.next_aria2_control_epoch(&id).await;
                             self.cancel_aria2_retries(&id).await;
                             self.clear_aria2_retry_state(&id).await;
@@ -4772,6 +5354,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
                             self.release_registered_id(&id).await;
                             self.emit_failed(&id, error);
                         } else {
+                            self.forget_pending_order_ordinal(&id, lifecycle_generation)
+                                .await;
                             log::info!(
                                 "aria2 dispatch [{}]: ignoring stale addUri failure after a newer lifecycle took ownership",
                                 id
@@ -4782,10 +5366,30 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 }
             }
             TaskKind::Media => {
+                self.forget_pending_order_ordinal(&id, lifecycle_generation)
+                    .await;
+                let producer_lease = self
+                    .app_handle
+                    .try_state::<crate::AppState>()
+                    .map(|state| Arc::clone(&state.shutdown_terminal_barrier));
+                let producer_lease = match producer_lease {
+                    Some(barrier) => match barrier.enter().await {
+                        Some(lease) => Some(lease),
+                        None => {
+                            self.release_permit_for_generation(&id, lifecycle_generation)
+                                .await;
+                            self.release_registered_id_for_generation(&id, lifecycle_generation)
+                                .await;
+                            return;
+                        }
+                    },
+                    None => None,
+                };
                 let this = Arc::clone(&self);
                 let payload = task.payload.clone();
                 let id_for_task = id.clone();
                 tauri::async_runtime::spawn(async move {
+                    let _producer_lease = producer_lease;
                     let outcome = this
                         .spawner
                         .run_media(&id_for_task, &payload, lifecycle_generation)
@@ -4799,6 +5403,87 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
     pub(crate) async fn media_payload_completed(&self, id: &str, generation: u64) -> bool {
         self.media_completed_generations.lock().await.get(id).copied() == Some(generation)
+    }
+
+    pub(crate) async fn record_media_terminal_outcome(
+        &self,
+        id: &str,
+        generation: u64,
+        outcome: MediaTerminalOutcome,
+    ) {
+        self.media_terminal_outcomes
+            .lock()
+            .await
+            .insert(id.to_string(), (generation, outcome));
+    }
+
+    pub(crate) async fn media_terminal_outcome(
+        &self,
+        id: &str,
+        generation: u64,
+    ) -> Option<MediaTerminalOutcome> {
+        self.media_terminal_outcomes
+            .lock()
+            .await
+            .get(id)
+            .filter(|(current_generation, _)| *current_generation == generation)
+            .map(|(_, outcome)| *outcome)
+    }
+
+    pub(crate) async fn clear_media_terminal_outcome(&self, id: &str, generation: u64) {
+        let mut outcomes = self.media_terminal_outcomes.lock().await;
+        if outcomes
+            .get(id)
+            .is_some_and(|(current_generation, _)| *current_generation == generation)
+        {
+            outcomes.remove(id);
+        }
+        drop(outcomes);
+        let mut completed = self.media_completed_generations.lock().await;
+        if completed.get(id).copied() == Some(generation) {
+            completed.remove(id);
+        }
+    }
+
+    async fn clear_media_terminal_state(&self, id: &str) {
+        self.media_terminal_outcomes.lock().await.remove(id);
+        self.media_completed_generations.lock().await.remove(id);
+    }
+
+    fn clear_shutdown_completion_journal(&self, id: &str) -> Result<(), String> {
+        if let Some(database) = self.app_handle.try_state::<crate::db::DbState>() {
+            let mut connection = database.lock()?;
+            crate::db::clear_shutdown_terminal(&mut connection, id)?;
+        }
+        if let Some(shutdown_guard) = self.app_handle.try_state::<crate::Aria2DaemonGuard>() {
+            shutdown_guard.clear_shutdown_journal_failure_for(id);
+        }
+        Ok(())
+    }
+
+    fn persist_shutdown_completion_journal(&self, id: &str, lifecycle_generation: u64) {
+        let Some(shutdown_guard) = self.app_handle.try_state::<crate::Aria2DaemonGuard>() else {
+            return;
+        };
+        if !shutdown_guard.is_shutting_down() {
+            return;
+        }
+        let result = self
+            .app_handle
+            .try_state::<crate::db::DbState>()
+            .ok_or_else(|| "persistence state is unavailable".to_string())
+            .and_then(|database| {
+                let mut connection = database.lock()?;
+                crate::db::record_shutdown_terminal(&mut connection, id, lifecycle_generation)
+            });
+        if result.is_err() {
+            shutdown_guard.mark_shutdown_journal_failed(id, lifecycle_generation);
+            log::error!(
+                "could not persist shutdown completion journal [id={} lifecycle_generation={}]",
+                id,
+                lifecycle_generation
+            );
+        }
     }
 
     fn persist_completed_removal_payload(&self, id: &str) -> Result<(), String> {
@@ -4823,8 +5508,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
         outcome: Result<(), String>,
     ) {
         // Completion and pause/remove/detach must observe one ordered
-        // lifecycle. Without this guard a terminal media outcome could emit
-        // Completed, then a racing pause could emit Paused afterward.
+        // lifecycle. The media dispatch holds a producer lease across both
+        // run_media and this reconciliation, so shutdown cannot finalize while
+        // a producer is between its result and terminal update.
         let _control_guard = self.acquire_aria2_control(id).await;
         if !self.is_registered_generation(id, lifecycle_generation).await {
             log::info!(
@@ -4838,11 +5524,32 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
         match outcome {
             Ok(()) => {
-                if self.persist_completed_removal_payload(id).is_err() {
-                    log::error!("could not persist media completion during removal [id={}]", id);
-                    return;
+                self.persist_shutdown_completion_journal(id, lifecycle_generation);
+                if let Err(error) = self.persist_completed_removal_payload(id) {
+                    // The output is already complete. Do not leak the permit
+                    // or leave the lifecycle registered because an auxiliary
+                    // removal-state write failed.
+                    log::error!("could not persist media completion during removal [id={}]: {}", id, error);
                 }
-                self.emit_state(id, DownloadStatus::Completed);
+                let completed_with_file = crate::download_ownership::primary_path_for_id(
+                    &self.app_handle,
+                    id,
+                )
+                .ok()
+                .flatten()
+                .and_then(|path| path.file_name().and_then(|name| name.to_str()).map(str::to_owned))
+                .is_some_and(|file_name| {
+                    use tauri::Emitter;
+                    self.app_handle
+                        .emit(
+                            "download-state",
+                            DownloadStateEvent::completed_with_file(id, file_name),
+                        )
+                        .is_ok()
+                });
+                if !completed_with_file {
+                    self.emit_state(id, DownloadStatus::Completed);
+                }
                 self.release_registered_id_for_generation(id, lifecycle_generation)
                     .await;
             }
@@ -5013,6 +5720,25 @@ impl<R: tauri::Runtime> QueueManager<R> {
         outcome: PendingOutcome,
         progress: Option<DownloadStateProgress>,
     ) {
+        let terminal_barrier = self
+            .app_handle
+            .try_state::<crate::AppState>()
+            .map(|state| Arc::clone(&state.shutdown_terminal_barrier));
+        if let Some(terminal_barrier) = terminal_barrier {
+            let Some(_terminal_work) = terminal_barrier.enter().await else {
+                return;
+            };
+        }
+        self.apply_completion_locked_with_progress_unfenced(id, outcome, progress)
+            .await;
+    }
+
+    async fn apply_completion_locked_with_progress_unfenced(
+        &self,
+        id: &str,
+        outcome: PendingOutcome,
+        progress: Option<DownloadStateProgress>,
+    ) {
         self.clear_aria2_magnet_handoff(id).await;
         self.clear_aria2_allocation(id).await;
         if matches!(&outcome, PendingOutcome::Complete) {
@@ -5082,6 +5808,29 @@ impl<R: tauri::Runtime> QueueManager<R> {
             PendingOutcome::Seeding => PendingOutcome::Complete,
             other => other,
         };
+        let restored_status = if verification_only {
+            if verification_restore_status.as_deref() == Some("completed") {
+                DownloadStatus::Completed
+            } else {
+                DownloadStatus::Paused
+            }
+        } else {
+            match verification_restore_status.as_deref() {
+                Some("paused") => DownloadStatus::Paused,
+                Some("failed") => DownloadStatus::Failed,
+                Some("ready") => DownloadStatus::Ready,
+                Some("staged") => DownloadStatus::Staged,
+                Some("completed") => DownloadStatus::Completed,
+                _ => DownloadStatus::Completed,
+            }
+        };
+        if matches!(&outcome, PendingOutcome::Complete)
+            && matches!(restored_status, DownloadStatus::Completed)
+        {
+            if let Some(lifecycle_generation) = self.registered_lifecycle_generation(id).await {
+                self.persist_shutdown_completion_journal(id, lifecycle_generation);
+            }
+        }
         if let Some(gid) = self.aria2_gid_for_download(id) {
             if let Err(error) = self.reconcile_aria2_torrent_ownership(id, &gid).await {
                 log::debug!(
@@ -5130,22 +5879,6 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 }
                 self.release_registered_id(id).await;
                 self.release_permit(id).await;
-                let restored_status = if verification_only {
-                    if verification_restore_status.as_deref() == Some("completed") {
-                        DownloadStatus::Completed
-                    } else {
-                        DownloadStatus::Paused
-                    }
-                } else {
-                    match verification_restore_status.as_deref() {
-                        Some("paused") => DownloadStatus::Paused,
-                        Some("failed") => DownloadStatus::Failed,
-                        Some("ready") => DownloadStatus::Ready,
-                        Some("staged") => DownloadStatus::Staged,
-                        Some("completed") => DownloadStatus::Completed,
-                        _ => DownloadStatus::Completed,
-                    }
-                };
                 let mut event = DownloadStateEvent::new(id, restored_status);
                 if let Some(progress) = progress {
                     event = event.with_progress(progress);
@@ -6175,7 +6908,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
         let payload = self.aria2_payloads.lock().await.get(&id).cloned();
         if payload.is_none() {
-            self.apply_completion_locked_with_progress(
+            self.apply_completion_locked_with_progress_unfenced(
                 &id,
                 PendingOutcome::Error(error),
                 progress,
@@ -6220,7 +6953,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             effective_connections
         );
         if retry_action == Aria2RetryAction::Terminal {
-            self.apply_completion_locked_with_progress(
+            self.apply_completion_locked_with_progress_unfenced(
                 &id,
                 PendingOutcome::Error(error),
                 progress,
@@ -6437,7 +7170,48 @@ impl<R: tauri::Runtime> QueueManager<R> {
         .await;
     }
 
+    pub(crate) async fn handle_aria2_event_with_progress_under_terminal_lease(
+        self: &Arc<Self>,
+        gid: &str,
+        outcome: PendingOutcome,
+        progress: Option<DownloadStateProgress>,
+    ) {
+        self.handle_aria2_pending_event_unfenced(
+            gid,
+            PendingAria2Outcome { outcome, progress },
+        )
+        .await;
+    }
+
+    pub(crate) async fn handle_aria2_event_under_terminal_lease(
+        self: &Arc<Self>,
+        gid: &str,
+        outcome: PendingOutcome,
+    ) {
+        self.handle_aria2_pending_event_unfenced(gid, PendingAria2Outcome::new(outcome))
+            .await;
+    }
+
     async fn handle_aria2_pending_event(
+        self: &Arc<Self>,
+        gid: &str,
+        pending: PendingAria2Outcome,
+    ) {
+        let terminal_barrier = self
+            .app_handle
+            .try_state::<crate::AppState>()
+            .map(|state| Arc::clone(&state.shutdown_terminal_barrier));
+        if let Some(terminal_barrier) = terminal_barrier {
+            let Some(_terminal_work) = terminal_barrier.enter().await else {
+                return;
+            };
+            self.handle_aria2_pending_event_unfenced(gid, pending).await;
+            return;
+        }
+        self.handle_aria2_pending_event_unfenced(gid, pending).await;
+    }
+
+    async fn handle_aria2_pending_event_unfenced(
         self: &Arc<Self>,
         gid: &str,
         pending: PendingAria2Outcome,
@@ -6491,7 +7265,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     return;
                 }
                 Aria2MagnetCompletionDisposition::Failed(error) => {
-                    self.apply_completion_locked_with_progress(
+                    self.apply_completion_locked_with_progress_unfenced(
                         &mapping.id,
                         PendingOutcome::Error(error),
                         progress,
@@ -6509,19 +7283,24 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     // payload lifecycle.
                     self.remove_aria2_magnet_parent_result(gid).await;
                     if let Some(pending) = child.pending {
-                        Box::pin(self.handle_aria2_pending_event(&child.gid, pending)).await;
+                    Box::pin(self.handle_aria2_pending_event_unfenced(&child.gid, pending)).await;
                     } else {
                         match child.status.as_str() {
                             "complete" => {
-                                Box::pin(self.handle_aria2_event(&child.gid, PendingOutcome::Complete))
+                                Box::pin(self.handle_aria2_pending_event_unfenced(
+                                    &child.gid,
+                                    PendingAria2Outcome::new(PendingOutcome::Complete),
+                                ))
                                     .await;
                             }
                             "error" | "removed" => {
-                                Box::pin(self.handle_aria2_event(
+                                Box::pin(self.handle_aria2_pending_event_unfenced(
                                     &child.gid,
-                                    PendingOutcome::Error(child.error.unwrap_or_else(|| {
-                                        "aria2 magnet payload child ended unexpectedly".to_string()
-                                    })),
+                                    PendingAria2Outcome::new(PendingOutcome::Error(
+                                        child.error.unwrap_or_else(|| {
+                                            "aria2 magnet payload child ended unexpectedly".to_string()
+                                        }),
+                                    )),
                                 ))
                                 .await;
                             }
@@ -6547,7 +7326,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 }
             }
         }
-        self.apply_completion_locked_with_progress(&mapping.id, outcome, progress)
+        self.apply_completion_locked_with_progress_unfenced(&mapping.id, outcome, progress)
             .await;
     }
 
@@ -6586,6 +7365,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .enumerate()
             .filter_map(|(position, index)| ids.iter().any(|id| id == &pending[*index].id).then_some(position))
             .collect::<Vec<_>>();
+        let mut refreshed_queue_order = None;
 
         if !selected_positions.is_empty() {
             let queue_tasks = queue_positions
@@ -6616,12 +7396,18 @@ impl<R: tauri::Runtime> QueueManager<R> {
             for (queue_index, pending_index) in queue_positions.iter().enumerate() {
                 pending[*pending_index] = reordered[queue_index].clone();
             }
+            refreshed_queue_order = Some(reordered);
         }
-        pending
+        let result = pending
             .iter()
             .filter(|task| task.queue_id == queue_id)
             .map(|task| task.id.clone())
-            .collect()
+            .collect();
+        drop(pending);
+        if let Some(reordered) = refreshed_queue_order {
+            self.refresh_pending_order_ordinals(queue_id, &reordered).await;
+        }
+        result
     }
 
     /// Atomically place a selected block at an insertion index among the
@@ -6646,17 +7432,23 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .map(|index| pending[*index].clone())
             .collect::<Vec<_>>();
 
-        if let Some(reordered) = reorder_selected_queue_tasks_in_order(&queue_tasks, ids, target_index) {
+        let reordered = reorder_selected_queue_tasks_in_order(&queue_tasks, ids, target_index);
+        if let Some(reordered) = reordered.as_ref() {
             for (queue_index, pending_index) in queue_positions.iter().enumerate() {
                 pending[*pending_index] = reordered[queue_index].clone();
             }
         }
 
-        pending
+        let result = pending
             .iter()
             .filter(|task| task.queue_id == queue_id)
             .map(|task| task.id.clone())
-            .collect()
+            .collect();
+        drop(pending);
+        if let Some(reordered) = reordered {
+            self.refresh_pending_order_ordinals(queue_id, &reordered).await;
+        }
+        result
     }
 
     /// Remove a task from pending if present (used by remove_download).
@@ -6666,8 +7458,17 @@ impl<R: tauri::Runtime> QueueManager<R> {
         let _admission_gate = self.admission_gate.lock().await;
         let mut pending = self.pending.lock().await;
         let before = pending.len();
+        let removed_keys = pending
+            .iter()
+            .filter(|task| task.id == id)
+            .map(|task| (task.id.clone(), task.lifecycle_generation))
+            .collect::<Vec<_>>();
         pending.retain(|t| t.id != id);
         let removed = pending.len() < before;
+        drop(pending);
+        for (id, generation) in removed_keys {
+            self.forget_pending_order_ordinal(&id, generation).await;
+        }
         if removed {
             self.notify.notify_one();
         }
@@ -6678,9 +7479,14 @@ impl<R: tauri::Runtime> QueueManager<R> {
         let _admission_gate = self.admission_gate.lock().await;
         let mut pending = self.pending.lock().await;
         let before = pending.len();
+        let removed = pending.iter().any(|task| {
+            task.id == id && task.lifecycle_generation == generation
+        });
         pending.retain(|task| !(task.id == id && task.lifecycle_generation == generation));
-        let removed = pending.len() < before;
+        let removed = removed && pending.len() < before;
+        drop(pending);
         if removed {
+            self.forget_pending_order_ordinal(id, generation).await;
             self.notify.notify_one();
         }
         removed
@@ -6760,6 +7566,14 @@ fn is_aria2_rpc_unavailable(error: &str) -> bool {
         || lower.contains("error trying to connect")
         || lower.contains("connection closed")
         || lower.contains("connection reset")
+}
+
+fn is_aria2_daemon_recovery_required(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("aria2 daemon unavailable")
+        || lower.contains("aria2 daemon is not ready")
+        || lower.contains("aria2 daemon did not become ready")
+        || lower.contains("aria2 did not become ready")
 }
 
 fn aria2_startup_failure_for_port(port: u16, startup_error: Option<&str>) -> Option<String> {
@@ -9332,26 +10146,51 @@ impl SidecarSpawner for ProductionSpawner {
             )
             .await
         };
-        if let Ok(path) = outcome.as_ref() {
-            // Publish completion evidence before Finished acknowledges a racing
-            // removal. The control lock may be held by that waiting remover.
-            state.queue_manager.media_completed_generations.lock().await
-                .insert(id.to_string(), lifecycle_generation);
-            if state.queue_manager.persist_completed_removal_payload(id).is_err() {
-                log::error!("could not persist media completion before removal acknowledgement [id={}]", id);
+        let terminal_outcome = match &outcome {
+            Ok(_) => MediaTerminalOutcome::Completed,
+            Err(error) if error == crate::queue::MEDIA_RUN_CANCELLED => {
+                MediaTerminalOutcome::Cancelled
             }
-            let _ = crate::download_ownership::set_primary_path(&self.app_handle, id, path);
-            if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
-                use tauri::Emitter;
-                let _ = self.app_handle.emit(
-                    "download-state",
-                    crate::ipc::DownloadStateEvent::completed_with_file(id, file_name),
-                );
+            Err(_) => MediaTerminalOutcome::Failed,
+        };
+        {
+            // Publish the exact terminal result before Finished acknowledges a
+            // racing control operation. That command can then distinguish a
+            // successful completion from a failed or cancelled media run.
+            let _control_guard = state.queue_manager.acquire_aria2_control(id).await;
+            if state
+                .queue_manager
+                .is_registered_generation(id, lifecycle_generation)
+                .await
+            {
+                state
+                    .queue_manager
+                    .record_media_terminal_outcome(id, lifecycle_generation, terminal_outcome)
+                    .await;
+                if let Ok(path) = outcome.as_ref() {
+                    state.queue_manager.media_completed_generations.lock().await
+                        .insert(id.to_string(), lifecycle_generation);
+                    state.queue_manager.persist_shutdown_completion_journal(id, lifecycle_generation);
+                    if state.queue_manager.persist_completed_removal_payload(id).is_err() {
+                        log::error!("could not persist media completion before removal acknowledgement [id={}]", id);
+                    }
+                    if let Err(error) = crate::download_ownership::set_primary_path(&self.app_handle, id, path) {
+                        log::error!("could not persist completed media path [id={}]: {}", id, error);
+                    }
+                }
             }
         }
+        let shutdown_interrupted = matches!(
+            &outcome,
+            Err(error) if error == crate::queue::MEDIA_RUN_CANCELLED
+        );
         let _ = state
             .download_coordinator
-            .finish_media(id.to_string(), lifecycle_generation)
+            .finish_media_with_shutdown_outcome(
+                id.to_string(),
+                lifecycle_generation,
+                shutdown_interrupted,
+            )
             .await;
         outcome.map(|_| ())
     }
@@ -9596,6 +10435,49 @@ mod tests {
         release: Arc<tokio::sync::Notify>,
     }
 
+    struct UnavailableAria2Spawner {
+        add_uri_calls: AtomicUsize,
+        gate_add_uri: bool,
+        add_uri_started: Arc<tokio::sync::Notify>,
+        release_add_uri: Arc<tokio::sync::Notify>,
+    }
+
+    impl UnavailableAria2Spawner {
+        fn new(gate_add_uri: bool) -> Self {
+            Self {
+                add_uri_calls: AtomicUsize::new(0),
+                gate_add_uri,
+                add_uri_started: Arc::new(tokio::sync::Notify::new()),
+                release_add_uri: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SidecarSpawner for UnavailableAria2Spawner {
+        async fn add_uri(&self, _id: &str, _payload: &SpawnPayload) -> Result<String, String> {
+            self.add_uri_calls.fetch_add(1, Ordering::SeqCst);
+            self.add_uri_started.notify_one();
+            if self.gate_add_uri {
+                self.release_add_uri.notified().await;
+            }
+            Err("aria2 daemon is not ready".to_string())
+        }
+
+        async fn remove_uri(&self, _gid: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn run_media(
+            &self,
+            _id: &str,
+            _payload: &SpawnPayload,
+            _lifecycle_generation: u64,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
     #[async_trait::async_trait]
     impl SidecarSpawner for BlockingSpawner {
         async fn add_uri(&self, _id: &str, _payload: &SpawnPayload) -> Result<String, String> {
@@ -9627,6 +10509,33 @@ mod tests {
             .try_lock()
             .ok()
             .and_then(|pending| pending.get(id).copied())
+    }
+
+    async fn enqueue_test_task<R: tauri::Runtime>(
+        manager: &QueueManager<R>,
+        id: &str,
+        queue_id: &str,
+        kind: TaskKind,
+        generation: u64,
+    ) {
+        let previous_generation = manager
+            .reserve_enqueue_generation(id, generation)
+            .await
+            .expect("test lifecycle reservation");
+        manager
+            .commit_reserved_enqueue(
+                QueuedTask {
+                    id: id.to_string(),
+                    queue_id: queue_id.to_string(),
+                    kind,
+                    payload: SpawnPayload::default(),
+                    lifecycle_generation: generation,
+                },
+                generation,
+                previous_generation,
+            )
+            .await
+            .expect("test task admission");
     }
 
     #[test]
@@ -9664,18 +10573,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn control_guard_can_be_released_for_a_media_terminal_ack() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(QueueManager::test_new(
+            app.handle().clone(),
+            1,
+            Arc::new(TestSpawner),
+        ));
+        let mut control = manager.acquire_aria2_control("media-control").await;
+        control.release();
+
+        let worker_manager = Arc::clone(&manager);
+        tokio::time::timeout(Duration::from_secs(1), async move {
+            let _worker_control = worker_manager
+                .acquire_aria2_control("media-control")
+                .await;
+        })
+        .await
+        .expect("media terminal writer must acquire the released control lock");
+
+        control.reacquire().await;
+        drop(control);
+    }
+
+    #[tokio::test]
     async fn media_removal_completion_evidence_is_lifecycle_fenced() {
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
         let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
         manager.reserve_enqueue_generation("media-removal", 7).await.unwrap();
         manager.media_completed_generations.lock().await.insert("media-removal".into(), 7);
+        manager
+            .record_media_terminal_outcome(
+                "media-removal",
+                7,
+                MediaTerminalOutcome::Completed,
+            )
+            .await;
         assert!(manager.media_payload_completed("media-removal", 7).await);
         assert!(!manager.media_payload_completed("media-removal", 8).await);
         manager.release_registered_id_for_generation("media-removal", 6).await;
         assert!(manager.media_payload_completed("media-removal", 7).await);
         manager.release_registered_id_for_generation("media-removal", 7).await;
+        assert!(manager.media_payload_completed("media-removal", 7).await);
+        assert_eq!(
+            manager
+                .media_terminal_outcome("media-removal", 7)
+                .await,
+            Some(MediaTerminalOutcome::Completed)
+        );
+
+        let previous = manager
+            .reserve_enqueue_generation("media-removal", 8)
+            .await
+            .unwrap();
+        manager
+            .commit_reserved_enqueue(
+                QueuedTask {
+                    id: "media-removal".to_string(),
+                    queue_id: "main".to_string(),
+                    kind: TaskKind::Media,
+                    payload: SpawnPayload::default(),
+                    lifecycle_generation: 8,
+                },
+                8,
+                previous,
+            )
+            .await
+            .unwrap();
         assert!(!manager.media_payload_completed("media-removal", 7).await);
+        assert_eq!(
+            manager
+                .media_terminal_outcome("media-removal", 7)
+                .await,
+            None
+        );
     }
 
     #[tokio::test]
@@ -9723,6 +10697,357 @@ mod tests {
         manager.next_aria2_control_epoch("telemetry").await;
         manager.observe_aria2_allocation("telemetry-gid", &observed, true).await;
         assert_eq!(allocation_pending_epoch(&manager, "telemetry"), None);
+    }
+
+    #[tokio::test]
+    async fn aria2_recovery_hold_skips_aria2_but_admits_media() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = QueueManager::test_new(app.handle().clone(), 2, Arc::new(TestSpawner));
+        enqueue_test_task(&manager, "aria2-held", "shared", TaskKind::Aria2, 1).await;
+        enqueue_test_task(&manager, "media-ready", "shared", TaskKind::Media, 1).await;
+        manager.set_aria2_dispatch_hold(true);
+
+        let (permit, task, _, _, _, _handoff_guard) = manager
+            .try_admit_next_task()
+            .await
+            .expect("Media remains eligible during an Aria2 recovery hold");
+        assert_eq!(task.id, "media-ready");
+        assert!(matches!(task.kind, TaskKind::Media));
+        manager
+            .release_queue_reservation_for_generation(&task.id, task.lifecycle_generation)
+            .await;
+        drop(permit);
+
+        assert_eq!(manager.pending_order(None).await, ["aria2-held"]);
+        assert!(manager.try_admit_next_task().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn aria2_hold_after_selection_restores_task_before_add_uri() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let spawner = Arc::new(UnavailableAria2Spawner::new(false));
+        let manager = Arc::new(QueueManager::test_new(
+            app.handle().clone(),
+            1,
+            spawner.clone(),
+        ));
+        enqueue_test_task(&manager, "selected-aria2", "main", TaskKind::Aria2, 4).await;
+        enqueue_test_task(&manager, "queued-media", "main", TaskKind::Media, 4).await;
+        let (
+            permit,
+            task,
+            pending_index,
+            previous_cursor,
+            pending_ordinal,
+            handoff_guard,
+        ) = manager
+            .try_admit_next_task()
+            .await
+            .expect("Aria2 task should be selected before recovery starts");
+
+        manager.set_aria2_dispatch_hold(true);
+        Arc::clone(&manager)
+            .dispatch_one(
+                permit,
+                task,
+                pending_index,
+                previous_cursor,
+                pending_ordinal,
+                handoff_guard,
+            )
+            .await;
+
+        assert_eq!(spawner.add_uri_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            manager.pending_order(None).await,
+            ["selected-aria2", "queued-media"]
+        );
+        assert_eq!(manager.registered_lifecycle_generation("selected-aria2").await, Some(4));
+        assert!(!manager.has_active_permit("selected-aria2").await);
+        assert!(manager.queue_permit_ownership.lock().await.is_empty());
+        assert_eq!(manager.available_permits(), 1);
+        assert!(manager.aria2_dispatch_held());
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_queue_restores_keep_fifo_when_ordinals_share_snapshot_index() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = QueueManager::test_new(app.handle().clone(), 2, Arc::new(TestSpawner));
+        for id in ["first", "second"] {
+            enqueue_test_task(&manager, id, "main", TaskKind::Aria2, 7).await;
+        }
+
+        let (
+            first_permit,
+            first,
+            first_index,
+            first_cursor,
+            first_ordinal,
+            first_handoff,
+        ) = manager
+            .try_admit_next_task()
+            .await
+            .expect("first same-queue task should be selected");
+        let (
+            second_permit,
+            second,
+            second_index,
+            second_cursor,
+            second_ordinal,
+            second_handoff,
+        ) = manager
+            .try_admit_next_task()
+            .await
+            .expect("second same-queue task should be selected concurrently");
+        assert_eq!(first.id, "first");
+        assert_eq!(second.id, "second");
+        assert_eq!(first_index, second_index);
+        assert!(first_ordinal < second_ordinal);
+
+        // Restore in admission order, which makes two index-only insertions
+        // put the later task ahead of the earlier task at the shared index.
+        manager
+            .restore_dispatch_task_to_pending(
+                first_index,
+                first_ordinal,
+                first,
+                first_cursor,
+                Some(first_permit),
+            )
+            .await;
+        drop(first_handoff);
+        manager
+            .restore_dispatch_task_to_pending(
+                second_index,
+                second_ordinal,
+                second,
+                second_cursor,
+                Some(second_permit),
+            )
+            .await;
+        drop(second_handoff);
+
+        assert_eq!(manager.pending_order(Some("main")).await, ["first", "second"]);
+        assert_eq!(manager.registered_lifecycle_generation("first").await, Some(7));
+        assert_eq!(manager.registered_lifecycle_generation("second").await, Some(7));
+        assert_eq!(manager.available_permits(), 2);
+    }
+
+    #[tokio::test]
+    async fn pending_reorder_during_dispatch_is_preserved_when_task_is_restored() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
+        for id in ["selected", "second", "third"] {
+            enqueue_test_task(&manager, id, "main", TaskKind::Aria2, 8).await;
+        }
+
+        let (permit, task, index, cursor, ordinal, handoff_guard) = manager
+            .try_admit_next_task()
+            .await
+            .expect("first task should be selected for dispatch");
+        let reordered = manager
+            .move_many_in_queue_to(&["third".to_string()], "main", 0)
+            .await;
+        assert_eq!(reordered, ["third", "second"]);
+
+        manager
+            .restore_dispatch_task_to_pending(index, ordinal, task, cursor, Some(permit))
+            .await;
+        drop(handoff_guard);
+
+        assert_eq!(manager.pending_order(Some("main")).await, ["selected", "third", "second"]);
+    }
+
+    #[tokio::test]
+    async fn rejected_shutdown_restores_selected_task_and_dispatches_it() {
+        let app = tauri::test::mock_builder()
+            .manage(crate::Aria2DaemonGuard::new())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let guard = app.handle().state::<crate::Aria2DaemonGuard>();
+        let manager = Arc::new(QueueManager::test_new(
+            app.handle().clone(),
+            1,
+            Arc::new(TestSpawner),
+        ));
+        enqueue_test_task(&manager, "shutdown-held", "main", TaskKind::Aria2, 11).await;
+
+        let (permit, task, pending_index, previous_cursor, pending_ordinal, handoff_guard) = manager
+            .try_admit_next_task()
+            .await
+            .expect("task is admitted before shutdown starts");
+        assert!(guard.begin_shutdown());
+        Arc::clone(&manager)
+            .dispatch_one(
+                permit,
+                task,
+                pending_index,
+                previous_cursor,
+                pending_ordinal,
+                handoff_guard,
+            )
+            .await;
+
+        assert_eq!(manager.pending_order(None).await, ["shutdown-held"]);
+        assert_eq!(manager.registered_lifecycle_generation("shutdown-held").await, Some(11));
+        assert!(!manager.has_active_permit("shutdown-held").await);
+        assert!(manager.queue_permit_ownership.lock().await.is_empty());
+        assert_eq!(manager.available_permits(), 1);
+        assert_eq!(manager.aria2_gid_for_download("shutdown-held"), None);
+
+        assert!(guard.cancel_shutdown(), "exit rejection reopens dispatch");
+        manager.wake_after_exit_rejected();
+        let dispatcher = tokio::spawn(Arc::clone(&manager).run_dispatcher());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if manager.aria2_gid_for_download("shutdown-held").as_deref()
+                    == Some("test-gid")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("rejected shutdown must redispatch the preserved task");
+
+        assert!(manager.pending_order(None).await.is_empty());
+        assert_eq!(manager.registered_lifecycle_generation("shutdown-held").await, Some(11));
+        assert!(manager.has_active_permit("shutdown-held").await);
+        assert_eq!(manager.available_permits(), 0);
+        dispatcher.abort();
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_gated_add_uri_dispatch_handoff_to_restore() {
+        let app = tauri::test::mock_builder()
+            .manage(crate::Aria2DaemonGuard::new())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let guard = app.handle().state::<crate::Aria2DaemonGuard>();
+        let spawner = Arc::new(UnavailableAria2Spawner::new(true));
+        let manager = Arc::new(QueueManager::test_new(
+            app.handle().clone(),
+            1,
+            spawner.clone(),
+        ));
+        enqueue_test_task(&manager, "gated-shutdown", "main", TaskKind::Aria2, 13).await;
+        let (permit, task, index, cursor, ordinal, handoff_guard) = manager
+            .try_admit_next_task()
+            .await
+            .expect("task should be selected before shutdown begins");
+        let dispatch = tokio::spawn(Arc::clone(&manager).dispatch_one(
+            permit,
+            task,
+            index,
+            cursor,
+            ordinal,
+            handoff_guard,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), spawner.add_uri_started.notified())
+            .await
+            .expect("dispatch should reach the gated addUri call");
+        assert!(guard.begin_shutdown());
+
+        let waiting_manager = Arc::clone(&manager);
+        let shutdown_waiter = tokio::spawn(async move {
+            waiting_manager.wait_for_dispatch_handoffs().await;
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(manager.dispatch_handoff_count.load(Ordering::Acquire), 1);
+        assert!(!shutdown_waiter.is_finished(), "shutdown must wait for addUri");
+
+        spawner.release_add_uri.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), dispatch)
+            .await
+            .expect("dispatch should finish after addUri is released")
+            .expect("dispatch task should not panic");
+        tokio::time::timeout(Duration::from_secs(1), shutdown_waiter)
+            .await
+            .expect("shutdown handoff wait should drain")
+            .expect("shutdown waiter should not panic");
+
+        assert_eq!(manager.dispatch_handoff_count.load(Ordering::Acquire), 0);
+        assert_eq!(manager.pending_order(None).await, ["gated-shutdown"]);
+        assert_eq!(manager.registered_lifecycle_generation("gated-shutdown").await, Some(13));
+        assert_eq!(manager.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn unavailable_add_uri_requeues_selected_task_without_terminal_failure() {
+        use tauri::Listener;
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let spawner = Arc::new(UnavailableAria2Spawner::new(true));
+        let manager = Arc::new(QueueManager::test_new(
+            app.handle().clone(),
+            1,
+            spawner.clone(),
+        ));
+        let failures = Arc::new(AtomicUsize::new(0));
+        let observed_failures = Arc::clone(&failures);
+        let listener = app.handle().listen("download-state", move |event| {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+                if payload.get("id").and_then(serde_json::Value::as_str)
+                    == Some("unavailable-aria2")
+                    && payload.get("status").and_then(serde_json::Value::as_str)
+                        == Some("failed")
+                {
+                    observed_failures.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+        enqueue_test_task(
+            &manager,
+            "unavailable-aria2",
+            "main",
+            TaskKind::Aria2,
+            9,
+        )
+        .await;
+
+        let dispatcher = tokio::spawn(Arc::clone(&manager).run_dispatcher());
+        tokio::time::timeout(Duration::from_secs(1), spawner.add_uri_started.notified())
+            .await
+            .expect("selected task should reach addUri");
+        manager.set_aria2_dispatch_hold(true);
+        spawner.release_add_uri.notify_one();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if spawner.add_uri_calls.load(Ordering::SeqCst) == 1
+                    && manager.aria2_dispatch_held()
+                    && manager.pending_order(None).await == ["unavailable-aria2"]
+                    && !manager.has_active_permit("unavailable-aria2").await
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("unavailable Aria2 task should return to pending under the recovery hold");
+
+        assert_eq!(manager.registered_lifecycle_generation("unavailable-aria2").await, Some(9));
+        assert_eq!(manager.available_permits(), 1);
+        assert!(manager.queue_permit_ownership.lock().await.is_empty());
+        assert!(manager.aria2_dispatch_inflight.lock().await.is_empty());
+        assert_eq!(allocation_pending_epoch(&manager, "unavailable-aria2"), None);
+        assert_eq!(failures.load(Ordering::SeqCst), 0);
+
+        dispatcher.abort();
+        app.handle().unlisten(listener);
     }
 
     #[tokio::test]
@@ -12625,6 +13950,25 @@ mod tests {
         assert!(is_aria2_rpc_unavailable("aria2 daemon is not ready"));
         assert!(!is_aria2_rpc_unavailable(
             "aria2 error code 3: Resource not found"
+        ));
+    }
+
+    #[test]
+    fn aria2_dispatch_recovery_hold_requires_explicit_daemon_unavailability() {
+        assert!(is_aria2_daemon_recovery_required(
+            "aria2 daemon unavailable: startup failed"
+        ));
+        assert!(is_aria2_daemon_recovery_required(
+            "aria2 did not become ready within 15 seconds"
+        ));
+        assert!(is_aria2_daemon_recovery_required(
+            "aria2 daemon is not ready"
+        ));
+        assert!(!is_aria2_daemon_recovery_required(
+            "error trying to connect: tcp connect error: Connection refused"
+        ));
+        assert!(!is_aria2_daemon_recovery_required(
+            "aria2 RPC connection reset after a temporary network fault"
         ));
     }
 

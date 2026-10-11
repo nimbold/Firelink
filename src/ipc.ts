@@ -268,7 +268,11 @@ type EventMap = {
   'tray-action-available': null;
   'tray-action-result': TrayActionResult;
   'app-exit-requested': { requestId: string };
-  'app-exit-cancelled': { requestId: string; reason: 'rejected' | 'timeout' };
+  'app-exit-cancelled': {
+    requestId: string;
+    reason: 'rejected' | 'timeout' | 'signal-failed' | 'media-shutdown-failed' | 'terminal-journal-failed';
+    interruptedMediaIds: string[];
+  };
   'app-exit-final-flush-requested': { requestId: string };
 };
 

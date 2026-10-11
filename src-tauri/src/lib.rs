@@ -7,7 +7,7 @@ use regex::Regex;
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -2764,7 +2764,123 @@ fn terminate_shell_process_tree(child: tauri_plugin_shell::process::CommandChild
     // direct kill is still needed when the root was not visible in the
     // snapshot, but its result is cleanup telemetry, not the operation's
     // primary error.
-    let _ = child.kill();
+    if let Err(error) = child.kill() {
+        log::warn!("failed to signal cancelled media process: {error}");
+    }
+}
+
+async fn receive_media_termination_after_cancel(
+    rx: &mut tauri::async_runtime::Receiver<tauri_plugin_shell::process::CommandEvent>,
+    stdout_buffer: &mut String,
+    stderr_buffer: &mut String,
+    final_output_path: &mut Option<PathBuf>,
+    stderr_tail: &mut String,
+    stderr_tail_limit: usize,
+) -> Result<tauri_plugin_shell::process::TerminatedPayload, String> {
+    loop {
+        match rx.recv().await {
+            Some(tauri_plugin_shell::process::CommandEvent::Stdout(bytes)) => {
+                let chunk = String::from_utf8_lossy(&bytes);
+                for line in drain_media_output_lines(stdout_buffer, &chunk) {
+                    if parse_media_progress_line(&line).is_none() {
+                        capture_media_output_path(final_output_path, &line);
+                    }
+                }
+            }
+            Some(tauri_plugin_shell::process::CommandEvent::Stderr(bytes)) => {
+                let chunk = String::from_utf8_lossy(&bytes);
+                append_bounded_stderr_tail(stderr_tail, &chunk, stderr_tail_limit);
+                let _ = drain_media_output_lines(stderr_buffer, &chunk);
+            }
+            Some(tauri_plugin_shell::process::CommandEvent::Terminated(payload)) => {
+                return Ok(payload);
+            }
+            Some(tauri_plugin_shell::process::CommandEvent::Error(_)) | None => {
+                return Err("could not confirm media process termination".to_string());
+            }
+            Some(_) => {}
+        }
+    }
+}
+
+async fn wait_for_media_termination_after_cancel(
+    rx: &mut tauri::async_runtime::Receiver<tauri_plugin_shell::process::CommandEvent>,
+    stdout_buffer: &mut String,
+    stderr_buffer: &mut String,
+    final_output_path: &mut Option<PathBuf>,
+    stderr_tail: &mut String,
+    stderr_tail_limit: usize,
+    grace_period: Duration,
+) -> Result<Option<tauri_plugin_shell::process::TerminatedPayload>, String> {
+    match tokio::time::timeout(
+        grace_period,
+        receive_media_termination_after_cancel(
+            rx,
+            stdout_buffer,
+            stderr_buffer,
+            final_output_path,
+            stderr_tail,
+            stderr_tail_limit,
+        ),
+    )
+    .await
+    {
+        Ok(result) => result.map(Some),
+        Err(_) => Ok(None),
+    }
+}
+
+async fn terminate_and_wait_for_media_after_cancel<F>(
+    rx: &mut tauri::async_runtime::Receiver<tauri_plugin_shell::process::CommandEvent>,
+    stdout_buffer: &mut String,
+    stderr_buffer: &mut String,
+    final_output_path: &mut Option<PathBuf>,
+    stderr_tail: &mut String,
+    stderr_tail_limit: usize,
+    grace_period: Duration,
+    terminate: F,
+) -> Result<tauri_plugin_shell::process::TerminatedPayload, String>
+where
+    F: FnOnce(),
+{
+    match wait_for_media_termination_after_cancel(
+        rx,
+        stdout_buffer,
+        stderr_buffer,
+        final_output_path,
+        stderr_tail,
+        stderr_tail_limit,
+        grace_period,
+    )
+    .await
+    {
+        Ok(Some(payload)) => Ok(payload),
+        Ok(None) => {
+            terminate();
+            receive_media_termination_after_cancel(
+                rx,
+                stdout_buffer,
+                stderr_buffer,
+                final_output_path,
+                stderr_tail,
+                stderr_tail_limit,
+            )
+            .await
+        }
+        Err(error) => {
+            terminate();
+            receive_media_termination_after_cancel(
+                rx,
+                stdout_buffer,
+                stderr_buffer,
+                final_output_path,
+                stderr_tail,
+                stderr_tail_limit,
+            )
+            .await
+            .map_err(|_| error)
+        }
+    }
 }
 
 async fn shell_command_output_with_timeout(
@@ -4325,22 +4441,36 @@ mod pending_tray_action_tests {
 
 struct Aria2DaemonGuard {
     child: Mutex<Option<std::process::Child>>,
+    restart_lock: tokio::sync::Mutex<()>,
     startup_error: Mutex<Option<String>>,
     last_stderr: Mutex<String>,
     config_path: Mutex<Option<tempfile::TempPath>>,
+    launch_spec: Mutex<Option<Aria2LaunchSpec>>,
     route_contract_available: AtomicBool,
     shutdown_state: AtomicU8,
+    shutdown_journal_failures: Mutex<HashMap<String, u64>>,
+}
+
+#[derive(Clone)]
+struct Aria2LaunchSpec {
+    binary_path: PathBuf,
+    args: Vec<OsString>,
+    environment: Vec<(OsString, Option<OsString>)>,
+    candidate_ports: Vec<u16>,
 }
 
 impl Aria2DaemonGuard {
     fn new() -> Self {
         Self {
             child: Mutex::new(None),
+            restart_lock: tokio::sync::Mutex::new(()),
             startup_error: Mutex::new(None),
             last_stderr: Mutex::new(String::new()),
             config_path: Mutex::new(None),
+            launch_spec: Mutex::new(None),
             route_contract_available: AtomicBool::new(false),
             shutdown_state: AtomicU8::new(0),
+            shutdown_journal_failures: Mutex::new(HashMap::new()),
         }
     }
 
@@ -4360,8 +4490,77 @@ impl Aria2DaemonGuard {
             .clone()
     }
 
-    fn exit_allowed(&self) -> bool {
+    pub(crate) fn exit_allowed(&self) -> bool {
         self.shutdown_state.load(Ordering::SeqCst) == 2
+    }
+
+    pub(crate) fn is_shutting_down(&self) -> bool {
+        self.shutdown_state.load(Ordering::SeqCst) == 1
+    }
+
+    pub(crate) fn mark_shutdown_journal_failed(&self, id: &str, lifecycle_generation: u64) {
+        self.shutdown_journal_failures
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id.to_string(), lifecycle_generation);
+    }
+
+    fn shutdown_journal_failed(&self) -> bool {
+        !self
+            .shutdown_journal_failures
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
+    }
+
+    fn clear_shutdown_journal_failure(&self) {
+        self.shutdown_journal_failures
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+
+    fn clear_shutdown_journal_failure_for(&self, id: &str) {
+        self.shutdown_journal_failures
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(id);
+    }
+
+    fn shutdown_journal_failures(&self) -> Vec<(String, u64)> {
+        self.shutdown_journal_failures
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .map(|(id, generation)| (id.clone(), *generation))
+            .collect()
+    }
+
+    fn set_launch_spec(&self, spec: Aria2LaunchSpec) {
+        *self
+            .launch_spec
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(spec);
+    }
+
+    fn launch_spec(&self) -> Option<Aria2LaunchSpec> {
+        self.launch_spec
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    /// Update a restart argument after a successful live option change.
+    /// Callers hold `restart_lock` across the RPC and this snapshot update so
+    /// a daemon restart cannot launch from an older setting.
+    fn update_launch_option(&self, option: &str, value: &str) {
+        let mut launch_spec = self
+            .launch_spec
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(spec) = launch_spec.as_mut() {
+            spec.args = set_aria2_option_argument(&spec.args, option, value);
+        }
     }
 
     fn begin_shutdown(&self) -> bool {
@@ -4407,36 +4606,56 @@ async fn shutdown_aria2_daemon(app_handle: tauri::AppHandle) {
 
     let child = guard.child.lock().ok().and_then(|mut child| child.take());
     if let Some(mut child) = child {
-        let child_wait = tokio::task::spawn_blocking(move || {
-            // Aria2 1.37.0 intentionally schedules an RPC-requested shutdown
-            // three seconds after replying. Leave a bounded margin for that
-            // timer and the subsequent state flush before forcing termination.
-            let child_wait_started = Instant::now();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-            let outcome = loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break "exited",
-                    Ok(None) if std::time::Instant::now() < deadline => {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                    _ => {
+        // Aria2 1.37.0 intentionally schedules an RPC-requested shutdown
+        // three seconds after replying. Leave a bounded margin for that
+        // timer and the subsequent state flush before forcing termination.
+        // Keep ownership here until the OS confirms exit. A timed-out
+        // spawn_blocking join would detach the waiter and permit a second
+        // daemon to start while the original process still owns its files.
+        let child_wait_started = Instant::now();
+        let graceful_deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        let mut forced = false;
+        let mut last_kill_attempt = tokio::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if !forced && tokio::time::Instant::now() >= graceful_deadline {
+                        match child.kill() {
+                            Ok(()) => forced = true,
+                            Err(error) => log::warn!(
+                                "app_shutdown_phase=aria2_child kill request failed: {error}"
+                            ),
+                        }
+                        last_kill_attempt = tokio::time::Instant::now();
+                    } else if forced
+                        && tokio::time::Instant::now().duration_since(last_kill_attempt)
+                            >= Duration::from_secs(1)
+                    {
+                        // A successful kill is still followed by try_wait;
+                        // do not clear the published port until the process
+                        // handle confirms that the old daemon has exited.
                         let _ = child.kill();
-                        let _ = child.wait();
-                        break "forced";
+                        last_kill_attempt = tokio::time::Instant::now();
                     }
                 }
-            };
-            (outcome, child_wait_started.elapsed())
-        });
-        match tokio::time::timeout(std::time::Duration::from_secs(10), child_wait).await {
-            Ok(Ok((outcome, elapsed))) => log::info!(
-                "app_shutdown_phase=aria2_child outcome={} elapsed_ms={}",
-                outcome,
-                elapsed.as_millis()
-            ),
-            Ok(Err(error)) => log::warn!("aria2 child wait task failed: {error}"),
-            Err(_) => log::warn!("app_shutdown_phase=aria2_child outcome=timeout"),
+                Err(error) => {
+                    log::warn!("app_shutdown_phase=aria2_child wait check failed: {error}");
+                    let _ = child.kill();
+                    forced = true;
+                    last_kill_attempt = tokio::time::Instant::now();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        log::info!(
+            "app_shutdown_phase=aria2_child outcome={} elapsed_ms={}",
+            if forced { "forced" } else { "exited" },
+            child_wait_started.elapsed().as_millis()
+        );
+    }
+    if let Some(state) = app_handle.try_state::<AppState>() {
+        state.aria2_port.store(0, Ordering::Release);
     }
     log::info!(
         "app_shutdown_phase=aria2_total elapsed_ms={}",
@@ -4444,8 +4663,231 @@ async fn shutdown_aria2_daemon(app_handle: tauri::AppHandle) {
     );
 }
 
-fn reject_app_exit_request(app: &tauri::AppHandle, request: u64, reason: &str) {
-    app.state::<Aria2DaemonGuard>().cancel_shutdown();
+fn monitor_aria2_stderr(app: tauri::AppHandle, stderr: std::process::ChildStderr) {
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let reader = std::io::BufReader::new(stderr);
+        for line in reader.lines().map_while(Result::ok) {
+            let trimmed = line.trim().to_string();
+            if let Ok(mut stderr_lock) = app.state::<Aria2DaemonGuard>().last_stderr.lock() {
+                stderr_lock.push_str(&trimmed);
+                stderr_lock.push('\n');
+                let excess = stderr_lock.len().saturating_sub(8192);
+                if excess > 0 {
+                    let _ = stderr_lock.drain(..excess);
+                }
+            }
+            let lower = trimmed.to_lowercase();
+            if lower.contains("error") || lower.contains("critical") {
+                log::error!("aria2c stderr: {}", trimmed);
+            }
+        }
+    });
+}
+
+fn set_aria2_option_argument(args: &[OsString], option: &str, value: &str) -> Vec<OsString> {
+    let mut updated = args.to_vec();
+    let prefix = format!("{option}=");
+    let replacement = OsString::from(format!("{option}={value}"));
+    for argument in &mut updated {
+        if argument
+            .to_str()
+            .is_some_and(|argument| argument.starts_with(&prefix))
+        {
+            *argument = replacement;
+            return updated;
+        }
+    }
+    updated.push(replacement);
+    updated
+}
+
+fn set_aria2_rpc_port_argument(args: &[OsString], port: u16) -> Vec<OsString> {
+    set_aria2_option_argument(args, "--rpc-listen-port", &port.to_string())
+}
+
+async fn restart_aria2_daemon(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    let guard = app_handle.state::<Aria2DaemonGuard>();
+    let _restart_guard = guard.restart_lock.lock().await;
+    if app_handle
+        .state::<AppState>()
+        .aria2_port
+        .load(Ordering::Acquire)
+        != 0
+    {
+        return Ok(());
+    }
+    let spec = guard
+        .launch_spec()
+        .ok_or_else(|| "aria2 restart configuration is unavailable".to_string())?;
+    let config_path_available = guard
+        .config_path
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+        .is_some_and(|path| path.exists());
+    if !config_path_available {
+        return Err("aria2 restart configuration has expired".to_string());
+    }
+
+    let restart_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut last_error = "no RPC port could be restarted".to_string();
+    for port in spec.candidate_ports.iter().copied() {
+        if tokio::time::Instant::now() >= restart_deadline {
+            break;
+        }
+        if aria2_rpc_port_is_occupied(port) {
+            continue;
+        }
+        let mut command = std::process::Command::new(&spec.binary_path);
+        crate::platform::hide_child_console(&mut command);
+        command.args(set_aria2_rpc_port_argument(&spec.args, port));
+        for (key, value) in &spec.environment {
+            match value {
+                Some(value) => {
+                    command.env(key, value);
+                }
+                None => {
+                    command.env_remove(key);
+                }
+            }
+        }
+        command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                last_error = format!("failed to restart aria2 on RPC port {port}: {error}");
+                continue;
+            }
+        };
+        tokio::time::sleep(
+            Duration::from_millis(200).min(
+                restart_deadline.saturating_duration_since(tokio::time::Instant::now()),
+            ),
+        )
+        .await;
+        if let Ok(Some(status)) = child.try_wait() {
+            use std::io::Read;
+            let mut stderr = String::new();
+            if let Some(stderr_pipe) = child.stderr.take() {
+                let _ = stderr_pipe.take(4096).read_to_string(&mut stderr);
+            }
+            last_error = if stderr.trim().is_empty() {
+                format!("aria2 exited during restart on RPC port {port} with status {status}")
+            } else {
+                format!("aria2 exited during restart on RPC port {port}: {}", stderr.trim())
+            };
+            continue;
+        }
+
+        if let Some(stderr) = child.stderr.take() {
+            monitor_aria2_stderr(app_handle.clone(), stderr);
+        }
+        *guard.child.lock().unwrap_or_else(|error| error.into_inner()) = Some(child);
+        let args = set_aria2_rpc_port_argument(&spec.args, port);
+        guard.set_launch_spec(Aria2LaunchSpec {
+            binary_path: spec.binary_path.clone(),
+            args,
+            environment: spec.environment.clone(),
+            candidate_ports: spec.candidate_ports.clone(),
+        });
+
+        let ready_started = tokio::time::Instant::now();
+        let mut last_rpc_error = String::new();
+        let readiness_deadline = (ready_started + Duration::from_secs(5)).min(restart_deadline);
+        while tokio::time::Instant::now() < readiness_deadline {
+            match rpc_call(port, &app_handle.state::<AppState>().aria2_secret, "aria2.getVersion", serde_json::json!([])).await {
+                Ok(version) if crate::network::aria2_baseline_error(&version).is_none() => {
+                    guard.set_route_contract_available(
+                        crate::network::aria2_route_capability_error(&version).is_none(),
+                    );
+                    guard
+                        .startup_error
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .take();
+                    app_handle
+                        .state::<AppState>()
+                        .aria2_port
+                        .store(port, Ordering::Release);
+                    log::info!("aria2 daemon restarted successfully on port {port}");
+                    return Ok(());
+                }
+                Ok(version) => {
+                    last_rpc_error = crate::network::aria2_baseline_error(&version)
+                        .unwrap_or_else(|| "aria2 returned an invalid readiness response".to_string());
+                }
+                Err(error) => last_rpc_error = error,
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        last_error = format!("aria2 restart did not become ready on port {port}: {last_rpc_error}");
+        let child = {
+            guard
+                .child
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+        };
+        if let Some(child) = child {
+            let cleanup = tokio::task::spawn_blocking(move || {
+                let mut child = child;
+                let kill_error = child.kill().err();
+                child.wait().map_err(|wait_error| {
+                    format!(
+                        "could not confirm aria2 candidate on port {port} exited after restart failure: {}; {}",
+                        wait_error,
+                        kill_error
+                            .map(|error| format!("kill request also failed: {error}"))
+                            .unwrap_or_else(|| "kill request succeeded".to_string())
+                    )
+                })
+            })
+            .await
+            .map_err(|error| format!("aria2 restart cleanup task failed: {error}"))?;
+            if let Err(error) = cleanup {
+                return Err(error);
+            }
+        }
+    }
+    app_handle.state::<AppState>().aria2_port.store(0, Ordering::Release);
+    guard.set_route_contract_available(false);
+    *guard
+        .startup_error
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(last_error.clone());
+    Err(last_error)
+}
+
+async fn reject_app_exit_request(
+    app: &tauri::AppHandle,
+    request: u64,
+    reason: &str,
+    interrupted_media_ids: &[String],
+) {
+    let was_shutting_down = app.state::<Aria2DaemonGuard>().cancel_shutdown();
+    if was_shutting_down {
+        app.state::<AppState>()
+            .queue_manager
+            .wake_after_exit_rejected();
+    }
+    let rejected_media_registrations = app.state::<AppState>()
+        .download_coordinator
+        .reopen_media_registration()
+        .await;
+    let mut interrupted_media_ids = interrupted_media_ids.to_vec();
+    interrupted_media_ids.extend(
+        rejected_media_registrations
+            .into_iter()
+            .map(|(id, _generation)| id),
+    );
+    app.state::<AppState>()
+        .shutdown_terminal_barrier
+        .reopen_after_rejection();
+    interrupted_media_ids.sort();
+    interrupted_media_ids.dedup();
     let tray_action_pending = app
         .state::<PendingTrayActionQueue>()
         .reopen_after_exit_rejected();
@@ -4459,10 +4901,47 @@ fn reject_app_exit_request(app: &tauri::AppHandle, request: u64, reason: &str) {
         "app-exit-cancelled",
         serde_json::json!({
             "requestId": request.to_string(),
-            "reason": reason
+            "reason": reason,
+            "interruptedMediaIds": interrupted_media_ids
         }),
     );
     restore_main_window(app);
+}
+
+fn shutdown_finalization_allowed(
+    shutdown_journal_failed: bool,
+    final_frontend_flush_succeeded: bool,
+    failed_rows_are_durably_completed: bool,
+) -> bool {
+    !shutdown_journal_failed
+        || (final_frontend_flush_succeeded && failed_rows_are_durably_completed)
+}
+
+fn shutdown_failed_rows_are_durably_completed(
+    guard: &Aria2DaemonGuard,
+    database: Option<&crate::db::DbState>,
+) -> bool {
+    let failures = guard.shutdown_journal_failures();
+    if failures.is_empty() {
+        return true;
+    }
+    let Some(database) = database else {
+        return false;
+    };
+    failures.into_iter().all(|(id, generation)| {
+        let verified = database
+            .lock()
+            .and_then(|connection| crate::db::is_download_durably_completed(&connection, &id))
+            .unwrap_or(false);
+        if !verified {
+            log::error!(
+                "shutdown completion fallback is not durable [id={} lifecycle_generation={}]",
+                id,
+                generation
+            );
+        }
+        verified
+    })
 }
 
 impl Drop for Aria2DaemonGuard {
@@ -4526,10 +5005,108 @@ pub struct AppState {
     frontend_exit_flush: Arc<FrontendExitFlush>,
     pub aria2_port: std::sync::Arc<std::sync::atomic::AtomicU16>,
     pub aria2_secret: String,
+    pub(crate) shutdown_terminal_barrier: Arc<ShutdownTerminalBarrier>,
     pub media_semaphore: Arc<tokio::sync::Semaphore>,
     pub power_manager: Arc<power::PowerManager>,
     pub scheduler_settings: Arc<RwLock<Option<crate::ipc::PersistedSettings>>>,
     pub queue_manager: Arc<queue::QueueManager>,
+}
+
+#[derive(Default)]
+struct ShutdownTerminalState {
+    sealed: bool,
+    exiting: bool,
+    active: usize,
+    late_writer: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct ShutdownTerminalBarrier {
+    state: Mutex<ShutdownTerminalState>,
+    changed: tokio::sync::Notify,
+}
+
+pub(crate) struct ShutdownTerminalLease {
+    barrier: Arc<ShutdownTerminalBarrier>,
+}
+
+impl ShutdownTerminalBarrier {
+    pub(crate) async fn enter(self: &Arc<Self>) -> Option<ShutdownTerminalLease> {
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                if state.exiting {
+                    return None;
+                }
+                if !state.sealed {
+                    state.active += 1;
+                    return Some(ShutdownTerminalLease {
+                        barrier: Arc::clone(self),
+                    });
+                }
+                state.late_writer = true;
+            }
+            notified.await;
+        }
+    }
+
+    async fn seal_and_wait(&self) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.sealed = true;
+        }
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .active
+                == 0
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn try_finalize(&self) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if !state.sealed || state.active != 0 || state.late_writer {
+            return false;
+        }
+        state.exiting = true;
+        drop(state);
+        self.changed.notify_waiters();
+        true
+    }
+
+    fn reopen_after_rejection(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.sealed = false;
+        state.exiting = false;
+        state.late_writer = false;
+        drop(state);
+        self.changed.notify_waiters();
+    }
+}
+
+impl Drop for ShutdownTerminalLease {
+    fn drop(&mut self) {
+        let mut state = self
+            .barrier
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.active = state.active.saturating_sub(1);
+        drop(state);
+        self.barrier.changed.notify_waiters();
+    }
 }
 
 #[derive(Default)]
@@ -6105,6 +6682,7 @@ pub(crate) async fn start_media_download_internal(
         let (mut rx, child) = cmd
             .spawn()
             .map_err(|e| format!("Failed to spawn yt-dlp: {}", e))?;
+        let mut child = Some(child);
         if strike > 0 {
             // The backoff path emits `Retrying`. Restore the live transfer
             // state when the replacement process actually starts so React
@@ -6122,16 +6700,49 @@ pub(crate) async fn start_media_download_internal(
         let mut stdout_buffer = String::new();
         let mut stderr_buffer = String::new();
         let failure_reason = loop {
-            tokio::select! {
+            let event = tokio::select! {
                 _ = cancel_rx.changed() => {
-                    terminate_shell_process_tree(child);
-                    if processing_started {
-                        cleanup_media_processing_artifacts(&app_handle, id, &out_path).await;
+                    // The shell plugin queues Terminated after draining both
+                    // output pipes. Give an already-finishing child a bounded
+                    // chance to report successful exit before killing it, so
+                    // shutdown cancellation cannot turn a completed file into
+                    // an interrupted row that startup requeues.
+                    let termination = terminate_and_wait_for_media_after_cancel(
+                        &mut rx,
+                        &mut stdout_buffer,
+                        &mut stderr_buffer,
+                        &mut final_output_path,
+                        &mut stderr_tail,
+                        STDERR_TAIL,
+                        Duration::from_secs(1),
+                        || {
+                            if let Some(child) = child.take() {
+                                terminate_shell_process_tree(child);
+                            }
+                        },
+                    )
+                    .await;
+                    let payload = match termination {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            if processing_started {
+                                cleanup_media_processing_artifacts(&app_handle, id, &out_path).await;
+                            }
+                            return Err(error);
+                        }
+                    };
+                    if payload.code == Some(0) {
+                        Some(tauri_plugin_shell::process::CommandEvent::Terminated(payload))
+                    } else {
+                        if processing_started {
+                            cleanup_media_processing_artifacts(&app_handle, id, &out_path).await;
+                        }
+                        return Err(crate::queue::MEDIA_RUN_CANCELLED.to_string());
                     }
-                    return Err(crate::queue::MEDIA_RUN_CANCELLED.to_string());
                 }
-                event = rx.recv() => {
-                    match event {
+                event = rx.recv() => event,
+            };
+            match event {
                         Some(tauri_plugin_shell::process::CommandEvent::Stdout(line_bytes)) => {
                             let chunk = String::from_utf8_lossy(&line_bytes);
                             for line in drain_media_output_lines(&mut stdout_buffer, &chunk) {
@@ -6285,8 +6896,6 @@ pub(crate) async fn start_media_download_internal(
                             };
                         }
                     }
-                }
-            }
         };
 
         let transient = is_transient_network_error(&failure_reason);
@@ -6348,6 +6957,42 @@ pub(crate) async fn start_media_download_internal(
     Err("yt-dlp retry loop exhausted".to_string())
 }
 
+/// Cancel a media runner without holding the per-download control lock while
+/// waiting for its terminal acknowledgement. The runner needs that same lock
+/// to arbitrate a successful completion against pause, remove, or reconfigure.
+async fn cancel_media_and_wait_for_finish(
+    state: &AppState,
+    id: &str,
+    lifecycle_generation: u64,
+    control_guard: &mut queue::Aria2ControlGuard,
+) -> Result<bool, String> {
+    control_guard.release();
+    let result = async {
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        state
+            .download_coordinator
+            .pause_media_with_ack(id.to_string(), lifecycle_generation, ack_tx)
+            .await?;
+        ack_rx
+            .await
+            .map_err(|_| "download worker stopped without acknowledging pause".to_string())
+    }
+    .await;
+    control_guard.reacquire().await;
+
+    let media_was_registered = result?;
+    if !media_was_registered {
+        // No runner registered for this generation. Retire the cancellation
+        // tombstone only after registration and lifecycle control are fenced
+        // again by the reacquired lock.
+        state
+            .download_coordinator
+            .finish_media(id.to_string(), lifecycle_generation)
+            .await;
+    }
+    Ok(media_was_registered)
+}
+
 #[tauri::command]
 async fn pause_download(
     caller: tauri::WebviewWindow,
@@ -6358,7 +7003,7 @@ async fn pause_download(
     properties_window::ensure_main_window(&caller)?;
     log::info!("pause_download called for id: {}", id);
 
-    let _control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    let mut control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     removal_jobs::ensure_not_removing(&app_handle, &id)?;
     let active_kind = state.queue_manager.active_kind(&id).await;
     let registered_lifecycle_generation = state
@@ -6594,26 +7239,54 @@ async fn pause_download(
         state.queue_manager.clear_aria2_retry_state(&id).await;
     }
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
     if matches!(active_kind, Some(crate::queue::TaskKind::Media)) {
-        state
-            .download_coordinator
-            .pause_media_with_ack(id.clone(), media_lifecycle_generation, tx)
-            .await?;
-    } else {
-        let _ = tx.send(false);
-    }
-    let media_was_registered = rx
-        .await
-        .map_err(|_| "download worker stopped without acknowledging pause".to_string())?;
-    if matches!(active_kind, Some(crate::queue::TaskKind::Media)) && !media_was_registered {
-        // No media runner reached the coordinator. The queue control lock is
-        // still held, and run_media now checks the same lifecycle generation
-        // before registration, so this tombstone can be retired safely.
-        state
-            .download_coordinator
-            .finish_media(id.clone(), media_lifecycle_generation)
+        let _ = cancel_media_and_wait_for_finish(
+            state.inner(),
+            &id,
+            media_lifecycle_generation,
+            &mut control_guard,
+        )
+        .await?;
+
+        // A successful media process records this marker before acknowledging
+        // Finished. If it won the race, leave terminal reconciliation to the
+        // worker instead of downgrading the completed row to Paused.
+        let current_generation = state
+            .queue_manager
+            .registered_lifecycle_generation(&id)
             .await;
+        let current_kind = state.queue_manager.active_kind(&id).await;
+        let terminal_outcome = state
+            .queue_manager
+            .media_terminal_outcome(&id, media_lifecycle_generation)
+            .await;
+        let lifecycle_is_current = current_generation == registered_lifecycle_generation
+            && matches!(current_kind, Some(crate::queue::TaskKind::Media));
+        if !lifecycle_is_current {
+            if terminal_outcome == Some(crate::queue::MediaTerminalOutcome::Cancelled)
+                && current_generation.is_none()
+                && current_kind.is_none()
+            {
+                // The worker completed cancellation and released ownership
+                // before this pause reacquired the lock. Preserve the user's
+                // pause request without reopening a stale lifecycle.
+                state
+                    .queue_manager
+                    .emit_state(id.clone(), crate::ipc::DownloadStatus::Paused);
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        if matches!(
+            terminal_outcome,
+            Some(crate::queue::MediaTerminalOutcome::Completed | crate::queue::MediaTerminalOutcome::Failed)
+        ) || state
+            .queue_manager
+            .media_payload_completed(&id, media_lifecycle_generation)
+            .await
+        {
+            return Ok(false);
+        }
     }
 
     let seed_remaining = if state.queue_manager.is_seed_owner(&id) {
@@ -7420,52 +8093,78 @@ async fn remove_download_inner(
         // removal so its late result cannot resurrect the download.
         let removal_epoch = state.queue_manager.next_aria2_control_epoch(&id).await;
         state.queue_manager.cancel_aria2_retries(&id).await;
-        let (tx, rx) = tokio::sync::oneshot::channel();
         if matches!(active_kind, Some(crate::queue::TaskKind::Media)) {
-            state
-                .download_coordinator
-                .pause_media_with_ack(id.clone(), media_lifecycle_generation, tx)
-                .await?;
-        } else {
-            let _ = tx.send(false);
-        }
-        let media_was_registered = rx.await.unwrap_or(false);
-        if matches!(active_kind, Some(crate::queue::TaskKind::Media)) && !media_was_registered {
-            state
-                .download_coordinator
-                .finish_media(id.clone(), media_lifecycle_generation)
-                .await;
-        }
+            let guard = control_guard
+                .as_mut()
+                .expect("remove lifecycle guard is held before media cancellation");
+            let _ = cancel_media_and_wait_for_finish(
+                state.inner(),
+                &id,
+                media_lifecycle_generation,
+                guard,
+            )
+            .await?;
 
-        // The initial addUri call intentionally runs outside the control lock.
-        // Do not delete the guessed magnet path and ownership record until a
-        // late GID has been removed; otherwise the daemon can finish creating
-        // an output after cleanup and leave an untracked file behind.
-        drop(control_guard.take());
-        state.queue_manager.wait_for_aria2_dispatch(&id).await;
-        let reacquired_control_guard = state.queue_manager.acquire_aria2_control(&id).await;
-        let current_generation = state
-            .queue_manager
-            .registered_lifecycle_generation(&id)
-            .await;
-        let current_active_kind = state.queue_manager.active_kind(&id).await;
-        let lifecycle_changed = registered_lifecycle_generation.is_some()
-            && current_generation != registered_lifecycle_generation
-            || registered_lifecycle_generation.is_none() && current_generation.is_some();
-        let late_native_lifecycle = !native_lifecycle_was_admitted
-            && current_active_kind.is_some();
-        if lifecycle_changed || late_native_lifecycle {
+            let current_generation = state
+                .queue_manager
+                .registered_lifecycle_generation(&id)
+                .await;
+            let current_active_kind = state.queue_manager.active_kind(&id).await;
+            let terminal_outcome = state
+                .queue_manager
+                .media_terminal_outcome(&id, media_lifecycle_generation)
+                .await;
+            let newer_lifecycle = current_generation
+                .is_some_and(|generation| Some(generation) != registered_lifecycle_generation)
+                || current_generation.is_none() && current_active_kind.is_some();
+            if newer_lifecycle {
+                return Err("download lifecycle changed while waiting for media shutdown".to_string());
+            }
+            if terminal_outcome == Some(crate::queue::MediaTerminalOutcome::Completed) {
+                permanent_asset_removal = false;
+            }
+
+            // Finished has drained the media writer. Keep the reacquired lock
+            // through ownership lookup and cleanup so a newer lifecycle
+            // cannot claim the output path while removal is in progress.
             state
                 .queue_manager
                 .release_permit_for_generation(&id, media_lifecycle_generation)
                 .await;
             state
                 .queue_manager
-                .clear_aria2_allocation_for_epoch(&id, removal_epoch)
+                .release_registered_id_for_generation(&id, media_lifecycle_generation)
                 .await;
-            return Err("download lifecycle changed while waiting for aria2 dispatch".to_string());
-        }
-        if let Some(late_gid) = state.queue_manager.aria2_gid_for_download(&id) {
+            cleanup_control_guard = control_guard.take();
+        } else {
+            // The initial addUri call intentionally runs outside the control
+            // lock. Do not delete a guessed path until any late GID has been
+            // removed, or Aria2 could recreate an untracked output.
+            drop(control_guard.take());
+            state.queue_manager.wait_for_aria2_dispatch(&id).await;
+            let reacquired_control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+            let current_generation = state
+                .queue_manager
+                .registered_lifecycle_generation(&id)
+                .await;
+            let current_active_kind = state.queue_manager.active_kind(&id).await;
+            let lifecycle_changed = registered_lifecycle_generation.is_some()
+                && current_generation != registered_lifecycle_generation
+                || registered_lifecycle_generation.is_none() && current_generation.is_some();
+            let late_native_lifecycle = !native_lifecycle_was_admitted
+                && current_active_kind.is_some();
+            if lifecycle_changed || late_native_lifecycle {
+                state
+                    .queue_manager
+                    .release_permit_for_generation(&id, media_lifecycle_generation)
+                    .await;
+                state
+                    .queue_manager
+                    .clear_aria2_allocation_for_epoch(&id, removal_epoch)
+                    .await;
+                return Err("download lifecycle changed while waiting for aria2 dispatch".to_string());
+            }
+            if let Some(late_gid) = state.queue_manager.aria2_gid_for_download(&id) {
             if let Err(error) = state
                 .queue_manager
                 .reconcile_aria2_torrent_ownership(&id, &late_gid)
@@ -7512,21 +8211,22 @@ async fn remove_download_inner(
             state.queue_manager.clear_aria2_retry_state(&id).await;
             state.queue_manager.forget_torrent_telemetry(&id).await;
             state.queue_manager.forget_aria2_gid(&id).await;
-        } else if !state
-            .queue_manager
-            .is_aria2_control_epoch_current(&id, removal_epoch)
-            .await
-        {
-            // A same-generation pause/resume control action may advance the
-            // epoch while the late add is being retired. Removal still owns
-            // the registered row, so fence that action before cleaning it.
-            state.queue_manager.next_aria2_control_epoch(&id).await;
+            } else if !state
+                .queue_manager
+                .is_aria2_control_epoch_current(&id, removal_epoch)
+                .await
+            {
+                // A same-generation pause/resume control action may advance the
+                // epoch while the late add is being retired. Removal still owns
+                // the registered row, so fence that action before cleaning it.
+                state.queue_manager.next_aria2_control_epoch(&id).await;
+            }
+            state.queue_manager.release_permit(&id).await;
+            state.queue_manager.clear_aria2_retry_state(&id).await;
+            state.queue_manager.forget_torrent_telemetry(&id).await;
+            state.queue_manager.forget_aria2_gid(&id).await;
+            cleanup_control_guard = Some(reacquired_control_guard);
         }
-        state.queue_manager.release_permit(&id).await;
-        state.queue_manager.clear_aria2_retry_state(&id).await;
-        state.queue_manager.forget_torrent_telemetry(&id).await;
-        state.queue_manager.forget_aria2_gid(&id).await;
-        cleanup_control_guard = Some(reacquired_control_guard);
     }
 
     // Keep lifecycle ownership fenced while the exact owned paths and the
@@ -7734,6 +8434,12 @@ async fn remove_download_inner(
     log::info!("download removal [id={} stage=cleanup success={} elapsed_ms={}]", id, cleanup_result.is_ok(), removal_cleanup_started.elapsed().as_millis());
 
     state.queue_manager.release_registered_id(&id).await;
+    if cleanup_result.is_ok() {
+        state
+            .queue_manager
+            .clear_media_terminal_outcome(&id, media_lifecycle_generation)
+            .await;
+    }
     cleanup_result
 }
 
@@ -9151,13 +9857,13 @@ async fn detach_download_for_reconfigure(
 ) -> Result<(), String> {
     properties_window::ensure_main_window(&caller)?;
     log::info!("detach_download_for_reconfigure called for id: {}", id);
-    let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    let mut control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     removal_jobs::ensure_not_removing(&app_handle, &id)?;
     detach_download_for_reconfigure_locked(
         &app_handle,
         state.inner(),
         &id,
-        &control_guard,
+        &mut control_guard,
     )
     .await
 }
@@ -9166,7 +9872,7 @@ async fn detach_download_for_reconfigure_locked(
     app_handle: &tauri::AppHandle,
     state: &AppState,
     id: &str,
-    _control_guard: &queue::Aria2ControlGuard,
+    control_guard: &mut queue::Aria2ControlGuard,
 ) -> Result<(), String> {
     let active_kind = state.queue_manager.active_kind(id).await;
     let media_lifecycle_generation = state
@@ -9219,27 +9925,46 @@ async fn detach_download_for_reconfigure_locked(
         // Invalidate a queued/addUri lifecycle that has not published a GID.
         state.queue_manager.next_aria2_control_epoch(id).await;
         state.queue_manager.cancel_aria2_retries(id).await;
-        let (tx, rx) = tokio::sync::oneshot::channel();
         if matches!(active_kind, Some(crate::queue::TaskKind::Media)) {
-            state
-                .download_coordinator
-                .pause_media_with_ack(id.to_string(), media_lifecycle_generation, tx)
-                .await?;
-        } else {
-            let _ = tx.send(false); // Fallback if no task exists
-        }
-        let media_was_registered = rx.await.unwrap_or(false); // Wait for the writer to stop
-        if matches!(active_kind, Some(crate::queue::TaskKind::Media)) && !media_was_registered {
-            state
-                .download_coordinator
-                .finish_media(id.to_string(), media_lifecycle_generation)
+            let _ = cancel_media_and_wait_for_finish(
+                state,
+                id,
+                media_lifecycle_generation,
+                control_guard,
+            )
+            .await?;
+            let terminal_outcome = state
+                .queue_manager
+                .media_terminal_outcome(id, media_lifecycle_generation)
                 .await;
+            if matches!(
+                terminal_outcome,
+                Some(crate::queue::MediaTerminalOutcome::Completed | crate::queue::MediaTerminalOutcome::Failed)
+            ) {
+                return Err("media lifecycle reached a terminal result while detaching".to_string());
+            }
+            let current_generation = state
+                .queue_manager
+                .registered_lifecycle_generation(id)
+                .await;
+            let current_active_kind = state.queue_manager.active_kind(id).await;
+            if current_generation.is_some_and(|generation| generation != media_lifecycle_generation)
+                || current_generation.is_none() && current_active_kind.is_some()
+            {
+                return Err("download lifecycle changed while waiting for media shutdown".to_string());
+            }
         }
 
-        state.queue_manager.release_permit(id).await;
+        state
+            .queue_manager
+            .release_permit_for_generation(id, media_lifecycle_generation)
+            .await;
         state.queue_manager.clear_aria2_retry_state(id).await;
         state.queue_manager.forget_aria2_gid(id).await;
-        state.queue_manager.release_registered_id(id).await;
+        state
+            .queue_manager
+            .release_registered_id_for_generation(id, media_lifecycle_generation)
+            .await;
     }
 
     use tauri::Emitter;
@@ -9390,11 +10115,12 @@ async fn verify_aria2_resume_status_snapshot(
     last_observation
 }
 
-async fn reconcile_aria2_downloads(app_handle: &tauri::AppHandle) {
+async fn reconcile_aria2_downloads(app_handle: &tauri::AppHandle) -> bool {
     let state = app_handle.state::<AppState>();
     let port = state.aria2_port.load(std::sync::atomic::Ordering::Relaxed);
     let secret = state.aria2_secret.clone();
     let mappings = state.queue_manager.aria2_gid_mappings();
+    let mut reconciled = true;
 
     for (gid, id) in mappings {
         let status = match rpc_call(
@@ -9407,6 +10133,7 @@ async fn reconcile_aria2_downloads(app_handle: &tauri::AppHandle) {
         {
             Ok(status) => status,
             Err(error) => {
+                reconciled = false;
                 log::debug!(
                     "aria2 reconnect reconciliation [{}]: could not query gid {}: {}",
                     id,
@@ -9431,6 +10158,7 @@ async fn reconcile_aria2_downloads(app_handle: &tauri::AppHandle) {
                             .refresh_aria2_connections(&id, &gid, mapping.epoch)
                             .await
                         {
+                            reconciled = false;
                             log::warn!(
                                 "aria2 reconnect reconciliation [{}]: payload recovery for missing gid {} failed: {}",
                                 id,
@@ -9445,6 +10173,10 @@ async fn reconcile_aria2_downloads(app_handle: &tauri::AppHandle) {
         };
 
         let status_name = status.get("status").and_then(|value| value.as_str());
+        if status_name.is_none() {
+            reconciled = false;
+            continue;
+        }
         let outcome = match status_name {
             Some("complete") => Some(crate::queue::PendingOutcome::Complete),
             Some("active")
@@ -9473,17 +10205,22 @@ async fn reconcile_aria2_downloads(app_handle: &tauri::AppHandle) {
                     None => error_message.to_string(),
                 }))
             }
-            _ => None,
+            Some("active") | Some("waiting") | Some("paused") => None,
+            _ => {
+                reconciled = false;
+                None
+            }
         };
 
         if let Some(outcome) = outcome {
             let progress = aria2_download_state_progress(Some(&status));
             state
                 .queue_manager
-                .handle_aria2_event_with_progress(&gid, outcome, progress)
+                .handle_aria2_event_with_progress_under_terminal_lease(&gid, outcome, progress)
                 .await;
         }
     }
+    reconciled
 }
 
 async fn aria2_daemon_is_reachable(port: u16, secret: &str) -> bool {
@@ -12141,7 +12878,7 @@ async fn set_torrent_file_selection(
     selected_indices: Option<Vec<u32>>,
 ) -> Result<crate::ipc::TorrentFileSelectionSnapshot, String> {
     properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
-    let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    let mut control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     removal_jobs::ensure_not_removing(&app_handle, &id)?;
     let item = load_persisted_torrent_item(database.inner(), &id)?;
     if item.is_torrent != Some(true) {
@@ -12212,7 +12949,7 @@ async fn set_torrent_file_selection(
             &app_handle,
             state.inner(),
             &id,
-            &control_guard,
+            &mut control_guard,
         )
         .await
         {
@@ -13501,7 +14238,7 @@ async fn verify_torrent_data(
     // Verification replaces the current Aria2 lifecycle. Serialize that
     // replacement with pause/resume/remove so a paused GID cannot reject the
     // maintenance enqueue as a duplicate task or race it with a late event.
-    let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
+    let mut control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     removal_jobs::ensure_not_removing(&app_handle, &id)?;
     let item = load_persisted_torrent_item(database.inner(), &id)?;
     if item.is_torrent != Some(true) {
@@ -13534,7 +14271,7 @@ async fn verify_torrent_data(
             &app_handle,
             state.inner(),
             &id,
-            &control_guard,
+            &mut control_guard,
         )
         .await?;
     } else if state.queue_manager.is_registered(&id).await
@@ -14125,6 +14862,8 @@ async fn set_torrent_max_open_files(
 ) -> Result<(), String> {
     properties_window::ensure_main_window(&caller)?;
     let max_open_files = queue::normalize_torrent_max_open_files(max_open_files)?;
+    let guard = caller.app_handle().state::<Aria2DaemonGuard>();
+    let _restart_guard = guard.restart_lock.lock().await;
     rpc_call(
         state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
         &state.aria2_secret,
@@ -14133,7 +14872,9 @@ async fn set_torrent_max_open_files(
     )
     .await
     .and_then(|result| ensure_aria2_ok_result("changeGlobalOption", &result))
-    .map_err(|error| format!("Failed to set Torrent maximum open files: {error}"))
+    .map_err(|error| format!("Failed to set Torrent maximum open files: {error}"))?;
+    guard.update_launch_option("--bt-max-open-files", &max_open_files.to_string());
+    Ok(())
 }
 
 #[tauri::command]
@@ -14145,6 +14886,8 @@ async fn set_torrent_overall_upload_limit(
     properties_window::ensure_main_window(&caller)?;
     let normalized_limit = normalize_torrent_overall_upload_limit(limit.as_deref())?;
     let limit_str = normalized_limit.as_deref().unwrap_or("0");
+    let guard = caller.app_handle().state::<Aria2DaemonGuard>();
+    let _restart_guard = guard.restart_lock.lock().await;
     rpc_call(
         state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
         &state.aria2_secret,
@@ -14153,7 +14896,9 @@ async fn set_torrent_overall_upload_limit(
     )
     .await
     .and_then(|result| ensure_aria2_ok_result("changeGlobalOption", &result))
-    .map_err(|error| format!("Failed to set Torrent overall upload limit: {error}"))
+    .map_err(|error| format!("Failed to set Torrent overall upload limit: {error}"))?;
+    guard.update_launch_option("--max-overall-upload-limit", limit_str);
+    Ok(())
 }
 
 #[tauri::command]
@@ -14171,6 +14916,8 @@ async fn set_global_speed_limit(
         ),
     };
     let limit_str = normalized_limit.clone().unwrap_or_else(|| "0".to_string());
+    let guard = caller.app_handle().state::<Aria2DaemonGuard>();
+    let _restart_guard = guard.restart_lock.lock().await;
     rpc_call(
         state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
         &state.aria2_secret,
@@ -14179,15 +14926,15 @@ async fn set_global_speed_limit(
     )
     .await
     .and_then(|result| ensure_aria2_ok_result("changeGlobalOption", &result))
-    .map(|_| {
-        state
-            .queue_manager
-            .set_aria2_global_speed_limit(normalized_limit);
-    })
     .map_err(|e| {
         eprintln!("Failed to set global speed limit: {}", e);
         e
-    })
+    })?;
+    guard.update_launch_option("--max-overall-download-limit", &limit_str);
+    state
+        .queue_manager
+        .set_aria2_global_speed_limit(normalized_limit);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -16056,6 +16803,9 @@ fn fail_extension_media_discovery(
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::sync::Arc;
+
     #[test]
     fn shell_fast_exit_output_fixture() {
         let Some(output_path) = std::env::var_os("FIRELINK_SHELL_TEST_OUTPUT_PATH") else {
@@ -17320,6 +18070,189 @@ mod tests {
         guard.allow_exit();
         assert!(guard.exit_allowed());
         assert!(!guard.begin_shutdown());
+    }
+
+    #[test]
+    fn shutdown_completion_journal_failure_needs_a_successful_final_frontend_flush() {
+        assert!(super::shutdown_finalization_allowed(false, false, false));
+        assert!(!super::shutdown_finalization_allowed(true, false, true));
+        assert!(!super::shutdown_finalization_allowed(true, true, false));
+        assert!(super::shutdown_finalization_allowed(true, true, true));
+
+        let guard = Aria2DaemonGuard::new();
+        assert!(guard.begin_shutdown());
+        guard.mark_shutdown_journal_failed("download-1", 7);
+        assert!(guard.shutdown_journal_failed());
+        assert_eq!(guard.shutdown_journal_failures(), vec![("download-1".into(), 7)]);
+        guard.clear_shutdown_journal_failure_for("download-1");
+        assert!(!guard.shutdown_journal_failed());
+        guard.mark_shutdown_journal_failed("download-1", 7);
+        guard.clear_shutdown_journal_failure();
+        assert!(!guard.shutdown_journal_failed());
+    }
+
+    #[tokio::test]
+    async fn shutdown_terminal_barrier_drains_and_reopens_late_writers() {
+        let barrier = Arc::new(super::ShutdownTerminalBarrier::default());
+        let active = barrier.enter().await.expect("barrier starts open");
+        let drain_barrier = Arc::clone(&barrier);
+        let drain = tokio::spawn(async move { drain_barrier.seal_and_wait().await });
+        tokio::task::yield_now().await;
+        assert!(!drain.is_finished(), "active terminal work must be drained");
+        drop(active);
+        drain.await.unwrap();
+
+        let late_barrier = Arc::clone(&barrier);
+        let late_writer = tokio::spawn(async move { late_barrier.enter().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !barrier.try_finalize(),
+            "a writer arriving after sealing must reject finalization"
+        );
+
+        barrier.reopen_after_rejection();
+        let resumed = late_writer
+            .await
+            .unwrap()
+            .expect("rejection must resume late terminal work");
+        drop(resumed);
+        barrier.seal_and_wait().await;
+        assert!(barrier.try_finalize());
+        assert!(barrier.enter().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_the_websocket_reader_to_drain_buffered_events() {
+        let barrier = Arc::new(super::ShutdownTerminalBarrier::default());
+        // The connection reader acquires this lease before connecting and
+        // retains it until its buffered messages have been processed.
+        let reader = barrier.enter().await.expect("reader starts tracked");
+        let shutdown_barrier = Arc::clone(&barrier);
+        let drain = tokio::spawn(async move { shutdown_barrier.seal_and_wait().await });
+        tokio::task::yield_now().await;
+        assert!(!drain.is_finished(), "shutdown must wait for buffered events");
+        drop(reader);
+        drain.await.unwrap();
+        assert!(barrier.try_finalize());
+    }
+
+    #[tokio::test]
+    async fn queued_successful_media_termination_wins_over_shutdown_cancellation() {
+        let (sender, mut receiver) = tauri::async_runtime::channel(1);
+        sender
+            .send(tauri_plugin_shell::process::CommandEvent::Terminated(
+                tauri_plugin_shell::process::TerminatedPayload {
+                    code: Some(0),
+                    signal: None,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let mut stdout_buffer = String::new();
+        let mut stderr_buffer = String::new();
+        let mut output_path = None;
+        let mut stderr_tail = String::new();
+        let termination = super::wait_for_media_termination_after_cancel(
+            &mut receiver,
+            &mut stdout_buffer,
+            &mut stderr_buffer,
+            &mut output_path,
+            &mut stderr_tail,
+            2048,
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("queued shell termination should be preserved")
+        .expect("queued shell termination should be returned");
+        assert_eq!(termination.code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn delayed_media_termination_is_observed_after_kill_request() {
+        let (sender, mut receiver) = tauri::async_runtime::channel(1);
+        let (terminate_tx, terminate_rx) = tokio::sync::oneshot::channel();
+        let termination_sender = sender.clone();
+        let termination = tokio::spawn(async move {
+            terminate_rx.await.expect("kill closure should signal");
+            termination_sender
+                .send(tauri_plugin_shell::process::CommandEvent::Terminated(
+                    tauri_plugin_shell::process::TerminatedPayload {
+                        code: Some(143),
+                        signal: Some(15),
+                    },
+                ))
+                .await
+                .expect("termination event should be delivered");
+        });
+
+        let mut stdout_buffer = String::new();
+        let mut stderr_buffer = String::new();
+        let mut output_path = None;
+        let mut stderr_tail = String::new();
+        let payload = super::terminate_and_wait_for_media_after_cancel(
+            &mut receiver,
+            &mut stdout_buffer,
+            &mut stderr_buffer,
+            &mut output_path,
+            &mut stderr_tail,
+            2048,
+            Duration::from_millis(1),
+            move || terminate_tx.send(()).expect("termination task is waiting"),
+        )
+        .await
+        .expect("kill must be followed by observed process termination");
+        termination.await.unwrap();
+        assert_eq!(payload.signal, Some(15));
+    }
+
+    #[test]
+    fn aria2_restart_changes_only_the_rpc_port_argument() {
+        let args = vec![
+            OsString::from("--enable-rpc=true"),
+            OsString::from("--rpc-listen-port=6800"),
+            OsString::from("--continue=true"),
+        ];
+        let updated = super::set_aria2_rpc_port_argument(&args, 6812);
+        assert_eq!(
+            updated,
+            vec![
+                OsString::from("--enable-rpc=true"),
+                OsString::from("--rpc-listen-port=6812"),
+                OsString::from("--continue=true"),
+            ]
+        );
+        assert_eq!(args[1], OsString::from("--rpc-listen-port=6800"));
+    }
+
+    #[test]
+    fn aria2_restart_snapshot_updates_existing_and_missing_options() {
+        let guard = super::Aria2DaemonGuard::new();
+        guard.set_launch_spec(super::Aria2LaunchSpec {
+            binary_path: std::path::PathBuf::from("aria2c"),
+            args: vec![
+                OsString::from("--enable-rpc=true"),
+                OsString::from("--bt-max-open-files=16"),
+                OsString::from("--max-overall-upload-limit=1M"),
+            ],
+            environment: Vec::new(),
+            candidate_ports: vec![6800],
+        });
+
+        guard.update_launch_option("--bt-max-open-files", "64");
+        guard.update_launch_option("--max-overall-upload-limit", "0");
+        guard.update_launch_option("--max-overall-download-limit", "512K");
+
+        let args = guard.launch_spec().expect("launch spec").args;
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("--enable-rpc=true"),
+                OsString::from("--bt-max-open-files=64"),
+                OsString::from("--max-overall-upload-limit=0"),
+                OsString::from("--max-overall-download-limit=512K"),
+            ]
+        );
     }
 
     #[test]
@@ -21653,7 +22586,7 @@ pub fn run() {
     let server_frontend_ready = extension_frontend_ready.clone();
     let extension_acks = Arc::new(Mutex::new(HashMap::new()));
     let server_extension_acks = extension_acks.clone();
-    let extension_media_handoffs = Arc::new(Mutex::new(HashMap::new()));
+    let extension_media_handoffs = extension_server::new_media_handoffs();
     let server_extension_media_handoffs = extension_media_handoffs.clone();
     let extension_server_port = Arc::new(RwLock::new(None));
     let server_extension_port = extension_server_port.clone();
@@ -21666,6 +22599,7 @@ pub fn run() {
     // WebSocket listener attach to an unrelated local service.
     let aria2_port = Arc::new(std::sync::atomic::AtomicU16::new(0));
     let aria2_port_clone = Arc::clone(&aria2_port);
+    let shutdown_terminal_barrier = Arc::new(ShutdownTerminalBarrier::default());
     let aria2_secret = uuid::Uuid::new_v4().to_string();
     let builder = tauri::Builder::default()
         .manage(MainWindowRestoreState::default())
@@ -21967,6 +22901,7 @@ pub fn run() {
                 frontend_exit_flush,
                 aria2_port: aria2_port.clone(),
                 aria2_secret: aria2_secret.clone(),
+                shutdown_terminal_barrier: shutdown_terminal_barrier.clone(),
                 media_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
                 power_manager: Arc::clone(&power_manager),
                 scheduler_settings: Arc::clone(&scheduler_settings),
@@ -22105,17 +23040,19 @@ pub fn run() {
                         let mut success = false;
                         let mut attempted_rpc_port = false;
                         let mut startup_failure = None;
-                        for attempt_port in 6800..6900 {
-                            if queue::torrent_port_spec_contains(
+                        let candidate_ports = (6800..6900)
+                            .filter(|attempt_port| {
+                                !queue::torrent_port_spec_contains(
                                 if torrent_startup_settings.listen_port.is_empty() {
                                     queue::DEFAULT_TORRENT_LISTEN_PORT_SPEC
                                 } else {
                                     &torrent_startup_settings.listen_port
                                 },
-                                attempt_port,
-                            ) {
-                                continue;
-                            }
+                                *attempt_port,
+                            )
+                            })
+                            .collect::<Vec<_>>();
+                        for attempt_port in candidate_ports.iter().copied() {
                             attempted_rpc_port = true;
                             app_handle_bg
                                 .state::<Aria2DaemonGuard>()
@@ -22199,6 +23136,14 @@ pub fn run() {
                                 cmd.arg(format!("--max-overall-download-limit={}", limit));
                             }
 
+                            let launch_args = cmd.get_args().map(OsString::from).collect();
+                            let launch_environment = cmd
+                                .get_envs()
+                                .map(|(key, value)| {
+                                    (OsString::from(key), value.map(OsString::from))
+                                })
+                                .collect();
+
                             cmd.stdout(std::process::Stdio::null());
                             cmd.stderr(std::process::Stdio::piped());
 
@@ -22243,32 +23188,19 @@ pub fn run() {
 
                                     log::info!("aria2c spawned successfully on port {}", attempt_port);
 
-                                    let daemon_app = app_handle_bg.clone();
                                     if let Some(stderr) = child.stderr.take() {
-                                        std::thread::spawn(move || {
-                                            use std::io::BufRead;
-                                            let reader = std::io::BufReader::new(stderr);
-                                            for line in reader.lines().map_while(Result::ok) {
-                                                let trimmed = line.trim().to_string();
-                                                if let Ok(mut stderr_lock) = daemon_app.state::<Aria2DaemonGuard>().last_stderr.lock() {
-                                                    stderr_lock.push_str(&trimmed);
-                                                    stderr_lock.push('\n');
-                                                    let excess = stderr_lock.len().saturating_sub(8192);
-                                                    if excess > 0 {
-                                                        let _ = stderr_lock.drain(..excess);
-                                                    }
-                                                }
-                                                let lower = trimmed.to_lowercase();
-                                                if lower.contains("error") || lower.contains("critical") {
-                                                    log::error!("aria2c stderr: {}", trimmed);
-                                                }
-                                            }
-                                        });
+                                        monitor_aria2_stderr(app_handle_bg.clone(), stderr);
                                     }
 
                                     let guard = app_handle_bg.state::<Aria2DaemonGuard>();
                                     *guard.child.lock().unwrap() = Some(child);
                                     *guard.config_path.lock().unwrap() = Some(config_path);
+                                    guard.set_launch_spec(Aria2LaunchSpec {
+                                        binary_path: binary_path.clone(),
+                                        args: launch_args,
+                                        environment: launch_environment,
+                                        candidate_ports: candidate_ports.clone(),
+                                    });
 
                                     let mut last_err = String::new();
                                     let start = std::time::Instant::now();
@@ -22364,7 +23296,7 @@ pub fn run() {
                     }
                 }
 
-                let Some(ws_port) = ws_port else {
+                let Some(_initial_ws_port) = ws_port else {
                     log::error!("aria2 startup completed without a verified WebSocket port");
                     aria2_port_clone.store(
                         0,
@@ -22375,6 +23307,31 @@ pub fn run() {
 
                 let mut ws_retries = 0;
                 loop {
+                    let state = app_handle_bg.state::<AppState>();
+                    let current_port = state.aria2_port.load(std::sync::atomic::Ordering::Acquire);
+                    if current_port == 0 {
+                        let guard = app_handle_bg.state::<Aria2DaemonGuard>();
+                        if !guard.is_shutting_down()
+                            && guard.startup_error_message().is_some()
+                            && guard.launch_spec().is_some()
+                        {
+                            match restart_aria2_daemon(&app_handle_bg).await {
+                                Ok(()) => log::info!(
+                                    "app_shutdown_phase=aria2_restart outcome=recovered"
+                                ),
+                                Err(error) => {
+                                    log::error!(
+                                        "app_shutdown_phase=aria2_restart outcome=retrying error={}",
+                                        error
+                                    );
+                                    tokio::time::sleep(Duration::from_secs(2)).await;
+                                }
+                            }
+                        } else {
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }
+                        continue;
+                    }
                     if ws_retries == 10 {
                         log::error!("Aria2 WebSocket is still unavailable after repeated reconnection attempts; continuing to retry.");
                         let guard = app_handle_bg.state::<Aria2DaemonGuard>();
@@ -22385,8 +23342,27 @@ pub fn run() {
                         ws_retries = 0;
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    let ws_url = format!("ws://127.0.0.1:{}/jsonrpc", ws_port);
-                    if let Ok((ws_stream, _)) = tokio_tungstenite::connect_async(&ws_url).await {
+                    let current_port = state.aria2_port.load(std::sync::atomic::Ordering::Acquire);
+                    if current_port == 0 {
+                        continue;
+                    }
+                    let ws_url = format!("ws://127.0.0.1:{}/jsonrpc", current_port);
+                    // Own a producer lease from before the socket can receive
+                    // events until its buffered messages have been drained.
+                    // Per-message leases leave a gap between the network
+                    // reader and `enter()` where shutdown could finalize past
+                    // a terminal event already queued by aria2.
+                    let Some(_terminal_work) =
+                        Arc::clone(&state.shutdown_terminal_barrier).enter().await
+                    else {
+                        break;
+                    };
+                    let connection = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        tokio_tungstenite::connect_async(&ws_url),
+                    )
+                    .await;
+                    if let Ok(Ok((ws_stream, _))) = connection {
                         ws_retries = 0; // reset on success
                         if let Ok(mut startup_error) = app_handle_bg
                             .state::<Aria2DaemonGuard>()
@@ -22399,7 +23375,22 @@ pub fn run() {
                                 *startup_error = None;
                             }
                         }
-                        reconcile_aria2_downloads(&app_handle_bg).await;
+                        let recovery_pending = state.queue_manager.aria2_dispatch_held();
+                        let reconciled = reconcile_aria2_downloads(&app_handle_bg).await;
+                        if recovery_pending && !reconciled {
+                            log::warn!(
+                                "aria2 restart reconciliation remains incomplete; keeping queued Aria2 work parked"
+                            );
+                            drop(_terminal_work);
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
+                        if recovery_pending {
+                            state.queue_manager.set_aria2_dispatch_hold(false);
+                            log::info!(
+                                "aria2 restart reconciliation complete; queued Aria2 work resumed"
+                            );
+                        }
                         use futures_util::StreamExt;
                         let (_, mut read) = ws_stream.split();
                         while let Some(msg) = read.next().await {
@@ -22497,8 +23488,11 @@ pub fn run() {
                                                         _ => None,
                                                     };
                                                     if let Some(outcome) = outcome {
-                                                        Arc::clone(&state.queue_manager)
-                                                            .handle_aria2_event_with_progress(gid, outcome, progress)
+                                                        let manager = Arc::clone(&state.queue_manager);
+                                                        manager
+                                                            .handle_aria2_event_with_progress_under_terminal_lease(
+                                                                gid, outcome, progress,
+                                                            )
                                                             .await;
                                                     }
                                                 }
@@ -22509,10 +23503,13 @@ pub fn run() {
                             }
                         }
                     }
+                    drop(_terminal_work);
                     ws_retries += 1;
                     let state = app_handle_bg.state::<AppState>();
                     let port = state.aria2_port.load(std::sync::atomic::Ordering::Relaxed);
-                    if !aria2_daemon_is_reachable(port, &state.aria2_secret).await
+                    if !app_handle_bg.state::<Aria2DaemonGuard>().is_shutting_down()
+                        && port != 0
+                        && !aria2_daemon_is_reachable(port, &state.aria2_secret).await
                         && aria2_daemon_process_exited(&app_handle_bg)
                     {
                         state.queue_manager.clear_aria2_permits().await;
@@ -22543,6 +23540,16 @@ pub fn run() {
                         // RPC failures while startup is pending or unavailable.
                         continue;
                     }
+                    let Some(_terminal_work) = Arc::clone(
+                        &app_handle_poll
+                            .state::<AppState>()
+                            .shutdown_terminal_barrier,
+                    )
+                    .enter()
+                    .await
+                    else {
+                        return;
+                    };
                     // Terminal cleanup removes a download's GID mapping. Do
                     // not retain one observation per historical download for
                     // the lifetime of the poller.
@@ -22587,6 +23594,13 @@ pub fn run() {
                     {
                         Ok(active_list) => active_list,
                         Err(error) => {
+                            if poll_port.load(std::sync::atomic::Ordering::Acquire) == 0
+                                && app_handle_poll
+                                    .state::<Aria2DaemonGuard>()
+                                    .is_shutting_down()
+                            {
+                                break;
+                            }
                             log::warn!(
                                 "aria2 poller [stage=poll operation=tell_active result=failed error_class={} error_code={} elapsed_ms={}]",
                                 crate::retry::network_error_class(&error),
@@ -23013,7 +24027,7 @@ pub fn run() {
                                         && poll_mgr.aria2_torrent_seeding_requested(&id).await
                                     {
                                         poll_mgr
-                                            .handle_aria2_event(
+                                            .handle_aria2_event_under_terminal_lease(
                                                 &gid,
                                                 crate::queue::PendingOutcome::Seeding,
                                             )
@@ -23267,7 +24281,9 @@ pub fn run() {
                                             .unwrap_or_else(|| "none".to_string())
                                     );
                                     poll_mgr
-                                        .handle_aria2_event_with_progress(&gid, outcome, progress)
+                                        .handle_aria2_event_with_progress_under_terminal_lease(
+                                            &gid, outcome, progress,
+                                        )
                                         .await;
                                 }
                             }
@@ -23755,7 +24771,7 @@ pub fn run() {
                             })) {
                                 log::warn!("app_shutdown_phase=frontend_flush signal failed: {error}");
                                 frontend_exit_flush.finish(request, false);
-                                reject_app_exit_request(&app, request, "signal-failed");
+                                reject_app_exit_request(&app, request, "signal-failed", &[]).await;
                                 log::info!(
                                     "app_shutdown_phase=total outcome=cancelled elapsed_ms={}",
                                     exit_started.elapsed().as_millis()
@@ -23818,15 +24834,79 @@ pub fn run() {
                                 } else {
                                     "rejected"
                                 };
-                                reject_app_exit_request(&app, request, cancel_reason);
+                                reject_app_exit_request(&app, request, cancel_reason, &[]).await;
                                 log::info!(
                                     "app_shutdown_phase=total outcome=cancelled elapsed_ms={}",
                                     exit_started.elapsed().as_millis()
                                 );
                                 return;
                             }
-                            let _ = extension_server_shutdown.send(true);
+                            // Stop any addUri handoff admitted just before the
+                            // shutdown fence. If one cannot settle promptly,
+                            // reject this exit while the existing daemon is
+                            // still available to finish the transfer.
+                            let dispatch_drain = tokio::time::timeout(
+                                Duration::from_secs(15),
+                                app.state::<AppState>()
+                                    .queue_manager
+                                    .wait_for_dispatch_handoffs(),
+                            )
+                            .await;
+                            if !matches!(dispatch_drain, Ok(true)) {
+                                log::warn!(
+                                    "app_shutdown_phase=aria2_dispatch_drain outcome=timeout-or-incomplete"
+                                );
+                                reject_app_exit_request(
+                                    &app,
+                                    request,
+                                    "aria2-dispatch-drain-failed",
+                                    &[],
+                                )
+                                .await;
+                                return;
+                            }
+                            // Close media registration and drain accepted
+                            // workers before stopping aria2. A successful
+                            // yt-dlp result then stays inside the terminal
+                            // barrier through its durable journal and row
+                            // update, and cancellation leaves the active row
+                            // restartable if this exit is later rejected.
+                            let interrupted_media_ids = match app
+                                .state::<AppState>()
+                                .download_coordinator
+                                .cancel_active_media_for_shutdown()
+                                .await
+                            {
+                                Ok(interrupted) => interrupted
+                                    .into_iter()
+                                    .map(|(id, _generation)| id)
+                                    .collect::<Vec<_>>(),
+                                Err(error) => {
+                                    log::error!(
+                                        "app_shutdown_phase=media_cancel outcome=failed error={error}"
+                                    );
+                                    reject_app_exit_request(
+                                        &app,
+                                        request,
+                                        "media-shutdown-failed",
+                                        &[],
+                                    )
+                                    .await;
+                                    return;
+                                }
+                            };
+                            // The accepted snapshot durably reconciles any
+                            // journal failure left by a rejected prior exit.
                             shutdown_aria2_daemon(app.clone()).await;
+                            let terminal_barrier = Arc::clone(
+                                &app.state::<AppState>().shutdown_terminal_barrier,
+                            );
+                            let terminal_drained = tokio::time::timeout(
+                                Duration::from_secs(15),
+                                terminal_barrier.seal_and_wait(),
+                            )
+                            .await
+                            .is_ok();
 
                             let final_flush_started = Instant::now();
                             let mut final_completed = frontend_exit_flush.completed.subscribe();
@@ -23837,6 +24917,7 @@ pub fn run() {
                                     "requestId": request.to_string()
                                 }),
                             );
+                            let mut final_flush_succeeded = false;
                             if let Err(error) = final_flush_emitted {
                                 log::warn!("app_shutdown_phase=final_flush signal failed: {error}");
                             } else {
@@ -23861,10 +24942,13 @@ pub fn run() {
                                 )
                                 .await
                                 {
-                                    Ok(true) => log::info!(
-                                        "app_shutdown_phase=final_flush outcome=complete elapsed_ms={}",
-                                        final_flush_started.elapsed().as_millis()
-                                    ),
+                                    Ok(true) => {
+                                        final_flush_succeeded = true;
+                                        log::info!(
+                                            "app_shutdown_phase=final_flush outcome=complete elapsed_ms={}",
+                                            final_flush_started.elapsed().as_millis()
+                                        );
+                                    }
                                     Ok(false) => log::warn!(
                                         "app_shutdown_phase=final_flush outcome=failed elapsed_ms={}",
                                         final_flush_started.elapsed().as_millis()
@@ -23875,7 +24959,58 @@ pub fn run() {
                                     ),
                                 }
                             }
+                            let shutdown_guard = app.state::<Aria2DaemonGuard>();
+                            let failed_rows_are_durably_completed =
+                                shutdown_failed_rows_are_durably_completed(
+                                    &shutdown_guard,
+                                    app.try_state::<crate::db::DbState>().as_deref(),
+                                );
+                            let finalization_checks_passed = terminal_drained
+                                && shutdown_finalization_allowed(
+                                shutdown_guard.shutdown_journal_failed(),
+                                final_flush_succeeded,
+                                failed_rows_are_durably_completed,
+                            );
+                            let finalization_allowed = finalization_checks_passed
+                                && terminal_barrier.try_finalize();
+                            if !finalization_allowed {
+                                log::error!(
+                                    "app_shutdown_phase=finalization outcome=blocked reason=terminal-state-not-durable-or-event-drain-failed"
+                                );
+                                let restart_required = app
+                                    .state::<Aria2DaemonGuard>()
+                                    .launch_spec()
+                                    .is_some();
+                                app.state::<AppState>()
+                                    .queue_manager
+                                    .set_aria2_dispatch_hold(true);
+                                if restart_required {
+                                    if let Err(error) = restart_aria2_daemon(&app).await {
+                                        log::error!(
+                                            "app_shutdown_phase=aria2_restart outcome=unavailable error={}",
+                                            error
+                                        );
+                                        *app.state::<Aria2DaemonGuard>()
+                                            .startup_error
+                                            .lock()
+                                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                                            Some(error);
+                                    }
+                                }
+                                reject_app_exit_request(
+                                    &app,
+                                    request,
+                                    "terminal-journal-failed",
+                                    &interrupted_media_ids,
+                                )
+                                .await;
+                                return;
+                            }
+                            if final_flush_succeeded {
+                                app.state::<Aria2DaemonGuard>().clear_shutdown_journal_failure();
+                            }
                             app.state::<Aria2DaemonGuard>().allow_exit();
+                            let _ = extension_server_shutdown.send(true);
                             log::info!(
                                 "app_shutdown_phase=total elapsed_ms={}",
                                 exit_started.elapsed().as_millis()

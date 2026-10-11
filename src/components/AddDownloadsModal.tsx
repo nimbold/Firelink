@@ -15,6 +15,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { writeText as writeClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import { invokeCommand as invoke } from '../ipc';
 import { DuplicateResolutionModal, DuplicateConflict } from './DuplicateResolutionModal';
+import { AddDownloadPreviewRow } from './AddDownloadPreviewRow';
 import { canonicalizeDownloadFileName, categoryForFileName, downloadFileNameWithSuffix, downloadFileNamesMatch, downloadMediaKindsMatch, headerNameHasCredentialMaterial, isDirectMediaManifestUrl, isHttpMediaRouteUrl, isMediaUrl, isValidTorrentExcludeTrackerList, isValidTorrentTrackerList, MAX_TORRENT_STOP_TIMEOUT, MAX_TORRENT_TRACKER_INTERVAL, MAX_TORRENT_TRACKER_TIMEOUT, normalizeSpeedLimitForBackend, normalizeTorrentWebSeedDrafts, normalizeTorrentTrackerInterval, normalizeTorrentTrackerTimeout, serializeTorrentPreviewPriority, TORRENT_ENCRYPTION_POLICY_DISABLED, TORRENT_ENCRYPTION_POLICY_FORCE_ENCRYPTION, TORRENT_ENCRYPTION_POLICY_REQUIRE_CRYPTO, type MediaMode, type TorrentEncryptionPolicy, type TorrentFileAllocation } from '../utils/downloads';
 import { fetchMediaMetadataDeduped, fetchMediaPlaylistMetadataDeduped } from '../utils/mediaMetadata';
 import {
@@ -37,6 +38,7 @@ import {
   canSubmitMetadataRows,
   applyMediaModeToRow,
   appendRequestUrlsAfterVersion,
+  buildSelectedBySourceUrl,
   commonMediaFormatsForRows,
   commonMediaQualitiesForRows,
   durableDownloadUrl,
@@ -424,8 +426,14 @@ export const AddDownloadsModal = () => {
     // Run these after the busy flag is cleared. The first queued handoff opens
     // a fresh modal after a completed submission, while later handoffs append
     // to that same review session.
-    for (const request of queued) {
+    for (const request of queued.handoffs) {
       void useDownloadStore.getState().handleExtensionDownload(request);
+    }
+    // Initial handoffs establish their row contexts synchronously. Apply
+    // accepted discovery updates afterward so a discovery that arrived while
+    // its initial capture was queued can still upgrade the correct row.
+    for (const update of queued.mediaDiscoveryUpdates) {
+      void useDownloadStore.getState().handleExtensionMediaDiscoveryUpdate(update);
     }
   }, [releasePendingAddHandoffs, toggleAddModal]);
 
@@ -676,14 +684,7 @@ export const AddDownloadsModal = () => {
           mediaModesBySourceUrl[normalizeComparableUrl(row.sourceUrl)] = row.mediaMode;
         }
       }
-      const selectedBySourceUrl = Object.fromEntries(
-        current.map(row => [row.sourceUrl, row.selected !== false])
-      );
-      for (const row of current) {
-        if (row.playlistSourceUrl && !(row.playlistSourceUrl in selectedBySourceUrl)) {
-          selectedBySourceUrl[row.playlistSourceUrl] = row.selected !== false;
-        }
-      }
+      const selectedBySourceUrl = buildSelectedBySourceUrl(current, pendingAddRequestContexts);
       return reconcileDownloadRows(
         urls,
         current,
@@ -2535,54 +2536,37 @@ export const AddDownloadsModal = () => {
                     <div className="flex-1">{t($ => $.addDownloads.size)}</div>
                     <div className="flex-[1.5]">{t($ => $.addDownloads.status)}</div>
                   </div>
-                  <div className="flex-1 min-h-0 min-w-0 overflow-y-auto p-2 space-y-1" role="listbox" aria-label={t($ => $.addDownloads.downloadPreview)}>
+                  <div className="flex-1 min-h-0 min-w-0 overflow-y-auto p-2 space-y-1" role="list" aria-label={t($ => $.addDownloads.downloadPreview)}>
                     {parsedItems.length === 0 ? (
                       <div className="add-download-empty h-full flex items-center justify-center text-text-muted text-xs">
                         {t($ => $.addDownloads.noLinks)}
                       </div>
                     ) : (
                       parsedItems.map((item, i) => (
-                        <div
+                        <AddDownloadPreviewRow
                           key={item.id}
-                          onClick={() => setSelectedItemIndex(i)}
-                          onKeyDown={(event) => {
-                            if (event.key === 'Enter' || event.key === ' ') {
-                              event.preventDefault();
-                              setSelectedItemIndex(i);
-                            }
-                          }}
-                          role="option"
-                          aria-selected={selectedItemIndex === i}
-                          tabIndex={0}
-                          className={`add-download-preview-row flex flex-col text-xs px-2 py-2 cursor-pointer rounded-md group ${
-                            selectedItemIndex === i
-                              ? 'is-selected border'
-                              : 'border border-transparent'
-                          }`}
-                          >
-                            <div className="flex items-center w-full">
-                            <input
-                              type="checkbox"
-                              checked={item.selected !== false}
-                              onChange={() => toggleRowSelection(i)}
-                              onClick={event => event.stopPropagation()}
-                              aria-label={t($ => $.addDownloads.selectItem, { file: item.file })}
-                              className="me-2 shrink-0 accent-purple-500"
-                            />
-                            <div className="flex-[2] min-w-0 flex items-center gap-2 text-text-primary font-medium truncate pe-2" title={item.file}>
+                          file={item.file}
+                          selected={item.selected !== false}
+                          detailsSelected={selectedItemIndex === i}
+                          selectionLabel={t($ => $.addDownloads.selectItem, { file: item.file })}
+                          onToggleSelection={() => toggleRowSelection(i)}
+                          onSelectDetails={() => setSelectedItemIndex(i)}
+                          details={(
+                            <span className="flex items-center w-full">
+                            <span className="flex-[2] min-w-0 flex items-center gap-2 text-text-primary font-medium truncate pe-2" title={item.file}>
                               <span className="truncate">{item.file}</span>
                               {item.isMedia && item.status === 'ready' && mediaQualityForRow(item) ? (
                                 <span className="add-download-quality-chip shrink-0" title={t($ => $.addDownloads.quality)}>
                                   {mediaQualityForRow(item)}
                                 </span>
                               ) : null}
-                            </div>
-                            <div className={`flex-1 font-mono ${isAddDownloadMetadataLoading(item) ? 'text-text-muted/50' : 'text-text-muted'}`}>{item.size || t($ => $.addDownloads.unknown)}</div>
-                            <div className={`flex-[1.5] font-medium ${((isAddDownloadMetadataError(item) && !isYtDlpDefaultMediaFormatSelected(item)) || item.status === 'invalid') ? 'text-red-500' : isAddDownloadMetadataLoading(item) ? 'text-orange-400' : 'text-blue-500'}`}>
+                            </span>
+                            <span className={`flex-1 font-mono ${isAddDownloadMetadataLoading(item) ? 'text-text-muted/50' : 'text-text-muted'}`}>{item.size || t($ => $.addDownloads.unknown)}</span>
+                            <span className={`flex-[1.5] font-medium ${((isAddDownloadMetadataError(item) && !isYtDlpDefaultMediaFormatSelected(item)) || item.status === 'invalid') ? 'text-red-500' : isAddDownloadMetadataLoading(item) ? 'text-orange-400' : 'text-blue-500'}`}>
                               {isAddDownloadMetadataLoading(item) ? (
-                                <div className="flex items-center gap-1.5">
+                                <span className="flex items-center gap-1.5">
                                   <RefreshCw size={12} className="animate-spin" /> {item.isPlaylist ? t($ => $.addDownloads.fetchingPlaylist) : t($ => $.addDownloads.fetching)}
-                                </div>
+                                </span>
                               ) : (
                                 isYtDlpDefaultMediaFormatSelected(item)
                                   ? t($ => $.addDownloads.defaultMediaFormat)
@@ -2602,27 +2586,23 @@ export const AddDownloadsModal = () => {
                                     ? t($ => $.addDownloads.invalid)
                                   : t($ => $.addDownloads.ready)
                               )}
-                            </div>
-                            {!item.isTorrent && (
-                              <button
-                                type="button"
-                                className={`app-icon-button h-6 w-6 shrink-0 ${item.mediaMode === 'media' ? 'text-blue-500' : ''}`}
-                                aria-label={t($ => $.addDownloads.treatAsMedia)}
-                                aria-pressed={item.mediaMode === 'media'}
-                                title={t($ => $.addDownloads.treatAsMedia)}
-                                disabled={!isHttpMediaRouteUrl(item.sourceUrl) || item.status === 'invalid'}
-                                onClick={event => {
-                                  event.preventDefault();
-                                  event.stopPropagation();
-                                  updateMediaModeForRow(i, 'media');
-                                }}
-                                onKeyDown={event => event.stopPropagation()}
-                              >
-                                <Video size={13} aria-hidden="true" />
-                              </button>
-                            )}
-                          </div>
-                        </div>
+                            </span>
+                            </span>
+                          )}
+                          mediaControl={!item.isTorrent ? (
+                            <button
+                              type="button"
+                              className={`app-icon-button h-6 w-6 shrink-0 ${item.mediaMode === 'media' ? 'text-blue-500' : ''}`}
+                              aria-label={t($ => $.addDownloads.treatAsMedia)}
+                              aria-pressed={item.mediaMode === 'media'}
+                              title={t($ => $.addDownloads.treatAsMedia)}
+                              disabled={!isHttpMediaRouteUrl(item.sourceUrl) || item.status === 'invalid'}
+                              onClick={() => updateMediaModeForRow(i, 'media')}
+                            >
+                              <Video size={13} aria-hidden="true" />
+                            </button>
+                          ) : undefined}
+                        />
                       ))
                     )}
                   </div>

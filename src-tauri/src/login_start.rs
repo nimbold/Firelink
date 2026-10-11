@@ -216,11 +216,55 @@ fn launch_path(path: String) -> String {
     format!("\"{}\"", path.replace('"', "\\\""))
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn encode_linux_exec_path(path: &str) -> Result<String, String> {
+    if path.chars().any(char::is_control) {
+        return Err(
+            "Linux executable path contains an unsupported control character".to_string(),
+        );
+    }
+    if path.contains('=') {
+        return Err(
+            "Linux executable path contains '=' which Desktop Entry Exec does not support"
+                .to_string(),
+        );
+    }
+
+    // First encode the argument according to the Exec quoting rules. Percent
+    // signs are doubled so the launcher does not treat them as field codes.
+    let mut quoted_argument = String::with_capacity(path.len() + 2);
+    quoted_argument.push('"');
+    for character in path.chars() {
+        match character {
+            '\\' | '"' | '`' | '$' => {
+                quoted_argument.push('\\');
+                quoted_argument.push(character);
+            }
+            '%' => quoted_argument.push_str("%%"),
+            _ => quoted_argument.push(character),
+        }
+    }
+    quoted_argument.push('"');
+
+    // Exec is also a desktop-entry string value. Escape its backslashes and
+    // supported control characters so the parser can apply the Exec quoting
+    // rules to the intended argument above.
+    let mut encoded = String::with_capacity(quoted_argument.len() + 2);
+    for character in quoted_argument.chars() {
+        match character {
+            '\\' => encoded.push_str("\\\\"),
+            '\t' => encoded.push_str("\\t"),
+            '\n' => encoded.push_str("\\n"),
+            '\r' => encoded.push_str("\\r"),
+            _ => encoded.push(character),
+        }
+    }
+    Ok(encoded)
+}
+
 #[cfg(target_os = "linux")]
-fn launch_path(path: String) -> String {
-    // XDG Exec values use double-quoted arguments rather than shell parsing.
-    let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+fn launch_path(path: String) -> Result<String, String> {
+    encode_linux_exec_path(&path)
 }
 
 #[cfg(target_os = "macos")]
@@ -248,7 +292,7 @@ fn build_auto_launch() -> Result<auto_launch::AutoLaunch, String> {
 fn build_auto_launch() -> Result<auto_launch::AutoLaunch, String> {
     use auto_launch::{AutoLaunchBuilder, LinuxLaunchMode};
 
-    let executable = launch_path(linux_executable_path()?);
+    let executable = launch_path(linux_executable_path()?)?;
     let mut builder = AutoLaunchBuilder::new();
     builder
         .set_app_name("Firelink")
@@ -481,7 +525,7 @@ pub fn open_login_items_settings() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_autostart_argument, AUTOSTART_ARGUMENT};
+    use super::{encode_linux_exec_path, has_autostart_argument, AUTOSTART_ARGUMENT};
 
     #[test]
     fn accepts_only_the_exact_autostart_argument() {
@@ -494,5 +538,28 @@ mod tests {
         assert!(!has_autostart_argument(["--firelink-autostart=true"]));
         assert!(!has_autostart_argument(["--firelink-autostart-extra"]));
         assert!(!has_autostart_argument(["firelink-autostart"]));
+    }
+
+    #[test]
+    fn encodes_linux_exec_path_special_characters() {
+        let path = r#"/opt/Firelink app/quoted"/back\slash/$cost/`tick`/100%"#;
+
+        assert_eq!(
+            encode_linux_exec_path(path).unwrap(),
+            r#""/opt/Firelink app/quoted\\"/back\\\\slash/\\$cost/\\`tick\\`/100%%""#
+        );
+    }
+
+    #[test]
+    fn rejects_control_characters_in_linux_executable_paths() {
+        for character in ['\0', '\t', '\n', '\r', '\u{1}', '\u{7f}', '\u{85}'] {
+            let path = format!("/opt/Firelink{character}path");
+            assert!(encode_linux_exec_path(&path).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_equals_in_linux_executable_path() {
+        assert!(encode_linux_exec_path("/opt/Fire=link").is_err());
     }
 }

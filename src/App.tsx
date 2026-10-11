@@ -299,6 +299,7 @@ function App() {
   const pendingScheduledStopIds = useRef(new Set<string>());
   const startupInputReady = useRef(false);
   const extensionProcessing = useRef(createSerialTaskQueue());
+  const mediaDiscoveryProcessing = useRef(createSerialTaskQueue());
   const frontendReadyUpdate = useRef<Promise<void>>(Promise.resolve());
   const pendingStartupInputs = useRef<Array<
     | { type: 'extension'; payload: ExtensionDownloadRequest }
@@ -394,24 +395,28 @@ function App() {
   }, []);
 
   const processExtensionMediaDiscovery = useCallback(async (payload: ExtensionMediaDiscoveryUpdate) => {
-    let handled = false;
+    let disposition = 'retryable';
     try {
-      await useDownloadStore.getState().handleExtensionMediaDiscoveryUpdate(payload);
-      handled = true;
-    } finally {
-      // Only a completed projection is a success ACK. On failure, close the
-      // native waiter as retryable so the extension can safely replay the
-      // bounded discovery update against the native admission state.
-      if (handled) {
-        await acknowledgeExtensionMediaDiscovery(payload.request_id);
-      } else {
-        await failExtensionMediaDiscovery(payload.request_id);
-      }
+      disposition = await useDownloadStore.getState().handleExtensionMediaDiscoveryUpdate(payload);
+    } catch (error) {
+      console.error('Could not apply browser media discovery:', error);
+    }
+    // A queued update is safe to acknowledge because the store now owns it;
+    // stale updates are intentional no-ops. Only a rejected update stays
+    // retryable at the native handoff boundary.
+    if (disposition === 'retryable') {
+      await failExtensionMediaDiscovery(payload.request_id);
+    } else {
+      await acknowledgeExtensionMediaDiscovery(payload.request_id);
     }
   }, [acknowledgeExtensionMediaDiscovery, failExtensionMediaDiscovery]);
 
   const enqueueAddInput = useCallback((task: () => void | Promise<void>) => {
     return extensionProcessing.current(task);
+  }, []);
+
+  const enqueueMediaDiscoveryInput = useCallback((task: () => void | Promise<void>) => {
+    return mediaDiscoveryProcessing.current(task);
   }, []);
 
   const schedulePostQueueAction = useCallback((action: Exclude<PostQueueAction, 'none'>) => {
@@ -686,7 +691,26 @@ function App() {
       }
     });
     const exitCancelledListener = listen('app-exit-cancelled', event => {
+      if (activeExitRequestId !== event.payload.requestId) return;
       restoreExitAttempt(event.payload.requestId, true);
+      const interruptedMediaIds = Array.isArray(event.payload.interruptedMediaIds)
+        ? event.payload.interruptedMediaIds.filter((id): id is string => typeof id === 'string')
+        : [];
+      if (interruptedMediaIds.length > 0) {
+        void Promise.allSettled(interruptedMediaIds.map(async id => {
+          const item = useDownloadStore.getState().downloads.find(download => download.id === id);
+          if (
+            !item
+            || !['downloading', 'processing', 'verifying', 'retrying'].includes(item.status)
+          ) {
+            return;
+          }
+          const resumed = await useDownloadStore.getState().resumeDownload(id);
+          if (!resumed) {
+            console.error(`Could not resume media download ${id} after exit was cancelled`);
+          }
+        }));
+      }
     });
     const exitFinalFlushListener = listen('app-exit-final-flush-requested', async event => {
       if (activeExitRequestId !== event.payload.requestId || !exiting) {
@@ -717,7 +741,6 @@ function App() {
           requestId: event.payload.requestId,
           succeeded
         });
-        activeExitRequestId = null;
       } catch (error) {
         console.error('Failed to acknowledge the final exit flush:', error);
       }
@@ -951,7 +974,7 @@ function App() {
             pendingStartupInputs.current.push({ type: 'extension-media-discovery', payload: event.payload });
             return;
           }
-          enqueueAddInput(() => processExtensionMediaDiscovery(event.payload)).catch(error => {
+          enqueueMediaDiscoveryInput(() => processExtensionMediaDiscovery(event.payload)).catch(error => {
             console.error('Failed to handle browser media discovery:', error);
           });
         });
@@ -1044,7 +1067,7 @@ function App() {
       disposePersistence?.();
       disposePersistence = null;
     };
-  }, [addToast, enqueueAddInput, processExtensionDownload, processExtensionMediaDiscovery, queueFrontendReadyUpdate]);
+  }, [addToast, enqueueAddInput, enqueueMediaDiscoveryInput, processExtensionDownload, processExtensionMediaDiscovery, queueFrontendReadyUpdate]);
 
   useEffect(() => {
     if (!coreReady || exitPreparing) return;
@@ -1070,14 +1093,14 @@ function App() {
           console.error('Failed to handle queued browser extension download:', error);
         });
       } else if (input.type === 'extension-media-discovery') {
-        enqueueAddInput(() => processExtensionMediaDiscovery(input.payload)).catch(error => {
+        enqueueMediaDiscoveryInput(() => processExtensionMediaDiscovery(input.payload)).catch(error => {
           console.error('Failed to handle queued browser media discovery:', error);
         });
       } else {
         enqueueAddInput(() => useDownloadStore.getState().openAddModalWithUrls(input.payload));
       }
     }
-  }, [coreReady, enqueueAddInput, exitPreparing, processExtensionDownload, processExtensionMediaDiscovery, showKeychainModal]);
+  }, [coreReady, enqueueAddInput, enqueueMediaDiscoveryInput, exitPreparing, processExtensionDownload, processExtensionMediaDiscovery, showKeychainModal]);
 
   useEffect(() => {
     if (!coreReady || showKeychainModal || startupResumeStarted.current || exitPreparing || frontendExitPreparing) return;

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   appendRequestUrlsAfterVersion,
   applyMediaModeToRow,
+  buildSelectedBySourceUrl,
   classifyMediaMetadataError,
   commonMediaFormatsForRows,
   canSubmitMetadataRows,
@@ -77,6 +78,30 @@ describe('add download metadata workflow', () => {
       status: 'loading',
       file: 'new.zip'
     });
+  });
+
+  it('keeps an unchecked row unchecked when discovery replaces its page URL', () => {
+    const pageUrl = 'https://video.example/watch?id=1';
+    const manifestUrl = 'https://cdn.example/master.m3u8';
+    const uncheckedPage = row({ sourceUrl: pageUrl, downloadUrl: pageUrl, selected: false });
+    const selectedBySourceUrl = buildSelectedBySourceUrl([uncheckedPage], {
+      [manifestUrl]: { replacesUrl: pageUrl }
+    });
+
+    const [replacement] = reconcileDownloadRows(
+      manifestUrl,
+      [uncheckedPage],
+      undefined,
+      new Set(),
+      undefined,
+      {},
+      {},
+      {},
+      selectedBySourceUrl
+    );
+
+    expect(replacement.sourceUrl).toBe(manifestUrl);
+    expect(replacement.selected).toBe(false);
   });
 
   it('deduplicates normalized URLs and marks malformed or unsupported URLs invalid', () => {

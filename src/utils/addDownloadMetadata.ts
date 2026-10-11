@@ -558,6 +558,36 @@ const comparableUrl = (rawUrl: string): string => {
   }
 };
 
+export const buildSelectedBySourceUrl = (
+  rows: readonly Pick<AddDownloadDraftRow, 'sourceUrl' | 'playlistSourceUrl' | 'selected'>[],
+  requestContexts: Readonly<Record<string, { replacesUrl?: string }>>
+): Record<string, boolean> => {
+  const selectedBySourceUrl: Record<string, boolean> = {};
+  for (const row of rows) {
+    const selected = row.selected !== false;
+    selectedBySourceUrl[comparableUrl(row.sourceUrl)] = selected;
+    if (row.playlistSourceUrl) {
+      const playlistUrl = comparableUrl(row.playlistSourceUrl);
+      if (!(playlistUrl in selectedBySourceUrl)) {
+        selectedBySourceUrl[playlistUrl] = selected;
+      }
+    }
+  }
+
+  // Discovery changes the input URL while retaining the original row as its
+  // logical identity. Carry an explicit unchecked state across that alias so
+  // reconciliation cannot default the replacement manifest back to selected.
+  for (const [url, context] of Object.entries(requestContexts)) {
+    if (!context.replacesUrl) continue;
+    const originalUrl = comparableUrl(context.replacesUrl);
+    const replacementUrl = comparableUrl(url);
+    if (originalUrl in selectedBySourceUrl && !(replacementUrl in selectedBySourceUrl)) {
+      selectedBySourceUrl[replacementUrl] = selectedBySourceUrl[originalUrl];
+    }
+  }
+  return selectedBySourceUrl;
+};
+
 export const appendRequestUrlsAfterVersion = (
   rawText: string,
   requestContexts: Readonly<Record<string, { version: number; replacesUrl?: string }>>,

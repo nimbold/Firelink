@@ -7,7 +7,7 @@ use std::sync::Mutex;
 const DATABASE_NAME: &str = "firelink.sqlite";
 const LEGACY_STORE_NAME: &str = "store.bin";
 const LEGACY_BUNDLE_IDENTIFIER: &str = "com.nima.tauri-app";
-const CURRENT_SCHEMA_VERSION: i64 = 4;
+const CURRENT_SCHEMA_VERSION: i64 = 5;
 pub(crate) const TOKEN_CHANGED_NOTICE: &str = "pairing-token-changed";
 pub const PAIRING_TOKEN_KEYCHAIN_ID: &str = "extension-pairing-token";
 // Development builds are a different executable identity from the packaged
@@ -106,6 +106,7 @@ fn init_at_path_internal(
 
     import_legacy_data(&mut connection, app_data_dir, portable)?;
     recover_downloads_from_migration_backup(&mut connection, app_data_dir, portable)?;
+    recover_shutdown_terminal_journal(&mut connection)?;
     if portable {
         sanitize_persisted_downloads(&mut connection)?;
     }
@@ -236,6 +237,19 @@ fn migrate_schema(connection: &mut Connection, from_version: i64) -> Result<(), 
             );
             CREATE TABLE IF NOT EXISTS download_removal_assets (id TEXT PRIMARY KEY, data TEXT NOT NULL);
         ").map_err(|error| format!("failed to migrate removal jobs: {error}"))?;
+    }
+
+    if from_version < 5 {
+        transaction
+            .execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS shutdown_terminal_journal (
+                    id TEXT PRIMARY KEY,
+                    lifecycle_generation TEXT NOT NULL
+                );
+                ",
+            )
+            .map_err(|error| format!("failed to create shutdown terminal journal: {error}"))?;
     }
 
     transaction
@@ -1420,6 +1434,167 @@ fn save_settings_tx(transaction: &Transaction<'_>, data: &str) -> Result<(), Str
 
 pub fn load_downloads(connection: &Connection) -> Result<Vec<String>, String> {
     query_string_column(connection, "SELECT data FROM downloads ORDER BY rowid")
+}
+
+/// Confirm that both the indexed status and the canonical download document
+/// durably describe a terminal completion. This is used only when the
+/// shutdown journal could not commit and a final frontend flush is the
+/// recovery path.
+pub fn is_download_durably_completed(connection: &Connection, id: &str) -> Result<bool, String> {
+    let row = connection
+        .query_row(
+            "SELECT status, data FROM downloads WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("failed to verify completed download '{id}': {error}"))?;
+    let Some((indexed_status, data)) = row else {
+        return Ok(false);
+    };
+    let document: Value = serde_json::from_str(&data)
+        .map_err(|error| format!("persisted download '{id}' is malformed: {error}"))?;
+    let document_id = required_string(&document, "id")?;
+    let document_status = required_string(&document, "status")?;
+    Ok(document_id == id && indexed_status == "completed" && document_status == "completed")
+}
+
+/// Persist a native completion observed while Firelink is shutting down.
+///
+/// The frontend owns full download snapshots, so this journal is deliberately
+/// separate: a late or failed frontend flush cannot overwrite the terminal
+/// fact. Startup applies it to the matching durable row before interrupted
+/// active rows are normalized for requeue.
+pub fn record_shutdown_terminal(
+    connection: &mut Connection,
+    id: &str,
+    lifecycle_generation: u64,
+) -> Result<(), String> {
+    if id.trim().is_empty() {
+        return Err("shutdown completion journal requires a download id".to_string());
+    }
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("failed to begin shutdown completion journal: {error}"))?;
+    let previous = transaction
+        .query_row(
+            "SELECT lifecycle_generation FROM shutdown_terminal_journal WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("failed to read shutdown completion journal: {error}"))?;
+    if let Some(previous) = previous {
+        let previous_generation = previous.parse::<u64>().map_err(|_| {
+            "shutdown completion journal contains an invalid lifecycle generation".to_string()
+        })?;
+        if previous_generation > lifecycle_generation {
+            transaction
+                .rollback()
+                .map_err(|error| format!("failed to keep newer shutdown completion: {error}"))?;
+            return Ok(());
+        }
+    }
+    transaction
+        .execute(
+            "INSERT INTO shutdown_terminal_journal (id, lifecycle_generation)
+             VALUES (?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET lifecycle_generation = excluded.lifecycle_generation",
+            params![id, lifecycle_generation.to_string()],
+        )
+        .map_err(|error| format!("failed to record shutdown completion: {error}"))?;
+    transaction
+        .commit()
+        .map_err(|error| format!("failed to commit shutdown completion journal: {error}"))
+}
+
+pub fn clear_shutdown_terminal(
+    connection: &mut Connection,
+    id: &str,
+) -> Result<(), String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("failed to begin shutdown completion invalidation: {error}"))?;
+    transaction
+        .execute("DELETE FROM shutdown_terminal_journal WHERE id = ?1", params![id])
+        .map_err(|error| format!("failed to invalidate shutdown completion for '{id}': {error}"))?;
+    transaction
+        .commit()
+        .map_err(|error| format!("failed to commit shutdown completion invalidation: {error}"))
+}
+
+fn recover_shutdown_terminal_journal(connection: &mut Connection) -> Result<usize, String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("failed to begin shutdown completion recovery: {error}"))?;
+    let entries = {
+        let mut statement = transaction
+            .prepare("SELECT id, lifecycle_generation FROM shutdown_terminal_journal ORDER BY id")
+            .map_err(|error| format!("failed to read shutdown completion journal: {error}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| format!("failed to query shutdown completion journal: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("failed to collect shutdown completion journal: {error}"))?
+    };
+
+    let mut recovered = 0;
+    for (id, generation) in entries {
+        generation.parse::<u64>().map_err(|_| {
+            format!("shutdown completion journal for '{id}' has an invalid lifecycle generation")
+        })?;
+        let persisted = transaction
+            .query_row(
+                "SELECT status, data FROM downloads WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("failed to load shutdown-completed download '{id}': {error}"))?;
+        let Some((indexed_status, data)) = persisted else {
+            // A later user removal is authoritative. The journal is still
+            // consumed atomically so a deleted row cannot be resurrected.
+            continue;
+        };
+        let mut value: Value = serde_json::from_str(&data)
+            .map_err(|error| format!("persisted download '{id}' is malformed: {error}"))?;
+        if required_string(&value, "id")? != id {
+            return Err(format!("persisted download '{id}' has mismatched document id"));
+        }
+        let document_status = required_string(&value, "status")?;
+        if document_status != indexed_status {
+            return Err(format!("persisted download '{id}' has mismatched indexed status"));
+        }
+        if document_status == "completed" {
+            continue;
+        }
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| format!("persisted download '{id}' is not an object"))?;
+        object.insert("status".to_string(), Value::String("completed".to_string()));
+        let data = serde_json::to_string(&value)
+            .map_err(|error| format!("failed to encode recovered completion '{id}': {error}"))?;
+        let changed = transaction
+            .execute(
+                "UPDATE downloads SET status = 'completed', data = ?1 WHERE id = ?2",
+                params![data, id],
+            )
+            .map_err(|error| format!("failed to recover shutdown completion '{id}': {error}"))?;
+        if changed != 1 {
+            return Err(format!("persisted download '{id}' changed during recovery"));
+        }
+        recovered += 1;
+    }
+
+    transaction
+        .execute("DELETE FROM shutdown_terminal_journal", [])
+        .map_err(|error| format!("failed to clear recovered shutdown completions: {error}"))?;
+    transaction
+        .commit()
+        .map_err(|error| format!("failed to commit shutdown completion recovery: {error}"))?;
+    Ok(recovered)
 }
 
 pub fn replace_downloads(
@@ -3527,6 +3702,143 @@ mod tests {
         .unwrap();
         assert!(load_downloads(&connection).unwrap()[0].contains("new-download"));
         assert!(load_queues(&connection).unwrap()[0].contains("new-queue"));
+    }
+
+    #[test]
+    fn shutdown_terminal_journal_prevents_requeue_after_final_frontend_flush_failure() {
+        let root = TempDir::new().unwrap();
+        let database = init_at_path(root.path()).unwrap();
+        {
+            let mut connection = database.lock().unwrap();
+            replace_downloads(
+                &mut connection,
+                &json!([{
+                    "id": "completed-during-shutdown",
+                    "status": "downloading",
+                    "queueId": "main",
+                    "downloadedBytes": 900,
+                    "totalBytes": 1000
+                }])
+                .to_string(),
+                false,
+            )
+            .unwrap();
+            // The native lifecycle observed completion, but the simulated
+            // final frontend flush times out and leaves the earlier active
+            // snapshot untouched.
+            record_shutdown_terminal(&mut connection, "completed-during-shutdown", 42).unwrap();
+            let journal_generation: String = connection
+                .query_row(
+                    "SELECT lifecycle_generation FROM shutdown_terminal_journal WHERE id = ?1",
+                    params!["completed-during-shutdown"],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(journal_generation, "42");
+        }
+        drop(database);
+
+        let restarted = init_at_path(root.path()).unwrap();
+        let connection = restarted.lock().unwrap();
+        let rows = load_downloads(&connection).unwrap();
+        let row: Value = serde_json::from_str(&rows[0]).unwrap();
+        assert_eq!(row["status"], "completed");
+        assert_eq!(row["downloadedBytes"], 900);
+        let journal_entries: i64 = connection
+            .query_row("SELECT COUNT(*) FROM shutdown_terminal_journal", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_entries, 0);
+    }
+
+    #[test]
+    fn failed_shutdown_terminal_journal_commit_is_not_reported_as_success() {
+        let root = TempDir::new().unwrap();
+        let database = init_at_path(root.path()).unwrap();
+        let mut connection = database.lock().unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TRIGGER reject_shutdown_terminal_journal
+                BEFORE INSERT ON shutdown_terminal_journal
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated journal failure');
+                END;
+                ",
+            )
+            .unwrap();
+
+        assert!(record_shutdown_terminal(&mut connection, "download-1", 7).is_err());
+        let journal_entries: i64 = connection
+            .query_row("SELECT COUNT(*) FROM shutdown_terminal_journal", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_entries, 0);
+    }
+
+    #[test]
+    fn failed_journal_fallback_requires_the_index_and_document_to_be_completed() {
+        let root = TempDir::new().unwrap();
+        let database = init_at_path(root.path()).unwrap();
+        let mut connection = database.lock().unwrap();
+        replace_downloads(
+            &mut connection,
+            &json!([
+                { "id": "completed", "status": "completed", "queueId": "main" },
+                { "id": "active", "status": "downloading", "queueId": "main" },
+                { "id": "mismatched", "status": "completed", "queueId": "main" }
+            ])
+            .to_string(),
+            false,
+        )
+        .unwrap();
+        connection
+            .execute(
+                "UPDATE downloads SET data = ?1 WHERE id = ?2",
+                params![json!({ "id": "mismatched", "status": "downloading" }).to_string(), "mismatched"],
+            )
+            .unwrap();
+
+        assert!(is_download_durably_completed(&connection, "completed").unwrap());
+        assert!(!is_download_durably_completed(&connection, "active").unwrap());
+        assert!(!is_download_durably_completed(&connection, "mismatched").unwrap());
+        assert!(!is_download_durably_completed(&connection, "missing").unwrap());
+    }
+
+    #[test]
+    fn new_download_lifecycle_clears_a_prior_shutdown_completion_record() {
+        let root = TempDir::new().unwrap();
+        let database = init_at_path(root.path()).unwrap();
+        let mut connection = database.lock().unwrap();
+        record_shutdown_terminal(&mut connection, "redownload", 5).unwrap();
+        clear_shutdown_terminal(&mut connection, "redownload").unwrap();
+
+        let journal_entries: i64 = connection
+            .query_row("SELECT COUNT(*) FROM shutdown_terminal_journal", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_entries, 0);
+    }
+
+    #[test]
+    fn shutdown_terminal_recovery_retains_journal_if_row_recovery_fails() {
+        let root = TempDir::new().unwrap();
+        let database = init_at_path(root.path()).unwrap();
+        let mut connection = database.lock().unwrap();
+        connection
+            .execute(
+                "INSERT INTO downloads (id, status, queue_id, data) VALUES ('broken', 'downloading', 'main', 'not-json')",
+                [],
+            )
+            .unwrap();
+        record_shutdown_terminal(&mut connection, "broken", 1).unwrap();
+
+        assert!(recover_shutdown_terminal_journal(&mut connection).is_err());
+        let journal_entries: i64 = connection
+            .query_row("SELECT COUNT(*) FROM shutdown_terminal_journal", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_entries, 1);
+        let status: String = connection
+            .query_row("SELECT status FROM downloads WHERE id = 'broken'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(status, "downloading");
     }
 
     #[test]

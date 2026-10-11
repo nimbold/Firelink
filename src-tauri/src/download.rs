@@ -17,6 +17,13 @@ pub enum DownloadEvent {
 pub struct DownloadCoordinator {
     tx: mpsc::Sender<DownloadCmd>,
     media_tx: mpsc::Sender<MediaCmd>,
+    media_registration: std::sync::Arc<tokio::sync::Mutex<MediaRegistrationState>>,
+}
+
+#[derive(Default)]
+struct MediaRegistrationState {
+    closed: bool,
+    rejected_during_shutdown: HashSet<(String, u64)>,
 }
 
 impl DownloadCoordinator {
@@ -36,7 +43,13 @@ impl DownloadCoordinator {
         let (tx, rx) = mpsc::channel(128);
         let (media_tx, media_rx) = mpsc::channel(32);
         tauri::async_runtime::spawn(run_coordinator(events, rx, media_rx));
-        Self { tx, media_tx }
+        Self {
+            tx,
+            media_tx,
+            media_registration: std::sync::Arc::new(tokio::sync::Mutex::new(
+                MediaRegistrationState::default(),
+            )),
+        }
     }
 
     pub async fn send(&self, command: DownloadCmd) -> Result<(), String> {
@@ -51,6 +64,14 @@ impl DownloadCoordinator {
         id: String,
         lifecycle_generation: u64,
     ) -> Result<watch::Receiver<bool>, String> {
+        let mut registration = self.media_registration.lock().await;
+        if registration.closed {
+            registration
+                .rejected_during_shutdown
+                .insert((id, lifecycle_generation));
+            let (_cancel_tx, cancel_rx) = watch::channel(true);
+            return Ok(cancel_rx);
+        }
         let (cancel_tx, cancel_rx) = watch::channel(false);
         self.media_tx
             .send(MediaCmd::Register {
@@ -60,7 +81,40 @@ impl DownloadCoordinator {
             })
             .await
             .map_err(|_| "download coordinator is unavailable".to_string())?;
+        drop(registration);
         Ok(cancel_rx)
+    }
+
+    /// Close media registration, cancel each active producer, and wait until
+    /// every accepted media runner has completed its terminal path.
+    pub async fn cancel_active_media_for_shutdown(&self) -> Result<Vec<(String, u64)>, String> {
+        let mut registration = self.media_registration.lock().await;
+        registration.closed = true;
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        if self
+            .media_tx
+            .send(MediaCmd::CancelAllForShutdown { ack: ack_tx })
+            .await
+            .is_err()
+        {
+            registration.closed = false;
+            return Err("download coordinator is unavailable".to_string());
+        }
+        drop(registration);
+        ack_rx
+            .await
+            .map_err(|_| "media runners stopped before shutdown cancellation completed".to_string())
+    }
+
+    pub async fn reopen_media_registration(&self) -> Vec<(String, u64)> {
+        let mut registration = self.media_registration.lock().await;
+        registration.closed = false;
+        let mut rejected = registration
+            .rejected_during_shutdown
+            .drain()
+            .collect::<Vec<_>>();
+        rejected.sort();
+        rejected
     }
 
     pub async fn pause_media(&self, id: String, lifecycle_generation: u64) -> Result<(), String> {
@@ -90,11 +144,22 @@ impl DownloadCoordinator {
     }
 
     pub async fn finish_media(&self, id: String, lifecycle_generation: u64) {
+        self.finish_media_with_shutdown_outcome(id, lifecycle_generation, false)
+            .await;
+    }
+
+    pub async fn finish_media_with_shutdown_outcome(
+        &self,
+        id: String,
+        lifecycle_generation: u64,
+        shutdown_interrupted: bool,
+    ) {
         let _ = self
             .media_tx
             .send(MediaCmd::Finished {
                 id,
                 lifecycle_generation,
+                shutdown_interrupted,
             })
             .await;
     }
@@ -133,7 +198,17 @@ enum MediaCmd {
     Finished {
         id: String,
         lifecycle_generation: u64,
+        shutdown_interrupted: bool,
     },
+    CancelAllForShutdown {
+        ack: tokio::sync::oneshot::Sender<Vec<(String, u64)>>,
+    },
+}
+
+struct PendingMediaShutdown {
+    remaining: HashSet<(String, u64)>,
+    interrupted: Vec<(String, u64)>,
+    ack: tokio::sync::oneshot::Sender<Vec<(String, u64)>>,
 }
 
 async fn run_coordinator(
@@ -145,6 +220,7 @@ async fn run_coordinator(
     let mut cancelled_media_generations = HashMap::<String, u64>::new();
     let mut pending_media_acks =
         HashMap::<(String, u64), tokio::sync::oneshot::Sender<bool>>::new();
+    let mut pending_shutdown: Option<PendingMediaShutdown> = None;
     let mut pending_captured_urls = Vec::<String>::new();
     let mut frontend_ready = false;
     let mut command_open = true;
@@ -234,7 +310,7 @@ async fn run_coordinator(
                             let _ = ack.send(false);
                         }
                     }
-                    MediaCmd::Finished { id, lifecycle_generation } => {
+                    MediaCmd::Finished { id, lifecycle_generation, shutdown_interrupted } => {
                         if active_media.get(&id).is_some_and(|(generation, _)| *generation == lifecycle_generation) {
                             active_media.remove(&id);
                         }
@@ -250,6 +326,43 @@ async fn run_coordinator(
                             .is_some_and(|generation| *generation <= lifecycle_generation)
                         {
                             cancelled_media_generations.remove(&id);
+                        }
+                        if let Some(waiting) = pending_shutdown.as_mut() {
+                            waiting
+                                .remaining
+                                .remove(&(id.clone(), lifecycle_generation));
+                            if shutdown_interrupted {
+                                waiting
+                                    .interrupted
+                                    .push((id.clone(), lifecycle_generation));
+                            }
+                            if waiting.remaining.is_empty() {
+                                if let Some(completed) = pending_shutdown.take() {
+                                    let mut interrupted = completed.interrupted;
+                                    interrupted.sort();
+                                    let _ = completed.ack.send(interrupted);
+                                }
+                            }
+                        }
+                    }
+                    MediaCmd::CancelAllForShutdown { ack } => {
+                        let mut candidates = active_media
+                            .iter()
+                            .map(|(id, (generation, _))| (id.clone(), *generation))
+                            .collect::<Vec<_>>();
+                        candidates.sort();
+                        let remaining = candidates.iter().cloned().collect::<HashSet<_>>();
+                        for (_, cancel_tx) in active_media.values() {
+                            let _ = cancel_tx.send(true);
+                        }
+                        if remaining.is_empty() {
+                            let _ = ack.send(Vec::new());
+                        } else {
+                            pending_shutdown = Some(PendingMediaShutdown {
+                                interrupted: Vec::new(),
+                                remaining,
+                                ack,
+                            });
                         }
                     }
                     },
@@ -497,5 +610,74 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_and_drains_active_media_before_reopening_registration() {
+        let (coordinator, _events) = DownloadCoordinator::spawn_headless();
+        let mut cancel_rx = coordinator
+            .register_media("shutdown-media".to_string(), 17)
+            .await
+            .unwrap();
+        let mut completed_cancel_rx = coordinator
+            .register_media("completed-media".to_string(), 20)
+            .await
+            .unwrap();
+        let shutdown_coordinator = coordinator.clone();
+        let shutdown = tokio::spawn(async move {
+            shutdown_coordinator
+                .cancel_active_media_for_shutdown()
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !*cancel_rx.borrow_and_update() {
+                cancel_rx.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("shutdown did not cancel the active media runner");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !*completed_cancel_rx.borrow_and_update() {
+                completed_cancel_rx.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("shutdown did not notify the finishing media runner");
+        assert!(!shutdown.is_finished(), "shutdown must wait for runner cleanup");
+
+        coordinator
+            .finish_media_with_shutdown_outcome("completed-media".to_string(), 20, false)
+            .await;
+        coordinator
+            .finish_media_with_shutdown_outcome("shutdown-media".to_string(), 17, true)
+            .await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), shutdown)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            vec![("shutdown-media".to_string(), 17)]
+        );
+
+        let late_registration = coordinator
+            .register_media("late-media".to_string(), 18)
+            .await
+            .unwrap();
+        assert!(*late_registration.borrow());
+
+        assert_eq!(
+            coordinator.reopen_media_registration().await,
+            vec![("late-media".to_string(), 18)]
+        );
+        let reopened_registration = coordinator
+            .register_media("reopened-media".to_string(), 19)
+            .await
+            .unwrap();
+        assert!(!*reopened_registration.borrow());
+        coordinator
+            .finish_media("reopened-media".to_string(), 19)
+            .await;
     }
 }

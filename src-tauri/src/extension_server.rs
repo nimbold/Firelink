@@ -52,6 +52,7 @@ const PROTOCOL_VERSION: &str = "7";
 const MEDIA_HANDOFF_PROTOCOL_VERSION: u16 = 7;
 const MAX_MEDIA_HANDOFF_ID_BYTES: usize = 128;
 const MAX_ACTIVE_MEDIA_HANDOFFS: usize = 64;
+const MAX_MEDIA_DISCOVERY_REPLAY_RECORDS: usize = 128;
 const MEDIA_HANDOFF_TTL: Duration = Duration::from_secs(30);
 const MEDIA_DISCOVERY_ATTEMPT_TTL: Duration = Duration::from_secs(10);
 const MAX_PENDING_EXTENSION_ACKS: usize = 64;
@@ -62,7 +63,7 @@ pub type SharedExtensionToken = Arc<RwLock<String>>;
 pub type SharedFrontendReady = Arc<AtomicBool>;
 pub type SharedServerPort = Arc<RwLock<Option<u16>>>;
 pub type SharedExtensionAcks = Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>;
-pub type SharedMediaHandoffs = Arc<Mutex<HashMap<String, MediaHandoffState>>>;
+pub type SharedMediaHandoffs = Arc<Mutex<MediaHandoffRegistry>>;
 type ReplayCache = Arc<Mutex<HashMap<String, u64>>>;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize, TS)]
@@ -94,15 +95,28 @@ enum MediaDiscoveryState {
         completion: watch::Sender<Option<MediaDiscoveryDeliveryResult>>,
         attempt_expires_at: Instant,
     },
-    Acknowledged {
-        content: MediaDiscoveryContent,
-    },
 }
 
 #[derive(Clone, Debug)]
 pub struct MediaHandoffState {
     discovery: Option<MediaDiscoveryState>,
     expires_at: Instant,
+}
+
+#[derive(Clone, Debug)]
+struct MediaDiscoveryReplay {
+    content: MediaDiscoveryContent,
+    expires_at: Instant,
+}
+
+#[derive(Default)]
+pub struct MediaHandoffRegistry {
+    active: HashMap<String, MediaHandoffState>,
+    replays: HashMap<String, MediaDiscoveryReplay>,
+}
+
+pub fn new_media_handoffs() -> SharedMediaHandoffs {
+    Arc::new(Mutex::new(MediaHandoffRegistry::default()))
 }
 
 #[derive(Clone)]
@@ -503,11 +517,21 @@ async fn download_handler(
     }
 
     if let Some(handoff_id) = media_handoff_id.as_deref() {
-        if !register_media_handoff(&state.media_handoffs, handoff_id) {
-            if cached_torrent {
-                crate::torrent::remove_managed_torrent(&state.app_handle, &request_id).await;
+        match register_media_handoff(&state.media_handoffs, handoff_id) {
+            MediaHandoffRegistration::Tracked
+            | MediaHandoffRegistration::TrackedAfterEviction => {}
+            MediaHandoffRegistration::UntrackedCapacity => {
+                log::warn!("media discovery capacity reached; preserving the initial page handoff");
             }
-            return Err(StatusCode::CONFLICT);
+            MediaHandoffRegistration::RegistryUnavailable => {
+                log::warn!("media discovery registry unavailable; preserving the initial page handoff");
+            }
+            MediaHandoffRegistration::Duplicate => {
+                if cached_torrent {
+                    crate::torrent::remove_managed_torrent(&state.app_handle, &request_id).await;
+                }
+                return Err(StatusCode::CONFLICT);
+            }
         }
     }
 
@@ -622,7 +646,12 @@ async fn deliver_media_discovery_update(
     let handoff_id = update.handoff_id.clone();
     let request_id = uuid::Uuid::new_v4().simple().to_string();
     match admit_media_discovery_update(&state.media_handoffs, &update, request_id.clone()) {
-        MediaDiscoveryAdmission::Missing => return Err(StatusCode::NOT_FOUND),
+        MediaDiscoveryAdmission::Missing => {
+            // The bounded active registry may evict an idle session under
+            // pressure. Its initial page handoff was already delivered, so a
+            // later optional manifest update is a successful no-op.
+            return signed_server_response(timestamp_str, nonce, state);
+        }
         MediaDiscoveryAdmission::Conflict => return Err(StatusCode::CONFLICT),
         MediaDiscoveryAdmission::RegistryUnavailable => {
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
@@ -890,9 +919,9 @@ fn media_discovery_content(update: &ExtensionMediaDiscoveryUpdate) -> MediaDisco
     }
 }
 
-fn prune_media_handoffs(registry: &mut HashMap<String, MediaHandoffState>) {
+fn prune_media_handoffs(registry: &mut MediaHandoffRegistry) {
     let now = Instant::now();
-    for state in registry.values_mut() {
+    for state in registry.active.values_mut() {
         let attempt_expired = matches!(
             state.discovery.as_ref(),
             Some(MediaDiscoveryState::InFlight {
@@ -906,30 +935,65 @@ fn prune_media_handoffs(registry: &mut HashMap<String, MediaHandoffState>) {
             }
         }
     }
-    registry.retain(|_, state| state.expires_at > now);
+    registry.active.retain(|_, state| state.expires_at > now);
+    registry.replays.retain(|_, replay| replay.expires_at > now);
 }
 
-fn register_media_handoff(registry: &SharedMediaHandoffs, handoff_id: &str) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MediaHandoffRegistration {
+    Tracked,
+    TrackedAfterEviction,
+    UntrackedCapacity,
+    Duplicate,
+    RegistryUnavailable,
+}
+
+fn register_media_handoff(
+    registry: &SharedMediaHandoffs,
+    handoff_id: &str,
+) -> MediaHandoffRegistration {
     let Ok(mut registry) = registry.lock() else {
-        return false;
+        return MediaHandoffRegistration::RegistryUnavailable;
     };
     prune_media_handoffs(&mut registry);
-    if registry.contains_key(handoff_id) || registry.len() >= MAX_ACTIVE_MEDIA_HANDOFFS {
-        return false;
+    if registry.active.contains_key(handoff_id) || registry.replays.contains_key(handoff_id) {
+        return MediaHandoffRegistration::Duplicate;
     }
-    registry.insert(
+
+    let registration = if registry.active.len() >= MAX_ACTIVE_MEDIA_HANDOFFS {
+        // An idle page session is less valuable than the new user's base
+        // handoff. Never evict a discovery request already being delivered.
+        let oldest_idle = registry
+            .active
+            .iter()
+            .filter(|(_, state)| state.discovery.is_none())
+            .min_by_key(|(_, state)| state.expires_at)
+            .map(|(id, _)| id.clone());
+        if let Some(id) = oldest_idle {
+            registry.active.remove(&id);
+            MediaHandoffRegistration::TrackedAfterEviction
+        } else {
+            // The initial page capture remains available. Its optional late
+            // manifest update will be acknowledged as a safe stale no-op.
+            return MediaHandoffRegistration::UntrackedCapacity;
+        }
+    } else {
+        MediaHandoffRegistration::Tracked
+    };
+    registry.active.insert(
         handoff_id.to_string(),
         MediaHandoffState {
             discovery: None,
             expires_at: Instant::now() + MEDIA_HANDOFF_TTL,
         },
     );
-    true
+    registration
 }
 
 fn remove_media_handoff(registry: &SharedMediaHandoffs, handoff_id: &str) {
     if let Ok(mut registry) = registry.lock() {
-        registry.remove(handoff_id);
+        registry.active.remove(handoff_id);
+        registry.replays.remove(handoff_id);
     }
 }
 
@@ -954,10 +1018,17 @@ fn admit_media_discovery_update(
         return MediaDiscoveryAdmission::RegistryUnavailable;
     };
     prune_media_handoffs(&mut registry);
-    let Some(state) = registry.get_mut(&update.handoff_id) else {
+    let content = media_discovery_content(update);
+    if let Some(replay) = registry.replays.get(&update.handoff_id) {
+        return if replay.content == content {
+            MediaDiscoveryAdmission::Duplicate
+        } else {
+            MediaDiscoveryAdmission::Conflict
+        };
+    }
+    let Some(state) = registry.active.get_mut(&update.handoff_id) else {
         return MediaDiscoveryAdmission::Missing;
     };
-    let content = media_discovery_content(update);
     match state.discovery.take() {
         None => {
             let (completion, _waiter) = watch::channel(None);
@@ -991,15 +1062,6 @@ fn admit_media_discovery_update(
                 MediaDiscoveryAdmission::Conflict
             }
         }
-        Some(MediaDiscoveryState::Acknowledged { content: previous }) => {
-            let same_content = previous == content;
-            state.discovery = Some(MediaDiscoveryState::Acknowledged { content: previous });
-            if same_content {
-                MediaDiscoveryAdmission::Duplicate
-            } else {
-                MediaDiscoveryAdmission::Conflict
-            }
-        }
     }
 }
 
@@ -1014,7 +1076,7 @@ fn finish_media_discovery_attempt(
         let Ok(mut registry) = registry.lock() else {
             return false;
         };
-        let Some(state) = registry.get_mut(handoff_id) else {
+        let Some(mut state) = registry.active.remove(handoff_id) else {
             return false;
         };
         let Some(MediaDiscoveryState::InFlight {
@@ -1024,6 +1086,7 @@ fn finish_media_discovery_attempt(
             attempt_expires_at,
         }) = state.discovery.take()
         else {
+            registry.active.insert(handoff_id.to_string(), state);
             return false;
         };
         if current_attempt_id != attempt_id || content != media_discovery_content(update) {
@@ -1033,11 +1096,33 @@ fn finish_media_discovery_attempt(
                 completion,
                 attempt_expires_at,
             });
+            registry.active.insert(handoff_id.to_string(), state);
             return false;
         }
 
         if result == MediaDiscoveryDeliveryResult::Acknowledged {
-            state.discovery = Some(MediaDiscoveryState::Acknowledged { content });
+            let now = Instant::now();
+            registry.replays.insert(
+                handoff_id.to_string(),
+                MediaDiscoveryReplay {
+                    content,
+                    expires_at: now + MEDIA_HANDOFF_TTL,
+                },
+            );
+            if registry.replays.len() > MAX_MEDIA_DISCOVERY_REPLAY_RECORDS {
+                if let Some(oldest_id) = registry
+                    .replays
+                    .iter()
+                    .min_by_key(|(_, replay)| replay.expires_at)
+                    .map(|(id, _)| id.clone())
+                {
+                    registry.replays.remove(&oldest_id);
+                }
+            }
+        } else {
+            state.discovery = None;
+            state.expires_at = Instant::now() + MEDIA_HANDOFF_TTL;
+            registry.active.insert(handoff_id.to_string(), state);
         }
         completion
     };
@@ -1049,7 +1134,7 @@ fn finish_media_discovery_attempt(
 #[cfg(test)]
 fn expire_media_handoff(registry: &SharedMediaHandoffs, handoff_id: &str) {
     if let Ok(mut registry) = registry.lock() {
-        if let Some(state) = registry.get_mut(handoff_id) {
+        if let Some(state) = registry.active.get_mut(handoff_id) {
             state.expires_at = Instant::now() - Duration::from_secs(1);
         }
     }
@@ -1591,7 +1676,8 @@ mod tests {
         is_valid_client_nonce, is_valid_media_handoff_id, normalize_download,
         normalize_headers, normalize_media_discovery_update, normalize_media_handoff_metadata,
         normalize_media_url, normalize_referer, normalize_url,
-        expire_media_handoff, finish_media_discovery_attempt, register_media_handoff,
+        expire_media_handoff, finish_media_discovery_attempt, new_media_handoffs,
+        register_media_handoff,
         reject_extension_download, wait_for_extension_acknowledgement,
         require_frontend_ready, required_client_nonce, same_origin_url, sanitize_filename,
         server_session_for_request, session_binding_requested,
@@ -1599,7 +1685,9 @@ mod tests {
         wait_for_media_discovery_completion,
         ExtensionCookieScope, ExtensionMediaDiscoveryRequest, ExtensionRequest,
         MediaDiscoveryAdmission, MediaDiscoveryDeliveryResult, MediaHandoffPhase,
-        MAX_MEDIA_HEADER_VALUE_BYTES, MAX_MEDIA_HANDOFF_ID_BYTES, MAX_MEDIA_REFERER_BYTES,
+        MediaHandoffRegistration, MAX_ACTIVE_MEDIA_HANDOFFS,
+        MAX_MEDIA_DISCOVERY_REPLAY_RECORDS, MAX_MEDIA_HEADER_VALUE_BYTES,
+        MAX_MEDIA_HANDOFF_ID_BYTES, MAX_MEDIA_REFERER_BYTES,
         MAX_URL_COUNT,
         MEDIA_HANDOFF_PROTOCOL_VERSION,
         PROTOCOL_VERSION_HEADER, SERVER_HEADER, SERVER_SESSION_HEADER,
@@ -1617,7 +1705,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, RwLock};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn normalized_discovery_update(
         handoff_id: &str,
@@ -1808,8 +1896,11 @@ mod tests {
 
     #[tokio::test]
     async fn discovery_updates_require_ack_before_deduplication_and_roll_back_on_failure() {
-        let registry = Arc::new(Mutex::new(HashMap::new()));
-        assert!(register_media_handoff(&registry, "media-opaque"));
+        let registry = new_media_handoffs();
+        assert_eq!(
+            register_media_handoff(&registry, "media-opaque"),
+            MediaHandoffRegistration::Tracked
+        );
 
         let update = normalized_discovery_update(
             "media-opaque",
@@ -1866,6 +1957,8 @@ mod tests {
             success_waiter.await.unwrap(),
             Some(MediaDiscoveryDeliveryResult::Acknowledged)
         );
+        assert_eq!(registry.lock().unwrap().active.len(), 0);
+        assert_eq!(registry.lock().unwrap().replays.len(), 1);
         assert!(matches!(
             admit_media_discovery_update(&registry, &update, "attempt-5".to_string()),
             MediaDiscoveryAdmission::Duplicate
@@ -1887,7 +1980,7 @@ mod tests {
 
     #[test]
     fn missing_and_expired_discovery_handoffs_are_not_successful_duplicates() {
-        let missing_registry = Arc::new(Mutex::new(HashMap::new()));
+        let missing_registry = new_media_handoffs();
         let update = normalized_discovery_update(
             "missing-handoff",
             "https://cdn.example/stream.m3u8",
@@ -1899,8 +1992,11 @@ mod tests {
             MediaDiscoveryAdmission::Missing
         ));
 
-        let expired_registry = Arc::new(Mutex::new(HashMap::new()));
-        assert!(register_media_handoff(&expired_registry, "expired-handoff"));
+        let expired_registry = new_media_handoffs();
+        assert_eq!(
+            register_media_handoff(&expired_registry, "expired-handoff"),
+            MediaHandoffRegistration::Tracked
+        );
         expire_media_handoff(&expired_registry, "expired-handoff");
         let expired = normalized_discovery_update(
             "expired-handoff",
@@ -1910,6 +2006,137 @@ mod tests {
         );
         assert!(matches!(
             admit_media_discovery_update(&expired_registry, &expired, "attempt-2".to_string()),
+            MediaDiscoveryAdmission::Missing
+        ));
+    }
+
+    #[test]
+    fn active_capacity_evicts_old_idle_sessions_and_keeps_initial_handoff_admissible() {
+        let registry = new_media_handoffs();
+        for index in 0..MAX_ACTIVE_MEDIA_HANDOFFS {
+            assert_eq!(
+                register_media_handoff(&registry, &format!("idle-{index}")),
+                MediaHandoffRegistration::Tracked
+            );
+        }
+        {
+            let mut registry = registry.lock().unwrap();
+            registry.active.get_mut("idle-0").unwrap().expires_at =
+                Instant::now() + Duration::from_secs(10);
+        }
+
+        assert_eq!(
+            register_media_handoff(&registry, "new-page-handoff"),
+            MediaHandoffRegistration::TrackedAfterEviction
+        );
+        assert_eq!(registry.lock().unwrap().active.len(), MAX_ACTIVE_MEDIA_HANDOFFS);
+        let evicted_update = normalized_discovery_update(
+            "idle-0",
+            "https://cdn.example/late.m3u8",
+            None,
+            None,
+        );
+        assert!(matches!(
+            admit_media_discovery_update(&registry, &evicted_update, "late-attempt".to_string()),
+            MediaDiscoveryAdmission::Missing
+        ));
+    }
+
+    #[test]
+    fn full_inflight_registry_preserves_base_handoff_without_evicting_delivery() {
+        let registry = new_media_handoffs();
+        for index in 0..MAX_ACTIVE_MEDIA_HANDOFFS {
+            let id = format!("inflight-{index}");
+            assert_eq!(
+                register_media_handoff(&registry, &id),
+                MediaHandoffRegistration::Tracked
+            );
+            let update = normalized_discovery_update(
+                &id,
+                &format!("https://cdn.example/{index}.m3u8"),
+                None,
+                None,
+            );
+            assert!(matches!(
+                admit_media_discovery_update(&registry, &update, format!("attempt-{index}")),
+                MediaDiscoveryAdmission::Fresh
+            ));
+        }
+
+        assert_eq!(
+            register_media_handoff(&registry, "untracked-page-handoff"),
+            MediaHandoffRegistration::UntrackedCapacity
+        );
+        assert_eq!(registry.lock().unwrap().active.len(), MAX_ACTIVE_MEDIA_HANDOFFS);
+        let late_update = normalized_discovery_update(
+            "untracked-page-handoff",
+            "https://cdn.example/untracked.m3u8",
+            None,
+            None,
+        );
+        assert!(matches!(
+            admit_media_discovery_update(&registry, &late_update, "late-attempt".to_string()),
+            MediaDiscoveryAdmission::Missing
+        ));
+    }
+
+    #[tokio::test]
+    async fn replay_records_are_separate_from_active_capacity_and_remain_bounded() {
+        let registry = new_media_handoffs();
+        for index in 0..(MAX_MEDIA_DISCOVERY_REPLAY_RECORDS + 1) {
+            let id = format!("replay-{index}");
+            assert_eq!(
+                register_media_handoff(&registry, &id),
+                MediaHandoffRegistration::Tracked
+            );
+            let update = normalized_discovery_update(
+                &id,
+                &format!("https://cdn.example/{index}.m3u8"),
+                None,
+                None,
+            );
+            assert!(matches!(
+                admit_media_discovery_update(&registry, &update, format!("attempt-{index}")),
+                MediaDiscoveryAdmission::Fresh
+            ));
+            assert!(finish_media_discovery_attempt(
+                &registry,
+                &id,
+                &format!("attempt-{index}"),
+                &update,
+                MediaDiscoveryDeliveryResult::Acknowledged,
+            ));
+        }
+
+        for index in 0..MAX_ACTIVE_MEDIA_HANDOFFS {
+            assert_eq!(
+                register_media_handoff(&registry, &format!("active-{index}")),
+                MediaHandoffRegistration::Tracked
+            );
+        }
+        {
+            let state = registry.lock().unwrap();
+            assert_eq!(state.active.len(), MAX_ACTIVE_MEDIA_HANDOFFS);
+            assert_eq!(state.replays.len(), MAX_MEDIA_DISCOVERY_REPLAY_RECORDS);
+        }
+        let retained_replay = normalized_discovery_update(
+            "replay-128",
+            "https://cdn.example/128.m3u8",
+            None,
+            None,
+        );
+        assert!(matches!(
+            admit_media_discovery_update(&registry, &retained_replay, "replay-check".to_string()),
+            MediaDiscoveryAdmission::Duplicate
+        ));
+        let evicted_replay = normalized_discovery_update(
+            "replay-0",
+            "https://cdn.example/0.m3u8",
+            None,
+            None,
+        );
+        assert!(matches!(
+            admit_media_discovery_update(&registry, &evicted_replay, "evicted-check".to_string()),
             MediaDiscoveryAdmission::Missing
         ));
     }
