@@ -122,7 +122,7 @@ jobs:
       - name: Test Windows yt-dlp process-group cancellation
         if: runner.os == 'Windows'
         working-directory: src-tauri
-        run: cargo test --lib tests::shell_process_group_kills_descendant_after_launcher_exit --target ${{ matrix.target }} -- --nocapture
+        run: cargo test --test shell_process_group --target ${{ matrix.target }} -- --nocapture
       - name: Run Windows headless production contracts
         if: runner.os == 'Windows'
         working-directory: src-tauri
