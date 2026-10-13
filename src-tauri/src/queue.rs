@@ -1115,19 +1115,31 @@ struct PendingOrderEntry {
     ordinal: u64,
 }
 
-struct DispatchHandoffGuard {
+pub(crate) struct Aria2HandoffGuard {
     count: Arc<AtomicUsize>,
     notify: Arc<Notify>,
 }
 
-impl DispatchHandoffGuard {
-    fn new(count: Arc<AtomicUsize>, notify: Arc<Notify>) -> Self {
+impl Aria2HandoffGuard {
+    fn try_new(
+        accepting: Arc<StdMutex<bool>>,
+        count: Arc<AtomicUsize>,
+        notify: Arc<Notify>,
+    ) -> Option<Self> {
+        let is_accepting = accepting.lock().unwrap_or_else(|error| error.into_inner());
+        if !*is_accepting {
+            return None;
+        }
         count.fetch_add(1, Ordering::AcqRel);
-        Self { count, notify }
+        drop(is_accepting);
+        Some(Self {
+            count,
+            notify,
+        })
     }
 }
 
-impl Drop for DispatchHandoffGuard {
+impl Drop for Aria2HandoffGuard {
     fn drop(&mut self) {
         self.count.fetch_sub(1, Ordering::AcqRel);
         self.notify.notify_waiters();
@@ -1342,10 +1354,12 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
     /// dispatch has not yet been accepted by the sidecar.
     pending_order_ordinals: Mutex<HashMap<(String, u64), PendingOrderEntry>>,
     next_pending_order_ordinal: Mutex<HashMap<String, u64>>,
-    /// Selection-to-dispatch handoffs that shutdown must wait for before
-    /// finalizing Aria2 exit.
-    dispatch_handoff_count: Arc<AtomicUsize>,
-    dispatch_handoff_notify: Arc<Notify>,
+    /// Aria2 operations admitted before shutdown that must finish or cancel
+    /// before the daemon can stop. The gate and count make close/admission a
+    /// single transition, including resume workers waiting for a permit.
+    aria2_handoff_accepting: Arc<StdMutex<bool>>,
+    aria2_handoff_count: Arc<AtomicUsize>,
+    aria2_handoff_notify: Arc<Notify>,
     /// Serializes queue-slot selection with global permit acquisition and
     /// ownership transitions.
     admission_gate: Mutex<()>,
@@ -1484,8 +1498,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
             queue_permit_ownership: Mutex::new(HashMap::new()),
             pending_order_ordinals: Mutex::new(HashMap::new()),
             next_pending_order_ordinal: Mutex::new(HashMap::new()),
-            dispatch_handoff_count: Arc::new(AtomicUsize::new(0)),
-            dispatch_handoff_notify: Arc::new(Notify::new()),
+            aria2_handoff_accepting: Arc::new(StdMutex::new(true)),
+            aria2_handoff_count: Arc::new(AtomicUsize::new(0)),
+            aria2_handoff_notify: Arc::new(Notify::new()),
             admission_gate: Mutex::new(()),
             aria2_dispatch_hold: AtomicBool::new(false),
             system_action_pending: AtomicBool::new(false),
@@ -1790,6 +1805,69 @@ impl<R: tauri::Runtime> QueueManager<R> {
         self.notify.notify_waiters();
     }
 
+    fn aria2_handoff_admission_closed(&self) -> bool {
+        self.aria2_handoff_accepting
+            .lock()
+            .map(|accepting| !*accepting)
+            .unwrap_or(true)
+    }
+
+    fn aria2_shutdown_requested(&self) -> bool {
+        self.aria2_handoff_admission_closed()
+            || self
+                .app_handle
+                .try_state::<crate::Aria2DaemonGuard>()
+                .is_some_and(|guard| guard.is_shutting_down())
+    }
+
+    pub(crate) fn try_begin_aria2_handoff(&self) -> Option<Aria2HandoffGuard> {
+        if self
+            .app_handle
+            .try_state::<crate::Aria2DaemonGuard>()
+            .is_some_and(|guard| guard.is_shutting_down())
+        {
+            return None;
+        }
+        Aria2HandoffGuard::try_new(
+            Arc::clone(&self.aria2_handoff_accepting),
+            Arc::clone(&self.aria2_handoff_count),
+            Arc::clone(&self.aria2_handoff_notify),
+        )
+    }
+
+    pub(crate) fn close_aria2_handoffs_for_shutdown(&self) {
+        *self
+            .aria2_handoff_accepting
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = false;
+        self.aria2_handoff_notify.notify_waiters();
+        self.notify.notify_waiters();
+    }
+
+    pub(crate) async fn wait_for_aria2_handoff(&self) -> Option<Aria2HandoffGuard> {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(handoff) = self.try_begin_aria2_handoff() {
+                return Some(handoff);
+            }
+            if self
+                .app_handle
+                .try_state::<crate::Aria2DaemonGuard>()
+                .is_some_and(|guard| guard.exit_allowed())
+            {
+                return None;
+            }
+            notified.await;
+        }
+    }
+
+    pub(crate) fn notify_aria2_exit_allowed(&self) {
+        self.aria2_handoff_notify.notify_waiters();
+        self.notify.notify_waiters();
+    }
+
     async fn record_seed_started(&self, id: &str) {
         let remaining_minutes = self
             .aria2_payloads
@@ -1924,22 +2002,24 @@ impl<R: tauri::Runtime> QueueManager<R> {
     }
 
     async fn try_start_waiting_seed(self: &Arc<Self>) -> bool {
-        if self.app_handle.try_state::<crate::Aria2DaemonGuard>()
-            .is_some_and(|guard| guard.is_shutting_down())
-        {
+        let Some(handoff_guard) = self.try_begin_aria2_handoff() else {
             return false;
-        }
+        };
         let Some(waiter) = self.reserve_seed_waiter() else {
             return false;
         };
         let manager = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
-            manager.resume_waiting_seed(waiter).await;
+            manager.resume_waiting_seed(waiter, handoff_guard).await;
         });
         true
     }
 
-    async fn resume_waiting_seed(self: Arc<Self>, waiter: SeedWaiter) {
+    async fn resume_waiting_seed(
+        self: Arc<Self>,
+        waiter: SeedWaiter,
+        _handoff_guard: Aria2HandoffGuard,
+    ) {
         let id = waiter.id.clone();
         let Some(gid) = self.aria2_gid_for_download(&id) else {
             self.abandon_seed_start(&id);
@@ -1965,6 +2045,23 @@ impl<R: tauri::Runtime> QueueManager<R> {
             )
             .await
         else {
+            if self.aria2_shutdown_requested() {
+                let _control_guard = self.acquire_aria2_control(&id).await;
+                let is_removing = self.removal_requested(&id);
+                let still_waiting = self
+                    .is_registered_generation_or_legacy(&id, waiter.lifecycle_generation)
+                    .await
+                    && self.seed_waiting(&id)
+                    && matches!(self.active_kind(&id).await, Some(TaskKind::Aria2))
+                    && !is_removing;
+                self.abandon_seed_start(&id);
+                if still_waiting {
+                    self.add_seed_waiter(waiter);
+                } else if is_removing {
+                    self.release_seed_tracking(&id);
+                }
+                return;
+            }
             self.abandon_seed_start(&id);
             return;
         };
@@ -2113,17 +2210,17 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 continue;
             }
 
+            let Some(_handoff_guard) = self.wait_for_aria2_handoff().await else {
+                return;
+            };
+
             let terminal_work = match self.enter_shutdown_terminal_work().await {
                 Ok(terminal_work) => terminal_work,
                 Err(()) => return,
             };
 
             let _control_guard = self.acquire_aria2_control(&waiter.id).await;
-            if self
-                .app_handle
-                .try_state::<crate::Aria2DaemonGuard>()
-                .is_some_and(|guard| guard.is_shutting_down())
-            {
+            if self.aria2_shutdown_requested() {
                 drop(_control_guard);
                 drop(terminal_work);
                 continue;
@@ -2770,11 +2867,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
 
     async fn next_queue_dispatch_hold_delay(&self) -> Option<Duration> {
         let now = Instant::now();
-        let mut holds = self.queue_dispatch_holds.lock().await;
-        holds.retain(|_, queue_holds| {
-            queue_holds.retain(|_, expires_at| *expires_at > now);
-            !queue_holds.is_empty()
-        });
+        // Do not prune expired leases here. `try_admit_next_task` already
+        // prunes them while checking eligibility. A lease can expire between
+        // that check and this deadline calculation; retaining its deadline
+        // yields a zero-duration wake so the dispatcher retries admission
+        // instead of waiting forever with no notification pending.
+        let holds = self.queue_dispatch_holds.lock().await;
         holds
             .values()
             .flat_map(HashMap::values)
@@ -3249,6 +3347,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
         ),
         String,
     > {
+        let Some(_handoff_guard) = self.try_begin_aria2_handoff() else {
+            return Err("Firelink is preparing to exit".to_string());
+        };
         let control_guard = self.acquire_aria2_control(id).await;
         self.set_aria2_torrent_web_seeds_locked(id, seeds, &control_guard)
             .await
@@ -3542,6 +3643,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     .ok_or_else(|| "invalid download speed limit".to_string())?,
             ),
         };
+        let Some(_handoff_guard) = self.try_begin_aria2_handoff() else {
+            return Err("Firelink is preparing to exit".to_string());
+        };
         let _control_guard = self.acquire_aria2_control(id).await;
 
         if !self.is_registered(id).await
@@ -3602,6 +3706,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 crate::normalize_speed_limit_for_aria2(raw)
                     .ok_or_else(|| "invalid torrent upload limit".to_string())?,
             ),
+        };
+        let Some(_handoff_guard) = self.try_begin_aria2_handoff() else {
+            return Err("Firelink is preparing to exit".to_string());
         };
         let _control_guard = self.acquire_aria2_control(id).await;
 
@@ -3674,6 +3781,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
         let rpc_peer_speed_limit = normalized_peer_speed_limit
             .as_deref()
             .unwrap_or(ARIA2_DEFAULT_TORRENT_PEER_SPEED_LIMIT);
+        let Some(_handoff_guard) = self.try_begin_aria2_handoff() else {
+            return Err("Firelink is preparing to exit".to_string());
+        };
         let _control_guard = self.acquire_aria2_control(id).await;
 
         if !self.is_registered(id).await
@@ -4079,7 +4189,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
         control_epoch: u64,
     ) -> Option<OwnedSemaphorePermit> {
         loop {
-            if !self
+            if self.aria2_shutdown_requested()
+                || !self
                 .is_registered_generation_or_legacy(id, lifecycle_generation)
                 .await
                 || self.is_aria2_retry_cancelled(id).await
@@ -4094,7 +4205,8 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 .try_reserve_queue_slot(id, queue_id, lifecycle_generation)
                 .await
             {
-                if self
+                if !self.aria2_shutdown_requested()
+                    && self
                     .is_registered_generation_or_legacy(id, lifecycle_generation)
                     .await
                     && !self.is_aria2_retry_cancelled(id).await
@@ -4136,7 +4248,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
         lifecycle_generation: u64,
     ) -> Option<OwnedSemaphorePermit> {
         let _admission_gate = self.admission_gate.lock().await;
-        if self.system_action_pending.load(Ordering::Acquire) {
+        if self.aria2_shutdown_requested()
+            || self.system_action_pending.load(Ordering::Acquire)
+        {
             return None;
         }
         let mut ownership = self.queue_permit_ownership.lock().await;
@@ -4361,7 +4475,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         usize,
         Option<String>,
         u64,
-        DispatchHandoffGuard,
+        Aria2HandoffGuard,
     )> {
         let _admission_gate = self.admission_gate.lock().await;
         if self.app_handle.try_state::<crate::Aria2DaemonGuard>()
@@ -4425,6 +4539,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
         drop(queue_limits);
         drop(ownership);
 
+        let Some(handoff_guard) = self.try_begin_aria2_handoff() else {
+            return None;
+        };
         let permit = self.try_acquire_permit_after_retirement()?;
         let previous_cursor = cursor;
         let task = pending.remove(task_index)?;
@@ -4438,10 +4555,6 @@ impl<R: tauri::Runtime> QueueManager<R> {
         );
         *self.dispatch_cursor.lock().await = Some(selected_queue);
         let pending_ordinal = self.ensure_pending_order_ordinal(&task).await;
-        let handoff_guard = DispatchHandoffGuard::new(
-            Arc::clone(&self.dispatch_handoff_count),
-            Arc::clone(&self.dispatch_handoff_notify),
-        );
         Some((
             permit,
             task,
@@ -4504,6 +4617,23 @@ impl<R: tauri::Runtime> QueueManager<R> {
         permit: OwnedSemaphorePermit,
     ) -> bool {
         let _admission_gate = self.admission_gate.lock().await;
+        if self.aria2_shutdown_requested() {
+            let remove_reservation = self
+                .queue_permit_ownership
+                .lock()
+                .await
+                .get(id)
+                .is_some_and(|entry| {
+                    entry.queue_id == queue_id
+                        && entry.lifecycle_generation == lifecycle_generation
+                        && !entry.active
+                });
+            if remove_reservation {
+                self.queue_permit_ownership.lock().await.remove(id);
+                self.notify.notify_waiters();
+            }
+            return false;
+        }
         let registered_generation = self
             .registered_lifecycle_generations
             .lock()
@@ -5036,17 +5166,22 @@ impl<R: tauri::Runtime> QueueManager<R> {
     }
 
     pub(crate) fn wake_after_exit_rejected(&self) {
+        *self
+            .aria2_handoff_accepting
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        self.aria2_handoff_notify.notify_waiters();
         self.notify.notify_waiters();
     }
 
-    pub(crate) async fn wait_for_dispatch_handoffs(&self) -> bool {
+    pub(crate) async fn wait_for_aria2_handoffs(&self) -> bool {
         loop {
-            let notified = self.dispatch_handoff_notify.notified();
+            let notified = self.aria2_handoff_notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
 
             let admission_gate = self.admission_gate.lock().await;
-            if self.dispatch_handoff_count.load(Ordering::Acquire) == 0 {
+            if self.aria2_handoff_count.load(Ordering::Acquire) == 0 {
                 return true;
             }
             drop(admission_gate);
@@ -5061,7 +5196,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         pending_index: usize,
         previous_cursor: Option<String>,
         pending_ordinal: u64,
-        _handoff_guard: DispatchHandoffGuard,
+        _handoff_guard: Aria2HandoffGuard,
     ) {
         let id = task.id.clone();
         let lifecycle_generation = task.lifecycle_generation;
@@ -6029,6 +6164,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
     }
 
     async fn remove_aria2_magnet_parent_result(&self, gid: &str) {
+        let Some(_handoff_guard) = self.wait_for_aria2_handoff().await else {
+            return;
+        };
         let Some(state) = self.app_handle.try_state::<crate::AppState>() else {
             return;
         };
@@ -6602,8 +6740,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
         gid: &str,
         observed_epoch: u64,
     ) -> Result<(), String> {
+        let Some(_handoff_guard) = self.try_begin_aria2_handoff() else {
+            return Ok(());
+        };
         let _control_guard = self.acquire_aria2_control(id).await;
-        if self.aria2_gid_for_download(id).as_deref() != Some(gid)
+        if self.aria2_shutdown_requested()
+            || self.aria2_gid_for_download(id).as_deref() != Some(gid)
             || !self.is_registered(id).await
             || !self.has_active_permit(id).await
             || self.is_aria2_retry_cancelled(id).await
@@ -7027,6 +7169,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     .await;
                 return;
             }
+
+            let Some(_handoff_guard) = this.wait_for_aria2_handoff().await else {
+                this.finish_aria2_retry(&id_for_task, &retry_gid, retry_epoch)
+                    .await;
+                return;
+            };
 
             // Serialize the payload snapshot and addUri with live speed
             // changes. Without this guard, a speed update could change the
@@ -10682,6 +10830,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hold_expiring_after_dispatch_eligibility_check_wakes_immediately() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
+
+        let token = manager.begin_queue_dispatch_hold("queue").await.unwrap();
+        assert!(manager
+            .active_queue_dispatch_holds()
+            .await
+            .contains("queue"));
+
+        // Model expiry after admission observed the live hold but before the
+        // dispatcher computes how long it should wait for the next lease.
+        manager
+            .queue_dispatch_holds
+            .lock()
+            .await
+            .get_mut("queue")
+            .unwrap()
+            .insert(token, Instant::now() - Duration::from_millis(1));
+
+        assert_eq!(
+            manager.next_queue_dispatch_hold_delay().await,
+            Some(Duration::ZERO),
+            "an expired deadline must trigger another admission pass"
+        );
+        assert!(!manager
+            .active_queue_dispatch_holds()
+            .await
+            .contains("queue"));
+    }
+
+    #[tokio::test]
     async fn explicit_allocation_telemetry_ends_without_payload_and_rejects_old_epoch() {
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
@@ -10885,6 +11067,7 @@ mod tests {
             .await
             .expect("task is admitted before shutdown starts");
         assert!(guard.begin_shutdown());
+        manager.close_aria2_handoffs_for_shutdown();
         Arc::clone(&manager)
             .dispatch_one(
                 permit,
@@ -10957,13 +11140,14 @@ mod tests {
             .await
             .expect("dispatch should reach the gated addUri call");
         assert!(guard.begin_shutdown());
+        manager.close_aria2_handoffs_for_shutdown();
 
         let waiting_manager = Arc::clone(&manager);
         let shutdown_waiter = tokio::spawn(async move {
-            waiting_manager.wait_for_dispatch_handoffs().await;
+            waiting_manager.wait_for_aria2_handoffs().await;
         });
         tokio::task::yield_now().await;
-        assert_eq!(manager.dispatch_handoff_count.load(Ordering::Acquire), 1);
+        assert_eq!(manager.aria2_handoff_count.load(Ordering::Acquire), 1);
         assert!(!shutdown_waiter.is_finished(), "shutdown must wait for addUri");
 
         spawner.release_add_uri.notify_one();
@@ -10976,10 +11160,107 @@ mod tests {
             .expect("shutdown handoff wait should drain")
             .expect("shutdown waiter should not panic");
 
-        assert_eq!(manager.dispatch_handoff_count.load(Ordering::Acquire), 0);
+        assert_eq!(manager.aria2_handoff_count.load(Ordering::Acquire), 0);
         assert_eq!(manager.pending_order(None).await, ["gated-shutdown"]);
         assert_eq!(manager.registered_lifecycle_generation("gated-shutdown").await, Some(13));
         assert_eq!(manager.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_admission_and_wakes_resume_permit_waiters() {
+        let app = tauri::test::mock_builder()
+            .manage(crate::Aria2DaemonGuard::new())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let guard = app.handle().state::<crate::Aria2DaemonGuard>();
+        let manager = Arc::new(QueueManager::test_new(
+            app.handle().clone(),
+            1,
+            Arc::new(TestSpawner),
+        ));
+        enqueue_test_task(&manager, "permit-owner", "occupied", TaskKind::Aria2, 1).await;
+        let (permit, task, _, _, _, handoff_guard) = manager
+            .try_admit_next_task()
+            .await
+            .expect("active transfer should take the only permit");
+        assert!(manager
+            .park_aria2_permit_if_missing_for_queue(
+                &task.id,
+                &task.queue_id,
+                task.lifecycle_generation,
+                permit,
+            )
+            .await);
+        drop(handoff_guard);
+        manager
+            .reserve_enqueue_generation("resume-waiter", 2)
+            .await
+            .expect("resume lifecycle registration");
+
+        let resume_handoff = manager
+            .try_begin_aria2_handoff()
+            .expect("resume is accepted before shutdown");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let resume_manager = Arc::clone(&manager);
+        let resume_worker = tokio::spawn(async move {
+            let _handoff = resume_handoff;
+            let _ = started_tx.send(());
+            let candidate = resume_manager
+                .acquire_aria2_permit_candidate_for_queue(
+                    "resume-waiter",
+                    "resume-queue",
+                    2,
+                    0,
+                )
+                .await;
+            if let Some(permit) = candidate {
+                resume_manager
+                    .park_aria2_permit_if_missing_for_queue(
+                        "resume-waiter",
+                        "resume-queue",
+                        2,
+                        permit,
+                    )
+                    .await
+            } else {
+                false
+            }
+        });
+        started_rx.await.expect("resume worker started");
+        tokio::task::yield_now().await;
+
+        assert!(guard.begin_shutdown());
+        manager.close_aria2_handoffs_for_shutdown();
+        let waiting_manager = Arc::clone(&manager);
+        let shutdown_drain = tokio::spawn(async move {
+            waiting_manager.wait_for_aria2_handoffs().await
+        });
+        manager.release_permit("permit-owner").await;
+
+        let acquired = tokio::time::timeout(Duration::from_secs(1), resume_worker)
+            .await
+            .expect("shutdown notification should release the waiting resume")
+            .expect("resume worker should not panic");
+        assert!(!acquired, "a closing handoff gate must reject the permit");
+        assert!(!manager.has_active_permit("resume-waiter").await);
+        assert!(!manager
+            .queue_permit_ownership
+            .lock()
+            .await
+            .contains_key("resume-waiter"));
+        assert!(tokio::time::timeout(Duration::from_secs(1), shutdown_drain)
+            .await
+            .expect("shutdown should drain the canceled resume")
+            .expect("shutdown waiter should not panic"));
+        assert_eq!(manager.aria2_handoff_count.load(Ordering::Acquire), 0);
+        assert!(manager.try_begin_aria2_handoff().is_none());
+
+        assert!(guard.cancel_shutdown());
+        manager.wake_after_exit_rejected();
+        let reopened = manager
+            .try_begin_aria2_handoff()
+            .expect("rejected shutdown should reopen handoff admission");
+        drop(reopened);
     }
 
     #[tokio::test]

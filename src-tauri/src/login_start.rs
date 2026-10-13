@@ -217,16 +217,10 @@ fn launch_path(path: String) -> String {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn encode_linux_exec_path(path: &str) -> Result<String, String> {
+fn encode_linux_exec_argument(path: &str) -> Result<String, String> {
     if path.chars().any(char::is_control) {
         return Err(
             "Linux executable path contains an unsupported control character".to_string(),
-        );
-    }
-    if path.contains('=') {
-        return Err(
-            "Linux executable path contains '=' which Desktop Entry Exec does not support"
-                .to_string(),
         );
     }
 
@@ -260,6 +254,18 @@ fn encode_linux_exec_path(path: &str) -> Result<String, String> {
         }
     }
     Ok(encoded)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn encode_linux_exec_path(path: &str) -> Result<String, String> {
+    // Desktop Entry Exec forbids '=' in its executable token. Keep that token
+    // fixed at env, then pass the AppImage path as a quoted argument so valid
+    // install paths such as "Work=Home" remain launchable. The absolute path
+    // also prevents env from interpreting it as an environment assignment.
+    Ok(format!(
+        "\"/usr/bin/env\" -- {}",
+        encode_linux_exec_argument(path)?
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -546,7 +552,16 @@ mod tests {
 
         assert_eq!(
             encode_linux_exec_path(path).unwrap(),
-            r#""/opt/Firelink app/quoted\\"/back\\\\slash/\\$cost/\\`tick\\`/100%%""#
+            r#""/usr/bin/env" -- "/opt/Firelink app/quoted\\"/back\\\\slash/\\$cost/\\`tick\\`/100%%""#
+        );
+    }
+
+    #[test]
+    fn passes_equals_in_linux_appimage_path_as_a_launcher_argument() {
+        assert_eq!(
+            encode_linux_exec_path("/home/user/Apps/Work=Home/Firelink AppImage%2.AppImage")
+                .unwrap(),
+            r#""/usr/bin/env" -- "/home/user/Apps/Work=Home/Firelink AppImage%%2.AppImage""#
         );
     }
 
@@ -558,8 +573,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn rejects_equals_in_linux_executable_path() {
-        assert!(encode_linux_exec_path("/opt/Fire=link").is_err());
-    }
 }

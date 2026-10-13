@@ -2758,15 +2758,25 @@ struct ShellCommandOutput {
     stderr: Vec<u8>,
 }
 
-fn terminate_shell_process_tree(child: tauri_plugin_shell::process::CommandChild) {
-    crate::process::kill_process_tree(child.pid());
-    // The process-tree helper may already have signalled the root. The
-    // direct kill is still needed when the root was not visible in the
-    // snapshot, but its result is cleanup telemetry, not the operation's
-    // primary error.
+fn terminate_shell_process_group(child: tauri_plugin_shell::process::CommandChild) {
+    // Firelink enables process-group ownership on every yt-dlp command. This
+    // reaches PyInstaller workers even after the wrapper exits, unlike a PID
+    // tree snapshot taken during cancellation.
     if let Err(error) = child.kill() {
         log::warn!("failed to signal cancelled media process: {error}");
     }
+}
+
+fn ytdlp_shell_command<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    executable: impl AsRef<std::ffi::OsStr>,
+) -> tauri_plugin_shell::process::Command {
+    use tauri_plugin_shell::ShellExt;
+
+    app_handle
+        .shell()
+        .command(executable)
+        .set_process_group(true)
 }
 
 async fn receive_media_termination_after_cancel(
@@ -2944,15 +2954,15 @@ async fn shell_command_output_with_timeout(
     match tokio::time::timeout(timeout, collect_output).await {
         Ok(Ok(output)) if output.status_code.is_some() => Ok(output),
         Ok(Ok(_)) => {
-            terminate_shell_process_tree(child);
+            terminate_shell_process_group(child);
             Err(format!("{operation} ended without a process exit status"))
         }
         Ok(Err(error)) => {
-            terminate_shell_process_tree(child);
+            terminate_shell_process_group(child);
             Err(error)
         }
         Err(_) => {
-            terminate_shell_process_tree(child);
+            terminate_shell_process_group(child);
             Err(format!(
                 "{operation} timed out after {}s",
                 timeout.as_secs()
@@ -3509,11 +3519,11 @@ async fn fetch_media_playlist_metadata_uncached(
     let deno_runtime = format!("deno:{}", deno_path.to_string_lossy());
     let trusted_path = crate::platform::trusted_system_path()?;
 
-    use tauri_plugin_shell::ShellExt;
     let (ytdlp_path, _) = resolve_metadata_ytdlp_path(&app_handle)?;
-    let mut cmd = app_handle
-        .shell()
-        .command(ytdlp_path.to_string_lossy().to_string());
+    let mut cmd = ytdlp_shell_command(
+        &app_handle,
+        ytdlp_path.to_string_lossy().to_string(),
+    );
     cmd = cmd
         .env("PATH", trusted_path)
         .arg("--ffmpeg-location")
@@ -3624,11 +3634,11 @@ async fn fetch_media_metadata_uncached(
     let deno_runtime = format!("deno:{}", deno_path.to_string_lossy());
     let trusted_path = crate::platform::trusted_system_path()?;
 
-    use tauri_plugin_shell::ShellExt;
     let (ytdlp_path, _) = resolve_metadata_ytdlp_path(&app_handle)?;
-    let mut cmd = app_handle
-        .shell()
-        .command(ytdlp_path.to_string_lossy().to_string());
+    let mut cmd = ytdlp_shell_command(
+        &app_handle,
+        ytdlp_path.to_string_lossy().to_string(),
+    );
     cmd = cmd
         .env("PATH", trusted_path)
         .arg("--ffmpeg-location")
@@ -4971,7 +4981,6 @@ mod login_start;
 pub use platform::atomic_write_replace;
 mod properties_window;
 pub mod queue;
-pub mod process;
 pub mod retry;
 mod torrent_probe;
 pub mod torrent;
@@ -6528,8 +6537,6 @@ pub(crate) async fn start_media_download_internal(
         1.0
     };
 
-    use tauri_plugin_shell::ShellExt;
-
     let mut config_file = tempfile::Builder::new()
         .prefix("ytdlp-")
         .suffix(".conf")
@@ -6602,7 +6609,7 @@ pub(crate) async fn start_media_download_internal(
         }
         let mut processing_started = false;
         let ytdlp_path = resolve_bundled_binary_path(&app_handle, "yt-dlp")?;
-        let mut cmd = app_handle.shell().command(&ytdlp_path);
+        let mut cmd = ytdlp_shell_command(&app_handle, &ytdlp_path);
         for arg in media_progress_args() {
             cmd = cmd.arg(arg);
         }
@@ -6717,7 +6724,7 @@ pub(crate) async fn start_media_download_internal(
                         Duration::from_secs(1),
                         || {
                             if let Some(child) = child.take() {
-                                terminate_shell_process_tree(child);
+                                terminate_shell_process_group(child);
                             }
                         },
                     )
@@ -7003,6 +7010,9 @@ async fn pause_download(
     properties_window::ensure_main_window(&caller)?;
     log::info!("pause_download called for id: {}", id);
 
+    let Some(_aria2_handoff_guard) = state.queue_manager.try_begin_aria2_handoff() else {
+        return Err("Firelink is preparing to exit".to_string());
+    };
     let mut control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     removal_jobs::ensure_not_removing(&app_handle, &id)?;
     let active_kind = state.queue_manager.active_kind(&id).await;
@@ -7330,6 +7340,9 @@ async fn resume_download(
     if queue_id.is_empty() {
         return Err("Queue id cannot be empty".to_string());
     }
+    let Some(aria2_handoff_guard) = state.queue_manager.try_begin_aria2_handoff() else {
+        return Err("Firelink is preparing to exit".to_string());
+    };
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     removal_jobs::ensure_not_removing(&app_handle, &id)?;
     let Some(gid) = state.queue_manager.aria2_gid_for_download(&id) else {
@@ -7423,8 +7436,10 @@ async fn resume_download(
             let gid_clone = gid.clone();
 
             let app_handle_clone = app_handle.clone();
+            let handoff_guard = aria2_handoff_guard;
             drop(control_guard);
             tauri::async_runtime::spawn(async move {
+                let _handoff_guard = handoff_guard;
                 let had_permit = queue_manager.has_active_permit(&id_clone).await;
                 let permit_candidate = if had_permit {
                     None
@@ -7777,7 +7792,9 @@ async fn resume_download(
             let queue_id_clone = queue_id.clone();
             let app_handle_clone = app_handle.clone();
             let status_for_log = status.to_string();
+            let handoff_guard = aria2_handoff_guard;
             tauri::async_runtime::spawn(async move {
+                let _handoff_guard = handoff_guard;
                 let had_permit = queue_manager.has_active_permit(&id_clone).await;
                 let permit_candidate = if had_permit {
                     None
@@ -7909,6 +7926,9 @@ async fn remove_download(
 ) -> Result<(), String> {
     properties_window::ensure_main_window(&caller)?;
     removal_jobs::ensure_not_removing(&app_handle, &id)?;
+    let Some(_handoff_guard) = state.queue_manager.try_begin_aria2_handoff() else {
+        return Err("Firelink is preparing to exit".to_string());
+    };
     remove_download_inner(app_handle, state, id, delete_assets, preserve_resumable,
         asset_removal_policy, expected_lifecycle_generation, false).await
 }
@@ -9857,6 +9877,9 @@ async fn detach_download_for_reconfigure(
 ) -> Result<(), String> {
     properties_window::ensure_main_window(&caller)?;
     log::info!("detach_download_for_reconfigure called for id: {}", id);
+    let Some(_handoff_guard) = state.queue_manager.try_begin_aria2_handoff() else {
+        return Err("Firelink is preparing to exit".to_string());
+    };
     let mut control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     removal_jobs::ensure_not_removing(&app_handle, &id)?;
     detach_download_for_reconfigure_locked(
@@ -12878,6 +12901,9 @@ async fn set_torrent_file_selection(
     selected_indices: Option<Vec<u32>>,
 ) -> Result<crate::ipc::TorrentFileSelectionSnapshot, String> {
     properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
+    let Some(_handoff_guard) = state.queue_manager.try_begin_aria2_handoff() else {
+        return Err("Firelink is preparing to exit".to_string());
+    };
     let mut control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     removal_jobs::ensure_not_removing(&app_handle, &id)?;
     let item = load_persisted_torrent_item(database.inner(), &id)?;
@@ -14235,6 +14261,9 @@ async fn verify_torrent_data(
     id: String,
 ) -> Result<(), String> {
     properties_window::ensure_properties_or_main(&caller, &properties, &id)?;
+    let Some(_handoff_guard) = state.queue_manager.try_begin_aria2_handoff() else {
+        return Err("Firelink is preparing to exit".to_string());
+    };
     // Verification replaces the current Aria2 lifecycle. Serialize that
     // replacement with pause/resume/remove so a paused GID cannot reject the
     // maintenance enqueue as a duplicate task or race it with a late event.
@@ -14592,6 +14621,9 @@ async fn set_torrent_web_seeds(
     seeds: Vec<crate::ipc::TorrentWebSeed>,
 ) -> Result<Vec<crate::ipc::TorrentWebSeed>, String> {
     properties_window::ensure_main_window(&caller)?;
+    let Some(_handoff_guard) = state.queue_manager.try_begin_aria2_handoff() else {
+        return Err("Firelink is preparing to exit".to_string());
+    };
     let control_guard = state.queue_manager.acquire_aria2_control(&id).await;
     removal_jobs::ensure_not_removing(&state.queue_manager.app_handle(), &id)?;
     let active = state.queue_manager.is_registered(&id).await
@@ -14863,6 +14895,9 @@ async fn set_torrent_max_open_files(
     properties_window::ensure_main_window(&caller)?;
     let max_open_files = queue::normalize_torrent_max_open_files(max_open_files)?;
     let guard = caller.app_handle().state::<Aria2DaemonGuard>();
+    let Some(_handoff_guard) = state.queue_manager.try_begin_aria2_handoff() else {
+        return Err("Firelink is preparing to exit".to_string());
+    };
     let _restart_guard = guard.restart_lock.lock().await;
     rpc_call(
         state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
@@ -14887,6 +14922,9 @@ async fn set_torrent_overall_upload_limit(
     let normalized_limit = normalize_torrent_overall_upload_limit(limit.as_deref())?;
     let limit_str = normalized_limit.as_deref().unwrap_or("0");
     let guard = caller.app_handle().state::<Aria2DaemonGuard>();
+    let Some(_handoff_guard) = state.queue_manager.try_begin_aria2_handoff() else {
+        return Err("Firelink is preparing to exit".to_string());
+    };
     let _restart_guard = guard.restart_lock.lock().await;
     rpc_call(
         state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
@@ -14917,6 +14955,9 @@ async fn set_global_speed_limit(
     };
     let limit_str = normalized_limit.clone().unwrap_or_else(|| "0".to_string());
     let guard = caller.app_handle().state::<Aria2DaemonGuard>();
+    let Some(_handoff_guard) = state.queue_manager.try_begin_aria2_handoff() else {
+        return Err("Firelink is preparing to exit".to_string());
+    };
     let _restart_guard = guard.restart_lock.lock().await;
     rpc_call(
         state.aria2_port.load(std::sync::atomic::Ordering::Relaxed),
@@ -16830,6 +16871,152 @@ mod tests {
         std::process::exit(0);
     }
 
+    #[test]
+    fn shell_process_group_descendant_fixture() {
+        match std::env::var("FIRELINK_SHELL_PROCESS_GROUP_FIXTURE").as_deref() {
+            Ok("launcher") => {
+                let executable = std::env::current_exe().expect("test executable path");
+                let descendant = std::process::Command::new(executable)
+                    .args([
+                        "--exact",
+                        "tests::shell_process_group_descendant_fixture",
+                        "--nocapture",
+                    ])
+                    .env("FIRELINK_SHELL_PROCESS_GROUP_FIXTURE", "descendant")
+                    .spawn()
+                    .expect("spawn long-running descendant");
+
+                use std::io::Write;
+                let mut stdout = std::io::stdout().lock();
+                writeln!(stdout, "FIRELINK_DESCENDANT_PID={}", descendant.id())
+                    .expect("write descendant PID");
+                stdout.flush().expect("flush descendant PID");
+            }
+            Ok("descendant") => loop {
+                std::thread::park_timeout(std::time::Duration::from_secs(60));
+            },
+            _ => {}
+        }
+    }
+
+    fn process_is_running(pid: u32) -> bool {
+        let mut system = sysinfo::System::new();
+        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        system.process(sysinfo::Pid::from_u32(pid)).is_some()
+    }
+
+    async fn wait_for_process_exit(pid: u32, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if !process_is_running(pid) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_process_group_kills_descendant_after_launcher_exit() {
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_shell::init())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let executable = std::env::current_exe().expect("test executable path");
+        let (mut events, child) = super::ytdlp_shell_command(app.handle(), executable)
+            .args([
+                "--exact",
+                "tests::shell_process_group_descendant_fixture",
+                "--nocapture",
+            ])
+            .env("FIRELINK_SHELL_PROCESS_GROUP_FIXTURE", "launcher")
+            .spawn()
+            .expect("spawn launcher with process-group ownership");
+        let launcher_pid = child.pid();
+        let mut output = String::new();
+        let descendant_pid = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match events.recv().await {
+                    Some(tauri_plugin_shell::process::CommandEvent::Stdout(bytes)) => {
+                        output.push_str(&String::from_utf8_lossy(&bytes));
+                        if let Some(pid) = output
+                            .split("FIRELINK_DESCENDANT_PID=")
+                            .nth(1)
+                            .and_then(|value| value.split_whitespace().next())
+                            .and_then(|value| value.parse::<u32>().ok())
+                        {
+                            return Ok(pid);
+                        }
+                    }
+                    Some(tauri_plugin_shell::process::CommandEvent::Terminated(_)) => {
+                        return Err("launcher exited before reporting its descendant".to_string());
+                    }
+                    Some(tauri_plugin_shell::process::CommandEvent::Error(error)) => {
+                        return Err(format!("launcher process error: {error}"));
+                    }
+                    None => {
+                        return Err(
+                            "launcher event stream closed before reporting its descendant"
+                                .to_string(),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        let descendant_pid = match descendant_pid {
+            Ok(Ok(pid)) => pid,
+            Ok(Err(error)) => {
+                super::terminate_shell_process_group(child);
+                panic!("{error}");
+            }
+            Err(_) => {
+                super::terminate_shell_process_group(child);
+                panic!("launcher did not report its descendant within 10 seconds");
+            }
+        };
+
+        if !wait_for_process_exit(launcher_pid, std::time::Duration::from_secs(10)).await {
+            super::terminate_shell_process_group(child);
+            panic!("launcher did not exit after spawning its descendant");
+        }
+        if !process_is_running(descendant_pid) {
+            super::terminate_shell_process_group(child);
+            panic!("descendant exited before its process group was terminated");
+        }
+
+        super::terminate_shell_process_group(child);
+        let terminated = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match events.recv().await {
+                    Some(tauri_plugin_shell::process::CommandEvent::Terminated(payload)) => {
+                        return Ok(payload);
+                    }
+                    Some(tauri_plugin_shell::process::CommandEvent::Error(error)) => {
+                        return Err(format!("process-group termination error: {error}"));
+                    }
+                    None => {
+                        return Err(
+                            "process-group event stream closed before termination".to_string()
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("process group should terminate within 10 seconds")
+        .expect("process group should report termination");
+        assert_eq!(terminated.code, Some(0), "launcher exit status");
+        assert!(
+            wait_for_process_exit(descendant_pid, std::time::Duration::from_secs(10)).await,
+            "descendant should exit when its process group is killed"
+        );
+    }
+
     #[tokio::test]
     async fn shell_fast_exit_preserves_final_output_and_reported_path() {
         use tauri_plugin_shell::ShellExt;
@@ -16845,7 +17032,7 @@ mod tests {
 
         // Repeated fast exits exercise the reader/termination race without
         // timing sleeps. The media consumer intentionally stops at Terminated,
-        // so this asserts the ordering guarantee supplied by shell 2.4.1.
+        // so this asserts the ordering guarantee supplied by shell 2.5.0.
         for _ in 0..8 {
             let (mut events, _child) = app
                 .shell()
@@ -16859,6 +17046,7 @@ mod tests {
                     "FIRELINK_SHELL_TEST_OUTPUT_PATH",
                     output_path.as_os_str(),
                 )
+                .set_process_group(true)
                 .spawn()
                 .expect("spawn fast-exiting shell child");
 
@@ -24755,6 +24943,10 @@ pub fn run() {
                 if !guard.exit_allowed() {
                     api.prevent_exit();
                     if guard.begin_shutdown() {
+                        app_handle
+                            .state::<AppState>()
+                            .queue_manager
+                            .close_aria2_handoffs_for_shutdown();
                         let app = app_handle.clone();
                         tauri::async_runtime::spawn(async move {
                             let exit_started = Instant::now();
@@ -24841,25 +25033,26 @@ pub fn run() {
                                 );
                                 return;
                             }
-                            // Stop any addUri handoff admitted just before the
-                            // shutdown fence. If one cannot settle promptly,
-                            // reject this exit while the existing daemon is
-                            // still available to finish the transfer.
-                            let dispatch_drain = tokio::time::timeout(
+                            // Drain Aria2 mutations admitted before the
+                            // shutdown fence. This includes dispatch, resume,
+                            // retry, seed, recovery, and user control work. If
+                            // any cannot settle promptly, reject this exit
+                            // while the existing daemon is still available.
+                            let handoff_drain = tokio::time::timeout(
                                 Duration::from_secs(15),
                                 app.state::<AppState>()
                                     .queue_manager
-                                    .wait_for_dispatch_handoffs(),
+                                    .wait_for_aria2_handoffs(),
                             )
                             .await;
-                            if !matches!(dispatch_drain, Ok(true)) {
+                            if !matches!(handoff_drain, Ok(true)) {
                                 log::warn!(
-                                    "app_shutdown_phase=aria2_dispatch_drain outcome=timeout-or-incomplete"
+                                    "app_shutdown_phase=aria2_handoff_drain outcome=timeout-or-incomplete"
                                 );
                                 reject_app_exit_request(
                                     &app,
                                     request,
-                                    "aria2-dispatch-drain-failed",
+                                    "aria2-handoff-drain-failed",
                                     &[],
                                 )
                                 .await;
@@ -25010,6 +25203,9 @@ pub fn run() {
                                 app.state::<Aria2DaemonGuard>().clear_shutdown_journal_failure();
                             }
                             app.state::<Aria2DaemonGuard>().allow_exit();
+                            app.state::<AppState>()
+                                .queue_manager
+                                .notify_aria2_exit_allowed();
                             let _ = extension_server_shutdown.send(true);
                             log::info!(
                                 "app_shutdown_phase=total elapsed_ms={}",
