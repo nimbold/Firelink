@@ -46,6 +46,23 @@ export function resolveTargetTriple(
   return assertSafeTarget(target);
 }
 
+export function assertProvisioningTarget(target, platform = os.platform(), arch = os.arch()) {
+  assertSafeTarget(target);
+  const hostArchitecture = ARCH_MAP[arch];
+  const hostPlatform = PLATFORM_MAP[platform];
+  if (!hostArchitecture || !hostPlatform) {
+    throw new Error(`Unsupported engine provisioning host: ${arch} / ${platform}`);
+  }
+
+  const hostTarget = `${hostArchitecture}-${hostPlatform}`;
+  if (target !== hostTarget) {
+    throw new Error(
+      `Cross-target engine provisioning is unsupported: requested ${target}, host is ${hostTarget}.`,
+    );
+  }
+  return target;
+}
+
 export function resolveOutputRoot(args = process.argv.slice(2), env = process.env) {
   const outputRoot = argumentValue(args, '--output-root') || env.FIRELINK_ENGINE_OUTPUT_ROOT;
   if (!outputRoot) {

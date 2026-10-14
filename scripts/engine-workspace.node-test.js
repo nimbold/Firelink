@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
+  assertProvisioningTarget,
   assertSafeTarget,
   assertSafeOutputRoot,
   createEngineWorkspace,
@@ -14,6 +15,29 @@ import {
   resolveWorkspaceTempBase,
   stripVerbatimPrefix,
 } from './engine-workspace.js';
+
+test('engine provisioning accepts only the native host target', () => {
+  assert.equal(
+    assertProvisioningTarget('x86_64-unknown-linux-gnu', 'linux', 'x64'),
+    'x86_64-unknown-linux-gnu',
+  );
+  assert.equal(
+    assertProvisioningTarget('x86_64-pc-windows-msvc', 'win32', 'x64'),
+    'x86_64-pc-windows-msvc',
+  );
+  assert.throws(
+    () => assertProvisioningTarget('x86_64-unknown-linux-gnu', 'darwin', 'arm64'),
+    /Cross-target engine provisioning is unsupported/,
+  );
+  assert.throws(
+    () => assertProvisioningTarget('x86_64-pc-windows-msvc', 'linux', 'x64'),
+    /Cross-target engine provisioning is unsupported/,
+  );
+  assert.throws(
+    () => assertProvisioningTarget('x86_64-unknown-linux-gnu', 'sunos', 'x64'),
+    /Unsupported engine provisioning host/,
+  );
+});
 
 test('target resolution accepts explicit and inline target arguments', () => {
   assert.equal(

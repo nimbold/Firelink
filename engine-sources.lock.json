@@ -14,8 +14,8 @@
       },
       "ffmpeg": {
         "version": "9.0.2-27-g7e93014c5b",
-        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-12-13-12/ffmpeg-n9.0.2-27-g7e93014c5b-win64-gpl-9.0.zip",
-        "sha256": "c4da71f5a7593802cbd16419def340c37beeb90d20d04f7dd02f0d4d08adb9e2"
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-14-13-03/ffmpeg-n9.0.2-27-g7e93014c5b-win64-gpl-9.0.zip",
+        "sha256": "f854c8dd01ef8a1e1b433687b3c7ff7a50dd4c89a5f99b57f7822b471f21085d"
       },
       "aria2c": {
         "version": "1.37.0-firelink-native-dns-v1",
@@ -46,8 +46,8 @@
       },
       "ffmpeg": {
         "version": "9.0.2-27-g7e93014c5b",
-        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-12-13-12/ffmpeg-n9.0.2-27-g7e93014c5b-linux64-gpl-9.0.tar.xz",
-        "sha256": "99ac3849c1910e8a2e0dc16da11bbacb2bd6e8c445b5d180e5540cb57871a8bf"
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-14-13-03/ffmpeg-n9.0.2-27-g7e93014c5b-linux64-gpl-9.0.tar.xz",
+        "sha256": "2678b5af04abe364b71566b56bd556645f96883f64cf8ea0945ccfa3eda4ab3f"
       },
       "aria2c": {
         "version": "1.37.0-firelink-native-dns-v1",

@@ -52,10 +52,15 @@ const loadLocale = (locale: AppLocale): Promise<void> => {
   return load;
 };
 
-const fallbackToEnglish = async (requestedLocale: AppLocale, error: unknown): Promise<void> => {
+const fallbackToEnglish = async (
+  requestedLocale: AppLocale,
+  error: unknown,
+  shouldApply: () => boolean = () => true,
+): Promise<void> => {
   console.error(`Failed to load locale "${requestedLocale}"; falling back to English.`, error);
+  if (!shouldApply()) return;
   await i18n.changeLanguage(DEFAULT_LOCALE);
-  syncDocumentLocale(DEFAULT_LOCALE);
+  if (shouldApply()) syncDocumentLocale(DEFAULT_LOCALE);
 };
 
 export const i18nReady = i18n
@@ -98,7 +103,7 @@ export const changeAppLocale = async (locale: AppLocale): Promise<void> => {
     if (request === localeChangeRequest) syncDocumentLocale(locale);
   } catch (error) {
     if (request === localeChangeRequest) {
-      await fallbackToEnglish(locale, error);
+      await fallbackToEnglish(locale, error, () => request === localeChangeRequest);
     }
   }
 };

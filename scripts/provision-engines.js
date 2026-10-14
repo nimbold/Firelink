@@ -20,6 +20,7 @@ import {
   saveAria2Cache,
   validateAria2Cache,
 } from './engine-aria2-cache.js';
+import { assertProvisioningTarget } from './engine-workspace.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -38,6 +39,13 @@ const target = argValue('--target')
   || process.env.TAURI_ENV_TARGET_TRIPLE;
 if (!target) {
   console.error('Pass --target <Rust target triple>.');
+  process.exit(1);
+}
+
+try {
+  assertProvisioningTarget(target);
+} catch (error) {
+  console.error(error.message);
   process.exit(1);
 }
 

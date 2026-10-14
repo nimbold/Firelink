@@ -49,7 +49,13 @@ describe('i18n runtime', () => {
     const originalLanguage = i18n.language;
 
     try {
+      await changeAppLocale('ru');
+      await i18n.changeLanguage('ru-RU');
+      expect(i18n.resolvedLanguage).toBe('ru');
+      expect(i18n.t($ => $.navigation.library)).toBe('Библиотека');
+
       await i18n.changeLanguage('de-DE');
+      expect(i18n.resolvedLanguage).toBe('en');
       expect(i18n.t($ => $.navigation.library)).toBe('Library');
       expect(resolveAppLocale('de-DE')).toBe('en');
       expect(resolveAppLocale('ru-RU')).toBe('ru');
