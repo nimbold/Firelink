@@ -52,6 +52,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { localeDirection, resolveAppLocale } from '../i18n';
 import { createEngineStatusRequestTracker } from '../utils/engineStatusRequests';
+import { writeClipboardSecret } from '../utils/clipboard';
 
 const settingsTabs: { type: SettingsTab; icon: typeof Download }[] = [
   { type: 'downloads', icon: Download },
@@ -987,7 +988,7 @@ runEngineChecks(false);
 
   const copyToken = async () => {
     try {
-      await navigator.clipboard.writeText(settings.extensionPairingToken);
+      await writeClipboardSecret(settings.extensionPairingToken);
       showToast(t($ => $.settings.integrations.tokenCopied), 'success');
     } catch (error) {
       showToast(t($ => $.settings.integrations.tokenCopyFailed, { detail: String(error) }), 'error');

@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { readClipboardDownloadUrls } from './clipboard';
-import { readText } from '@tauri-apps/plugin-clipboard-manager';
+import { readClipboardDownloadUrls, writeClipboardSecret } from './clipboard';
+import { readText, writeSecret, writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({
   readText: vi.fn(),
+  writeSecret: vi.fn(),
+  writeText: vi.fn(),
 }));
 
-describe('clipboard URL extraction', () => {
+describe('clipboard utilities', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -35,5 +37,24 @@ describe('clipboard URL extraction', () => {
     vi.mocked(readText).mockRejectedValue(error);
 
     await expect(readClipboardDownloadUrls()).rejects.toBe(error);
+  });
+
+  it('writes sensitive values through the secret clipboard API', async () => {
+    const token = 'pairing-secret-token';
+    vi.mocked(writeSecret).mockResolvedValue(undefined);
+
+    await writeClipboardSecret(token);
+
+    expect(writeSecret).toHaveBeenCalledOnce();
+    expect(writeSecret).toHaveBeenCalledWith(token);
+  });
+
+  it('propagates write failures without falling back to an ordinary clipboard write', async () => {
+    const failure = new Error('clipboard write failed');
+    vi.mocked(writeSecret).mockRejectedValueOnce(failure);
+
+    await expect(writeClipboardSecret('pairing-secret-token')).rejects.toBe(failure);
+    expect(writeSecret).toHaveBeenCalledOnce();
+    expect(writeText).not.toHaveBeenCalled();
   });
 });

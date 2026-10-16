@@ -20,12 +20,12 @@ name = "firelink_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.7.2", features = [] }
+tauri-build = { version = "2.7.3", features = [] }
 
 [dependencies]
-tauri = { version = "2.12.3", features = ["tray-icon", "image-png", "test"] }
-tauri-plugin-opener = "2.7.1"
-tauri-plugin-dialog = "2.8.2"
+tauri = { version = "2.12.4", features = ["tray-icon", "image-png", "test"] }
+tauri-plugin-opener = "2.7.2"
+tauri-plugin-dialog = "2.8.3"
 tauri-plugin-shell = "2.5.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -35,15 +35,15 @@ reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 uuid = { version = "1", features = ["v4"] }
 ts-rs = { version = "12", features = ["serde-compat", "uuid-impl"] }
-tauri-plugin-notification = "2.6.0"
-tauri-plugin-clipboard-manager = "2.4.2"
+tauri-plugin-notification = "2.7.0"
+tauri-plugin-clipboard-manager = "2.5.0"
 sysinfo = "0.39.6"
 hmac = "0.13"
 sha2 = "0.11"
 sha1 = "0.11"
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
-tauri-plugin-deep-link = "2.6.1"
-tauri-plugin-single-instance = { version = "2.5.3", features = ["deep-link"] }
+tauri-plugin-deep-link = "2.6.2"
+tauri-plugin-single-instance = { version = "2.5.4", features = ["deep-link"] }
 tempfile = "3"
 thiserror = "2.0.21"
 axum = "0.8.9"

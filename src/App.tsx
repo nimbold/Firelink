@@ -8,7 +8,7 @@ import { DownloadTable, type DownloadTableStatusSummary } from "./components/Dow
 import { AddDownloadsModal } from './components/AddDownloadsModal';
 import { KeychainPermissionModal } from './components/KeychainPermissionModal';
 import { extractValidDownloadUrls } from './utils/url';
-import { readClipboardDownloadUrls } from './utils/clipboard';
+import { readClipboardDownloadUrls, writeClipboardSecret } from './utils/clipboard';
 import { listenEvent as listen, invokeCommand as invoke } from "./ipc";
 import { flushDownloadPersistence, initializeDownloadPersistence, useDownloadStore, waitForDownloadLifecycleWork, MAIN_QUEUE_ID, type ExtensionDownloadRequest } from './store/useDownloadStore';
 import { closeDownloadWorkAdmission, reopenDownloadWorkAdmission } from './store/downloadWorkBarrier';
@@ -851,7 +851,7 @@ function App() {
                     onClick={async () => {
                       const token = useSettingsStore.getState().extensionPairingToken;
                       try {
-                        if (token) await navigator.clipboard.writeText(token);
+                        if (token) await writeClipboardSecret(token);
                         acknowledgePairingTokenChange();
                       } catch (error) {
                         addToast({
