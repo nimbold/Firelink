@@ -115,7 +115,7 @@ type CommandMap = {
     result: void;
   };
   perform_system_action: { args: { action: PostQueueAction; force: boolean }; result: void };
-  ack_schedule_trigger: { args: { action: 'start' | 'stop'; key: string }; result: void };
+  ack_schedule_trigger: { args: { action: 'start' | 'stop'; key: string; runKey: string }; result: void };
   set_concurrent_limit: { args: { limit: number }; result: void };
   set_queue_concurrency_limits: { args: { limits: QueueConcurrencyConfig[] }; result: void };
   set_download_speed_limit: { args: { id: string; limit: string | null }; result: void };
@@ -254,7 +254,7 @@ export function invokeCommand<K extends CommandName>(
 }
 
 type EventMap = {
-  'schedule-trigger': { action: 'start' | 'stop'; key: string };
+  'schedule-trigger': { action: 'start' | 'stop'; key: string; runKey: string };
   'download-progress': DownloadProgressEvent;
   'download-removal': DownloadRemovalJob;
   'download-allocation': DownloadAllocationEvent;

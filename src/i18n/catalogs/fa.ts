@@ -1076,6 +1076,7 @@ const fa = {
       firefoxWindows: 'Firefox (Windows)',
       firefoxMacos: 'Firefox (macOS)',
       safariMacos: 'Safari (macOS)',
+      safariUnsupported: 'Safari (macOS) — در این سیستم‌عامل پشتیبانی نمی‌شود',
       windowsDesktop: 'دسکتاپ Windows',
       macosDesktop: 'دسکتاپ macOS',
     },

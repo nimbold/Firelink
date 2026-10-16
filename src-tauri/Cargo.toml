@@ -62,8 +62,13 @@ trash = "5"
 async-trait = "0.1"
 keyring-core = "1.0.1"
 auto-launch = "0.6.0"
+
+[patch.crates-io]
+tauri-plugin-deep-link = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "463977675da7bbb257dee59669b5e122c8d681db" }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+plist = "1.10.1"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSDockTile"] }
 objc2-core-services = "0.3"

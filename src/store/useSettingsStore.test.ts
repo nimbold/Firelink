@@ -346,6 +346,25 @@ describe('durable main-window and sidebar preferences', () => {
     expect(result?.schedulerActiveDownloadIds).toEqual(['download-1']);
   });
 
+  it('hydrates the pending native scheduler start marker without persisting it from the UI', () => {
+    const current = {
+      ...useSettingsStore.getState(),
+      schedulerTriggeredStartKey: ''
+    };
+    const merge = useSettingsStore.persist.getOptions().merge;
+    const result = merge?.({
+      schedulerTriggeredStartKey: '2026-06-22-start'
+    }, current);
+
+    expect(result?.schedulerTriggeredStartKey).toBe('2026-06-22-start');
+    const partialize = useSettingsStore.persist.getOptions().partialize;
+    const snapshot = partialize?.({
+      ...current,
+      schedulerTriggeredStartKey: '2026-06-22-start'
+    });
+    expect(snapshot).not.toHaveProperty('schedulerTriggeredStartKey');
+  });
+
   it('does not restore a running scheduler without active download IDs', () => {
     const merge = useSettingsStore.persist.getOptions().merge;
     expect(merge).toBeTypeOf('function');
@@ -1087,7 +1106,9 @@ describe('scheduled trigger durability', () => {
     // This is the same ordering used by App's schedule-trigger handler.
     const delivery = (async () => {
       await useSettingsStore.getState().persistSchedulerTracking(['download-1', 'download-1']);
-      await ipc.invokeCommand('ack_schedule_trigger', { action: 'start', key: 'scheduled-start' });
+      await ipc.invokeCommand('ack_schedule_trigger', {
+        action: 'start', key: 'scheduled-start', runKey: 'scheduled-start'
+      });
     })();
 
     await vi.waitFor(() => expect(events).toEqual(['settings-write-started']));
@@ -1131,7 +1152,9 @@ describe('scheduled trigger durability', () => {
 
     const deliverStart = async () => {
       await useSettingsStore.getState().persistSchedulerTracking(['download-1', 'download-1']);
-      await ipc.invokeCommand('ack_schedule_trigger', { action: 'start', key: 'scheduled-start' });
+      await ipc.invokeCommand('ack_schedule_trigger', {
+        action: 'start', key: 'scheduled-start', runKey: 'scheduled-start'
+      });
     };
 
     await expect(deliverStart()).rejects.toBeInstanceOf(SettingsPersistenceError);

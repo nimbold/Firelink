@@ -1076,6 +1076,7 @@ const common = {
       firefoxWindows: 'Firefox (Windows)',
       firefoxMacos: 'Firefox (macOS)',
       safariMacos: 'Safari (macOS)',
+      safariUnsupported: 'Safari (macOS) — unsupported on this platform',
       windowsDesktop: 'Windows desktop',
       macosDesktop: 'macOS desktop',
     },

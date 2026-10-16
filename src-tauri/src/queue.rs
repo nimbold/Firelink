@@ -2066,7 +2066,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
             return;
         };
         let _control_guard = self.acquire_aria2_control(&id).await;
-        if self.app_handle.try_state::<crate::Aria2DaemonGuard>()
+        if self
+            .app_handle
+            .try_state::<crate::Aria2DaemonGuard>()
             .is_some_and(|guard| guard.is_shutting_down())
         {
             self.release_aria2_permit_candidate(&id, waiter.lifecycle_generation)
@@ -2587,11 +2589,6 @@ impl<R: tauri::Runtime> QueueManager<R> {
         drop(registered);
         drop(generations);
         drop(cancellations);
-        if let Err(error) = self.clear_shutdown_completion_journal(id) {
-            self.rollback_enqueue_reservation(id, generation, previous_generation)
-                .await;
-            return Err(error);
-        }
         Ok(previous_generation)
     }
 
@@ -2696,26 +2693,42 @@ impl<R: tauri::Runtime> QueueManager<R> {
             return Err(error);
         }
 
-        // Cancellation can arrive while the durable admission marker is being
-        // written. Recheck it before making the task visible to the rest of
-        // the lifecycle; the admission gate prevents a dispatcher or queue
-        // mutation from observing a half-committed replacement.
-        {
-            let cancellations = self.enqueue_cancellations.lock().await;
+        // The finalizer can yield while shutdown or a newer user action begins.
+        // Resolve those races before retiring terminal evidence from a prior
+        // lifecycle, while the admission gate still keeps the pending task
+        // invisible to the dispatcher.
+        let cancellations = self.enqueue_cancellations.lock().await;
+        let admission_error = {
+            let shutdown_guard = self.app_handle.try_state::<crate::Aria2DaemonGuard>();
+            let _shutdown_admission = shutdown_guard
+                .as_ref()
+                .map(|guard| guard.lock_enqueue_admission());
+
             if cancellations
                 .get(&id)
                 .is_some_and(|cancelled| *cancelled >= generation)
             {
-                let mut pending = self.pending.lock().await;
-                pending.retain(|candidate| {
-                    !(candidate.id == id && candidate.lifecycle_generation == generation)
-                });
-                drop(pending);
-                self.forget_pending_order_ordinal(&id, generation).await;
-                self.rollback_enqueue_reservation(&id, generation, previous_generation)
-                    .await;
-                return Err("Download enqueue was superseded by a newer user action".to_string());
+                Some("Download enqueue was superseded by a newer user action".to_string())
+            } else if shutdown_guard
+                .as_ref()
+                .is_some_and(|guard| guard.is_shutting_down())
+            {
+                Some("Firelink is preparing to exit".to_string())
+            } else {
+                self.clear_shutdown_completion_journal(&id).err()
             }
+        };
+        drop(cancellations);
+        if let Some(error) = admission_error {
+            let mut pending = self.pending.lock().await;
+            pending.retain(|candidate| {
+                !(candidate.id == id && candidate.lifecycle_generation == generation)
+            });
+            drop(pending);
+            self.forget_pending_order_ordinal(&id, generation).await;
+            self.rollback_enqueue_reservation(&id, generation, previous_generation)
+                .await;
+            return Err(error);
         }
 
         // A committed replacement owns a new lifecycle. Retire terminal
@@ -11408,10 +11421,10 @@ mod tests {
                     kind: TaskKind::Aria2,
                     payload: SpawnPayload::default(),
                     lifecycle_generation: generation,
-                    },
-                    generation,
-                    previous_generation,
-                    || async { Err("journal commit failed".to_string()) },
+                },
+                generation,
+                previous_generation,
+                || async { Err("journal commit failed".to_string()) },
             )
             .await
             .expect_err("a failed finalizer must reject admission");
@@ -11420,6 +11433,198 @@ mod tests {
         assert!(manager.pending_order(None).await.is_empty());
         assert_eq!(manager.registered_lifecycle_generation(id).await, None);
         assert!(!manager.is_registered(id).await);
+    }
+
+    #[tokio::test]
+    async fn rejected_enqueue_preserves_shutdown_completion_from_an_earlier_rejected_exit() {
+        let root = tempfile::TempDir::new().expect("temporary database directory");
+        let database = crate::db::init_at_path(root.path()).expect("initialized database");
+        {
+            let mut connection = database.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO downloads (id, status, queue_id, data)
+                     VALUES (?1, 'downloading', 'main', ?2)",
+                    rusqlite::params![
+                        "shutdown-journal-rollback",
+                        r#"{"id":"shutdown-journal-rollback","status":"downloading","queueId":"main"}"#
+                    ],
+                )
+                .expect("active download row");
+            crate::db::record_shutdown_terminal(&mut connection, "shutdown-journal-rollback", 41)
+                .expect("prior shutdown completion journal");
+        }
+
+        let app = tauri::test::mock_builder()
+            .manage(database)
+            .manage(crate::Aria2DaemonGuard::new())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let guard = app.handle().state::<crate::Aria2DaemonGuard>();
+        assert!(guard.begin_shutdown(), "simulate the earlier exit request");
+        assert!(guard.cancel_shutdown(), "the earlier exit is rejected");
+
+        let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
+        let generation = 42;
+        let previous_generation = manager
+            .reserve_enqueue_generation("shutdown-journal-rollback", generation)
+            .await
+            .expect("new lifecycle reservation");
+        assert!(guard.begin_shutdown(), "a later exit starts before commit");
+        let error = manager
+            .commit_reserved_enqueue(
+                QueuedTask {
+                    id: "shutdown-journal-rollback".to_string(),
+                    queue_id: "main".to_string(),
+                    kind: TaskKind::Aria2,
+                    payload: SpawnPayload::default(),
+                    lifecycle_generation: generation,
+                },
+                generation,
+                previous_generation,
+            )
+            .await
+            .expect_err("shutdown must reject the new admission");
+        assert_eq!(error, "Firelink is preparing to exit");
+        drop(guard);
+        drop(manager);
+
+        {
+            let database = app.handle().state::<crate::db::DbState>();
+            let connection = database.lock().expect("database lock");
+            let journal_generation: String = connection
+                .query_row(
+                    "SELECT lifecycle_generation FROM shutdown_terminal_journal WHERE id = ?1",
+                    rusqlite::params!["shutdown-journal-rollback"],
+                    |row| row.get(0),
+                )
+                .expect("prior journal must remain until enqueue admission succeeds");
+            assert_eq!(journal_generation, "41");
+        }
+        drop(app);
+
+        let restarted = crate::db::init_at_path(root.path()).expect("restart recovery");
+        let connection = restarted.lock().expect("database lock");
+        let rows = crate::db::load_downloads(&connection).expect("recovered downloads");
+        let row: serde_json::Value = serde_json::from_str(&rows[0]).expect("download row JSON");
+        assert_eq!(row["status"], "completed");
+        let remaining_entries: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM shutdown_terminal_journal",
+                [],
+                |row| row.get(0),
+            )
+            .expect("journal count");
+        assert_eq!(remaining_entries, 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_enqueue_finalizer_preserves_prior_completion_journal() {
+        let root = tempfile::TempDir::new().expect("temporary database directory");
+        let database = crate::db::init_at_path(root.path()).expect("initialized database");
+        {
+            let mut connection = database.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO downloads (id, status, queue_id, data)
+                     VALUES (?1, 'downloading', 'main', ?2)",
+                    rusqlite::params![
+                        "shutdown-during-finalizer",
+                        r#"{"id":"shutdown-during-finalizer","status":"downloading","queueId":"main"}"#
+                    ],
+                )
+                .expect("active download row");
+            crate::db::record_shutdown_terminal(&mut connection, "shutdown-during-finalizer", 41)
+                .expect("prior shutdown completion journal");
+        }
+
+        let app = tauri::test::mock_builder()
+            .manage(database)
+            .manage(crate::Aria2DaemonGuard::new())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let guard = app.handle().state::<crate::Aria2DaemonGuard>();
+        let manager = Arc::new(QueueManager::test_new(
+            app.handle().clone(),
+            1,
+            Arc::new(TestSpawner),
+        ));
+        let id = "shutdown-during-finalizer".to_string();
+        let generation = 42;
+        let previous_generation = manager
+            .reserve_enqueue_generation(&id, generation)
+            .await
+            .expect("new lifecycle reservation");
+        let finalizer_started = Arc::new(tokio::sync::Notify::new());
+        let release_finalizer = Arc::new(tokio::sync::Notify::new());
+        let started = Arc::clone(&finalizer_started);
+        let release = Arc::clone(&release_finalizer);
+        let commit_manager = Arc::clone(&manager);
+        let commit_id = id.clone();
+        let commit = tokio::spawn(async move {
+            commit_manager
+                .commit_reserved_enqueue_with_finalizer(
+                    QueuedTask {
+                        id: commit_id,
+                        queue_id: "main".to_string(),
+                        kind: TaskKind::Aria2,
+                        payload: SpawnPayload::default(),
+                        lifecycle_generation: generation,
+                    },
+                    generation,
+                    previous_generation,
+                    move || async move {
+                        started.notify_one();
+                        release.notified().await;
+                        Ok(())
+                    },
+                )
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), finalizer_started.notified())
+            .await
+            .expect("durable finalizer should start");
+        assert!(guard.begin_shutdown(), "shutdown begins during finalization");
+        release_finalizer.notify_one();
+        let error = tokio::time::timeout(Duration::from_secs(1), commit)
+            .await
+            .expect("enqueue admission should finish")
+            .expect("enqueue task should not panic")
+            .expect_err("shutdown must reject the in-flight admission");
+        assert_eq!(error, "Firelink is preparing to exit");
+        assert!(manager.pending_order(None).await.is_empty());
+        assert!(!manager.is_registered(&id).await);
+
+        drop(guard);
+        drop(manager);
+        {
+            let database = app.handle().state::<crate::db::DbState>();
+            let connection = database.lock().expect("database lock");
+            let journal_generation: String = connection
+                .query_row(
+                    "SELECT lifecycle_generation FROM shutdown_terminal_journal WHERE id = ?1",
+                    rusqlite::params![id],
+                    |row| row.get(0),
+                )
+                .expect("prior journal must remain until enqueue admission succeeds");
+            assert_eq!(journal_generation, "41");
+        }
+        drop(app);
+
+        let restarted = crate::db::init_at_path(root.path()).expect("restart recovery");
+        let connection = restarted.lock().expect("database lock");
+        let rows = crate::db::load_downloads(&connection).expect("recovered downloads");
+        let row: serde_json::Value = serde_json::from_str(&rows[0]).expect("download row JSON");
+        assert_eq!(row["status"], "completed");
+        let remaining_entries: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM shutdown_terminal_journal",
+                [],
+                |row| row.get(0),
+            )
+            .expect("journal count");
+        assert_eq!(remaining_entries, 0);
     }
 
     #[tokio::test]

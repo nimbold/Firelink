@@ -1430,6 +1430,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-core-services",
  "objc2-foundation",
+ "plist",
  "regex",
  "reqwest",
  "rusqlite",
@@ -4909,8 +4910,7 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-deep-link"
 version = "2.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b3c64e24ebcbc63aaa2d88a9c51e2507084b46620baf39ecb0baa0738a08bb4"
+source = "git+https://github.com/tauri-apps/plugins-workspace?rev=463977675da7bbb257dee59669b5e122c8d681db#463977675da7bbb257dee59669b5e122c8d681db"
 dependencies = [
  "dunce",
  "plist",

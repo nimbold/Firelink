@@ -1076,6 +1076,7 @@ const uk = {
       firefoxWindows: 'Firefox (Windows)',
       firefoxMacos: 'Firefox (macOS)',
       safariMacos: 'Safari (macOS)',
+      safariUnsupported: 'Safari (macOS) — не підтримується на цій платформі',
       windowsDesktop: 'Робочий стіл Windows',
       macosDesktop: 'Робочий стіл macOS',
     },

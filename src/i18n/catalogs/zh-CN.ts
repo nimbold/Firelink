@@ -1076,6 +1076,7 @@ const zhCN = {
       firefoxWindows: 'Firefox (Windows)',
       firefoxMacos: 'Firefox (macOS)',
       safariMacos: 'Safari (macOS)',
+      safariUnsupported: 'Safari (macOS) — 此平台不支持',
       windowsDesktop: 'Windows 桌面',
       macosDesktop: 'macOS 桌面',
     },

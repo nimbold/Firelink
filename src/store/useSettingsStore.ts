@@ -338,6 +338,7 @@ export interface SettingsState {
   schedulerRunning: boolean;
   schedulerActiveDownloadIds: string[];
   schedulerLastStartKey: string;
+  schedulerTriggeredStartKey: string;
   schedulerLastStopKey: string;
   lastCustomSpeedLimitKiB: number;
   lastCustomSpeedLimitUnit: string;
@@ -536,6 +537,7 @@ export const useSettingsStore = create<SettingsState>()(
       schedulerRunning: false,
       schedulerActiveDownloadIds: [],
       schedulerLastStartKey: '',
+      schedulerTriggeredStartKey: '',
       schedulerLastStopKey: '',
       lastCustomSpeedLimitKiB: 1024,
       lastCustomSpeedLimitUnit: 'MB/s',
@@ -1402,6 +1404,10 @@ export const useSettingsStore = create<SettingsState>()(
           && schedulerActiveDownloadIds.length > 0,
         schedulerActiveDownloadIds,
         schedulerLastStartKey: persistedString(persisted.schedulerLastStartKey, currentState.schedulerLastStartKey),
+        schedulerTriggeredStartKey: persistedString(
+          persisted.schedulerTriggeredStartKey,
+          currentState.schedulerTriggeredStartKey
+        ),
         schedulerLastStopKey: persistedString(persisted.schedulerLastStopKey, currentState.schedulerLastStopKey),
         siteLogins: Array.isArray(persisted.siteLogins)
           ? sanitizeSiteLogins(persisted.siteLogins)

@@ -1076,6 +1076,7 @@ const ru = {
       firefoxWindows: 'Firefox (Windows)',
       firefoxMacos: 'Firefox (macOS)',
       safariMacos: 'Safari (macOS)',
+      safariUnsupported: 'Safari (macOS) — не поддерживается на этой платформе',
       windowsDesktop: 'Windows (ПК)',
       macosDesktop: 'macOS (ПК)',
     },

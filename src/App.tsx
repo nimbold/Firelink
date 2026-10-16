@@ -64,6 +64,7 @@ import {
   resolveSchedulerStopOutcome
 } from './utils/schedulerControl';
 import { createSerialTaskQueue } from './utils/serialTaskQueue';
+import { shouldApplySchedulerTriggerToRun } from './utils/schedulerTrigger';
 import { useWindowFocusState } from './utils/windowFocus';
 import { useWindowMaximizedState } from './utils/windowMaximized';
 
@@ -1255,129 +1256,170 @@ function App() {
     // async handler is still unwinding, causing the replacement listener to
     // drop the only retry for that scheduled action.
     const processingScheduleKeys = new Set<string>();
+    const scheduleTriggerQueue = createSerialTaskQueue();
+    const initialSchedulerState = useSettingsStore.getState();
+    let activeSchedulerRunKey = initialSchedulerState.schedulerTriggeredStartKey
+      || initialSchedulerState.schedulerLastStartKey
+      || null;
+    let latestSchedulerRunKey = activeSchedulerRunKey;
     let reportedStopFailureKey: string | null = null;
     let listenerActive = true;
-    const unlisten = listen('schedule-trigger', async (event) => {
+    const unlisten = listen('schedule-trigger', (event) => {
       if (!listenerActive || frontendExitPreparing) return;
-      const state = useSettingsStore.getState();
       const payload = event.payload;
-      if (processingScheduleKeys.has(payload.key)) return;
-      processingScheduleKeys.add(payload.key);
-      try {
-        if (payload.action === 'start') {
-          reportedStopFailureKey = null;
-          pendingScheduledStopIds.current.clear();
-          clearPendingPostActionTimer();
-          const scheduledQueueIds = getScheduledQueueIds();
-          const generation = beginSchedulerControl(scheduledQueueIds);
-          if (scheduledQueueIds.length === 0) {
-            await state.persistSchedulerTracking([]);
-            if (!listenerActive) return;
-            addToast({
-              message: t($ => $.app.schedulerNoQueues),
-              variant: 'warning',
-              isActionable: true
-            });
-            await invoke('ack_schedule_trigger', { action: 'start', key: payload.key });
-            return;
-          }
-          const previouslyTrackedIds = new Set(state.schedulerActiveDownloadIds);
-          const startedResults = await Promise.all(
-            scheduledQueueIds.map(queueId => useDownloadStore.getState().startQueue(queueId))
-          );
-          const acceptedIds = startedResults.flat();
-          if (!isSchedulerControlCurrent(generation)) {
-            const handoffIds = handoffSupersededSchedulerIds(
-              acceptedIds,
-              id => useDownloadStore.getState().downloads.find(download => download.id === id)?.queueId || MAIN_QUEUE_ID
-            );
-            await Promise.allSettled(
-              acceptedIds
-                .filter(id => !handoffIds.has(id))
-                .map(id => useDownloadStore.getState().pauseDownload(id))
-            );
-            const currentSchedulerState = useSettingsStore.getState();
-            await currentSchedulerState.persistSchedulerTracking(
-              currentSchedulerState.schedulerActiveDownloadIds
-            );
-            if (!listenerActive) return;
-            await invoke('ack_schedule_trigger', { action: 'start', key: payload.key });
-            return;
-          }
-          const scheduledQueueSet = new Set(scheduledQueueIds);
-          const handoffIds = consumeSchedulerHandoffIds(generation);
-          const trackedIds = useDownloadStore.getState().downloads
-            .filter(download =>
-              (previouslyTrackedIds.has(download.id) || handoffIds.has(download.id)) &&
-              scheduledQueueSet.has(download.queueId || MAIN_QUEUE_ID) &&
-              isActiveDownloadStatus(download.status)
-            )
-            .map(download => download.id);
-          const activeIds = [...new Set([...acceptedIds, ...trackedIds])];
-          await state.persistSchedulerTracking(activeIds);
-          if (!listenerActive) return;
-          await invoke('ack_schedule_trigger', { action: 'start', key: payload.key });
-        } else if (payload.action === 'stop') {
-          const generation = beginSchedulerControl();
-          // A stop event can race with the completion effect's post-action
-          // countdown after it has already cleared the tracked IDs. Always
-          // cancel that pending action before applying the stop transition.
-          clearPendingPostActionTimer();
-          const trackedIds = state.schedulerActiveDownloadIds;
-          pendingScheduledStopIds.current = new Set(trackedIds);
-          const failedIds = new Set<string>();
-          if (trackedIds.length > 0) {
-            const pauseResults = await Promise.allSettled(
-              trackedIds.map(id => useDownloadStore.getState().pauseDownload(id))
-            );
-            pauseResults.forEach((result, index) => {
-              if (result.status === 'rejected') failedIds.add(trackedIds[index]);
-            });
-          }
-          const schedulerState = useSettingsStore.getState();
-          const activeIds = new Set(useDownloadStore.getState().downloads
-            .filter(download => isActiveDownloadStatus(download.status))
-            .map(download => download.id));
-          const stopOutcome = resolveSchedulerStopOutcome({
-            controlCurrent: isSchedulerControlCurrent(generation),
-            attemptedIds: trackedIds,
-            failedIds,
-            activeIds,
-            currentTrackedIds: schedulerState.schedulerActiveDownloadIds
-          });
-          // The tracking snapshot may belong to a newer start when this stop
-          // was superseded. Only stop targets that still need a retry should
-          // suppress normal completion reconciliation.
-          pendingScheduledStopIds.current = new Set(stopOutcome.retryIds);
-          await schedulerState.persistSchedulerTracking(stopOutcome.trackedIds);
-          if (!stopOutcome.acknowledge) {
-            if (reportedStopFailureKey !== payload.key) {
-              reportedStopFailureKey = payload.key;
+      const eventIdentity = `${payload.action}:${payload.runKey}:${payload.key}`;
+      if (processingScheduleKeys.has(eventIdentity)) return;
+      processingScheduleKeys.add(eventIdentity);
+      void scheduleTriggerQueue(async () => {
+        if (!listenerActive || frontendExitPreparing) {
+          processingScheduleKeys.delete(eventIdentity);
+          return;
+        }
+        const state = useSettingsStore.getState();
+        try {
+          if (payload.action === 'start') {
+            if (!shouldApplySchedulerTriggerToRun(
+              'start', payload.key, payload.runKey, activeSchedulerRunKey,
+              latestSchedulerRunKey
+            )) {
+              await invoke('ack_schedule_trigger', {
+                action: 'start', key: payload.key, runKey: payload.runKey
+              });
+              return;
+            }
+            activeSchedulerRunKey = payload.runKey;
+            latestSchedulerRunKey = payload.runKey;
+            reportedStopFailureKey = null;
+            pendingScheduledStopIds.current.clear();
+            clearPendingPostActionTimer();
+            const scheduledQueueIds = getScheduledQueueIds();
+            const generation = beginSchedulerControl(scheduledQueueIds);
+            if (scheduledQueueIds.length === 0) {
+              await state.persistSchedulerTracking([]);
+              if (!listenerActive) return;
               addToast({
-                message: stopOutcome.trackedIds.length === 1
-                  ? t($ => $.app.schedulerPauseOneFailed)
-                  : t($ => $.app.schedulerPauseManyFailed, { count: stopOutcome.trackedIds.length }),
-                variant: 'error',
+                message: t($ => $.app.schedulerNoQueues),
+                variant: 'warning',
                 isActionable: true
               });
+              await invoke('ack_schedule_trigger', {
+                action: 'start', key: payload.key, runKey: payload.runKey
+              });
+              return;
             }
-            // Leave the native stop trigger unacknowledged while a failed
-            // target remains active. The scheduler will redeliver it, and the
-            // durable tracking snapshot narrows each retry to unfinished IDs.
-            return;
+            const previouslyTrackedIds = new Set(state.schedulerActiveDownloadIds);
+            const startedResults = await Promise.all(
+              scheduledQueueIds.map(queueId => useDownloadStore.getState().startQueue(queueId))
+            );
+            const acceptedIds = startedResults.flat();
+            if (!isSchedulerControlCurrent(generation)) {
+              const handoffIds = handoffSupersededSchedulerIds(
+                acceptedIds,
+                id => useDownloadStore.getState().downloads.find(download => download.id === id)?.queueId || MAIN_QUEUE_ID
+              );
+              await Promise.allSettled(
+                acceptedIds
+                  .filter(id => !handoffIds.has(id))
+                  .map(id => useDownloadStore.getState().pauseDownload(id))
+              );
+              const currentSchedulerState = useSettingsStore.getState();
+              await currentSchedulerState.persistSchedulerTracking(
+                currentSchedulerState.schedulerActiveDownloadIds
+              );
+              if (!listenerActive) return;
+              await invoke('ack_schedule_trigger', {
+                action: 'start', key: payload.key, runKey: payload.runKey
+              });
+              return;
+            }
+            const scheduledQueueSet = new Set(scheduledQueueIds);
+            const handoffIds = consumeSchedulerHandoffIds(generation);
+            const trackedIds = useDownloadStore.getState().downloads
+              .filter(download =>
+                (previouslyTrackedIds.has(download.id) || handoffIds.has(download.id)) &&
+                scheduledQueueSet.has(download.queueId || MAIN_QUEUE_ID) &&
+                isActiveDownloadStatus(download.status)
+              )
+              .map(download => download.id);
+            const activeIds = [...new Set([...acceptedIds, ...trackedIds])];
+            await state.persistSchedulerTracking(activeIds);
+            if (!listenerActive) return;
+            await invoke('ack_schedule_trigger', {
+              action: 'start', key: payload.key, runKey: payload.runKey
+            });
+          } else if (payload.action === 'stop') {
+            if (!shouldApplySchedulerTriggerToRun(
+              'stop', payload.key, payload.runKey, activeSchedulerRunKey
+            )) {
+              await invoke('ack_schedule_trigger', {
+                action: 'stop', key: payload.key, runKey: payload.runKey
+              });
+              return;
+            }
+            const generation = beginSchedulerControl();
+            // A stop event can race with the completion effect's post-action
+            // countdown after it has already cleared the tracked IDs. Always
+            // cancel that pending action before applying the stop transition.
+            clearPendingPostActionTimer();
+            const trackedIds = state.schedulerActiveDownloadIds;
+            pendingScheduledStopIds.current = new Set(trackedIds);
+            const failedIds = new Set<string>();
+            if (trackedIds.length > 0) {
+              const pauseResults = await Promise.allSettled(
+                trackedIds.map(id => useDownloadStore.getState().pauseDownload(id))
+              );
+              pauseResults.forEach((result, index) => {
+                if (result.status === 'rejected') failedIds.add(trackedIds[index]);
+              });
+            }
+            const schedulerState = useSettingsStore.getState();
+            const activeIds = new Set(useDownloadStore.getState().downloads
+              .filter(download => isActiveDownloadStatus(download.status))
+              .map(download => download.id));
+            const stopOutcome = resolveSchedulerStopOutcome({
+              controlCurrent: isSchedulerControlCurrent(generation),
+              attemptedIds: trackedIds,
+              failedIds,
+              activeIds,
+              currentTrackedIds: schedulerState.schedulerActiveDownloadIds
+            });
+            // The tracking snapshot may belong to a newer start when this stop
+            // was superseded. Only stop targets that still need a retry should
+            // suppress normal completion reconciliation.
+            pendingScheduledStopIds.current = new Set(stopOutcome.retryIds);
+            await schedulerState.persistSchedulerTracking(stopOutcome.trackedIds);
+            if (!stopOutcome.acknowledge) {
+              if (reportedStopFailureKey !== eventIdentity) {
+                reportedStopFailureKey = eventIdentity;
+                addToast({
+                  message: stopOutcome.trackedIds.length === 1
+                    ? t($ => $.app.schedulerPauseOneFailed)
+                    : t($ => $.app.schedulerPauseManyFailed, { count: stopOutcome.trackedIds.length }),
+                  variant: 'error',
+                  isActionable: true
+                });
+              }
+              // Leave the native stop trigger unacknowledged while a failed
+              // target remains active. The scheduler will redeliver it, and the
+              // durable tracking snapshot narrows each retry to unfinished IDs.
+              return;
+            }
+            if (!listenerActive) return;
+            await invoke('ack_schedule_trigger', {
+              action: 'stop', key: payload.key, runKey: payload.runKey
+            });
+            if (activeSchedulerRunKey === payload.runKey) activeSchedulerRunKey = null;
+            if (reportedStopFailureKey === eventIdentity) reportedStopFailureKey = null;
           }
-          if (!listenerActive) return;
-          await invoke('ack_schedule_trigger', { action: 'stop', key: payload.key });
-          if (reportedStopFailureKey === payload.key) reportedStopFailureKey = null;
+        } catch (error) {
+          // A persistence failure must leave the native trigger unacknowledged so
+          // it can be delivered again. The persistence listener reports the
+          // user-visible error; log here to avoid an unhandled listener promise.
+          console.error('Failed to process scheduler trigger:', error);
+        } finally {
+          processingScheduleKeys.delete(eventIdentity);
         }
-      } catch (error) {
-        // A persistence failure must leave the native trigger unacknowledged so
-        // it can be delivered again. The persistence listener reports the
-        // user-visible error; log here to avoid an unhandled listener promise.
-        console.error('Failed to process scheduler trigger:', error);
-      } finally {
-        processingScheduleKeys.delete(payload.key);
-      }
+      });
     });
     
     return () => {

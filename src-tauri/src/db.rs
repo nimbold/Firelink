@@ -55,7 +55,7 @@ pub fn init(storage_layout: &crate::storage::StorageLayout) -> Result<DbState, S
 }
 
 #[cfg(test)]
-fn init_at_path(app_data_dir: &Path) -> Result<DbState, String> {
+pub(crate) fn init_at_path(app_data_dir: &Path) -> Result<DbState, String> {
     init_at_path_internal(app_data_dir, false)
 }
 

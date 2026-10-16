@@ -32,6 +32,10 @@ import {
   subfolderFromDerivedCategoryPath
 } from '../utils/downloadLocations';
 import { usePlatformInfo } from '../utils/platform';
+import {
+  getBrowserCookieSourceOptions,
+  isMediaCookieSourceSupported
+} from '../utils/mediaCookieSources';
 import { isTrustedFirelinkReleaseUrl } from '../utils/releaseUrls';
 import { normalizeCustomProxy } from '../store/useDownloadStore';
 import { shouldApplyTorrentNetworkInputResult } from '../utils/torrentNetworkInput';
@@ -71,19 +75,6 @@ const engineChecks = [
   { kind: 'ytdlp', name: 'yt-dlp', command: 'get_ytdlp_engine_status' },
   { kind: 'ffmpeg', name: 'FFmpeg', command: 'get_ffmpeg_engine_status' },
   { kind: 'deno', name: 'Deno', command: 'get_deno_engine_status' },
-] as const;
-
-const browserCookieSourceOptions = [
-  { value: 'none', label: 'None' },
-  { value: 'safari', label: 'Safari' },
-  { value: 'chrome', label: 'Chrome' },
-  { value: 'chromium', label: 'Chromium' },
-  { value: 'firefox', label: 'Firefox' },
-  { value: 'edge', label: 'Edge' },
-  { value: 'brave', label: 'Brave' },
-  { value: 'opera', label: 'Opera' },
-  { value: 'vivaldi', label: 'Vivaldi' },
-  { value: 'whale', label: 'Whale' },
 ] as const;
 
 type EngineCheck = typeof engineChecks[number];
@@ -420,6 +411,14 @@ export default function SettingsView() {
   const isSidebarOnRight = settings.sidebarPosition === 'right'
     || (settings.sidebarPosition === 'auto' && isRtl);
   const platform = usePlatformInfo();
+  const mediaCookieSourceOptions = getBrowserCookieSourceOptions(
+    platform.os,
+    settings.mediaCookieSource
+  );
+  const mediaCookieSourceSupported = isMediaCookieSourceSupported(
+    settings.mediaCookieSource,
+    platform.os
+  );
   const platformName =
     platform.os === 'macos'
       ? 'macOS'
@@ -912,7 +911,9 @@ runEngineChecks(false);
 
   const handleBrowseMediaCookieBrowserProfile = async () => {
     const browser = settings.mediaCookieSource;
-    if (browser === 'none' || !browserCookieSourceOptions.some(option => option.value === browser)) return;
+    if (browser === 'none'
+      || !mediaCookieSourceSupported
+      || !mediaCookieSourceOptions.some(option => option.value === browser)) return;
     try {
       const selected = await open({
         directory: browser !== 'safari',
@@ -2323,12 +2324,20 @@ className="app-button px-3 py-1.5 text-[12px] flex items-center gap-1.5 disabled
                         <label htmlFor="media-browser-cookie-source" className="text-text-secondary font-semibold">{t($ => $.settings.engine.browserCookiesSource)}</label>
                         <select
                           id="media-browser-cookie-source"
-                          value={browserCookieSourceOptions.some(option => option.value === settings.mediaCookieSource) ? settings.mediaCookieSource : 'none'}
+                          value={mediaCookieSourceOptions.some(option => option.value === settings.mediaCookieSource) ? settings.mediaCookieSource : 'none'}
                           onChange={(e) => settings.setMediaCookieSource(e.target.value)}
                           className="bg-bg-input border border-border-modal rounded-lg p-1.5 text-[13px] text-text-primary focus:outline-none focus:border-accent w-full"
                         >
-                          {browserCookieSourceOptions.map(option => (
-                            <option key={option.value} value={option.value}>{option.value === 'none' ? t($ => $.settings.engine.none) : option.label}</option>
+                          {mediaCookieSourceOptions.map(option => (
+                            <option key={option.value} value={option.value} disabled={option.disabled}>
+                              {option.value === 'none'
+                                ? t($ => $.settings.engine.none)
+                                : option.label === 'safariUnsupported'
+                                  ? t($ => $.settings.network.safariUnsupported)
+                                  : option.label === 'safariMacos'
+                                  ? t($ => $.settings.network.safariMacos)
+                                  : option.label}
+                            </option>
                           ))}
                         </select>
                       </div>
@@ -2360,7 +2369,7 @@ className="app-button px-3 py-1.5 text-[12px] flex items-center gap-1.5 disabled
                               type="button"
                               className="app-button px-2.5 py-1.5 text-xs"
                               onClick={() => void handleBrowseMediaCookieBrowserProfile()}
-                              disabled={settings.mediaCookieSource === 'none'}
+                              disabled={settings.mediaCookieSource === 'none' || !mediaCookieSourceSupported}
                             >
                               {settings.mediaCookieSource === 'safari'
                                 ? t($ => $.settings.engine.chooseSafariCookieDatabase)

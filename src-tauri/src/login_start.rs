@@ -273,11 +273,6 @@ fn launch_path(path: String) -> Result<String, String> {
     encode_linux_exec_path(&path)
 }
 
-#[cfg(target_os = "macos")]
-fn launch_path(path: String) -> String {
-    path
-}
-
 #[cfg(target_os = "windows")]
 fn build_auto_launch() -> Result<auto_launch::AutoLaunch, String> {
     use auto_launch::{AutoLaunchBuilder, WindowsEnableMode};
@@ -324,20 +319,195 @@ fn build_macos_sm_app_service() -> Result<auto_launch::AutoLaunch, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn build_macos_launch_agent() -> Result<auto_launch::AutoLaunch, String> {
-    use auto_launch::{AutoLaunchBuilder, MacOSLaunchMode};
+fn macos_launch_agent_path() -> Result<std::path::PathBuf, String> {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| "could not resolve the macOS user home directory".to_string())?;
+    Ok(home
+        .join("Library")
+        .join("LaunchAgents")
+        .join("Firelink.plist"))
+}
 
-    let executable = launch_path(current_executable_path()?);
-    let mut builder = AutoLaunchBuilder::new();
-    builder
-        .set_app_name("Firelink")
-        .set_app_path(&executable)
-        .set_macos_launch_mode(MacOSLaunchMode::LaunchAgent)
-        .set_bundle_identifiers(&["com.nimbold.firelink"])
-        .set_args(&[AUTOSTART_ARGUMENT]);
-    builder
-        .build()
-        .map_err(|error| format!("could not configure macOS LaunchAgent: {error}"))
+#[cfg(target_os = "macos")]
+fn macos_launch_agent_value(executable: &str) -> plist::Value {
+    let mut dictionary = plist::Dictionary::new();
+    dictionary.insert(
+        "Label".to_string(),
+        plist::Value::String("Firelink".to_string()),
+    );
+    dictionary.insert(
+        "AssociatedBundleIdentifiers".to_string(),
+        plist::Value::Array(vec![plist::Value::String(
+            "com.nimbold.firelink".to_string(),
+        )]),
+    );
+    dictionary.insert(
+        "ProgramArguments".to_string(),
+        plist::Value::Array(vec![
+            plist::Value::String(executable.to_string()),
+            plist::Value::String(AUTOSTART_ARGUMENT.to_string()),
+        ]),
+    );
+    dictionary.insert("RunAtLoad".to_string(), plist::Value::Boolean(true));
+    plist::Value::Dictionary(dictionary)
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MacOSLaunchAgentState {
+    Missing,
+    CurrentFirelink,
+    StaleFirelink,
+    ForeignOrInvalid,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_launch_agent_is_owned(value: &plist::Value) -> bool {
+    let Some(dictionary) = value.as_dictionary() else {
+        return false;
+    };
+    let bundle_identifiers = dictionary
+        .get("AssociatedBundleIdentifiers")
+        .and_then(plist::Value::as_array);
+
+    dictionary.get("Label").and_then(plist::Value::as_string) == Some("Firelink")
+        && bundle_identifiers.is_some_and(|identifiers| {
+            identifiers
+                .iter()
+                .any(|identifier| identifier.as_string() == Some("com.nimbold.firelink"))
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_launch_agent_matches(value: &plist::Value, executable: &str) -> bool {
+    if !macos_launch_agent_is_owned(value) {
+        return false;
+    }
+    let Some(dictionary) = value.as_dictionary() else {
+        return false;
+    };
+    let arguments = dictionary
+        .get("ProgramArguments")
+        .and_then(plist::Value::as_array);
+
+    dictionary
+        .get("RunAtLoad")
+        .and_then(plist::Value::as_boolean)
+        == Some(true)
+        && arguments.is_some_and(|arguments| {
+            arguments.len() == 2
+                && arguments[0].as_string() == Some(executable)
+                && arguments[1].as_string() == Some(AUTOSTART_ARGUMENT)
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_launch_agent_state(contents: &[u8], executable: &str) -> MacOSLaunchAgentState {
+    let Ok(value) = plist::Value::from_reader(std::io::Cursor::new(contents)) else {
+        return MacOSLaunchAgentState::ForeignOrInvalid;
+    };
+    if !macos_launch_agent_is_owned(&value) {
+        return MacOSLaunchAgentState::ForeignOrInvalid;
+    }
+    if macos_launch_agent_matches(&value, executable) {
+        MacOSLaunchAgentState::CurrentFirelink
+    } else {
+        MacOSLaunchAgentState::StaleFirelink
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_launch_agent_needs_cleanup(state: MacOSLaunchAgentState) -> bool {
+    state == MacOSLaunchAgentState::StaleFirelink
+}
+
+#[cfg(target_os = "macos")]
+fn macos_launch_agent_is_firelink_owned(state: MacOSLaunchAgentState) -> bool {
+    matches!(
+        state,
+        MacOSLaunchAgentState::CurrentFirelink | MacOSLaunchAgentState::StaleFirelink
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn inspect_macos_launch_agent() -> Result<MacOSLaunchAgentState, String> {
+    let path = macos_launch_agent_path()?;
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(MacOSLaunchAgentState::Missing);
+        }
+        Err(error) => Err(format!(
+            "could not inspect macOS LaunchAgent plist: {error}"
+        ))?,
+    };
+    if !metadata.file_type().is_file() {
+        return Ok(MacOSLaunchAgentState::ForeignOrInvalid);
+    }
+    let executable = current_executable_path()?;
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(macos_launch_agent_state(&bytes, &executable)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(MacOSLaunchAgentState::Missing)
+        }
+        Err(error) => Err(format!("could not read macOS LaunchAgent plist: {error}")),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn enable_macos_launch_agent() -> Result<(), String> {
+    match inspect_macos_launch_agent()? {
+        MacOSLaunchAgentState::CurrentFirelink => return Ok(()),
+        MacOSLaunchAgentState::StaleFirelink => disable_macos_launch_agent()?,
+        MacOSLaunchAgentState::Missing => {}
+        MacOSLaunchAgentState::ForeignOrInvalid => {
+            return Err(
+                "an existing LaunchAgent plist at Firelink's path is not owned by Firelink"
+                    .to_string(),
+            );
+        }
+    }
+    let path = macos_launch_agent_path()?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "macOS LaunchAgent path has no parent directory".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("could not create macOS LaunchAgents directory: {error}"))?;
+
+    let executable = current_executable_path()?;
+    let value = macos_launch_agent_value(&executable);
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|error| format!("could not prepare macOS LaunchAgent plist: {error}"))?;
+    value
+        .to_writer_xml(temporary.as_file_mut())
+        .map_err(|error| format!("could not serialize macOS LaunchAgent plist: {error}"))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| format!("could not sync macOS LaunchAgent plist: {error}"))?;
+    temporary
+        .persist_noclobber(&path)
+        .map_err(|error| format!("could not install macOS LaunchAgent plist: {}", error.error))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn disable_macos_launch_agent() -> Result<(), String> {
+    let state = inspect_macos_launch_agent()?;
+    if !macos_launch_agent_is_firelink_owned(state) {
+        return Ok(());
+    }
+    let path = macos_launch_agent_path()?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => std::fs::remove_file(path)
+            .map_err(|error| format!("could not remove macOS LaunchAgent plist: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "could not inspect macOS LaunchAgent plist: {error}"
+        )),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -351,10 +521,20 @@ fn macos_service_status() -> smappservice_rs::ServiceStatus {
 fn status_macos() -> Result<LoginStartStatus, String> {
     use smappservice_rs::ServiceStatus;
 
-    let fallback = build_macos_launch_agent()?;
-    let fallback_enabled = fallback
-        .is_enabled()
-        .map_err(|error| format!("could not read macOS LaunchAgent state: {error}"))?;
+    let mut fallback_state = inspect_macos_launch_agent()?;
+    if fallback_state == MacOSLaunchAgentState::ForeignOrInvalid {
+        log::warn!("existing macOS LaunchAgent plist is invalid or not owned by Firelink");
+    }
+    if macos_launch_agent_needs_cleanup(fallback_state) {
+        // A LaunchAgent for an older app path can still start that old copy at
+        // login even though this installation would report itself disabled.
+        // Remove the stale Firelink-owned fallback before returning status.
+        disable_macos_launch_agent().map_err(|error| {
+            format!("could not remove stale macOS LaunchAgent startup: {error}")
+        })?;
+        fallback_state = MacOSLaunchAgentState::Missing;
+    }
+    let fallback_enabled = fallback_state == MacOSLaunchAgentState::CurrentFirelink;
 
     let Some(_modern) = build_macos_sm_app_service().ok() else {
         return Ok(LoginStartStatus {
@@ -367,8 +547,8 @@ fn status_macos() -> Result<LoginStartStatus, String> {
     let modern_status = macos_service_status();
     match modern_status {
         ServiceStatus::Enabled | ServiceStatus::RequiresApproval => {
-            if fallback_enabled {
-                fallback.disable().map_err(|error| {
+            if macos_launch_agent_is_firelink_owned(fallback_state) {
+                disable_macos_launch_agent().map_err(|error| {
                     format!("could not remove stale macOS LaunchAgent startup: {error}")
                 })?;
             }
@@ -416,7 +596,6 @@ pub fn status() -> Result<LoginStartStatus, String> {
 pub fn enable() -> Result<LoginStartStatus, String> {
     #[cfg(target_os = "macos")]
     {
-        let fallback = build_macos_launch_agent()?;
         if let Ok(modern) = build_macos_sm_app_service() {
             use smappservice_rs::ServiceStatus;
 
@@ -427,9 +606,14 @@ pub fn enable() -> Result<LoginStartStatus, String> {
                 // Only one registration may own startup. A stale fallback
                 // from an older build must not launch a second Firelink
                 // process alongside SMAppService.
-                fallback.disable().map_err(|error| {
-                    format!("could not remove stale macOS LaunchAgent startup: {error}")
-                })?;
+                if matches!(
+                    inspect_macos_launch_agent()?,
+                    MacOSLaunchAgentState::CurrentFirelink | MacOSLaunchAgentState::StaleFirelink
+                ) {
+                    disable_macos_launch_agent().map_err(|error| {
+                        format!("could not remove stale macOS LaunchAgent startup: {error}")
+                    })?;
+                }
                 return status_macos();
             }
             match modern.enable() {
@@ -438,11 +622,17 @@ pub fn enable() -> Result<LoginStartStatus, String> {
                         macos_service_status(),
                         ServiceStatus::Enabled | ServiceStatus::RequiresApproval
                     ) {
-                        if let Err(error) = fallback.disable() {
-                            let _ = modern.disable();
-                            return Err(format!(
-                                "could not remove stale macOS LaunchAgent startup: {error}"
-                            ));
+                        if matches!(
+                            inspect_macos_launch_agent()?,
+                            MacOSLaunchAgentState::CurrentFirelink
+                                | MacOSLaunchAgentState::StaleFirelink
+                        ) {
+                            if let Err(error) = disable_macos_launch_agent() {
+                                let _ = modern.disable();
+                                return Err(format!(
+                                    "could not remove stale macOS LaunchAgent startup: {error}"
+                                ));
+                            }
                         }
                         return status_macos();
                     }
@@ -455,8 +645,7 @@ pub fn enable() -> Result<LoginStartStatus, String> {
             }
         }
 
-        fallback
-            .enable()
+        enable_macos_launch_agent()
             .map_err(|error| format!("could not enable macOS login startup: {error}"))?;
         return status_macos();
     }
@@ -491,12 +680,10 @@ pub fn disable() -> Result<LoginStartStatus, String> {
             }
         }
 
-        if let Ok(fallback) = build_macos_launch_agent() {
-            if let Err(error) = fallback.disable() {
-                first_error.get_or_insert_with(|| {
-                    format!("could not disable macOS LaunchAgent startup: {error}")
-                });
-            }
+        if let Err(error) = disable_macos_launch_agent() {
+            first_error.get_or_insert_with(|| {
+                format!("could not disable macOS LaunchAgent startup: {error}")
+            });
         }
 
         if let Some(error) = first_error {
@@ -532,6 +719,12 @@ pub fn open_login_items_settings() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{encode_linux_exec_path, has_autostart_argument, AUTOSTART_ARGUMENT};
+
+    #[cfg(target_os = "macos")]
+    use super::{macos_launch_agent_state, macos_launch_agent_value, MacOSLaunchAgentState};
+
+    #[cfg(target_os = "macos")]
+    use super::{macos_launch_agent_is_firelink_owned, macos_launch_agent_needs_cleanup};
 
     #[test]
     fn accepts_only_the_exact_autostart_argument() {
@@ -573,4 +766,66 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn launch_agent_plist_round_trips_xml_metacharacters_and_validates_status() {
+        let executable = "/Applications/Firelink & <QA> >.app/Contents/MacOS/firelink";
+        let value = macos_launch_agent_value(executable);
+        let mut serialized = Vec::new();
+        value.to_writer_xml(&mut serialized).unwrap();
+
+        let serialized_text = std::str::from_utf8(&serialized).unwrap();
+        assert!(serialized_text.contains("&amp;"));
+        assert!(serialized_text.contains("&lt;"));
+        assert_eq!(
+            macos_launch_agent_state(&serialized, executable),
+            MacOSLaunchAgentState::CurrentFirelink
+        );
+        assert_eq!(
+            macos_launch_agent_state(
+                &serialized,
+                "/Applications/Another Firelink.app/Contents/MacOS/firelink"
+            ),
+            MacOSLaunchAgentState::StaleFirelink
+        );
+        assert_eq!(
+            macos_launch_agent_state(b"<plist><invalid>", executable),
+            MacOSLaunchAgentState::ForeignOrInvalid
+        );
+        assert!(macos_launch_agent_needs_cleanup(
+            MacOSLaunchAgentState::StaleFirelink
+        ));
+        assert!(!macos_launch_agent_needs_cleanup(
+            MacOSLaunchAgentState::CurrentFirelink
+        ));
+        assert!(!macos_launch_agent_needs_cleanup(
+            MacOSLaunchAgentState::ForeignOrInvalid
+        ));
+        assert!(!macos_launch_agent_needs_cleanup(
+            MacOSLaunchAgentState::Missing
+        ));
+        assert!(macos_launch_agent_is_firelink_owned(
+            MacOSLaunchAgentState::CurrentFirelink
+        ));
+        assert!(macos_launch_agent_is_firelink_owned(
+            MacOSLaunchAgentState::StaleFirelink
+        ));
+        assert!(!macos_launch_agent_is_firelink_owned(
+            MacOSLaunchAgentState::ForeignOrInvalid
+        ));
+
+        let mut foreign_dictionary = plist::Dictionary::new();
+        foreign_dictionary.insert("Label".to_string(), plist::Value::String("Other".into()));
+        foreign_dictionary.insert(
+            "AssociatedBundleIdentifiers".to_string(),
+            plist::Value::Array(vec![plist::Value::String("com.example.other".into())]),
+        );
+        let foreign = plist::Value::Dictionary(foreign_dictionary);
+        let mut foreign_serialized = Vec::new();
+        foreign.to_writer_xml(&mut foreign_serialized).unwrap();
+        assert_eq!(
+            macos_launch_agent_state(&foreign_serialized, executable),
+            MacOSLaunchAgentState::ForeignOrInvalid
+        );
+    }
 }

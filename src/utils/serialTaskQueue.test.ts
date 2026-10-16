@@ -42,4 +42,37 @@ describe('createSerialTaskQueue', () => {
     await expect(continued).resolves.toBeUndefined();
     expect(events).toEqual(['failed', 'continued']);
   });
+
+  it('waits for an overdue scheduled stop before processing the next run start', async () => {
+    const queue = createSerialTaskQueue();
+    const events: string[] = [];
+    let acknowledgeStop!: () => void;
+    const stopAcknowledged = new Promise<void>(resolve => {
+      acknowledgeStop = resolve;
+    });
+    let markStopStarted!: () => void;
+    const stopStarted = new Promise<void>(resolve => {
+      markStopStarted = resolve;
+    });
+
+    const stop = queue(async () => {
+      events.push('previous-run-stop-started');
+      markStopStarted();
+      await stopAcknowledged;
+      events.push('previous-run-stop-acknowledged');
+    });
+    const start = queue(async () => {
+      events.push('next-run-started');
+    });
+
+    await stopStarted;
+    expect(events).toEqual(['previous-run-stop-started']);
+    acknowledgeStop();
+    await Promise.all([stop, start]);
+    expect(events).toEqual([
+      'previous-run-stop-started',
+      'previous-run-stop-acknowledged',
+      'next-run-started'
+    ]);
+  });
 });

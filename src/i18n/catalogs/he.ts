@@ -1076,6 +1076,7 @@ const he = {
       firefoxWindows: 'Firefox (Windows)',
       firefoxMacos: 'Firefox (macOS)',
       safariMacos: 'Safari (macOS)',
+      safariUnsupported: 'Safari (macOS) — לא נתמך בפלטפורמה הזו',
       windowsDesktop: 'שולחן עבודה Windows',
       macosDesktop: 'שולחן עבודה macOS',
     },

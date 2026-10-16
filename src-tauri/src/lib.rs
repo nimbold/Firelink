@@ -4458,6 +4458,7 @@ struct Aria2DaemonGuard {
     launch_spec: Mutex<Option<Aria2LaunchSpec>>,
     route_contract_available: AtomicBool,
     shutdown_state: AtomicU8,
+    enqueue_admission_lock: Mutex<()>,
     shutdown_journal_failures: Mutex<HashMap<String, u64>>,
 }
 
@@ -4480,6 +4481,7 @@ impl Aria2DaemonGuard {
             launch_spec: Mutex::new(None),
             route_contract_available: AtomicBool::new(false),
             shutdown_state: AtomicU8::new(0),
+            enqueue_admission_lock: Mutex::new(()),
             shutdown_journal_failures: Mutex::new(HashMap::new()),
         }
     }
@@ -4505,7 +4507,13 @@ impl Aria2DaemonGuard {
     }
 
     pub(crate) fn is_shutting_down(&self) -> bool {
-        self.shutdown_state.load(Ordering::SeqCst) == 1
+        self.shutdown_state.load(Ordering::SeqCst) != 0
+    }
+
+    pub(crate) fn lock_enqueue_admission(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.enqueue_admission_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
     }
 
     pub(crate) fn mark_shutdown_journal_failed(&self, id: &str, lifecycle_generation: u64) {
@@ -4574,18 +4582,21 @@ impl Aria2DaemonGuard {
     }
 
     fn begin_shutdown(&self) -> bool {
+        let _admission = self.lock_enqueue_admission();
         self.shutdown_state
             .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     }
 
     fn cancel_shutdown(&self) -> bool {
+        let _admission = self.lock_enqueue_admission();
         self.shutdown_state
             .compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     }
 
     fn allow_exit(&self) {
+        let _admission = self.lock_enqueue_admission();
         self.shutdown_state.store(2, Ordering::SeqCst);
     }
 }
@@ -6303,12 +6314,25 @@ fn resolve_bundled_binary_path(
 }
 
 fn normalize_media_cookie_source(source: Option<&str>) -> Result<Option<String>, String> {
+    normalize_media_cookie_source_for_platform(source, std::env::consts::OS)
+}
+
+fn normalize_media_cookie_source_for_platform(
+    source: Option<&str>,
+    platform: &str,
+) -> Result<Option<String>, String> {
     let Some(source) = source.map(str::trim).filter(|source| !source.is_empty()) else {
         return Ok(None);
     };
     let source = source.to_ascii_lowercase();
     if source == "none" {
         return Ok(None);
+    }
+    if source == "safari" && platform != "macos" {
+        return Err(
+            "Safari browser cookies are only supported on macOS; choose another browser cookie source or None"
+                .to_string(),
+        );
     }
     if matches!(
         source.as_str(),
@@ -10466,40 +10490,84 @@ fn ack_schedule_trigger(
     state: tauri::State<'_, AppState>,
     action: String,
     key: String,
+    run_key: String,
 ) -> Result<(), String> {
     properties_window::ensure_main_window(&caller)?;
-    crate::settings::update_settings_state(&app_handle, |state| match action.as_str() {
-        "start" => {
-            state.insert("schedulerLastStartKey".to_string(), serde_json::json!(key));
-            state.insert("schedulerTriggeredStartKey".to_string(), serde_json::json!(""));
+    if !matches!(action.as_str(), "start" | "stop") {
+        return Err("Unknown scheduler trigger action".to_string());
+    }
+    let mut acknowledged = false;
+    crate::settings::update_settings_state(&app_handle, |settings| {
+        if !crate::scheduler::scheduler_trigger_matches_state(settings, &action, &key, &run_key) {
+            return;
         }
-        "stop" => {
-            state.insert("schedulerLastStopKey".to_string(), serde_json::json!(key));
-            let snapshot_stop_key = state
-                .get("schedulerActiveRunSnapshot")
-                .and_then(|snapshot| snapshot.get("stopKey"))
-                .and_then(serde_json::Value::as_str);
-            if snapshot_stop_key == Some(key.as_str()) {
-                state.remove("schedulerActiveRunSnapshot");
+        match action.as_str() {
+            "start" => {
+                settings.insert(
+                    "schedulerLastStartKey".to_string(),
+                    serde_json::json!(key.clone()),
+                );
+                settings.insert(
+                    "schedulerTriggeredStartKey".to_string(),
+                    serde_json::json!(""),
+                );
             }
+            "stop" => {
+                settings.insert("schedulerLastStopKey".to_string(), serde_json::json!(key));
+                settings.remove("schedulerActiveRunSnapshot");
+                if settings
+                    .get("schedulerTriggeredStartKey")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(run_key.as_str())
+                {
+                    settings.insert(
+                        "schedulerTriggeredStartKey".to_string(),
+                        serde_json::json!(""),
+                    );
+                }
+            }
+            _ => return,
         }
-        _ => {}
+        acknowledged = true;
     })?;
+    if !acknowledged {
+        // A delayed acknowledgement belongs to an older scheduler run. Leave
+        // the current run's durable marker untouched; it will acknowledge its
+        // own event when its lifecycle finishes.
+        return Ok(());
+    }
+
     match action.as_str() {
         "start" | "stop" => {
             if let Ok(mut cached) = state.scheduler_settings.write() {
                 if let Some(settings) = cached.as_mut() {
                     if action == "start" {
-                        settings.scheduler_last_start_key = key;
-                        settings.scheduler_triggered_start_key = None;
+                        if settings.scheduler_triggered_start_key.as_deref()
+                            == Some(run_key.as_str())
+                        {
+                            settings.scheduler_last_start_key = key.clone();
+                            settings.scheduler_triggered_start_key = None;
+                        }
                     } else {
-                        settings.scheduler_last_stop_key = key.clone();
-                        if settings
+                        let matching_snapshot = settings
                             .scheduler_active_run_snapshot
                             .as_ref()
-                            .is_some_and(|snapshot| snapshot.stop_key.as_deref() == Some(key.as_str()))
-                        {
-                            settings.scheduler_active_run_snapshot = None;
+                            .is_some_and(|snapshot| {
+                                snapshot.start_key == run_key
+                                    && snapshot.stop_key.as_deref() == Some(key.as_str())
+                            });
+                        let matching_legacy_run = settings.scheduler_active_run_snapshot.is_none()
+                            && settings.scheduler_last_start_key.as_str() == run_key.as_str();
+                        if matching_snapshot || matching_legacy_run {
+                            settings.scheduler_last_stop_key = key.clone();
+                            if matching_snapshot {
+                                settings.scheduler_active_run_snapshot = None;
+                            }
+                            if settings.scheduler_triggered_start_key.as_deref()
+                                == Some(run_key.as_str())
+                            {
+                                settings.scheduler_triggered_start_key = None;
+                            }
                         }
                     }
                 }
@@ -16963,6 +17031,7 @@ mod tests {
         media_cookie_browser_is_active, json_lower,
         media_cookie_cache_identity, media_metadata_cache_key,
         normalize_media_cookie_browser_profile,
+        normalize_media_cookie_source_for_platform,
         media_output_template, media_progress_args, media_progress_event_totals,
         media_progress_speed,
         cookie_scope_for_url, metadata_authentication_error, metadata_cookie_header_present,
@@ -18111,6 +18180,7 @@ mod tests {
 
         guard.allow_exit();
         assert!(guard.exit_allowed());
+        assert!(guard.is_shutting_down());
         assert!(!guard.begin_shutdown());
     }
 
@@ -21620,6 +21690,23 @@ mod tests {
         );
         assert!(normalize_media_cookie_source(Some("profile=secret")).is_err());
         assert!(normalize_media_cookie_source(Some("unknown-browser")).is_err());
+    }
+
+    #[test]
+    fn safari_media_cookies_are_rejected_on_unsupported_platforms() {
+        assert_eq!(
+            normalize_media_cookie_source_for_platform(Some("Safari"), "macos").unwrap(),
+            Some("safari".to_string())
+        );
+        for platform in ["windows", "linux"] {
+            let error = normalize_media_cookie_source_for_platform(Some("safari"), platform)
+                .expect_err("Safari cookie extraction is unsupported here");
+            assert!(error.contains("only supported on macOS"));
+        }
+        assert_eq!(
+            normalize_media_cookie_source_for_platform(Some("firefox"), "linux").unwrap(),
+            Some("firefox".to_string())
+        );
     }
 
     #[test]
