@@ -31,7 +31,7 @@ provisioning now builds the checksum-pinned upstream source archive with
 `scripts/aria2/firelink.patch`; this patch also retains Firelink's native DNS,
 network target policy, and Torrent routing changes. CI installs the compiler
 and static-library prerequisites. Windows uses the MSYS2 UCRT64 environment,
-supported by Firelink's Windows 10+ target and returned by the setup action
+supported by Firelink's Windows 10 22H2+ target and returned by the setup action
 (`FIRELINK_MSYS2_ROOT`, default `C:/msys64` for local builds).
 The patch checksum is recorded in both source and payload provenance. Never
 replace these builds with stock Aria2 archives: package verification requires
@@ -140,5 +140,14 @@ git push origin v<version>
 GitHub Actions builds all targets on native runners, verifies engines inside
 final package contents, performs packaged launch smoke where supported, and
 publishes the GitHub Release after the build matrix passes.
+
+The Windows hosted runner smoke does not qualify the declared Windows 10
+22H2 minimum. Before claiming that minimum as verified for a release, run the
+NSIS-installed app and extracted portable package on a clean Windows 10 22H2
+client (OS build 19045.x). Run `scripts/smoke-packaged-app.js` against the
+installed executable with `--assert-no-visible-child-windows`; run it against
+the portable executable with both `--assert-no-visible-child-windows` and
+`--assert-portable-data`. Record the tested OS build and artifact version with
+release QA results.
 
 No target may silently skip missing engines, failed extraction, checksum mismatch, or missing package output.

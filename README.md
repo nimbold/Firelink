@@ -62,8 +62,8 @@ Download the [latest Firelink release](https://github.com/nimbold/Firelink/relea
 | Platform | Package | Notes |
 | --- | --- | --- |
 | macOS Apple silicon | `.dmg` | Ad-hoc signed and not notarized. macOS may require approval in **System Settings -> Privacy & Security**. |
-| Windows x64 | NSIS `.exe` | Unsigned. Windows SmartScreen may display a warning. |
-| Windows x64 portable | `.zip` | Extract to a writable folder and launch `firelink.exe`. |
+| Windows x64 | NSIS `.exe` | Windows 10 22H2 or newer. Unsigned; SmartScreen may display a warning. |
+| Windows x64 portable | `.zip` | Windows 10 22H2 or newer. Extract to a writable folder and launch `firelink.exe`. |
 | Linux x64 | `.deb`, `.rpm`, or `.AppImage` | The current AppImage requires host glibc 2.35 or newer. |
 
 All packages include aria2, yt-dlp, FFmpeg, Deno, and SQLite support. No separate engine installation is required.

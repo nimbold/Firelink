@@ -44,7 +44,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 24.22.0
           cache: npm
       - name: Verify tagged release version
         if: github.event_name == 'push' || inputs.publish_release
@@ -58,8 +58,9 @@ jobs:
       - name: Verify non-publishing Companion package metadata
         if: github.event_name == 'workflow_dispatch' && !inputs.publish_release
         run: node scripts/verify-companion-release.js --allow-untagged
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable action branch (2026-10-09)
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable action branch (2026-10-16)
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       - name: Install Linux dependencies
         if: runner.os == 'Linux'

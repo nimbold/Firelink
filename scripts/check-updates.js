@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import semver from 'semver';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -72,16 +73,29 @@ function npmExecutable(platform = process.platform) {
   return platform === 'win32' ? 'npm.cmd' : 'npm';
 }
 
-function npmOutdated(cwd) {
+function npmOutdated(cwd, {
+  platform = process.platform,
+  runFile = execFileSync,
+  runShell = execSync,
+} = {}) {
   if (!fs.existsSync(path.join(cwd, 'package.json'))) {
     throw new Error(`npm workspace is missing package.json: ${cwd}`);
   }
+  const args = ['outdated', '--all', '--json'];
+  const options = {
+    cwd,
+    encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  };
   try {
-    execFileSync(npmExecutable(), ['outdated', '--json'], {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    if (platform === 'win32') {
+      // npm.cmd is a command shim, not a native executable. Keep the command
+      // fixed here (no user-controlled arguments) and let cmd.exe run it.
+      runShell(`${npmExecutable(platform)} ${args.join(' ')}`, options);
+    } else {
+      runFile(npmExecutable(platform), args, options);
+    }
     return {};
   } catch (error) {
     if (error.status !== 1) {
@@ -323,6 +337,140 @@ function printCargoReport(updates) {
   return updates.length;
 }
 
+function npmUpdateRows(outdated, { cwd = process.cwd(), lockfilePackages = {} } = {}) {
+  if (!outdated || typeof outdated !== 'object' || Array.isArray(outdated)) {
+    throw new Error('npm outdated response was not a package map');
+  }
+
+  const lockfileVersionAtLocation = location => {
+    if (typeof location !== 'string' || !location.trim()) return undefined;
+    let lockfilePath = location.trim().replaceAll('\\', '/');
+    if (path.isAbsolute(location)) {
+      const relativePath = path.relative(cwd, location);
+      if (path.isAbsolute(relativePath) || relativePath === '..' || relativePath.startsWith(`..${path.sep}`)) {
+        return undefined;
+      }
+      lockfilePath = relativePath.split(path.sep).join('/');
+    }
+    lockfilePath = lockfilePath.replace(/^\.\//, '');
+    if (lockfilePath === '..' || lockfilePath.startsWith('../')) return undefined;
+    return normalizeVersion(lockfilePackages[lockfilePath]?.version);
+  };
+  const lockfileVersionsForName = name => {
+    const suffix = `/node_modules/${name}`;
+    return Object.entries(lockfilePackages)
+      .filter(([lockfilePath]) => lockfilePath === `node_modules/${name}` || lockfilePath.endsWith(suffix))
+      .map(([, entry]) => normalizeVersion(entry?.version))
+      .filter(Boolean);
+  };
+
+  const rows = new Map();
+  for (const [name, value] of Object.entries(outdated)) {
+    const records = Array.isArray(value) ? value : [value];
+    const normalizedRecords = records.map(info => {
+      if (!info || typeof info !== 'object' || Array.isArray(info)) {
+        throw new Error(`npm outdated response for ${name} was not a package record`);
+      }
+      return {
+        info,
+        installedVersion: normalizeVersion(info.current),
+        locatedVersion: lockfileVersionAtLocation(info.location),
+        wanted: normalizeVersion(info.wanted),
+        latest: normalizeVersion(info.latest),
+      };
+    });
+    for (const record of normalizedRecords) {
+      if (!record.wanted || !record.latest) {
+        throw new Error(`npm outdated response for ${name} omitted wanted or latest version`);
+      }
+    }
+
+    const unresolved = normalizedRecords
+      .map((record, index) => ({ record, index }))
+      .filter(({ record }) => !record.installedVersion && !record.locatedVersion);
+    const lockVersions = unresolved.length ? lockfileVersionsForName(name) : [];
+    const resolvedLockVersions = new Map();
+    if (lockVersions.length === 1) {
+      for (const { index } of unresolved) resolvedLockVersions.set(index, lockVersions[0]);
+    } else if (lockVersions.length > 1) {
+      if (lockVersions.length !== unresolved.length) {
+        throw new Error(`npm outdated response for ${name} omitted locations for duplicate package-lock entries`);
+      }
+
+      const remainingLockVersions = [...lockVersions];
+      const remainingRecords = [];
+      for (const { record, index } of unresolved) {
+        const wanted = semver.valid(record.wanted);
+        if (!wanted) continue;
+        const exactIndex = remainingLockVersions.findIndex(version => semver.valid(version)
+          && semver.eq(version, wanted));
+        if (exactIndex >= 0) {
+          resolvedLockVersions.set(index, remainingLockVersions.splice(exactIndex, 1)[0]);
+        } else {
+          remainingRecords.push({ record, index, wanted });
+        }
+      }
+
+      if (remainingRecords.length !== remainingLockVersions.length) {
+        throw new Error(`npm outdated response for ${name} could not be matched safely to package-lock entries`);
+      }
+      remainingRecords.sort((left, right) => semver.compare(left.wanted, right.wanted));
+      remainingLockVersions.sort((left, right) => {
+        const leftVersion = semver.valid(left);
+        const rightVersion = semver.valid(right);
+        if (!leftVersion || !rightVersion) {
+          throw new Error(`npm lockfile contains a non-semver duplicate for ${name}`);
+        }
+        return semver.compare(leftVersion, rightVersion);
+      });
+      remainingRecords.forEach(({ index }, offset) => {
+        resolvedLockVersions.set(index, remainingLockVersions[offset]);
+      });
+    }
+
+    for (const [index, record] of normalizedRecords.entries()) {
+      const currentVersions = record.installedVersion
+        ? [record.installedVersion]
+        : record.locatedVersion
+          ? [record.locatedVersion]
+          : resolvedLockVersions.has(index)
+            ? [resolvedLockVersions.get(index)]
+            : [];
+      // npm can include optional or peer packages that are absent from both
+      // this host's physical tree and the lockfile. They are not resolved
+      // Firelink dependencies. When lock entries exist, map them to records
+      // by physical location or the matching npm `wanted` version.
+      if (!currentVersions.length) continue;
+
+      if (!semver.valid(record.wanted) || !semver.valid(record.latest)) continue;
+      for (const current of currentVersions) {
+        if (!semver.valid(current) || semver.gte(current, record.wanted)) continue;
+
+        const key = `${name}\0${current}\0${record.wanted}\0${record.latest}`;
+        const row = rows.get(key) || {
+          name,
+          current,
+          wanted: record.wanted,
+          latest: record.latest,
+          lockfileOnly: !record.installedVersion,
+          dependents: new Set(),
+        };
+        row.lockfileOnly = row.lockfileOnly && !record.installedVersion;
+        if (typeof record.info.dependent === 'string' && record.info.dependent.trim()) {
+          row.dependents.add(record.info.dependent.trim());
+        }
+        rows.set(key, row);
+      }
+    }
+  }
+
+  return [...rows.values()]
+    .map(row => ({ ...row, dependents: [...row.dependents].sort() }))
+    .sort((left, right) => left.name.localeCompare(right.name)
+      || left.current.localeCompare(right.current)
+      || left.wanted.localeCompare(right.wanted));
+}
+
 function hasUpdateCheckFailures({
   outdatedCount,
   engineIssueCount,
@@ -335,17 +483,28 @@ function hasUpdateCheckFailures({
     || providerBehind.length > 0;
 }
 
-function printNpmReport(label, outdated) {
-  const entries = Object.entries(outdated);
-  if (!entries.length) {
+function printNpmReport(label, outdated, cwd) {
+  let lockfilePackages = {};
+  if (Object.keys(outdated).length > 0) {
+    const lockfilePath = path.join(cwd, 'package-lock.json');
+    const lockfile = JSON.parse(fs.readFileSync(lockfilePath, 'utf8'));
+    if (!lockfile.packages || typeof lockfile.packages !== 'object' || Array.isArray(lockfile.packages)) {
+      throw new Error(`npm lockfile did not contain a package map: ${lockfilePath}`);
+    }
+    lockfilePackages = lockfile.packages;
+  }
+  const rows = npmUpdateRows(outdated, { cwd, lockfilePackages });
+  if (!rows.length) {
     console.log(`${label}: current`);
     return 0;
   }
-  console.log(`${label}: ${entries.length} outdated package(s)`);
-  for (const [name, info] of entries) {
-    console.log(`  ${name}: ${info.current} -> ${info.latest} (wanted ${info.wanted})`);
+  console.log(`${label}: ${rows.length} compatible package update(s)`);
+  for (const row of rows) {
+    const dependents = row.dependents.length ? ` via ${row.dependents.join(', ')}` : '';
+    const source = row.lockfileOnly ? ' (from lockfile)' : '';
+    console.log(`  ${row.name}: ${row.current}${source} -> ${row.wanted} (latest ${row.latest})${dependents}`);
   }
-  return entries.length;
+  return rows.length;
 }
 
 function sourceEngineVersions(sourceLock) {
@@ -500,10 +659,11 @@ function checkRows(
 async function main() {
   let outdatedCount = 0;
 
-  outdatedCount += printNpmReport('root npm', npmOutdated(repoRoot));
+  outdatedCount += printNpmReport('root npm', npmOutdated(repoRoot), repoRoot);
   outdatedCount += printNpmReport(
     'Browser extension npm',
-    npmOutdated(path.join(repoRoot, 'Extensions', 'Browser'))
+    npmOutdated(path.join(repoRoot, 'Extensions', 'Browser')),
+    path.join(repoRoot, 'Extensions', 'Browser')
   );
   outdatedCount += printCargoReport(cargoCompatibleUpdates());
 
@@ -726,5 +886,7 @@ export {
   latestBtbnFfmpegStableBuild,
   latestMartinRiedlMacArm64Release,
   npmExecutable,
+  npmOutdated,
+  npmUpdateRows,
   providerAssetHashes,
 };

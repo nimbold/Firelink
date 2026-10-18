@@ -8,6 +8,12 @@ const releaseWorkflow = fs.readFileSync(
   path.join(repositoryRoot, '.github', 'workflows', 'release.yml'),
   'utf8',
 );
+const ciWorkflow = fs.readFileSync(
+  path.join(repositoryRoot, '.github', 'workflows', 'ci.yml'),
+  'utf8',
+);
+const readme = fs.readFileSync(path.join(repositoryRoot, 'README.md'), 'utf8');
+const releaseGuide = fs.readFileSync(path.join(repositoryRoot, 'RELEASE.md'), 'utf8');
 
 test('release Linux dependency installation is mirror-normalized and bounded', () => {
   assert.match(releaseWorkflow, /azure\\\.archive\\\.ubuntu\\\.com/);
@@ -38,6 +44,24 @@ test('Linux release pins and verifies appimagetool and its runtime inputs', () =
   assert.match(releaseWorkflow, /APPIMAGETOOL_RUNTIME_SHA256: 156f4bdbde9c52d01814600013e0a273f0118dc2de98975f3c8c63427ec79074/);
   assert.match(releaseWorkflow, /echo "\$APPIMAGETOOL_RUNTIME_SHA256  \$RUNNER_TEMP\/appimage-runtime" \| sha256sum -c -/);
   assert.match(releaseWorkflow, /APPIMAGETOOL_RUNTIME_FILE: \$\{\{ runner\.temp \}\}\/appimage-runtime/);
+});
+
+test('CI covers the declared Node floor and current runtimes while native jobs use Node 24 LTS', () => {
+  assert.match(ciWorkflow, /node: \[22\.23\.3, 24\.22\.0, 26\.12\.0\]/);
+  assert.equal((ciWorkflow.match(/node-version: 24\.22\.0/g) || []).length, 1);
+  assert.equal((releaseWorkflow.match(/node-version: 24\.22\.0/g) || []).length, 1);
+  assert.doesNotMatch(`${ciWorkflow}\n${releaseWorkflow}`, /node-version: 24\.21\.0/);
+});
+
+test('Tauri CI and release workflows pin stable explicitly and Windows support floor is consistent', () => {
+  const workflows = `${ciWorkflow}\n${releaseWorkflow}`;
+  assert.equal((workflows.match(/dtolnay\/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec/g) || []).length, 3);
+  assert.equal((workflows.match(/toolchain: stable/g) || []).length, 3);
+  assert.doesNotMatch(workflows, /dtolnay\/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249/);
+  assert.match(readme, /Windows 10 22H2 or newer/);
+  assert.match(releaseGuide, /Windows 10 22H2\+ target/);
+  assert.match(releaseGuide, /clean Windows 10 22H2\s+client \(OS build 19045\.x\)/);
+  assert.match(releaseGuide, /--assert-no-visible-child-windows.*--assert-portable-data/s);
 });
 
 test('Windows release job packages portable ZIP with portable.flag and data cleanup', () => {

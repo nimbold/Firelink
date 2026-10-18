@@ -34,10 +34,11 @@ test('frontend CI covers the supported Node lines and native builds use the curr
   const desktopJob = ciWorkflow.slice(ciWorkflow.indexOf('\n  desktop:'));
 
   assert.match(ciWorkflow, /uses: actions\/setup-node@v7(?:\.\d+){0,2}/);
-  assert.match(frontendJob, /node:\s*\[22\.23\.3,\s*24\.21\.0\]/);
+  assert.match(frontendJob, /node:\s*\[22\.23\.3,\s*24\.22\.0,\s*26\.12\.0\]/);
   assert.match(frontendJob, /node-version: \$\{\{ matrix\.node \}\}/);
-  assert.match(desktopJob, /node-version: 24\.21\.0/);
-  assert.match(releaseWorkflow, /node-version: 24\.21\.0/);
+  assert.match(desktopJob, /node-version: 24\.22\.0/);
+  assert.match(releaseWorkflow, /node-version: 24\.22\.0/);
+  assert.doesNotMatch(`${ciWorkflow}\n${releaseWorkflow}`, /node-version: 24\.21\.0/);
   assert.doesNotMatch(`${ciWorkflow}\n${releaseWorkflow}`, /node-version: 22\.12(?:\D|$)/);
 });
 

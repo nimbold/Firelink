@@ -10,6 +10,8 @@ import {
   latestMartinRiedlMacArm64Release,
   hasUpdateCheckFailures,
   npmExecutable,
+  npmOutdated,
+  npmUpdateRows,
   providerAssetHashes,
 } from './check-updates.js';
 
@@ -243,10 +245,209 @@ test('update checks pass only when every blocking count is clear', () => {
   }), false);
 });
 
-test('npm executable selection uses the Windows command shim when needed', () => {
+test('npm outdated runs the Windows command shim through a shell', () => {
   assert.equal(npmExecutable('win32'), 'npm.cmd');
   assert.equal(npmExecutable('darwin'), 'npm');
   assert.equal(npmExecutable('linux'), 'npm');
+
+  let shellCommand;
+  let shellOptions;
+  let fileRunCalled = false;
+  assert.deepEqual(npmOutdated(process.cwd(), {
+    platform: 'win32',
+    runFile: () => { fileRunCalled = true; },
+    runShell: (command, options) => {
+      shellCommand = command;
+      shellOptions = options;
+      return '{}';
+    },
+  }), {});
+  assert.equal(shellCommand, 'npm.cmd outdated --all --json');
+  assert.equal(shellOptions.cwd, process.cwd());
+  assert.equal(shellOptions.encoding, 'utf8');
+  assert.equal(fileRunCalled, false);
+});
+
+test('npm update rows deduplicate nested records and retain compatible and major versions', () => {
+  const rows = npmUpdateRows({
+    '@babel/runtime': [
+      {
+        current: '7.29.7',
+        wanted: '7.29.10',
+        latest: '8.0.7',
+        dependent: 'react-i18next',
+        location: '/workspace/node_modules/@babel/runtime',
+      },
+      {
+        current: '7.29.7',
+        wanted: '7.29.10',
+        latest: '8.0.7',
+        dependent: 'another-package',
+        location: '/workspace/node_modules/@babel/runtime',
+      },
+      {
+        current: '7.29.7',
+        wanted: '7.29.10',
+        latest: '8.0.7',
+        dependent: 'react-i18next',
+        location: '/workspace/node_modules/@babel/runtime',
+      },
+    ],
+  });
+
+  assert.deepEqual(rows, [{
+    name: '@babel/runtime',
+    current: '7.29.7',
+    wanted: '7.29.10',
+    latest: '8.0.7',
+    lockfileOnly: false,
+    dependents: ['another-package', 'react-i18next'],
+  }]);
+});
+
+test('npm update rows safely ignore absent optional platform packages', () => {
+  const rows = npmUpdateRows({
+    '@rolldown/binding-linux-x64-gnu': {
+      wanted: '1.2.14',
+      latest: '1.2.14',
+      dependent: 'rolldown',
+      location: '/workspace/node_modules/@rolldown/binding-linux-x64-gnu',
+    },
+    '@types/node': [
+      {
+        wanted: '26.6.5',
+        latest: '26.6.5',
+        dependent: 'vite',
+      },
+      {
+        wanted: '26.6.5',
+        latest: '26.6.5',
+        dependent: 'vitest',
+      },
+    ],
+  }, {
+    cwd: '/workspace',
+    lockfilePackages: {
+      'node_modules/@rolldown/binding-linux-x64-gnu': { version: '1.2.14' },
+      'node_modules/@types/node': { version: '26.6.5' },
+    },
+  });
+
+  assert.deepEqual(rows, []);
+});
+
+test('npm update rows find compatible lockfile updates for absent optional packages', () => {
+  const rows = npmUpdateRows({
+    '@rolldown/binding-linux-x64-gnu': {
+      wanted: '1.2.14',
+      latest: '1.2.14',
+      dependent: 'rolldown',
+    },
+  }, {
+    cwd: '/workspace',
+    lockfilePackages: {
+      'node_modules/@rolldown/binding-linux-x64-gnu': { version: '1.2.12' },
+    },
+  });
+
+  assert.deepEqual(rows, [{
+    name: '@rolldown/binding-linux-x64-gnu',
+    current: '1.2.12',
+    wanted: '1.2.14',
+    latest: '1.2.14',
+    lockfileOnly: true,
+    dependents: ['rolldown'],
+  }]);
+});
+
+test('npm update rows match duplicate optional records to lockfile wanted versions', () => {
+  const rows = npmUpdateRows({
+    'lightningcss-linux-x64-gnu': [
+      { wanted: '1.32.0', latest: '1.33.0', dependent: 'lightningcss' },
+      { wanted: '1.33.0', latest: '1.33.0', dependent: 'lightningcss' },
+    ],
+  }, {
+    cwd: '/workspace',
+    lockfilePackages: {
+      'node_modules/lightningcss-linux-x64-gnu': { version: '1.32.0' },
+      'node_modules/vite/node_modules/lightningcss-linux-x64-gnu': { version: '1.33.0' },
+    },
+  });
+
+  assert.deepEqual(rows, []);
+});
+
+test('npm update rows retain stale duplicates when current is absent on this platform', () => {
+  const rows = npmUpdateRows({
+    'lightningcss-linux-x64-gnu': [
+      { wanted: '1.33.0', latest: '1.33.0', dependent: 'lightningcss' },
+      { wanted: '1.33.0', latest: '1.33.0', dependent: 'lightningcss' },
+    ],
+  }, {
+    cwd: '/workspace',
+    lockfilePackages: {
+      'node_modules/lightningcss-linux-x64-gnu': { version: '1.32.0' },
+      'node_modules/vite/node_modules/lightningcss-linux-x64-gnu': { version: '1.33.0' },
+    },
+  });
+
+  assert.deepEqual(rows, [{
+    name: 'lightningcss-linux-x64-gnu',
+    current: '1.32.0',
+    wanted: '1.33.0',
+    latest: '1.33.0',
+    lockfileOnly: true,
+    dependents: ['lightningcss'],
+  }]);
+});
+
+test('npm update rows recognize a prerelease to its compatible stable version', () => {
+  const rows = npmUpdateRows({
+    package: {
+      current: '1.0.0-rc.1',
+      wanted: '1.0.0',
+      latest: '2.0.0',
+    },
+  });
+
+  assert.deepEqual(rows, [{
+    name: 'package',
+    current: '1.0.0-rc.1',
+    wanted: '1.0.0',
+    latest: '2.0.0',
+    lockfileOnly: false,
+    dependents: [],
+  }]);
+});
+
+test('npm update rows ignore absent optional packages that are not in the lockfile', () => {
+  assert.deepEqual(npmUpdateRows({
+    'optional-package': {
+      wanted: '1.2.0',
+      latest: '2.0.0',
+    },
+  }, { cwd: '/workspace' }), []);
+});
+
+test('npm update rows fail closed when an absent duplicate has ambiguous lockfile versions', () => {
+  assert.throws(() => npmUpdateRows({
+    package: {
+      wanted: '1.2.0',
+      latest: '2.0.0',
+    },
+  }, {
+    lockfilePackages: {
+      'node_modules/first/node_modules/package': { version: '1.0.0' },
+      'node_modules/second/node_modules/package': { version: '1.1.0' },
+    },
+  }), /omitted locations for duplicate package-lock entries/);
+});
+
+test('npm update rows fail closed for malformed package records', () => {
+  assert.throws(
+    () => npmUpdateRows({ broken: [{ current: '1.0.0', latest: '2.0.0' }] }),
+    /omitted wanted or latest version/,
+  );
 });
 
 test('selects a complete BtbN build for the current stable series', async () => {

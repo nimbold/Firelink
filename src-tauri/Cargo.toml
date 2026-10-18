@@ -74,7 +74,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["NSAppl
 objc2-core-services = "0.3"
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSAppleEventDescriptor", "NSAppleEventManager", "NSAppleScript", "NSDictionary", "NSNotification", "NSObject", "NSString", "objc2-core-services", "std"] }
 smappservice-rs = "0.1.3"
-unicode-normalization = "0.1.25"
+unicode-normalization = "0.1.26"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store = "1.1.0"
