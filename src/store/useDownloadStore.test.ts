@@ -3,7 +3,8 @@ import { commitDownloadState, currentDownloadLifecycleGeneration, dispatchItem, 
 import { useDownloadProgressStore } from './downloadProgressStore';
 import { useSettingsStore } from './useSettingsStore';
 import * as ipc from '../ipc';
-import { MAX_DOWNLOAD_FILENAME_BYTES } from '../utils/downloads';
+import { MAX_DOWNLOAD_FILENAME_BYTES, redactDownloadForPersistence } from '../utils/downloads';
+import { resolveDownloadFraction } from '../utils/downloadProgress';
 import type { ExtensionMediaDiscoveryUpdate } from '../bindings/ExtensionMediaDiscoveryUpdate';
 
 vi.mock('../ipc', () => ({
@@ -1236,6 +1237,91 @@ describe('useDownloadStore', () => {
       totalBytes: 89_817_907,
       totalIsEstimate: true
     });
+  });
+
+  it('restores a paused media fraction across persistence and hydration without estimating legacy rows', () => {
+    const pausedMedia = {
+      id: 'paused-media-progress',
+      url: 'https://youtube.com/watch?v=paused',
+      fileName: 'video.mkv',
+      status: 'paused' as const,
+      category: 'Movies' as const,
+      dateAdded: '',
+      isMedia: true,
+      fraction: 0.169,
+      downloadedBytes: 95.7 * 1024 ** 2,
+      totalBytes: 566 * 1024 ** 2,
+      totalIsEstimate: true,
+      size: '~566 MB',
+      speed: '1 MB/s',
+      eta: '1m'
+    };
+
+    const persisted = redactDownloadForPersistence(pausedMedia);
+    expect(persisted).toMatchObject({
+      fraction: 0.169,
+      downloadedBytes: pausedMedia.downloadedBytes,
+      totalBytes: pausedMedia.totalBytes,
+      totalIsEstimate: true
+    });
+    expect(persisted.speed).toBeUndefined();
+    expect(persisted.eta).toBeUndefined();
+
+    for (const fraction of [0, 1]) {
+      expect(redactDownloadForPersistence({
+        ...pausedMedia,
+        fraction
+      }).fraction).toBe(fraction);
+    }
+
+    const serialized = JSON.stringify(persisted);
+    const hydrated = normalizePersistedDownloadProgress(
+      JSON.parse(serialized) as typeof pausedMedia
+    );
+    expect(resolveDownloadFraction({
+      fraction: hydrated.fraction,
+      downloadedBytes: hydrated.downloadedBytes,
+      totalBytes: hydrated.totalBytes,
+      totalIsEstimate: hydrated.totalIsEstimate,
+      isMedia: hydrated.isMedia,
+      size: hydrated.size,
+      status: hydrated.status
+    })).toBe(0.169);
+
+    const activeMedia = redactDownloadForPersistence({
+      ...pausedMedia,
+      status: 'downloading'
+    });
+    expect(activeMedia.fraction).toBeUndefined();
+
+    const pausedNormalDownload = redactDownloadForPersistence({
+      ...pausedMedia,
+      isMedia: false
+    });
+    expect(pausedNormalDownload.fraction).toBeUndefined();
+
+    for (const fraction of [-0.01, 1.01, Number.POSITIVE_INFINITY, Number.NaN]) {
+      const invalidPausedMediaFraction = redactDownloadForPersistence({
+        ...pausedMedia,
+        fraction
+      });
+      expect(invalidPausedMediaFraction.fraction).toBeUndefined();
+    }
+
+    const legacyPausedMedia = normalizePersistedDownloadProgress({
+      ...pausedMedia,
+      fraction: undefined
+    });
+    expect(legacyPausedMedia.fraction).toBeUndefined();
+    expect(resolveDownloadFraction({
+      fraction: legacyPausedMedia.fraction,
+      downloadedBytes: legacyPausedMedia.downloadedBytes,
+      totalBytes: legacyPausedMedia.totalBytes,
+      totalIsEstimate: legacyPausedMedia.totalIsEstimate,
+      isMedia: legacyPausedMedia.isMedia,
+      size: legacyPausedMedia.size,
+      status: legacyPausedMedia.status
+    })).toBe(0);
   });
 
   it('does not discard a legitimate small media estimate without contradictory progress', () => {

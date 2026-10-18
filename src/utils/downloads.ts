@@ -846,11 +846,12 @@ export const headersWithoutCredentialMaterial = (
 
 /**
  * Returns a shallow copy of `item` with secret fields removed. Volatile
- * progress fields (`fraction`, `speed`, `eta`) are also dropped as in the
- * existing persistence path. Numeric byte totals remain for paused, failed,
- * and completed rows so those snapshots keep their accurate Size-column
- * display after restart; counters for the actively ticking `downloading`
- * state stay in memory to avoid a database write for every progress tick.
+ * progress fields (`speed`, `eta`, and fractions except validated paused-media
+ * checkpoints) are dropped as in the existing persistence path. Numeric byte
+ * totals remain for paused, failed, and completed rows so those snapshots
+ * keep their accurate Size-column display after restart. Counters for the
+ * actively ticking `downloading` state stay in memory to avoid a database
+ * write for every progress tick.
  * Non-ticking states retain counters so paused, queued, staged, retrying, and
  * processing snapshots remain useful across restart and reconfiguration.
  * The credential marker is narrower than the redacted field set: ordinary
@@ -880,7 +881,15 @@ export const redactDownloadForPersistence = (item: DownloadItem): DownloadItem =
     || hasCredentialBearingHeaders(item.headers)) {
     copy.credentialsRequired = true;
   }
-  delete copy.fraction;
+  // Paused media cannot ask yt-dlp for a fresh fraction after restart. Keep
+  // only its validated pause snapshot; all other fractions remain volatile.
+  const hasPersistablePausedMediaFraction = item.isMedia === true
+    && item.status === 'paused'
+    && typeof item.fraction === 'number'
+    && Number.isFinite(item.fraction)
+    && item.fraction >= 0
+    && item.fraction <= 1;
+  if (!hasPersistablePausedMediaFraction) delete copy.fraction;
   delete copy.speed;
   delete copy.eta;
   if (VOLATILE_PROGRESS_STATUSES.has(item.status)) {

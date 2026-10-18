@@ -3728,9 +3728,9 @@ let persistenceWaiters: PersistenceWaiter[] = [];
 let downloadPersistenceReady = false;
 
 const persistenceSnapshotForState = (state: Pick<DownloadState, 'downloads' | 'queues'>): Omit<PersistenceSnapshot, 'revision'> => {
-  // Strip secret fields (password/cookies/headers) and volatile progress
-  // before writing to disk. Secrets remain on the in-memory item for the
-  // active session only.
+  // Strip secret fields (password/cookies/headers) and live progress before
+  // writing to disk. Paused media fractions are retained as the engine's last
+  // progress checkpoint; secrets remain in memory for the active session.
   const downloadsData = JSON.stringify(state.downloads.map(redactDownloadForPersistence));
   const queuesData = JSON.stringify(state.queues);
   return {

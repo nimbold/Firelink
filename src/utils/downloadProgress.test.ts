@@ -81,6 +81,18 @@ describe('resolveDownloadFraction', () => {
     })).toBe(0);
   });
 
+  it('uses a persisted paused media fraction with an estimated total', () => {
+    expect(resolveDownloadFraction({
+      fraction: 0.169,
+      downloadedBytes: 95.7 * 1024 ** 2,
+      totalBytes: 566 * 1024 ** 2,
+      totalIsEstimate: true,
+      isMedia: true,
+      size: '~566 MB',
+      status: 'paused',
+    })).toBe(0.169);
+  });
+
   it('keeps zero at the start and does not divide by an unknown total', () => {
     expect(resolveDownloadFraction({
       downloadedBytes: 0,

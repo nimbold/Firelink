@@ -28,11 +28,11 @@ const clampFraction = (value: number): number => Math.max(0, Math.min(1, value))
 
 /**
  * Resolves the fraction shown by progress bars when a live fraction is not
- * available. Volatile fractions are intentionally omitted from persisted
- * downloads, but paused rows retain exact byte counters so their progress can
- * still be reconstructed after restart. Estimated media totals are excluded:
- * they describe a provisional denominator and must not become a false visual
- * claim about completion.
+ * available. Paused media rows may retain their last engine-reported fraction
+ * across restart. When that snapshot is absent, estimated media totals are
+ * excluded because they describe a provisional denominator and must not become
+ * a false visual claim about completion. Paused rows with exact byte counters
+ * can still reconstruct progress after restart.
  */
 export const resolveDownloadFraction = ({
   fraction,
