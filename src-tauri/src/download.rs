@@ -24,6 +24,8 @@ pub struct DownloadCoordinator {
 struct MediaRegistrationState {
     closed: bool,
     rejected_during_shutdown: HashSet<(String, u64)>,
+    active: HashSet<(String, u64)>,
+    interrupted_during_shutdown: HashSet<(String, u64)>,
 }
 
 impl DownloadCoordinator {
@@ -75,12 +77,13 @@ impl DownloadCoordinator {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         self.media_tx
             .send(MediaCmd::Register {
-                id,
+                id: id.clone(),
                 lifecycle_generation,
                 cancel_tx,
             })
             .await
             .map_err(|_| "download coordinator is unavailable".to_string())?;
+        registration.active.insert((id, lifecycle_generation));
         drop(registration);
         Ok(cancel_rx)
     }
@@ -90,6 +93,10 @@ impl DownloadCoordinator {
     pub async fn cancel_active_media_for_shutdown(&self) -> Result<Vec<(String, u64)>, String> {
         let mut registration = self.media_registration.lock().await;
         registration.closed = true;
+        let active = registration.active.iter().cloned().collect::<Vec<_>>();
+        registration
+            .interrupted_during_shutdown
+            .extend(active.iter().cloned());
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         if self
             .media_tx
@@ -101,9 +108,14 @@ impl DownloadCoordinator {
             return Err("download coordinator is unavailable".to_string());
         }
         drop(registration);
-        ack_rx
+        let interrupted = ack_rx
             .await
-            .map_err(|_| "media runners stopped before shutdown cancellation completed".to_string())
+            .map_err(|_| "media runners stopped before shutdown cancellation completed".to_string())?;
+        // Keep interrupted registrations durable until `reopen_media_registration`
+        // drains them. A concurrent or retried shutdown may have outlived the
+        // first caller's deadline; it must not lose the only recovery IDs when
+        // the original caller is dropped before it can publish them.
+        Ok(interrupted)
     }
 
     pub async fn reopen_media_registration(&self) -> Vec<(String, u64)> {
@@ -113,7 +125,9 @@ impl DownloadCoordinator {
             .rejected_during_shutdown
             .drain()
             .collect::<Vec<_>>();
+        rejected.extend(registration.interrupted_during_shutdown.drain());
         rejected.sort();
+        rejected.dedup();
         rejected
     }
 
@@ -154,6 +168,20 @@ impl DownloadCoordinator {
         lifecycle_generation: u64,
         shutdown_interrupted: bool,
     ) {
+        {
+            let mut registration = self.media_registration.lock().await;
+            let key = (id.clone(), lifecycle_generation);
+            registration.active.remove(&key);
+            if shutdown_interrupted && registration.closed {
+                registration.interrupted_during_shutdown.insert(key);
+            } else {
+                // A shutdown timeout may have provisionally marked every
+                // active runner as interrupted before its Finished message
+                // was observed. A runner that completes normally must retire
+                // that marker or the next startup will report false recovery.
+                registration.interrupted_during_shutdown.remove(&key);
+            }
+        }
         let _ = self
             .media_tx
             .send(MediaCmd::Finished {
@@ -669,7 +697,10 @@ mod tests {
 
         assert_eq!(
             coordinator.reopen_media_registration().await,
-            vec![("late-media".to_string(), 18)]
+            vec![
+                ("late-media".to_string(), 18),
+                ("shutdown-media".to_string(), 17)
+            ]
         );
         let reopened_registration = coordinator
             .register_media("reopened-media".to_string(), 19)
@@ -679,5 +710,76 @@ mod tests {
         coordinator
             .finish_media("reopened-media".to_string(), 19)
             .await;
+    }
+
+    #[tokio::test]
+    async fn normal_media_finish_clears_provisional_marker_after_shutdown_timeout() {
+        let (coordinator, _events) = DownloadCoordinator::spawn_headless();
+        let mut cancel_rx = coordinator
+            .register_media("completed-media".to_string(), 31)
+            .await
+            .unwrap();
+        let shutdown_coordinator = coordinator.clone();
+        let shutdown = tokio::spawn(async move {
+            shutdown_coordinator.cancel_active_media_for_shutdown().await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !*cancel_rx.borrow_and_update() {
+                cancel_rx.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("shutdown did not cancel the active media runner");
+
+        // The real shutdown path can time out while this runner is still
+        // completing cleanup. Dropping the waiter leaves its provisional
+        // marker for Finished to reconcile.
+        shutdown.abort();
+        let _ = shutdown.await;
+        coordinator
+            .finish_media_with_shutdown_outcome("completed-media".to_string(), 31, false)
+            .await;
+
+        assert!(coordinator.reopen_media_registration().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn interrupted_media_ids_survive_a_timed_out_shutdown_caller() {
+        let (coordinator, _events) = DownloadCoordinator::spawn_headless();
+        let mut cancel_rx = coordinator
+            .register_media("interrupted-media".to_string(), 32)
+            .await
+            .unwrap();
+        let shutdown_coordinator = coordinator.clone();
+        let shutdown = tokio::spawn(async move {
+            shutdown_coordinator.cancel_active_media_for_shutdown().await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !*cancel_rx.borrow_and_update() {
+                cancel_rx.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("shutdown did not cancel the active media runner");
+
+        // The absolute exit deadline can drop the caller while the actor still
+        // waits for this runner's cleanup result.
+        shutdown.abort();
+        let _ = shutdown.await;
+        coordinator
+            .finish_media_with_shutdown_outcome("interrupted-media".to_string(), 32, true)
+            .await;
+
+        assert!(coordinator
+            .cancel_active_media_for_shutdown()
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            coordinator.reopen_media_registration().await,
+            vec![("interrupted-media".to_string(), 32)]
+        );
     }
 }

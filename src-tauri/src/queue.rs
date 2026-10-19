@@ -10287,6 +10287,7 @@ impl SidecarSpawner for ProductionSpawner {
             crate::start_media_download_internal(
                 self.app_handle.clone(),
                 id,
+                lifecycle_generation,
                 payload.url.clone(),
                 payload.destination.clone(),
                 payload.filename.clone(),
@@ -11079,7 +11080,7 @@ mod tests {
             .try_admit_next_task()
             .await
             .expect("task is admitted before shutdown starts");
-        assert!(guard.begin_shutdown());
+        let shutdown_generation = guard.begin_shutdown().unwrap();
         manager.close_aria2_handoffs_for_shutdown();
         Arc::clone(&manager)
             .dispatch_one(
@@ -11099,7 +11100,8 @@ mod tests {
         assert_eq!(manager.available_permits(), 1);
         assert_eq!(manager.aria2_gid_for_download("shutdown-held"), None);
 
-        assert!(guard.cancel_shutdown(), "exit rejection reopens dispatch");
+        assert!(guard.begin_shutdown_recovery(shutdown_generation));
+        assert!(guard.finish_shutdown_recovery(shutdown_generation));
         manager.wake_after_exit_rejected();
         let dispatcher = tokio::spawn(Arc::clone(&manager).run_dispatcher());
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -11152,7 +11154,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), spawner.add_uri_started.notified())
             .await
             .expect("dispatch should reach the gated addUri call");
-        assert!(guard.begin_shutdown());
+        let _shutdown_generation = guard.begin_shutdown().unwrap();
         manager.close_aria2_handoffs_for_shutdown();
 
         let waiting_manager = Arc::clone(&manager);
@@ -11242,7 +11244,7 @@ mod tests {
         started_rx.await.expect("resume worker started");
         tokio::task::yield_now().await;
 
-        assert!(guard.begin_shutdown());
+        let shutdown_generation = guard.begin_shutdown().unwrap();
         manager.close_aria2_handoffs_for_shutdown();
         let waiting_manager = Arc::clone(&manager);
         let shutdown_drain = tokio::spawn(async move {
@@ -11268,7 +11270,8 @@ mod tests {
         assert_eq!(manager.aria2_handoff_count.load(Ordering::Acquire), 0);
         assert!(manager.try_begin_aria2_handoff().is_none());
 
-        assert!(guard.cancel_shutdown());
+        assert!(guard.begin_shutdown_recovery(shutdown_generation));
+        assert!(guard.finish_shutdown_recovery(shutdown_generation));
         manager.wake_after_exit_rejected();
         let reopened = manager
             .try_begin_aria2_handoff()
@@ -11461,8 +11464,9 @@ mod tests {
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("mock app");
         let guard = app.handle().state::<crate::Aria2DaemonGuard>();
-        assert!(guard.begin_shutdown(), "simulate the earlier exit request");
-        assert!(guard.cancel_shutdown(), "the earlier exit is rejected");
+        let earlier_generation = guard.begin_shutdown().unwrap();
+        assert!(guard.begin_shutdown_recovery(earlier_generation));
+        assert!(guard.finish_shutdown_recovery(earlier_generation));
 
         let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
         let generation = 42;
@@ -11470,7 +11474,7 @@ mod tests {
             .reserve_enqueue_generation("shutdown-journal-rollback", generation)
             .await
             .expect("new lifecycle reservation");
-        assert!(guard.begin_shutdown(), "a later exit starts before commit");
+        let _later_generation = guard.begin_shutdown().expect("a later exit starts before commit");
         let error = manager
             .commit_reserved_enqueue(
                 QueuedTask {
@@ -11585,7 +11589,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), finalizer_started.notified())
             .await
             .expect("durable finalizer should start");
-        assert!(guard.begin_shutdown(), "shutdown begins during finalization");
+        let _shutdown_generation = guard.begin_shutdown().expect("shutdown begins during finalization");
         release_finalizer.notify_one();
         let error = tokio::time::timeout(Duration::from_secs(1), commit)
             .await

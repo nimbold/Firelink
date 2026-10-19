@@ -244,6 +244,210 @@ describe('useDownloadStore', () => {
     expect(commitCalled).toBe(false);
   });
 
+  it('persists provisional progress checkpoints for normal, Torrent, and media transfers', async () => {
+    const persistedSnapshots: Array<Array<Record<string, unknown>>> = [];
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command, args) => {
+      if (command === 'db_commit_download_state') {
+        const downloadsData = (args as { downloadsData?: string } | undefined)?.downloadsData;
+        if (typeof downloadsData === 'string') {
+          persistedSnapshots.push(JSON.parse(downloadsData) as Array<Record<string, unknown>>);
+        }
+      }
+      return undefined as never;
+    });
+    useDownloadStore.setState({
+      downloads: [
+        {
+          id: 'checkpoint-normal',
+          url: 'https://example.com/normal.bin',
+          fileName: 'normal.bin',
+          status: 'downloading',
+          category: 'Other',
+          dateAdded: '',
+          fraction: 0.2,
+          downloadedBytes: 200,
+          totalBytes: 1000,
+          totalIsEstimate: false
+        },
+        {
+          id: 'checkpoint-torrent',
+          url: 'magnet:?xt=urn:btih:checkpoint',
+          fileName: 'torrent.bin',
+          status: 'seeding',
+          category: 'Other',
+          dateAdded: '',
+          isTorrent: true,
+          fraction: 0.45,
+          downloadedBytes: 450,
+          totalBytes: 1000,
+          totalIsEstimate: false
+        },
+        {
+          id: 'checkpoint-media',
+          url: 'https://example.com/video',
+          fileName: 'video.mkv',
+          status: 'downloading',
+          category: 'Movies',
+          dateAdded: '',
+          isMedia: true,
+          fraction: 0.65,
+          downloadedBytes: 650,
+          totalBytes: 1000,
+          totalIsEstimate: true,
+          size: '~1 KB'
+        }
+      ] as any[]
+    });
+    const disposePersistence = initializeDownloadPersistence('main');
+
+    try {
+      await flushDownloadPersistence();
+      const snapshot: Array<Record<string, unknown>> = persistedSnapshots[persistedSnapshots.length - 1]!;
+      for (const [id, fraction, downloadedBytes] of [
+        ['checkpoint-normal', 0.2, 200],
+        ['checkpoint-torrent', 0.45, 450],
+        ['checkpoint-media', 0.65, 650]
+      ] as const) {
+        const persisted = snapshot.find(item => item.id === id)!;
+        expect(persisted).toMatchObject({ fraction, downloadedBytes, totalBytes: 1000 });
+        const restored = normalizePersistedDownloadProgress({
+          ...(persisted as any),
+          status: 'queued'
+        });
+        expect(restored).toMatchObject({ fraction, downloadedBytes, totalBytes: 1000 });
+        expect(resolveDownloadFraction({
+          fraction: restored.fraction,
+          downloadedBytes: restored.downloadedBytes,
+          totalBytes: restored.totalBytes,
+          totalIsEstimate: restored.totalIsEstimate,
+          isMedia: restored.isMedia,
+          size: restored.size,
+          status: restored.status
+        })).toBe(fraction);
+      }
+      expect(snapshot.find((item: Record<string, unknown>) => item.id === 'checkpoint-media')?.totalIsEstimate).toBe(true);
+    } finally {
+      disposePersistence();
+    }
+  });
+
+  it('throttles active progress writes and immediately flushes a pending checkpoint when activity stops', async () => {
+    vi.useFakeTimers();
+    const persistedSnapshots: Array<Array<Record<string, unknown>>> = [];
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command, args) => {
+      if (command === 'db_commit_download_state') {
+        const downloadsData = (args as { downloadsData?: string } | undefined)?.downloadsData;
+        if (typeof downloadsData === 'string') {
+          persistedSnapshots.push(JSON.parse(downloadsData) as Array<Record<string, unknown>>);
+        }
+      }
+      return undefined as never;
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'throttled-checkpoint',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: '',
+        fraction: 0.1,
+        downloadedBytes: 100,
+        totalBytes: 1000
+      }] as any[]
+    });
+    const disposePersistence = initializeDownloadPersistence('main');
+
+    try {
+      await flushDownloadPersistence();
+      expect(persistedSnapshots).toHaveLength(1);
+      useDownloadStore.getState().updateDownload('throttled-checkpoint', {
+        fraction: 0.2,
+        downloadedBytes: 200
+      });
+      expect(persistedSnapshots).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(persistedSnapshots).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await flushDownloadPersistence();
+      expect(persistedSnapshots).toHaveLength(2);
+      expect(persistedSnapshots[persistedSnapshots.length - 1]?.[0]).toMatchObject({
+        fraction: 0.2,
+        downloadedBytes: 200
+      });
+
+      useDownloadStore.getState().updateDownload('throttled-checkpoint', {
+        fraction: 0.3,
+        downloadedBytes: 300
+      });
+      useDownloadStore.getState().updateDownload('throttled-checkpoint', { status: 'paused' });
+      await flushDownloadPersistence();
+      expect(persistedSnapshots).toHaveLength(3);
+      expect(persistedSnapshots[persistedSnapshots.length - 1]?.[0]).toMatchObject({
+        status: 'paused',
+        fraction: 0.3,
+        downloadedBytes: 300
+      });
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(persistedSnapshots).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+      disposePersistence();
+    }
+  });
+
+  it('durably clears media progress before deleting unfinished resume assets', async () => {
+    const persistedSnapshots: Array<Array<Record<string, unknown>>> = [];
+    let checkpointAtRemoval: Record<string, unknown> | undefined;
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command, args) => {
+      if (command === 'db_commit_download_state') {
+        const downloadsData = (args as { downloadsData?: string } | undefined)?.downloadsData;
+        if (typeof downloadsData === 'string') {
+          persistedSnapshots.push(JSON.parse(downloadsData) as Array<Record<string, unknown>>);
+        }
+      }
+      if (command === 'remove_download') {
+        const snapshot = persistedSnapshots[persistedSnapshots.length - 1] ?? [];
+        checkpointAtRemoval = snapshot.find(item => item.id === 'delete-media-checkpoint');
+      }
+      return undefined as never;
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'delete-media-checkpoint',
+        url: 'https://example.com/watch',
+        fileName: 'video.mkv',
+        status: 'paused',
+        category: 'Movies',
+        dateAdded: '',
+        isMedia: true,
+        fraction: 0.7,
+        downloadedBytes: 700,
+        totalBytes: 1000,
+        totalIsEstimate: true,
+        size: '~1 KB'
+      }]
+    });
+    const disposePersistence = initializeDownloadPersistence('main');
+
+    try {
+      await useDownloadStore.getState().removeDownload(
+        'delete-media-checkpoint',
+        true,
+        false,
+        'permanentIfUnfinished'
+      );
+      expect(checkpointAtRemoval).toBeDefined();
+      expect(checkpointAtRemoval).not.toHaveProperty('fraction');
+      expect(checkpointAtRemoval).not.toHaveProperty('downloadedBytes');
+      expect(checkpointAtRemoval).not.toHaveProperty('totalBytes');
+      expect(checkpointAtRemoval).not.toHaveProperty('size');
+      expect(useDownloadStore.getState().downloads).toEqual([]);
+    } finally {
+      disposePersistence();
+    }
+  });
+
   it('ignores duplicate identical removal jobs and stale revisions without mutating state', () => {
     const job = {
       id: 'job-1',
@@ -1239,6 +1443,70 @@ describe('useDownloadStore', () => {
     });
   });
 
+  it('drops malformed persisted progress checkpoints while preserving valid zero and one boundaries', () => {
+    const invalid = normalizePersistedDownloadProgress({
+      id: 'invalid-checkpoint',
+      url: 'https://example.com/video',
+      fileName: 'video.mkv',
+      status: 'queued',
+      category: 'Movies',
+      dateAdded: '',
+      isMedia: true,
+      fraction: Number.NaN,
+      downloadedBytes: Number.POSITIVE_INFINITY,
+      totalBytes: -1,
+      totalIsEstimate: 'maybe'
+    } as any);
+    expect(invalid.fraction).toBeUndefined();
+    expect(invalid.downloadedBytes).toBeUndefined();
+    expect(invalid.totalBytes).toBeUndefined();
+    expect(invalid.totalIsEstimate).toBeUndefined();
+
+    const validBoundaries = normalizePersistedDownloadProgress({
+      id: 'boundary-checkpoint',
+      url: 'https://example.com/video',
+      fileName: 'video.mkv',
+      status: 'queued',
+      category: 'Movies',
+      dateAdded: '',
+      isMedia: true,
+      fraction: 1,
+      downloadedBytes: 0,
+      totalBytes: 0,
+      totalIsEstimate: false
+    });
+    expect(validBoundaries).toMatchObject({
+      fraction: 1,
+      downloadedBytes: 0,
+      totalBytes: 0,
+      totalIsEstimate: false
+    });
+
+    const invalidEpoch = normalizePersistedDownloadProgress({
+      id: 'invalid-epoch-checkpoint',
+      url: 'https://example.com/video',
+      fileName: 'video.mkv',
+      status: 'queued',
+      category: 'Movies',
+      dateAdded: '',
+      isMedia: true,
+      progressCheckpointEpoch: 'not-an-epoch',
+      fraction: 0.8,
+      downloadedBytes: 800,
+      totalBytes: 1000,
+      totalIsEstimate: true,
+      size: '~1 KB'
+    } as any);
+    expect(invalidEpoch).toMatchObject({
+      progressCheckpointEpoch: undefined,
+      fraction: undefined,
+      downloadedBytes: undefined,
+      totalBytes: undefined,
+      totalIsEstimate: undefined,
+      size: undefined
+    });
+  });
+
   it('restores a paused media fraction across persistence and hydration without estimating legacy rows', () => {
     const pausedMedia = {
       id: 'paused-media-progress',
@@ -1541,6 +1809,47 @@ describe('useDownloadStore', () => {
     expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
   });
 
+  it('does not attach a stale proxy error after a queue row is paused during lookup', async () => {
+    vi.mocked(useSettingsStore.getState).mockReturnValue({
+      ...useSettingsStore.getState(),
+      proxyMode: 'system'
+    } as unknown as ReturnType<typeof useSettingsStore.getState>);
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'proxy-pause-race',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        destination: '/tmp',
+        status: 'staged',
+        category: 'Other',
+        dateAdded: '',
+        queueId: 'proxy-race'
+      }] as any[],
+      backendRegisteredIds: new Set(),
+      pendingOrder: []
+    });
+
+    let rejectProxy!: (error: Error) => void;
+    const proxyLookup = new Promise<never>((_resolve, reject) => { rejectProxy = reject; });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
+      if (command === 'get_system_proxy') return proxyLookup as never;
+      if (command === 'pause_download') return true as never;
+      return undefined as never;
+    });
+
+    const starting = useDownloadStore.getState().startQueue('proxy-race');
+    await vi.waitFor(() => expect(ipc.invokeCommand).toHaveBeenCalledWith('get_system_proxy'));
+
+    await useDownloadStore.getState().pauseDownload('proxy-pause-race');
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({ status: 'paused' });
+    rejectProxy(new Error('system settings unavailable'));
+
+    await expect(starting).resolves.toEqual([]);
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({ status: 'paused' });
+    expect(useDownloadStore.getState().downloads[0].lastError).toBeUndefined();
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('enqueue_download', expect.anything());
+  });
+
   it('keeps destination permission failures retryable before backend admission', async () => {
     vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string) => {
       if (command === 'enqueue_download') {
@@ -1611,6 +1920,43 @@ describe('useDownloadStore', () => {
     const enqueues = calls.filter(c => c[0] === 'enqueue_download');
     expect(enqueues.length).toBe(1);
     expect((enqueues[0] as any)[1].item.id).toBe('2');
+  });
+
+  it('honors a queue reorder for rows not yet dispatched by an in-flight start', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'first', url: 'http://first', fileName: 'first', destination: '/tmp', status: 'staged', category: 'Other', dateAdded: '', queueId: 'start-reorder', queuePosition: 0 },
+        { id: 'second', url: 'http://second', fileName: 'second', destination: '/tmp', status: 'staged', category: 'Other', dateAdded: '', queueId: 'start-reorder', queuePosition: 1 },
+        { id: 'third', url: 'http://third', fileName: 'third', destination: '/tmp', status: 'staged', category: 'Other', dateAdded: '', queueId: 'start-reorder', queuePosition: 2 },
+      ] as any[],
+      backendRegisteredIds: new Set(),
+      pendingOrder: [],
+    });
+
+    let resolveFirstEnqueue!: (value: { id: string; filename: string }) => void;
+    const firstEnqueue = new Promise<{ id: string; filename: string }>(resolve => {
+      resolveFirstEnqueue = resolve;
+    });
+    const enqueuedIds: string[] = [];
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'enqueue_download') {
+        const id = (args as { item: { id: string } }).item.id;
+        enqueuedIds.push(id);
+        if (id === 'first') return firstEnqueue as never;
+        return { id, filename: id } as never;
+      }
+      if (command === 'get_pending_order') return [...enqueuedIds] as never;
+      return undefined;
+    });
+
+    const starting = useDownloadStore.getState().startQueue('start-reorder');
+    await vi.waitFor(() => expect(enqueuedIds).toEqual(['first']));
+
+    await useDownloadStore.getState().moveManyInQueueToPosition('third', 'start-reorder', 0);
+    resolveFirstEnqueue({ id: 'first', filename: 'first' });
+
+    await expect(starting).resolves.toEqual(['first', 'third', 'second']);
+    expect(enqueuedIds).toEqual(['first', 'third', 'second']);
   });
 
   it('repairs stale queued backend registrations before accepting a queue start', async () => {

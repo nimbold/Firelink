@@ -256,6 +256,11 @@ export function invokeCommand<K extends CommandName>(
 type EventMap = {
   'schedule-trigger': { action: 'start' | 'stop'; key: string; runKey: string };
   'download-progress': DownloadProgressEvent;
+  'download-progress-invalidated': {
+    id: string;
+    lifecycleGeneration: string;
+    progressCheckpointEpoch: string;
+  };
   'download-removal': DownloadRemovalJob;
   'download-allocation': DownloadAllocationEvent;
   'download-state': DownloadStateEvent;
@@ -270,9 +275,18 @@ type EventMap = {
   'app-exit-requested': { requestId: string };
   'app-exit-cancelled': {
     requestId: string;
-    reason: 'rejected' | 'timeout' | 'signal-failed' | 'media-shutdown-failed' | 'terminal-journal-failed';
+    reason:
+      | 'rejected'
+      | 'timeout'
+      | 'signal-failed'
+      | 'media-shutdown-failed'
+      | 'media-shutdown-deadline-expired'
+      | 'aria2-handoff-drain-failed'
+      | 'aria2-shutdown-deadline-expired'
+      | 'terminal-journal-failed';
     interruptedMediaIds: string[];
   };
+  'app-exit-media-recovery-complete': { requestId: string; interruptedMediaIds: string[] };
   'app-exit-final-flush-requested': { requestId: string };
 };
 

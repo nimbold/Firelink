@@ -7,6 +7,8 @@ import {
 } from './downloadStore';
 import {
   clearDownloadControlIntents,
+  currentDownloadLifecycleGeneration,
+  flushDownloadPersistence,
   initializeDownloadPersistence,
   resetDownloadStoreModuleStateForTests,
   downloadControlIntentFor,
@@ -51,7 +53,7 @@ describe('useDownloadProgressStore', () => {
     const first = initDownloadListener();
     const second = initDownloadListener();
 
-    expect(ipc.listenEvent).toHaveBeenCalledTimes(5);
+    expect(ipc.listenEvent).toHaveBeenCalledTimes(6);
 
     const releaseFirst = await first;
     const releaseSecond = await second;
@@ -59,7 +61,7 @@ describe('useDownloadProgressStore', () => {
     expect(unlisten).not.toHaveBeenCalled();
 
     releaseSecond();
-    expect(unlisten).toHaveBeenCalledTimes(5);
+    expect(unlisten).toHaveBeenCalledTimes(6);
   });
 
   it('acknowledges a failed tray action attempt and reports the unfinished target', async () => {
@@ -431,6 +433,242 @@ describe('useDownloadProgressStore', () => {
 
     expect(useDownloadProgressStore.getState().progressMap).toEqual({});
     expect(useDownloadStore.getState().downloads[0].status).toBe('completed');
+    release();
+  });
+
+  it('invalidates media checkpoints only for the current lifecycle after cleanup', async () => {
+    resetDownloadStoreModuleStateForTests();
+    const persistedSnapshots: Array<Array<Record<string, unknown>>> = [];
+    let pauseStatusAtInvalidation: string | undefined;
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (command, args) => {
+      if (command === 'db_commit_download_state') {
+        const downloadsData = (args as { downloadsData?: string } | undefined)?.downloadsData;
+        if (typeof downloadsData === 'string') {
+          persistedSnapshots.push(JSON.parse(downloadsData) as Array<Record<string, unknown>>);
+        }
+      }
+      if (command === 'pause_download') {
+        pauseStatusAtInvalidation = useDownloadStore.getState().downloads[0]?.status;
+        handlers['download-progress-invalidated']({ payload: {
+          id: 'media-cleanup',
+          lifecycleGeneration: '0',
+          progressCheckpointEpoch: '1'
+        } });
+        return true as never;
+      }
+      return undefined as never;
+    });
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'media-cleanup',
+        url: 'https://example.com/watch',
+        fileName: 'video.mkv',
+        status: 'downloading',
+        category: 'Movies',
+        dateAdded: '',
+        isMedia: true,
+        fraction: 0.8,
+        downloadedBytes: 800,
+        totalBytes: 1000,
+        totalIsEstimate: true,
+        size: '~1 KB'
+      }]
+    });
+    useDownloadProgressStore.getState().updateDownloadProgress('media-cleanup', {
+      id: 'media-cleanup',
+      fraction: 0.8,
+      speed: '1 MB/s',
+      eta: '1s',
+      size: '~1 KB',
+      size_is_final: false,
+      downloaded_bytes: 800,
+      total_bytes: 1000,
+      total_is_estimate: true
+    });
+
+    const disposePersistence = initializeDownloadPersistence('main');
+    await flushDownloadPersistence();
+    const release = await initDownloadListener();
+    handlers['download-progress-invalidated']({ payload: {
+      id: 'media-cleanup',
+      lifecycleGeneration: '1',
+      progressCheckpointEpoch: '1'
+    } });
+    expect(useDownloadStore.getState().downloads[0].downloadedBytes).toBe(800);
+    expect(useDownloadProgressStore.getState().retainedProgressMap['media-cleanup']).toBeDefined();
+
+    await useDownloadStore.getState().pauseDownload('media-cleanup');
+    expect(pauseStatusAtInvalidation).toBe('downloading');
+    expect(currentDownloadLifecycleGeneration('media-cleanup')).toBe('1');
+    expect(useDownloadStore.getState().downloads[0].status).toBe('paused');
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      id: 'media-cleanup',
+      status: 'paused',
+      progressCheckpointEpoch: '1',
+      fraction: undefined,
+      downloadedBytes: undefined,
+      totalBytes: undefined,
+      totalIsEstimate: undefined,
+      size: undefined
+    });
+    expect(useDownloadProgressStore.getState().progressMap['media-cleanup']).toBeUndefined();
+    expect(useDownloadProgressStore.getState().retainedProgressMap['media-cleanup']).toBeUndefined();
+    await flushDownloadPersistence();
+    expect(persistedSnapshots[persistedSnapshots.length - 1]?.[0]).not.toHaveProperty('downloadedBytes');
+    expect(persistedSnapshots[persistedSnapshots.length - 1]?.[0]).not.toHaveProperty('fraction');
+    release();
+    disposePersistence();
+  });
+
+  it('recovers a missed media checkpoint invalidation from the next native progress frame', async () => {
+    resetDownloadStoreModuleStateForTests();
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'media-epoch-recovery',
+        url: 'https://example.com/watch',
+        fileName: 'video.mkv',
+        status: 'downloading',
+        category: 'Movies',
+        dateAdded: '',
+        isMedia: true,
+        progressCheckpointEpoch: '0',
+        fraction: 0.8,
+        downloadedBytes: 800,
+        totalBytes: 1000,
+        totalIsEstimate: false
+      }]
+    });
+    const release = await initDownloadListener();
+
+    await useDownloadStore.getState().pauseDownload('media-epoch-recovery');
+    expect(useDownloadStore.getState().downloads[0].status).toBe('paused');
+    const resumedLifecycle = currentDownloadLifecycleGeneration('media-epoch-recovery');
+    expect(resumedLifecycle).toBe('1');
+    useDownloadStore.setState(state => ({
+      downloads: state.downloads.map(download => download.id === 'media-epoch-recovery'
+        ? { ...download, status: 'downloading', fraction: undefined, downloadedBytes: undefined }
+        : download)
+    }));
+
+    handlers['download-progress']({ payload: {
+      id: 'media-epoch-recovery',
+      fraction: 0.9,
+      speed: '1 MB/s',
+      eta: '1s',
+      size: '1 MB',
+      size_is_final: false,
+      downloaded_bytes: 900,
+      total_bytes: 1000,
+      total_is_estimate: false,
+      progress_checkpoint_epoch: '0',
+      lifecycle_generation: '0'
+    } });
+    expect(useDownloadStore.getState().downloads[0].fraction).toBeUndefined();
+    expect(useDownloadProgressStore.getState().progressMap['media-epoch-recovery']).toBeUndefined();
+
+    // The durable DB epoch advanced while the invalidation event was missed.
+    // A new native worker carries that epoch on its first progress frame.
+    handlers['download-progress']({ payload: {
+      id: 'media-epoch-recovery',
+      fraction: 0.2,
+      speed: '2 MB/s',
+      eta: '40s',
+      size: '1 MB',
+      size_is_final: false,
+      downloaded_bytes: 200,
+      total_bytes: 1000,
+      total_is_estimate: false,
+      progress_checkpoint_epoch: '1',
+      lifecycle_generation: resumedLifecycle
+    } });
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'downloading',
+      progressCheckpointEpoch: '1',
+      fraction: 0.2,
+      downloadedBytes: 200
+    });
+    release();
+  });
+
+  it('ignores unfenced media progress without clearing the current lifecycle snapshot', async () => {
+    const handlers: Record<string, (event: any) => void> = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'media-progress-fence',
+        url: 'https://example.com/watch',
+        fileName: 'video.mkv',
+        status: 'downloading',
+        category: 'Movies',
+        dateAdded: '',
+        isMedia: true,
+        progressCheckpointEpoch: '1',
+        fraction: 0.25,
+        downloadedBytes: 250,
+        totalBytes: 1000,
+        totalIsEstimate: false
+      }]
+    });
+    const release = await initDownloadListener();
+
+    const currentFrame = {
+      id: 'media-progress-fence',
+      fraction: 0.25,
+      speed: '1 MB/s',
+      eta: '1s',
+      size: '1 KB',
+      size_is_final: false,
+      downloaded_bytes: 250,
+      total_bytes: 1000,
+      total_is_estimate: false,
+      progress_checkpoint_epoch: '1',
+      lifecycle_generation: '0'
+    };
+    handlers['download-progress']({ payload: currentFrame });
+    handlers['download-progress']({ payload: {
+      ...currentFrame,
+      fraction: 0.9,
+      downloaded_bytes: 900,
+      progress_checkpoint_epoch: '0'
+    } });
+    handlers['download-progress']({ payload: {
+      ...currentFrame,
+      fraction: 0.95,
+      downloaded_bytes: 950,
+      progress_checkpoint_epoch: undefined
+    } });
+    handlers['download-progress']({ payload: {
+      ...currentFrame,
+      fraction: 0.99,
+      downloaded_bytes: 990,
+      lifecycle_generation: undefined
+    } });
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      fraction: 0.25,
+      downloadedBytes: 250,
+      progressCheckpointEpoch: '1'
+    });
+    expect(useDownloadProgressStore.getState().progressMap['media-progress-fence']).toMatchObject({
+      fraction: 0.25,
+      downloaded_bytes: 250,
+      progress_checkpoint_epoch: '1',
+      lifecycle_generation: '0'
+    });
     release();
   });
 
@@ -1327,7 +1565,9 @@ describe('useDownloadProgressStore', () => {
       size_is_final: false,
       downloaded_bytes: 13000,
       total_bytes: null,
-      total_is_estimate: null
+      total_is_estimate: null,
+      progress_checkpoint_epoch: '0',
+      lifecycle_generation: '0'
     } });
 
     expect(useDownloadStore.getState().downloads[0]).toMatchObject({
@@ -1368,7 +1608,9 @@ describe('useDownloadProgressStore', () => {
       size_is_final: false,
       downloaded_bytes: 2048,
       total_bytes: null,
-      total_is_estimate: null
+      total_is_estimate: null,
+      progress_checkpoint_epoch: '0',
+      lifecycle_generation: '0'
     } });
 
     expect(useDownloadStore.getState().downloads[0].size).toBeUndefined();

@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
@@ -38,6 +39,12 @@ impl DbState {
         self.conn
             .lock()
             .map_err(|_| "persistence database lock is unavailable".to_string())
+    }
+
+    /// Acquire the database only when it is immediately available. Shutdown
+    /// uses this to keep terminal verification inside its bounded deadline.
+    pub fn try_lock(&self) -> Option<std::sync::MutexGuard<'_, Connection>> {
+        self.conn.try_lock().ok()
     }
 }
 
@@ -1716,6 +1723,64 @@ where
     Ok(result)
 }
 
+/// Clear a media checkpoint before native cleanup removes its resumable asset.
+/// This small transactional mutation closes the crash window before the
+/// renderer can receive and persist its progress-invalidation event.
+pub fn invalidate_media_progress_checkpoint(
+    connection: &mut Connection,
+    id: &str,
+    portable: bool,
+) -> Result<Option<String>, String> {
+    mutate_download(connection, id, portable, |object| {
+        if object.get("isMedia").and_then(Value::as_bool) != Some(true)
+            || object.get("status").and_then(Value::as_str) == Some("completed")
+        {
+            return Ok(None);
+        }
+        let previous_epoch = parse_progress_checkpoint_epoch(object.get("progressCheckpointEpoch"))
+            .unwrap_or(0);
+        let epoch = previous_epoch
+            .checked_add(1)
+            .ok_or_else(|| "media progress checkpoint epoch is exhausted".to_string())?
+            .to_string();
+        let had_estimated_total = object.get("totalIsEstimate").and_then(Value::as_bool) == Some(true);
+        object.insert("progressCheckpointEpoch".to_string(), Value::String(epoch.clone()));
+        for field in ["fraction", "downloadedBytes", "totalBytes", "totalIsEstimate"] {
+            object.remove(field);
+        }
+        if had_estimated_total {
+            object.remove("size");
+        }
+        Ok(Some(epoch))
+    })
+}
+
+/// Return the durable checkpoint epoch used by native media progress events.
+/// Reading it at worker admission lets the renderer recover if it missed the
+/// one-shot invalidation event before a later media lifecycle starts.
+pub fn media_progress_checkpoint_epoch(
+    connection: &Connection,
+    id: &str,
+) -> Result<Option<String>, String> {
+    let data: Option<String> = connection
+        .query_row("SELECT data FROM downloads WHERE id = ?1", [id], |row| row.get(0))
+        .optional()
+        .map_err(|error| format!("failed to read media checkpoint epoch: {error}"))?;
+    let Some(data) = data else {
+        return Ok(None);
+    };
+    let value: Value = serde_json::from_str(&data)
+        .map_err(|error| format!("persisted download '{id}' is malformed: {error}"))?;
+    if value.get("isMedia").and_then(Value::as_bool) != Some(true) {
+        return Ok(None);
+    }
+    Ok(Some(
+        parse_progress_checkpoint_epoch(value.get("progressCheckpointEpoch"))
+            .unwrap_or(1)
+            .to_string(),
+    ))
+}
+
 fn remove_live_download_metadata(value: &mut Value) {
     if let Some(object) = value.as_object_mut() {
         // Error classifications and resolver phase are process-local
@@ -2160,26 +2225,98 @@ fn sanitize_persisted_downloads(connection: &mut Connection) -> Result<(), Strin
 }
 
 fn replace_downloads_tx(transaction: &Transaction<'_>, downloads: &[String]) -> Result<(), String> {
+    let existing_media_epochs = {
+        let mut statement = transaction
+            .prepare("SELECT id, data FROM downloads ORDER BY rowid")
+            .map_err(|error| format!("failed to read media checkpoint fences: {error}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| format!("failed to query media checkpoint fences: {error}"))?;
+        let mut epochs = HashMap::new();
+        for row in rows {
+            let (id, data) = row
+                .map_err(|error| format!("failed to read media checkpoint fence: {error}"))?;
+            // A malformed pre-existing record must not block the renderer's
+            // next full snapshot from repairing the downloads table. It has
+            // no trustworthy checkpoint fence, so let the normal replacement
+            // path replace it instead of turning one corrupt row into a
+            // database-wide persistence outage.
+            let Ok(value) = serde_json::from_str::<Value>(&data) else {
+                continue;
+            };
+            if value.get("isMedia").and_then(Value::as_bool) == Some(true) {
+                epochs.insert(
+                    id,
+                    parse_progress_checkpoint_epoch(value.get("progressCheckpointEpoch"))
+                        // Missing means a legacy row at epoch zero; a present
+                        // but malformed epoch must fail closed and clear old
+                        // progress by advancing it to a valid epoch.
+                        .unwrap_or(1),
+                );
+            }
+        }
+        epochs
+    };
     transaction
         .execute("DELETE FROM downloads WHERE id NOT IN (SELECT id FROM download_removal_jobs)", [])
         .map_err(|error| format!("failed to clear downloads: {error}"))?;
     for data in downloads {
-        let value: Value = serde_json::from_str(data)
+        let mut value: Value = serde_json::from_str(data)
             .map_err(|error| format!("failed to decode download: {error}"))?;
-        let id = required_string(&value, "id")?;
+        let id = required_string(&value, "id")?.to_string();
         // Native removal intent and terminal tombstones outrank renderer snapshots.
-        if transaction.query_row("SELECT EXISTS(SELECT 1 FROM download_removal_jobs WHERE id=?1)", [id], |row| row.get::<_, bool>(0))
+        if transaction.query_row("SELECT EXISTS(SELECT 1 FROM download_removal_jobs WHERE id=?1)", [&id], |row| row.get::<_, bool>(0))
             .map_err(|error| error.to_string())? {
             continue;
         }
-        let status = required_string(&value, "status")?;
-        let queue_id = value.get("queueId").and_then(Value::as_str);
+        let status = required_string(&value, "status")?.to_string();
+        let queue_id = value.get("queueId").and_then(Value::as_str).map(str::to_owned);
+        if value.get("isMedia").and_then(Value::as_bool) == Some(true) {
+            let persisted_epoch = existing_media_epochs.get(&id).copied().unwrap_or(0);
+            if parse_progress_checkpoint_epoch(value.get("progressCheckpointEpoch"))
+                != Some(persisted_epoch)
+            {
+                fence_stale_media_progress(&mut value, persisted_epoch)?;
+            }
+        }
+        let data = serde_json::to_string(&value)
+            .map_err(|error| format!("failed to encode download '{id}': {error}"))?;
         transaction
             .execute(
                 "INSERT INTO downloads (id, status, queue_id, data) VALUES (?1, ?2, ?3, ?4)",
                 params![id, status, queue_id, data],
             )
             .map_err(|error| format!("failed to save download '{id}': {error}"))?;
+    }
+    Ok(())
+}
+
+fn parse_progress_checkpoint_epoch(value: Option<&Value>) -> Option<u64> {
+    match value {
+        None => Some(0),
+        Some(Value::String(epoch)) => epoch
+            .parse::<u64>()
+            .ok(),
+        Some(_) => None,
+    }
+}
+
+fn fence_stale_media_progress(value: &mut Value, persisted_epoch: u64) -> Result<(), String> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "persisted media download is not an object".to_string())?;
+    let had_estimated_total = object.get("totalIsEstimate").and_then(Value::as_bool) == Some(true);
+    object.insert(
+        "progressCheckpointEpoch".to_string(),
+        Value::String(persisted_epoch.to_string()),
+    );
+    for field in ["fraction", "downloadedBytes", "totalBytes", "totalIsEstimate"] {
+        object.remove(field);
+    }
+    if had_estimated_total {
+        object.remove("size");
     }
     Ok(())
 }
@@ -2983,6 +3120,47 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::TempDir;
+
+    #[test]
+    fn try_lock_never_waits_for_a_busy_database() {
+        let root = TempDir::new().unwrap();
+        let db = init_at_path(root.path()).unwrap();
+        let held = db.lock().unwrap();
+
+        assert!(db.try_lock().is_none());
+
+        drop(held);
+        assert!(db.try_lock().is_some());
+    }
+
+    #[test]
+    fn full_snapshot_repairs_malformed_existing_download_records() {
+        let root = TempDir::new().unwrap();
+        let db = init_at_path(root.path()).unwrap();
+        let mut connection = db.lock().unwrap();
+        connection
+            .execute(
+                "INSERT INTO downloads (id, status, queue_id, data) VALUES ('broken', 'downloading', 'main', 'not-json')",
+                [],
+            )
+            .unwrap();
+
+        replace_downloads(
+            &mut connection,
+            &json!([{
+                "id": "repaired",
+                "status": "queued",
+                "queueId": "main"
+            }])
+            .to_string(),
+            false,
+        )
+        .unwrap();
+
+        let rows = load_downloads(&connection).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].contains("repaired"));
+    }
 
     #[test]
     fn removal_jobs_preserve_intent_and_prevent_stale_snapshot_resurrection() {
@@ -3952,6 +4130,201 @@ mod tests {
         let missing = mutate_download(&mut connection, "missing", false, |_| Ok(()))
             .unwrap_err();
         assert_eq!(missing, "download is no longer persisted");
+    }
+
+    #[test]
+    fn media_checkpoint_invalidation_is_durable_and_scoped_to_unfinished_media() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let mut connection = state.lock().unwrap();
+        replace_downloads(
+            &mut connection,
+            &json!([
+                {
+                    "id": "active-media",
+                    "status": "downloading",
+                    "isMedia": true,
+                    "fraction": 0.6,
+                    "downloadedBytes": 600,
+                    "totalBytes": 1000,
+                    "totalIsEstimate": true,
+                    "size": "~1 KB"
+                },
+                {
+                    "id": "active-normal",
+                    "status": "downloading",
+                    "fraction": 0.6,
+                    "downloadedBytes": 600,
+                    "totalBytes": 1000
+                },
+                {
+                    "id": "completed-media",
+                    "status": "completed",
+                    "isMedia": true,
+                    "fraction": 1.0,
+                    "downloadedBytes": 1000,
+                    "totalBytes": 1000,
+                    "size": "1 KB"
+                }
+            ])
+            .to_string(),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            invalidate_media_progress_checkpoint(&mut connection, "active-media", false).unwrap(),
+            Some("1".to_string())
+        );
+        assert_eq!(
+            media_progress_checkpoint_epoch(&connection, "active-media").unwrap(),
+            Some("1".to_string())
+        );
+        assert_eq!(
+            media_progress_checkpoint_epoch(&connection, "active-normal").unwrap(),
+            None
+        );
+
+        let records = load_downloads(&connection).unwrap();
+        let documents = records
+            .iter()
+            .map(|record| serde_json::from_str::<Value>(record).unwrap())
+            .collect::<Vec<_>>();
+        let media = documents.iter().find(|item| item["id"] == "active-media").unwrap();
+        assert!(media.get("fraction").is_none());
+        assert!(media.get("downloadedBytes").is_none());
+        assert!(media.get("totalBytes").is_none());
+        assert!(media.get("totalIsEstimate").is_none());
+        assert!(media.get("size").is_none());
+        let normal = documents.iter().find(|item| item["id"] == "active-normal").unwrap();
+        assert_eq!(normal["downloadedBytes"], 600);
+        let completed = documents.iter().find(|item| item["id"] == "completed-media").unwrap();
+        assert_eq!(completed["fraction"], 1.0);
+        assert_eq!(completed["downloadedBytes"], 1000);
+    }
+
+    #[test]
+    fn stale_media_snapshot_cannot_restore_checkpoint_after_native_invalidation() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let mut connection = state.lock().unwrap();
+        let active = json!({
+            "id": "active-media",
+            "status": "downloading",
+            "isMedia": true,
+            "progressCheckpointEpoch": "0",
+            "fraction": 0.6,
+            "downloadedBytes": 600,
+            "totalBytes": 1000,
+            "totalIsEstimate": true,
+            "size": "~1 KB"
+        });
+        replace_downloads(&mut connection, &json!([active]).to_string(), false).unwrap();
+
+        assert_eq!(
+            invalidate_media_progress_checkpoint(&mut connection, "active-media", false).unwrap(),
+            Some("1".to_string())
+        );
+
+        // This is a renderer snapshot serialized before the native cleanup
+        // committed its invalidation, but delivered afterward.
+        let stale_snapshot = json!({
+            "id": "active-media",
+            "status": "downloading",
+            "isMedia": true,
+            "progressCheckpointEpoch": "0",
+            "fraction": 0.8,
+            "downloadedBytes": 800,
+            "totalBytes": 1000,
+            "totalIsEstimate": true,
+            "size": "~1 KB"
+        });
+        replace_downloads(&mut connection, &json!([stale_snapshot]).to_string(), false).unwrap();
+        let record = load_downloads(&connection).unwrap().remove(0);
+        let stored: Value = serde_json::from_str(&record).unwrap();
+        assert_eq!(stored["progressCheckpointEpoch"], "1");
+        assert!(stored.get("fraction").is_none());
+        assert!(stored.get("downloadedBytes").is_none());
+        assert!(stored.get("totalBytes").is_none());
+        assert!(stored.get("totalIsEstimate").is_none());
+        assert!(stored.get("size").is_none());
+
+        // A later checkpoint explicitly carrying the current native epoch is
+        // allowed through the same replacement path.
+        let current_snapshot = json!({
+            "id": "active-media",
+            "status": "downloading",
+            "isMedia": true,
+            "progressCheckpointEpoch": "1",
+            "fraction": 0.2,
+            "downloadedBytes": 200,
+            "totalBytes": 1000,
+            "totalIsEstimate": false
+        });
+        replace_downloads(&mut connection, &json!([current_snapshot]).to_string(), false).unwrap();
+        let record = load_downloads(&connection).unwrap().remove(0);
+        let stored: Value = serde_json::from_str(&record).unwrap();
+        assert_eq!(stored["progressCheckpointEpoch"], "1");
+        assert_eq!(stored["fraction"], 0.2);
+        assert_eq!(stored["downloadedBytes"], 200);
+
+        // A future epoch is not renderer authority and fails closed too.
+        let future_snapshot = json!({
+            "id": "active-media",
+            "status": "downloading",
+            "isMedia": true,
+            "progressCheckpointEpoch": "2",
+            "fraction": 0.9,
+            "downloadedBytes": 900,
+            "totalBytes": 1000
+        });
+        replace_downloads(&mut connection, &json!([future_snapshot]).to_string(), false).unwrap();
+        let record = load_downloads(&connection).unwrap().remove(0);
+        let stored: Value = serde_json::from_str(&record).unwrap();
+        assert_eq!(stored["progressCheckpointEpoch"], "1");
+        assert!(stored.get("fraction").is_none());
+        assert!(stored.get("downloadedBytes").is_none());
+    }
+
+    #[test]
+    fn malformed_media_checkpoint_epoch_clears_old_progress_and_recovers() {
+        let temp = TempDir::new().unwrap();
+        let state = init_at_path(temp.path()).unwrap();
+        let mut connection = state.lock().unwrap();
+        connection
+            .execute(
+                "INSERT INTO downloads (id, status, queue_id, data) VALUES ('active-media', 'downloading', 'main', ?1)",
+                [json!({
+                    "id": "active-media",
+                    "status": "downloading",
+                    "isMedia": true,
+                    "progressCheckpointEpoch": "invalid",
+                    "fraction": 0.8,
+                    "downloadedBytes": 800,
+                    "totalBytes": 1000
+                })
+                .to_string()],
+            )
+            .unwrap();
+
+        let stale_snapshot = json!({
+            "id": "active-media",
+            "status": "downloading",
+            "isMedia": true,
+            "fraction": 0.9,
+            "downloadedBytes": 900,
+            "totalBytes": 1000
+        });
+        replace_downloads(&mut connection, &json!([stale_snapshot]).to_string(), false).unwrap();
+
+        let stored: Value = serde_json::from_str(&load_downloads(&connection).unwrap()[0]).unwrap();
+        assert_eq!(stored["progressCheckpointEpoch"], "1");
+        assert!(stored.get("fraction").is_none());
+        assert!(stored.get("downloadedBytes").is_none());
+        assert_eq!(
+            media_progress_checkpoint_epoch(&connection, "active-media").unwrap(),
+            Some("1".to_string())
+        );
     }
 
     #[test]

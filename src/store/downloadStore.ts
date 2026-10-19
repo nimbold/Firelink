@@ -17,12 +17,14 @@ import {
   downloadControlIntentFor,
   flushDownloadPersistence,
   hasStaleTemporaryMediaEstimate,
+  invalidateDownloadProgressCheckpoint,
   useDownloadStore
 } from './useDownloadStore';
 
 export { useDownloadProgressStore } from './downloadProgressStore';
 
 let unlistenProgress: UnlistenFn | null = null;
+let unlistenProgressInvalidated: UnlistenFn | null = null;
 let unlistenAllocation: UnlistenFn | null = null;
 let unlistenState: UnlistenFn | null = null;
 let unlistenMoveProgress: UnlistenFn | null = null;
@@ -269,7 +271,7 @@ const isDownloadErrorKind = (value: unknown): value is DownloadErrorKind =>
   value === 'nameResolution' || value === 'destinationAccess';
 
 const isLifecycleGeneration = (value: unknown): value is string =>
-  typeof value === 'string' && /^\d+$/.test(value);
+  typeof value === 'string' && /^(0|[1-9]\d*)$/.test(value);
 
 type SanitizedDownloadStateEvent = Omit<DownloadStateEvent, 'status'> & {
   status: DownloadStatus;
@@ -338,6 +340,14 @@ const sanitizeProgressPayload = (
   }
   if (sanitized.upload_speed !== undefined && typeof sanitized.upload_speed !== 'string') {
     delete sanitized.upload_speed;
+  }
+  if (sanitized.progress_checkpoint_epoch !== undefined
+    && !isLifecycleGeneration(sanitized.progress_checkpoint_epoch)) {
+    delete sanitized.progress_checkpoint_epoch;
+  }
+  if (sanitized.lifecycle_generation !== undefined
+    && !isLifecycleGeneration(sanitized.lifecycle_generation)) {
+    delete sanitized.lifecycle_generation;
   }
   return sanitized;
 };
@@ -411,6 +421,8 @@ const mergeTerminalProgress = (
 const disposeDownloadListeners = () => {
   unlistenProgress?.();
   unlistenProgress = null;
+  unlistenProgressInvalidated?.();
+  unlistenProgressInvalidated = null;
   unlistenAllocation?.();
   unlistenAllocation = null;
   unlistenState?.();
@@ -446,6 +458,21 @@ const startDownloadListeners = async () => {
         useDownloadProgressStore.getState().clearDownloadProgress(payload.id);
         return;
       }
+      if (current.isMedia === true) {
+        const currentGeneration = currentDownloadLifecycleGeneration(payload.id);
+        const currentCheckpointEpoch = isLifecycleGeneration(current.progressCheckpointEpoch)
+          ? current.progressCheckpointEpoch
+          : '0';
+        // Current native media producers always attach both fences. A frame
+        // without them cannot prove that it belongs to this transfer attempt.
+        // Ignore stale frames without clearing the newer lifecycle's display.
+        if (payload.lifecycle_generation === undefined
+          || payload.progress_checkpoint_epoch === undefined
+          || payload.lifecycle_generation !== currentGeneration
+          || BigInt(payload.progress_checkpoint_epoch) < BigInt(currentCheckpointEpoch)) {
+          return;
+        }
+      }
       const sanitizedPayload = payload;
       useDownloadProgressStore.getState().updateDownloadProgress(payload.id, sanitizedPayload);
       const shouldUpdateSize = Boolean(sanitizedPayload.size && (!current.isMedia || sanitizedPayload.size_is_final));
@@ -468,6 +495,13 @@ const startDownloadListeners = async () => {
       }
       if (sanitizedPayload.total_is_estimate !== null && sanitizedPayload.total_is_estimate !== undefined) {
         updates.totalIsEstimate = sanitizedPayload.total_is_estimate;
+      }
+      if (current.isMedia === true
+        && sanitizedPayload.lifecycle_generation === currentDownloadLifecycleGeneration(payload.id)
+        && isLifecycleGeneration(sanitizedPayload.progress_checkpoint_epoch)
+        && BigInt(sanitizedPayload.progress_checkpoint_epoch)
+          > BigInt(isLifecycleGeneration(current.progressCheckpointEpoch) ? current.progressCheckpointEpoch : '0')) {
+        updates.progressCheckpointEpoch = sanitizedPayload.progress_checkpoint_epoch;
       }
       if (current.isTorrent) {
         if (sanitizedPayload.uploaded_bytes !== null
@@ -505,6 +539,48 @@ const startDownloadListeners = async () => {
       if (Object.keys(updates).length > 0) {
         mainStore.updateDownload(payload.id, updates);
       }
+    }),
+    listen('download-progress-invalidated', (event) => {
+      const payload = event.payload;
+      if (!isRecord(payload)
+        || typeof payload.id !== 'string'
+        || !isLifecycleGeneration(payload.lifecycleGeneration)
+        || !isLifecycleGeneration(payload.progressCheckpointEpoch)) {
+        return;
+      }
+      const current = useDownloadStore.getState().downloads.find(download => download.id === payload.id);
+      const currentGeneration = currentDownloadLifecycleGeneration(payload.id);
+      const currentCheckpointEpoch = isLifecycleGeneration(current?.progressCheckpointEpoch)
+        ? current.progressCheckpointEpoch
+        : '0';
+      const isPriorPauseLifecycle = (current?.status === 'paused'
+        || downloadControlIntentFor(payload.id) === 'pause')
+        && currentGeneration !== '0'
+        && payload.lifecycleGeneration === (BigInt(currentGeneration) - 1n).toString();
+      if (!current
+        || current.isMedia !== true
+        || current.status === 'completed'
+        || BigInt(payload.progressCheckpointEpoch) < BigInt(currentCheckpointEpoch)
+        || (payload.lifecycleGeneration !== currentGeneration && !isPriorPauseLifecycle)) return;
+
+      // A pause advances the renderer control epoch before native cancellation,
+      // while the media worker remains registered to its old generation. Its
+      // invalidation can arrive before the pause IPC returns, so accept the
+      // exact prior generation while that pause is pending and after it has
+      // completed. Any later lifecycle still rejects the delayed event.
+      // Native cleanup durably clears the checkpoint before deleting an exact
+      // yt-dlp resume asset. Clear local snapshots too so a retry cannot
+      // resurrect progress for bytes that no longer exist.
+      invalidateDownloadProgressCheckpoint(payload.id);
+      useDownloadProgressStore.getState().resetDownloadProgress(payload.id);
+      useDownloadStore.getState().updateDownload(payload.id, {
+        progressCheckpointEpoch: payload.progressCheckpointEpoch,
+        fraction: undefined,
+        downloadedBytes: undefined,
+        totalBytes: undefined,
+        totalIsEstimate: undefined,
+        ...(current.totalIsEstimate === true ? { size: undefined } : {})
+      });
     }),
     listen('download-allocation', (event) => {
       const payload = event.payload;
@@ -772,7 +848,8 @@ const startDownloadListeners = async () => {
     throw failedRegistration.reason;
   }
 
-  const [progress, allocation, state, moveProgress, tray] = registrations as [
+  const [progress, progressInvalidated, allocation, state, moveProgress, tray] = registrations as [
+    PromiseFulfilledResult<UnlistenFn>,
     PromiseFulfilledResult<UnlistenFn>,
     PromiseFulfilledResult<UnlistenFn>,
     PromiseFulfilledResult<UnlistenFn>,
@@ -780,6 +857,7 @@ const startDownloadListeners = async () => {
     PromiseFulfilledResult<UnlistenFn>,
   ];
   unlistenProgress = progress.value;
+  unlistenProgressInvalidated = progressInvalidated.value;
   unlistenAllocation = allocation.value;
   unlistenState = state.value;
   unlistenMoveProgress = moveProgress.value;

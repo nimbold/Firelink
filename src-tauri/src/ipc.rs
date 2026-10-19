@@ -207,6 +207,9 @@ pub struct DownloadItem {
     pub total_bytes: Option<f64>,
     #[ts(optional)]
     pub total_is_estimate: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub progress_checkpoint_epoch: Option<String>,
     pub category: DownloadCategory,
     pub date_added: String,
     #[ts(optional)]

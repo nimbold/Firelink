@@ -883,6 +883,41 @@ export const hasStaleTemporaryMediaEstimate = (
 };
 
 export const normalizePersistedDownloadProgress = (download: DownloadItem): DownloadItem => {
+  const rawProgressCheckpointEpoch = download.progressCheckpointEpoch as unknown;
+  const normalizedProgressCheckpointEpoch = typeof rawProgressCheckpointEpoch === 'string'
+    && /^(0|[1-9][0-9]*)$/.test(rawProgressCheckpointEpoch)
+    ? rawProgressCheckpointEpoch
+    : undefined;
+  const invalidMediaCheckpointEpoch = download.isMedia === true
+    && rawProgressCheckpointEpoch !== undefined
+    && normalizedProgressCheckpointEpoch === undefined;
+  const rawFraction = download.fraction as unknown;
+  const normalizedFraction = typeof rawFraction === 'number'
+    && Number.isFinite(rawFraction)
+    && rawFraction >= 0
+    && rawFraction <= 1
+    && !invalidMediaCheckpointEpoch
+    ? rawFraction
+    : undefined;
+  const rawDownloadedBytes = download.downloadedBytes as unknown;
+  const normalizedDownloadedBytes = typeof rawDownloadedBytes === 'number'
+    && Number.isFinite(rawDownloadedBytes)
+    && rawDownloadedBytes >= 0
+    && !invalidMediaCheckpointEpoch
+    ? rawDownloadedBytes
+    : undefined;
+  const rawTotalBytes = download.totalBytes as unknown;
+  const normalizedTotalBytes = typeof rawTotalBytes === 'number'
+    && Number.isFinite(rawTotalBytes)
+    && rawTotalBytes >= 0
+    && !invalidMediaCheckpointEpoch
+    ? rawTotalBytes
+    : undefined;
+  const rawTotalIsEstimate = download.totalIsEstimate as unknown;
+  const normalizedTotalIsEstimate = typeof rawTotalIsEstimate === 'boolean'
+    && !invalidMediaCheckpointEpoch
+    ? rawTotalIsEstimate
+    : undefined;
   const rawSeedRemaining = download.torrentSeedRemaining as unknown;
   const normalizedConnections = download.isTorrent === true ? undefined : download.connections;
   const normalizedSeedRemaining = typeof rawSeedRemaining === 'number' &&
@@ -1006,6 +1041,11 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
     || download.credentialsRequired !== undefined
   );
   const normalizedOptions = rawSeedRemaining !== normalizedSeedRemaining ||
+    rawFraction !== normalizedFraction ||
+    rawDownloadedBytes !== normalizedDownloadedBytes ||
+    rawTotalBytes !== normalizedTotalBytes ||
+    rawTotalIsEstimate !== normalizedTotalIsEstimate ||
+    rawProgressCheckpointEpoch !== normalizedProgressCheckpointEpoch ||
     download.connections !== normalizedConnections ||
     rawUploadedBytes !== normalizedUploadedBytes ||
     rawSeededSeconds !== normalizedSeededSeconds ||
@@ -1033,6 +1073,12 @@ export const normalizePersistedDownloadProgress = (download: DownloadItem): Down
     torrentCredentialStateChanged
       ? {
         ...download,
+        fraction: normalizedFraction,
+        downloadedBytes: normalizedDownloadedBytes,
+        totalBytes: normalizedTotalBytes,
+        totalIsEstimate: normalizedTotalIsEstimate,
+        progressCheckpointEpoch: normalizedProgressCheckpointEpoch,
+        ...(invalidMediaCheckpointEpoch && rawTotalIsEstimate === true ? { size: undefined } : {}),
         connections: normalizedConnections,
         status: recoveredMoveStatus,
         torrentSeedRemaining: normalizedSeedRemaining,
@@ -2445,7 +2491,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
         ? {
             ...d,
             ...updates,
-            fraction: updates.fraction !== undefined ? updates.fraction : d.fraction
+            fraction: Object.prototype.hasOwnProperty.call(updates, 'fraction')
+              ? updates.fraction
+              : d.fraction
           }
         : d
       );
@@ -2497,6 +2545,28 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
       await flushDownloadPersistence();
     }
     const item = get().downloads.find(d => d.id === id);
+
+    if (
+      deleteFile
+      && !preserveResumable
+      && item?.isMedia === true
+      && item.status !== 'completed'
+    ) {
+      // Persist checkpoint invalidation before native deletion can remove
+      // yt-dlp resume assets. If cleanup fails, losing the displayed estimate
+      // is conservative; restoring progress for deleted bytes after a crash is
+      // not. A failed commit must stop cleanup, just like failed admission.
+      invalidateDownloadProgressCheckpoint(id);
+      useDownloadProgressStore.getState().resetDownloadProgress(id);
+      get().updateDownload(id, {
+        fraction: undefined,
+        downloadedBytes: undefined,
+        totalBytes: undefined,
+        totalIsEstimate: undefined,
+        ...(item.totalIsEstimate === true ? { size: undefined } : {})
+      });
+      await commitDownloadState();
+    }
 
     if (item) {
       await invoke('remove_download', {
@@ -2802,9 +2872,9 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
 
       if (runnable.length === 0 || !isCurrentQueueControlGeneration(queueId, requestedGeneration)) return [];
 
-      const runnableForStart = runnable;
+      const runnableIds = new Set(runnable.map(item => item.id));
 
-      const needsNewDispatch = runnableForStart.some(item => {
+      const dispatchCandidates = runnable.filter(item => {
         const currentItem = get().downloads.find(download => download.id === item.id);
         if (!currentItem) return false;
         // Paused rows must go through resumeDownload. This includes rows that
@@ -2822,28 +2892,55 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
           !currentItem.hasBeenDispatched ||
           !backendRegistered;
       });
+      const dispatchCandidateIds = new Set(dispatchCandidates.map(item => item.id));
+      const dispatchLifecycleGenerations = new Map(
+        dispatchCandidates.map(item => [item.id, currentDownloadLifecycleGeneration(item.id)])
+      );
       let queueProxy: string | null | undefined;
-      if (needsNewDispatch) {
+      if (dispatchCandidates.length > 0) {
         try {
           queueProxy = await getProxyArgs(useSettingsStore.getState());
         } catch (error) {
           const message = errorMessage(error);
           console.error(`Could not safely resolve the proxy for queue ${queueId}:`, error);
-          const runnableIds = new Set(runnableForStart.map(item => item.id));
+          if (!isCurrentQueueControlGeneration(queueId, requestedGeneration)) return [];
           set(state => ({
-            downloads: state.downloads.map(item =>
-              runnableIds.has(item.id) && item.status !== 'completed'
-                ? { ...item, lastError: message }
-                : item
-            )
+            downloads: state.downloads.map(item => {
+              const lifecycleGeneration = dispatchLifecycleGenerations.get(item.id);
+              const stillEligible = dispatchCandidateIds.has(item.id)
+                && lifecycleGeneration === currentDownloadLifecycleGeneration(item.id)
+                && !state.removalJobs[item.id]
+                && (item.queueId || MAIN_QUEUE_ID) === queueId
+                && item.status !== 'paused'
+                && (item.status === 'queued' || canStartDownload(item.status));
+              return stillEligible ? { ...item, lastError: message } : item;
+            })
           }));
           return [];
         }
       }
 
       const acceptedIds: string[] = [];
-      for (const item of runnableForStart) {
+      const processedIds = new Set<string>();
+      while (processedIds.size < runnableIds.size) {
         if (!isCurrentQueueControlGeneration(queueId, requestedGeneration)) break;
+
+        // Queue rows can be rearranged while a previous dispatch is awaiting
+        // native admission. Re-read their order before selecting each next
+        // row so the in-flight Start Queue operation follows the latest
+        // user-visible order instead of dispatching its stale initial
+        // snapshot.
+        const item = get().downloads
+          .filter(download =>
+            runnableIds.has(download.id) &&
+            !processedIds.has(download.id) &&
+            !get().removalJobs[download.id] &&
+            (download.queueId || MAIN_QUEUE_ID) === queueId &&
+            (download.status === 'queued' || canStartDownload(download.status))
+          )
+          .sort(queuePositionComparator)[0];
+        if (!item) break;
+        processedIds.add(item.id);
 
         const currentItem = get().downloads.find(download => download.id === item.id);
         if (!currentItem || currentItem.status === 'completed') continue;
@@ -3726,12 +3823,198 @@ let nextPersistenceSnapshot: PersistenceSnapshot | null = null;
 let persistenceSaveInFlight = false;
 let persistenceWaiters: PersistenceWaiter[] = [];
 let downloadPersistenceReady = false;
+const PROGRESS_CHECKPOINT_INTERVAL_MS = 2000;
+type DurableProgressCheckpoint = Pick<DownloadItem, 'fraction' | 'downloadedBytes' | 'totalBytes' | 'totalIsEstimate'>;
+type ProgressCheckpointEntry = {
+  persisted: DurableProgressCheckpoint;
+  pending: DurableProgressCheckpoint | null;
+  lastPersistedAt: number;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+const durableProgressCheckpoints = new Map<string, ProgressCheckpointEntry>();
+
+const progressCheckpointForDownload = (download: DownloadItem): DurableProgressCheckpoint | null => {
+  const checkpoint: DurableProgressCheckpoint = {};
+  if (typeof download.fraction === 'number' && Number.isFinite(download.fraction)
+    && download.fraction >= 0 && download.fraction <= 1) {
+    checkpoint.fraction = download.fraction;
+  }
+  if (typeof download.downloadedBytes === 'number' && Number.isFinite(download.downloadedBytes)
+    && download.downloadedBytes >= 0) {
+    checkpoint.downloadedBytes = download.downloadedBytes;
+  }
+  if (typeof download.totalBytes === 'number' && Number.isFinite(download.totalBytes)
+    && download.totalBytes >= 0) {
+    checkpoint.totalBytes = download.totalBytes;
+  }
+  if (typeof download.totalIsEstimate === 'boolean') {
+    checkpoint.totalIsEstimate = download.totalIsEstimate;
+  }
+  return Object.keys(checkpoint).length > 0 ? checkpoint : null;
+};
+
+const sameProgressCheckpoint = (
+  left: DurableProgressCheckpoint | null,
+  right: DurableProgressCheckpoint | null
+): boolean => left === right || (
+  left !== null && right !== null
+  && left.fraction === right.fraction
+  && left.downloadedBytes === right.downloadedBytes
+  && left.totalBytes === right.totalBytes
+  && left.totalIsEstimate === right.totalIsEstimate
+);
+
+const clearProgressCheckpointTimer = (entry: ProgressCheckpointEntry): void => {
+  if (entry.timer !== null) clearTimeout(entry.timer);
+  entry.timer = null;
+};
+
+const setPersistedProgressCheckpoint = (
+  id: string,
+  checkpoint: DurableProgressCheckpoint | null,
+  persistedAt = Date.now()
+): void => {
+  const previous = durableProgressCheckpoints.get(id);
+  if (previous) clearProgressCheckpointTimer(previous);
+  if (!checkpoint) {
+    durableProgressCheckpoints.delete(id);
+    return;
+  }
+  durableProgressCheckpoints.set(id, {
+    persisted: checkpoint,
+    pending: null,
+    lastPersistedAt: persistedAt,
+    timer: null
+  });
+};
+
+const promotePendingProgressCheckpoint = (id: string): boolean => {
+  const entry = durableProgressCheckpoints.get(id);
+  if (!entry?.pending) return false;
+  entry.persisted = entry.pending;
+  entry.pending = null;
+  entry.lastPersistedAt = Date.now();
+  clearProgressCheckpointTimer(entry);
+  return true;
+};
+
+const stageProgressCheckpoint = (
+  id: string,
+  checkpoint: DurableProgressCheckpoint | null
+): boolean => {
+  const now = Date.now();
+  let entry = durableProgressCheckpoints.get(id);
+  if (!entry) {
+    if (!checkpoint) return false;
+    setPersistedProgressCheckpoint(id, checkpoint, now);
+    return true;
+  }
+  if (!checkpoint) {
+    clearProgressCheckpointTimer(entry);
+    durableProgressCheckpoints.delete(id);
+    return true;
+  }
+  if (sameProgressCheckpoint(entry.pending, checkpoint)
+    || (!entry.pending && sameProgressCheckpoint(entry.persisted, checkpoint))) {
+    return false;
+  }
+  entry.pending = checkpoint;
+  const remaining = PROGRESS_CHECKPOINT_INTERVAL_MS - (now - entry.lastPersistedAt);
+  if (remaining <= 0) return promotePendingProgressCheckpoint(id);
+  if (entry.timer === null) {
+    entry.timer = setTimeout(() => {
+      const current = durableProgressCheckpoints.get(id);
+      if (!current?.pending) return;
+      promotePendingProgressCheckpoint(id);
+      if (downloadPersistenceReady) {
+        void queuePersistenceSnapshot(persistenceSnapshotForState(useDownloadStore.getState())).catch(error => {
+          console.error('Failed to persist download progress checkpoint:', error);
+        });
+      }
+    }, remaining);
+  }
+  return false;
+};
+
+const observeDownloadProgressForPersistence = (
+  state: Pick<DownloadState, 'downloads'>,
+  previousState: Pick<DownloadState, 'downloads'>
+): boolean => {
+  const previousById = new Map(previousState.downloads.map(download => [download.id, download]));
+  const currentIds = new Set(state.downloads.map(download => download.id));
+  let checkpointChanged = false;
+  for (const id of durableProgressCheckpoints.keys()) {
+    if (!currentIds.has(id)) {
+      const entry = durableProgressCheckpoints.get(id);
+      if (entry) clearProgressCheckpointTimer(entry);
+      durableProgressCheckpoints.delete(id);
+    }
+  }
+  for (const download of state.downloads) {
+    const previous = previousById.get(download.id);
+    if (download.isMedia === true && download.status === 'processing') {
+      const hadCheckpoint = durableProgressCheckpoints.has(download.id);
+      const entry = durableProgressCheckpoints.get(download.id);
+      if (entry) clearProgressCheckpointTimer(entry);
+      durableProgressCheckpoints.delete(download.id);
+      checkpointChanged ||= hadCheckpoint;
+      continue;
+    }
+    const currentCheckpoint = progressCheckpointForDownload(download);
+    const previousCheckpoint = previous ? progressCheckpointForDownload(previous) : null;
+    const isTicking = download.status === 'downloading'
+      || download.status === 'verifying'
+      || download.status === 'seeding';
+    const wasTicking = previous?.status === 'downloading'
+      || previous?.status === 'verifying'
+      || previous?.status === 'seeding';
+    if (sameProgressCheckpoint(currentCheckpoint, previousCheckpoint)
+      && durableProgressCheckpoints.has(download.id)) {
+      if (wasTicking && !isTicking && durableProgressCheckpoints.get(download.id)?.pending) {
+        setPersistedProgressCheckpoint(download.id, currentCheckpoint);
+        checkpointChanged = true;
+      }
+      continue;
+    }
+    if (isTicking) {
+      checkpointChanged = stageProgressCheckpoint(download.id, currentCheckpoint) || checkpointChanged;
+    } else {
+      setPersistedProgressCheckpoint(download.id, currentCheckpoint);
+      checkpointChanged = true;
+    }
+  }
+  return checkpointChanged;
+};
+
+export const invalidateDownloadProgressCheckpoint = (id: string): void => {
+  const entry = durableProgressCheckpoints.get(id);
+  if (entry) clearProgressCheckpointTimer(entry);
+  durableProgressCheckpoints.delete(id);
+};
+
+const flushPendingProgressCheckpoints = (): void => {
+  for (const id of durableProgressCheckpoints.keys()) promotePendingProgressCheckpoint(id);
+};
 
 const persistenceSnapshotForState = (state: Pick<DownloadState, 'downloads' | 'queues'>): Omit<PersistenceSnapshot, 'revision'> => {
   // Strip secret fields (password/cookies/headers) and live progress before
   // writing to disk. Paused media fractions are retained as the engine's last
   // progress checkpoint; secrets remain in memory for the active session.
-  const downloadsData = JSON.stringify(state.downloads.map(redactDownloadForPersistence));
+  const downloadsData = JSON.stringify(state.downloads.map(download => {
+    const persisted = redactDownloadForPersistence(download);
+    if (download.isMedia === true && download.status === 'processing') {
+      delete persisted.fraction;
+      delete persisted.downloadedBytes;
+      delete persisted.totalBytes;
+      delete persisted.totalIsEstimate;
+      return persisted;
+    }
+    const checkpoint = durableProgressCheckpoints.get(download.id)?.persisted;
+    if (checkpoint && download.status !== 'completed') {
+      Object.assign(persisted, checkpoint);
+    }
+    return persisted;
+  }));
   const queuesData = JSON.stringify(state.queues);
   return {
     key: JSON.stringify([downloadsData, queuesData]),
@@ -3810,6 +4093,7 @@ async function processPersistenceSave(): Promise<void> {
 
 export const commitDownloadState = async (): Promise<void> => {
   if (!downloadPersistenceReady) return;
+  flushPendingProgressCheckpoints();
   while (true) {
     const snapshot = persistenceSnapshotForState(useDownloadStore.getState());
     await queuePersistenceSnapshot(snapshot);
@@ -3827,6 +4111,7 @@ export const commitDownloadState = async (): Promise<void> => {
 
 export const flushDownloadPersistence = async (): Promise<void> => {
   if (!downloadPersistenceReady) return;
+  flushPendingProgressCheckpoints();
   while (true) {
     const snapshot = persistenceSnapshotForState(useDownloadStore.getState());
     await queuePersistenceSnapshot(snapshot);
@@ -3870,6 +4155,10 @@ export const resetDownloadStoreModuleStateForTests = (): void => {
   persistenceSaveInFlight = false;
   persistenceWaiters = [];
   downloadPersistenceReady = false;
+  for (const checkpoint of durableProgressCheckpoints.values()) {
+    clearProgressCheckpointTimer(checkpoint);
+  }
+  durableProgressCheckpoints.clear();
 };
 
 /**
@@ -3881,9 +4170,25 @@ export const initializeDownloadPersistence = (windowLabel: string): (() => void)
   if (windowLabel !== 'main') return () => undefined;
   if (downloadPersistenceUnsubscribe) return downloadPersistenceDisposer ?? (() => undefined);
 
+  for (const checkpoint of durableProgressCheckpoints.values()) {
+    clearProgressCheckpointTimer(checkpoint);
+  }
+  durableProgressCheckpoints.clear();
+  for (const download of useDownloadStore.getState().downloads) {
+    setPersistedProgressCheckpoint(
+      download.id,
+      download.isMedia === true && download.status === 'processing'
+        ? null
+        : progressCheckpointForDownload(download)
+    );
+  }
+
   downloadPersistenceUnsubscribe = useDownloadStore.subscribe((state, prevState) => {
     if (!downloadPersistenceReady) return;
-    if (state.queues !== prevState.queues || state.downloads !== prevState.downloads) {
+    const checkpointChanged = state.downloads !== prevState.downloads
+      ? observeDownloadProgressForPersistence(state, prevState)
+      : false;
+    if (state.queues !== prevState.queues || state.downloads !== prevState.downloads || checkpointChanged) {
       void queuePersistenceSnapshot(persistenceSnapshotForState(state)).catch(error => {
         console.error('Failed to persist download state:', error);
       });

@@ -1553,6 +1553,8 @@ fn media_progress_event_totals(
 fn emit_media_progress(
     app_handle: &tauri::AppHandle,
     id: &str,
+    lifecycle_generation: u64,
+    progress_checkpoint_epoch: &str,
     progress: MediaProgress,
     total_tracks: f64,
     state: &mut MediaProgressEmitterState,
@@ -1603,6 +1605,8 @@ fn emit_media_progress(
                 upload_speed: None,
                 num_seeders: None,
                 torrent_seeded_seconds: None,
+                progress_checkpoint_epoch: Some(progress_checkpoint_epoch.to_string()),
+                lifecycle_generation: Some(lifecycle_generation.to_string()),
             },
         );
         state.last_progress_at = now;
@@ -1612,20 +1616,108 @@ fn emit_media_progress(
 async fn cleanup_media_processing_artifacts<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     expected_owner: &str,
+    lifecycle_generation: u64,
     out_path: &std::path::Path,
 ) {
-    let _ = cleanup_media_artifacts(app_handle, Some(expected_owner), out_path, true).await;
+    match cleanup_media_artifacts(
+        app_handle,
+        Some(expected_owner),
+        Some((expected_owner, lifecycle_generation)),
+        out_path,
+        true,
+    )
+    .await
+    {
+        Ok(_) => {}
+        Err(error) => {
+            log::warn!(
+                "media cleanup [{}] could not confirm removal of resume assets (any_resume_asset_removed={})",
+                expected_owner,
+                error.removed_resume_asset
+            );
+        }
+    }
+}
+
+fn emit_media_progress_invalidated<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    id: &str,
+    lifecycle_generation: u64,
+    progress_checkpoint_epoch: &str,
+) {
+    let _ = app_handle.emit(
+        "download-progress-invalidated",
+        serde_json::json!({
+            "id": id,
+            "lifecycleGeneration": lifecycle_generation.to_string(),
+            "progressCheckpointEpoch": progress_checkpoint_epoch,
+        }),
+    );
+}
+
+async fn invalidate_media_progress_before_cleanup<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    id: &str,
+    lifecycle_generation: u64,
+) -> Result<(), String> {
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return Err("application state is unavailable for lifecycle validation".to_string());
+    };
+    if state
+        .queue_manager
+        .registered_lifecycle_generation(id)
+        .await
+        != Some(lifecycle_generation)
+    {
+        return Err("media lifecycle changed before cleanup".to_string());
+    }
+
+    if let Some(database) = app_handle.try_state::<crate::db::DbState>() {
+        let portable = database.is_portable();
+        let durable_invalidation = database.lock().and_then(|mut connection| {
+            crate::db::invalidate_media_progress_checkpoint(
+                &mut connection,
+                id,
+                portable,
+            )
+        });
+        if let Some(progress_checkpoint_epoch) = durable_invalidation? {
+            // The native epoch is committed with the checkpoint clear. A later
+            // full renderer snapshot must carry this epoch before its progress
+            // can become durable again.
+            emit_media_progress_invalidated(
+                app_handle,
+                id,
+                lifecycle_generation,
+                &progress_checkpoint_epoch,
+            );
+        }
+    } else {
+        return Err("database is unavailable for durable progress invalidation".to_string());
+    }
+
+    // Commit the durable invalidation before deleting the exact assets. This
+    // closes the crash window between filesystem removal and renderer save.
+    Ok(())
 }
 
 async fn remove_file_best_effort_with_retry<R: tauri::Runtime>(
     path: &std::path::Path,
     app_handle: &tauri::AppHandle<R>,
     expected_owner: Option<&str>,
+    progress_lifecycle: Option<(&str, u64)>,
+    progress_invalidated: &mut bool,
 ) -> Result<(), String> {
     validate_cleanup_target_owner(app_handle, path, expected_owner)?;
     let Some(snapshot) = capture_regular_file_snapshot(path, app_handle).await? else {
         return Ok(());
     };
+    if !*progress_invalidated {
+        if let Some((id, lifecycle_generation)) = progress_lifecycle {
+            invalidate_media_progress_before_cleanup(app_handle, id, lifecycle_generation).await?;
+            *progress_invalidated = true;
+        }
+    }
 
     for attempt in 0..=5 {
         if !validate_regular_file_snapshot(path, app_handle, &snapshot)? {
@@ -1702,39 +1794,125 @@ async fn collect_media_processing_artifact_paths<R: tauri::Runtime>(
     Ok(artifacts)
 }
 
+#[derive(Debug)]
+struct MediaCleanupFailure {
+    removed_resume_asset: bool,
+}
+
+impl std::fmt::Display for MediaCleanupFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Filesystem errors can contain a user's absolute destination path.
+        // Keep cleanup status actionable without exposing that private path.
+        formatter.write_str("media artifact cleanup did not complete")
+    }
+}
+
+impl From<String> for MediaCleanupFailure {
+    fn from(_message: String) -> Self {
+        Self {
+            removed_resume_asset: false,
+        }
+    }
+}
+
 async fn cleanup_media_artifacts<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     expected_owner: Option<&str>,
+    progress_lifecycle: Option<(&str, u64)>,
     out_path: &std::path::Path,
     remove_primary: bool,
-) -> Result<(), String> {
-    let mut targets = collect_media_processing_artifact_paths(out_path, app_handle).await?;
+) -> Result<bool, MediaCleanupFailure> {
+    let artifacts = collect_media_processing_artifact_paths(out_path, app_handle).await?;
+    let mut targets = artifacts.clone();
     if remove_primary {
         targets.push(out_path.to_path_buf());
     }
     let _target_guards = lock_download_targets(&mut targets).await;
-    cleanup_media_artifacts_locked(app_handle, expected_owner, out_path, remove_primary).await
+    cleanup_media_artifacts_locked(
+        app_handle,
+        expected_owner,
+        progress_lifecycle,
+        out_path,
+        artifacts,
+        remove_primary,
+    )
+    .await
 }
 
 async fn cleanup_media_artifacts_locked<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     expected_owner: Option<&str>,
+    progress_lifecycle: Option<(&str, u64)>,
     out_path: &std::path::Path,
+    artifacts: Vec<std::path::PathBuf>,
     remove_primary: bool,
-) -> Result<(), String> {
-    let artifacts = validate_media_artifact_targets(app_handle, expected_owner, out_path).await?;
+) -> Result<bool, MediaCleanupFailure> {
+    let mut snapshots = Vec::new();
+    for artifact in &artifacts {
+        validate_cleanup_target_owner(app_handle, artifact, expected_owner)?;
+        if let Some(snapshot) = capture_regular_file_snapshot(artifact, app_handle).await? {
+            snapshots.push((artifact.clone(), snapshot));
+        }
+    }
     if remove_primary {
         validate_cleanup_target_owner(app_handle, out_path, expected_owner)?;
-        let _ = capture_regular_file_snapshot(out_path, app_handle).await?;
+        if let Some(snapshot) = capture_regular_file_snapshot(out_path, app_handle).await? {
+            snapshots.push((out_path.to_path_buf(), snapshot));
+        }
     }
 
+    let mut progress_invalidated = false;
+    if !snapshots.is_empty() {
+        if let Some((id, lifecycle_generation)) = progress_lifecycle {
+            invalidate_media_progress_before_cleanup(app_handle, id, lifecycle_generation)
+                .await
+                .map_err(|error| {
+                    MediaCleanupFailure::from(format!(
+                        "could not durably invalidate media progress before cleanup: {error}"
+                    ))
+                })?;
+            progress_invalidated = true;
+        }
+    }
+
+    let mut first_cleanup_error = None;
     if remove_primary {
-        remove_file_best_effort_with_retry(out_path, app_handle, expected_owner).await?;
+        if let Err(error) = remove_file_best_effort_with_retry(
+            out_path,
+            app_handle,
+            expected_owner,
+            progress_lifecycle,
+            &mut progress_invalidated,
+        )
+        .await
+        {
+            first_cleanup_error = Some(error);
+        }
     }
     for path in artifacts {
-        remove_file_best_effort_with_retry(&path, app_handle, expected_owner).await?;
+        if let Err(error) = remove_file_best_effort_with_retry(
+            &path,
+            app_handle,
+            expected_owner,
+            progress_lifecycle,
+            &mut progress_invalidated,
+        )
+        .await
+        {
+            if first_cleanup_error.is_none() {
+                first_cleanup_error = Some(error);
+            }
+        }
     }
-    Ok(())
+    let removed_resume_asset = snapshots.iter().any(|(path, snapshot)| {
+        !matches!(validate_regular_file_snapshot(path, app_handle, snapshot), Ok(true))
+    });
+    match first_cleanup_error {
+        Some(_message) => Err(MediaCleanupFailure {
+            removed_resume_asset,
+        }),
+        None => Ok(removed_resume_asset),
+    }
 }
 
 async fn validate_media_artifact_targets<R: tauri::Runtime>(
@@ -2840,7 +3018,17 @@ async fn wait_for_media_termination_after_cancel(
     }
 }
 
-async fn terminate_and_wait_for_media_after_cancel<F>(
+#[derive(Debug)]
+enum MediaTerminationOutcome {
+    Event(tauri_plugin_shell::process::TerminatedPayload),
+    ConfirmedAfterKill,
+}
+
+fn media_cancel_requires_processing_cleanup(processing_started: bool) -> bool {
+    processing_started
+}
+
+async fn terminate_and_wait_for_media_after_cancel<F, Fut>(
     rx: &mut tauri::async_runtime::Receiver<tauri_plugin_shell::process::CommandEvent>,
     stdout_buffer: &mut String,
     stderr_buffer: &mut String,
@@ -2849,9 +3037,10 @@ async fn terminate_and_wait_for_media_after_cancel<F>(
     stderr_tail_limit: usize,
     grace_period: Duration,
     terminate: F,
-) -> Result<tauri_plugin_shell::process::TerminatedPayload, String>
+) -> Result<MediaTerminationOutcome, String>
 where
-    F: FnOnce(),
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
 {
     match wait_for_media_termination_after_cancel(
         rx,
@@ -2864,31 +3053,56 @@ where
     )
     .await
     {
-        Ok(Some(payload)) => Ok(payload),
-        Ok(None) => {
-            terminate();
-            receive_media_termination_after_cancel(
-                rx,
-                stdout_buffer,
-                stderr_buffer,
-                final_output_path,
-                stderr_tail,
-                stderr_tail_limit,
+        Ok(Some(payload)) => Ok(MediaTerminationOutcome::Event(payload)),
+        Ok(None) | Err(_) => {
+            // CommandChild::kill consumes the shell handle, signals the full
+            // process group/job, and waits for the child process. Keep this
+            // future owned by the media runner until that wait is confirmed.
+            // A successful kill is itself termination evidence, so a missing
+            // final shell event cannot strand the queue permit forever.
+            if let Err(kill_error) = terminate().await {
+                // On an ambiguous kill failure, the shell process monitor may
+                // still deliver a later Terminated event. Keep the runner and
+                // its queue permit alive until that event confirms exit. In
+                // particular, never let a closed/error event stream be treated
+                // as proof that the OS process stopped.
+                log::error!("media process termination is unconfirmed: {kill_error}");
+                loop {
+                    match receive_media_termination_after_cancel(
+                        rx,
+                        stdout_buffer,
+                        stderr_buffer,
+                        final_output_path,
+                        stderr_tail,
+                        stderr_tail_limit,
+                    )
+                    .await
+                    {
+                        Ok(payload) => return Ok(MediaTerminationOutcome::Event(payload)),
+                        Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
+                    }
+                }
+            }
+
+            match tokio::time::timeout(
+                Duration::from_millis(250),
+                receive_media_termination_after_cancel(
+                    rx,
+                    stdout_buffer,
+                    stderr_buffer,
+                    final_output_path,
+                    stderr_tail,
+                    stderr_tail_limit,
+                ),
             )
             .await
-        }
-        Err(error) => {
-            terminate();
-            receive_media_termination_after_cancel(
-                rx,
-                stdout_buffer,
-                stderr_buffer,
-                final_output_path,
-                stderr_tail,
-                stderr_tail_limit,
-            )
-            .await
-            .map_err(|_| error)
+            {
+                Ok(Ok(payload)) => Ok(MediaTerminationOutcome::Event(payload)),
+                // `kill()` waits for child exit. The bounded event grace only
+                // drains output and observes a completion race; after it,
+                // confirmed process exit is sufficient to release ownership.
+                Ok(Err(_)) | Err(_) => Ok(MediaTerminationOutcome::ConfirmedAfterKill),
+            }
         }
     }
 }
@@ -4458,6 +4672,7 @@ struct Aria2DaemonGuard {
     launch_spec: Mutex<Option<Aria2LaunchSpec>>,
     route_contract_available: AtomicBool,
     shutdown_state: AtomicU8,
+    shutdown_generation: AtomicU64,
     enqueue_admission_lock: Mutex<()>,
     shutdown_journal_failures: Mutex<HashMap<String, u64>>,
 }
@@ -4481,6 +4696,7 @@ impl Aria2DaemonGuard {
             launch_spec: Mutex::new(None),
             route_contract_available: AtomicBool::new(false),
             shutdown_state: AtomicU8::new(0),
+            shutdown_generation: AtomicU64::new(0),
             enqueue_admission_lock: Mutex::new(()),
             shutdown_journal_failures: Mutex::new(HashMap::new()),
         }
@@ -4581,35 +4797,78 @@ impl Aria2DaemonGuard {
         }
     }
 
-    fn begin_shutdown(&self) -> bool {
+    fn begin_shutdown(&self) -> Option<u64> {
         let _admission = self.lock_enqueue_admission();
+        if self.shutdown_state.load(Ordering::SeqCst) != 0 {
+            return None;
+        }
+        let generation = self.shutdown_generation.load(Ordering::SeqCst).checked_add(1)?;
+        self.shutdown_generation.store(generation, Ordering::SeqCst);
+        self.shutdown_state.store(1, Ordering::SeqCst);
+        Some(generation)
+    }
+
+    fn begin_shutdown_recovery(&self, generation: u64) -> bool {
+        let _admission = self.lock_enqueue_admission();
+        if self.shutdown_generation.load(Ordering::SeqCst) != generation {
+            return false;
+        }
         self.shutdown_state
-            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .compare_exchange(1, 3, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     }
 
-    fn cancel_shutdown(&self) -> bool {
+    fn finish_shutdown_recovery(&self, generation: u64) -> bool {
         let _admission = self.lock_enqueue_admission();
+        if self.shutdown_generation.load(Ordering::SeqCst) != generation {
+            return false;
+        }
         self.shutdown_state
-            .compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .compare_exchange(3, 0, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     }
 
-    fn allow_exit(&self) {
+    fn is_shutdown_recovery_current(&self, generation: u64) -> bool {
         let _admission = self.lock_enqueue_admission();
-        self.shutdown_state.store(2, Ordering::SeqCst);
+        self.shutdown_generation.load(Ordering::SeqCst) == generation
+            && self.shutdown_state.load(Ordering::SeqCst) == 0
+    }
+
+    fn is_shutdown_generation_active(&self, generation: u64) -> bool {
+        let _admission = self.lock_enqueue_admission();
+        self.shutdown_generation.load(Ordering::SeqCst) == generation
+            && self.shutdown_state.load(Ordering::SeqCst) == 1
+    }
+
+    fn allow_exit(&self, generation: u64) -> bool {
+        let _admission = self.lock_enqueue_admission();
+        self.shutdown_generation.load(Ordering::SeqCst) == generation
+            && self
+                .shutdown_state
+                .compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
     }
 }
 
-async fn shutdown_aria2_daemon(app_handle: tauri::AppHandle) {
+async fn shutdown_aria2_daemon(
+    app_handle: tauri::AppHandle,
+    deadline: tokio::time::Instant,
+) -> Result<(), String> {
     let shutdown_started = Instant::now();
     let guard = app_handle.state::<Aria2DaemonGuard>();
+    let _restart_guard = tokio::time::timeout_at(deadline, guard.restart_lock.lock())
+        .await
+        .map_err(|_| "aria2 shutdown deadline expired while waiting for daemon ownership".to_string())?;
+    if tokio::time::Instant::now() >= deadline {
+        return Err("aria2 shutdown deadline expired before daemon shutdown began".to_string());
+    }
     if let Some(state) = app_handle.try_state::<AppState>() {
         let port = state.aria2_port.load(Ordering::Relaxed);
         if port != 0 {
             let rpc_started = Instant::now();
-            let shutdown = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
+            let rpc_deadline = (tokio::time::Instant::now() + Duration::from_secs(2)).min(deadline);
+            let shutdown = tokio::time::timeout_at(
+                rpc_deadline,
                 rpc_call(port, &state.aria2_secret, "aria2.shutdown", serde_json::json!([])),
             )
             .await;
@@ -4625,21 +4884,46 @@ async fn shutdown_aria2_daemon(app_handle: tauri::AppHandle) {
         }
     }
 
-    let child = guard.child.lock().ok().and_then(|mut child| child.take());
-    if let Some(mut child) = child {
+    let child = guard
+        .child
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take();
+    let mut child = match child {
+        Some(child) => child,
+        None => {
+            let port = app_handle
+                .try_state::<AppState>()
+                .map(|state| state.aria2_port.load(Ordering::Acquire))
+                .unwrap_or(0);
+            if port != 0 {
+                return Err("aria2 RPC port is published without an owned process handle".to_string());
+            }
+            return Ok(());
+        }
+    };
+    let exited_after_deadline = {
         // Aria2 1.37.0 intentionally schedules an RPC-requested shutdown
         // three seconds after replying. Leave a bounded margin for that
-        // timer and the subsequent state flush before forcing termination.
-        // Keep ownership here until the OS confirms exit. A timed-out
-        // spawn_blocking join would detach the waiter and permit a second
-        // daemon to start while the original process still owns its files.
+        // timer before forcing termination. The caller's single absolute
+        // deadline is shared with every earlier and later shutdown phase.
+        // Return the child to the guard if that deadline expires so a
+        // canceled exit never drops the only process handle.
         let child_wait_started = Instant::now();
-        let graceful_deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        let graceful_deadline = (tokio::time::Instant::now() + Duration::from_secs(8)).min(deadline);
         let mut forced = false;
         let mut last_kill_attempt = tokio::time::Instant::now();
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => break,
+                Ok(Some(_)) => {
+                    let exited_after_deadline = tokio::time::Instant::now() >= deadline;
+                    log::info!(
+                        "app_shutdown_phase=aria2_child outcome={} elapsed_ms={}",
+                        if forced { "forced" } else { "exited" },
+                        child_wait_started.elapsed().as_millis()
+                    );
+                    break exited_after_deadline;
+                }
                 Ok(None) => {
                     if !forced && tokio::time::Instant::now() >= graceful_deadline {
                         match child.kill() {
@@ -4667,14 +4951,22 @@ async fn shutdown_aria2_daemon(app_handle: tauri::AppHandle) {
                     last_kill_attempt = tokio::time::Instant::now();
                 }
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                let mut child_slot = guard
+                    .child
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if child_slot.is_none() {
+                    *child_slot = Some(child);
+                } else {
+                    return Err("aria2 process ownership changed during shutdown".to_string());
+                }
+                return Err("aria2 process did not confirm exit before the shutdown deadline".to_string());
+            }
+            tokio::time::sleep(Duration::from_millis(50).min(deadline - now)).await;
         }
-        log::info!(
-            "app_shutdown_phase=aria2_child outcome={} elapsed_ms={}",
-            if forced { "forced" } else { "exited" },
-            child_wait_started.elapsed().as_millis()
-        );
-    }
+    };
     if let Some(state) = app_handle.try_state::<AppState>() {
         state.aria2_port.store(0, Ordering::Release);
     }
@@ -4682,6 +4974,10 @@ async fn shutdown_aria2_daemon(app_handle: tauri::AppHandle) {
         "app_shutdown_phase=aria2_total elapsed_ms={}",
         shutdown_started.elapsed().as_millis()
     );
+    if exited_after_deadline {
+        return Err("aria2 confirmed exit after the application shutdown deadline".to_string());
+    }
+    Ok(())
 }
 
 fn monitor_aria2_stderr(app: tauri::AppHandle, stderr: std::process::ChildStderr) {
@@ -4727,9 +5023,17 @@ fn set_aria2_rpc_port_argument(args: &[OsString], port: u16) -> Vec<OsString> {
     set_aria2_option_argument(args, "--rpc-listen-port", &port.to_string())
 }
 
-async fn restart_aria2_daemon(app_handle: &tauri::AppHandle) -> Result<(), String> {
+async fn restart_aria2_daemon(
+    app_handle: &tauri::AppHandle,
+    recovery_generation: Option<u64>,
+) -> Result<(), String> {
     let guard = app_handle.state::<Aria2DaemonGuard>();
     let _restart_guard = guard.restart_lock.lock().await;
+    if recovery_generation
+        .is_some_and(|generation| !guard.is_shutdown_recovery_current(generation))
+    {
+        return Err("aria2 recovery was superseded by a newer shutdown attempt".to_string());
+    }
     if app_handle
         .state::<AppState>()
         .aria2_port
@@ -4885,14 +5189,14 @@ async fn restart_aria2_daemon(app_handle: &tauri::AppHandle) -> Result<(), Strin
 async fn reject_app_exit_request(
     app: &tauri::AppHandle,
     request: u64,
+    shutdown_generation: u64,
     reason: &str,
     interrupted_media_ids: &[String],
 ) {
-    let was_shutting_down = app.state::<Aria2DaemonGuard>().cancel_shutdown();
-    if was_shutting_down {
-        app.state::<AppState>()
-            .queue_manager
-            .wake_after_exit_rejected();
+    let guard = app.state::<Aria2DaemonGuard>();
+    if !guard.begin_shutdown_recovery(shutdown_generation) {
+        log::warn!("ignored stale shutdown rejection for generation {shutdown_generation}");
+        return;
     }
     let rejected_media_registrations = app.state::<AppState>()
         .download_coordinator
@@ -4917,6 +5221,13 @@ async fn reject_app_exit_request(
             log::warn!("pending tray action wakeup failed after exit rejection: {error}");
         }
     }
+    if !guard.finish_shutdown_recovery(shutdown_generation) {
+        log::error!("shutdown rejection recovery lost ownership for generation {shutdown_generation}");
+        return;
+    }
+    app.state::<AppState>()
+        .queue_manager
+        .wake_after_exit_rejected();
     let _ = app.emit_to(
         "main",
         "app-exit-cancelled",
@@ -4927,6 +5238,172 @@ async fn reject_app_exit_request(
         }),
     );
     restore_main_window(app);
+}
+
+async fn reject_app_exit_request_preserving_media_ownership(
+    app: &tauri::AppHandle,
+    request: u64,
+    shutdown_generation: u64,
+    reason: &str,
+) {
+    // Media cancellation has not confirmed that every child stopped. Restore
+    // the window while keeping registration closed and the app shutdown fence
+    // active until the coordinator confirms runner completion.
+    let guard = app.state::<Aria2DaemonGuard>();
+    if !guard.is_shutdown_generation_active(shutdown_generation) {
+        log::warn!("ignored stale media shutdown rejection for generation {shutdown_generation}");
+        return;
+    }
+    app.state::<AppState>()
+        .shutdown_terminal_barrier
+        .reopen_after_rejection();
+    let tray_action_pending = app
+        .state::<PendingTrayActionQueue>()
+        .reopen_after_exit_rejected();
+    if tray_action_pending {
+        if let Err(error) = app.emit("tray-action-available", ()) {
+            log::warn!("pending tray action wakeup failed after exit rejection: {error}");
+        }
+    }
+    let _ = app.emit_to(
+        "main",
+        "app-exit-cancelled",
+        serde_json::json!({
+            "requestId": request.to_string(),
+            "reason": reason,
+            "interruptedMediaIds": []
+        }),
+    );
+    restore_main_window(app);
+}
+
+fn merged_interrupted_media_ids(
+    cancelled: impl IntoIterator<Item = (String, u64)>,
+    rejected: impl IntoIterator<Item = (String, u64)>,
+) -> Vec<String> {
+    let mut ids = cancelled
+        .into_iter()
+        .chain(rejected)
+        .map(|(id, _generation)| id)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn schedule_media_recovery_after_rejected_shutdown(
+    app_handle: tauri::AppHandle,
+    request: u64,
+    shutdown_generation: u64,
+    aria2_dispatch_was_held: bool,
+) {
+    tauri::async_runtime::spawn(async move {
+        let coordinator = app_handle.state::<AppState>().download_coordinator.clone();
+        let cancelled = loop {
+            match coordinator.cancel_active_media_for_shutdown().await {
+                Ok(interrupted) => break interrupted,
+                Err(error) => {
+                    log::error!(
+                        "app_shutdown_recovery=media outcome=unconfirmed error={error}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        };
+
+        let guard = app_handle.state::<Aria2DaemonGuard>();
+        if !guard.begin_shutdown_recovery(shutdown_generation) {
+            log::error!(
+                "app_shutdown_recovery=media outcome=blocked reason=shutdown-attempt-changed"
+            );
+            return;
+        }
+        let interrupted = coordinator.reopen_media_registration().await;
+        let interrupted_media_ids = merged_interrupted_media_ids(cancelled, interrupted);
+        let state = app_handle.state::<AppState>();
+        if !aria2_dispatch_was_held {
+            state.queue_manager.set_aria2_dispatch_hold(false);
+        }
+        if !guard.finish_shutdown_recovery(shutdown_generation) {
+            log::error!(
+                "app_shutdown_recovery=media outcome=blocked reason=shutdown-attempt-changed-during-reopen"
+            );
+            return;
+        }
+        state.queue_manager.wake_after_exit_rejected();
+        let _ = app_handle.emit_to(
+            "main",
+            "app-exit-media-recovery-complete",
+            serde_json::json!({
+                "requestId": request.to_string(),
+                "interruptedMediaIds": interrupted_media_ids
+            }),
+        );
+        log::info!("app_shutdown_recovery=media outcome=complete");
+    });
+}
+
+fn schedule_aria2_recovery_after_rejected_shutdown(
+    app_handle: tauri::AppHandle,
+    shutdown_generation: u64,
+) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let guard = app_handle.state::<Aria2DaemonGuard>();
+            if !guard.is_shutdown_recovery_current(shutdown_generation) {
+                log::info!(
+                    "app_shutdown_recovery=aria2 outcome=superseded shutdown_generation={shutdown_generation}"
+                );
+                return;
+            }
+            let has_owned_child = guard
+                .child
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_some();
+            let port = app_handle
+                .state::<AppState>()
+                .aria2_port
+                .load(Ordering::Acquire);
+            if has_owned_child || port != 0 {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                if let Err(error) = shutdown_aria2_daemon(app_handle.clone(), deadline).await {
+                    log::error!(
+                        "app_shutdown_recovery=aria2 outcome=termination-unconfirmed error={error}"
+                    );
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            }
+
+            if !guard.is_shutdown_recovery_current(shutdown_generation) {
+                log::info!(
+                    "app_shutdown_recovery=aria2 outcome=superseded shutdown_generation={shutdown_generation}"
+                );
+                return;
+            }
+            match restart_aria2_daemon(&app_handle, Some(shutdown_generation)).await {
+                Ok(()) => {
+                    log::info!(
+                        "app_shutdown_recovery=aria2 outcome=daemon-restarted; waiting for lifecycle reconciliation"
+                    );
+                    return;
+                }
+                Err(error) => {
+                    if !guard.is_shutdown_recovery_current(shutdown_generation) {
+                        log::info!(
+                            "app_shutdown_recovery=aria2 outcome=superseded shutdown_generation={shutdown_generation}"
+                        );
+                        return;
+                    }
+                    log::error!(
+                        "app_shutdown_recovery=aria2 outcome=restart-pending error={error}"
+                    );
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    });
 }
 
 fn shutdown_finalization_allowed(
@@ -4951,8 +5428,8 @@ fn shutdown_failed_rows_are_durably_completed(
     };
     failures.into_iter().all(|(id, generation)| {
         let verified = database
-            .lock()
-            .and_then(|connection| crate::db::is_download_durably_completed(&connection, &id))
+            .try_lock()
+            .and_then(|connection| crate::db::is_download_durably_completed(&connection, &id).ok())
             .unwrap_or(false);
         if !verified {
             log::error!(
@@ -5267,6 +5744,10 @@ pub struct DownloadProgressEvent {
     num_seeders: Option<i32>,
     #[ts(optional)]
     torrent_seeded_seconds: Option<f64>,
+    #[ts(optional)]
+    progress_checkpoint_epoch: Option<String>,
+    #[ts(optional)]
+    lifecycle_generation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -6507,6 +6988,7 @@ fn media_format_and_container_args(format: &str, safe_filename: &str) -> Vec<Str
 pub(crate) async fn start_media_download_internal(
     app_handle: tauri::AppHandle,
     id: &str,
+    lifecycle_generation: u64,
     url: String,
     destination: String,
     filename: String,
@@ -6550,7 +7032,14 @@ pub(crate) async fn start_media_download_internal(
     let out_path = resolved_dest.join(&safe_filename);
     let output_template =
         media_output_template(&resolved_dest, &safe_filename, format_selector.as_deref());
-
+    let progress_checkpoint_epoch = {
+        let database = app_handle
+            .try_state::<crate::db::DbState>()
+            .ok_or_else(|| "database is unavailable for media progress recovery".to_string())?;
+        let connection = database.lock()?;
+        crate::db::media_progress_checkpoint_epoch(&connection, id)?
+            .unwrap_or_else(|| "0".to_string())
+    };
     let total_tracks: f64 = if let Some(ref format) = format_selector {
         if format.contains('+') {
             2.0
@@ -6746,29 +7235,43 @@ pub(crate) async fn start_media_download_internal(
                         &mut stderr_tail,
                         STDERR_TAIL,
                         Duration::from_secs(1),
-                        || {
+                        || async {
                             if let Some(child) = child.take() {
-                                terminate_shell_process_group(child);
+                                tokio::task::spawn_blocking(move || {
+                                    child.kill().map_err(|error| error.to_string())
+                                })
+                                .await
+                                .map_err(|error| format!("media termination task failed: {error}"))?
+                            } else {
+                                Ok(())
                             }
                         },
                     )
                     .await;
-                    let payload = match termination {
-                        Ok(payload) => payload,
-                        Err(error) => {
-                            if processing_started {
-                                cleanup_media_processing_artifacts(&app_handle, id, &out_path).await;
+                    match termination {
+                        Ok(MediaTerminationOutcome::Event(payload)) if payload.code == Some(0) => {
+                            Some(tauri_plugin_shell::process::CommandEvent::Terminated(payload))
+                        }
+                        Ok(MediaTerminationOutcome::Event(_)
+                        | MediaTerminationOutcome::ConfirmedAfterKill) => {
+                            if media_cancel_requires_processing_cleanup(processing_started) {
+                                cleanup_media_processing_artifacts(
+                                    &app_handle,
+                                    id,
+                                    lifecycle_generation,
+                                    &out_path,
+                                )
+                                .await;
                             }
+                            return Err(crate::queue::MEDIA_RUN_CANCELLED.to_string());
+                        }
+                        Err(error) => {
+                            // This path is reserved for a failure before the
+                            // child could be confirmed stopped. Keep the row's
+                            // partial assets and fail closed; the queue runner
+                            // retains ownership until its terminal path.
                             return Err(error);
                         }
-                    };
-                    if payload.code == Some(0) {
-                        Some(tauri_plugin_shell::process::CommandEvent::Terminated(payload))
-                    } else {
-                        if processing_started {
-                            cleanup_media_processing_artifacts(&app_handle, id, &out_path).await;
-                        }
-                        return Err(crate::queue::MEDIA_RUN_CANCELLED.to_string());
                     }
                 }
                 event = rx.recv() => event,
@@ -6781,6 +7284,8 @@ pub(crate) async fn start_media_download_internal(
                                     emit_media_progress(
                                         &app_handle,
                                         id,
+                                        lifecycle_generation,
+                                        &progress_checkpoint_epoch,
                                         progress,
                                         total_tracks,
                                         &mut progress_state,
@@ -6798,6 +7303,8 @@ pub(crate) async fn start_media_download_internal(
                                     emit_media_progress(
                                         &app_handle,
                                         id,
+                                        lifecycle_generation,
+                                        &progress_checkpoint_epoch,
                                         progress,
                                         total_tracks,
                                         &mut progress_state,
@@ -6829,6 +7336,8 @@ pub(crate) async fn start_media_download_internal(
                                         upload_speed: None,
                                         num_seeders: None,
                                         torrent_seeded_seconds: None,
+                                        progress_checkpoint_epoch: Some(progress_checkpoint_epoch.clone()),
+                                        lifecycle_generation: Some(lifecycle_generation.to_string()),
                                     });
                                 }
                                 let lower = line.to_lowercase();
@@ -6852,6 +7361,8 @@ pub(crate) async fn start_media_download_internal(
                                     emit_media_progress(
                                         &app_handle,
                                         id,
+                                        lifecycle_generation,
+                                        &progress_checkpoint_epoch,
                                         progress,
                                         total_tracks,
                                         &mut progress_state,
@@ -6865,6 +7376,8 @@ pub(crate) async fn start_media_download_internal(
                                     emit_media_progress(
                                         &app_handle,
                                         id,
+                                        lifecycle_generation,
+                                        &progress_checkpoint_epoch,
                                         progress,
                                         total_tracks,
                                         &mut progress_state,
@@ -6906,6 +7419,8 @@ pub(crate) async fn start_media_download_internal(
                                             upload_speed: None,
                                             num_seeders: None,
                                             torrent_seeded_seconds: None,
+                                            progress_checkpoint_epoch: Some(progress_checkpoint_epoch.clone()),
+                                            lifecycle_generation: Some(lifecycle_generation.to_string()),
                                         });
                                     }
                                 }
@@ -6963,7 +7478,24 @@ pub(crate) async fn start_media_download_internal(
             continue;
         }
         if should_cleanup_media_artifacts_after_failure(&failure_reason, strike, max_retries) {
-            let _ = cleanup_media_artifacts(&app_handle, Some(id), &out_path, false).await;
+            match cleanup_media_artifacts(
+                &app_handle,
+                Some(id),
+                Some((id, lifecycle_generation)),
+                &out_path,
+                false,
+            )
+            .await
+            {
+                Ok(_) => {}
+                Err(error) => {
+                    log::warn!(
+                        "media retry cleanup [{}] did not finish completely (any_resume_asset_removed={})",
+                        id,
+                        error.removed_resume_asset
+                    );
+                }
+            }
         }
         if !(transient && strikes_left) {
             return Err(failure_reason);
@@ -9288,10 +9820,13 @@ async fn remove_download_assets_locked<R: tauri::Runtime>(
     cleanup_media_artifacts_locked(
         app_handle,
         expected_owner.as_deref(),
+        None,
         primary,
+        artifacts,
         false,
     )
-    .await?;
+    .await
+    .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -10456,17 +10991,35 @@ fn set_power_preferences(
         .set_preferences(prevent_system_sleep, prevent_display_sleep)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SystemActionOperation {
+    Shutdown,
+    Restart,
+    Sleep,
+}
+
+fn execute_system_action_with<F>(
+    action: crate::ipc::PostQueueAction,
+    dispatch: F,
+) -> Result<(), String>
+where
+    F: FnOnce(SystemActionOperation) -> Result<(), String>,
+{
+    let operation = match action {
+        crate::ipc::PostQueueAction::Shutdown => SystemActionOperation::Shutdown,
+        crate::ipc::PostQueueAction::Restart => SystemActionOperation::Restart,
+        crate::ipc::PostQueueAction::Sleep => SystemActionOperation::Sleep,
+        crate::ipc::PostQueueAction::None => return Err("Invalid action".to_string()),
+    };
+    dispatch(operation)
+}
+
 pub(crate) fn execute_system_action(action: crate::ipc::PostQueueAction) -> Result<(), String> {
-    match action {
-        crate::ipc::PostQueueAction::Shutdown => {
-            system_shutdown::shutdown().map_err(|e| e.to_string())
-        }
-        crate::ipc::PostQueueAction::Restart => {
-            system_shutdown::reboot().map_err(|e| e.to_string())
-        }
-        crate::ipc::PostQueueAction::Sleep => system_shutdown::sleep().map_err(|e| e.to_string()),
-        crate::ipc::PostQueueAction::None => Err("Invalid action".to_string()),
-    }
+    execute_system_action_with(action, |operation| match operation {
+        SystemActionOperation::Shutdown => system_shutdown::shutdown().map_err(|error| error.to_string()),
+        SystemActionOperation::Restart => system_shutdown::reboot().map_err(|error| error.to_string()),
+        SystemActionOperation::Sleep => system_shutdown::sleep().map_err(|error| error.to_string()),
+    })
 }
 
 #[tauri::command]
@@ -11839,6 +12392,7 @@ async fn resolve_magnet_metadata(
         .ok_or_else(|| "torrent storage has no parent directory".to_string())?;
     let operation_deadline = Instant::now() + MAGNET_METADATA_TOTAL_TIMEOUT;
     let probe_dir = storage_root.join(format!(".probe-{}", uuid::Uuid::new_v4().simple()));
+    let _probe_artifact_lease = crate::torrent::protect_torrent_session_artifact(&probe_dir);
     tokio::fs::create_dir_all(&probe_dir)
         .await
         .map_err(|error| format!("could not create torrent metadata probe: {error}"))?;
@@ -16916,6 +17470,59 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn post_queue_actions_map_through_safe_system_action_adapter() {
+        let cases = [
+            (
+                crate::ipc::PostQueueAction::Shutdown,
+                super::SystemActionOperation::Shutdown,
+            ),
+            (
+                crate::ipc::PostQueueAction::Restart,
+                super::SystemActionOperation::Restart,
+            ),
+            (
+                crate::ipc::PostQueueAction::Sleep,
+                super::SystemActionOperation::Sleep,
+            ),
+        ];
+
+        for (requested, expected) in cases {
+            let mut dispatched = Vec::new();
+            super::execute_system_action_with(requested, |operation| {
+                dispatched.push(operation);
+                Ok(())
+            })
+            .expect("fake system-action adapter should succeed");
+            assert_eq!(dispatched, [expected]);
+        }
+
+        let mut dispatched = false;
+        assert_eq!(
+            super::execute_system_action_with(crate::ipc::PostQueueAction::None, |_| {
+                dispatched = true;
+                Ok(())
+            }),
+            Err("Invalid action".to_string())
+        );
+        assert!(!dispatched, "None must never reach the OS adapter");
+    }
+
+    #[test]
+    fn rejected_media_shutdown_recovery_keeps_cancelled_runner_ids() {
+        assert_eq!(
+            super::merged_interrupted_media_ids(
+                vec![("media-b".to_string(), 2), ("media-a".to_string(), 1)],
+                vec![
+                    ("media-b".to_string(), 2),
+                    ("media-b".to_string(), 3),
+                    ("media-c".to_string(), 4),
+                ],
+            ),
+            vec!["media-a", "media-b", "media-c"]
+        );
+    }
+
+    #[test]
     fn shell_fast_exit_output_fixture() {
         let Some(output_path) = std::env::var_os("FIRELINK_SHELL_TEST_OUTPUT_PATH") else {
             return;
@@ -18170,18 +18777,46 @@ mod tests {
     fn aria2_shutdown_blocks_repeated_exit_requests_until_cleanup_finishes() {
         let guard = Aria2DaemonGuard::new();
         assert!(!guard.exit_allowed());
-        assert!(guard.begin_shutdown());
-        assert!(!guard.begin_shutdown());
+        let first_generation = guard.begin_shutdown().unwrap();
+        assert!(guard.begin_shutdown().is_none());
         assert!(!guard.exit_allowed());
 
-        assert!(guard.cancel_shutdown());
+        assert!(guard.begin_shutdown_recovery(first_generation));
+        assert!(guard.finish_shutdown_recovery(first_generation));
         assert!(!guard.exit_allowed());
-        assert!(guard.begin_shutdown());
+        let second_generation = guard.begin_shutdown().unwrap();
+        assert_ne!(first_generation, second_generation);
 
-        guard.allow_exit();
+        assert!(guard.allow_exit(second_generation));
         assert!(guard.exit_allowed());
         assert!(guard.is_shutting_down());
-        assert!(!guard.begin_shutdown());
+        assert!(guard.begin_shutdown().is_none());
+    }
+
+    #[test]
+    fn stale_shutdown_recovery_cannot_replace_a_new_exit_attempt() {
+        let guard = Aria2DaemonGuard::new();
+        let old_generation = guard.begin_shutdown().unwrap();
+        assert!(guard.begin_shutdown_recovery(old_generation));
+        assert!(guard.finish_shutdown_recovery(old_generation));
+
+        let current_generation = guard.begin_shutdown().unwrap();
+        assert_ne!(old_generation, current_generation);
+        assert!(!guard.begin_shutdown_recovery(old_generation));
+        assert!(!guard.is_shutdown_recovery_current(old_generation));
+        assert!(guard.is_shutdown_generation_active(current_generation));
+    }
+
+    #[test]
+    fn media_shutdown_recovery_fences_exit_until_registration_is_reopened() {
+        let guard = Aria2DaemonGuard::new();
+        let generation = guard.begin_shutdown().unwrap();
+        assert!(guard.begin_shutdown_recovery(generation));
+        assert!(guard.is_shutting_down());
+        assert!(guard.begin_shutdown().is_none());
+        assert!(guard.finish_shutdown_recovery(generation));
+        assert!(!guard.is_shutting_down());
+        assert!(guard.begin_shutdown().is_some());
     }
 
     #[test]
@@ -18192,7 +18827,7 @@ mod tests {
         assert!(super::shutdown_finalization_allowed(true, true, true));
 
         let guard = Aria2DaemonGuard::new();
-        assert!(guard.begin_shutdown());
+        assert!(guard.begin_shutdown().is_some());
         guard.mark_shutdown_journal_failed("download-1", 7);
         assert!(guard.shutdown_journal_failed());
         assert_eq!(guard.shutdown_journal_failures(), vec![("download-1".into(), 7)]);
@@ -18310,12 +18945,133 @@ mod tests {
             &mut stderr_tail,
             2048,
             Duration::from_millis(1),
-            move || terminate_tx.send(()).expect("termination task is waiting"),
+            move || async move {
+                terminate_tx.send(()).expect("termination task is waiting");
+                Ok(())
+            },
         )
         .await
         .expect("kill must be followed by observed process termination");
         termination.await.unwrap();
-        assert_eq!(payload.signal, Some(15));
+        assert!(matches!(
+            payload,
+            super::MediaTerminationOutcome::Event(payload) if payload.signal == Some(15)
+        ));
+    }
+
+    #[test]
+    fn cancellation_before_processing_preserves_resumable_partial_assets() {
+        assert!(!super::media_cancel_requires_processing_cleanup(false));
+        assert!(super::media_cancel_requires_processing_cleanup(true));
+    }
+
+    #[test]
+    fn media_cleanup_errors_do_not_expose_private_destination_paths() {
+        let error = super::MediaCleanupFailure::from(
+            "/Users/example/Downloads/private/video.mkv: permission denied".to_string(),
+        );
+        assert_eq!(error.to_string(), "media artifact cleanup did not complete");
+        assert!(!format!("{error}").contains("/Users/example"));
+    }
+
+    #[tokio::test]
+    async fn successful_kill_confirms_exit_when_shell_termination_event_is_missing() {
+        let (_sender, mut receiver) = tauri::async_runtime::channel(1);
+        let mut stdout_buffer = String::new();
+        let mut stderr_buffer = String::new();
+        let mut output_path = None;
+        let mut stderr_tail = String::new();
+        let outcome = super::terminate_and_wait_for_media_after_cancel(
+            &mut receiver,
+            &mut stdout_buffer,
+            &mut stderr_buffer,
+            &mut output_path,
+            &mut stderr_tail,
+            2048,
+            Duration::from_millis(1),
+            || async { Ok(()) },
+        )
+        .await
+        .expect("successful kill waits for and confirms child exit");
+        assert!(matches!(
+            outcome,
+            super::MediaTerminationOutcome::ConfirmedAfterKill
+        ));
+    }
+
+    #[tokio::test]
+    async fn kill_failure_and_missing_termination_event_retain_runner_ownership() {
+        let (sender, mut receiver) = tauri::async_runtime::channel(1);
+        drop(sender);
+        let kill_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let kill_called_in_future = std::sync::Arc::clone(&kill_called);
+        let mut stdout_buffer = String::new();
+        let mut stderr_buffer = String::new();
+        let mut output_path = None;
+        let mut stderr_tail = String::new();
+        let result = tokio::time::timeout(
+            Duration::from_millis(30),
+            super::terminate_and_wait_for_media_after_cancel(
+                &mut receiver,
+                &mut stdout_buffer,
+                &mut stderr_buffer,
+                &mut output_path,
+                &mut stderr_tail,
+                2048,
+                Duration::from_millis(1),
+                move || async move {
+                    kill_called_in_future.store(true, std::sync::atomic::Ordering::Release);
+                    Err("kill could not confirm process termination".to_string())
+                },
+            ),
+        )
+        .await;
+        assert!(kill_called.load(std::sync::atomic::Ordering::Acquire));
+        assert!(result.is_err(), "missing termination evidence must not release ownership");
+    }
+
+    #[tokio::test]
+    async fn successful_completion_event_racing_with_kill_wins_over_cancellation() {
+        let (sender, mut receiver) = tauri::async_runtime::channel(1);
+        let termination_sender = sender.clone();
+        let (kill_tx, kill_rx) = tokio::sync::oneshot::channel();
+        let termination = tokio::spawn(async move {
+            kill_rx.await.expect("kill is requested");
+            termination_sender
+                .send(tauri_plugin_shell::process::CommandEvent::Terminated(
+                    tauri_plugin_shell::process::TerminatedPayload {
+                        code: Some(0),
+                        signal: None,
+                    },
+                ))
+                .await
+                .expect("completion event should reach the runner");
+        });
+
+        let mut stdout_buffer = String::new();
+        let mut stderr_buffer = String::new();
+        let mut output_path = None;
+        let mut stderr_tail = String::new();
+        let outcome = super::terminate_and_wait_for_media_after_cancel(
+            &mut receiver,
+            &mut stdout_buffer,
+            &mut stderr_buffer,
+            &mut output_path,
+            &mut stderr_tail,
+            2048,
+            Duration::from_millis(1),
+            move || async move {
+                kill_tx.send(()).expect("termination task is waiting");
+                Ok(())
+            },
+        )
+        .await
+        .expect("termination race should settle");
+        termination.await.unwrap();
+        assert!(matches!(
+            outcome,
+            super::MediaTerminationOutcome::Event(payload) if payload.code == Some(0)
+        ));
     }
 
     #[test]
@@ -22690,10 +23446,90 @@ fn set_log_stream_active(caller: tauri::WebviewWindow, active: bool) -> Result<(
 type FirelinkInvokeHandler =
     Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync>;
 
+fn log_startup_phase(phase: &str, phase_started_at: Instant, app_started_at: Instant) {
+    log::info!(
+        "app_startup_phase={} elapsed_ms={} total_elapsed_ms={}",
+        phase,
+        phase_started_at.elapsed().as_millis(),
+        app_started_at.elapsed().as_millis()
+    );
+}
+
+async fn cleanup_startup_torrent_artifacts(
+    app_handle: tauri::AppHandle,
+    app_started_at: Instant,
+) {
+    let phase_started_at = Instant::now();
+    if let Err(error) = crate::torrent::remove_orphaned_probe_dirs(&app_handle) {
+        log::warn!("could not remove orphaned torrent probes: {error}");
+    }
+    log_startup_phase("orphaned_torrent_probe_cleanup", phase_started_at, app_started_at);
+
+    let retention_started_at = Instant::now();
+    let retained_torrent_metadata = app_handle
+        .state::<crate::db::DbState>()
+        .lock()
+        .and_then(|connection| crate::db::load_downloads(&connection))
+        .map(|records| {
+            let mut retained_ids = HashSet::new();
+            let mut retained_info_hashes = HashSet::new();
+            for record in records {
+                let retained_id = retained_torrent_id_from_persisted_record(&record);
+                let retained_info_hash = retained_torrent_info_hash_from_persisted_record(&record);
+                let has_retained_metadata = retained_id.is_some() || retained_info_hash.is_some();
+                if let Some(id) = retained_id {
+                    retained_ids.insert(id);
+                }
+                if let Some(info_hash) = retained_info_hash {
+                    retained_info_hashes.insert(info_hash);
+                }
+                if !has_retained_metadata
+                    && serde_json::from_str::<crate::ipc::DownloadItem>(&record).is_err()
+                {
+                    log::warn!(
+                        "skipping malformed persisted download during torrent metadata retention"
+                    );
+                }
+            }
+            (retained_ids, retained_info_hashes)
+        });
+    log_startup_phase(
+        "torrent_metadata_retention_snapshot",
+        retention_started_at,
+        app_started_at,
+    );
+
+    match retained_torrent_metadata {
+        Ok((retained_torrent_ids, retained_torrent_info_hashes)) => {
+            let cache_cleanup_started_at = Instant::now();
+            if let Err(error) = crate::torrent::remove_orphaned_cached_torrents(
+                &app_handle,
+                &retained_torrent_ids,
+                &retained_torrent_info_hashes,
+            )
+            .await
+            {
+                log::warn!("could not remove orphaned torrent metadata: {error}");
+            }
+            log_startup_phase(
+                "orphaned_torrent_cache_cleanup",
+                cache_cleanup_started_at,
+                app_started_at,
+            );
+        }
+        Err(error) => {
+            log::warn!("could not identify retained torrent metadata: {error}");
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     ensure_reqwest_crypto_provider();
     crate::login_start::install_macos_login_launch_detector();
+
+    let app_startup_started_at = Instant::now();
+    let startup_cleanup_started = Arc::new(AtomicBool::new(false));
 
     let storage_mode = crate::storage::StorageMode::detect();
     let setup_storage_mode = storage_mode.clone();
@@ -22730,6 +23566,7 @@ pub fn run() {
     let aria2_port_clone = Arc::clone(&aria2_port);
     let shutdown_terminal_barrier = Arc::new(ShutdownTerminalBarrier::default());
     let aria2_secret = uuid::Uuid::new_v4().to_string();
+    let run_startup_cleanup_started = Arc::clone(&startup_cleanup_started);
     let builder = tauri::Builder::default()
         .manage(MainWindowRestoreState::default())
         .manage(properties_window::PropertiesWindowRegistry::default())
@@ -22755,10 +23592,12 @@ pub fn run() {
                     .store(started_at_login, Ordering::Release);
             }
 
+            let storage_started = Instant::now();
             let storage_layout = crate::storage::StorageLayout::resolve(
                 app.handle(),
                 setup_storage_mode.clone(),
             )?;
+            log_startup_phase("storage", storage_started, app_startup_started_at);
             let main_window_config = app
                 .config()
                 .app
@@ -22792,10 +23631,7 @@ pub fn run() {
             log::info!("Memory: {} MB total", sys.total_memory() / 1024 / 1024);
             log::info!("App Version: {}", env!("CARGO_PKG_VERSION"));
             log::info!("==========================");
-            log::debug!(
-                "app_startup_phase=system_information elapsed_ms={}",
-                system_info_started.elapsed().as_millis()
-            );
+            log_startup_phase("system_information", system_info_started, app_startup_started_at);
             let tray_available = match build_main_tray(app.handle()) {
                 Ok(()) => true,
                 Err(error) if started_at_login => {
@@ -22860,13 +23696,16 @@ pub fn run() {
                     .map_err(|error| format!("failed to install application menu: {error}"))?;
             }
 
+            let database_started = Instant::now();
             let database = crate::db::init(&storage_layout)
                 .map_err(|error| format!("failed to initialize persistence: {error}"))?;
+            log_startup_phase("database", database_started, app_startup_started_at);
             // Replacement recovery consults the persisted ownership registry.
             // Register the database before running any recovery pass so a
             // malformed or interrupted transaction cannot reach a missing
             // Tauri state entry at startup.
             app.manage(database);
+            let torrent_recovery_started = Instant::now();
             if let Err(error) = recover_torrent_move_journals(
                 app.handle(),
                 &*app.state::<crate::db::DbState>(),
@@ -22874,12 +23713,23 @@ pub fn run() {
             ) {
                 log::warn!("Torrent move recovery did not complete: {error}");
             }
+            log_startup_phase(
+                "torrent_ownership_recovery",
+                torrent_recovery_started,
+                app_startup_started_at,
+            );
+            let replacement_recovery_started = Instant::now();
             if let Err(error) = recover_download_replacement_journals(
                 app.handle(),
                 &storage_layout,
             ) {
                 log::warn!("Download replacement recovery did not complete: {error}");
             }
+            log_startup_phase(
+                "download_replacement_recovery",
+                replacement_recovery_started,
+                app_startup_started_at,
+            );
             // Establish Firelink-owned Aria2 routing-table paths after the
             // existing data-root initializer has created the selected storage
             // directory, but before the daemon launcher is scheduled. A
@@ -22895,52 +23745,6 @@ pub fn run() {
                     None
                 }
             };
-            if let Err(error) = crate::torrent::remove_orphaned_probe_dirs(app.handle()) {
-                log::warn!("could not remove orphaned torrent probes: {error}");
-            }
-            let retained_torrent_metadata = app
-                .state::<crate::db::DbState>()
-                .lock()
-                .and_then(|connection| crate::db::load_downloads(&connection))
-                .map(|records| {
-                    let mut retained_ids = HashSet::new();
-                    let mut retained_info_hashes = HashSet::new();
-                    for record in records {
-                        let retained_id = retained_torrent_id_from_persisted_record(&record);
-                        let retained_info_hash =
-                            retained_torrent_info_hash_from_persisted_record(&record);
-                        let has_retained_metadata =
-                            retained_id.is_some() || retained_info_hash.is_some();
-                        if let Some(id) = retained_id {
-                            retained_ids.insert(id);
-                        }
-                        if let Some(info_hash) = retained_info_hash {
-                            retained_info_hashes.insert(info_hash);
-                        }
-                        if !has_retained_metadata
-                            && serde_json::from_str::<crate::ipc::DownloadItem>(&record).is_err()
-                        {
-                            log::warn!(
-                                "skipping malformed persisted download during torrent metadata retention"
-                            );
-                        }
-                    }
-                    (retained_ids, retained_info_hashes)
-                });
-            match retained_torrent_metadata {
-                Ok((retained_torrent_ids, retained_torrent_info_hashes)) => {
-                    if let Err(error) = crate::torrent::remove_orphaned_cached_torrents(
-                        app.handle(),
-                        &retained_torrent_ids,
-                        &retained_torrent_info_hashes,
-                    ) {
-                        log::warn!("could not remove orphaned torrent metadata: {error}");
-                    }
-                }
-                Err(error) => {
-                    log::warn!("could not identify retained torrent metadata: {error}");
-                }
-            }
             let initial_pairing_token = {
                 // Generate a temporary session token for the extension server on startup.
                 // The frontend will hydrate the real token via IPC once it mounts,
@@ -23095,9 +23899,11 @@ pub fn run() {
                     .focused(false)
                     .focusable(false);
             }
+            let window_build_started = Instant::now();
             main_window_builder
                 .build()
                 .map_err(|error| format!("failed to create main window: {error}"))?;
+            log_startup_phase("main_window_build", window_build_started, app_startup_started_at);
             restore_pending_main_window(app.handle());
 
             #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -23382,11 +24188,16 @@ pub fn run() {
                                         let err = if last_err.is_empty() { "aria2 daemon did not become ready within 5 seconds".to_string() } else { format!("aria2 did not become ready: {last_err}") };
                                         log::error!("{}", err);
                                         *guard.startup_error.lock().unwrap() = Some(err);
-                                        shutdown_aria2_daemon(app_handle_bg.clone()).await;
-                                        aria2_port_clone.store(
-                                            0,
-                                            std::sync::atomic::Ordering::Release,
-                                        );
+                                        if let Err(shutdown_error) = shutdown_aria2_daemon(
+                                            app_handle_bg.clone(),
+                                            tokio::time::Instant::now() + Duration::from_secs(15),
+                                        )
+                                        .await
+                                        {
+                                            log::error!(
+                                                "could not confirm aria2 startup cleanup: {shutdown_error}"
+                                            );
+                                        }
                                         return;
                                     }
                                     break;
@@ -23444,7 +24255,7 @@ pub fn run() {
                             && guard.startup_error_message().is_some()
                             && guard.launch_spec().is_some()
                         {
-                            match restart_aria2_daemon(&app_handle_bg).await {
+                            match restart_aria2_daemon(&app_handle_bg, None).await {
                                 Ok(()) => log::info!(
                                     "app_shutdown_phase=aria2_restart outcome=recovered"
                                 ),
@@ -24150,6 +24961,8 @@ pub fn run() {
                                         num_seeders,
                                         torrent_seeded_seconds: torrent_telemetry
                                             .map(|value| value.seeded_seconds as f64),
+                                        progress_checkpoint_epoch: None,
+                                        lifecycle_generation: None,
                                     });
 
                                     if entering_seeding
@@ -24851,8 +25664,9 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| match event {
+        .run(move |app_handle, event| match event {
             tauri::RunEvent::Ready => {
+                let ready_started_at = Instant::now();
                 mark_main_window_startup_complete(app_handle);
                 let started_at_login = app_handle
                     .try_state::<MainWindowRestoreState>()
@@ -24862,6 +25676,22 @@ pub fn run() {
                     reveal_main_window(app_handle);
                 }
                 restore_pending_main_window(app_handle);
+                log_startup_phase("application_ready", ready_started_at, app_startup_started_at);
+
+                // These best-effort sweeps run after the main window becomes
+                // available. Cache writers share ownership with the sweep,
+                // and current-session paths are tracked directly rather than
+                // inferred from filesystem timestamps.
+                if !run_startup_cleanup_started.swap(true, Ordering::AcqRel) {
+                    let cleanup_app_handle = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        cleanup_startup_torrent_artifacts(
+                            cleanup_app_handle,
+                            app_startup_started_at,
+                        )
+                        .await;
+                    });
+                }
             }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Opened { urls } => {
@@ -24883,7 +25713,8 @@ pub fn run() {
                 let guard = app_handle.state::<Aria2DaemonGuard>();
                 if !guard.exit_allowed() {
                     api.prevent_exit();
-                    if guard.begin_shutdown() {
+                    if let Some(shutdown_generation) = guard.begin_shutdown() {
+                        let shutdown_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
                         app_handle
                             .state::<AppState>()
                             .queue_manager
@@ -24904,7 +25735,14 @@ pub fn run() {
                             })) {
                                 log::warn!("app_shutdown_phase=frontend_flush signal failed: {error}");
                                 frontend_exit_flush.finish(request, false);
-                                reject_app_exit_request(&app, request, "signal-failed", &[]).await;
+                                reject_app_exit_request(
+                                    &app,
+                                    request,
+                                    shutdown_generation,
+                                    "signal-failed",
+                                    &[],
+                                )
+                                .await;
                                 log::info!(
                                     "app_shutdown_phase=total outcome=cancelled elapsed_ms={}",
                                     exit_started.elapsed().as_millis()
@@ -24925,11 +25763,8 @@ pub fn run() {
                                 }
                             };
                             let flush_started = Instant::now();
-                            // Frontend shutdown now waits for accepted lifecycle
-                            // operations and durable writes. Do not cancel a
-                            // normal exit after the old two-second window.
-                            let flush_timeout = Duration::from_secs(60);
-                            let flush_result = tokio::time::timeout(flush_timeout, flush_wait).await;
+                            let flush_result =
+                                tokio::time::timeout_at(shutdown_deadline, flush_wait).await;
                             let timed_out = flush_result.is_err();
                             let mut flush_succeeded = matches!(&flush_result, Ok(true));
                             if timed_out && !flush_succeeded {
@@ -24967,7 +25802,14 @@ pub fn run() {
                                 } else {
                                     "rejected"
                                 };
-                                reject_app_exit_request(&app, request, cancel_reason, &[]).await;
+                                reject_app_exit_request(
+                                    &app,
+                                    request,
+                                    shutdown_generation,
+                                    cancel_reason,
+                                    &[],
+                                )
+                                .await;
                                 log::info!(
                                     "app_shutdown_phase=total outcome=cancelled elapsed_ms={}",
                                     exit_started.elapsed().as_millis()
@@ -24979,8 +25821,8 @@ pub fn run() {
                             // retry, seed, recovery, and user control work. If
                             // any cannot settle promptly, reject this exit
                             // while the existing daemon is still available.
-                            let handoff_drain = tokio::time::timeout(
-                                Duration::from_secs(15),
+                            let handoff_drain = tokio::time::timeout_at(
+                                shutdown_deadline,
                                 app.state::<AppState>()
                                     .queue_manager
                                     .wait_for_aria2_handoffs(),
@@ -24993,6 +25835,7 @@ pub fn run() {
                                 reject_app_exit_request(
                                     &app,
                                     request,
+                                    shutdown_generation,
                                     "aria2-handoff-drain-failed",
                                     &[],
                                 )
@@ -25005,38 +25848,101 @@ pub fn run() {
                             // barrier through its durable journal and row
                             // update, and cancellation leaves the active row
                             // restartable if this exit is later rejected.
-                            let interrupted_media_ids = match app
-                                .state::<AppState>()
-                                .download_coordinator
-                                .cancel_active_media_for_shutdown()
-                                .await
+                            let interrupted_media_ids = match tokio::time::timeout_at(
+                                shutdown_deadline,
+                                app.state::<AppState>()
+                                    .download_coordinator
+                                    .cancel_active_media_for_shutdown(),
+                            )
+                            .await
                             {
-                                Ok(interrupted) => interrupted
+                                Ok(Ok(interrupted)) => interrupted
                                     .into_iter()
                                     .map(|(id, _generation)| id)
                                     .collect::<Vec<_>>(),
-                                Err(error) => {
+                                Ok(Err(error)) => {
                                     log::error!(
                                         "app_shutdown_phase=media_cancel outcome=failed error={error}"
                                     );
-                                    reject_app_exit_request(
+                                    let aria2_dispatch_was_held = app
+                                        .state::<AppState>()
+                                        .queue_manager
+                                        .aria2_dispatch_held();
+                                    app.state::<AppState>()
+                                        .queue_manager
+                                        .set_aria2_dispatch_hold(true);
+                                    reject_app_exit_request_preserving_media_ownership(
                                         &app,
                                         request,
+                                        shutdown_generation,
                                         "media-shutdown-failed",
-                                        &[],
                                     )
                                     .await;
+                                    schedule_media_recovery_after_rejected_shutdown(
+                                        app.clone(),
+                                        request,
+                                        shutdown_generation,
+                                        aria2_dispatch_was_held,
+                                    );
+                                    return;
+                                }
+                                Err(_) => {
+                                    log::warn!(
+                                        "app_shutdown_phase=media_cancel outcome=deadline-expired"
+                                    );
+                                    let aria2_dispatch_was_held = app
+                                        .state::<AppState>()
+                                        .queue_manager
+                                        .aria2_dispatch_held();
+                                    app.state::<AppState>()
+                                        .queue_manager
+                                        .set_aria2_dispatch_hold(true);
+                                    reject_app_exit_request_preserving_media_ownership(
+                                        &app,
+                                        request,
+                                        shutdown_generation,
+                                        "media-shutdown-deadline-expired",
+                                    )
+                                    .await;
+                                    schedule_media_recovery_after_rejected_shutdown(
+                                        app.clone(),
+                                        request,
+                                        shutdown_generation,
+                                        aria2_dispatch_was_held,
+                                    );
                                     return;
                                 }
                             };
                             // The accepted snapshot durably reconciles any
                             // journal failure left by a rejected prior exit.
-                            shutdown_aria2_daemon(app.clone()).await;
+                            if let Err(error) =
+                                shutdown_aria2_daemon(app.clone(), shutdown_deadline).await
+                            {
+                                log::error!(
+                                    "app_shutdown_phase=aria2_child outcome=unconfirmed error={error}"
+                                );
+                                app.state::<AppState>()
+                                    .queue_manager
+                                    .set_aria2_dispatch_hold(true);
+                                reject_app_exit_request(
+                                    &app,
+                                    request,
+                                    shutdown_generation,
+                                    "aria2-shutdown-deadline-expired",
+                                    &interrupted_media_ids,
+                                )
+                                .await;
+                                schedule_aria2_recovery_after_rejected_shutdown(
+                                    app.clone(),
+                                    shutdown_generation,
+                                );
+                                return;
+                            }
                             let terminal_barrier = Arc::clone(
                                 &app.state::<AppState>().shutdown_terminal_barrier,
                             );
-                            let terminal_drained = tokio::time::timeout(
-                                Duration::from_secs(15),
+                            let terminal_drained = tokio::time::timeout_at(
+                                shutdown_deadline,
                                 terminal_barrier.seal_and_wait(),
                             )
                             .await
@@ -25070,8 +25976,8 @@ pub fn run() {
                                         }
                                     }
                                 };
-                                match tokio::time::timeout(
-                                    Duration::from_secs(5),
+                                match tokio::time::timeout_at(
+                                    shutdown_deadline,
                                     final_flush_wait,
                                 )
                                 .await
@@ -25099,7 +26005,9 @@ pub fn run() {
                                     &shutdown_guard,
                                     app.try_state::<crate::db::DbState>().as_deref(),
                                 );
-                            let finalization_checks_passed = terminal_drained
+                            let finalization_checks_passed =
+                                tokio::time::Instant::now() < shutdown_deadline
+                                && terminal_drained
                                 && shutdown_finalization_allowed(
                                 shutdown_guard.shutdown_journal_failed(),
                                 final_flush_succeeded,
@@ -25111,39 +26019,43 @@ pub fn run() {
                                 log::error!(
                                     "app_shutdown_phase=finalization outcome=blocked reason=terminal-state-not-durable-or-event-drain-failed"
                                 );
-                                let restart_required = app
-                                    .state::<Aria2DaemonGuard>()
-                                    .launch_spec()
-                                    .is_some();
                                 app.state::<AppState>()
                                     .queue_manager
                                     .set_aria2_dispatch_hold(true);
-                                if restart_required {
-                                    if let Err(error) = restart_aria2_daemon(&app).await {
-                                        log::error!(
-                                            "app_shutdown_phase=aria2_restart outcome=unavailable error={}",
-                                            error
-                                        );
-                                        *app.state::<Aria2DaemonGuard>()
-                                            .startup_error
-                                            .lock()
-                                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                                            Some(error);
-                                    }
-                                }
                                 reject_app_exit_request(
                                     &app,
                                     request,
+                                    shutdown_generation,
+                                    "terminal-journal-failed",
+                                    &interrupted_media_ids,
+                                )
+                                .await;
+                                schedule_aria2_recovery_after_rejected_shutdown(
+                                    app.clone(),
+                                    shutdown_generation,
+                                );
+                                return;
+                            }
+                            if final_flush_succeeded {
+                                app.state::<Aria2DaemonGuard>().clear_shutdown_journal_failure();
+                            }
+                            if !app
+                                .state::<Aria2DaemonGuard>()
+                                .allow_exit(shutdown_generation)
+                            {
+                                log::error!(
+                                    "app_shutdown_phase=finalization outcome=blocked reason=shutdown-attempt-changed"
+                                );
+                                reject_app_exit_request(
+                                    &app,
+                                    request,
+                                    shutdown_generation,
                                     "terminal-journal-failed",
                                     &interrupted_media_ids,
                                 )
                                 .await;
                                 return;
                             }
-                            if final_flush_succeeded {
-                                app.state::<Aria2DaemonGuard>().clear_shutdown_journal_failure();
-                            }
-                            app.state::<Aria2DaemonGuard>().allow_exit();
                             app.state::<AppState>()
                                 .queue_manager
                                 .notify_aria2_exit_allowed();

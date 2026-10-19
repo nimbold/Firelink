@@ -49,6 +49,7 @@ import { formatDownloadBytes } from './utils/downloadProgress';
 import { synchronizeDocumentAppearance } from './utils/documentAppearance';
 import { createMainWindowSizePersistence } from './utils/mainWindowState';
 import { createSidebarResizeSession } from './utils/sidebarResize';
+import { MediaExitRecoveryQueue } from './utils/mediaExitRecovery';
 import {
   resolveFallbackFilter,
   shouldRestoreSidebarRevealFocus,
@@ -620,11 +621,13 @@ function App() {
     let cleanupListeners: (() => void) | null = null;
     let unlistenExit: (() => void) | null = null;
     let unlistenExitCancelled: (() => void) | null = null;
+    let unlistenExitMediaRecovery: (() => void) | null = null;
     let unlistenExitFinalFlush: (() => void) | null = null;
     let unlistenExitDownload: (() => void) | null = null;
     let bodyWasInertBeforeExit = false;
     let activeExitRequestId: string | null = null;
     let exitPersistenceDisposed = false;
+    const deferredMediaRecovery = new MediaExitRecoveryQueue();
     const restoreExitAttempt = (requestId: string, showCancelledNotice: boolean) => {
       if (activeExitRequestId !== requestId) return;
       activeExitRequestId = null;
@@ -691,14 +694,10 @@ function App() {
         });
       }
     });
-    const exitCancelledListener = listen('app-exit-cancelled', event => {
-      if (activeExitRequestId !== event.payload.requestId) return;
-      restoreExitAttempt(event.payload.requestId, true);
-      const interruptedMediaIds = Array.isArray(event.payload.interruptedMediaIds)
-        ? event.payload.interruptedMediaIds.filter((id): id is string => typeof id === 'string')
-        : [];
-      if (interruptedMediaIds.length > 0) {
-        void Promise.allSettled(interruptedMediaIds.map(async id => {
+    const resumeInterruptedMedia = (interruptedMediaIds: unknown) => {
+      const ids = deferredMediaRecovery.collect(interruptedMediaIds, activeExitRequestId !== null);
+      if (ids.length > 0) {
+        void Promise.allSettled(ids.map(async id => {
           const item = useDownloadStore.getState().downloads.find(download => download.id === id);
           if (
             !item
@@ -712,6 +711,14 @@ function App() {
           }
         }));
       }
+    };
+    const exitCancelledListener = listen('app-exit-cancelled', event => {
+      if (activeExitRequestId !== event.payload.requestId) return;
+      restoreExitAttempt(event.payload.requestId, true);
+      resumeInterruptedMedia(event.payload.interruptedMediaIds);
+    });
+    const exitMediaRecoveryListener = listen('app-exit-media-recovery-complete', event => {
+      resumeInterruptedMedia(event.payload.interruptedMediaIds);
     });
     const exitFinalFlushListener = listen('app-exit-final-flush-requested', async event => {
       if (activeExitRequestId !== event.payload.requestId || !exiting) {
@@ -758,6 +765,12 @@ function App() {
     }).catch(error => {
       console.error('Failed to listen for frontend exit cancellation:', error);
     });
+    void exitMediaRecoveryListener.then(unlisten => {
+      if (active) unlistenExitMediaRecovery = unlisten;
+      else unlisten();
+    }).catch(error => {
+      console.error('Failed to listen for media recovery after exit cancellation:', error);
+    });
     void exitFinalFlushListener.then(unlisten => {
       if (active) unlistenExitFinalFlush = unlisten;
       else unlisten();
@@ -778,6 +791,8 @@ function App() {
         unlistenExit = null;
         unlistenExitCancelled?.();
         unlistenExitCancelled = null;
+        unlistenExitMediaRecovery?.();
+        unlistenExitMediaRecovery = null;
         unlistenExitFinalFlush?.();
         unlistenExitFinalFlush = null;
         unlistenExitDownload?.();
@@ -1059,6 +1074,8 @@ function App() {
       unlistenExit = null;
       unlistenExitCancelled?.();
       unlistenExitCancelled = null;
+      unlistenExitMediaRecovery?.();
+      unlistenExitMediaRecovery = null;
       unlistenExitFinalFlush?.();
       unlistenExitFinalFlush = null;
       unlistenExitDownload?.();

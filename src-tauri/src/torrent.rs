@@ -1001,6 +1001,53 @@ pub fn managed_torrent_storage_root<R: tauri::Runtime>(
     Ok(root)
 }
 
+static TORRENT_SESSION_ARTIFACTS: std::sync::OnceLock<std::sync::Mutex<HashSet<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+fn torrent_session_artifacts() -> &'static std::sync::Mutex<HashSet<PathBuf>> {
+    TORRENT_SESSION_ARTIFACTS.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+}
+
+/// Mark a managed torrent artifact as touched or created by this process.
+/// Startup cleanup checks this registry instead of timestamps, which can be
+/// coarse or stale on portable filesystems.
+pub(crate) fn register_torrent_session_artifact(path: &Path) {
+    torrent_session_artifacts()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(path.to_path_buf());
+}
+
+pub(crate) struct TorrentSessionArtifactLease {
+    path: PathBuf,
+}
+
+impl Drop for TorrentSessionArtifactLease {
+    fn drop(&mut self) {
+        torrent_session_artifacts()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.path);
+    }
+}
+
+/// Protect a transient artifact while an operation is using it. The lease
+/// keeps startup cleanup from racing the operation and removes the registry
+/// entry on every return path, including errors.
+pub(crate) fn protect_torrent_session_artifact(path: &Path) -> TorrentSessionArtifactLease {
+    register_torrent_session_artifact(path);
+    TorrentSessionArtifactLease {
+        path: path.to_path_buf(),
+    }
+}
+
+fn is_torrent_session_artifact(path: &Path) -> bool {
+    torrent_session_artifacts()
+        .lock()
+        .map(|artifacts| artifacts.contains(path))
+        .unwrap_or(true)
+}
+
 pub fn remove_orphaned_probe_dirs<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
 ) -> Result<usize, String> {
@@ -1025,6 +1072,7 @@ fn remove_orphaned_probe_dirs_at(root: &Path) -> Result<usize, String> {
             .file_type()
             .map_err(|error| format!("could not inspect torrent probe entry: {error}"))?
             .is_dir()
+            || is_torrent_session_artifact(&entry.path())
         {
             continue;
         }
@@ -1037,16 +1085,25 @@ fn remove_orphaned_probe_dirs_at(root: &Path) -> Result<usize, String> {
     Ok(removed)
 }
 
-pub fn remove_orphaned_cached_torrents<R: tauri::Runtime>(
+pub async fn remove_orphaned_cached_torrents<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     retained_ids: &HashSet<String>,
     retained_info_hashes: &HashSet<String>,
 ) -> Result<usize, String> {
     let root = managed_torrent_storage_root(app_handle)?;
-    remove_orphaned_cached_torrents_at(&root, retained_ids, retained_info_hashes)
+    remove_orphaned_cached_torrents_at(&root, retained_ids, retained_info_hashes).await
 }
 
-fn remove_orphaned_cached_torrents_at(
+async fn remove_orphaned_cached_torrents_at(
+    root: &Path,
+    retained_ids: &HashSet<String>,
+    retained_info_hashes: &HashSet<String>,
+) -> Result<usize, String> {
+    let _guard = canonical_torrent_cache_lock().lock().await;
+    remove_orphaned_cached_torrents_at_locked(root, retained_ids, retained_info_hashes)
+}
+
+fn remove_orphaned_cached_torrents_at_locked(
     root: &Path,
     retained_ids: &HashSet<String>,
     retained_info_hashes: &HashSet<String>,
@@ -1066,6 +1123,13 @@ fn remove_orphaned_cached_torrents_at(
         let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
             continue;
         };
+        // Cache writers and this sweep share one lock. The process registry
+        // protects files touched earlier in this session, including those
+        // whose filesystem timestamp granularity cannot distinguish them
+        // from files left by a previous run.
+        if is_torrent_session_artifact(&entry.path()) {
+            continue;
+        }
         if crate::platform::is_atomic_temp_file_name(&name) {
             if file_type.is_file() || file_type.is_symlink() {
                 if remove_cached_torrent_entry(
@@ -1211,6 +1275,7 @@ pub async fn cache_torrent_bytes<R: tauri::Runtime>(
             "torrent metadata must be between 1 byte and {MAX_TORRENT_BYTES} bytes"
         ));
     }
+    let _guard = canonical_torrent_cache_lock().lock().await;
     let destination = managed_torrent_path(app_handle, id)?;
     if let Some(parent) = destination.parent() {
         tokio::fs::create_dir_all(parent)
@@ -1220,6 +1285,7 @@ pub async fn cache_torrent_bytes<R: tauri::Runtime>(
     crate::platform::atomic_write_replace(&destination, bytes)
         .await
         .map_err(|error| format!("could not cache torrent metadata: {error}"))?;
+    register_torrent_session_artifact(&destination);
     Ok(destination.to_string_lossy().to_string())
 }
 
@@ -1335,7 +1401,14 @@ pub async fn read_cached_torrent_by_info_hash_at(
     info_hash: &str,
 ) -> Result<Option<Vec<u8>>, String> {
     let _guard = canonical_torrent_cache_lock().lock().await;
-    read_cached_torrent_by_info_hash_unlocked(root, info_hash).await
+    let info_hash = canonical_btih(info_hash)
+        .ok_or_else(|| "invalid torrent info hash cache key".to_string())?;
+    let path = managed_torrent_info_hash_path_at(root, &info_hash)?;
+    let cached = read_cached_torrent_by_info_hash_unlocked(root, &info_hash).await?;
+    if cached.is_some() {
+        register_torrent_session_artifact(&path);
+    }
+    Ok(cached)
 }
 
 pub async fn cache_torrent_info_hash<R: tauri::Runtime>(
@@ -1362,6 +1435,7 @@ pub async fn cache_torrent_info_hash_at(
         .await?
         .is_some()
     {
+        register_torrent_session_artifact(&destination);
         return Ok(Some(destination.to_string_lossy().to_string()));
     }
 
@@ -1374,6 +1448,7 @@ pub async fn cache_torrent_info_hash_at(
     crate::platform::atomic_write_replace(&destination, bytes)
         .await
         .map_err(|error| format!("could not commit canonical torrent metadata: {error}"))?;
+    register_torrent_session_artifact(&destination);
     Ok(Some(destination.to_string_lossy().to_string()))
 }
 
@@ -1896,6 +1971,34 @@ mod tests {
     }
 
     #[test]
+    fn probe_cleanup_preserves_registered_current_session_paths() {
+        let temporary = tempfile::tempdir().expect("temporary torrent storage should exist");
+        let root = temporary.path();
+        let active_probe = root.join(".probe-active");
+        register_torrent_session_artifact(&active_probe);
+        std::fs::create_dir(&active_probe).expect("active probe directory should exist");
+
+        assert_eq!(
+            remove_orphaned_probe_dirs_at(root).unwrap(),
+            0
+        );
+        assert!(active_probe.is_dir());
+    }
+
+    #[test]
+    fn transient_torrent_artifact_lease_releases_its_registry_entry() {
+        let temporary = tempfile::tempdir().expect("temporary torrent storage should exist");
+        let active_probe = temporary.path().join(".probe-active-lease");
+        std::fs::create_dir(&active_probe).expect("active probe directory should exist");
+        let lease = protect_torrent_session_artifact(&active_probe);
+
+        assert_eq!(remove_orphaned_probe_dirs_at(temporary.path()).unwrap(), 0);
+        drop(lease);
+        assert_eq!(remove_orphaned_probe_dirs_at(temporary.path()).unwrap(), 1);
+        assert!(!active_probe.exists());
+    }
+
+    #[test]
     fn removes_unretained_torrent_files_but_preserves_retained_and_unrelated_entries() {
         let temporary = tempfile::tempdir().expect("temporary torrent storage should exist");
         let root = temporary.path();
@@ -1931,7 +2034,12 @@ mod tests {
         let retained_hashes = HashSet::from([retained_hash.to_string()]);
 
         assert_eq!(
-            remove_orphaned_cached_torrents_at(root, &retained, &retained_hashes).unwrap(),
+            remove_orphaned_cached_torrents_at_locked(
+                root,
+                &retained,
+                &retained_hashes,
+            )
+            .unwrap(),
             5
         );
         assert!(root.join("keep-id.torrent").is_file());
@@ -1952,6 +2060,41 @@ mod tests {
         assert!(root.join("notes.txt").is_file());
     }
 
+    #[test]
+    fn cached_torrent_cleanup_preserves_registered_current_session_paths() {
+        let temporary = tempfile::tempdir().expect("temporary torrent storage should exist");
+        let root = temporary.path();
+        let active_metadata = root.join("active-id.torrent");
+        register_torrent_session_artifact(&active_metadata);
+        std::fs::write(&active_metadata, b"metadata lookup in progress")
+            .expect("active metadata should exist");
+
+        assert_eq!(
+            remove_orphaned_cached_torrents_at_locked(
+                root,
+                &HashSet::new(),
+                &HashSet::new(),
+            )
+            .unwrap(),
+            0
+        );
+        assert!(active_metadata.is_file());
+    }
+
+    #[tokio::test]
+    async fn missing_info_hash_cache_reads_do_not_register_nonexistent_paths() {
+        let temporary = tempfile::tempdir().expect("temporary torrent storage should exist");
+        let root = temporary.path();
+        let info_hash = "0123456789abcdef0123456789abcdef01234567";
+        let path = managed_torrent_info_hash_path_at(root, info_hash).unwrap();
+
+        assert!(read_cached_torrent_by_info_hash_at(root, info_hash)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!is_torrent_session_artifact(&path));
+    }
+
     #[cfg(unix)]
     #[test]
     fn removes_unretained_torrent_symlinks_without_following_targets() {
@@ -1969,7 +2112,12 @@ mod tests {
         symlink(&target, &temporary_link).expect("orphan temporary symlink should exist");
 
         assert_eq!(
-            remove_orphaned_cached_torrents_at(root, &HashSet::new(), &HashSet::new()).unwrap(),
+            remove_orphaned_cached_torrents_at_locked(
+                root,
+                &HashSet::new(),
+                &HashSet::new(),
+            )
+            .unwrap(),
             2
         );
         assert!(!link.exists());
@@ -1990,7 +2138,7 @@ mod tests {
         symlink(&target, &link).expect("retained symbolic link should be created");
 
         assert_eq!(
-            remove_orphaned_cached_torrents_at(
+            remove_orphaned_cached_torrents_at_locked(
                 root,
                 &HashSet::from(["retained-id".to_string()]),
                 &HashSet::new(),
