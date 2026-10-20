@@ -28,9 +28,9 @@ It uses a Rust and Tauri backend with a React and TypeScript interface. Required
 
 ## Status
 
-Firelink `1.4.2` is the latest desktop release.
+Firelink `1.5.0` is the latest desktop release.
 
-Use [the latest Firelink Companion release, `2.2.2`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.2) with Firelink. The Companion is maintained in the [Firelink-Extension repository](https://github.com/nimbold/Firelink-Extension).
+Use [the latest Firelink Companion release, `2.2.3`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.3) with Firelink. The Companion is maintained in the [Firelink-Extension repository](https://github.com/nimbold/Firelink-Extension).
 
 The project is actively maintained. See the [changelog](CHANGELOG.md) for release history and current work.
 
@@ -40,7 +40,10 @@ Translations are available for English, Simplified Chinese, Hebrew, Persian, Ukr
 
 - Segmented HTTP and HTTPS downloads with retries, speed limits, and connection controls.
 - Media and playlist downloads through the bundled yt-dlp, FFmpeg, and Deno
-  path, including direct HTTP(S) HLS, DASH, and Smooth Streaming manifest URLs.
+  path, including direct manifest links and supported streams discovered in
+  browser pages.
+- Choose a custom browser profile folder for media cookies, including browsers
+  with a different profile location such as Opera GX.
 - BitTorrent downloads from `.torrent` files, magnet links, and browser handoff, with file selection, web seeds, seeding, and live diagnostics.
 - Standalone Download and Torrent Properties windows with live controls, transfer details, and safe Torrent relocation.
 - Adaptive mirror selection for multi-source downloads.
@@ -51,8 +54,8 @@ Translations are available for English, Simplified Chinese, Hebrew, Persian, Ukr
 - A customizable download table with sorting, column selection, reordering, and bulk actions.
 - File organization with categories, default folders, and per-download locations.
 - Appearance preferences with window styles, multilingual fonts, and localized calendar dates.
-- Browser handoff through local pairing and signed requests.
-- Tray controls, notifications, sounds, sleep prevention, and secure credential storage.
+- Browser handoff for downloads, detected media, and Torrents through local pairing and signed requests.
+- Start Firelink at login, with tray controls, notifications, sounds, sleep prevention, and secure credential storage.
 - RTL support for Hebrew and Persian.
 
 ## Installation
@@ -100,7 +103,7 @@ Only use these steps for Firelink downloaded from the [official GitHub release p
 
 ## Browser integration
 
-[Firelink Companion `2.2.2`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.2) connects browser downloads, links, media pages, magnets, and Torrent metadata to Firelink. Use the [latest Companion release](https://github.com/nimbold/Firelink-Extension/releases/latest) with the [latest Firelink release](https://github.com/nimbold/Firelink/releases/latest).
+[Firelink Companion `2.2.3`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.3) connects browser downloads, links, detected media, magnets, and Torrent metadata to Firelink. Use the [latest Companion release](https://github.com/nimbold/Firelink-Extension/releases/latest) with the [latest Firelink release](https://github.com/nimbold/Firelink/releases/latest).
 
 Captured links open Firelink's Add window for review before they are started or queued.
 

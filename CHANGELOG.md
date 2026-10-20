@@ -5,6 +5,41 @@ All notable changes to Firelink will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-10-20
+
+This release adds browser-discovered media downloads, custom browser cookie profiles, and start-at-login, with broader improvements to download recovery and release reliability.
+
+### New features
+
+- **Browser media discovery and handoff**
+  - Find supported video streams on browser pages, including embedded players, and send the page to Firelink's Add window for review.
+  - Review available formats before starting or queueing the download; direct HLS, DASH, and Smooth Streaming manifest links are also supported.
+  - Keep the handoff connected to the correct page and the latest player stream.
+- **Custom browser profile folders for media cookies**
+  - Choose a separate profile folder for each browser, including custom locations such as Opera GX, addressing the profile mismatch reported in [#44](https://github.com/nimbold/Firelink/issues/44).
+  - Use the selected profile for media details, playlists, and downloads; Netscape cookie files remain available.
+- **Start Firelink at login**
+  - Enable automatic startup from Settings on macOS, Windows, and Linux.
+  - Login launches can stay in the tray until you open the main window.
+
+### Improvements
+
+- Keep downloads and queue work more reliable across restarts, retries, pause/resume races, and app shutdown.
+- Keep browser captures pending until Firelink is ready and recover safe handoffs after a restart.
+- Improve media authentication recovery when a browser cookie database is unavailable.
+- Make Linux package creation and release checks more dependable.
+
+### Fixes
+
+- Address the status-bar clipping, sidebar flashing or shifting, and Speed Limiter save problems reported in [#42](https://github.com/nimbold/Firelink/issues/42).
+- Restore paused media progress after relaunch and stop the Add window from repeating save-folder prompts.
+- Reject Torrent files with a zero piece length without interrupting other active transfers.
+- Preserve the final download state when app shutdown or a missed completion event races with other actions.
+
+### Compatibility
+
+- Use [Firelink Companion 2.2.3](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.3) with Firelink 1.5.0. The extension is maintained in the [Firelink-Extension repository](https://github.com/nimbold/Firelink-Extension).
+
 ## [1.4.2] - 2026-09-08
 
 This is the stable follow-up to the 1.4.0 pre-release and includes all work since 1.3.1. It is a major release focused on built-in Torrents, clearer transfer controls, safer recovery, and better browser and VPN support.
