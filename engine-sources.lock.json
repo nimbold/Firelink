@@ -14,8 +14,8 @@
       },
       "ffmpeg": {
         "version": "9.0.2-28-g669f5ab083",
-        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-17-20-51/ffmpeg-n9.0.2-28-g669f5ab083-win64-gpl-9.0.zip",
-        "sha256": "e84429075cf1b1fa9a85c5d4a5f97899145b4f6a712da02a864393203a3d5cd3"
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-19-13-06/ffmpeg-n9.0.2-28-g669f5ab083-win64-gpl-9.0.zip",
+        "sha256": "b2b9817023338f801b86d36b9bc41eb8b953ce895367ef2b776a8651aad68944"
       },
       "aria2c": {
         "version": "1.37.0-firelink-native-dns-v1",
@@ -23,7 +23,7 @@
         "sha256": "60a420ad7085eb616cb6e2bdf0a7206d68ff3d37fb5a956dc44242eb2f79b66b",
         "buildFromSource": true,
         "patch": "scripts/aria2/firelink.patch",
-        "patchSha256": "1210eeeb0c82a2fee1ef5d28521569259c18a122d3b439135bba57ee39c5f61d",
+        "patchSha256": "6d6dab9e16c571de6bf7e842e3c8abb7a6f01d8e3637a0823f61d1eb7759e51d",
         "allocationTelemetry": true,
         "firelinkRouteContract": {
           "revision": "firelink-native-dns-v1",
@@ -46,8 +46,8 @@
       },
       "ffmpeg": {
         "version": "9.0.2-28-g669f5ab083",
-        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-17-20-51/ffmpeg-n9.0.2-28-g669f5ab083-linux64-gpl-9.0.tar.xz",
-        "sha256": "cc171d4d373f9ca633741d38fae6a17cd914075818febb1465f6f64e6d57f7ca"
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-19-13-06/ffmpeg-n9.0.2-28-g669f5ab083-linux64-gpl-9.0.tar.xz",
+        "sha256": "6668d9fda6278375751f3272f5a6799829b424eedf1934f32d4ee784e646a66e"
       },
       "aria2c": {
         "version": "1.37.0-firelink-native-dns-v1",
@@ -55,7 +55,7 @@
         "sha256": "60a420ad7085eb616cb6e2bdf0a7206d68ff3d37fb5a956dc44242eb2f79b66b",
         "buildFromSource": true,
         "patch": "scripts/aria2/firelink.patch",
-        "patchSha256": "1210eeeb0c82a2fee1ef5d28521569259c18a122d3b439135bba57ee39c5f61d",
+        "patchSha256": "6d6dab9e16c571de6bf7e842e3c8abb7a6f01d8e3637a0823f61d1eb7759e51d",
         "allocationTelemetry": true,
         "firelinkRouteContract": {
           "revision": "firelink-native-dns-v1",

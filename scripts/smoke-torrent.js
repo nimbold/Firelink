@@ -737,6 +737,45 @@ async function main() {
       },
     ]);
     await waitForDataComplete(seeder, seedGid);
+    const seedBeforeMalformedTorrent = await tellStatus(seeder, seedGid);
+    assert(
+      seedBeforeMalformedTorrent.status === 'active',
+      `seed fixture is not active before malformed metadata test: ${JSON.stringify(seedBeforeMalformedTorrent)}`,
+    );
+    const zeroPieceLengthTorrent = bencode({
+      info: {
+        length: 100,
+        name: 'zero-piece-length',
+        'piece length': 0,
+        pieces: Buffer.alloc(20, 0x41),
+      },
+    }).toString('base64');
+    let zeroPieceLengthError;
+    try {
+      await rpc(seeder.rpcPort, seeder.secret, 'aria2.addTorrent', [
+        zeroPieceLengthTorrent,
+        [],
+        { dir: seedParent },
+      ]);
+    } catch (error) {
+      zeroPieceLengthError = error;
+    }
+    assert(
+      zeroPieceLengthError instanceof Error,
+      'Aria2 accepted a torrent with a zero piece length',
+    );
+    assert(
+      /Piece length must be greater than zero\./.test(zeroPieceLengthError.message),
+      `zero piece-length metadata was rejected for the wrong reason: ${zeroPieceLengthError.message}`,
+    );
+    assertDaemonRunning(seeder);
+    assertAria2Baseline(await rpc(seeder.rpcPort, seeder.secret, 'aria2.getVersion'));
+    const seedAfterMalformedTorrent = await tellStatus(seeder, seedGid);
+    assert(
+      seedAfterMalformedTorrent.status === 'active',
+      `active seeding transfer did not survive malformed metadata: ${JSON.stringify(seedAfterMalformedTorrent)}`,
+    );
+    console.log('[OK] zero piece-length metadata was rejected while the active daemon transfer survived');
     console.log(`[OK] local seeder completed ${seedGid}`);
 
     const clientRpcPort = await findAvailablePort();
