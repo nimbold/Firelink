@@ -3,7 +3,7 @@
 `cargo audit` is a required CI gate. Vulnerability advisories must be resolved;
 the gate must not be bypassed with a broad ignore list.
 
-As of 2026-09-05, Cargo reports no vulnerability advisories. It does report
+As of 2026-10-20, Cargo reports no vulnerability advisories. It does report
 the following informational warnings, which remain visible in CI output:
 
 - `RUSTSEC-2024-0411` through `RUSTSEC-2024-0420` (GTK3 bindings) and
@@ -16,6 +16,14 @@ the following informational warnings, which remain visible in CI output:
 - `RUSTSEC-2025-0075`, `RUSTSEC-2025-0080`, `RUSTSEC-2025-0081`,
   `RUSTSEC-2025-0098`, and `RUSTSEC-2025-0100` are unmaintained UNIC crates
   reached through `tauri-utils -> urlpattern`.
+- `RUSTSEC-2026-0370`, `RUSTSEC-2026-0371`, and `RUSTSEC-2026-0372` mark
+  `zvariant`, `zbus_names`, and `zvariant_derive` as unmaintained standalone
+  crates. They are present through the Linux D-Bus `zbus` 5 dependency graph
+  (including Tauri plugins and system integrations); the advisories state that
+  these APIs have moved into modules provided by `zbus` 6. This is maintenance
+  status, not a vulnerability finding. Firelink does not directly depend on
+  these crates, and forcing `zbus` 6 across the current Tauri 2 graph is not a
+  compatible lockfile-only remediation.
 
 Review these paths with every Tauri/Wry update and no later than 2026-12-05.
 Remove this acknowledgement when the upstream graph no longer contains the
