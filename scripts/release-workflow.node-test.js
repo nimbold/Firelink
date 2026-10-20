@@ -41,7 +41,7 @@ test('release workflow normalizes all 6 distribution target artifacts', () => {
 
 test('Linux release pins and verifies appimagetool and its runtime inputs', () => {
   assert.match(releaseWorkflow, /APPIMAGETOOL_SHA256: 95cbe7cce9717fce90c484e34052ee7c7f1d7635b33c12525b4776826a7d29b6/);
-  assert.match(releaseWorkflow, /APPIMAGETOOL_RUNTIME_SHA256: 156f4bdbde9c52d01814600013e0a273f0118dc2de98975f3c8c63427ec79074/);
+  assert.match(releaseWorkflow, /APPIMAGETOOL_RUNTIME_SHA256: 617aa77314d57c8b8e4fae9c3f0b35af7b30d5529cb69e98f64f92510ed98a46/);
   assert.match(releaseWorkflow, /echo "\$APPIMAGETOOL_RUNTIME_SHA256  \$RUNNER_TEMP\/appimage-runtime" \| sha256sum -c -/);
   assert.match(releaseWorkflow, /APPIMAGETOOL_RUNTIME_FILE: \$\{\{ runner\.temp \}\}\/appimage-runtime/);
 });
