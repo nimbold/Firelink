@@ -193,9 +193,9 @@ jobs:
           APPIMAGETOOL_URL: https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           APPIMAGETOOL_SHA256: 95cbe7cce9717fce90c484e34052ee7c7f1d7635b33c12525b4776826a7d29b6
           # appimagetool otherwise downloads this mutable runtime during packaging.
-          # type2-runtime continuous currently targets 8f39b89e2ac31e1640b3d3f7e9a5108e6ce805fa.
+          # type2-runtime continuous currently targets fedfad51acc2860b2916a1eef32ba4a500ff31ef.
           APPIMAGETOOL_RUNTIME_URL: https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
-          APPIMAGETOOL_RUNTIME_SHA256: 156f4bdbde9c52d01814600013e0a273f0118dc2de98975f3c8c63427ec79074
+          APPIMAGETOOL_RUNTIME_SHA256: 617aa77314d57c8b8e4fae9c3f0b35af7b30d5529cb69e98f64f92510ed98a46
         run: |
           curl -fsSL "$APPIMAGETOOL_URL" -o "$RUNNER_TEMP/appimagetool"
           echo "$APPIMAGETOOL_SHA256  $RUNNER_TEMP/appimagetool" | sha256sum -c -
