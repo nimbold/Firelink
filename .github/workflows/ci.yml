@@ -114,10 +114,10 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: src-tauri
         run: cargo test --test torrent_rpc --target ${{ matrix.target }} -- --nocapture
-      - name: Compile Windows queue-manager integration
+      - name: Test Windows queue-manager integration
         if: runner.os == 'Windows'
         working-directory: src-tauri
-        run: cargo test --test queue_manager --no-run --target ${{ matrix.target }}
+        run: cargo test --test queue_manager --target ${{ matrix.target }} -- --nocapture
       - name: Compile Windows Rust library tests
         if: runner.os == 'Windows'
         working-directory: src-tauri
