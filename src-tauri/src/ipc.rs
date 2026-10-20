@@ -897,6 +897,18 @@ pub struct DownloadStateEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub progress: Option<DownloadStateProgress>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub lifecycle_generation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub control_epoch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub owner_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub gid: Option<String>,
 }
 
 impl DownloadStateEvent {
@@ -911,6 +923,10 @@ impl DownloadStateEvent {
             destination: None,
             torrent_seed_remaining: None,
             progress: None,
+            lifecycle_generation: None,
+            control_epoch: None,
+            owner_revision: None,
+            gid: None,
         }
     }
 
@@ -926,6 +942,10 @@ impl DownloadStateEvent {
             destination: None,
             torrent_seed_remaining: None,
             progress: None,
+            lifecycle_generation: None,
+            control_epoch: None,
+            owner_revision: None,
+            gid: None,
         }
     }
 
@@ -941,6 +961,10 @@ impl DownloadStateEvent {
             destination: None,
             torrent_seed_remaining: None,
             progress: None,
+            lifecycle_generation: None,
+            control_epoch: None,
+            owner_revision: None,
+            gid: None,
         }
     }
 
@@ -955,6 +979,10 @@ impl DownloadStateEvent {
             destination: None,
             torrent_seed_remaining: remaining,
             progress: None,
+            lifecycle_generation: None,
+            control_epoch: None,
+            owner_revision: None,
+            gid: None,
         }
     }
 
@@ -969,6 +997,10 @@ impl DownloadStateEvent {
             destination: None,
             torrent_seed_remaining: None,
             progress: None,
+            lifecycle_generation: None,
+            control_epoch: None,
+            owner_revision: None,
+            gid: None,
         }
     }
 
@@ -986,6 +1018,10 @@ impl DownloadStateEvent {
             destination: None,
             torrent_seed_remaining: None,
             progress: None,
+            lifecycle_generation: None,
+            control_epoch: None,
+            owner_revision: None,
+            gid: None,
         }
     }
 
@@ -1000,6 +1036,10 @@ impl DownloadStateEvent {
             destination: None,
             torrent_seed_remaining: remaining,
             progress: None,
+            lifecycle_generation: None,
+            control_epoch: None,
+            owner_revision: None,
+            gid: None,
         }
     }
 
@@ -1019,6 +1059,25 @@ impl DownloadStateEvent {
 
     pub fn with_progress(mut self, progress: DownloadStateProgress) -> Self {
         self.progress = Some(progress);
+        self
+    }
+
+    pub fn with_lifecycle_generation(mut self, lifecycle_generation: u64) -> Self {
+        self.lifecycle_generation = Some(lifecycle_generation.to_string());
+        self
+    }
+
+    pub fn with_aria2_owner(
+        mut self,
+        gid: impl Into<String>,
+        lifecycle_generation: u64,
+        control_epoch: u64,
+        owner_revision: u64,
+    ) -> Self {
+        self.gid = Some(gid.into());
+        self.lifecycle_generation = Some(lifecycle_generation.to_string());
+        self.control_epoch = Some(control_epoch.to_string());
+        self.owner_revision = Some(owner_revision.to_string());
         self
     }
 

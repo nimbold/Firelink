@@ -131,8 +131,13 @@ function serveBuffer(request, response, buffer) {
   response.end(body);
 }
 
-function serveThrottledBuffer(request, response, buffer) {
-  const match = /^bytes=(\d+)-(\d*)$/.exec(request.headers.range || '');
+function serveThrottledBuffer(
+  request,
+  response,
+  buffer,
+  { honorRange = true, advertiseRange = true } = {},
+) {
+  const match = honorRange ? /^bytes=(\d+)-(\d*)$/.exec(request.headers.range || '') : null;
   const start = match ? Number(match[1]) : 0;
   const requestedEnd = match && match[2] ? Number(match[2]) : buffer.length - 1;
   const end = Math.min(requestedEnd, buffer.length - 1);
@@ -145,7 +150,7 @@ function serveThrottledBuffer(request, response, buffer) {
   response.writeHead(match ? 206 : 200, {
     'content-length': String(body.length),
     ...(match ? { 'content-range': `bytes ${start}-${end}/${buffer.length}` } : {}),
-    'accept-ranges': 'bytes',
+    ...(advertiseRange ? { 'accept-ranges': 'bytes' } : {}),
   });
   let offset = 0;
   const timer = setInterval(() => {
@@ -225,6 +230,8 @@ async function removeTempRoot(tempRoot) {
 }
 
 const payload = Buffer.alloc(4 * 1024 * 1024, 0x5a);
+const parallelPayload = Buffer.alloc(32 * 1024 * 1024, 0x4d);
+const smallPayload = Buffer.alloc(1536 * 1024, 0x2a);
 const checksum = crypto.createHash('sha256').update(payload).digest('hex');
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'firelink-aria2-transfers-'));
 const serverStatPath = path.join(tempRoot, 'server-stat.txt');
@@ -232,8 +239,52 @@ fs.writeFileSync(serverStatPath, '', { mode: 0o600 });
 let finalRequests = 0;
 let finalCredentials = [];
 let redirectSourceCredentials;
+const connectionStats = {
+  parallelRange: {
+    requests: 0,
+    active: 0,
+    peak: 0,
+    rangedGets: 0,
+    activeRangedGets: 0,
+    peakRangedGets: 0,
+    rangeHeaders: [],
+  },
+  noRange: { requests: 0, active: 0, peak: 0, rangedGets: 0, activeRangedGets: 0, peakRangedGets: 0, rangeHeaders: [] },
+  smallRange: {
+    requests: 0,
+    active: 0,
+    peak: 0,
+    rangedGets: 0,
+    activeRangedGets: 0,
+    peakRangedGets: 0,
+    rangeHeaders: [],
+  },
+};
 let smokePassed = false;
 let smokeFailure;
+
+function observeConnection(name, request, response) {
+  const stats = connectionStats[name];
+  const isRangedGet = request.method === 'GET' && typeof request.headers.range === 'string';
+  stats.requests += 1;
+  stats.rangeHeaders.push({ method: request.method, range: request.headers.range || null });
+  stats.active += 1;
+  stats.peak = Math.max(stats.peak, stats.active);
+  if (isRangedGet) {
+    stats.rangedGets += 1;
+    stats.activeRangedGets += 1;
+    stats.peakRangedGets = Math.max(stats.peakRangedGets, stats.activeRangedGets);
+  }
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    stats.active = Math.max(0, stats.active - 1);
+    if (isRangedGet) stats.activeRangedGets = Math.max(0, stats.activeRangedGets - 1);
+  };
+  response.once('finish', release);
+  response.once('close', release);
+}
 
 const targetServer = http.createServer((request, response) => {
   finalRequests += 1;
@@ -251,8 +302,16 @@ const fixtureServer = http.createServer((request, response) => {
       serveBuffer(request, response, payload);
       break;
     case '/no-range':
-      response.writeHead(200, { 'content-length': String(payload.length) });
-      response.end(payload);
+      observeConnection('noRange', request, response);
+      serveThrottledBuffer(request, response, payload, { honorRange: false, advertiseRange: false });
+      break;
+    case '/parallel-range':
+      observeConnection('parallelRange', request, response);
+      serveThrottledBuffer(request, response, parallelPayload);
+      break;
+    case '/small-range':
+      observeConnection('smallRange', request, response);
+      serveBuffer(request, response, smallPayload);
       break;
     case '/throttled':
       serveThrottledBuffer(request, response, payload);
@@ -362,12 +421,47 @@ try {
     throw new Error(`bounded-range transfer failed: ${JSON.stringify(rangeStatus)}`);
   }
 
+  const parallelGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/parallel-range`], {
+    ...ARIA2_LOCAL_FIXTURE_OPTIONS,
+    out: 'parallel-range.bin', split: '16', 'max-connection-per-server': '16', 'min-split-size': '1M',
+  }]);
+  const parallelStatus = await waitForTerminal(rpcPort, secret, parallelGid, 30000);
+  if (parallelStatus.status !== 'complete'
+    || !fs.readFileSync(path.join(tempRoot, 'parallel-range.bin')).equals(parallelPayload)) {
+    throw new Error(`parallel bounded-range transfer failed: ${JSON.stringify(parallelStatus)}`);
+  }
+  if (connectionStats.parallelRange.rangedGets < 12
+    || connectionStats.parallelRange.peakRangedGets < 12
+    || connectionStats.parallelRange.peakRangedGets > 16) {
+    throw new Error(`supported byte ranges did not use the configured multi-connection pool: ${JSON.stringify(connectionStats.parallelRange)}`);
+  }
+
+  // Direct Aria2 intentionally bypasses Firelink's bounded range preflight.
+  // This case checks safe recovery from an ignored Range header; the app-level
+  // effective-connection fallback is covered by queue.rs unit tests.
   const noRangeGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/no-range`], {
     ...ARIA2_LOCAL_FIXTURE_OPTIONS,
-    out: 'no-range.bin', split: '1', 'max-connection-per-server': '1',
+    out: 'no-range.bin', split: '4', 'max-connection-per-server': '4', 'min-split-size': '1M',
   }]);
-  if ((await waitForTerminal(rpcPort, secret, noRangeGid)).status !== 'complete') {
-    throw new Error('single-connection no-range transfer did not complete');
+  const noRangeStatus = await waitForTerminal(rpcPort, secret, noRangeGid);
+  if (noRangeStatus.status !== 'complete'
+    || !fs.readFileSync(path.join(tempRoot, 'no-range.bin')).equals(payload)) {
+    throw new Error('unsupported-range transfer did not recover to exact output bytes');
+  }
+  if (connectionStats.noRange.peak > 4 || connectionStats.noRange.requests > 5) {
+    throw new Error(`unsupported byte ranges exceeded the bounded initial split and probe: ${JSON.stringify(connectionStats.noRange)}`);
+  }
+
+  const smallRangeGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/small-range`], {
+    ...ARIA2_LOCAL_FIXTURE_OPTIONS,
+    out: 'small-range.bin', split: '4', 'max-connection-per-server': '4', 'min-split-size': '1M',
+  }]);
+  if ((await waitForTerminal(rpcPort, secret, smallRangeGid)).status !== 'complete'
+    || !fs.readFileSync(path.join(tempRoot, 'small-range.bin')).equals(smallPayload)) {
+    throw new Error('small-file transfer did not complete correctly');
+  }
+  if (connectionStats.smallRange.rangedGets > 1 || connectionStats.smallRange.peakRangedGets > 1) {
+    throw new Error(`a file below the configured split floor opened multiple byte-range connections: ${JSON.stringify(connectionStats.smallRange)}`);
   }
 
   const authenticatedGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/authenticated`], {
@@ -518,4 +612,4 @@ try {
 }
 
 if (smokeFailure) throw smokeFailure;
-console.log('[PASS] Aria2 normal transfers, auth/cookies, resume/cancel, mirrors, integrity, redirects, low-speed/not-found classification, malformed responses, proxy failures, and server statistics');
+console.log('[PASS] Aria2 normal transfers, range/small-file concurrency, auth/cookies, resume/cancel, mirrors, integrity, redirects, low-speed/not-found classification, malformed responses, proxy failures, and server statistics');

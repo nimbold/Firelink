@@ -529,6 +529,7 @@ const common = {
     exitFlushFailed: 'Firelink could not save all changes before quitting: {{detail}}',
     exitFlushCancelled: 'Firelink cancelled quitting because it could not confirm that all changes were saved.',
     trayActionFailed: 'The tray action could not be completed. Review download status in Firelink.',
+    trayUnavailable: 'Firelink could not create the system tray icon in this session. Keep this window open to control Firelink.',
     trayPersistenceFailed: 'Firelink could not save this tray action. It remains pending; check storage and try a tray action again.',
     trayStartupPauseUnverified: 'Firelink could not verify tray actions at startup, so saved downloads were not resumed. You can resume them manually.',
     trayPausePartial: 'Pause All could not pause {{count}} downloads. Review their status in Firelink.',

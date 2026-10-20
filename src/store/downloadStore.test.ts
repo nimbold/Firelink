@@ -10,6 +10,7 @@ import {
   currentDownloadLifecycleGeneration,
   flushDownloadPersistence,
   initializeDownloadPersistence,
+  MAIN_QUEUE_ID,
   resetDownloadStoreModuleStateForTests,
   downloadControlIntentFor,
   setDownloadControlIntent,
@@ -22,12 +23,47 @@ vi.mock('../ipc', () => ({
   listenEvent: vi.fn(),
 }));
 
+type DownloadEventHandlers = Record<string, (event: any) => void>;
+
+const aria2Owner = (
+  id: string,
+  controlEpoch = '1',
+  lifecycleGeneration = '0',
+  ownerRevision = controlEpoch,
+) => ({
+  gid: `gid-${id}`,
+  controlEpoch,
+  lifecycleGeneration,
+  ownerRevision
+});
+
+const emitAria2OwnerState = (
+  handlers: DownloadEventHandlers,
+  id: string,
+  status: string = 'downloading',
+  owner = aria2Owner(id),
+) => handlers['download-state']({ payload: { id, status, ...owner } });
+
+const aria2ProgressOwnerFields = (owner: ReturnType<typeof aria2Owner>) => ({
+  gid: owner.gid,
+  control_epoch: owner.controlEpoch,
+  owner_revision: owner.ownerRevision,
+  lifecycle_generation: owner.lifecycleGeneration
+});
+
 describe('useDownloadProgressStore', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetTrayActionDrainStateForTests();
     vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined);
-    useDownloadProgressStore.setState({ progressMap: {}, retainedProgressMap: {}, moveProgressMap: {} });
+    useDownloadProgressStore.setState({
+      progressMap: {},
+      retainedProgressMap: {},
+      moveProgressMap: {},
+      aria2ProgressOwnerMap: {},
+      aria2ProgressOwnerWatermarkMap: {},
+      aria2LifecycleGenerationMap: {}
+    });
     clearDownloadControlIntents();
   });
 
@@ -85,6 +121,10 @@ describe('useDownloadProgressStore', () => {
       if (command === 'take_pending_tray_action') {
         return (actionPending ? action : null) as any;
       }
+      if (command === 'claim_pending_tray_action') {
+        return { shouldExecute: true, execution: null } as any;
+      }
+      if (command === 'record_tray_action_result') return undefined as any;
       if (command === 'acknowledge_tray_action' && args?.id === action.id) {
         actionPending = false;
       }
@@ -113,6 +153,10 @@ describe('useDownloadProgressStore', () => {
     let actionPending = true;
     vi.mocked(ipc.invokeCommand).mockImplementation((async (command: string, args?: any) => {
       if (command === 'take_pending_tray_action') return (actionPending ? action : null) as any;
+      if (command === 'claim_pending_tray_action') {
+        return { shouldExecute: true, execution: null } as any;
+      }
+      if (command === 'record_tray_action_result') return undefined as any;
       if (command === 'acknowledge_tray_action' && args?.id === action.id) actionPending = false;
       return undefined as any;
     }) as any);
@@ -161,6 +205,10 @@ describe('useDownloadProgressStore', () => {
     const acknowledgements: unknown[] = [];
     vi.mocked(ipc.invokeCommand).mockImplementation((async (command: string, args?: any) => {
       if (command === 'take_pending_tray_action') return (actionPending ? action : null) as any;
+      if (command === 'claim_pending_tray_action') {
+        return { shouldExecute: true, execution: null } as any;
+      }
+      if (command === 'record_tray_action_result') return undefined as any;
       if (command === 'acknowledge_tray_action' && args?.id === action.id) {
         acknowledgements.push(args);
         actionPending = false;
@@ -238,12 +286,128 @@ describe('useDownloadProgressStore', () => {
     pauseAll.mockRestore();
   });
 
+  it('reuses a recorded tray action result after a successful flush and lost ACK on renderer reload', async () => {
+    resetDownloadStoreModuleStateForTests();
+    resetTrayActionDrainStateForTests();
+    vi.mocked(ipc.listenEvent).mockImplementation(() => Promise.resolve(vi.fn()));
+    useDownloadStore.setState({
+      isInitialized: false,
+      downloads: [{
+        id: 'reload-safe-tray-pause',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+    useDownloadStore.setState({ isInitialized: true });
+    await drainPendingTrayActionsAfterHydration();
+
+    const action = { id: 'tray-pause-lost-ack', action: 'pause-all' } as const;
+    const expectedExecution = {
+      failedCount: 0,
+      operationFailed: false,
+      persistenceFailed: false
+    };
+    let actionPending = true;
+    let executionClaimed = false;
+    let recordedExecution: typeof expectedExecution | null = null;
+    const acknowledgements: unknown[] = [];
+    vi.mocked(ipc.invokeCommand).mockImplementation((async (command: string, args?: any) => {
+      if (command === 'take_pending_tray_action') {
+        return (actionPending ? action : null) as any;
+      }
+      if (command === 'claim_pending_tray_action' && args?.id === action.id) {
+        if (recordedExecution) {
+          return { shouldExecute: false, execution: recordedExecution } as any;
+        }
+        if (!executionClaimed) {
+          executionClaimed = true;
+          return { shouldExecute: true, execution: null } as any;
+        }
+        return { shouldExecute: false, execution: null } as any;
+      }
+      if (command === 'record_tray_action_result' && args?.id === action.id) {
+        recordedExecution = {
+          failedCount: args.failedCount,
+          operationFailed: args.operationFailed,
+          persistenceFailed: args.persistenceFailed
+        };
+      }
+      if (command === 'acknowledge_tray_action' && args?.id === action.id) {
+        acknowledgements.push(args);
+        if (acknowledgements.length === 1) {
+          // Simulate the webview losing the IPC response before native dequeue.
+          throw new Error('webview reloaded before the tray action ACK completed');
+        }
+        actionPending = false;
+      }
+      return undefined as any;
+    }) as any);
+
+    const pauseAll = vi.spyOn(useDownloadStore.getState(), 'pauseAll').mockImplementation(async () => {
+      useDownloadStore.getState().updateDownload('reload-safe-tray-pause', { status: 'paused' });
+      return 1;
+    });
+
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const disposePersistence = initializeDownloadPersistence('main');
+    const release = await initDownloadListener();
+    await vi.waitFor(() => {
+      expect(recordedExecution).toEqual(expectedExecution);
+      expect(acknowledgements).toHaveLength(1);
+    });
+    expect(actionPending).toBe(true);
+    expect(pauseAll).toHaveBeenCalledTimes(1);
+
+    disposePersistence();
+    release();
+    resetDownloadStoreModuleStateForTests();
+    resetTrayActionDrainStateForTests();
+    useDownloadStore.setState({
+      isInitialized: true,
+      downloads: [{
+        id: 'reload-safe-tray-pause',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'paused',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+
+    const reloadedDisposePersistence = initializeDownloadPersistence('main');
+    const reloadedRelease = await initDownloadListener();
+    await vi.waitFor(() => expect(acknowledgements).toHaveLength(2));
+
+    expect(pauseAll).toHaveBeenCalledTimes(1);
+    expect(acknowledgements[1]).toEqual({
+      id: action.id,
+      ...expectedExecution
+    });
+    expect(actionPending).toBe(false);
+    expect(useDownloadStore.getState().downloads[0]?.status).toBe('paused');
+    expect(vi.mocked(ipc.invokeCommand).mock.calls.filter(([command]) =>
+      command === 'record_tray_action_result'
+    )).toHaveLength(1);
+
+    reloadedDisposePersistence();
+    reloadedRelease();
+    pauseAll.mockRestore();
+    consoleError.mockRestore();
+  });
+
   it('counts a queued but accepted resume as a successful tray action', async () => {
     vi.mocked(ipc.listenEvent).mockImplementation(() => Promise.resolve(vi.fn()));
     const action = { id: 'tray-resume-queued', action: 'resume-all' };
     let actionPending = true;
     vi.mocked(ipc.invokeCommand).mockImplementation((async (command: string, args?: any) => {
       if (command === 'take_pending_tray_action') return (actionPending ? action : null) as any;
+      if (command === 'claim_pending_tray_action') {
+        return { shouldExecute: true, execution: null } as any;
+      }
+      if (command === 'record_tray_action_result') return undefined as any;
       if (command === 'acknowledge_tray_action' && args?.id === action.id) actionPending = false;
       return undefined as any;
     }) as any);
@@ -290,6 +454,10 @@ describe('useDownloadProgressStore', () => {
     let actionPending = true;
     vi.mocked(ipc.invokeCommand).mockImplementation((async (command: string, args?: any) => {
       if (command === 'take_pending_tray_action') return (actionPending ? action : null) as any;
+      if (command === 'claim_pending_tray_action') {
+        return { shouldExecute: true, execution: null } as any;
+      }
+      if (command === 'record_tray_action_result') return undefined as any;
       if (command === 'acknowledge_tray_action' && args?.id === action.id) actionPending = false;
       return undefined as any;
     }) as any);
@@ -371,6 +539,10 @@ describe('useDownloadProgressStore', () => {
         if (takeCalls === 1) return new Promise(resolve => { releaseFirstRead = resolve; });
         return (actionPending ? action : null) as any;
       }
+      if (command === 'claim_pending_tray_action') {
+        return { shouldExecute: true, execution: null } as any;
+      }
+      if (command === 'record_tray_action_result') return undefined as any;
       if (command === 'acknowledge_tray_action' && args?.id === action.id) actionPending = false;
       return undefined as any;
     }) as any);
@@ -672,6 +844,59 @@ describe('useDownloadProgressStore', () => {
     release();
   });
 
+  it('ignores a delayed prior-lifecycle media state after the new lifecycle starts', async () => {
+    resetDownloadStoreModuleStateForTests();
+    const id = 'media-state-lifecycle-fence';
+    useDownloadStore.setState({
+      downloads: [],
+      queues: [{ id: MAIN_QUEUE_ID, name: 'Main Queue', isMain: true }],
+      backendRegisteredIds: new Set(),
+      pendingOrder: []
+    });
+    await useDownloadStore.getState().addDownload({
+      id,
+      url: 'https://example.com/watch',
+      fileName: 'video.mkv',
+      destination: '/tmp',
+      category: 'Movies',
+      dateAdded: '',
+      isMedia: true
+    }, { type: 'add-to-queue', queueId: MAIN_QUEUE_ID });
+    const activeGeneration = currentDownloadLifecycleGeneration(id);
+    expect(activeGeneration).not.toBe('0');
+    useDownloadStore.getState().updateDownload(id, { status: 'downloading' });
+
+    const handlers: DownloadEventHandlers = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    const release = await initDownloadListener();
+    handlers['download-state']({ payload: {
+      id,
+      status: 'downloading',
+      lifecycleGeneration: activeGeneration
+    } });
+    handlers['download-state']({ payload: {
+      id,
+      status: 'failed',
+      error: 'old media attempt failed',
+      lifecycleGeneration: (BigInt(activeGeneration) - 1n).toString()
+    } });
+    handlers['download-state']({ payload: {
+      id,
+      status: 'processing'
+    } });
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'downloading',
+      lastError: undefined
+    });
+    expect(useDownloadStore.getState().backendRegisteredIds.has(id)).toBe(true);
+    expect(useDownloadProgressStore.getState().aria2LifecycleGenerationMap[id]).toBe(activeGeneration);
+    release();
+  });
+
   it('ignores malformed state events instead of projecting an unknown status', async () => {
     const handlers: Record<string, (event: any) => void> = {};
     vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
@@ -727,6 +952,14 @@ describe('useDownloadProgressStore', () => {
       id: 'pending-transition',
       status: 'downloading'
     } });
+    expect(useDownloadStore.getState().downloads[0].status).toBe('queued');
+    expect(useDownloadStore.getState().pendingOrder).toEqual(['pending-transition']);
+    const owner = aria2Owner('pending-transition');
+    handlers['download-state']({ payload: {
+      id: 'pending-transition',
+      status: 'downloading',
+      ...owner
+    } });
     expect(useDownloadStore.getState().pendingOrder).toEqual([]);
 
     useDownloadStore.getState().updateDownload('pending-transition', { status: 'downloading' });
@@ -734,7 +967,8 @@ describe('useDownloadProgressStore', () => {
     handlers['download-state']({ payload: {
       id: 'pending-transition',
       status: 'retrying',
-      error: 'network dropped'
+      error: 'network dropped',
+      ...owner
     } });
     expect(useDownloadStore.getState().pendingOrder).toEqual([]);
     release();
@@ -758,6 +992,8 @@ describe('useDownloadProgressStore', () => {
     });
 
     const release = await initDownloadListener();
+    const owner = aria2Owner('malformed-progress');
+    emitAria2OwnerState(handlers, 'malformed-progress', 'downloading', owner);
     handlers['download-progress']({ payload: {
       id: 'malformed-progress',
       fraction: 0.5,
@@ -767,7 +1003,8 @@ describe('useDownloadProgressStore', () => {
       size_is_final: false,
       downloaded_bytes: -1,
       total_bytes: Number.NaN,
-      active_connections: -2
+      active_connections: -2,
+      ...aria2ProgressOwnerFields(owner)
     } });
 
     expect(useDownloadProgressStore.getState().progressMap['malformed-progress'])
@@ -797,12 +1034,15 @@ describe('useDownloadProgressStore', () => {
     });
 
     const release = await initDownloadListener();
+    const owner = aria2Owner('omitted-size');
+    emitAria2OwnerState(handlers, 'omitted-size', 'downloading', owner);
     handlers['download-progress']({ payload: {
       id: 'omitted-size',
       fraction: 0.25,
       speed: '1 MB/s',
       eta: '1s',
-      size_is_final: false
+      size_is_final: false,
+      ...aria2ProgressOwnerFields(owner)
     } });
 
     expect(useDownloadProgressStore.getState().progressMap['omitted-size'])
@@ -828,6 +1068,8 @@ describe('useDownloadProgressStore', () => {
     });
 
     const release = await initDownloadListener();
+    const owner = aria2Owner('invalid-fraction');
+    emitAria2OwnerState(handlers, 'invalid-fraction', 'downloading', owner);
     handlers['download-progress']({ payload: {
       id: 'invalid-fraction',
       fraction: 0.4,
@@ -835,7 +1077,8 @@ describe('useDownloadProgressStore', () => {
       eta: '1s',
       size: '1 MB',
       size_is_final: false,
-      downloaded_bytes: 400
+      downloaded_bytes: 400,
+      ...aria2ProgressOwnerFields(owner)
     } });
     handlers['download-progress']({ payload: {
       id: 'invalid-fraction',
@@ -844,7 +1087,8 @@ describe('useDownloadProgressStore', () => {
       eta: '0s',
       size: '1 MB',
       size_is_final: false,
-      downloaded_bytes: 2000
+      downloaded_bytes: 2000,
+      ...aria2ProgressOwnerFields(owner)
     } });
 
     expect(useDownloadProgressStore.getState().progressMap['invalid-fraction'])
@@ -1037,6 +1281,8 @@ describe('useDownloadProgressStore', () => {
     });
 
     const release = await initDownloadListener();
+    const owner = aria2Owner('connection-telemetry');
+    emitAria2OwnerState(handlers, 'connection-telemetry', 'downloading', owner);
     handlers['download-progress']({ payload: {
       id: 'connection-telemetry',
       fraction: 0.2,
@@ -1045,7 +1291,8 @@ describe('useDownloadProgressStore', () => {
       size: '38 MB',
       size_is_final: false,
       active_connections: 16,
-      requested_connections: 16
+      requested_connections: 16,
+      ...aria2ProgressOwnerFields(owner)
     } });
 
     expect(useDownloadProgressStore.getState().progressMap['connection-telemetry'])
@@ -1085,6 +1332,7 @@ describe('useDownloadProgressStore', () => {
       id: 'resolver-error',
       status: 'downloading',
       error: null,
+      ...aria2Owner('resolver-error', '2')
     } });
     expect(useDownloadStore.getState().downloads[0].lastErrorKind).toBeUndefined();
     expect(useDownloadStore.getState().downloads[0].lastResolverFallback).toBeUndefined();
@@ -1109,9 +1357,11 @@ describe('useDownloadProgressStore', () => {
     });
 
     const release = await initDownloadListener();
+    const owner = aria2Owner('torrent-seeding');
     handlers['download-state']({ payload: {
       id: 'torrent-seeding',
-      status: 'seeding'
+      status: 'seeding',
+      ...owner
     } });
     handlers['download-progress']({ payload: {
       id: 'torrent-seeding',
@@ -1124,7 +1374,8 @@ describe('useDownloadProgressStore', () => {
       upload_speed: '512 KiB/s',
       num_seeders: 4,
       active_connections: 6,
-      requested_connections: 8
+      requested_connections: 8,
+      ...aria2ProgressOwnerFields(owner)
     } });
 
     expect(useDownloadStore.getState().downloads[0]).toMatchObject({
@@ -1187,9 +1438,11 @@ describe('useDownloadProgressStore', () => {
     });
 
     const release = await initDownloadListener();
+    const owner = aria2Owner('torrent-seeding-verification');
     handlers['download-state']({ payload: {
       id: 'torrent-seeding-verification',
-      status: 'verifying'
+      status: 'verifying',
+      ...owner
     } });
 
     expect(useDownloadStore.getState().downloads[0].status).toBe('verifying');
@@ -1288,17 +1541,21 @@ describe('useDownloadProgressStore', () => {
     });
 
     const release = await initDownloadListener();
+    const owner = aria2Owner('reused');
+    emitAria2OwnerState(handlers, 'reused', 'downloading', owner);
     handlers['download-progress']({ payload: {
       id: 'reused',
       fraction: 0.8,
       speed: '1 MB/s',
       eta: '2s',
       size: '8 MB',
-      size_is_final: false
+      size_is_final: false,
+      ...aria2ProgressOwnerFields(owner)
     } });
     handlers['download-state']({ payload: {
       id: 'reused',
-      status: 'queued'
+      status: 'queued',
+      lifecycleGeneration: '1'
     } });
     handlers['download-progress']({ payload: {
       id: 'reused',
@@ -1331,6 +1588,8 @@ describe('useDownloadProgressStore', () => {
     });
 
     const release = await initDownloadListener();
+    const owner = aria2Owner('snapshot');
+    emitAria2OwnerState(handlers, 'snapshot', 'downloading', owner);
     handlers['download-progress']({ payload: {
       id: 'snapshot',
       fraction: 0.8,
@@ -1340,11 +1599,13 @@ describe('useDownloadProgressStore', () => {
       size_is_final: false,
       downloaded_bytes: 8192,
       total_bytes: 10240,
-      total_is_estimate: true
+      total_is_estimate: true,
+      ...aria2ProgressOwnerFields(owner)
     } });
     handlers['download-state']({ payload: {
       id: 'snapshot',
-      status: 'paused'
+      status: 'paused',
+      ...owner
     } });
 
     const row = useDownloadStore.getState().downloads[0];
@@ -1380,6 +1641,8 @@ describe('useDownloadProgressStore', () => {
     });
 
     const release = await initDownloadListener();
+    const owner = aria2Owner('terminal-progress');
+    emitAria2OwnerState(handlers, 'terminal-progress', 'downloading', owner);
     handlers['download-progress']({ payload: {
       id: 'terminal-progress',
       fraction: 0.7,
@@ -1389,11 +1652,13 @@ describe('useDownloadProgressStore', () => {
       size_is_final: false,
       downloaded_bytes: 7000,
       total_bytes: 10000,
-      total_is_estimate: false
+      total_is_estimate: false,
+      ...aria2ProgressOwnerFields(owner)
     } });
     handlers['download-state']({ payload: {
       id: 'terminal-progress',
       status: 'paused',
+      ...owner
     } });
     expect(useDownloadStore.getState().downloads[0]).toMatchObject({
       status: 'paused',
@@ -1444,6 +1709,18 @@ describe('useDownloadProgressStore', () => {
     });
 
     const release = await initDownloadListener();
+    const previousOwner = {
+      gid: 'same-gid-resume-gid',
+      controlEpoch: '1',
+      lifecycleGeneration: '0',
+      ownerRevision: '1'
+    };
+    const resumedOwner = {
+      ...previousOwner,
+      controlEpoch: '2',
+      ownerRevision: '2'
+    };
+    emitAria2OwnerState(handlers, 'same-gid-resume', 'downloading', previousOwner);
     handlers['download-progress']({ payload: {
       id: 'same-gid-resume',
       fraction: 0.6,
@@ -1453,7 +1730,8 @@ describe('useDownloadProgressStore', () => {
       size_is_final: false,
       downloaded_bytes: 6000,
       total_bytes: 10000,
-      total_is_estimate: false
+      total_is_estimate: false,
+      ...aria2ProgressOwnerFields(previousOwner)
     } });
     useDownloadStore.setState(state => ({
       downloads: state.downloads.map(download => ({
@@ -1463,7 +1741,8 @@ describe('useDownloadProgressStore', () => {
     }));
     handlers['download-state']({ payload: {
       id: 'same-gid-resume',
-      status: 'queued'
+      status: 'queued',
+      ...resumedOwner
     } });
 
     expect(useDownloadProgressStore.getState().progressMap['same-gid-resume']).toBeUndefined();
@@ -1471,6 +1750,276 @@ describe('useDownloadProgressStore', () => {
       downloaded_bytes: 6000,
       total_bytes: 10000
     });
+    release();
+  });
+
+  it('rejects a delayed pre-resume Aria2 frame after the same GID is downloading again', async () => {
+    const handlers: DownloadEventHandlers = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'same-gid-owner-fence',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+
+    const release = await initDownloadListener();
+    const previousOwner = {
+      gid: 'same-gid',
+      controlEpoch: '41',
+      lifecycleGeneration: '12',
+      ownerRevision: '90'
+    };
+    const resumedOwner = {
+      ...previousOwner,
+      controlEpoch: '42',
+      ownerRevision: '91'
+    };
+    emitAria2OwnerState(handlers, 'same-gid-owner-fence', 'downloading', previousOwner);
+    const progress = (owner: typeof previousOwner, fraction: number, downloadedBytes: number) =>
+      handlers['download-progress']({ payload: {
+        id: 'same-gid-owner-fence',
+        fraction,
+        speed: '1 MB/s',
+        eta: '4s',
+        size: '10 KB',
+        size_is_final: false,
+        downloaded_bytes: downloadedBytes,
+        total_bytes: 10000,
+        total_is_estimate: false,
+        ...aria2ProgressOwnerFields(owner)
+      } });
+
+    progress(previousOwner, 0.4, 4000);
+    handlers['download-state']({ payload: {
+      id: 'same-gid-owner-fence',
+      status: 'paused'
+    } });
+    useDownloadStore.getState().updateDownload('same-gid-owner-fence', { status: 'queued' });
+    emitAria2OwnerState(handlers, 'same-gid-owner-fence', 'queued', resumedOwner);
+    emitAria2OwnerState(handlers, 'same-gid-owner-fence', 'downloading', resumedOwner);
+    progress(resumedOwner, 0.61, 6100);
+
+    // The old worker's frame is delivered after the row is active under the
+    // resumed control epoch. Its same GID and download ID are insufficient.
+    progress(previousOwner, 0.99, 9900);
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'downloading',
+      fraction: 0.61,
+      downloadedBytes: 6100,
+      totalBytes: 10000
+    });
+    expect(useDownloadProgressStore.getState().progressMap['same-gid-owner-fence']).toMatchObject({
+      fraction: 0.61,
+      downloaded_bytes: 6100,
+      gid: 'same-gid',
+      control_epoch: '42',
+      owner_revision: '91',
+      lifecycle_generation: '12'
+    });
+    expect(useDownloadProgressStore.getState().retainedProgressMap['same-gid-owner-fence'])
+      .toMatchObject({ downloaded_bytes: 6100 });
+    release();
+  });
+
+  it('fences a same-epoch GID replacement by its owner revision', async () => {
+    const handlers: DownloadEventHandlers = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'same-epoch-gid-replacement',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+
+    const release = await initDownloadListener();
+    const oldOwner = {
+      gid: 'old-gid',
+      controlEpoch: '71',
+      lifecycleGeneration: '18',
+      ownerRevision: '140'
+    };
+    const replacementOwner = {
+      ...oldOwner,
+      gid: 'replacement-gid',
+      ownerRevision: '141'
+    };
+    const progress = (owner: typeof oldOwner, fraction: number, downloadedBytes: number) =>
+      handlers['download-progress']({ payload: {
+        id: 'same-epoch-gid-replacement',
+        fraction,
+        speed: '1 MB/s',
+        eta: '4s',
+        size: '10 KB',
+        size_is_final: false,
+        downloaded_bytes: downloadedBytes,
+        total_bytes: 10000,
+        total_is_estimate: false,
+        ...aria2ProgressOwnerFields(owner)
+      } });
+
+    emitAria2OwnerState(handlers, 'same-epoch-gid-replacement', 'downloading', oldOwner);
+    progress(oldOwner, 0.4, 4000);
+    emitAria2OwnerState(handlers, 'same-epoch-gid-replacement', 'downloading', replacementOwner);
+    progress(replacementOwner, 0.6, 6000);
+
+    emitAria2OwnerState(handlers, 'same-epoch-gid-replacement', 'paused', oldOwner);
+    emitAria2OwnerState(handlers, 'same-epoch-gid-replacement', 'retrying', oldOwner);
+    progress(oldOwner, 0.99, 9900);
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'downloading',
+      fraction: 0.6,
+      downloadedBytes: 6000,
+      totalBytes: 10000
+    });
+    expect(useDownloadProgressStore.getState().aria2ProgressOwnerMap['same-epoch-gid-replacement'])
+      .toEqual(replacementOwner);
+    expect(useDownloadProgressStore.getState().progressMap['same-epoch-gid-replacement']).toMatchObject({
+      fraction: 0.6,
+      downloaded_bytes: 6000,
+      gid: 'replacement-gid',
+      control_epoch: '71',
+      owner_revision: '141'
+    });
+    release();
+  });
+
+  it('rejects delayed Aria2 paused and retrying states after a same-GID resume', async () => {
+    const handlers: DownloadEventHandlers = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'same-gid-state-fence',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'downloading',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+
+    const release = await initDownloadListener();
+    const previousOwner = {
+      gid: 'same-gid',
+      controlEpoch: '51',
+      lifecycleGeneration: '14',
+      ownerRevision: '103'
+    };
+    const resumedOwner = {
+      ...previousOwner,
+      controlEpoch: '52',
+      ownerRevision: '104'
+    };
+    emitAria2OwnerState(handlers, 'same-gid-state-fence', 'downloading', previousOwner);
+    handlers['download-progress']({ payload: {
+      id: 'same-gid-state-fence',
+      fraction: 0.62,
+      speed: '1 MB/s',
+      eta: '4s',
+      size: '10 KB',
+      size_is_final: false,
+      downloaded_bytes: 6200,
+      total_bytes: 10000,
+      total_is_estimate: false,
+      ...aria2ProgressOwnerFields(previousOwner)
+    } });
+
+    useDownloadStore.getState().updateDownload('same-gid-state-fence', { status: 'queued' });
+    emitAria2OwnerState(handlers, 'same-gid-state-fence', 'queued', resumedOwner);
+    emitAria2OwnerState(handlers, 'same-gid-state-fence', 'downloading', resumedOwner);
+    handlers['download-progress']({ payload: {
+      id: 'same-gid-state-fence',
+      fraction: 0.68,
+      speed: '2 MB/s',
+      eta: '3s',
+      size: '10 KB',
+      size_is_final: false,
+      downloaded_bytes: 6800,
+      total_bytes: 10000,
+      total_is_estimate: false,
+      ...aria2ProgressOwnerFields(resumedOwner)
+    } });
+
+    emitAria2OwnerState(handlers, 'same-gid-state-fence', 'paused', previousOwner);
+    emitAria2OwnerState(handlers, 'same-gid-state-fence', 'retrying', previousOwner);
+    handlers['download-state']({ payload: {
+      id: 'same-gid-state-fence',
+      status: 'paused'
+    } });
+    handlers['download-state']({ payload: {
+      id: 'same-gid-state-fence',
+      status: 'retrying',
+      error: 'old retry worker'
+    } });
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'downloading',
+      fraction: 0.68,
+      downloadedBytes: 6800,
+      totalBytes: 10000
+    });
+    expect(useDownloadProgressStore.getState().aria2ProgressOwnerMap['same-gid-state-fence'])
+      .toEqual(resumedOwner);
+    expect(useDownloadProgressStore.getState().progressMap['same-gid-state-fence']).toMatchObject({
+      fraction: 0.68,
+      downloaded_bytes: 6800,
+      owner_revision: '104'
+    });
+    release();
+  });
+
+  it('rejects an older Aria2 add failure after a newer lifecycle becomes active', async () => {
+    const handlers: DownloadEventHandlers = {};
+    vi.mocked(ipc.listenEvent).mockImplementation((event, handler) => {
+      handlers[event] = handler as (event: any) => void;
+      return Promise.resolve(vi.fn());
+    });
+    useDownloadStore.setState({
+      downloads: [{
+        id: 'stale-add-failure',
+        url: 'https://example.com/file.bin',
+        fileName: 'file.bin',
+        status: 'queued',
+        category: 'Other',
+        dateAdded: ''
+      }]
+    });
+
+    const release = await initDownloadListener();
+    const activeOwner = aria2Owner('stale-add-failure', '9', '5', '12');
+    emitAria2OwnerState(handlers, 'stale-add-failure', 'downloading', activeOwner);
+    handlers['download-state']({ payload: {
+      id: 'stale-add-failure',
+      status: 'failed',
+      error: 'older addUri attempt failed',
+      lifecycleGeneration: '4'
+    } });
+
+    expect(useDownloadStore.getState().downloads[0]).toMatchObject({
+      status: 'downloading',
+      lastError: undefined
+    });
+    expect(useDownloadProgressStore.getState().aria2LifecycleGenerationMap['stale-add-failure'])
+      .toBe('5');
     release();
   });
 
@@ -1492,6 +2041,8 @@ describe('useDownloadProgressStore', () => {
     });
 
     const release = await initDownloadListener();
+    let owner = aria2Owner('retry-progress');
+    emitAria2OwnerState(handlers, 'retry-progress', 'downloading', owner);
     const progress = (fraction: number, downloadedBytes: number) => handlers['download-progress']({ payload: {
       id: 'retry-progress',
       fraction,
@@ -1501,13 +2052,15 @@ describe('useDownloadProgressStore', () => {
       size_is_final: false,
       downloaded_bytes: downloadedBytes,
       total_bytes: 10000,
-      total_is_estimate: false
+      total_is_estimate: false,
+      ...aria2ProgressOwnerFields(owner)
     } });
     progress(0.8, 8000);
     handlers['download-state']({ payload: {
       id: 'retry-progress',
       status: 'retrying',
-      error: 'network dropped'
+      error: 'network dropped',
+      ...owner
     } });
     expect(useDownloadStore.getState().downloads[0]).toMatchObject({
       status: 'retrying',
@@ -1517,11 +2070,14 @@ describe('useDownloadProgressStore', () => {
       totalIsEstimate: false
     });
     useDownloadStore.getState().updateDownload('retry-progress', { status: 'downloading' });
+    owner = aria2Owner('retry-progress', '2');
+    emitAria2OwnerState(handlers, 'retry-progress', 'downloading', owner);
     progress(0.1, 1000);
     handlers['download-state']({ payload: {
       id: 'retry-progress',
       status: 'failed',
-      error: 'retry exhausted'
+      error: 'retry exhausted',
+      ...owner
     } });
 
     expect(useDownloadStore.getState().downloads[0]).toMatchObject({
@@ -1668,6 +2224,12 @@ describe('useDownloadProgressStore', () => {
     setDownloadControlIntent('resume-race', 'resume');
 
     const release = await initDownloadListener();
+    const owner = aria2Owner('resume-race', '2', '1');
+    handlers['download-state']({ payload: {
+      id: 'resume-race',
+      status: 'queued',
+      ...owner
+    } });
     handlers['download-state']({ payload: {
       id: 'resume-race',
       status: 'paused'
@@ -1682,7 +2244,8 @@ describe('useDownloadProgressStore', () => {
 
     handlers['download-state']({ payload: {
       id: 'resume-race',
-      status: 'downloading'
+      status: 'downloading',
+      ...owner
     } });
     expect(useDownloadStore.getState().downloads[0].status).toBe('downloading');
     release();

@@ -2,4 +2,4 @@
 import type { DownloadErrorKind } from "./DownloadErrorKind";
 import type { DownloadStateProgress } from "./DownloadStateProgress";
 
-export type DownloadStateEvent = { id: string, status: string, error: string | null, errorKind?: DownloadErrorKind, resolverFallback?: boolean, fileName?: string, destination?: string, torrentSeedRemaining?: number, progress?: DownloadStateProgress, };
+export type DownloadStateEvent = { id: string, status: string, error: string | null, errorKind?: DownloadErrorKind, resolverFallback?: boolean, fileName?: string, destination?: string, torrentSeedRemaining?: number, progress?: DownloadStateProgress, lifecycleGeneration?: string, controlEpoch?: string, ownerRevision?: string, gid?: string, };

@@ -1607,6 +1607,9 @@ fn emit_media_progress(
                 torrent_seeded_seconds: None,
                 progress_checkpoint_epoch: Some(progress_checkpoint_epoch.to_string()),
                 lifecycle_generation: Some(lifecycle_generation.to_string()),
+                control_epoch: None,
+                owner_revision: None,
+                gid: None,
             },
         );
         state.last_progress_at = now;
@@ -4437,8 +4440,30 @@ struct PendingTrayAction {
     action: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrayActionExecution {
+    failed_count: u32,
+    operation_failed: bool,
+    persistence_failed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrayActionClaim {
+    should_execute: bool,
+    execution: Option<TrayActionExecution>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PendingTrayActionEntry {
+    delivery: PendingTrayAction,
+    attempted: bool,
+    execution: Option<TrayActionExecution>,
+}
+
 struct PendingTrayActionQueue {
-    pending: Mutex<VecDeque<PendingTrayAction>>,
+    pending: Mutex<VecDeque<PendingTrayActionEntry>>,
     accepting: AtomicBool,
 }
 
@@ -4466,7 +4491,11 @@ impl PendingTrayActionQueue {
         if !self.accepting.load(Ordering::Acquire) {
             return None;
         }
-        pending.push_back(delivery.clone());
+        pending.push_back(PendingTrayActionEntry {
+            delivery: delivery.clone(),
+            attempted: false,
+            execution: None,
+        });
         Some(delivery)
     }
 
@@ -4475,15 +4504,70 @@ impl PendingTrayActionQueue {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .front()
-            .cloned()
+            .map(|entry| entry.delivery.clone())
     }
 
-    fn acknowledge(&self, id: &str) -> Option<PendingTrayAction> {
+    fn claim(&self, id: &str) -> Result<TrayActionClaim, String> {
         let mut pending = self
             .pending
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if pending.front().is_some_and(|action| action.id == id) {
+        let Some(entry) = pending.front_mut().filter(|entry| entry.delivery.id == id) else {
+            return Err("tray action is no longer the pending action".to_string());
+        };
+
+        if let Some(execution) = &entry.execution {
+            return Ok(TrayActionClaim {
+                should_execute: false,
+                execution: Some(execution.clone()),
+            });
+        }
+        if entry.attempted {
+            return Ok(TrayActionClaim {
+                should_execute: false,
+                execution: None,
+            });
+        }
+
+        entry.attempted = true;
+        Ok(TrayActionClaim {
+            should_execute: true,
+            execution: None,
+        })
+    }
+
+    fn record_execution(&self, id: &str, execution: TrayActionExecution) -> Result<(), String> {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(entry) = pending.front_mut().filter(|entry| entry.delivery.id == id) else {
+            return Err("tray action is no longer the pending action".to_string());
+        };
+        if !entry.attempted {
+            return Err("tray action must be claimed before recording its result".to_string());
+        }
+        match &entry.execution {
+            Some(recorded) if recorded != &execution => {
+                Err("tray action result was already recorded".to_string())
+            }
+            Some(_) => Ok(()),
+            None => {
+                entry.execution = Some(execution);
+                Ok(())
+            }
+        }
+    }
+
+    fn acknowledge(&self, id: &str) -> Option<PendingTrayActionEntry> {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if pending
+            .front()
+            .is_some_and(|entry| entry.delivery.id == id && entry.attempted)
+        {
             pending.pop_front()
         } else {
             None
@@ -4576,6 +4660,38 @@ fn take_pending_tray_action(
 }
 
 #[tauri::command]
+fn claim_pending_tray_action(
+    caller: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+    id: String,
+) -> Result<TrayActionClaim, String> {
+    properties_window::ensure_main_window(&caller)?;
+    app_handle.state::<PendingTrayActionQueue>().claim(&id)
+}
+
+#[tauri::command]
+fn record_tray_action_result(
+    caller: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+    id: String,
+    failed_count: u32,
+    operation_failed: bool,
+    persistence_failed: bool,
+) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
+    app_handle
+        .state::<PendingTrayActionQueue>()
+        .record_execution(
+            &id,
+            TrayActionExecution {
+                failed_count,
+                operation_failed,
+                persistence_failed,
+            },
+        )
+}
+
+#[tauri::command]
 fn acknowledge_tray_action(
     caller: tauri::WebviewWindow,
     app_handle: tauri::AppHandle,
@@ -4585,15 +4701,21 @@ fn acknowledge_tray_action(
     persistence_failed: bool,
 ) -> Result<(), String> {
     properties_window::ensure_main_window(&caller)?;
-    let Some(action) = app_handle.state::<PendingTrayActionQueue>().acknowledge(&id) else {
+    let Some(entry) = app_handle.state::<PendingTrayActionQueue>().acknowledge(&id) else {
         return Err("tray action is no longer the pending action".to_string());
     };
-    emit_tray_action_result(
-        &app_handle,
-        &action,
+    let action = entry.delivery;
+    let result = entry.execution.unwrap_or(TrayActionExecution {
         failed_count,
         operation_failed,
         persistence_failed,
+    });
+    emit_tray_action_result(
+        &app_handle,
+        &action,
+        result.failed_count,
+        result.operation_failed,
+        result.persistence_failed,
     );
     Ok(())
 }
@@ -4623,7 +4745,9 @@ fn emit_tray_action_result(
 
 #[cfg(test)]
 mod pending_tray_action_tests {
-    use super::{validate_tray_menu_label, PendingTrayActionQueue};
+    use super::{
+        validate_tray_menu_label, PendingTrayActionQueue, TrayActionExecution,
+    };
 
     #[test]
     fn queued_actions_remain_ordered_until_the_front_action_is_acknowledged() {
@@ -4632,12 +4756,62 @@ mod pending_tray_action_tests {
         let resume = queue.enqueue("resume-all").unwrap();
 
         assert_eq!(queue.peek(), Some(pause.clone()));
+        assert!(queue.claim(&pause.id).unwrap().should_execute);
         assert_eq!(queue.acknowledge("a-different-action"), None);
         assert_eq!(queue.peek(), Some(pause.clone()));
-        assert_eq!(queue.acknowledge(&pause.id), Some(pause));
+        assert_eq!(queue.acknowledge(&pause.id).unwrap().delivery, pause);
         assert_eq!(queue.peek(), Some(resume.clone()));
-        assert_eq!(queue.acknowledge(&resume.id), Some(resume));
+        assert!(queue.claim(&resume.id).unwrap().should_execute);
+        assert_eq!(queue.acknowledge(&resume.id).unwrap().delivery, resume);
         assert_eq!(queue.peek(), None);
+    }
+
+    #[test]
+    fn a_claim_is_single_use_and_a_recorded_result_survives_renderer_reload() {
+        let queue = PendingTrayActionQueue::default();
+        let pause = queue.enqueue("pause-all").unwrap();
+        let result = TrayActionExecution {
+            failed_count: 2,
+            operation_failed: false,
+            persistence_failed: true,
+        };
+
+        let first_claim = queue.claim(&pause.id).unwrap();
+        assert!(first_claim.should_execute);
+        assert_eq!(first_claim.execution, None);
+
+        let duplicate_claim = queue.claim(&pause.id).unwrap();
+        assert!(!duplicate_claim.should_execute);
+        assert_eq!(duplicate_claim.execution, None);
+
+        queue
+            .record_execution(&pause.id, result.clone())
+            .unwrap();
+        // Recording the same result again is safe when an IPC response was lost.
+        queue
+            .record_execution(&pause.id, result.clone())
+            .unwrap();
+        let reloaded_claim = queue.claim(&pause.id).unwrap();
+        assert!(!reloaded_claim.should_execute);
+        assert_eq!(reloaded_claim.execution, Some(result.clone()));
+
+        let acknowledged = queue.acknowledge(&pause.id).unwrap();
+        assert_eq!(acknowledged.delivery, pause);
+        assert_eq!(acknowledged.execution, Some(result));
+        assert_eq!(queue.peek(), None);
+    }
+
+    #[test]
+    fn an_attempt_without_a_recorded_result_cannot_be_replayed_or_acknowledged_without_a_claim() {
+        let queue = PendingTrayActionQueue::default();
+        let resume = queue.enqueue("resume-all").unwrap();
+
+        assert_eq!(queue.acknowledge(&resume.id), None);
+        assert!(queue.claim(&resume.id).unwrap().should_execute);
+        let after_reload = queue.claim(&resume.id).unwrap();
+        assert!(!after_reload.should_execute);
+        assert_eq!(after_reload.execution, None);
+        assert!(queue.acknowledge(&resume.id).unwrap().execution.is_none());
     }
 
     #[test]
@@ -5507,6 +5681,8 @@ pub struct AppState {
     pub power_manager: Arc<power::PowerManager>,
     pub scheduler_settings: Arc<RwLock<Option<crate::ipc::PersistedSettings>>>,
     pub queue_manager: Arc<queue::QueueManager>,
+    startup_started_at: Instant,
+    frontend_core_ready_logged: AtomicBool,
 }
 
 #[derive(Default)]
@@ -5610,7 +5786,8 @@ impl Drop for ShutdownTerminalLease {
 struct MainWindowRestoreState {
     requested: AtomicBool,
     startup_complete: AtomicBool,
-    started_at_login: AtomicBool,
+    hide_main_window_at_startup: AtomicBool,
+    tray_startup_warning: AtomicBool,
     pending_opened_torrent_paths: std::sync::Mutex<PendingOpenedTorrentPaths>,
 }
 
@@ -5657,6 +5834,8 @@ impl MainWindowRestoreState {
 
 #[cfg(target_os = "macos")]
 const MAIN_WINDOW_MINIMIZE_MENU_ID: &str = "main_window_minimize";
+#[cfg(target_os = "macos")]
+const MAIN_WINDOW_QUIT_MENU_ID: &str = "main_window_quit";
 
 const KEYCHAIN_CONSENT_REQUIRED_ERROR: &str =
     "Credential-store access requires explicit user consent";
@@ -5748,6 +5927,15 @@ pub struct DownloadProgressEvent {
     progress_checkpoint_epoch: Option<String>,
     #[ts(optional)]
     lifecycle_generation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    control_epoch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    owner_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    gid: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -7210,7 +7398,8 @@ pub(crate) async fn start_media_download_internal(
             progress_state.speed_sampler.reset();
             let _ = app_handle.emit(
                 "download-state",
-                DownloadStateEvent::new(id, crate::ipc::DownloadStatus::Downloading),
+                DownloadStateEvent::new(id, crate::ipc::DownloadStatus::Downloading)
+                    .with_lifecycle_generation(lifecycle_generation),
             );
         }
         log::info!("yt-dlp spawned for id: {} (strike {})", id, strike);
@@ -7317,7 +7506,8 @@ pub(crate) async fn start_media_download_internal(
                                         DownloadStateEvent::new(
                                             id,
                                             crate::ipc::DownloadStatus::Processing,
-                                        ),
+                                        )
+                                        .with_lifecycle_generation(lifecycle_generation),
                                     );
                                     let _ = app_handle.emit("download-progress", DownloadProgressEvent {
                                         id: id.to_string(),
@@ -7338,6 +7528,9 @@ pub(crate) async fn start_media_download_internal(
                                         torrent_seeded_seconds: None,
                                         progress_checkpoint_epoch: Some(progress_checkpoint_epoch.clone()),
                                         lifecycle_generation: Some(lifecycle_generation.to_string()),
+                                        control_epoch: None,
+                                        owner_revision: None,
+                                        gid: None,
                                     });
                                 }
                                 let lower = line.to_lowercase();
@@ -7389,7 +7582,8 @@ pub(crate) async fn start_media_download_internal(
                                         DownloadStateEvent::new(
                                             id,
                                             crate::ipc::DownloadStatus::Processing,
-                                        ),
+                                        )
+                                        .with_lifecycle_generation(lifecycle_generation),
                                     );
                                 }
                             }
@@ -7421,6 +7615,9 @@ pub(crate) async fn start_media_download_internal(
                                             torrent_seeded_seconds: None,
                                             progress_checkpoint_epoch: Some(progress_checkpoint_epoch.clone()),
                                             lifecycle_generation: Some(lifecycle_generation.to_string()),
+                                            control_epoch: None,
+                                            owner_revision: None,
+                                            gid: None,
                                         });
                                     }
                                 }
@@ -7505,7 +7702,8 @@ pub(crate) async fn start_media_download_internal(
         let outcome = backoff_and_emit_cancel(strike, reason, cancel_rx, |retry_reason| {
             let _ = app_handle.emit(
                 "download-state",
-                DownloadStateEvent::retrying(id, retry_reason),
+                DownloadStateEvent::retrying(id, retry_reason)
+                    .with_lifecycle_generation(lifecycle_generation),
             );
         })
         .await;
@@ -7642,10 +7840,13 @@ async fn pause_download(
                                 .aria2_direct_magnet_needs_child_handoff(&id, gid)
                                 .await
                             {
-                                state.queue_manager.emit_state(
-                                    id.clone(),
-                                    crate::ipc::DownloadStatus::Downloading,
-                                );
+                                state
+                                    .queue_manager
+                                    .emit_current_aria2_state(
+                                        &id,
+                                        crate::ipc::DownloadStatus::Downloading,
+                                    )
+                                    .await;
                                 return Err(format!(
                                     "{pause_error}; Torrent metadata is complete but its payload is still being discovered"
                                 ));
@@ -7700,10 +7901,13 @@ async fn pause_download(
                     .aria2_direct_magnet_needs_child_handoff(&id, gid)
                     .await
                 {
-                    state.queue_manager.emit_state(
-                        id.clone(),
-                        crate::ipc::DownloadStatus::Downloading,
-                    );
+                    state
+                        .queue_manager
+                        .emit_current_aria2_state(
+                            &id,
+                            crate::ipc::DownloadStatus::Downloading,
+                        )
+                        .await;
                     log::info!(
                         "aria2 pause [{}]: gid {} completed metadata; deferring pause until the payload child is mapped",
                         id,
@@ -7740,7 +7944,11 @@ async fn pause_download(
                 state.queue_manager.clear_aria2_retry_state(&id).await;
                 state.queue_manager.forget_aria2_gid(&id).await;
                 state.queue_manager.release_permit(&id).await;
-                state.queue_manager.next_aria2_control_epoch(&id).await;
+                let paused_epoch = state.queue_manager.next_aria2_control_epoch(&id).await;
+                let owner_revision = state
+                    .queue_manager
+                    .current_aria2_owner_revision(&id)
+                    .await;
                 state.queue_manager.cancel_aria2_retries(&id).await;
                 if retrying && matches!(terminal, "error" | "removed") {
                     // The terminal GID was forgotten above, so this
@@ -7751,8 +7959,14 @@ async fn pause_download(
                     state.queue_manager.release_registered_id(&id).await;
                     use tauri::Emitter;
                     let mut event = crate::ipc::DownloadStateEvent::new(
-                        id,
+                        &id,
                         crate::ipc::DownloadStatus::Paused,
+                    )
+                    .with_aria2_owner(
+                        gid,
+                        registered_lifecycle_generation.unwrap_or_default(),
+                        paused_epoch,
+                        owner_revision,
                     );
                     if let Some(progress) = status_progress {
                         event = event.with_progress(progress);
@@ -7784,7 +7998,15 @@ async fn pause_download(
         .and_then(|(_, progress)| progress)
         .or(status_progress);
         use tauri::Emitter;
-        let mut event = crate::ipc::DownloadStateEvent::paused_with_seed_remaining(id, seed_remaining);
+        let paused_epoch = state.queue_manager.current_aria2_control_epoch(&id).await;
+        let owner_revision = state.queue_manager.current_aria2_owner_revision(&id).await;
+        let mut event = crate::ipc::DownloadStateEvent::paused_with_seed_remaining(&id, seed_remaining)
+            .with_aria2_owner(
+                gid,
+                registered_lifecycle_generation.unwrap_or_default(),
+                paused_epoch,
+                owner_revision,
+            );
         if let Some(progress) = paused_progress {
             event = event.with_progress(progress);
         }
@@ -7838,7 +8060,11 @@ async fn pause_download(
                 // pause request without reopening a stale lifecycle.
                 state
                     .queue_manager
-                    .emit_state(id.clone(), crate::ipc::DownloadStatus::Paused);
+                    .emit_state_for_lifecycle(
+                        id.clone(),
+                        crate::ipc::DownloadStatus::Paused,
+                        media_lifecycle_generation,
+                    );
                 return Ok(true);
             }
             return Ok(false);
@@ -7876,10 +8102,13 @@ async fn pause_download(
         }
     }
     use tauri::Emitter;
-    let _ = app_handle.emit(
-        "download-state",
-        crate::ipc::DownloadStateEvent::paused_with_seed_remaining(id, seed_remaining),
-    );
+    let mut event = crate::ipc::DownloadStateEvent::paused_with_seed_remaining(&id, seed_remaining);
+    if matches!(active_kind, Some(crate::queue::TaskKind::Aria2)) {
+        if let Some(generation) = registered_lifecycle_generation {
+            event = event.with_lifecycle_generation(generation);
+        }
+    }
+    let _ = app_handle.emit("download-state", event);
     Ok(true)
 }
 
@@ -7972,6 +8201,10 @@ async fn resume_download(
     match status.as_str() {
         "paused" => {
             let control_epoch = state.queue_manager.next_aria2_control_epoch(&id).await;
+            let owner_revision = state
+                .queue_manager
+                .current_aria2_owner_revision(&id)
+                .await;
             let lifecycle_generation = state
                 .queue_manager
                 .registered_lifecycle_generation(&id)
@@ -7982,7 +8215,11 @@ async fn resume_download(
             use tauri::Emitter;
             let _ = app_handle.emit(
                 "download-state",
-                crate::ipc::DownloadStateEvent::new(&id, crate::ipc::DownloadStatus::Queued),
+                crate::ipc::DownloadStateEvent::new(
+                    &id,
+                    crate::ipc::DownloadStatus::Queued,
+                )
+                .with_aria2_owner(&gid, lifecycle_generation, control_epoch, owner_revision),
             );
 
             let queue_manager = state.queue_manager.clone();
@@ -8030,7 +8267,12 @@ async fn resume_download(
                     return;
                 }
                 if !queue_manager
-                    .rebind_aria2_gid_epoch(&id_clone, &gid_clone, control_epoch)
+                    .rebind_aria2_gid_epoch(
+                        &id_clone,
+                        &gid_clone,
+                        control_epoch,
+                        owner_revision,
+                    )
                     .await
                 {
                     if permit_candidate.is_some() {
@@ -8103,14 +8345,16 @@ async fn resume_download(
                                 .await;
                                 return;
                             }
-                            use tauri::Emitter;
-                            let _ = app_handle_clone.emit(
-                                "download-state",
-                                crate::ipc::DownloadStateEvent::new(
+                            queue_manager
+                                .emit_aria2_state_with_owner(
                                     &id_clone,
                                     crate::ipc::DownloadStatus::Downloading,
-                                ),
-                            );
+                                    &gid_clone,
+                                    control_epoch,
+                                    lifecycle_generation,
+                                    owner_revision,
+                                )
+                                .await;
                             log::warn!(
                                 "aria2 resume [{}]: {} but daemon reports gid {} as {}; retaining permit",
                                 id_clone,
@@ -8125,10 +8369,16 @@ async fn resume_download(
                                 .aria2_direct_magnet_needs_child_handoff(&id_clone, &gid_clone)
                                 .await
                             {
-                                queue_manager.emit_state(
-                                    id_clone.clone(),
-                                    crate::ipc::DownloadStatus::Downloading,
-                                );
+                                queue_manager
+                                    .emit_aria2_state_with_owner(
+                                        &id_clone,
+                                        crate::ipc::DownloadStatus::Downloading,
+                                        &gid_clone,
+                                        control_epoch,
+                                        lifecycle_generation,
+                                        owner_revision,
+                                    )
+                                    .await;
                                 log::info!(
                                     "aria2 resume [{}]: gid {} completed metadata after an ambiguous unpause; deferring until the payload child is mapped",
                                     id_clone,
@@ -8152,7 +8402,11 @@ async fn resume_download(
                             return;
                         }
                         Ok((status, progress)) if status == "paused" => {
-                            queue_manager.next_aria2_control_epoch(&id_clone).await;
+                            let paused_epoch =
+                                queue_manager.next_aria2_control_epoch(&id_clone).await;
+                            let paused_owner_revision = queue_manager
+                                .current_aria2_owner_revision(&id_clone)
+                                .await;
                             queue_manager.cancel_aria2_retries(&id_clone).await;
                             queue_manager.release_permit(&id_clone).await;
                             log::error!(
@@ -8164,6 +8418,12 @@ async fn resume_download(
                             let mut event = crate::ipc::DownloadStateEvent::paused_with_error(
                                 &id_clone,
                                 unpause_error,
+                            )
+                            .with_aria2_owner(
+                                &gid_clone,
+                                lifecycle_generation,
+                                paused_epoch,
+                                paused_owner_revision,
                             );
                             if let Some(progress) = progress {
                                 event = event.with_progress(progress);
@@ -8239,10 +8499,16 @@ async fn resume_download(
                             .aria2_direct_magnet_needs_child_handoff(&id_clone, &gid_clone)
                             .await
                         {
-                            queue_manager.emit_state(
-                                id_clone.clone(),
-                                crate::ipc::DownloadStatus::Downloading,
-                            );
+                            queue_manager
+                                .emit_aria2_state_with_owner(
+                                    &id_clone,
+                                    crate::ipc::DownloadStatus::Downloading,
+                                    &gid_clone,
+                                    control_epoch,
+                                    lifecycle_generation,
+                                    owner_revision,
+                                )
+                                .await;
                             log::info!(
                                 "aria2 resume [{}]: gid {} completed metadata after unpause; deferring until the payload child is mapped",
                                 id_clone,
@@ -8273,7 +8539,10 @@ async fn resume_download(
                         return;
                     }
                     "paused" => {
-                        queue_manager.next_aria2_control_epoch(&id_clone).await;
+                        let paused_epoch = queue_manager.next_aria2_control_epoch(&id_clone).await;
+                        let paused_owner_revision = queue_manager
+                            .current_aria2_owner_revision(&id_clone)
+                            .await;
                         queue_manager.cancel_aria2_retries(&id_clone).await;
                         queue_manager.release_permit(&id_clone).await;
                         let error = "aria2 kept the download paused after resume".to_string();
@@ -8286,6 +8555,12 @@ async fn resume_download(
                         let mut event = crate::ipc::DownloadStateEvent::paused_with_error(
                             &id_clone,
                             error,
+                        )
+                        .with_aria2_owner(
+                            &gid_clone,
+                            lifecycle_generation,
+                            paused_epoch,
+                            paused_owner_revision,
                         );
                         if let Some(progress) = status_after_unpause_progress {
                             event = event.with_progress(progress);
@@ -8321,20 +8596,23 @@ async fn resume_download(
                     .await;
                     return;
                 }
-                use tauri::Emitter;
-                let _ = app_handle_clone.emit(
-                    "download-state",
-                    crate::ipc::DownloadStateEvent::new(
+                queue_manager
+                    .emit_aria2_state_with_owner(
                         &id_clone,
                         crate::ipc::DownloadStatus::Downloading,
-                    ),
-                );
+                        &gid_clone,
+                        control_epoch,
+                        lifecycle_generation,
+                        owner_revision,
+                    )
+                    .await;
                 log::info!("aria2 resume [{}]: unpaused gid {}", id_clone, gid_clone);
             });
             Ok(true)
         }
         "active" | "waiting" => {
             let resume_epoch = state.queue_manager.current_aria2_control_epoch(&id).await;
+            let owner_revision = state.queue_manager.current_aria2_owner_revision(&id).await;
             let lifecycle_generation = state
                 .queue_manager
                 .registered_lifecycle_generation(&id)
@@ -8346,7 +8624,6 @@ async fn resume_download(
             let id_clone = id.clone();
             let gid_clone = gid.clone();
             let queue_id_clone = queue_id.clone();
-            let app_handle_clone = app_handle.clone();
             let status_for_log = status.to_string();
             let handoff_guard = aria2_handoff_guard;
             tauri::async_runtime::spawn(async move {
@@ -8408,14 +8685,16 @@ async fn resume_download(
                     gid_clone,
                     status_for_log
                 );
-                use tauri::Emitter;
-                let _ = app_handle_clone.emit(
-                    "download-state",
-                    crate::ipc::DownloadStateEvent::new(
+                queue_manager
+                    .emit_aria2_state_with_owner(
                         &id_clone,
                         crate::ipc::DownloadStatus::Downloading,
-                    ),
-                );
+                        &gid_clone,
+                        resume_epoch,
+                        lifecycle_generation,
+                        owner_revision,
+                    )
+                    .await;
             });
             Ok(true)
         }
@@ -8426,10 +8705,23 @@ async fn resume_download(
                     .aria2_direct_magnet_needs_child_handoff(&id, &gid)
                     .await
             {
-                state.queue_manager.emit_state(
-                    id.clone(),
-                    crate::ipc::DownloadStatus::Downloading,
-                );
+                let lifecycle_generation = state
+                    .queue_manager
+                    .registered_lifecycle_generation(&id)
+                    .await
+                    .unwrap_or_default();
+                let control_epoch = state.queue_manager.current_aria2_control_epoch(&id).await;
+                state
+                    .queue_manager
+                    .emit_aria2_state_with_owner(
+                        &id,
+                        crate::ipc::DownloadStatus::Downloading,
+                        &gid,
+                        control_epoch,
+                        lifecycle_generation,
+                        state.queue_manager.current_aria2_owner_revision(&id).await,
+                    )
+                    .await;
                 log::info!(
                     "aria2 resume [{}]: gid {} completed metadata; deferring re-enqueue until the payload child is mapped",
                     id,
@@ -8610,6 +8902,7 @@ async fn remove_download_inner(
     let media_lifecycle_generation = registered_lifecycle_generation.unwrap_or_default();
 
     let gid = state.queue_manager.aria2_gid_for_download(&id);
+    let mut aria2_paused_owner = None;
     if let Some(gid) = gid.as_deref() {
         if let Err(error) = state
             .queue_manager
@@ -8657,7 +8950,13 @@ async fn remove_download_inner(
             })?;
             permanent_asset_removal = false;
         }
-        state.queue_manager.next_aria2_control_epoch(&id).await;
+        let paused_epoch = state.queue_manager.next_aria2_control_epoch(&id).await;
+        aria2_paused_owner = Some((
+            gid.to_string(),
+            media_lifecycle_generation,
+            paused_epoch,
+            state.queue_manager.current_aria2_owner_revision(&id).await,
+        ));
         state.queue_manager.clear_aria2_retry_state(&id).await;
         state.queue_manager.forget_torrent_telemetry(&id).await;
         state.queue_manager.forget_aria2_gid(&id).await;
@@ -8904,10 +9203,19 @@ async fn remove_download_inner(
     }
 
     use tauri::Emitter;
-    let _ = app_handle.emit(
-        "download-state",
-        crate::ipc::DownloadStateEvent::new(id.clone(), crate::ipc::DownloadStatus::Paused),
+    let mut paused_event = crate::ipc::DownloadStateEvent::new(
+        id.clone(),
+        crate::ipc::DownloadStatus::Paused,
     );
+    if let Some((gid, lifecycle_generation, control_epoch, owner_revision)) = aria2_paused_owner {
+        paused_event = paused_event.with_aria2_owner(
+            gid,
+            lifecycle_generation,
+            control_epoch,
+            owner_revision,
+        );
+    }
+    let _ = app_handle.emit("download-state", paused_event);
 
     // Asset cleanup and exact replacement share the same target namespace.
     // Hold every affected target lock in a stable order until the ownership
@@ -10464,6 +10772,7 @@ async fn detach_download_for_reconfigure_locked(
         .unwrap_or_default();
     state.queue_manager.remove_from_pending(id).await;
     let gid = state.queue_manager.aria2_gid_for_download(id);
+    let mut aria2_paused_owner = None;
 
     if let Some(gid) = gid.as_deref() {
         // Do not invalidate the mapped lifecycle until the daemon confirms
@@ -10497,7 +10806,17 @@ async fn detach_download_for_reconfigure_locked(
             state.queue_manager.allow_aria2_retries(id).await;
             return Err(error);
         }
-        state.queue_manager.next_aria2_control_epoch(id).await;
+        let paused_epoch = state.queue_manager.next_aria2_control_epoch(id).await;
+        let owner_revision = state
+            .queue_manager
+            .current_aria2_owner_revision(id)
+            .await;
+        aria2_paused_owner = Some((
+            gid.to_string(),
+            media_lifecycle_generation,
+            paused_epoch,
+            owner_revision,
+        ));
         state.queue_manager.clear_aria2_retry_state(id).await;
         state.queue_manager.forget_aria2_gid(id).await;
         state.queue_manager.release_permit(id).await;
@@ -10550,10 +10869,15 @@ async fn detach_download_for_reconfigure_locked(
     }
 
     use tauri::Emitter;
-    let _ = app_handle.emit(
-        "download-state",
-        crate::ipc::DownloadStateEvent::new(id, crate::ipc::DownloadStatus::Paused),
-    );
+    let mut event = crate::ipc::DownloadStateEvent::new(id, crate::ipc::DownloadStatus::Paused);
+    if let Some((gid, lifecycle_generation, control_epoch, owner_revision)) = aria2_paused_owner {
+        event = event.with_aria2_owner(gid, lifecycle_generation, control_epoch, owner_revision);
+    } else if matches!(active_kind, Some(crate::queue::TaskKind::Aria2)) {
+        event = event.with_lifecycle_generation(media_lifecycle_generation);
+    } else if matches!(active_kind, Some(crate::queue::TaskKind::Media)) {
+        event = event.with_lifecycle_generation(media_lifecycle_generation);
+    }
+    let _ = app_handle.emit("download-state", event);
 
     Ok(())
 }
@@ -17143,6 +17467,36 @@ fn toggle_tray_icon(
     }
 }
 
+#[tauri::command]
+fn has_startup_tray_warning(
+    caller: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+) -> Result<bool, String> {
+    properties_window::ensure_main_window(&caller)?;
+    let failed_at_startup = app_handle
+        .try_state::<MainWindowRestoreState>()
+        .is_some_and(|state| state.tray_startup_warning.load(Ordering::Acquire));
+    Ok(failed_at_startup && app_handle.tray_by_id("main").is_none())
+}
+
+#[tauri::command]
+fn mark_frontend_core_ready(
+    caller: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    properties_window::ensure_main_window(&caller)?;
+    if !state
+        .frontend_core_ready_logged
+        .swap(true, Ordering::AcqRel)
+    {
+        log::info!(
+            "app_startup_milestone=frontend_core_ready total_elapsed_ms={}",
+            state.startup_started_at.elapsed().as_millis()
+        );
+    }
+    Ok(())
+}
+
 fn validate_tray_menu_label(label: &str) -> Result<(), String> {
     let length = label.chars().count();
     if label.trim().is_empty() || length > 96 || label.chars().any(char::is_control) {
@@ -23455,6 +23809,66 @@ fn log_startup_phase(phase: &str, phase_started_at: Instant, app_started_at: Ins
     );
 }
 
+fn should_create_main_tray(
+    started_at_login: bool,
+    configured_show_menu_bar_icon: Option<bool>,
+) -> bool {
+    started_at_login || configured_show_menu_bar_icon.unwrap_or(true)
+}
+
+fn should_hide_main_window_for_login(started_at_login: bool, tray_available: bool) -> bool {
+    started_at_login && tray_available
+}
+
+fn should_hide_main_window_on_close(tray_available: bool) -> bool {
+    tray_available
+}
+
+fn should_report_startup_tray_unavailable(tray_requested: bool, tray_available: bool) -> bool {
+    tray_requested && !tray_available
+}
+
+fn should_pause_logs(logs_enabled: bool, smoke_test_mode: bool) -> bool {
+    !logs_enabled && !smoke_test_mode
+}
+
+#[cfg(test)]
+mod tray_startup_policy_tests {
+    use super::{
+        should_create_main_tray, should_hide_main_window_for_login,
+        should_hide_main_window_on_close, should_pause_logs, should_report_startup_tray_unavailable,
+    };
+
+    #[test]
+    fn startup_respects_saved_tray_preference_and_keeps_window_reachable() {
+        assert!(!should_create_main_tray(false, Some(false)));
+        assert!(should_create_main_tray(false, Some(true)));
+        assert!(should_create_main_tray(false, None));
+        assert!(should_create_main_tray(true, Some(false)));
+
+        assert!(!should_hide_main_window_for_login(false, true));
+        assert!(should_hide_main_window_for_login(true, true));
+        assert!(!should_hide_main_window_for_login(true, false));
+
+        assert!(!should_report_startup_tray_unavailable(false, false));
+        assert!(should_report_startup_tray_unavailable(true, false));
+        assert!(!should_report_startup_tray_unavailable(true, true));
+    }
+
+    #[test]
+    fn closing_the_main_window_hides_only_when_a_tray_can_restore_it() {
+        assert!(should_hide_main_window_on_close(true));
+        assert!(!should_hide_main_window_on_close(false));
+    }
+
+    #[test]
+    fn isolated_smoke_profiles_record_startup_and_shutdown_phases() {
+        assert!(should_pause_logs(false, false));
+        assert!(!should_pause_logs(false, true));
+        assert!(!should_pause_logs(true, false));
+    }
+}
+
 async fn cleanup_startup_torrent_artifacts(
     app_handle: tauri::AppHandle,
     app_started_at: Instant,
@@ -23530,6 +23944,11 @@ pub fn run() {
 
     let app_startup_started_at = Instant::now();
     let startup_cleanup_started = Arc::new(AtomicBool::new(false));
+    let smoke_test_mode = std::env::var("FIRELINK_SMOKE_TEST").as_deref() == Ok("1");
+    LOG_PAUSED.store(
+        should_pause_logs(false, smoke_test_mode),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     let storage_mode = crate::storage::StorageMode::detect();
     let setup_storage_mode = storage_mode.clone();
@@ -23586,11 +24005,6 @@ pub fn run() {
             let started_at_login = crate::login_start::is_login_launch(
                 std::env::args_os().skip(1),
             );
-            if let Some(state) = app.try_state::<MainWindowRestoreState>() {
-                state
-                    .started_at_login
-                    .store(started_at_login, Ordering::Release);
-            }
 
             let storage_started = Instant::now();
             let storage_layout = crate::storage::StorageLayout::resolve(
@@ -23632,31 +24046,56 @@ pub fn run() {
             log::info!("App Version: {}", env!("CARGO_PKG_VERSION"));
             log::info!("==========================");
             log_startup_phase("system_information", system_info_started, app_startup_started_at);
-            let tray_available = match build_main_tray(app.handle()) {
-                Ok(()) => true,
-                Err(error) if started_at_login => {
-                    // A login-started process must never remain hidden when
-                    // its discoverability surface cannot be created.
-                    log::error!(
-                        "tray unavailable during system-login startup; showing the main window: {error}"
-                    );
-                    false
-                }
-                Err(error) => {
-                    return Err(format!("failed to create tray menu: {error}").into());
-                }
-            };
-            if started_at_login && !tray_available {
-                if let Some(state) = app.try_state::<MainWindowRestoreState>() {
-                    state.requested.store(true, Ordering::Release);
-                }
-            }
             #[cfg(target_os = "macos")]
             {
                 use tauri::menu::{MenuItem, WINDOW_SUBMENU_ID};
 
                 let app_menu = tauri::menu::Menu::default(app.handle())
                     .map_err(|error| format!("failed to create application menu: {error}"))?;
+                let app_submenu = app_menu
+                    .items()
+                    .map_err(|error| format!("failed to inspect application menu: {error}"))?
+                    .into_iter()
+                    .next()
+                    .and_then(|item| item.as_submenu().cloned())
+                    .ok_or_else(|| "application menu has no application submenu".to_string())?;
+                let app_items = app_submenu
+                    .items()
+                    .map_err(|error| format!("failed to inspect application submenu: {error}"))?;
+                // Tauri's predefined macOS Quit item calls NSApp terminate:
+                // directly. Tao reports that route as RunEvent::Exit after
+                // termination, bypassing our ExitRequested persistence and
+                // sidecar drain. Route user-initiated Quit through app.exit so
+                // it shares the tray's fenced shutdown path.
+                let quit_position = app_items
+                    .len()
+                    .checked_sub(1)
+                    .filter(|position| {
+                        app_items[*position].as_predefined_menuitem().is_some()
+                    })
+                    .ok_or_else(|| {
+                        "application submenu does not end with the expected Quit item".to_string()
+                    })?;
+                let quit_label = app_items[quit_position]
+                    .as_predefined_menuitem()
+                    .expect("the Quit menu item was validated as predefined")
+                    .text()
+                    .map_err(|error| format!("failed to read the native Quit label: {error}"))?;
+                app_submenu
+                    .remove_at(quit_position)
+                    .map_err(|error| format!("failed to replace application Quit item: {error}"))?
+                    .ok_or_else(|| "application Quit item disappeared during replacement".to_string())?;
+                let quit_item = MenuItem::with_id(
+                    app.handle(),
+                    MAIN_WINDOW_QUIT_MENU_ID,
+                    &quit_label,
+                    true,
+                    Some("CmdOrCtrl+Q"),
+                )
+                .map_err(|error| format!("failed to create application Quit item: {error}"))?;
+                app_submenu
+                    .insert(&quit_item, quit_position)
+                    .map_err(|error| format!("failed to install application Quit item: {error}"))?;
                 let minimize_item = MenuItem::with_id(
                     app.handle(),
                     MAIN_WINDOW_MINIMIZE_MENU_ID,
@@ -23686,10 +24125,14 @@ pub fn run() {
                     .insert(&minimize_item, 0)
                     .map_err(|error| format!("failed to install minimize menu item: {error}"))?;
                 app.on_menu_event(|app, event| {
-                    if event.id.as_ref() == MAIN_WINDOW_MINIMIZE_MENU_ID {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.minimize();
+                    match event.id.as_ref() {
+                        MAIN_WINDOW_MINIMIZE_MENU_ID => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.minimize();
+                            }
                         }
+                        MAIN_WINDOW_QUIT_MENU_ID => app.exit(0),
+                        _ => {}
                     }
                 });
                 app.set_menu(app_menu)
@@ -23705,6 +24148,51 @@ pub fn run() {
             // malformed or interrupted transaction cannot reach a missing
             // Tauri state entry at startup.
             app.manage(database);
+            let settings_started = Instant::now();
+            let persisted_settings = match crate::settings::load_settings(app.handle()) {
+                Ok(settings) => Some(settings),
+                Err(error) => {
+                    log::warn!(
+                        "could not load saved tray preference; using the default startup preference: {error}"
+                    );
+                    None
+                }
+            };
+            log_startup_phase("settings_load", settings_started, app_startup_started_at);
+
+            let tray_requested = should_create_main_tray(
+                started_at_login,
+                persisted_settings
+                    .as_ref()
+                    .map(|settings| settings.show_menu_bar_icon),
+            );
+            let tray_started = Instant::now();
+            let tray_available = if tray_requested {
+                match build_main_tray(app.handle()) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        log::warn!(
+                            "system tray is unavailable; Firelink will keep its main window available: {error}"
+                        );
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            let hide_main_window_at_startup =
+                should_hide_main_window_for_login(started_at_login, tray_available);
+            if let Some(state) = app.try_state::<MainWindowRestoreState>() {
+                state
+                    .hide_main_window_at_startup
+                    .store(hide_main_window_at_startup, Ordering::Release);
+                state.tray_startup_warning.store(
+                    should_report_startup_tray_unavailable(tray_requested, tray_available),
+                    Ordering::Release,
+                );
+            }
+            log_startup_phase("tray_creation", tray_started, app_startup_started_at);
+
             let torrent_recovery_started = Instant::now();
             if let Err(error) = recover_torrent_move_journals(
                 app.handle(),
@@ -23761,11 +24249,13 @@ pub fn run() {
                     .map_err(|_| "extension pairing token lock is unavailable".to_string())?;
                 *pairing_token = initial_pairing_token;
             }
-            let persisted_settings = crate::settings::load_settings(app.handle()).ok();
             let logs_enabled = persisted_settings
                 .as_ref()
                 .is_some_and(|settings| settings.logs_enabled);
-            LOG_PAUSED.store(!logs_enabled, std::sync::atomic::Ordering::Relaxed);
+            LOG_PAUSED.store(
+                should_pause_logs(logs_enabled, smoke_test_mode),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             if logs_enabled {
                 log::info!("=== System Information ===");
                 log::info!(
@@ -23839,6 +24329,8 @@ pub fn run() {
                 power_manager: Arc::clone(&power_manager),
                 scheduler_settings: Arc::clone(&scheduler_settings),
                 queue_manager,
+                startup_started_at: app_startup_started_at,
+                frontend_core_ready_logged: AtomicBool::new(false),
             });
 
             let pending_opened_torrent_paths = app
@@ -23885,7 +24377,7 @@ pub fn run() {
             main_window_builder = main_window_builder
                 .inner_size(startup_size.width as f64, startup_size.height as f64)
                 .prevent_overflow();
-            if started_at_login {
+            if hide_main_window_at_startup {
                 main_window_builder = main_window_builder.visible(false).focused(false);
             }
             #[cfg(target_os = "windows")]
@@ -24602,6 +25094,10 @@ pub fn run() {
                                     let is_verification =
                                         poll_mgr.aria2_is_torrent_verification(&id).await;
                                     let control_epoch = mapping.epoch;
+                                    let lifecycle_generation = poll_mgr
+                                        .registered_lifecycle_generation(&id)
+                                        .await
+                                        .unwrap_or_default();
                                     // The status snapshot and both connection
                                     // lookups await. A pause,
                                     // retry, or same-GID resume may replace the
@@ -24869,21 +25365,27 @@ pub fn run() {
                                     }
 
                                     if entering_verifying {
-                                        let _ = app_handle_poll.emit(
-                                            "download-state",
-                                            crate::ipc::DownloadStateEvent::new(
+                                        poll_mgr
+                                            .emit_aria2_state_with_owner(
                                                 &id,
                                                 crate::ipc::DownloadStatus::Verifying,
-                                            ),
-                                        );
+                                                gid,
+                                                control_epoch,
+                                                lifecycle_generation,
+                                                mapping.owner_revision,
+                                            )
+                                            .await;
                                     } else if leaving_verifying && matches!(status, "active" | "waiting") {
-                                        let _ = app_handle_poll.emit(
-                                            "download-state",
-                                            crate::ipc::DownloadStateEvent::new(
+                                        poll_mgr
+                                            .emit_aria2_state_with_owner(
                                                 &id,
                                                 crate::ipc::DownloadStatus::Downloading,
-                                            ),
-                                        );
+                                                gid,
+                                                control_epoch,
+                                                lifecycle_generation,
+                                                mapping.owner_revision,
+                                            )
+                                            .await;
                                     }
 
                                     let fraction = if is_verifying {
@@ -24931,7 +25433,12 @@ pub fn run() {
                                     } else {
                                         poll_mgr.complete_aria2_allocation_for_gid(gid, completed).await;
                                     }
-                                    if !poll_mgr.is_current_aria2_gid_mapping(gid, &mapping)
+                                    if poll_mgr
+                                        .registered_lifecycle_generation(&id)
+                                        .await
+                                        .unwrap_or_default()
+                                        != lifecycle_generation
+                                        || !poll_mgr.is_current_aria2_gid_mapping(gid, &mapping)
                                         || !poll_mgr
                                             .is_aria2_control_epoch_current(&id, control_epoch)
                                             .await
@@ -24962,7 +25469,10 @@ pub fn run() {
                                         torrent_seeded_seconds: torrent_telemetry
                                             .map(|value| value.seeded_seconds as f64),
                                         progress_checkpoint_epoch: None,
-                                        lifecycle_generation: None,
+                                        lifecycle_generation: Some(lifecycle_generation.to_string()),
+                                        control_epoch: Some(control_epoch.to_string()),
+                                        owner_revision: Some(mapping.owner_revision.to_string()),
+                                        gid: Some(gid.to_string()),
                                     });
 
                                     if entering_seeding
@@ -25349,7 +25859,16 @@ pub fn run() {
             if window.label() == "main" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
-                    let _ = window.hide();
+                    if should_hide_main_window_on_close(
+                        window.app_handle().tray_by_id("main").is_some(),
+                    ) {
+                        let _ = window.hide();
+                    } else {
+                        // Without a tray icon there is no guaranteed route
+                        // back to a hidden window on Windows or Linux. Close
+                        // through the durable app-exit pipeline instead.
+                        window.app_handle().exit(0);
+                    }
                 }
             }
         });
@@ -25394,6 +25913,8 @@ pub fn run() {
         get_start_at_login,
         set_start_at_login,
         open_login_items_settings,
+        has_startup_tray_warning,
+        mark_frontend_core_ready,
     ]);
     let keychain_handler: FirelinkInvokeHandler = Box::new(tauri::generate_handler![
         set_keychain_password,
@@ -25417,6 +25938,8 @@ pub fn run() {
         inspect_download_target,
         toggle_tray_icon,
         take_pending_tray_action,
+        claim_pending_tray_action,
+        record_tray_action_result,
         acknowledge_tray_action,
         set_tray_menu_labels,
         set_extension_pairing_token,
@@ -25556,7 +26079,9 @@ pub fn run() {
                 | "open_automation_settings"
                 | "get_start_at_login"
                 | "set_start_at_login"
-                | "open_login_items_settings" => system_handler(invoke),
+                | "open_login_items_settings"
+                | "has_startup_tray_warning"
+                | "mark_frontend_core_ready" => system_handler(invoke),
                 "set_keychain_password"
                 | "get_keychain_password"
                 | "delete_keychain_password"
@@ -25574,6 +26099,8 @@ pub fn run() {
                 "inspect_download_target"
                 | "toggle_tray_icon"
                 | "take_pending_tray_action"
+                | "claim_pending_tray_action"
+                | "record_tray_action_result"
                 | "acknowledge_tray_action"
                 | "set_tray_menu_labels"
                 | "set_extension_pairing_token"
@@ -25668,10 +26195,14 @@ pub fn run() {
             tauri::RunEvent::Ready => {
                 let ready_started_at = Instant::now();
                 mark_main_window_startup_complete(app_handle);
-                let started_at_login = app_handle
+                let hide_main_window_at_startup = app_handle
                     .try_state::<MainWindowRestoreState>()
-                    .is_some_and(|state| state.started_at_login.load(Ordering::Acquire));
-                if !started_at_login {
+                    .is_some_and(|state| {
+                        state
+                            .hide_main_window_at_startup
+                            .load(Ordering::Acquire)
+                    });
+                if !hide_main_window_at_startup {
                     #[cfg(target_os = "windows")]
                     reveal_main_window(app_handle);
                 }
@@ -25711,6 +26242,10 @@ pub fn run() {
             }
             tauri::RunEvent::ExitRequested { code, api, .. } => {
                 let guard = app_handle.state::<Aria2DaemonGuard>();
+                log::info!(
+                    "app_shutdown_event=exit_requested exit_allowed={}",
+                    guard.exit_allowed()
+                );
                 if !guard.exit_allowed() {
                     api.prevent_exit();
                     if let Some(shutdown_generation) = guard.begin_shutdown() {
@@ -25821,6 +26356,7 @@ pub fn run() {
                             // retry, seed, recovery, and user control work. If
                             // any cannot settle promptly, reject this exit
                             // while the existing daemon is still available.
+                            let handoff_drain_started = Instant::now();
                             let handoff_drain = tokio::time::timeout_at(
                                 shutdown_deadline,
                                 app.state::<AppState>()
@@ -25830,7 +26366,8 @@ pub fn run() {
                             .await;
                             if !matches!(handoff_drain, Ok(true)) {
                                 log::warn!(
-                                    "app_shutdown_phase=aria2_handoff_drain outcome=timeout-or-incomplete"
+                                    "app_shutdown_phase=aria2_handoff_drain outcome=timeout-or-incomplete elapsed_ms={}",
+                                    handoff_drain_started.elapsed().as_millis()
                                 );
                                 reject_app_exit_request(
                                     &app,
@@ -25842,12 +26379,17 @@ pub fn run() {
                                 .await;
                                 return;
                             }
+                            log::info!(
+                                "app_shutdown_phase=aria2_handoff_drain outcome=complete elapsed_ms={}",
+                                handoff_drain_started.elapsed().as_millis()
+                            );
                             // Close media registration and drain accepted
                             // workers before stopping aria2. A successful
                             // yt-dlp result then stays inside the terminal
                             // barrier through its durable journal and row
                             // update, and cancellation leaves the active row
                             // restartable if this exit is later rejected.
+                            let media_cancel_started = Instant::now();
                             let interrupted_media_ids = match tokio::time::timeout_at(
                                 shutdown_deadline,
                                 app.state::<AppState>()
@@ -25856,13 +26398,20 @@ pub fn run() {
                             )
                             .await
                             {
-                                Ok(Ok(interrupted)) => interrupted
-                                    .into_iter()
-                                    .map(|(id, _generation)| id)
-                                    .collect::<Vec<_>>(),
+                                Ok(Ok(interrupted)) => {
+                                    log::info!(
+                                        "app_shutdown_phase=media_cancel outcome=complete elapsed_ms={}",
+                                        media_cancel_started.elapsed().as_millis()
+                                    );
+                                    interrupted
+                                        .into_iter()
+                                        .map(|(id, _generation)| id)
+                                        .collect::<Vec<_>>()
+                                }
                                 Ok(Err(error)) => {
                                     log::error!(
-                                        "app_shutdown_phase=media_cancel outcome=failed error={error}"
+                                        "app_shutdown_phase=media_cancel outcome=failed elapsed_ms={} error={error}",
+                                        media_cancel_started.elapsed().as_millis()
                                     );
                                     let aria2_dispatch_was_held = app
                                         .state::<AppState>()
@@ -25888,7 +26437,8 @@ pub fn run() {
                                 }
                                 Err(_) => {
                                     log::warn!(
-                                        "app_shutdown_phase=media_cancel outcome=deadline-expired"
+                                        "app_shutdown_phase=media_cancel outcome=deadline-expired elapsed_ms={}",
+                                        media_cancel_started.elapsed().as_millis()
                                     );
                                     let aria2_dispatch_was_held = app
                                         .state::<AppState>()
@@ -25915,11 +26465,13 @@ pub fn run() {
                             };
                             // The accepted snapshot durably reconciles any
                             // journal failure left by a rejected prior exit.
+                            let aria2_shutdown_started = Instant::now();
                             if let Err(error) =
                                 shutdown_aria2_daemon(app.clone(), shutdown_deadline).await
                             {
                                 log::error!(
-                                    "app_shutdown_phase=aria2_child outcome=unconfirmed error={error}"
+                                    "app_shutdown_phase=aria2_child outcome=unconfirmed elapsed_ms={} error={error}",
+                                    aria2_shutdown_started.elapsed().as_millis()
                                 );
                                 app.state::<AppState>()
                                     .queue_manager
@@ -25938,15 +26490,25 @@ pub fn run() {
                                 );
                                 return;
                             }
+                            log::info!(
+                                "app_shutdown_phase=aria2_child outcome=complete elapsed_ms={}",
+                                aria2_shutdown_started.elapsed().as_millis()
+                            );
                             let terminal_barrier = Arc::clone(
                                 &app.state::<AppState>().shutdown_terminal_barrier,
                             );
+                            let terminal_drain_started = Instant::now();
                             let terminal_drained = tokio::time::timeout_at(
                                 shutdown_deadline,
                                 terminal_barrier.seal_and_wait(),
                             )
                             .await
                             .is_ok();
+                            log::info!(
+                                "app_shutdown_phase=terminal_drain outcome={} elapsed_ms={}",
+                                if terminal_drained { "complete" } else { "timeout" },
+                                terminal_drain_started.elapsed().as_millis()
+                            );
 
                             let final_flush_started = Instant::now();
                             let mut final_completed = frontend_exit_flush.completed.subscribe();
@@ -26005,6 +26567,7 @@ pub fn run() {
                                     &shutdown_guard,
                                     app.try_state::<crate::db::DbState>().as_deref(),
                                 );
+                            let finalization_started = Instant::now();
                             let finalization_checks_passed =
                                 tokio::time::Instant::now() < shutdown_deadline
                                 && terminal_drained
@@ -26017,7 +26580,8 @@ pub fn run() {
                                 && terminal_barrier.try_finalize();
                             if !finalization_allowed {
                                 log::error!(
-                                    "app_shutdown_phase=finalization outcome=blocked reason=terminal-state-not-durable-or-event-drain-failed"
+                                    "app_shutdown_phase=finalization outcome=blocked elapsed_ms={} reason=terminal-state-not-durable-or-event-drain-failed",
+                                    finalization_started.elapsed().as_millis()
                                 );
                                 app.state::<AppState>()
                                     .queue_manager
@@ -26044,7 +26608,8 @@ pub fn run() {
                                 .allow_exit(shutdown_generation)
                             {
                                 log::error!(
-                                    "app_shutdown_phase=finalization outcome=blocked reason=shutdown-attempt-changed"
+                                    "app_shutdown_phase=finalization outcome=blocked elapsed_ms={} reason=shutdown-attempt-changed",
+                                    finalization_started.elapsed().as_millis()
                                 );
                                 reject_app_exit_request(
                                     &app,
@@ -26060,6 +26625,10 @@ pub fn run() {
                                 .queue_manager
                                 .notify_aria2_exit_allowed();
                             let _ = extension_server_shutdown.send(true);
+                            log::info!(
+                                "app_shutdown_phase=finalization outcome=complete elapsed_ms={}",
+                                finalization_started.elapsed().as_millis()
+                            );
                             log::info!(
                                 "app_shutdown_phase=total elapsed_ms={}",
                                 exit_started.elapsed().as_millis()

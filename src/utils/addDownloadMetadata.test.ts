@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   appendRequestUrlsAfterVersion,
   applyMediaModeToRow,
+  buildMediaModesBySourceUrl,
   buildSelectedBySourceUrl,
   classifyMediaMetadataError,
   commonMediaFormatsForRows,
@@ -102,6 +103,44 @@ describe('add download metadata workflow', () => {
 
     expect(replacement.sourceUrl).toBe(manifestUrl);
     expect(replacement.selected).toBe(false);
+  });
+
+  it('carries only explicit media routing choices across discovery URL replacement', () => {
+    const pageUrl = 'https://video.example/watch?id=1';
+    const manifestUrl = 'https://cdn.example/master.m3u8';
+    const fileRow = row({ sourceUrl: pageUrl, mediaMode: 'file', isMedia: false });
+    const mediaModesBySourceUrl = buildMediaModesBySourceUrl([fileRow], {
+      [manifestUrl]: { replacesUrl: pageUrl }
+    });
+
+    const [replacement] = reconcileDownloadRows(
+      manifestUrl,
+      [fileRow],
+      undefined,
+      new Set([manifestUrl]),
+      undefined,
+      {},
+      { [manifestUrl]: 2 },
+      {},
+      {},
+      new Set(),
+      {},
+      {},
+      mediaModesBySourceUrl
+    );
+
+    expect(mediaModesBySourceUrl[manifestUrl]).toBe('file');
+    expect(replacement).toMatchObject({
+      sourceUrl: manifestUrl,
+      downloadUrl: manifestUrl,
+      mediaMode: 'file',
+      isMedia: false
+    });
+
+    const autoRow = row({ sourceUrl: pageUrl, mediaMode: 'auto', isMedia: true });
+    expect(buildMediaModesBySourceUrl([autoRow], {
+      [manifestUrl]: { replacesUrl: pageUrl }
+    })).toEqual({});
   });
 
   it('deduplicates normalized URLs and marks malformed or unsupported URLs invalid', () => {

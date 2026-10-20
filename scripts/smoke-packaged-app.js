@@ -45,6 +45,8 @@ let stderr = '';
 let spawnError = null;
 let readyPort = null;
 let childExit = null;
+let frontendCoreReadyMs = null;
+let startupLogTail = '';
 
 child.on('error', error => {
   spawnError = error;
@@ -60,7 +62,13 @@ child.on('exit', (code, signal) => {
 child.stderr.on('data', data => {
   stderr += data.toString();
 });
-child.stdout.on('data', () => {});
+child.stdout.on('data', data => {
+  startupLogTail = `${startupLogTail}${data.toString()}`.slice(-64 * 1024);
+  const match = startupLogTail.match(
+    /app_startup_milestone=frontend_core_ready total_elapsed_ms=(\d+)/,
+  );
+  if (match) frontendCoreReadyMs = Number(match[1]);
+});
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -272,6 +280,27 @@ Get-CimInstance Win32_Process |
   }
 }
 
+function readFrontendReadyElapsedMs() {
+  if (!smokeStorageRoot) return null;
+  const logRoot = path.join(smokeStorageRoot, 'data', 'logs');
+  try {
+    const logFiles = fs.readdirSync(logRoot)
+      .filter(name => name.endsWith('.log'))
+      .map(name => path.join(logRoot, name));
+    let latest = null;
+    for (const logFile of logFiles) {
+      const contents = fs.readFileSync(logFile, 'utf8');
+      const matches = contents.matchAll(
+        /app_startup_milestone=frontend_core_ready total_elapsed_ms=(\d+)/g,
+      );
+      for (const match of matches) latest = Number(match[1]);
+    }
+    return latest;
+  } catch {
+    return null;
+  }
+}
+
 function terminateWindowsBundleProcesses() {
   const root = windowsBundleRoot();
   const script = `
@@ -397,8 +426,15 @@ try {
   }
 
   await assertStableReady();
+  frontendCoreReadyMs ??= readFrontendReadyElapsedMs();
+  if (frontendCoreReadyMs === null) {
+    throw new Error('Packaged Firelink did not report frontend core readiness.');
+  }
 
-  console.log(`Packaged Firelink smoke passed on 127.0.0.1:${readyPort} with ${stabilityMs}ms stability`);
+  console.log(
+    `Packaged Firelink smoke passed on 127.0.0.1:${readyPort} with ${stabilityMs}ms stability; ` +
+    `frontend core ready after ${frontendCoreReadyMs}ms`,
+  );
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
@@ -407,6 +443,10 @@ try {
     console.error('Packaged Firelink could not be terminated cleanly; refusing to report smoke success.');
     process.exitCode = 1;
   } else if (smokeStorageRoot) {
-    fs.rmSync(smokeStorageRoot, { recursive: true, force: true });
+    if (process.env.FIRELINK_KEEP_SMOKE_STORAGE === '1') {
+      console.log('Retained isolated packaged smoke storage for diagnostics.');
+    } else {
+      fs.rmSync(smokeStorageRoot, { recursive: true, force: true });
+    }
   }
 }

@@ -753,6 +753,7 @@ type Aria2ControlLocks = Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>;
 pub struct Aria2GidMapping {
     pub id: String,
     pub epoch: u64,
+    pub owner_revision: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1460,6 +1461,10 @@ pub struct QueueManager<R: tauri::Runtime = tauri::Wry> {
     /// Monotonic per-download aria2 control generation. Long-running queued
     /// resume tasks capture this and abort when a later pause/remove wins.
     aria2_control_epochs: Mutex<HashMap<String, u64>>,
+    /// Monotonic per-download mapping revision. Unlike the control epoch,
+    /// this advances when Aria2 replaces a GID without resetting the
+    /// connection-recovery budget for the active control epoch.
+    aria2_owner_revisions: Mutex<HashMap<String, u64>>,
 
     /// Backend-owned power policy and active-transfer accounting.
     power_manager: Arc<PowerManager>,
@@ -1539,6 +1544,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             aria2_control_locks: Arc::new(StdMutex::new(HashMap::new())),
             aria2_gid_state: Mutex::new(()),
             aria2_control_epochs: Mutex::new(HashMap::new()),
+            aria2_owner_revisions: Mutex::new(HashMap::new()),
             power_manager: PowerManager::new(),
             spawner,
             app_handle,
@@ -1993,11 +1999,32 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .ok_or(())
     }
 
-    fn emit_waiting_to_seed(&self, id: &str, remaining: Option<f64>) {
+    async fn emit_waiting_to_seed(&self, id: &str, remaining: Option<f64>) {
         use tauri::Emitter;
+        let Some(gid) = self.aria2_gid_for_download(id) else {
+            return;
+        };
+        let Some(mapping) = self.aria2_gid_mapping(&gid) else {
+            return;
+        };
+        let lifecycle_generation = self
+            .registered_lifecycle_generation(id)
+            .await
+            .unwrap_or_default();
+        if !self.is_aria2_control_epoch_current(id, mapping.epoch).await
+            || !self.is_current_aria2_gid_mapping(&gid, &mapping)
+        {
+            return;
+        }
+        let event = DownloadStateEvent::waiting_to_seed(id, remaining).with_aria2_owner(
+            &gid,
+            lifecycle_generation,
+            mapping.epoch,
+            mapping.owner_revision,
+        );
         let _ = self.app_handle.emit(
             "download-state",
-            DownloadStateEvent::waiting_to_seed(id, remaining),
+            event,
         );
     }
 
@@ -2093,7 +2120,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
             return;
         }
         let epoch = self.next_aria2_control_epoch(&id).await;
-        if !self.rebind_aria2_gid_epoch(&id, &gid, epoch).await {
+        let owner_revision = self.current_aria2_owner_revision(&id).await;
+        if !self
+            .rebind_aria2_gid_epoch(&id, &gid, epoch, owner_revision)
+            .await
+        {
             self.release_aria2_permit_candidate(&id, waiter.lifecycle_generation)
                 .await;
             self.abandon_seed_start(&id);
@@ -2120,7 +2151,14 @@ impl<R: tauri::Runtime> QueueManager<R> {
         match self.spawner.resume_for_seed(&gid).await {
             Ok(Aria2SeedControlOutcome::Resumed) => {
                 if !self.is_aria2_control_epoch_current(&id, epoch).await
-                    || !self.is_current_aria2_gid_mapping(&gid, &Aria2GidMapping { id: id.clone(), epoch })
+                    || !self.is_current_aria2_gid_mapping(
+                        &gid,
+                        &Aria2GidMapping {
+                            id: id.clone(),
+                            epoch,
+                            owner_revision,
+                        },
+                    )
                 {
                     let _ = self.spawner.pause_for_seed(&gid).await;
                     self.release_download_permit_for_seed(&id).await;
@@ -2133,7 +2171,15 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 // see a resumed seeder before the permit transition finishes.
                 self.release_download_permit_for_seed(&id).await;
                 self.finish_seed_start(&id);
-                self.emit_state(&id, DownloadStatus::Seeding);
+                self.emit_aria2_state_with_owner(
+                    &id,
+                    DownloadStatus::Seeding,
+                    &gid,
+                    epoch,
+                    waiter.lifecycle_generation,
+                    owner_revision,
+                )
+                .await;
             }
             Ok(Aria2SeedControlOutcome::Complete) => {
                 self.finish_seed_start(&id);
@@ -2154,7 +2200,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     queue_id: waiter.queue_id,
                     lifecycle_generation: waiter.lifecycle_generation,
                 });
-                self.emit_waiting_to_seed(&id, remaining);
+                self.emit_waiting_to_seed(&id, remaining).await;
             }
             Err(error) => {
                 // An unverified unpause must not release either the seed
@@ -2168,7 +2214,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     id,
                     error
                 );
-                self.emit_waiting_to_seed(&id, None);
+                self.emit_waiting_to_seed(&id, None).await;
                 let retry_waiter = SeedWaiter {
                     id: id.clone(),
                     queue_id: waiter.queue_id.clone(),
@@ -2177,7 +2223,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 let manager = Arc::clone(&self);
                 tauri::async_runtime::spawn(async move {
                     manager
-                        .retry_ambiguous_seed_resume(retry_waiter, gid, epoch)
+                        .retry_ambiguous_seed_resume(retry_waiter, gid, epoch, owner_revision)
                         .await;
                 });
             }
@@ -2189,6 +2235,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         waiter: SeedWaiter,
         gid: String,
         epoch: u64,
+        owner_revision: u64,
     ) {
         let mut delay = Duration::from_millis(250);
         loop {
@@ -2240,6 +2287,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     &Aria2GidMapping {
                         id: waiter.id.clone(),
                         epoch,
+                        owner_revision,
                     },
                 );
             if !lifecycle_current {
@@ -2254,6 +2302,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                             &Aria2GidMapping {
                                 id: waiter.id.clone(),
                                 epoch,
+                                owner_revision,
                             },
                         )
                     {
@@ -2265,7 +2314,15 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     self.record_seed_started(&waiter.id).await;
                     self.release_download_permit_for_seed(&waiter.id).await;
                     self.finish_seed_start(&waiter.id);
-                    self.emit_state(&waiter.id, DownloadStatus::Seeding);
+                    self.emit_aria2_state_with_owner(
+                        &waiter.id,
+                        DownloadStatus::Seeding,
+                        &gid,
+                        epoch,
+                        waiter.lifecycle_generation,
+                        owner_revision,
+                    )
+                    .await;
                     return;
                 }
                 Ok(Aria2SeedControlOutcome::Complete) => {
@@ -2288,7 +2345,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                         queue_id: waiter.queue_id.clone(),
                         lifecycle_generation: waiter.lifecycle_generation,
                     });
-                    self.emit_waiting_to_seed(&waiter.id, remaining);
+                    self.emit_waiting_to_seed(&waiter.id, remaining).await;
                     return;
                 }
                 Err(error) => {
@@ -2735,7 +2792,10 @@ impl<R: tauri::Runtime> QueueManager<R> {
         // evidence from the prior generation only after admission can no
         // longer roll back.
         self.clear_media_terminal_state(&id).await;
-        self.emit_state(id, DownloadStatus::Queued);
+        use tauri::Emitter;
+        let event = DownloadStateEvent::new(id, DownloadStatus::Queued)
+            .with_lifecycle_generation(generation);
+        let _ = self.app_handle.emit("download-state", event);
         self.notify.notify_one();
         Ok(())
     }
@@ -2897,8 +2957,34 @@ impl<R: tauri::Runtime> QueueManager<R> {
         let mut epochs = self.aria2_control_epochs.lock().await;
         let epoch = epochs.get(id).copied().unwrap_or_default().wrapping_add(1);
         epochs.insert(id.to_string(), epoch);
+        drop(epochs);
+        self.next_aria2_owner_revision(id).await;
         self.notify.notify_waiters();
         epoch
+    }
+
+    /// Advance the presentation owner sequence without changing the control
+    /// epoch. GID replacement uses this so recovery-budget accounting remains
+    /// scoped to its existing control epoch.
+    pub async fn next_aria2_owner_revision(&self, id: &str) -> u64 {
+        let mut revisions = self.aria2_owner_revisions.lock().await;
+        let revision = revisions
+            .get(id)
+            .copied()
+            .unwrap_or_default()
+            .checked_add(1)
+            .expect("Aria2 owner revision exhausted");
+        revisions.insert(id.to_string(), revision);
+        revision
+    }
+
+    pub async fn current_aria2_owner_revision(&self, id: &str) -> u64 {
+        self.aria2_owner_revisions
+            .lock()
+            .await
+            .get(id)
+            .copied()
+            .unwrap_or_default()
     }
 
     pub async fn is_aria2_control_epoch_current(&self, id: &str, epoch: u64) -> bool {
@@ -4896,11 +4982,75 @@ impl<R: tauri::Runtime> QueueManager<R> {
         self.aria2_dispatch_hold.load(Ordering::Acquire)
     }
 
-    pub(crate) fn emit_state(&self, id: impl Into<String>, status: DownloadStatus) {
+    pub(crate) fn emit_state_for_lifecycle(
+        &self,
+        id: impl Into<String>,
+        status: DownloadStatus,
+        lifecycle_generation: u64,
+    ) {
         use tauri::Emitter;
-        let _ = self
-            .app_handle
-            .emit("download-state", DownloadStateEvent::new(id, status));
+        let event = DownloadStateEvent::new(id, status)
+            .with_lifecycle_generation(lifecycle_generation);
+        let _ = self.app_handle.emit("download-state", event);
+    }
+
+    pub(crate) async fn emit_aria2_state_with_owner(
+        &self,
+        id: &str,
+        status: DownloadStatus,
+        gid: &str,
+        control_epoch: u64,
+        lifecycle_generation: u64,
+        owner_revision: u64,
+    ) {
+        let mapping = Aria2GidMapping {
+            id: id.to_string(),
+            epoch: control_epoch,
+            owner_revision,
+        };
+        if !self
+            .is_registered_generation_or_legacy(id, lifecycle_generation)
+            .await
+            || !self.is_aria2_control_epoch_current(id, control_epoch).await
+            || !self.is_current_aria2_gid_mapping(gid, &mapping)
+        {
+            return;
+        }
+
+        use tauri::Emitter;
+        let event = DownloadStateEvent::new(id, status).with_aria2_owner(
+            gid,
+            lifecycle_generation,
+            control_epoch,
+            owner_revision,
+        );
+        let _ = self.app_handle.emit("download-state", event);
+    }
+
+    pub(crate) async fn emit_current_aria2_state(
+        &self,
+        id: &str,
+        status: DownloadStatus,
+    ) {
+        let Some(gid) = self.aria2_gid_for_download(id) else {
+            return;
+        };
+        let Some(mapping) = self.aria2_gid_mapping(&gid) else {
+            return;
+        };
+        let lifecycle_generation = self
+            .registered_lifecycle_generation(id)
+            .await
+            .unwrap_or_default();
+        self.emit_aria2_state_with_owner(
+            id,
+            status,
+            &gid,
+            mapping.epoch,
+            lifecycle_generation,
+            mapping.owner_revision,
+        )
+        .await;
     }
 
     fn emit_allocation_event(&self, id: &str, pending: bool, lifecycle_generation: u64) {
@@ -5321,7 +5471,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
         // active at this point, so publish their live state before spawning
         // the runner; Aria2 tasks publish only after remember_gid below.
         if matches!(&task.kind, TaskKind::Media) {
-            self.emit_state(&id, DownloadStatus::Downloading);
+            self.emit_state_for_lifecycle(
+                &id,
+                DownloadStatus::Downloading,
+                lifecycle_generation,
+            );
         }
 
         match &task.kind {
@@ -5402,10 +5556,22 @@ impl<R: tauri::Runtime> QueueManager<R> {
                         // lets the UI (and a concurrent Properties pause)
                         // act on a lifecycle that does not yet exist.
                         let buffered_outcome = self.remember_gid(id.clone(), gid.clone()).await;
+                        let owner_revision = self
+                            .aria2_gid_mapping(&gid)
+                            .map(|mapping| mapping.owner_revision)
+                            .unwrap_or_default();
                         self.forget_pending_order_ordinal(&id, lifecycle_generation)
                             .await;
                         if buffered_outcome.is_none() {
-                            self.emit_state(&id, DownloadStatus::Downloading);
+                            self.emit_aria2_state_with_owner(
+                                &id,
+                                DownloadStatus::Downloading,
+                                &gid,
+                                lifecycle_epoch,
+                                lifecycle_generation,
+                                owner_revision,
+                            )
+                            .await;
                         }
                         let install_web_seeds = buffered_outcome.is_none()
                             && task.payload.is_torrent
@@ -5500,7 +5666,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                             self.clear_aria2_retry_state(&id).await;
                             self.release_permit(&id).await;
                             self.release_registered_id(&id).await;
-                            self.emit_failed(&id, error);
+                            self.emit_failed(&id, error, lifecycle_generation);
                         } else {
                             self.forget_pending_order_ordinal(&id, lifecycle_generation)
                                 .await;
@@ -5691,12 +5857,17 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     self.app_handle
                         .emit(
                             "download-state",
-                            DownloadStateEvent::completed_with_file(id, file_name),
+                            DownloadStateEvent::completed_with_file(id, file_name)
+                                .with_lifecycle_generation(lifecycle_generation),
                         )
                         .is_ok()
                 });
                 if !completed_with_file {
-                    self.emit_state(id, DownloadStatus::Completed);
+                    self.emit_state_for_lifecycle(
+                        id,
+                        DownloadStatus::Completed,
+                        lifecycle_generation,
+                    );
                 }
                 self.release_registered_id_for_generation(id, lifecycle_generation)
                     .await;
@@ -5706,7 +5877,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     .await;
             }
             Err(error) => {
-                self.emit_failed(id, error);
+                self.emit_failed(id, error, lifecycle_generation);
                 self.release_registered_id_for_generation(id, lifecycle_generation)
                     .await;
             }
@@ -5715,8 +5886,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .await;
     }
 
-    fn emit_failed(&self, id: &str, error: String) {
-        self.emit_failed_with_progress(id, error, None);
+    fn emit_failed(&self, id: &str, error: String, lifecycle_generation: u64) {
+        use tauri::Emitter;
+        let event = DownloadStateEvent::failed(id, error)
+            .with_lifecycle_generation(lifecycle_generation);
+        let _ = self.app_handle.emit("download-state", event);
     }
 
     fn emit_failed_with_progress(
@@ -5724,9 +5898,18 @@ impl<R: tauri::Runtime> QueueManager<R> {
         id: &str,
         error: String,
         progress: Option<DownloadStateProgress>,
+        aria2_owner: Option<(String, u64, u64, u64)>,
     ) {
         use tauri::Emitter;
         let mut event = DownloadStateEvent::failed(id, error);
+        if let Some((gid, lifecycle_generation, control_epoch, owner_revision)) = aria2_owner {
+            event = event.with_aria2_owner(
+                gid,
+                lifecycle_generation,
+                control_epoch,
+                owner_revision,
+            );
+        }
         if let Some(progress) = progress {
             event = event.with_progress(progress);
         }
@@ -5740,9 +5923,18 @@ impl<R: tauri::Runtime> QueueManager<R> {
         id: &str,
         error: String,
         progress: Option<DownloadStateProgress>,
+        aria2_owner: Option<(String, u64, u64, u64)>,
     ) {
         use tauri::Emitter;
         let mut event = DownloadStateEvent::paused_with_error(id, error);
+        if let Some((gid, lifecycle_generation, control_epoch, owner_revision)) = aria2_owner {
+            event = event.with_aria2_owner(
+                gid,
+                lifecycle_generation,
+                control_epoch,
+                owner_revision,
+            );
+        }
         if let Some(progress) = progress {
             event = event.with_progress(progress);
         }
@@ -5764,6 +5956,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         let epoch = self.current_aria2_control_epoch(&id).await;
         let buffered_outcome = {
             let _gid_state = self.aria2_gid_state.lock().await;
+            let owner_revision = self.next_aria2_owner_revision(&id).await;
             let mut replaced_gids = Vec::new();
             {
                 let mut gids = self.aria2_gids.write().unwrap();
@@ -5785,6 +5978,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     Aria2GidMapping {
                         id: id.clone(),
                         epoch,
+                        owner_revision,
                     },
                 );
             }
@@ -5821,8 +6015,20 @@ impl<R: tauri::Runtime> QueueManager<R> {
     /// Rebind an existing paused GID to the new lifecycle created by resume.
     /// The GID remains stable across aria2.pause/unpause, but its previous
     /// epoch must not be reused after a pause invalidated that lifecycle.
-    pub async fn rebind_aria2_gid_epoch(&self, id: &str, gid: &str, epoch: u64) -> bool {
+    pub async fn rebind_aria2_gid_epoch(
+        &self,
+        id: &str,
+        gid: &str,
+        epoch: u64,
+        owner_revision: u64,
+    ) -> bool {
+        if self.current_aria2_owner_revision(id).await != owner_revision {
+            return false;
+        }
         let _gid_state = self.aria2_gid_state.lock().await;
+        if self.current_aria2_owner_revision(id).await != owner_revision {
+            return false;
+        }
         {
             let mut gids = self.aria2_gids.write().unwrap();
             let Some(mapping) = gids.get_mut(gid) else {
@@ -5832,6 +6038,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 return false;
             }
             mapping.epoch = epoch;
+            mapping.owner_revision = owner_revision;
         }
         if let Some(options) = self.aria2_connection_options.lock().await.get_mut(id) {
             options.epoch = epoch;
@@ -5840,6 +6047,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
             if let Some(payload_mapping) = self.aria2_magnet_payload_gids.lock().await.get_mut(id) {
                 if payload_mapping.id == id {
                     payload_mapping.epoch = epoch;
+                    payload_mapping.owner_revision = owner_revision;
                 }
             }
         }
@@ -5887,6 +6095,20 @@ impl<R: tauri::Runtime> QueueManager<R> {
         outcome: PendingOutcome,
         progress: Option<DownloadStateProgress>,
     ) {
+        let terminal_lifecycle_generation = self
+            .registered_lifecycle_generation(id)
+            .await
+            .unwrap_or_default();
+        let terminal_owner = self.aria2_gid_for_download(id).and_then(|gid| {
+            self.aria2_gid_mapping(&gid).and_then(|mapping| {
+                (mapping.id == id).then_some((
+                    gid,
+                    terminal_lifecycle_generation,
+                    mapping.epoch,
+                    mapping.owner_revision,
+                ))
+            })
+        });
         self.clear_aria2_magnet_handoff(id).await;
         self.clear_aria2_allocation(id).await;
         if matches!(&outcome, PendingOutcome::Complete) {
@@ -5928,12 +6150,14 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     // existing seeder must be counted before admitting new
                     // seeders.
                     self.record_seed_started(id).await;
-                    self.emit_state(id, DownloadStatus::Seeding);
+                    self.emit_current_aria2_state(id, DownloadStatus::Seeding)
+                        .await;
                     return;
                 }
                 match self.admit_seed_after_completion(id).await {
                     SeedAdmissionOutcome::Seeding => {
-                        self.emit_state(id, DownloadStatus::Seeding);
+                        self.emit_current_aria2_state(id, DownloadStatus::Seeding)
+                            .await;
                         return;
                     }
                     SeedAdmissionOutcome::Waiting => {
@@ -5943,7 +6167,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                             .await
                             .get(id)
                             .and_then(|payload| payload.torrent_seed_remaining);
-                        self.emit_waiting_to_seed(id, remaining);
+                        self.emit_waiting_to_seed(id, remaining).await;
                         return;
                     }
                     SeedAdmissionOutcome::Complete => PendingOutcome::Complete,
@@ -6028,6 +6252,16 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 self.release_registered_id(id).await;
                 self.release_permit(id).await;
                 let mut event = DownloadStateEvent::new(id, restored_status);
+                if let Some((gid, lifecycle_generation, control_epoch, owner_revision)) =
+                    terminal_owner.clone()
+                {
+                    event = event.with_aria2_owner(
+                        gid,
+                        lifecycle_generation,
+                        control_epoch,
+                        owner_revision,
+                    );
+                }
                 if let Some(progress) = progress {
                     event = event.with_progress(progress);
                 }
@@ -6099,7 +6333,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 self.release_registered_id(id).await;
                 self.release_permit(id).await;
                 if verification_only {
-                    self.emit_paused_with_error_and_progress(id, error, progress);
+                    self.emit_paused_with_error_and_progress(
+                        id,
+                        error,
+                        progress,
+                        terminal_owner.clone(),
+                    );
                 } else {
                     let aria2_code = aria2_error_code(&error).unwrap_or_else(|| "none".to_string());
                     log::error!(
@@ -6113,7 +6352,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
                         network_error_class(&error),
                         aria2_code
                     );
-                    self.emit_failed_with_progress(id, error, progress);
+                    self.emit_failed_with_progress(id, error, progress, terminal_owner.clone());
                 }
             }
             PendingOutcome::Seeding => unreachable!("seeding outcomes are normalized before terminal cleanup"),
@@ -6817,7 +7056,45 @@ impl<R: tauri::Runtime> QueueManager<R> {
                 return Ok(());
             }
 
+            // A replacement GID is a new observable owner even when the
+            // control epoch and queue permit remain unchanged. Advance only
+            // the owner revision so connection-recovery budget accounting
+            // remains scoped to this control epoch.
+            self.clear_aria2_allocation_for_epoch(id, observed_epoch)
+                .await;
+            if let Some(payload) = payload.as_ref() {
+                let lifecycle_generation = self
+                    .registered_lifecycle_generation(id)
+                    .await
+                    .unwrap_or_default();
+                self.begin_aria2_allocation(
+                    id,
+                    observed_epoch,
+                    lifecycle_generation,
+                    payload,
+                )
+                .await;
+            }
             let buffered_outcome = self.remember_gid(id.to_string(), new_gid.clone()).await;
+            if buffered_outcome.is_none() {
+                let lifecycle_generation = self
+                    .registered_lifecycle_generation(id)
+                    .await
+                    .unwrap_or_default();
+                let owner_revision = self
+                    .aria2_gid_mapping(&new_gid)
+                    .map(|mapping| mapping.owner_revision)
+                    .unwrap_or_default();
+                self.emit_aria2_state_with_owner(
+                    id,
+                    DownloadStatus::Downloading,
+                    &new_gid,
+                    observed_epoch,
+                    lifecycle_generation,
+                    owner_revision,
+                )
+                .await;
+            }
             log::info!(
                 "aria2 connection recovery [{}]: recreated gid {} from {} while retaining the lifecycle permit",
                 id,
@@ -6853,13 +7130,25 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     return Ok(());
                 }
 
-                self.next_aria2_control_epoch(id).await;
+                let paused_epoch = self.next_aria2_control_epoch(id).await;
+                let owner_revision = self.current_aria2_owner_revision(id).await;
+                let lifecycle_generation = self
+                    .registered_lifecycle_generation(id)
+                    .await
+                    .unwrap_or_default();
                 self.cancel_aria2_retries(id).await;
                 self.clear_aria2_retry_state(id).await;
                 self.forget_aria2_gid(id).await;
                 self.release_registered_id(id).await;
                 self.release_permit(id).await;
-                self.emit_state(id, DownloadStatus::Paused);
+                use tauri::Emitter;
+                let event = DownloadStateEvent::new(id, DownloadStatus::Paused).with_aria2_owner(
+                    gid,
+                    lifecycle_generation,
+                    paused_epoch,
+                    owner_revision,
+                );
+                let _ = self.app_handle.emit("download-state", event);
                 log::warn!(
                     "aria2 connection recovery [stage=recovery id={} gid={} result=paused_unavailable error_class={} error_code={}]",
                     id,
@@ -6888,10 +7177,22 @@ impl<R: tauri::Runtime> QueueManager<R> {
         match outcome {
             Aria2RefreshOutcome::Resumed => {}
             Aria2RefreshOutcome::Paused => {
-                self.next_aria2_control_epoch(id).await;
+                let paused_epoch = self.next_aria2_control_epoch(id).await;
+                let owner_revision = self.current_aria2_owner_revision(id).await;
+                let lifecycle_generation = self
+                    .registered_lifecycle_generation(id)
+                    .await
+                    .unwrap_or_default();
                 self.cancel_aria2_retries(id).await;
                 self.release_permit(id).await;
-                self.emit_state(id, DownloadStatus::Paused);
+                use tauri::Emitter;
+                let event = DownloadStateEvent::new(id, DownloadStatus::Paused).with_aria2_owner(
+                    gid,
+                    lifecycle_generation,
+                    paused_epoch,
+                    owner_revision,
+                );
+                let _ = self.app_handle.emit("download-state", event);
                 log::warn!(
                     "aria2 connection refresh [{}]: gid {} remained paused; released its queue permit",
                     id,
@@ -7022,7 +7323,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
         };
         if current_mapping
             .as_ref()
-            .is_none_or(|current| current.id != mapping.id || current.epoch != mapping.epoch)
+            .is_none_or(|current| {
+                current.id != mapping.id
+                    || current.epoch != mapping.epoch
+                    || current.owner_revision != mapping.owner_revision
+            })
             || !self
                 .is_aria2_control_epoch_current(&mapping.id, mapping.epoch)
                 .await
@@ -7122,6 +7427,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
             .await
             .insert(gid.to_string());
         let retry_epoch = self.current_aria2_control_epoch(&id).await;
+        let retry_owner_revision = mapping.owner_revision;
+        let retry_lifecycle_generation = self
+            .registered_lifecycle_generation(&id)
+            .await
+            .unwrap_or_default();
         let already_inflight = {
             let mut inflight = self.aria2_retry_inflight.lock().await;
             inflight.insert(id.clone(), retry_epoch).is_some()
@@ -7172,7 +7482,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
             };
             let outcome = backoff_and_emit(strike, error_for_emit, retry_cancel, |reason| {
                 use tauri::Emitter;
-                let event = DownloadStateEvent::retrying(&id_for_task, reason);
+                let event = DownloadStateEvent::retrying(&id_for_task, reason).with_aria2_owner(
+                    &retry_gid,
+                    retry_lifecycle_generation,
+                    retry_epoch,
+                    retry_owner_revision,
+                );
                 let _ = this.app_handle.emit("download-state", event);
             })
             .await;
@@ -7268,13 +7583,25 @@ impl<R: tauri::Runtime> QueueManager<R> {
                         .insert(id_for_task.clone(), strike + 1);
                     let new_gid_for_event = new_gid.clone();
                     let buffered_outcome = this.remember_gid(id_for_task.clone(), new_gid).await;
+                    let owner_revision = this
+                        .aria2_gid_mapping(&new_gid_for_event)
+                        .map(|mapping| mapping.owner_revision)
+                        .unwrap_or_default();
                     // Install the replacement GID before exposing the
                     // Downloading state. If Aria2 completed or failed the
                     // replacement before the mapping was installed, apply
                     // that buffered terminal outcome directly and never
                     // publish a stale transient state.
                     if buffered_outcome.is_none() {
-                        this.emit_state(&id_for_task, DownloadStatus::Downloading);
+                        this.emit_aria2_state_with_owner(
+                            &id_for_task,
+                            DownloadStatus::Downloading,
+                            &new_gid_for_event,
+                            retry_epoch,
+                            lifecycle_generation,
+                            owner_revision,
+                        )
+                        .await;
                     }
                     // The old gid remains marked as retrying until the new
                     // mapping is installed, so a duplicate old event is
@@ -7404,7 +7731,11 @@ impl<R: tauri::Runtime> QueueManager<R> {
         };
         if current_mapping
             .as_ref()
-            .is_none_or(|current| current.id != mapping.id || current.epoch != mapping.epoch)
+            .is_none_or(|current| {
+                current.id != mapping.id
+                    || current.epoch != mapping.epoch
+                    || current.owner_revision != mapping.owner_revision
+            })
             || !self
                 .is_aria2_control_epoch_current(&mapping.id, mapping.epoch)
                 .await
@@ -7422,7 +7753,20 @@ impl<R: tauri::Runtime> QueueManager<R> {
                     // A metadata parent is not the user's payload. Keep the
                     // current permit and mapping alive until the next
                     // poll/reconnect observation exposes the child GID.
-                    self.emit_state(&mapping.id, DownloadStatus::Downloading);
+                    if let Some(lifecycle_generation) = self
+                        .registered_lifecycle_generation(&mapping.id)
+                        .await
+                    {
+                        self.emit_aria2_state_with_owner(
+                            &mapping.id,
+                            DownloadStatus::Downloading,
+                            gid,
+                            mapping.epoch,
+                            lifecycle_generation,
+                            mapping.owner_revision,
+                        )
+                        .await;
+                    }
                     return;
                 }
                 Aria2MagnetCompletionDisposition::Failed(error) => {
@@ -7471,14 +7815,42 @@ impl<R: tauri::Runtime> QueueManager<R> {
                                 // flight. Mirror the normal pause boundary so
                                 // this handoff cannot strand a queue permit.
                                 self.clear_aria2_allocation(&id).await;
-                                self.next_aria2_control_epoch(&id).await;
+                                let paused_epoch = self.next_aria2_control_epoch(&id).await;
+                                let owner_revision = self.current_aria2_owner_revision(&id).await;
+                                let lifecycle_generation = self
+                                    .registered_lifecycle_generation(&id)
+                                    .await
+                                    .unwrap_or_default();
                                 self.cancel_aria2_retries(&id).await;
                                 self.release_seed_tracking(&id);
                                 self.release_permit(&id).await;
-                                self.emit_state(&id, DownloadStatus::Paused);
+                                use tauri::Emitter;
+                                let event = DownloadStateEvent::new(&id, DownloadStatus::Paused)
+                                    .with_aria2_owner(
+                                        &child.gid,
+                                        lifecycle_generation,
+                                        paused_epoch,
+                                        owner_revision,
+                                    );
+                                let _ = self.app_handle.emit("download-state", event);
                             }
                             "active" | "waiting" => {
-                                self.emit_state(&id, DownloadStatus::Downloading)
+                                if let Some(mapping) = self.aria2_gid_mapping(&child.gid) {
+                                    if let Some(lifecycle_generation) = self
+                                        .registered_lifecycle_generation(&id)
+                                        .await
+                                    {
+                                        self.emit_aria2_state_with_owner(
+                                            &id,
+                                            DownloadStatus::Downloading,
+                                            &child.gid,
+                                            mapping.epoch,
+                                            lifecycle_generation,
+                                            mapping.owner_revision,
+                                        )
+                                        .await;
+                                    }
+                                }
                             }
                             _ => {}
                         }
@@ -7786,6 +8158,17 @@ impl BoundedRangeSupport {
     }
 }
 
+fn effective_connections_for_range_support(
+    requested: i32,
+    range_support: BoundedRangeSupport,
+) -> i32 {
+    if requested > 1 && range_support == BoundedRangeSupport::Unsupported {
+        1
+    } else {
+        requested
+    }
+}
+
 struct HttpTransferProbe {
     final_uri: String,
     range_support: BoundedRangeSupport,
@@ -7945,7 +8328,10 @@ async fn prepare_normal_transfer(
                             epoch,
                             uri_host_for_log(&uri)
                         );
-                        connections = 1;
+                        connections = effective_connections_for_range_support(
+                            requested,
+                            probe.range_support,
+                        );
                     }
                     BoundedRangeSupport::Unknown if requested > 1 => {
                         log::debug!(
@@ -12259,6 +12645,10 @@ mod tests {
                 Aria2GidMapping {
                     id: id.to_string(),
                     epoch: 0,
+                    owner_revision: manager
+                        .aria2_gid_mapping(gid)
+                        .expect("mapped GID")
+                        .owner_revision,
                 },
             );
         assert!(!manager
@@ -14012,6 +14402,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_epoch_gid_replacement_advances_owner_revision_only() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
+        let id = "same-epoch-owner-replacement";
+        let epoch = manager.next_aria2_control_epoch(id).await;
+        manager
+            .remember_gid(id.to_string(), "gid-old".to_string())
+            .await;
+        let old_mapping = manager.aria2_gid_mapping("gid-old").expect("old mapping");
+
+        manager
+            .remember_gid(id.to_string(), "gid-new".to_string())
+            .await;
+        let new_mapping = manager.aria2_gid_mapping("gid-new").expect("new mapping");
+
+        assert_eq!(manager.current_aria2_control_epoch(id).await, epoch);
+        assert_eq!(new_mapping.epoch, old_mapping.epoch);
+        assert!(new_mapping.owner_revision > old_mapping.owner_revision);
+        assert!(!manager.is_current_aria2_gid_mapping("gid-old", &old_mapping));
+        assert!(manager.is_current_aria2_gid_mapping("gid-new", &new_mapping));
+    }
+
+    #[tokio::test]
     async fn separate_seed_capacity_pauses_fairly_and_rebinds_before_resume() {
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -14320,6 +14735,26 @@ mod tests {
         assert_eq!(
             classify_bounded_range_response(reqwest::StatusCode::RANGE_NOT_SATISFIABLE, None),
             BoundedRangeSupport::Unsupported
+        );
+    }
+
+    #[test]
+    fn unsupported_ranges_reduce_effective_connections_to_one() {
+        assert_eq!(
+            effective_connections_for_range_support(16, BoundedRangeSupport::Unsupported),
+            1
+        );
+        assert_eq!(
+            effective_connections_for_range_support(16, BoundedRangeSupport::Supported),
+            16
+        );
+        assert_eq!(
+            effective_connections_for_range_support(16, BoundedRangeSupport::Unknown),
+            16
+        );
+        assert_eq!(
+            effective_connections_for_range_support(1, BoundedRangeSupport::Unsupported),
+            1
         );
     }
 

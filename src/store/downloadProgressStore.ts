@@ -1,13 +1,29 @@
 import { create } from 'zustand';
 import type { DownloadProgressEvent } from '../bindings/DownloadProgressEvent';
 
+export interface Aria2ProgressOwner {
+  gid: string;
+  lifecycleGeneration: string;
+  controlEpoch: string;
+  ownerRevision: string;
+}
+
 interface DownloadProgressState {
   progressMap: Record<string, DownloadProgressEvent>;
   retainedProgressMap: Record<string, DownloadProgressEvent>;
   moveProgressMap: Record<string, number>;
+  aria2ProgressOwnerMap: Record<string, Aria2ProgressOwner>;
+  aria2ProgressOwnerWatermarkMap: Record<string, Aria2ProgressOwner>;
+  aria2LifecycleGenerationMap: Record<string, string>;
   updateDownloadProgress: (id: string, payload: DownloadProgressEvent) => void;
   clearDownloadProgress: (id: string) => void;
   resetDownloadProgress: (id: string) => void;
+  setAria2LifecycleGeneration: (id: string, generation: string) => boolean;
+  acceptAria2ProgressOwner: (
+    id: string,
+    owner: Aria2ProgressOwner,
+  ) => boolean;
+  clearAria2ProgressOwner: (id: string) => void;
   setMoveProgress: (id: string, fraction: number) => void;
   clearMoveProgress: (id: string) => void;
 }
@@ -65,6 +81,9 @@ export const useDownloadProgressStore = create<DownloadProgressState>((set) => (
   progressMap: {},
   retainedProgressMap: {},
   moveProgressMap: {},
+  aria2ProgressOwnerMap: {},
+  aria2ProgressOwnerWatermarkMap: {},
+  aria2LifecycleGenerationMap: {},
   updateDownloadProgress: (id, payload) =>
     set((state) => ({
       progressMap: {
@@ -89,18 +108,91 @@ export const useDownloadProgressStore = create<DownloadProgressState>((set) => (
     set((state) => {
       if (!(id in state.progressMap)
         && !(id in state.retainedProgressMap)
-        && !(id in state.moveProgressMap)) return state;
+        && !(id in state.moveProgressMap)
+        && !(id in state.aria2ProgressOwnerMap)
+        && !(id in state.aria2ProgressOwnerWatermarkMap)
+        && !(id in state.aria2LifecycleGenerationMap)) return state;
       const next = { ...state.progressMap };
       delete next[id];
       const nextRetained = { ...state.retainedProgressMap };
       delete nextRetained[id];
       const nextMove = { ...state.moveProgressMap };
       delete nextMove[id];
+      const nextOwners = { ...state.aria2ProgressOwnerMap };
+      delete nextOwners[id];
+      const nextWatermarks = { ...state.aria2ProgressOwnerWatermarkMap };
+      delete nextWatermarks[id];
+      const nextLifecycleGenerations = { ...state.aria2LifecycleGenerationMap };
+      delete nextLifecycleGenerations[id];
       return {
         progressMap: next,
         retainedProgressMap: nextRetained,
-        moveProgressMap: nextMove
+        moveProgressMap: nextMove,
+        aria2ProgressOwnerMap: nextOwners,
+        aria2ProgressOwnerWatermarkMap: nextWatermarks,
+        aria2LifecycleGenerationMap: nextLifecycleGenerations
       };
+    }),
+  setAria2LifecycleGeneration: (id, generation) => {
+    let accepted = false;
+    set((state) => {
+      const current = state.aria2LifecycleGenerationMap[id];
+      if (current !== undefined && BigInt(generation) < BigInt(current)) return state;
+      accepted = true;
+      if (current === generation) return state;
+      const nextGenerations = { ...state.aria2LifecycleGenerationMap, [id]: generation };
+      const nextOwners = { ...state.aria2ProgressOwnerMap };
+      delete nextOwners[id];
+      return {
+        aria2LifecycleGenerationMap: nextGenerations,
+        aria2ProgressOwnerMap: nextOwners
+      };
+    });
+    return accepted;
+  },
+  acceptAria2ProgressOwner: (id, owner) => {
+    let accepted = false;
+    set((state) => {
+      const expectedGeneration = state.aria2LifecycleGenerationMap[id];
+      if (expectedGeneration !== undefined && owner.lifecycleGeneration !== expectedGeneration) {
+        return state;
+      }
+      const watermark = state.aria2ProgressOwnerWatermarkMap[id];
+      if (watermark) {
+        const incomingGeneration = BigInt(owner.lifecycleGeneration);
+        const watermarkGeneration = BigInt(watermark.lifecycleGeneration);
+        if (incomingGeneration < watermarkGeneration) return state;
+        if (incomingGeneration === watermarkGeneration) {
+          const incomingEpoch = BigInt(owner.controlEpoch);
+          const watermarkEpoch = BigInt(watermark.controlEpoch);
+          if (incomingEpoch < watermarkEpoch) return state;
+          if (incomingEpoch === watermarkEpoch) {
+            const incomingRevision = BigInt(owner.ownerRevision);
+            const watermarkRevision = BigInt(watermark.ownerRevision);
+            if (incomingRevision < watermarkRevision) return state;
+            if (incomingRevision === watermarkRevision && owner.gid !== watermark.gid) {
+              return state;
+            }
+          }
+        }
+      }
+      accepted = true;
+      return {
+        aria2ProgressOwnerMap: { ...state.aria2ProgressOwnerMap, [id]: owner },
+        aria2ProgressOwnerWatermarkMap: {
+          ...state.aria2ProgressOwnerWatermarkMap,
+          [id]: owner
+        }
+      };
+    });
+    return accepted;
+  },
+  clearAria2ProgressOwner: (id) =>
+    set((state) => {
+      if (!(id in state.aria2ProgressOwnerMap)) return state;
+      const next = { ...state.aria2ProgressOwnerMap };
+      delete next[id];
+      return { aria2ProgressOwnerMap: next };
     }),
   setMoveProgress: (id, fraction) =>
     set((state) => ({

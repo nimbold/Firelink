@@ -529,6 +529,7 @@ const zhCN = {
     exitFlushFailed: 'Firelink 退出前无法保存所有更改：{{detail}}',
     exitFlushCancelled: '无法确认所有更改均已保存，因此 Firelink 已取消退出。',
     trayActionFailed: '无法完成托盘操作。请在 Firelink 中检查下载状态。',
+    trayUnavailable: 'Firelink 无法在此会话中创建系统托盘图标。请保持此窗口打开以控制 Firelink。',
     trayPersistenceFailed: 'Firelink 无法保存此托盘操作的更改。操作仍在队列中；请检查存储，然后再次使用托盘操作。',
     trayStartupPauseUnverified: 'Firelink 无法在启动时确认托盘操作，因此没有恢复已保存的下载。你可以手动恢复。',
     trayPausePartial: '“全部暂停”未能暂停 {{count}} 个下载。请在 Firelink 中检查其状态。',

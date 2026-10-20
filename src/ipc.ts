@@ -43,6 +43,11 @@ export type TrayActionResult = {
   operationFailed: boolean;
   persistenceFailed: boolean;
 };
+export type TrayActionExecution = Omit<TrayActionResult, 'action'>;
+export type TrayActionClaim = {
+  shouldExecute: boolean;
+  execution: TrayActionExecution | null;
+};
 
 type CommandMap = {
   fetch_metadata: {
@@ -155,7 +160,19 @@ type CommandMap = {
   delete_site_login: { args: { id: string }; result: void };
   inspect_download_target: { args: { path: string }; result: DownloadTargetInfo };
   toggle_tray_icon: { args: { show: boolean }; result: void };
+  has_startup_tray_warning: { args: undefined; result: boolean };
+  mark_frontend_core_ready: { args: undefined; result: void };
   take_pending_tray_action: { args: undefined; result: PendingTrayAction | null };
+  claim_pending_tray_action: { args: { id: string }; result: TrayActionClaim };
+  record_tray_action_result: {
+    args: {
+      id: string;
+      failedCount: number;
+      operationFailed: boolean;
+      persistenceFailed: boolean;
+    };
+    result: void;
+  };
   acknowledge_tray_action: {
     args: {
       id: string;

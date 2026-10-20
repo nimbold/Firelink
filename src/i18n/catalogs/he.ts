@@ -529,6 +529,7 @@ const he = {
     exitFlushFailed: 'Firelink לא הצליחה לשמור את כל השינויים לפני היציאה: {{detail}}',
     exitFlushCancelled: 'היציאה מ-Firelink בוטלה כי לא ניתן היה לאשר שכל השינויים נשמרו.',
     trayActionFailed: 'לא ניתן היה להשלים את פעולת מגש המערכת. בדוק את מצב ההורדות ב-Firelink.',
+    trayUnavailable: 'Firelink לא הצליחה ליצור את סמל מגש המערכת בהפעלה זו. השאר את החלון פתוח כדי לשלוט ב-Firelink.',
     trayPersistenceFailed: 'Firelink לא הצליחה לשמור את השינויים מפעולת המגש. הפעולה נשארת בתור; בדוק את האחסון ונסה שוב דרך המגש.',
     trayStartupPauseUnverified: 'Firelink לא הצליחה לאמת פעולות מגש בעת ההפעלה, ולכן ההורדות השמורות לא חודשו. אפשר לחדש אותן ידנית.',
     trayPausePartial: 'השהיית הכול לא הצליחה להשהות {{count}} הורדות. בדוק את מצבן ב-Firelink.',

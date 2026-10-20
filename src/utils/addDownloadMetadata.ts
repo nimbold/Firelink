@@ -393,6 +393,7 @@ export const reconcileDownloadRows = (
           : requestFilenames[input.sourceUrl];
         return {
           ...preserved,
+          downloadUrl: input.sourceUrl,
           file: contextChanged || playlistContextChanged
             ? canonicalizeDownloadFileName(requestedFilename || fileNameFromUrl(input.sourceUrl))
             : preserved.file,
@@ -586,6 +587,30 @@ export const buildSelectedBySourceUrl = (
     }
   }
   return selectedBySourceUrl;
+};
+
+export const buildMediaModesBySourceUrl = (
+  rows: readonly Pick<AddDownloadDraftRow, 'sourceUrl' | 'mediaMode'>[],
+  requestContexts: Readonly<Record<string, { replacesUrl?: string }>>
+): Record<string, MediaMode> => {
+  const mediaModesBySourceUrl: Record<string, MediaMode> = {};
+  for (const row of rows) {
+    if (!row.mediaMode || row.mediaMode === 'auto') continue;
+    mediaModesBySourceUrl[comparableUrl(row.sourceUrl)] = row.mediaMode;
+  }
+
+  // A discovered URL is a replacement for the same reviewed row. Carry only
+  // explicit user routing choices across that identity change; the discovery
+  // context's forced Media intent must not undo a prior Treat as File choice.
+  for (const [url, context] of Object.entries(requestContexts)) {
+    if (!context.replacesUrl) continue;
+    const originalUrl = comparableUrl(context.replacesUrl);
+    const replacementUrl = comparableUrl(url);
+    if (originalUrl in mediaModesBySourceUrl && !(replacementUrl in mediaModesBySourceUrl)) {
+      mediaModesBySourceUrl[replacementUrl] = mediaModesBySourceUrl[originalUrl];
+    }
+  }
+  return mediaModesBySourceUrl;
 };
 
 export const appendRequestUrlsAfterVersion = (

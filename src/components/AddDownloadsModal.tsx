@@ -38,6 +38,7 @@ import {
   canSubmitMetadataRows,
   applyMediaModeToRow,
   appendRequestUrlsAfterVersion,
+  buildMediaModesBySourceUrl,
   buildSelectedBySourceUrl,
   commonMediaFormatsForRows,
   commonMediaQualitiesForRows,
@@ -676,14 +677,7 @@ export const AddDownloadsModal = () => {
         .map(([url, context]) => [url, context.torrentCacheId as string])
     );
     setParsedItems(current => {
-      const mediaModesBySourceUrl: Record<string, MediaMode> = {};
-      for (const row of current) {
-        // Auto is the absence of an override. Do not let a stale default-Auto
-        // row mask a newer explicit media handoff for the same URL.
-        if (row.mediaMode && row.mediaMode !== 'auto') {
-          mediaModesBySourceUrl[normalizeComparableUrl(row.sourceUrl)] = row.mediaMode;
-        }
-      }
+      const mediaModesBySourceUrl = buildMediaModesBySourceUrl(current, pendingAddRequestContexts);
       const selectedBySourceUrl = buildSelectedBySourceUrl(current, pendingAddRequestContexts);
       return reconcileDownloadRows(
         urls,

@@ -1276,6 +1276,7 @@ async fn resumed_gid_rebinds_to_the_new_control_epoch() {
         .await;
 
     let resume_epoch = manager.next_aria2_control_epoch("resumed-gid").await;
+    let resume_owner_revision = manager.current_aria2_owner_revision("resumed-gid").await;
     manager
         .handle_aria2_event("gid-resumed", PendingOutcome::Complete)
         .await;
@@ -1286,7 +1287,12 @@ async fn resumed_gid_rebinds_to_the_new_control_epoch() {
     );
 
     assert!(manager
-        .rebind_aria2_gid_epoch("resumed-gid", "gid-resumed", resume_epoch)
+        .rebind_aria2_gid_epoch(
+            "resumed-gid",
+            "gid-resumed",
+            resume_epoch,
+            resume_owner_revision,
+        )
         .await);
     manager
         .handle_aria2_event("gid-resumed", PendingOutcome::Complete)
@@ -1308,8 +1314,9 @@ async fn gid_mapping_snapshot_is_invalid_after_epoch_or_gid_replacement() {
     assert!(mgr.is_current_aria2_gid_mapping("gid-old", &old_mapping));
 
     let resume_epoch = mgr.next_aria2_control_epoch("snapshot").await;
+    let resume_owner_revision = mgr.current_aria2_owner_revision("snapshot").await;
     assert!(mgr
-        .rebind_aria2_gid_epoch("snapshot", "gid-old", resume_epoch)
+        .rebind_aria2_gid_epoch("snapshot", "gid-old", resume_epoch, resume_owner_revision)
         .await);
     assert!(!mgr.is_current_aria2_gid_mapping("gid-old", &old_mapping));
 

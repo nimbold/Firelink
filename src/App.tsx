@@ -8,6 +8,7 @@ import { DownloadTable, type DownloadTableStatusSummary } from "./components/Dow
 import { AddDownloadsModal } from './components/AddDownloadsModal';
 import { KeychainPermissionModal } from './components/KeychainPermissionModal';
 import { extractValidDownloadUrls } from './utils/url';
+import { takeSettledStartupInputs } from './utils/startupInputs';
 import { readClipboardDownloadUrls, writeClipboardSecret } from './utils/clipboard';
 import { listenEvent as listen, invokeCommand as invoke } from "./ipc";
 import { flushDownloadPersistence, initializeDownloadPersistence, useDownloadStore, waitForDownloadLifecycleWork, MAIN_QUEUE_ID, type ExtensionDownloadRequest } from './store/useDownloadStore';
@@ -298,6 +299,7 @@ function App() {
   const pendingPostActionToastId = useRef<string | null>(null);
   const pendingForceActionToastId = useRef<string | null>(null);
   const startupResumeStarted = useRef(false);
+  const trayUnavailableNoticeShown = useRef(false);
   const pendingScheduledStopIds = useRef(new Set<string>());
   const startupInputReady = useRef(false);
   const extensionProcessing = useRef(createSerialTaskQueue());
@@ -309,11 +311,21 @@ function App() {
     | { type: 'deep-link'; payload: string }
   >>([]);
   const maxConcurrentDownloads = useSettingsStore(state => state.maxConcurrentDownloads);
+  const startAtLoginSyncState = useSettingsStore(state => state.startAtLoginSyncState);
   const preventsSleepWhileDownloading = useSettingsStore(state => state.preventsSleepWhileDownloading);
   const preventsDisplaySleepWhileDownloading = useSettingsStore(
     state => state.preventsDisplaySleepWhileDownloading
   );
   const { addToast, removeToast } = useToast();
+  const showTrayUnavailableNotice = useCallback(() => {
+    if (trayUnavailableNoticeShown.current) return;
+    trayUnavailableNoticeShown.current = true;
+    addToast({
+      message: t($ => $.app.trayUnavailable),
+      variant: 'warning',
+      isActionable: true
+    });
+  }, [addToast, t]);
   const isMacUserAgent = navigator.userAgent.includes('Mac');
   const usesCustomWindowControls = shouldUseCustomWindowControls(platform.os, navigator.userAgent);
   const windowControlStyle = resolveWindowControlStyle(windowControlStylePreference, platform.os, navigator.userAgent);
@@ -1102,9 +1114,14 @@ function App() {
       startupInputReady.current = false;
       return;
     }
-    if (startupInputReady.current) return;
+    if (startupInputReady.current && pendingStartupInputs.current.length === 0) return;
+    const startAtLoginSettled = startAtLoginSyncState === 'ready' || startAtLoginSyncState === 'error';
+    const pendingInputs = takeSettledStartupInputs(
+      pendingStartupInputs.current,
+      startAtLoginSettled
+    );
+    if (!pendingInputs) return;
     startupInputReady.current = true;
-    const pendingInputs = pendingStartupInputs.current.splice(0);
     for (const input of pendingInputs) {
       if (input.type === 'extension') {
         enqueueAddInput(() => processExtensionDownload(input.payload)).catch(error => {
@@ -1114,11 +1131,11 @@ function App() {
         enqueueMediaDiscoveryInput(() => processExtensionMediaDiscovery(input.payload)).catch(error => {
           console.error('Failed to handle queued browser media discovery:', error);
         });
-      } else {
+      } else if (startAtLoginSettled) {
         enqueueAddInput(() => useDownloadStore.getState().openAddModalWithUrls(input.payload));
       }
     }
-  }, [coreReady, enqueueAddInput, enqueueMediaDiscoveryInput, exitPreparing, processExtensionDownload, processExtensionMediaDiscovery, showKeychainModal]);
+  }, [coreReady, enqueueAddInput, enqueueMediaDiscoveryInput, exitPreparing, processExtensionDownload, processExtensionMediaDiscovery, showKeychainModal, startAtLoginSyncState]);
 
   useEffect(() => {
     if (!coreReady || showKeychainModal || startupResumeStarted.current || exitPreparing || frontendExitPreparing) return;
@@ -1250,8 +1267,53 @@ function App() {
   ]);
 
   useEffect(() => {
-    invoke('toggle_tray_icon', { show: showMenuBarIcon || startAtLogin }).catch(console.error);
-  }, [showMenuBarIcon, startAtLogin]);
+    if (!coreReady) return;
+    let active = true;
+
+    const syncTrayAvailability = async () => {
+      const trayRequested = showMenuBarIcon || startAtLogin;
+      if (trayRequested) {
+        try {
+          await invoke('toggle_tray_icon', { show: true });
+        } catch (error) {
+          console.warn('System tray icon is unavailable:', error);
+          if (active) showTrayUnavailableNotice();
+          return;
+        }
+      } else {
+        try {
+          await invoke('toggle_tray_icon', { show: false });
+        } catch (error) {
+          console.warn('Could not synchronize the system tray preference:', error);
+        }
+      }
+
+      try {
+        const startupTrayUnavailable = await invoke('has_startup_tray_warning');
+        if (active && startupTrayUnavailable) showTrayUnavailableNotice();
+      } catch (error) {
+        console.error('Could not read startup tray availability:', error);
+      }
+    };
+
+    void syncTrayAvailability();
+    return () => {
+      active = false;
+    };
+  }, [
+    coreReady,
+    showMenuBarIcon,
+    startAtLogin,
+    startAtLoginSyncState,
+    showTrayUnavailableNotice
+  ]);
+
+  useEffect(() => {
+    if (!coreReady) return;
+    invoke('mark_frontend_core_ready').catch(error => {
+      console.error('Could not record frontend readiness:', error);
+    });
+  }, [coreReady]);
 
   useEffect(() => {
     if (activeView !== 'logs') {

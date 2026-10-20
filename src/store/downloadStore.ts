@@ -2,7 +2,12 @@ import type { UnlistenFn } from '@tauri-apps/api/event';
 import type { DownloadStatus } from '../bindings/DownloadStatus';
 import type { DownloadStateEvent } from '../bindings/DownloadStateEvent';
 import type { DownloadErrorKind } from '../bindings/DownloadErrorKind';
-import { invokeCommand, listenEvent as listen, type PendingTrayAction } from '../ipc';
+import {
+  invokeCommand,
+  listenEvent as listen,
+  type PendingTrayAction,
+  type TrayActionExecution
+} from '../ipc';
 import type { DownloadItem } from '../bindings/DownloadItem';
 import type { DownloadProgressEvent } from '../bindings/DownloadProgressEvent';
 import { categoryForDownload, isDownloadStatus } from '../utils/downloads';
@@ -34,10 +39,6 @@ let listenerConsumers = 0;
 type TrayActionDrainResult = {
   pending: PendingTrayAction | null;
   error?: unknown;
-};
-type TrayActionExecution = {
-  failedCount: number;
-  operationFailed: boolean;
 };
 let trayActionDrain: Promise<TrayActionDrainResult> | null = null;
 let trayActionDrainRequested = false;
@@ -97,7 +98,7 @@ const performPendingTrayAction = async (pending: PendingTrayAction): Promise<Tra
       ? canPauseDownload(download.status)
       : !acceptedIds.has(id);
   }).length;
-  return { failedCount, operationFailed };
+  return { failedCount, operationFailed, persistenceFailed: false };
 };
 
 const drainPendingTrayActions = (): Promise<TrayActionDrainResult> => {
@@ -123,38 +124,44 @@ const drainPendingTrayActions = (): Promise<TrayActionDrainResult> => {
             // with App's explicit post-hydration drain.
             startupTrayPauseAllSeen = true;
           }
-          let execution = attemptedTrayActions.get(pending.id);
-          if (!execution) {
+          const claim = await invokeCommand('claim_pending_tray_action', { id: pending.id });
+          let execution = claim.execution ?? attemptedTrayActions.get(pending.id);
+          if (!execution && claim.shouldExecute) {
             execution = await performPendingTrayAction(pending);
             attemptedTrayActions.set(pending.id, execution);
+            try {
+              await flushDownloadPersistence();
+            } catch {
+              // The bulk action has already run. Record and consume it with a
+              // persistence failure so a renderer reload cannot replay stale
+              // intent and reverse a later manual control.
+              execution = { ...execution, persistenceFailed: true };
+              attemptedTrayActions.set(pending.id, execution);
+              error ??= new Error('Tray action state could not be persisted');
+            }
+          } else if (!execution) {
+            // A prior renderer claimed the action but disappeared before
+            // recording its result. Its side effects are unknown, so report an
+            // uncertain attempt and consume it rather than applying it twice.
+            execution = {
+              failedCount: 0,
+              operationFailed: true,
+              persistenceFailed: false
+            };
           }
-          try {
-            await flushDownloadPersistence();
-          } catch {
-            // Tray actions are commands, not durable jobs. The operation has
-            // already run, so consume it even when the resulting snapshot
-            // cannot be saved; retaining it would replay stale bulk intent
-            // after a renderer reload and could reverse a newer user action.
-            // The native acknowledgement reports the persistence failure to
-            // the user, and startup resume remains blocked for this startup.
-            error ??= new Error('Tray action state could not be persisted');
-            await invokeCommand('acknowledge_tray_action', {
+
+          // Claim ownership and the completed result live in the native queue.
+          // If ACK delivery is lost, a reloaded renderer reads this result and
+          // acknowledges it without re-running the bulk action.
+          if (!claim.execution) {
+            await invokeCommand('record_tray_action_result', {
               id: pending.id,
-              failedCount: execution.failedCount,
-              operationFailed: execution.operationFailed,
-              persistenceFailed: true
+              ...execution
             });
-            attemptedTrayActions.delete(pending.id);
-            continue;
           }
-          // A completed attempt is acknowledged even when some rows failed.
-          // Replaying a bulk command after later manual controls could reverse
-          // the user's newer intent; report the outcome and let them retry.
           await invokeCommand('acknowledge_tray_action', {
             id: pending.id,
-            failedCount: execution.failedCount,
-            operationFailed: execution.operationFailed,
-            persistenceFailed: false
+            ...execution
           });
           attemptedTrayActions.delete(pending.id);
         } catch (cause) {
@@ -282,6 +289,19 @@ const sanitizeStatePayload = (value: unknown): SanitizedDownloadStateEvent | nul
     return null;
   }
 
+  const lifecycleGeneration = isLifecycleGeneration(value.lifecycleGeneration)
+    ? value.lifecycleGeneration
+    : undefined;
+  const controlEpoch = isLifecycleGeneration(value.controlEpoch)
+    ? value.controlEpoch
+    : undefined;
+  const ownerRevision = isLifecycleGeneration(value.ownerRevision)
+    ? value.ownerRevision
+    : undefined;
+  const gid = typeof value.gid === 'string' && value.gid.trim().length > 0
+    ? value.gid
+    : undefined;
+
   return {
     id: value.id,
     status: value.status,
@@ -295,7 +315,11 @@ const sanitizeStatePayload = (value: unknown): SanitizedDownloadStateEvent | nul
     ...(finiteNonNegative(value.torrentSeedRemaining)
       ? { torrentSeedRemaining: value.torrentSeedRemaining }
       : {}),
-    ...(value.progress !== undefined ? { progress: value.progress as DownloadStateEvent['progress'] } : {})
+    ...(value.progress !== undefined ? { progress: value.progress as DownloadStateEvent['progress'] } : {}),
+    ...(lifecycleGeneration !== undefined ? { lifecycleGeneration } : {}),
+    ...(controlEpoch !== undefined ? { controlEpoch } : {}),
+    ...(ownerRevision !== undefined ? { ownerRevision } : {}),
+    ...(gid !== undefined ? { gid } : {})
   };
 };
 
@@ -348,6 +372,18 @@ const sanitizeProgressPayload = (
   if (sanitized.lifecycle_generation !== undefined
     && !isLifecycleGeneration(sanitized.lifecycle_generation)) {
     delete sanitized.lifecycle_generation;
+  }
+  if (sanitized.control_epoch !== undefined
+    && !isLifecycleGeneration(sanitized.control_epoch)) {
+    delete sanitized.control_epoch;
+  }
+  if (sanitized.owner_revision !== undefined
+    && !isLifecycleGeneration(sanitized.owner_revision)) {
+    delete sanitized.owner_revision;
+  }
+  if (sanitized.gid !== undefined
+    && (typeof sanitized.gid !== 'string' || sanitized.gid.trim().length === 0)) {
+    delete sanitized.gid;
   }
   return sanitized;
 };
@@ -470,6 +506,23 @@ const startDownloadListeners = async () => {
           || payload.progress_checkpoint_epoch === undefined
           || payload.lifecycle_generation !== currentGeneration
           || BigInt(payload.progress_checkpoint_epoch) < BigInt(currentCheckpointEpoch)) {
+          return;
+        }
+      } else {
+        const owner = useDownloadProgressStore.getState().aria2ProgressOwnerMap[payload.id];
+        const expectedLifecycleGeneration = useDownloadProgressStore.getState()
+          .aria2LifecycleGenerationMap[payload.id];
+        if (!owner
+          || payload.gid === undefined
+          || payload.control_epoch === undefined
+          || payload.owner_revision === undefined
+          || payload.lifecycle_generation === undefined
+          || payload.gid !== owner.gid
+          || payload.control_epoch !== owner.controlEpoch
+          || payload.owner_revision !== owner.ownerRevision
+          || payload.lifecycle_generation !== owner.lifecycleGeneration
+          || (expectedLifecycleGeneration !== undefined
+            && payload.lifecycle_generation !== expectedLifecycleGeneration)) {
           return;
         }
       }
@@ -631,10 +684,6 @@ const startDownloadListeners = async () => {
       if (current.status === 'moving' && status !== 'moving' && payload.destination == null) {
         return;
       }
-      if (status !== 'moving') {
-        useDownloadProgressStore.getState().clearMoveProgress(payload.id);
-      }
-
       // resume_download queues the row before the backend can emit its new
       // active state. Paused events already emitted by the old lifecycle may
       // arrive in that gap, and more than one can be queued before the new
@@ -651,16 +700,6 @@ const startDownloadListeners = async () => {
         // applied while the transition is in flight.
         return;
       }
-      if (status === 'downloading' || status === 'processing' || status === 'moving' ||
-          status === 'verifying' || status === 'seeding' || status === 'waitingToSeed' ||
-          status === 'completed' || status === 'failed') {
-        clearDownloadControlIntent(payload.id, 'resume');
-      }
-      if (status === 'paused') {
-        clearDownloadControlIntent(payload.id, 'pause');
-        if (payload.error) clearDownloadControlIntent(payload.id, 'resume');
-      }
-
       // Prevent stale lifecycle events from moving a paused row back into an
       // active state. A pause request can finish before one already-emitted
       // worker event reaches the frontend. Resume paths set the row to queued
@@ -689,6 +728,83 @@ const startDownloadListeners = async () => {
       }
 
       const progressState = useDownloadProgressStore.getState();
+      if (current.isMedia === true) {
+        const mediaLifecycleStatuses = [
+          'queued', 'downloading', 'processing', 'retrying', 'completed', 'failed', 'paused'
+        ];
+        if (mediaLifecycleStatuses.includes(status)) {
+          const lifecycleGeneration = payload.lifecycleGeneration;
+          if (lifecycleGeneration === undefined) return;
+
+          const currentGeneration = currentDownloadLifecycleGeneration(payload.id);
+          if (lifecycleGeneration !== currentGeneration) {
+            const pauseTransitionPending = current.status === 'paused'
+              || downloadControlIntentFor(payload.id) === 'pause';
+            const isPriorPauseLifecycle = currentGeneration !== '0'
+              && lifecycleGeneration === (BigInt(currentGeneration) - 1n).toString()
+              && pauseTransitionPending
+              && (status === 'paused' || status === 'completed' || status === 'failed');
+            if (!isPriorPauseLifecycle) return;
+          }
+        }
+        if (payload.lifecycleGeneration !== undefined
+          && !progressState.setAria2LifecycleGeneration(
+            payload.id,
+            payload.lifecycleGeneration,
+          )) {
+          return;
+        }
+      } else {
+        if (payload.lifecycleGeneration !== undefined
+          && !progressState.setAria2LifecycleGeneration(
+            payload.id,
+            payload.lifecycleGeneration,
+          )) {
+          return;
+        }
+        const owner = payload.gid !== undefined
+          && payload.lifecycleGeneration !== undefined
+          && payload.controlEpoch !== undefined
+          && payload.ownerRevision !== undefined
+          ? {
+              gid: payload.gid,
+              lifecycleGeneration: payload.lifecycleGeneration,
+              controlEpoch: payload.controlEpoch,
+              ownerRevision: payload.ownerRevision
+            }
+          : null;
+        if (['downloading', 'processing', 'verifying', 'seeding'].includes(status) && !owner) {
+          return;
+        }
+        if (owner) {
+          if (!progressState.acceptAria2ProgressOwner(payload.id, owner)) {
+            return;
+          }
+        } else {
+          const currentOwner = progressState.aria2ProgressOwnerMap[payload.id];
+          const ownerWatermark = progressState.aria2ProgressOwnerWatermarkMap[payload.id];
+          if ((status === 'paused' || status === 'retrying')
+            && (currentOwner !== undefined
+              || (ownerWatermark !== undefined
+                && (payload.lifecycleGeneration === undefined
+                  || payload.lifecycleGeneration === ownerWatermark.lifecycleGeneration)))) {
+            return;
+          }
+          progressState.clearAria2ProgressOwner(payload.id);
+        }
+      }
+      if (status !== 'moving') {
+        useDownloadProgressStore.getState().clearMoveProgress(payload.id);
+      }
+      if (status === 'downloading' || status === 'processing' || status === 'moving' ||
+          status === 'verifying' || status === 'seeding' || status === 'waitingToSeed' ||
+          status === 'completed' || status === 'failed') {
+        clearDownloadControlIntent(payload.id, 'resume');
+      }
+      if (status === 'paused') {
+        clearDownloadControlIntent(payload.id, 'pause');
+        if (payload.error) clearDownloadControlIntent(payload.id, 'resume');
+      }
       const liveProgress = progressState.progressMap[payload.id];
       const retainedProgress = progressState.retainedProgressMap[payload.id];
       const isTerminalOrPaused = ['completed', 'failed', 'paused', 'retrying', 'waitingToSeed'].includes(status);
