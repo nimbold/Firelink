@@ -16,6 +16,7 @@ import {
   assertAria2RouteSource,
 } from './aria2-route-contract.js';
 import { readAndValidatePayloadManifest } from './engine-payload-manifest.js';
+import { sha256, treeDigest } from './engine-payload-integrity.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -122,6 +123,109 @@ function fail(msg) {
 
 function ok(msg) {
   console.log(`[OK] ${msg}`);
+}
+
+function macOSPackageLockErrors(root, target, engineLock) {
+  const errors = [];
+  const targetLock = engineLock?.targets?.[target];
+  if (!targetLock || typeof targetLock !== 'object') {
+    return [`engines.lock.json has no packaged integrity lock for ${target}`];
+  }
+
+  const lockedEngines = targetLock.engines;
+  for (const engine of requiredEngines) {
+    const metadata = lockedEngines?.[engine];
+    if (!metadata || typeof metadata !== 'object') {
+      errors.push(`engines.lock.json is missing ${engine} metadata for ${target}`);
+      continue;
+    }
+    if (typeof metadata.sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(metadata.sha256)) {
+      errors.push(`engines.lock.json has an invalid ${engine} executable SHA-256 for ${target}`);
+      continue;
+    }
+
+    const executable = path.join(root, `${engine}-${target}`);
+    try {
+      const stat = fs.lstatSync(executable);
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        errors.push(`${engine}-${target} is not a regular executable file`);
+      } else if (sha256(executable) !== metadata.sha256.toLowerCase()) {
+        errors.push(`${engine}-${target} SHA-256 does not match engines.lock.json`);
+      }
+    } catch (error) {
+      errors.push(`cannot verify ${engine}-${target}: ${error.message}`);
+    }
+  }
+
+  const runtimeTrees = targetLock.runtimeTrees;
+  if (!runtimeTrees || typeof runtimeTrees !== 'object' || Array.isArray(runtimeTrees)) {
+    errors.push(`engines.lock.json has no runtime-tree integrity map for ${target}`);
+    return errors;
+  }
+  for (const requiredTree of ['_internal', 'aria2-libs']) {
+    if (!Object.hasOwn(runtimeTrees, requiredTree)) {
+      errors.push(`engines.lock.json is missing the ${requiredTree} runtime-tree hash for ${target}`);
+    }
+  }
+
+  for (const [relative, expected] of Object.entries(runtimeTrees)) {
+    if (
+      typeof relative !== 'string'
+      || relative.length === 0
+      || path.isAbsolute(relative)
+      || !expected
+      || typeof expected !== 'object'
+      || !Number.isInteger(expected.files)
+      || expected.files < 1
+      || typeof expected.sha256 !== 'string'
+      || !/^[a-f0-9]{64}$/i.test(expected.sha256)
+    ) {
+      errors.push(`engines.lock.json has invalid runtime-tree metadata for ${target}`);
+      continue;
+    }
+
+    const directory = path.resolve(root, relative);
+    const relativeToRoot = path.relative(path.resolve(root), directory);
+    if (
+      relativeToRoot === '..'
+      || relativeToRoot.startsWith(`..${path.sep}`)
+      || path.isAbsolute(relativeToRoot)
+    ) {
+      errors.push(`engines.lock.json runtime-tree path escapes the package root: ${relative}`);
+      continue;
+    }
+
+    try {
+      const stat = fs.lstatSync(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        errors.push(`${relative} is not a regular runtime directory`);
+        continue;
+      }
+      const actual = treeDigest(directory);
+      if (actual.files !== expected.files || actual.sha256 !== expected.sha256.toLowerCase()) {
+        errors.push(`${relative} runtime-tree hashes do not match engines.lock.json`);
+      }
+    } catch (error) {
+      errors.push(`cannot verify ${relative} runtime tree: ${error.message}`);
+    }
+  }
+
+  return errors;
+}
+
+if (isMacOS) {
+  console.log('\n─── macOS packaged engine lock integrity ───');
+  try {
+    const engineLock = JSON.parse(fs.readFileSync(path.join(repoRoot, 'engines.lock.json'), 'utf8'));
+    const errors = macOSPackageLockErrors(binariesDir, targetTriple, engineLock);
+    if (errors.length === 0) {
+      ok('Packaged executable and runtime-tree checksums match engines.lock.json');
+    } else {
+      for (const error of errors) fail(error);
+    }
+  } catch (error) {
+    fail(`Unable to validate engines.lock.json: ${error.message}`);
+  }
 }
 
 if (sourceTargetLock) {

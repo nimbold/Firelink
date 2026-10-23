@@ -7,7 +7,7 @@
 	<key>CFBundleIdentifier</key>
 	<string>org.python.python</string>
 	<key>CFBundleVersion</key>
-	<string>3.14.6</string>
+	<string>3.14.7</string>
 	<key>CFBundlePackageType</key>
 	<string>FMWK</string>
 	<key>CFBundleSignature</key>
@@ -17,7 +17,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleShortVersionString</key>
-	<string>3.14.6</string>
+	<string>3.14.7</string>
 	<key>CFBundleSupportedPlatforms</key>
 	<array>
 		<string>MacOSX</string>

@@ -2916,11 +2916,9 @@ const MEDIA_METADATA_TIMEOUT: Duration = Duration::from_secs(55);
 const MEDIA_METADATA_CACHE_MAX_ENTRIES: usize = 128;
 const FILE_METADATA_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_SHELL_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
-// Since early 2026, YouTube's default client set can expose only a
-// progressive 360p stream without separate audio formats. Keep the default
-// client for normal authenticated/public behavior, then let yt-dlp try the
-// embedded player client for the richer format set recommended by yt-dlp's
-// maintainers.
+// yt-dlp 2026.10.21's `default` alias includes tv_samsung, visionos, and web.
+// Keep web_embedded alongside that upstream set because it exposes additional
+// usable formats on public multi-quality videos.
 const YTDLP_YOUTUBE_PLAYER_CLIENTS: &str = "youtube:player_client=default,web_embedded";
 
 fn ytdlp_youtube_extractor_args() -> [&'static str; 2] {

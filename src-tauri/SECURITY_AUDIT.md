@@ -3,27 +3,23 @@
 `cargo audit` is a required CI gate. Vulnerability advisories must be resolved;
 the gate must not be bypassed with a broad ignore list.
 
-As of 2026-10-20, Cargo reports no vulnerability advisories. It does report
-the following informational warnings, which remain visible in CI output:
+As of 2026-10-23, `cargo audit` reports no vulnerability advisories. It reports
+five allowed warnings, which remain visible in CI output:
 
-- `RUSTSEC-2024-0411` through `RUSTSEC-2024-0420` (GTK3 bindings) and
-  `RUSTSEC-2024-0370` (`proc-macro-error`) are Linux-only dependencies reached
-  through Tauri/Wry's GTK3 and tray integration.
-- `RUSTSEC-2024-0429` (`glib` 0.18.5 iterator unsoundness) is in that same
-  Linux Tauri/Wry GTK3 graph. Firelink does not directly use
-  `glib::VariantStrIter`, but this remains an upstream risk rather than a
-  Firelink-level remediation.
-- `RUSTSEC-2025-0075`, `RUSTSEC-2025-0080`, `RUSTSEC-2025-0081`,
-  `RUSTSEC-2025-0098`, and `RUSTSEC-2025-0100` are unmaintained UNIC crates
-  reached through `tauri-utils -> urlpattern`.
+- `RUSTSEC-2024-0370` marks `proc-macro-error` 1.0.4 unmaintained.
+- `RUSTSEC-2024-0429` reports unsound iterator implementations in `glib`
+  0.18.5. This is in the Linux Tauri/Wry GTK3 graph; Firelink does not directly
+  use `glib::VariantStrIter`.
 - `RUSTSEC-2026-0370`, `RUSTSEC-2026-0371`, and `RUSTSEC-2026-0372` mark
-  `zvariant`, `zbus_names`, and `zvariant_derive` as unmaintained standalone
-  crates. They are present through the Linux D-Bus `zbus` 5 dependency graph
-  (including Tauri plugins and system integrations); the advisories state that
-  these APIs have moved into modules provided by `zbus` 6. This is maintenance
-  status, not a vulnerability finding. Firelink does not directly depend on
-  these crates, and forcing `zbus` 6 across the current Tauri 2 graph is not a
-  compatible lockfile-only remediation.
+  `zvariant` 5.15.1, `zbus_names` 4.3.5, and `zvariant_derive` 5.15.1
+  unmaintained. They are reached through the Linux D-Bus `zbus` 5 graph,
+  including Tauri plugins and system integrations. The advisories describe
+  these APIs as moved into modules provided by `zbus` 6. Forcing `zbus` 6
+  across the current Tauri 2 graph is not a compatible lockfile-only change.
+
+The previous GTK3, UNIC, and `urlpattern` warning IDs did not appear in this
+refreshed audit output. Keep the current audit output as the authority and
+recheck this note on the next Cargo dependency refresh.
 
 Review these paths with every Tauri/Wry update and no later than 2026-12-05.
 Remove this acknowledgement when the upstream graph no longer contains the

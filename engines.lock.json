@@ -4,10 +4,12 @@
     "aarch64-apple-darwin": {
       "engines": {
         "yt-dlp": {
-          "version": "2026.08.19",
+          "version": "2026.10.21",
           "source": "https://github.com/yt-dlp/yt-dlp",
           "build": "PyInstaller onedir distribution with embedded Python and yt_dlp_ejs",
-          "sha256": "4f54eb67e4e96c7c3ffa49dd5deb81bc348bbb495080889b47d157d5c6d74443"
+          "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.21/yt-dlp_macos.zip",
+          "sourceSha256": "2b5251788b36fcbc476568b4eea8cb239f0a775759456f2ff9344a437c52f000",
+          "sha256": "c30b56b0ff1e1259e3431c78d3e0e319c9ef00e97b874f2fb235c6e60b2aab24"
         },
         "aria2c": {
           "version": "1.37.0-firelink-native-dns-v1",
@@ -32,16 +34,18 @@
           "sha256": "2e11c6f90993cdb79fff84d3f90044d28316b310e75b3e030cfc9a54f2c9d384"
         },
         "deno": {
-          "version": "2.9.7",
+          "version": "2.9.8",
           "source": "https://github.com/denoland/deno",
           "build": "official aarch64-apple-darwin executable",
-          "sha256": "b73737579d5a84c160e3316487594783fa5c15f4e13252a6a07050b755317f1a"
+          "url": "https://github.com/denoland/deno/releases/download/v2.9.8/deno-aarch64-apple-darwin.zip",
+          "sourceSha256": "9f0bf660393da2eaff044cdc7444cb08c73f235849b61d224d825a194ce7c98e",
+          "sha256": "d1e99265e5e6ee096c5780d88ff7d3e6cfdf33b1953a118b4889cab8ca6980ba"
         }
       },
       "runtimeTrees": {
         "_internal": {
           "files": 133,
-          "sha256": "24ac8c7557dbef0ef9e5685365b4620bc441a168daf314b71218276b782dc449"
+          "sha256": "7a1342ae7dc9073957a4f10aa47c0c46b7874592c083c1f656288020d1871960"
         },
         "aria2-libs": {
           "files": 7,

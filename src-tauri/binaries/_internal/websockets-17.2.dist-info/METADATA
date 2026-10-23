@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: websockets
-Version: 17.0.1
+Version: 17.2
 Summary: An implementation of the WebSocket Protocol (RFC 6455 & 7692)
 Author-email: Aymeric Augustin <aymeric.augustin@m4x.org>
 License-Expression: BSD-3-Clause
@@ -143,7 +143,7 @@ Why shouldn't I use ``websockets``?
   that build on top of ``websockets`` to support WebSocket connections, like
   uvicorn_ or Sanic_.
 
-.. _uvicorn: https://www.uvicorn.org/
+.. _uvicorn: https://uvicorn.dev/
 .. _Sanic: https://sanic.dev/en/
 
 What else?

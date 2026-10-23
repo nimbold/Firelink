@@ -25,6 +25,18 @@ async function withMockFetch(mockFetch, callback) {
   }
 }
 
+function btbnAsset(tag, name, digest) {
+  return {
+    name,
+    browser_download_url: `https://github.com/BtbN/FFmpeg-Builds/releases/download/${tag}/${name}`,
+    digest,
+  };
+}
+
+function btbnRelease(tag, assets, publishedAt = '2026-10-22T13:00:00Z') {
+  return { tag_name: tag, published_at: publishedAt, assets };
+}
+
 test('fetchJson retries transient HTTP responses before succeeding', async () => {
   let attempts = 0;
   const result = await withMockFetch(async () => {
@@ -155,11 +167,149 @@ test('checkRows detects an aria2 asset digest change when the provider supplies 
     {},
     new Set(),
     {},
-    hashes,
+    hashes.hashesByUrl,
   );
 
   assert.equal(report.rows[0].status, 'hash-mismatch');
   assert.equal(report.counts['hash-mismatch'], 1);
+});
+
+test('GitHub engine digests require the exact target asset name and release URL', () => {
+  const tag = '2026.10.20';
+  const windowsDigest = 'a'.repeat(64);
+  const hashes = providerAssetHashes({
+    ytDlp: {
+      tag_name: tag,
+      assets: [
+        {
+          name: 'yt-dlp_win.zip',
+          browser_download_url: `https://github.com/yt-dlp/yt-dlp/releases/download/${tag}/yt-dlp_win.zip`,
+          digest: `sha256:${windowsDigest}`,
+        },
+        {
+          name: 'yt-dlp_macos.zip',
+          browser_download_url: `https://github.com/yt-dlp/yt-dlp/releases/download/${tag}/yt-dlp_linux.zip`,
+          digest: `sha256:${'b'.repeat(64)}`,
+        },
+      ],
+    },
+    deno: {
+      tag_name: `v${tag}`,
+      assets: [{
+        name: 'deno-x86_64-unknown-linux-gnu.zip',
+        browser_download_url: `https://github.com/denoland/deno/releases/download/v${tag}/deno-x86_64-pc-windows-msvc.zip`,
+        digest: `sha256:${'c'.repeat(64)}`,
+      }],
+    },
+  });
+
+  assert.deepEqual(hashes.hashesByTargetEngine, {
+    'x86_64-pc-windows-msvc:yt-dlp': windowsDigest,
+  });
+  assert.equal(hashes.urlsByTargetEngine['x86_64-unknown-linux-gnu:yt-dlp'], undefined);
+
+  const report = checkRows(
+    [{
+      target: 'x86_64-unknown-linux-gnu',
+      engine: 'yt-dlp',
+      version: tag,
+      url: `https://github.com/yt-dlp/yt-dlp/releases/download/${tag}/yt-dlp_linux.zip`,
+      sha256: 'b'.repeat(64),
+    }],
+    { 'yt-dlp': tag },
+    {},
+    hashes.urlsByTargetEngine,
+    new Set(),
+    hashes.hashesByTargetEngine,
+    hashes.hashesByUrl,
+  );
+  assert.equal(report.rows[0].status, 'unverified');
+  assert.match(report.rows[0].reason, /verifiable SHA-256/);
+});
+
+test('GitHub engine assets without a digest remain unverified', () => {
+  const tag = 'v2.9.8';
+  const hashes = providerAssetHashes({
+    deno: {
+      tag_name: tag,
+      assets: [{
+        name: 'deno-x86_64-unknown-linux-gnu.zip',
+        browser_download_url: `https://github.com/denoland/deno/releases/download/${tag}/deno-x86_64-unknown-linux-gnu.zip`,
+      }],
+    },
+  });
+  const report = checkRows(
+    [{
+      target: 'x86_64-unknown-linux-gnu',
+      engine: 'deno',
+      version: '2.9.8',
+      url: `https://github.com/denoland/deno/releases/download/${tag}/deno-x86_64-unknown-linux-gnu.zip`,
+      sha256: 'd'.repeat(64),
+    }],
+    { deno: '2.9.8' },
+    {},
+    hashes.urlsByTargetEngine,
+    new Set(),
+    hashes.hashesByTargetEngine,
+    hashes.hashesByUrl,
+  );
+
+  assert.equal(report.rows[0].status, 'unverified');
+  assert.match(report.rows[0].reason, /verifiable SHA-256/);
+});
+
+test('macOS yt-dlp uses the locked official archive identity and fails closed on bad metadata', () => {
+  const target = 'aarch64-apple-darwin';
+  const tag = '2026.10.21';
+  const url = `https://github.com/yt-dlp/yt-dlp/releases/download/${tag}/yt-dlp_macos.zip`;
+  const archiveDigest = 'a'.repeat(64);
+  const row = {
+    target,
+    engine: 'yt-dlp',
+    version: tag,
+    url,
+    sourceSha256: archiveDigest,
+    sha256: 'b'.repeat(64),
+  };
+  const reportFor = hashes => checkRows(
+    [row],
+    { 'yt-dlp': tag },
+    {},
+    hashes.urlsByTargetEngine,
+    new Set(),
+    hashes.hashesByTargetEngine,
+    hashes.hashesByUrl,
+  );
+  const validAsset = {
+    name: 'yt-dlp_macos.zip',
+    browser_download_url: url,
+    digest: `sha256:${archiveDigest}`,
+  };
+
+  const validHashes = providerAssetHashes({
+    ytDlp: { tag_name: tag, assets: [validAsset] },
+  });
+  assert.equal(validHashes.hashesByTargetEngine[`${target}:yt-dlp`], archiveDigest);
+  assert.equal(reportFor(validHashes).rows[0].status, 'current');
+
+  const wrongAssetHashes = providerAssetHashes({
+    ytDlp: {
+      tag_name: tag,
+      assets: [{
+        ...validAsset,
+        browser_download_url: `https://github.com/yt-dlp/yt-dlp/releases/download/${tag}/yt-dlp_linux.zip`,
+      }],
+    },
+  });
+  assert.equal(wrongAssetHashes.hashesByTargetEngine[`${target}:yt-dlp`], undefined);
+  assert.equal(reportFor(wrongAssetHashes).rows[0].status, 'unverified');
+
+  const missingDigestHashes = providerAssetHashes({
+    ytDlp: { tag_name: tag, assets: [{ name: validAsset.name, browser_download_url: url }] },
+  });
+  assert.equal(missingDigestHashes.urlsByTargetEngine[`${target}:yt-dlp`], url);
+  assert.equal(missingDigestHashes.hashesByTargetEngine[`${target}:yt-dlp`], undefined);
+  assert.equal(reportFor(missingDigestHashes).rows[0].status, 'unverified');
 });
 
 test('checkRows preserves independent row results when one provider is unavailable', () => {
@@ -452,76 +602,104 @@ test('npm update rows fail closed for malformed package records', () => {
 
 test('selects a complete BtbN build for the current stable series', async () => {
   const digest = value => `sha256:${value.repeat(64)}`;
-  const release = {
-    tag_name: 'autobuild-test',
-    assets: [
-      {
-        name: 'ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-9.0.zip',
-        browser_download_url: 'https://example.test/windows.zip',
-        digest: digest('a'),
-      },
-      {
-        name: 'ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0.tar.xz',
-        browser_download_url: 'https://example.test/linux.tar.xz',
-        digest: digest('b'),
-      },
-      {
-        name: 'ffmpeg-n8.1.2-50-g1a748fe2cd-win64-gpl-8.1.zip',
-        browser_download_url: 'https://example.test/old.zip',
-        digest: digest('c'),
-      },
-    ],
-  };
+  const tag = 'autobuild-test';
+  const release = btbnRelease(tag, [
+      btbnAsset(tag, 'ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-9.0.zip', digest('a')),
+      btbnAsset(tag, 'ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0.tar.xz', digest('b')),
+      btbnAsset(tag, 'ffmpeg-n8.1.2-50-g1a748fe2cd-win64-gpl-8.1.zip', digest('c')),
+    ]);
   const result = await withMockFetch(
     async () => new Response(JSON.stringify([release]), { status: 200 }),
     () => latestBtbnFfmpegStableBuild('9.0.1'),
   );
 
   assert.equal(result.version, '9.0.1-11-ge47273f4d9');
-  assert.equal(result.urls.windows, 'https://example.test/windows.zip');
+  assert.equal(
+    result.urls.windows,
+    `https://github.com/BtbN/FFmpeg-Builds/releases/download/${tag}/ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-9.0.zip`,
+  );
   assert.equal(result.hashes.linux, 'b'.repeat(64));
 });
 
 test('selects a complete BtbN build for a two-part stable version and tag-exact assets', async () => {
   const digest = value => `sha256:${value.repeat(64)}`;
-  const release = {
-    tag_name: 'autobuild-test',
-    assets: [
-      {
-        name: 'ffmpeg-n9.0-win64-gpl-9.0.zip',
-        browser_download_url: 'https://example.test/windows-exact.zip',
-        digest: digest('e'),
-      },
-      {
-        name: 'ffmpeg-n9.0-linux64-gpl-9.0.tar.xz',
-        browser_download_url: 'https://example.test/linux-exact.tar.xz',
-        digest: digest('f'),
-      },
-    ],
-  };
+  const tag = 'autobuild-test';
+  const release = btbnRelease(tag, [
+      btbnAsset(tag, 'ffmpeg-n9.0-win64-gpl-9.0.zip', digest('e')),
+      btbnAsset(tag, 'ffmpeg-n9.0-linux64-gpl-9.0.tar.xz', digest('f')),
+    ]);
   const result = await withMockFetch(
     async () => new Response(JSON.stringify([release]), { status: 200 }),
     () => latestBtbnFfmpegStableBuild('9.0'),
   );
 
   assert.equal(result.version, '9.0');
-  assert.equal(result.urls.windows, 'https://example.test/windows-exact.zip');
+  assert.equal(
+    result.urls.windows,
+    `https://github.com/BtbN/FFmpeg-Builds/releases/download/${tag}/ffmpeg-n9.0-win64-gpl-9.0.zip`,
+  );
   assert.equal(result.hashes.linux, 'f'.repeat(64));
 });
 
 test('rejects an incomplete BtbN stable target tuple', async () => {
-  const release = {
-    tag_name: 'autobuild-test',
-    assets: [{
-      name: 'ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-9.0.zip',
-      browser_download_url: 'https://example.test/windows.zip',
-      digest: `sha256:${'a'.repeat(64)}`,
-    }],
-  };
+  const release = btbnRelease('autobuild-test', [btbnAsset(
+      'autobuild-test',
+      'ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-9.0.zip',
+      `sha256:${'a'.repeat(64)}`,
+    )]);
   const result = await withMockFetch(
     async () => new Response(JSON.stringify([release]), { status: 200 }),
     () => latestBtbnFfmpegStableBuild('9.0.1'),
   );
+  assert.equal(result, undefined);
+});
+
+test('rejects BtbN assets with a mismatched target URL or an absent digest', async () => {
+  const tag = 'autobuild-test';
+  const windowsName = 'ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-9.0.zip';
+  const linuxName = 'ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0.tar.xz';
+  const linux = btbnAsset(tag, linuxName, `sha256:${'b'.repeat(64)}`);
+  const badWindowsUrl = {
+    ...btbnAsset(tag, windowsName, `sha256:${'a'.repeat(64)}`),
+    browser_download_url: `https://github.com/BtbN/FFmpeg-Builds/releases/download/${tag}/${linuxName}`,
+  };
+  const missingDigest = btbnAsset(tag, windowsName, undefined);
+
+  const mismatched = await withMockFetch(
+    async () => new Response(JSON.stringify([btbnRelease(tag, [badWindowsUrl, linux])]), { status: 200 }),
+    () => latestBtbnFfmpegStableBuild('9.0.1'),
+  );
+  assert.equal(mismatched, undefined);
+
+  const absentDigest = await withMockFetch(
+    async () => new Response(JSON.stringify([btbnRelease(tag, [missingDigest, linux])]), { status: 200 }),
+    () => latestBtbnFfmpegStableBuild('9.0.1'),
+  );
+  assert.equal(absentDigest, undefined);
+});
+
+test('does not fall back to an older BtbN build when the newest matching release is incomplete', async () => {
+  const newestTag = 'autobuild-newest';
+  const olderTag = 'autobuild-older';
+  const windowsName = 'ffmpeg-n9.0.1-12-g123456789ab-win64-gpl-9.0.zip';
+  const linuxName = 'ffmpeg-n9.0.1-12-g123456789ab-linux64-gpl-9.0.tar.xz';
+  const olderWindowsName = 'ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-9.0.zip';
+  const olderLinuxName = 'ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0.tar.xz';
+  const releases = [
+    btbnRelease(olderTag, [
+        btbnAsset(olderTag, olderWindowsName, `sha256:${'c'.repeat(64)}`),
+        btbnAsset(olderTag, olderLinuxName, `sha256:${'d'.repeat(64)}`),
+      ], '2026-10-21T13:07:52Z'),
+    btbnRelease(newestTag, [
+        btbnAsset(newestTag, windowsName, undefined),
+        btbnAsset(newestTag, linuxName, `sha256:${'b'.repeat(64)}`),
+      ], '2026-10-22T13:07:34Z'),
+  ];
+  const result = await withMockFetch(
+    async () => new Response(JSON.stringify(releases), { status: 200 }),
+    () => latestBtbnFfmpegStableBuild('9.0.1'),
+  );
+
   assert.equal(result, undefined);
 });
 

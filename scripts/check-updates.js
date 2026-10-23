@@ -61,11 +61,86 @@ function releaseAssetHashes(release) {
   );
 }
 
-function providerAssetHashes({ ytDlp, deno, aria2 }) {
+const targetGithubAssets = {
+  'yt-dlp': {
+    'aarch64-apple-darwin': {
+      repository: 'yt-dlp/yt-dlp',
+      name: 'yt-dlp_macos.zip',
+    },
+    'x86_64-pc-windows-msvc': {
+      repository: 'yt-dlp/yt-dlp',
+      name: 'yt-dlp_win.zip',
+    },
+    'x86_64-unknown-linux-gnu': {
+      repository: 'yt-dlp/yt-dlp',
+      name: 'yt-dlp_linux.zip',
+    },
+  },
+  deno: {
+    'aarch64-apple-darwin': {
+      repository: 'denoland/deno',
+      name: 'deno-aarch64-apple-darwin.zip',
+    },
+    'x86_64-pc-windows-msvc': {
+      repository: 'denoland/deno',
+      name: 'deno-x86_64-pc-windows-msvc.zip',
+    },
+    'x86_64-unknown-linux-gnu': {
+      repository: 'denoland/deno',
+      name: 'deno-x86_64-unknown-linux-gnu.zip',
+    },
+  },
+};
+
+function isCanonicalGithubReleaseAsset(release, asset, repository) {
+  if (
+    typeof release?.tag_name !== 'string'
+    || typeof asset?.name !== 'string'
+    || typeof asset?.browser_download_url !== 'string'
+  ) {
+    return false;
+  }
+
+  try {
+    const url = new URL(asset.browser_download_url);
+    return url.protocol === 'https:'
+      && url.hostname === 'github.com'
+      && url.pathname === `/${repository}/releases/download/${release.tag_name}/${asset.name}`;
+  } catch {
+    return false;
+  }
+}
+
+function releaseTargetAsset(release, { repository, name }) {
+  if (!Array.isArray(release?.assets)) return undefined;
+  const matches = release.assets.filter(asset => asset?.name === name);
+  if (matches.length !== 1 || !isCanonicalGithubReleaseAsset(release, matches[0], repository)) {
+    return undefined;
+  }
+
   return {
-    ...releaseAssetHashes(ytDlp),
-    ...releaseAssetHashes(deno),
-    ...releaseAssetHashes(aria2),
+    url: matches[0].browser_download_url,
+    sha256: parseSha256Digest(matches[0].digest),
+  };
+}
+
+function providerAssetHashes({ ytDlp, deno, aria2 }) {
+  const hashesByTargetEngine = {};
+  const urlsByTargetEngine = {};
+  for (const [engine, release] of [['yt-dlp', ytDlp], ['deno', deno]]) {
+    for (const [target, identity] of Object.entries(targetGithubAssets[engine])) {
+      const asset = releaseTargetAsset(release, identity);
+      if (!asset) continue;
+      const key = `${target}:${engine}`;
+      urlsByTargetEngine[key] = asset.url;
+      if (asset.sha256) hashesByTargetEngine[key] = asset.sha256;
+    }
+  }
+
+  return {
+    hashesByTargetEngine,
+    urlsByTargetEngine,
+    hashesByUrl: releaseAssetHashes(aria2),
   };
 }
 
@@ -202,33 +277,63 @@ async function latestBtbnFfmpegStableBuild(stableVersion) {
   );
   const releases = await fetchJson('https://api.github.com/repos/BtbN/FFmpeg-Builds/releases?per_page=10');
   if (!Array.isArray(releases)) throw new Error('BtbN releases response is not an array');
+  const candidates = [];
   for (const release of releases) {
     if (release.tag_name === 'latest') continue;
-    const assets = (release.assets || [])
+    const assets = (Array.isArray(release.assets) ? release.assets : [])
       .map(asset => {
-        const match = asset.name.match(assetPattern);
+        const match = typeof asset?.name === 'string' ? asset.name.match(assetPattern) : undefined;
         if (!match) return undefined;
         return {
           target: match[2] === 'win64' ? 'windows' : 'linux',
           version: match[1],
           url: asset.browser_download_url,
           sha256: parseSha256Digest(asset.digest),
+          canonical: isCanonicalGithubReleaseAsset(release, asset, 'BtbN/FFmpeg-Builds'),
         };
       })
       .filter(Boolean);
-    const unique = [...new Set(assets.map(asset => asset.version))];
-    const byTarget = Object.fromEntries(assets.map(asset => [asset.target, asset]));
-    if (
-      unique.length === 1 &&
-      byTarget.windows?.sha256 &&
-      byTarget.linux?.sha256
-    ) {
-      return {
-        version: unique[0],
-        urls: { windows: byTarget.windows.url, linux: byTarget.linux.url },
-        hashes: { windows: byTarget.windows.sha256, linux: byTarget.linux.sha256 },
-      };
-    }
+    if (assets.length === 0) continue;
+
+    const publishedAt = Date.parse(release.published_at);
+    if (!Number.isFinite(publishedAt)) return undefined;
+    candidates.push({ assets, publishedAt });
+  }
+
+  // The release-list endpoint does not define an ordering contract. Select by
+  // publication time, then fail closed if the newest matching autobuild is
+  // incomplete or unverifiable instead of falling back to an older build.
+  candidates.sort((left, right) => right.publishedAt - left.publishedAt);
+  if (
+    candidates.length > 1 &&
+    candidates[0].publishedAt === candidates[1].publishedAt
+  ) {
+    return undefined;
+  }
+  const assets = candidates[0]?.assets;
+  if (!assets) return undefined;
+
+  const unique = [...new Set(assets.map(asset => asset.version))];
+  const byTarget = Object.fromEntries(
+    ['windows', 'linux'].map(target => [
+      target,
+      assets.filter(asset => asset.target === target),
+    ]),
+  );
+  if (
+    unique.length === 1 &&
+    byTarget.windows.length === 1 &&
+    byTarget.linux.length === 1 &&
+    byTarget.windows[0].canonical &&
+    byTarget.linux[0].canonical &&
+    byTarget.windows[0].sha256 &&
+    byTarget.linux[0].sha256
+  ) {
+    return {
+      version: unique[0],
+      urls: { windows: byTarget.windows[0].url, linux: byTarget.linux[0].url },
+      hashes: { windows: byTarget.windows[0].sha256, linux: byTarget.linux[0].sha256 },
+    };
   }
   return undefined;
 }
@@ -622,11 +727,16 @@ function checkRows(
     const latestUrl = latestUrlsByTargetEngine[targetKey];
     const versionOutdated = compareVersions(current, wanted) < 0;
     const sourceOutdated = Boolean(latestUrl && row.url && row.url !== latestUrl);
-    const latestHash = latestHashesByTargetEngine[targetKey] || latestHashesByUrl[row.url];
+    const latestHash = latestHashesByTargetEngine[targetKey]
+      || (['yt-dlp', 'deno', 'ffmpeg'].includes(row.engine)
+        ? undefined
+        : latestHashesByUrl[row.url]);
     const checkedHash = row.sourceSha256 || row.sha256;
     const currentHash = typeof checkedHash === 'string' ? checkedHash.toLowerCase() : '';
     const hashMismatch = Boolean(latestHash && currentHash !== latestHash);
-    const hashRequired = Object.hasOwn(row, 'sourceSha256') || Object.hasOwn(row, 'sha256');
+    const hashRequired =
+      (Object.hasOwn(row, 'sha256') || Object.hasOwn(row, 'sourceSha256'))
+      && (typeof row.sourceSha256 === 'string' || typeof row.url === 'string');
     const hashUnavailable = Boolean(hashRequired && !latestHash);
     const status = versionOutdated
       ? 'outdated'
@@ -770,9 +880,10 @@ async function main() {
     ffmpeg,
   };
   const latestByTargetEngine = {};
-  const latestUrlsByTargetEngine = {};
-  const latestHashesByTargetEngine = {};
-  const latestHashesByUrl = providerAssetHashes({ ytDlp, deno, aria2 });
+  const assetData = providerAssetHashes({ ytDlp, deno, aria2 });
+  const latestUrlsByTargetEngine = { ...assetData.urlsByTargetEngine };
+  const latestHashesByTargetEngine = { ...assetData.hashesByTargetEngine };
+  const latestHashesByUrl = assetData.hashesByUrl;
   const providerStatus = outcome => outcome.status === 'available'
     ? undefined
     : { status: outcome.status, detail: outcome.detail };

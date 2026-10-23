@@ -3,19 +3,19 @@
   "targets": {
     "x86_64-pc-windows-msvc": {
       "yt-dlp": {
-        "version": "2026.08.19",
-        "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_win.zip",
-        "sha256": "30b4c14aafab6082becff7881e41b76df46dc43ea7633479410a91e29da492bf"
+        "version": "2026.10.21",
+        "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.21/yt-dlp_win.zip",
+        "sha256": "a981b50fff6e437576d1c3c8df0680af572028ca12dff5e49435d9d33c98294b"
       },
       "deno": {
-        "version": "2.9.7",
-        "url": "https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-pc-windows-msvc.zip",
-        "sha256": "a0c3101b4158d1dfb7d6a78a7bf0f3de80c96bb423c152beec8beb22786f2238"
+        "version": "2.9.8",
+        "url": "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-pc-windows-msvc.zip",
+        "sha256": "cba84b26e0df5ae7f74fc66b86a95b866872a86292ebd84fa1e959927edd93bf"
       },
       "ffmpeg": {
-        "version": "9.0.2-28-g669f5ab083",
-        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-19-13-06/ffmpeg-n9.0.2-28-g669f5ab083-win64-gpl-9.0.zip",
-        "sha256": "b2b9817023338f801b86d36b9bc41eb8b953ce895367ef2b776a8651aad68944"
+        "version": "9.0.2-33-g4cf298e66a",
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-22-13-06/ffmpeg-n9.0.2-33-g4cf298e66a-win64-gpl-9.0.zip",
+        "sha256": "5a8898e31f2c452062d1f1be475befd8ffba04db11e9f8251da3d10d9a1ae2e5"
       },
       "aria2c": {
         "version": "1.37.0-firelink-native-dns-v1",
@@ -35,19 +35,19 @@
     },
     "x86_64-unknown-linux-gnu": {
       "yt-dlp": {
-        "version": "2026.08.19",
-        "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_linux.zip",
-        "sha256": "32e72032766bef9199d99d15beb69fd52e46df8f8b06f0d8745db59e04d339e9"
+        "version": "2026.10.21",
+        "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.21/yt-dlp_linux.zip",
+        "sha256": "dcddc44b6151ccd855a9a3c8fcdb00e897bb872ec9f4908b1b708b16eaaaa114"
       },
       "deno": {
-        "version": "2.9.7",
-        "url": "https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-unknown-linux-gnu.zip",
-        "sha256": "c6527f24f4b16031d3ae4fa9f658d5f11534c8d84ce7dc8502420280919c3490"
+        "version": "2.9.8",
+        "url": "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-unknown-linux-gnu.zip",
+        "sha256": "e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609"
       },
       "ffmpeg": {
-        "version": "9.0.2-28-g669f5ab083",
-        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-19-13-06/ffmpeg-n9.0.2-28-g669f5ab083-linux64-gpl-9.0.tar.xz",
-        "sha256": "6668d9fda6278375751f3272f5a6799829b424eedf1934f32d4ee784e646a66e"
+        "version": "9.0.2-33-g4cf298e66a",
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-22-13-06/ffmpeg-n9.0.2-33-g4cf298e66a-linux64-gpl-9.0.tar.xz",
+        "sha256": "1cb0a72cf393a1fdb661cbbbd0cfe89dc8b197bb21e21473bbde505bb4f2a2a7"
       },
       "aria2c": {
         "version": "1.37.0-firelink-native-dns-v1",
