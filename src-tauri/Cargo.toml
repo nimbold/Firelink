@@ -20,30 +20,30 @@ name = "firelink_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.7.3", features = [] }
+tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
-tauri = { version = "2.12.4", features = ["tray-icon", "image-png", "test"] }
+tauri = { version = "2.12.5", features = ["tray-icon", "image-png", "test"] }
 tauri-plugin-opener = "2.7.2"
-tauri-plugin-dialog = "2.8.3"
-tauri-plugin-shell = "2.5.0"
+tauri-plugin-dialog = "2.8.4"
+tauri-plugin-shell = "2.6.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["fs", "process", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time"] }
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json", "stream", "socks"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1.29.0", features = ["v4"] }
 ts-rs = { version = "12", features = ["serde-compat", "uuid-impl"] }
-tauri-plugin-notification = "2.7.0"
+tauri-plugin-notification = "2.8.0"
 tauri-plugin-clipboard-manager = "2.5.0"
-sysinfo = "0.39.6"
+sysinfo = "0.40.0"
 hmac = "0.13"
 sha2 = "0.11"
 sha1 = "0.11"
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
-tauri-plugin-deep-link = "2.6.2"
-tauri-plugin-single-instance = { version = "2.5.4", features = ["deep-link"] }
+tauri-plugin-deep-link = "2.6.3"
+tauri-plugin-single-instance = { version = "2.5.5", features = ["deep-link"] }
 tempfile = "3"
 thiserror = "2.0.21"
 axum = "0.8.9"
@@ -55,16 +55,13 @@ tokio-tungstenite = "0.30.0"
 futures-util = { version = "0.3.34", features = ["sink"] }
 chrono = "0.4.45"
 url = "2"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 log = "0.4.34"
 tauri-plugin-log = "2.10.1"
 trash = "5"
 async-trait = "0.1"
 keyring-core = "1.0.1"
 auto-launch = "0.6.0"
-
-[patch.crates-io]
-tauri-plugin-deep-link = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "463977675da7bbb257dee59669b5e122c8d681db" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }

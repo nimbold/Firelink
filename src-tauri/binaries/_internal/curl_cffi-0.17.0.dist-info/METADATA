@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: curl_cffi
-Version: 0.16.3
+Version: 0.17.0
 Summary: libcurl ffi bindings for Python, with impersonation support.
 Author-email: lexiforest <infinitesheldon@gmail.com>
 License-Expression: MIT
@@ -17,19 +17,21 @@ Classifier: Programming Language :: Python :: Free Threading
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
 License-File: LICENSE
-Requires-Dist: cffi>=2.0.0
-Requires-Dist: certifi>=2024.2.2
+Requires-Dist: cffi>=2.1.1
+Requires-Dist: certifi>=2026.10.19
 Provides-Extra: extra
 Requires-Dist: readability-lxml>=0.8.1; extra == "extra"
 Requires-Dist: markdownify>=1.1.0; extra == "extra"
 Requires-Dist: lxml_html_clean; extra == "extra"
+Requires-Dist: jsonpath-ng<2,>=1.7; extra == "extra"
 Provides-Extra: cli
 Requires-Dist: rich; extra == "cli"
 Provides-Extra: dev
+Requires-Dist: jsonpath-ng<2,>=1.7; extra == "dev"
 Requires-Dist: charset_normalizer<4.0,>=3.3.2; extra == "dev"
 Requires-Dist: coverage<7.0,>=6.4.1; extra == "dev"
-Requires-Dist: cryptography<47.0,>=46.0.4; extra == "dev"
-Requires-Dist: httpx==0.23.1; extra == "dev"
+Requires-Dist: cryptography<51.0,>=46.0.4; extra == "dev"
+Requires-Dist: httpx<1.0,>=0.23.1; extra == "dev"
 Requires-Dist: pytest<9.0,>=8.1.1; extra == "dev"
 Requires-Dist: pytest-asyncio<1.0,>=0.23.6; extra == "dev"
 Requires-Dist: pytest-trio<1.0,>=0.8.0; extra == "dev"
@@ -43,10 +45,11 @@ Provides-Extra: build
 Requires-Dist: cibuildwheel; extra == "build"
 Requires-Dist: wheel; extra == "build"
 Provides-Extra: test
+Requires-Dist: jsonpath-ng<2,>=1.7; extra == "test"
 Requires-Dist: charset_normalizer<4.0,>=3.3.2; extra == "test"
-Requires-Dist: cryptography<47.0,>=46.0.4; extra == "test"
+Requires-Dist: cryptography<51.0,>=46.0.4; extra == "test"
 Requires-Dist: litestar<3.0,>=2.19.0; extra == "test"
-Requires-Dist: httpx==0.23.1; extra == "test"
+Requires-Dist: httpx<1.0,>=0.23.1; extra == "test"
 Requires-Dist: proxy.py<3.0,>=2.4.3; extra == "test"
 Requires-Dist: pytest<9.0,>=8.1.1; extra == "test"
 Requires-Dist: pytest-asyncio<1.0,>=0.23.6; extra == "test"
@@ -85,7 +88,7 @@ Python 3.10 is the minimum supported version since v0.14.
 ## Recent highlights
 
 - 🧭 Our new toy, [brimp](https://github.com/lexiforest/brimp), a lightweight browser, works like curl_cffi with JavaScript enabled. Try it out today!
-- 🆕 Added support for the new algorithm and extensions in Chrome 150/152.
+- 🆕 **0.17.0** updates to curl-impersonate 2.3.0 (curl 8.23.0), with Chrome 151/152, Safari 27, and Firefox 153–155 profiles.
 
 ## Recall.ai - API for meeting recordings
 
@@ -133,7 +136,7 @@ No browser automation. Just simple API calls that return the exact cookies and h
 
 - [curl-impersonate](https://github.com/lexiforest/curl-impersonate). A curl distribution that impersonates browsers.
 - [curl_cffi](https://github.com/lexiforest/curl_cffi). Python binding to curl-impersonate.
-- [brimp](https://docs.brimp.ai). Browser-impersonate, a lightweight browser 
+- [brimp](https://docs.brimp.ai). Browser-impersonate, a lightweight browser
 - [impers](https://github.com/lexiforest/impers). Node.js binding to curl-impersonate.
 - [impersonate.pro](https://impersonate.pro). Commercial support, more fingerprints and cloud offering.
 
@@ -268,10 +271,10 @@ print(r.json())
 `curl_cffi` supports the same browser versions preset as supported by our [fork](https://github.com/lexiforest/curl-impersonate) of [curl-impersonate](https://github.com/lwthiker/curl-impersonate):
 
 The open source version of `curl_cffi` includes versions when we are adding new capabilities for impersonating.
-If you see a version, e.g. `chrome135`, was skipped, it's simply because there's nothing new or we were busy at that time. 
+If you see a version, e.g. `chrome135`, was skipped, it's simply because there's nothing new or we were busy at that time.
 You can simply impersonate it with your own headers and the previous browser target.
 
-For a full list of preset fingerprints, see the [curl-impersonate docs](https://curl-impersonate.readthedocs.io/en/latest/fingerprints.html). 
+For a full list of preset fingerprints, see the [curl-impersonate docs](https://curl-impersonate.readthedocs.io/en/latest/fingerprints.html).
 We will no longer put duplicated and outdated info here.
 
 If you don't want to look up the headers/etc by yourself, consider buying commercial support from [impersonate.pro](https://impersonate.pro).
@@ -282,8 +285,8 @@ We offer the Safari, Chrome, Firefox updates for free and others as part of the 
 
 The current number of fingerprints:
 
-![Preset](https://img.shields.io/badge/Preset_Fingerprints-37-blue)
-![Free](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.impersonate.pro%2Fv1%2Fcounts&query=%24.free&label=Free%20Fingerprints) 
+![Preset](https://img.shields.io/badge/Preset_Fingerprints-47-blue)
+![Free](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.impersonate.pro%2Fv1%2Fcounts&query=%24.free&label=Free%20Fingerprints)
 ![Pro](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.impersonate.pro%2Fv1%2Fcounts&query=%24.all&label=Pro%20Fingerprints)
 
 To see the current list of fingerprints on your device, use the command line:
@@ -300,7 +303,6 @@ curl-cffi update
 
 If you are trying to impersonate a target other than a browser, use `ja3=...`, `akamai=...`, `extra_fp=...`, and `perk=...`
 to specify your own customized fingerprints. See the [docs on impersonation](https://curl-cffi.readthedocs.io/en/latest/impersonate/_index.html) for details.
-
 
 ### Asyncio
 
@@ -336,30 +338,61 @@ For low-level APIs, Scrapy integration and other advanced topics, see the
 
 ### WebSockets
 
+`curl_cffi` provides an advanced Python interface to libcurl's WebSocket client.
+
+WebSocket handshakes go through your session, so they use the same browser impersonation (TLS/JA3 fingerprint), proxies, cookies and headers as your HTTP requests.
+
 ```python
-from curl_cffi import WebSocket
+from curl_cffi import Session
 
-def on_message(ws: WebSocket, message: str | bytes):
-    print(message)
-
-ws = WebSocket(on_message=on_message)
-ws.run_forever("wss://api.gemini.com/v1/marketdata/BTCUSD")
+with Session(impersonate="chrome") as s:
+    with s.ws_connect("wss://ws.postman-echo.com/raw") as ws:
+        ws.send_str("Hello, World!")
+        print(ws.recv_str())
+        # Hello, World!
 ```
 
-### Asyncio WebSockets
+The sync client also supports an event-driven callback style, similar to `websocket-client`:
+
+```python
+from curl_cffi import Session
+
+def on_message(ws, message):
+    print(message)
+
+with Session() as s:
+    url = "wss://api.gemini.com/v1/marketdata/BTCUSD"
+    with s.ws_connect(url, on_message=on_message) as ws:
+        ws.run_forever()
+```
+
+The async client sends and receives concurrently, similar to `aiohttp`:
 
 ```python
 import asyncio
 from curl_cffi import AsyncSession
 
-async with AsyncSession() as session:
-    async with session.ws_connect("wss://echo.websocket.org") as ws:
-        await asyncio.gather(*[ws.send_str("Hello, World!") for _ in range(10)])
-        async for message in ws:
-            print(message)
+async def main():
+    async with AsyncSession(impersonate="chrome") as s:
+        async with s.ws_connect("wss://ws.postman-echo.com/raw") as ws:
+            # Sends are queued and return immediately
+            await asyncio.gather(*(ws.send_str(f"Message {i}") for i in range(3)))
+
+            for _ in range(3):
+                print(await ws.recv_str())
+
+asyncio.run(main())
 ```
 
-See the WebSocket [docs](https://curl-cffi.readthedocs.io/en/latest/websockets.html) for full details and advanced options.
+#### Features
+
+- **Browser impersonation:** the handshake uses your session's TLS/JA3 fingerprint, proxies, cookies and headers.
+- **Complete messages:** fragmented messages are reassembled for you.
+- **Timeouts and retries:** every send and receive accepts a `timeout`, and failed reads can be retried with backoff.
+- **Compression:** opt in to `permessage-deflate` with `curl_options={CurlOpt.WS_OPTIONS: CurlWsOption.PERMESSAGE_DEFLATE}` on `ws_connect()`.
+- **Fast masking:** outgoing frames are masked with SIMD instructions (AVX-512, AVX2, NEON) in a customized libcurl build.
+
+See the [WebSockets guide](https://curl-cffi.readthedocs.io/en/latest/websockets.html) for callbacks, timeouts, configuration and more.
 
 ## Ecosystem
 

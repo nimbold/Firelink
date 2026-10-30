@@ -47,7 +47,8 @@ fn process_is_running(pid: u32) -> bool {
 
 #[cfg(not(windows))]
 fn process_is_running(pid: u32) -> bool {
-    let mut system = sysinfo::System::new();
+    let mut system =
+        sysinfo::System::new().expect("system information is supported on this test host");
     system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     system.process(sysinfo::Pid::from_u32(pid)).is_some()
 }
@@ -84,6 +85,7 @@ async fn shell_process_group_kills_descendant_after_launcher_exit() {
         ])
         .env("FIRELINK_SHELL_PROCESS_GROUP_FIXTURE", "launcher")
         .set_process_group(true)
+        .kill_on_drop(true)
         .spawn()
         .expect("spawn launcher with process-group ownership");
     let launcher_pid = child.pid();
@@ -139,29 +141,9 @@ async fn shell_process_group_kills_descendant_after_launcher_exit() {
         panic!("descendant exited before its process group was terminated");
     }
 
-    child.kill().expect("terminate process group");
-    let terminated = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            match events.recv().await {
-                Some(tauri_plugin_shell::process::CommandEvent::Terminated(payload)) => {
-                    return Ok(payload);
-                }
-                Some(tauri_plugin_shell::process::CommandEvent::Error(error)) => {
-                    return Err(format!("process-group termination error: {error}"));
-                }
-                None => {
-                    return Err("process-group event stream closed before termination".to_string());
-                }
-                _ => {}
-            }
-        }
-    })
-    .await
-    .expect("process group should terminate within 10 seconds")
-    .expect("process group should report termination");
-    assert_eq!(terminated.code, Some(0), "launcher exit status");
+    drop(child);
     assert!(
         wait_for_process_exit(descendant_pid, Duration::from_secs(10)).await,
-        "descendant should exit when its process group is killed"
+        "dropping the child handle should kill its process group"
     );
 }

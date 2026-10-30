@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: websockets
-Version: 17.2
+Version: 17.3
 Summary: An implementation of the WebSocket Protocol (RFC 6455 & 7692)
 Author-email: Aymeric Augustin <aymeric.augustin@m4x.org>
 License-Expression: BSD-3-Clause

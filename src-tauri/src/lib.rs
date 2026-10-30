@@ -2916,7 +2916,7 @@ const MEDIA_METADATA_TIMEOUT: Duration = Duration::from_secs(55);
 const MEDIA_METADATA_CACHE_MAX_ENTRIES: usize = 128;
 const FILE_METADATA_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_SHELL_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
-// yt-dlp 2026.10.21's `default` alias includes tv_samsung, visionos, and web.
+// yt-dlp 2026.10.26's `default` alias includes tv_samsung, visionos, and web.
 // Keep web_embedded alongside that upstream set because it exposes additional
 // usable formats on public multi-quality videos.
 const YTDLP_YOUTUBE_PLAYER_CLIENTS: &str = "youtube:player_client=default,web_embedded";
@@ -2956,6 +2956,7 @@ fn ytdlp_shell_command<R: tauri::Runtime>(
         .shell()
         .command(executable)
         .set_process_group(true)
+        .kill_on_drop(true)
 }
 
 async fn receive_media_termination_after_cancel(
@@ -16029,7 +16030,13 @@ fn get_free_space(
 ) -> Result<String, String> {
     properties_window::ensure_main_window(&caller)?;
     use sysinfo::Disks;
-    let disks = Disks::new_with_refreshed_list();
+    let disks = match Disks::new_with_refreshed_list() {
+        Ok(disks) => disks,
+        Err(error) => {
+            log::warn!("Could not inspect destination disk space: {error}");
+            return Ok("Unknown".to_string());
+        }
+    };
 
     let resolved_dest = resolve_path(&path, &app_handle);
 
@@ -16037,7 +16044,7 @@ fn get_free_space(
     let mut best_match: Option<&sysinfo::Disk> = None;
     let mut max_match_len = 0;
 
-    for disk in disks.list() {
+    for disk in disks.iter() {
         let mount_point = disk.mount_point();
         if crate::platform::path_is_within(&resolved_dest, mount_point) {
             let match_len = mount_point.as_os_str().len();
@@ -24029,18 +24036,44 @@ pub fn run() {
             }
 
             let system_info_started = Instant::now();
-            let mut sys = sysinfo::System::new_with_specifics(
+            let sys = match sysinfo::System::new_with_specifics(
                 sysinfo::RefreshKind::nothing().with_memory(
                     sysinfo::MemoryRefreshKind::nothing().with_ram(),
                 ),
-            );
-            sys.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
-            log::info!("=== System Information ===");
-            log::info!("OS: {} {}", sysinfo::System::name().unwrap_or_else(|| "Unknown".to_string()), sysinfo::System::os_version().unwrap_or_else(|| "Unknown".to_string()));
+            ) {
+                Ok(mut sys) => {
+                    sys.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
+                    Some(sys)
+                }
+                Err(error) => {
+                    log::warn!("System information is unavailable on this platform: {error}");
+                    None
+                }
+            };
             let arch = sysinfo::System::cpu_arch();
+            let cpu_summary = sys
+                .as_ref()
+                .map(|sys| {
+                    format!(
+                        "{} ({} cores)",
+                        sys.cpus().first().map(|cpu| cpu.brand()).unwrap_or("Unknown"),
+                        sys.cpus().len()
+                    )
+                })
+                .unwrap_or_else(|| "Unknown".to_string());
+            let memory_summary = sys
+                .as_ref()
+                .map(|sys| format!("{} MB total", sys.total_memory() / 1024 / 1024))
+                .unwrap_or_else(|| "Unknown".to_string());
+            log::info!("=== System Information ===");
+            log::info!(
+                "OS: {} {}",
+                sysinfo::System::name().unwrap_or_else(|_| "Unknown".to_string()),
+                sysinfo::System::os_version().unwrap_or_else(|_| "Unknown".to_string())
+            );
             log::info!("Architecture: {}", if arch.is_empty() { "Unknown" } else { &arch });
-            log::info!("CPU: {} ({} cores)", sys.cpus().first().map(|c| c.brand()).unwrap_or("Unknown"), sys.cpus().len());
-            log::info!("Memory: {} MB total", sys.total_memory() / 1024 / 1024);
+            log::info!("CPU: {cpu_summary}");
+            log::info!("Memory: {memory_summary}");
             log::info!("App Version: {}", env!("CARGO_PKG_VERSION"));
             log::info!("==========================");
             log_startup_phase("system_information", system_info_started, app_startup_started_at);
@@ -24258,20 +24291,15 @@ pub fn run() {
                 log::info!("=== System Information ===");
                 log::info!(
                     "OS: {} {}",
-                    sysinfo::System::name().unwrap_or_else(|| "Unknown".to_string()),
-                    sysinfo::System::os_version().unwrap_or_else(|| "Unknown".to_string())
+                    sysinfo::System::name().unwrap_or_else(|_| "Unknown".to_string()),
+                    sysinfo::System::os_version().unwrap_or_else(|_| "Unknown".to_string())
                 );
-                let arch = sysinfo::System::cpu_arch();
                 log::info!(
                     "Architecture: {}",
                     if arch.is_empty() { "Unknown" } else { &arch }
                 );
-                log::info!(
-                    "CPU: {} ({} cores)",
-                    sys.cpus().first().map(|c| c.brand()).unwrap_or("Unknown"),
-                    sys.cpus().len()
-                );
-                log::info!("Memory: {} MB total", sys.total_memory() / 1024 / 1024);
+                log::info!("CPU: {cpu_summary}");
+                log::info!("Memory: {memory_summary}");
                 log::info!("App Version: {}", env!("CARGO_PKG_VERSION"));
                 log::info!("==========================");
             }

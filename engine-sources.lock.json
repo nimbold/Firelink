@@ -3,9 +3,9 @@
   "targets": {
     "x86_64-pc-windows-msvc": {
       "yt-dlp": {
-        "version": "2026.10.21",
-        "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.21/yt-dlp_win.zip",
-        "sha256": "a981b50fff6e437576d1c3c8df0680af572028ca12dff5e49435d9d33c98294b"
+        "version": "2026.10.26",
+        "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.26/yt-dlp_win.zip",
+        "sha256": "fd51b212cf8380c7a52ee08c0d6be7f3c59b2f2c832eaf7b45acfae6eab57419"
       },
       "deno": {
         "version": "2.9.8",
@@ -13,9 +13,9 @@
         "sha256": "cba84b26e0df5ae7f74fc66b86a95b866872a86292ebd84fa1e959927edd93bf"
       },
       "ffmpeg": {
-        "version": "9.0.2-33-g4cf298e66a",
-        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-22-13-06/ffmpeg-n9.0.2-33-g4cf298e66a-win64-gpl-9.0.zip",
-        "sha256": "5a8898e31f2c452062d1f1be475befd8ffba04db11e9f8251da3d10d9a1ae2e5"
+        "version": "9.0.2-37-gae19868753",
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-29-19-17/ffmpeg-n9.0.2-37-gae19868753-win64-gpl-9.0.zip",
+        "sha256": "6c3bc37134657f822fe5e530de6d438d6cd041dc32cb4ca1ef00f316f3a45911"
       },
       "aria2c": {
         "version": "1.37.0-firelink-native-dns-v1",
@@ -35,9 +35,9 @@
     },
     "x86_64-unknown-linux-gnu": {
       "yt-dlp": {
-        "version": "2026.10.21",
-        "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.21/yt-dlp_linux.zip",
-        "sha256": "dcddc44b6151ccd855a9a3c8fcdb00e897bb872ec9f4908b1b708b16eaaaa114"
+        "version": "2026.10.26",
+        "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.26/yt-dlp_linux.zip",
+        "sha256": "f34053415136e55073dd64ba5326d161ecc23ce0e98c081d8752867b37809450"
       },
       "deno": {
         "version": "2.9.8",
@@ -45,9 +45,9 @@
         "sha256": "e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609"
       },
       "ffmpeg": {
-        "version": "9.0.2-33-g4cf298e66a",
-        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-22-13-06/ffmpeg-n9.0.2-33-g4cf298e66a-linux64-gpl-9.0.tar.xz",
-        "sha256": "1cb0a72cf393a1fdb661cbbbd0cfe89dc8b197bb21e21473bbde505bb4f2a2a7"
+        "version": "9.0.2-37-gae19868753",
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-29-19-17/ffmpeg-n9.0.2-37-gae19868753-linux64-gpl-9.0.tar.xz",
+        "sha256": "83537b0f6a97905f325080f6f5916e70ec252d1ef3e4ce4746f755b88720cbf5"
       },
       "aria2c": {
         "version": "1.37.0-firelink-native-dns-v1",
