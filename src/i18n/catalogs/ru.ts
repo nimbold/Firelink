@@ -627,6 +627,8 @@ const ru = {
     revealFileFailed: 'Не удалось показать файл в Finder',
     pauseFailed: 'Не удалось приостановить загрузку',
     resumeFailed: 'Не удалось возобновить {{fileName}}',
+    resumeSelectedFailed: 'Не удалось возобновить выбранные загрузки',
+    resumeAllFailed: 'Не удалось возобновить все загрузки',
     moveManyFailed: 'Не удалось переместить загрузки в очередь',
     moveOneFailed: 'Не удалось переместить загрузку в очередь',
     copyAddressesFailed: 'Не удалось скопировать адреса',

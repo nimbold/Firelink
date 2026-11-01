@@ -7,5 +7,6 @@ declare module 'i18next' {
     enableSelector: 'optimize';
     resources: typeof resources['en'];
     returnNull: false;
+    strictInterpolationChecks: true;
   }
 }

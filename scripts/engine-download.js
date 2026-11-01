@@ -116,8 +116,9 @@ function sleep(milliseconds, signal) {
   });
 }
 
-async function resetArchive(archive) {
+async function resetArchive(archive, signal) {
   for (let attempt = 0; ; attempt += 1) {
+    throwIfAborted(signal);
     try {
       fs.rmSync(archive, { force: true });
       return;
@@ -125,7 +126,7 @@ async function resetArchive(archive) {
       const retryable = process.platform === 'win32'
         && ['EACCES', 'EBUSY', 'EPERM'].includes(error?.code);
       if (!retryable || attempt >= FILE_RESET_RETRY_DELAYS_MS.length) throw error;
-      await sleep(FILE_RESET_RETRY_DELAYS_MS[attempt]);
+      await sleep(FILE_RESET_RETRY_DELAYS_MS[attempt], signal);
     }
   }
 }
@@ -155,13 +156,16 @@ export async function downloadEngineArchive({
     const downloadTimeout = createDownloadTimeout(idleTimeoutMs);
     const requestSignal = combineAbortSignals([signal, downloadTimeout.signal]);
     let resetForRetry = false;
+    let response;
 
     try {
-      const response = await fetch(url, {
+      response = await fetch(url, {
         headers: partialSize > 0 ? { Range: `bytes=${partialSize}-` } : undefined,
         redirect: 'follow',
         signal: requestSignal.signal,
       });
+
+      throwIfAborted(requestSignal.signal);
 
       if (response.status === 416 && partialSize > 0) {
         await response.body?.cancel();
@@ -186,9 +190,10 @@ export async function downloadEngineArchive({
       const expectedResponseLength = responseLength(response);
       if (!append && partialSize > 0) {
         // The provider ignored Range and returned the complete archive.
-        await resetArchive(archive);
+        await resetArchive(archive, requestSignal.signal);
       }
 
+      throwIfAborted(requestSignal.signal);
       await pipeline(
         Readable.fromWeb(response.body),
         new Transform({
@@ -219,10 +224,13 @@ export async function downloadEngineArchive({
       resetForRetry = true;
       throw checksumMismatchError(name, expectedSha256, actual);
     } catch (error) {
+      if (response?.body && !response.body.locked) {
+        void response.body.cancel().catch(() => {});
+      }
       if (signal?.aborted) throw abortReason(signal);
       lastError = error;
       if (resetForRetry || error?.code === 'ARCHIVE_CHECKSUM_MISMATCH') {
-        await resetArchive(archive);
+        await resetArchive(archive, signal);
       }
       if (attempt === attempts) {
         throw new Error(

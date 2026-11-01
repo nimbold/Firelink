@@ -627,6 +627,8 @@ const fa = {
     revealFileFailed: 'نمایش فایل دانلودشده در پوشه ناموفق بود',
     pauseFailed: 'توقف دانلود ناموفق بود',
     resumeFailed: 'ادامه {{fileName}} ناموفق بود',
+    resumeSelectedFailed: 'ادامه دانلودهای انتخاب‌شده ناموفق بود',
+    resumeAllFailed: 'ادامه همه دانلودها ناموفق بود',
     moveManyFailed: 'انتقال دانلودها به صف ناموفق بود',
     moveOneFailed: 'انتقال دانلود به صف ناموفق بود',
     copyAddressesFailed: 'آدرس‌ها کپی نشدند',

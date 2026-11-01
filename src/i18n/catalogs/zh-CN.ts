@@ -627,6 +627,8 @@ const zhCN = {
     revealFileFailed: '无法在文件管理器中显示下载',
     pauseFailed: '无法暂停下载',
     resumeFailed: '无法恢复 {{fileName}}',
+    resumeSelectedFailed: '无法恢复所选下载',
+    resumeAllFailed: '无法恢复所有下载',
     moveManyFailed: '无法将下载移动到队列',
     moveOneFailed: '无法将下载移动到队列',
     copyAddressesFailed: '无法复制地址',

@@ -627,6 +627,8 @@ const uk = {
     revealFileFailed: 'Не вдалося показати завантаження в Finder',
     pauseFailed: 'Не вдалося призупинити завантаження',
     resumeFailed: 'Не вдалося відновити {{fileName}}',
+    resumeSelectedFailed: 'Не вдалося відновити вибрані завантаження',
+    resumeAllFailed: 'Не вдалося відновити всі завантаження',
     moveManyFailed: 'Не вдалося перемістити завантаження до черги',
     moveOneFailed: 'Не вдалося перемістити завантаження до черги',
     copyAddressesFailed: 'Не вдалося скопіювати адреси',

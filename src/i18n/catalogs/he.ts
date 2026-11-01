@@ -627,6 +627,8 @@ const he = {
     revealFileFailed: 'לא ניתן להציג את הקובץ ב-Finder',
     pauseFailed: 'לא ניתן להשהות את ההורדה',
     resumeFailed: 'לא ניתן לחדש את {{fileName}}',
+    resumeSelectedFailed: 'לא ניתן לחדש את ההורדות שנבחרו',
+    resumeAllFailed: 'לא ניתן לחדש את כל ההורדות',
     moveManyFailed: 'לא ניתן להעביר הורדות לתור',
     moveOneFailed: 'לא ניתן להעביר הורדה לתור',
     copyAddressesFailed: 'לא ניתן להעתיק כתובות',

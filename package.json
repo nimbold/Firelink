@@ -58,11 +58,11 @@
     "@tauri-apps/plugin-log": "^2.10.1",
     "@tauri-apps/plugin-notification": "^2.8.0",
     "@tauri-apps/plugin-opener": "^2.7.2",
-    "i18next": "^26.5.11",
-    "lucide-react": "^1.65.0",
+    "i18next": "^26.6.0",
+    "lucide-react": "^1.66.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "react-i18next": "^17.1.9",
+    "react-i18next": "^17.1.10",
     "zustand": "^5.0.15"
   },
   "devDependencies": {

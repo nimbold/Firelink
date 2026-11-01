@@ -2032,13 +2032,13 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     const ids = Array.from(selectedIdsRef.current);
     if (ids.length === 0) return;
     void startSelected(ids).catch(error => {
-      showInteractionError(t($ => $.downloadTable.resumeFailed), error);
+      showInteractionError(t($ => $.downloadTable.resumeSelectedFailed), error);
     });
   }, [showInteractionError, startSelected, t]);
 
   const handleStartAll = useCallback(() => {
     void startAll().catch(error => {
-      showInteractionError(t($ => $.downloadTable.resumeFailed), error);
+      showInteractionError(t($ => $.downloadTable.resumeAllFailed), error);
     });
   }, [showInteractionError, startAll, t]);
 

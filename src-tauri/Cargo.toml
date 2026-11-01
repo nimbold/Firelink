@@ -37,7 +37,7 @@ uuid = { version = "1.29.0", features = ["v4"] }
 ts-rs = { version = "12", features = ["serde-compat", "uuid-impl"] }
 tauri-plugin-notification = "2.8.0"
 tauri-plugin-clipboard-manager = "2.5.0"
-sysinfo = "0.40.0"
+sysinfo = "0.40.1"
 hmac = "0.13"
 sha2 = "0.11"
 sha1 = "0.11"
@@ -56,7 +56,7 @@ futures-util = { version = "0.3.34", features = ["sink"] }
 chrono = "0.4.45"
 url = "2"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
-log = "0.4.34"
+log = "0.4.35"
 tauri-plugin-log = "2.10.1"
 trash = "5"
 async-trait = "0.1"

@@ -627,6 +627,8 @@ const common = {
     revealFileFailed: 'Could not show download in Finder',
     pauseFailed: 'Could not pause download',
     resumeFailed: 'Could not resume {{fileName}}',
+    resumeSelectedFailed: 'Could not resume selected downloads',
+    resumeAllFailed: 'Could not resume all downloads',
     moveManyFailed: 'Could not move downloads to queue',
     moveOneFailed: 'Could not move download to queue',
     copyAddressesFailed: 'Could not copy addresses',

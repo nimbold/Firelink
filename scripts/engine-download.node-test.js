@@ -39,6 +39,70 @@ function digest(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
+function waitForFilePrefix(filePath, prefix, timeoutMs = 5_000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timeout;
+
+    const finish = error => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      fs.unwatchFile(filePath, onFileChange);
+      if (error) reject(error);
+      else resolve();
+    };
+
+    const onFileChange = () => {
+      try {
+        const contents = fs.readFileSync(filePath);
+        if (
+          contents.length >= prefix.length
+          && contents.subarray(0, prefix.length).equals(prefix)
+        ) {
+          finish();
+        }
+      } catch (error) {
+        if (error?.code !== 'ENOENT') finish(error);
+      }
+    };
+
+    fs.watchFile(filePath, { interval: 10, persistent: false }, onFileChange);
+    timeout = setTimeout(() => {
+      finish(new Error(`Timed out waiting for ${filePath} to contain the written bytes`));
+    }, timeoutMs);
+    onFileChange();
+  });
+}
+
+function makeTrackedResponseBody(onCancel) {
+  let resolveCancelled;
+  const cancelled = new Promise(resolve => {
+    resolveCancelled = resolve;
+  });
+  const body = new ReadableStream({
+    cancel(reason) {
+      onCancel?.(reason);
+      resolveCancelled(reason);
+    },
+  });
+  return { body, cancelled };
+}
+
+async function waitForBodyCancellation(cancelled, timeoutMs = 1_000) {
+  let timeout;
+  try {
+    await Promise.race([
+      cancelled,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('Response body was not canceled')), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 test('resumes an interrupted archive response from the retained partial file', async () => {
   const { directory, archive } = makeArchivePath();
   const full = Buffer.from('complete archive payload');
@@ -184,20 +248,79 @@ test('restarts from zero after an unsatisfiable retained range', async () => {
 test('propagates external cancellation without retrying an in-flight archive', async () => {
   const { directory, archive } = makeArchivePath();
   const abortController = new AbortController();
+  const cancellationReason = new Error('provisioning interrupted');
+  const partialBytes = Buffer.from('partial archive bytes');
+  let downloadPromise;
   let calls = 0;
 
   try {
     await withMockFetch(async (_url, options) => {
       calls += 1;
       assert.equal(options.signal.aborted, false);
-      setTimeout(() => {
-        abortController.abort(new Error('provisioning interrupted'));
-      }, 10);
       return new Response(new ReadableStream({
         start(controller) {
-          controller.enqueue(Buffer.from('partial archive bytes'));
+          controller.enqueue(partialBytes);
         },
       }), {
+        status: 200,
+        headers: { 'Content-Length': '100' },
+      });
+    }, async () => {
+      downloadPromise = downloadEngineArchive({
+        name: 'test',
+        url: 'https://example.test/engine.zip',
+        archive,
+        expectedSha256: digest(Buffer.from('never completed')),
+        attempts: 3,
+        idleTimeoutMs: 10_000,
+        retryDelaysMs: [0, 0],
+        signal: abortController.signal,
+      });
+      void downloadPromise.catch(() => {});
+
+      try {
+        await waitForFilePrefix(archive, partialBytes);
+      } catch (error) {
+        abortController.abort(error);
+        await downloadPromise.catch(() => {});
+        throw error;
+      }
+
+      abortController.abort(cancellationReason);
+      await assert.rejects(downloadPromise, error => {
+        assert.equal(error, cancellationReason);
+        return true;
+      });
+    });
+
+    assert.equal(calls, 1);
+    assert.deepEqual(fs.readFileSync(archive), partialBytes);
+  } finally {
+    if (downloadPromise && !abortController.signal.aborted) {
+      abortController.abort(new Error('test cleanup'));
+    }
+    await downloadPromise?.catch(() => {});
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('preserves a retained partial archive when cancellation wins before an ignored-range response', async () => {
+  const { directory, archive } = makeArchivePath();
+  const retainedBytes = Buffer.from('retained partial archive');
+  fs.writeFileSync(archive, retainedBytes);
+  const abortController = new AbortController();
+  const cancellationReason = new Error('provisioning interrupted before response');
+  const trackedBody = makeTrackedResponseBody();
+  let calls = 0;
+  let requestedRange;
+
+  try {
+    await withMockFetch(async (_url, options) => {
+      calls += 1;
+      requestedRange = options.headers?.Range;
+      assert.equal(options.signal.aborted, false);
+      abortController.abort(cancellationReason);
+      return new Response(trackedBody.body, {
         status: 200,
         headers: { 'Content-Length': '100' },
       });
@@ -209,20 +332,242 @@ test('propagates external cancellation without retrying an in-flight archive', a
           archive,
           expectedSha256: digest(Buffer.from('never completed')),
           attempts: 3,
-          retryDelaysMs: [500, 500],
+          retryDelaysMs: [0, 0],
           signal: abortController.signal,
         }),
         error => {
-          assert.match(error.message, /provisioning interrupted/);
+          assert.equal(error, cancellationReason);
+          return true;
+        },
+      );
+      await waitForBodyCancellation(trackedBody.cancelled);
+    });
+
+    assert.equal(requestedRange, `bytes=${retainedBytes.length}-`);
+    assert.equal(calls, 1);
+    assert.deepEqual(fs.readFileSync(archive), retainedBytes);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('preserves a retained partial archive when the idle timeout wins before an ignored-range response', async () => {
+  const { directory, archive } = makeArchivePath();
+  const retainedBytes = Buffer.from('retained partial archive');
+  fs.writeFileSync(archive, retainedBytes);
+  const trackedBody = makeTrackedResponseBody();
+  let calls = 0;
+  let requestedRange;
+
+  try {
+    await withMockFetch(async (_url, options) => {
+      calls += 1;
+      requestedRange = options.headers?.Range;
+      return new Promise(resolve => {
+        const respondAfterTimeout = () => resolve(new Response(trackedBody.body, {
+          status: 200,
+          headers: { 'Content-Length': '100' },
+        }));
+        options.signal.addEventListener('abort', respondAfterTimeout, { once: true });
+        if (options.signal.aborted) respondAfterTimeout();
+      });
+    }, async () => {
+      await assert.rejects(
+        downloadEngineArchive({
+          name: 'test',
+          url: 'https://example.test/engine.zip',
+          archive,
+          expectedSha256: digest(Buffer.from('never completed')),
+          attempts: 1,
+          idleTimeoutMs: 25,
+          retryDelaysMs: [],
+        }),
+        error => {
+          assert.match(error.message, /Download idle for 25ms/);
+          return true;
+        },
+      );
+      await waitForBodyCancellation(trackedBody.cancelled);
+    });
+
+    assert.equal(requestedRange, `bytes=${retainedBytes.length}-`);
+    assert.equal(calls, 1);
+    assert.deepEqual(fs.readFileSync(archive), retainedBytes);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('preserves a retained partial archive when cancellation occurs while discarding an unsatisfiable range response', async () => {
+  const { directory, archive } = makeArchivePath();
+  const retainedBytes = Buffer.from('retained partial archive');
+  fs.writeFileSync(archive, retainedBytes);
+  const abortController = new AbortController();
+  const cancellationReason = new Error('provisioning interrupted while discarding response');
+  let calls = 0;
+  let requestedRange;
+  let bodyCanceled = false;
+
+  try {
+    await withMockFetch(async (_url, options) => {
+      calls += 1;
+      requestedRange = options.headers?.Range;
+      return new Response(new ReadableStream({
+        cancel() {
+          bodyCanceled = true;
+          abortController.abort(cancellationReason);
+        },
+      }), { status: 416 });
+    }, async () => {
+      await assert.rejects(
+        downloadEngineArchive({
+          name: 'test',
+          url: 'https://example.test/engine.zip',
+          archive,
+          expectedSha256: digest(Buffer.from('never completed')),
+          attempts: 3,
+          retryDelaysMs: [0, 0],
+          signal: abortController.signal,
+        }),
+        error => {
+          assert.equal(error, cancellationReason);
           return true;
         },
       );
     });
 
+    assert.equal(requestedRange, `bytes=${retainedBytes.length}-`);
+    assert.equal(bodyCanceled, true);
     assert.equal(calls, 1);
-    assert.ok(fs.statSync(archive).size > 0);
+    assert.deepEqual(fs.readFileSync(archive), retainedBytes);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('cancels Windows archive reset backoff without retrying or changing the partial file', async () => {
+  const { directory, archive } = makeArchivePath();
+  const retainedBytes = Buffer.from('retained partial archive during Windows reset');
+  fs.writeFileSync(archive, retainedBytes);
+
+  const abortController = new AbortController();
+  const cancellationReason = new Error('provisioning interrupted during file reset');
+  const trackedBody = makeTrackedResponseBody();
+  const originalRmSync = fs.rmSync;
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+  let calls = 0;
+  let requestedRange;
+  let removalAttempts = 0;
+
+  try {
+    // Drive the platform-specific retry branch in this isolated test process.
+    Object.defineProperty(process, 'platform', { ...originalPlatform, value: 'win32' });
+    fs.rmSync = function mockRmSync(target, ...args) {
+      if (path.resolve(target) === archive) {
+        removalAttempts += 1;
+        const error = new Error('simulated Windows sharing violation');
+        error.code = 'EBUSY';
+
+        // This timer fires after resetArchive has entered its 100ms backoff.
+        setTimeout(() => abortController.abort(cancellationReason), 0);
+        throw error;
+      }
+      return originalRmSync.call(this, target, ...args);
+    };
+
+    await withMockFetch(async (_url, options) => {
+      calls += 1;
+      requestedRange = options.headers?.Range;
+      return new Response(trackedBody.body, {
+        status: 200,
+        headers: { 'Content-Length': '100' },
+      });
+    }, async () => {
+      await assert.rejects(
+        downloadEngineArchive({
+          name: 'test',
+          url: 'https://example.test/engine.zip',
+          archive,
+          expectedSha256: digest(Buffer.from('never completed')),
+          attempts: 3,
+          retryDelaysMs: [0, 0],
+          signal: abortController.signal,
+        }),
+        error => {
+          assert.equal(error, cancellationReason);
+          return true;
+        },
+      );
+      await waitForBodyCancellation(trackedBody.cancelled);
+    });
+
+    assert.equal(requestedRange, `bytes=${retainedBytes.length}-`);
+    assert.equal(calls, 1);
+    assert.equal(removalAttempts, 1);
+    assert.deepEqual(fs.readFileSync(archive), retainedBytes);
+  } finally {
+    fs.rmSync = originalRmSync;
+    Object.defineProperty(process, 'platform', originalPlatform);
+    originalRmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('cancels the response body and preserves a partial archive when reset fails with EIO', async () => {
+  const { directory, archive } = makeArchivePath();
+  const retainedBytes = Buffer.from('retained partial archive after reset failure');
+  fs.writeFileSync(archive, retainedBytes);
+
+  const trackedBody = makeTrackedResponseBody();
+  const originalRmSync = fs.rmSync;
+  let calls = 0;
+  let requestedRange;
+  let removalAttempts = 0;
+
+  try {
+    fs.rmSync = function mockRmSync(target, ...args) {
+      if (path.resolve(target) === archive) {
+        removalAttempts += 1;
+        const error = new Error('simulated archive reset I/O failure');
+        error.code = 'EIO';
+        throw error;
+      }
+      return originalRmSync.call(this, target, ...args);
+    };
+
+    await withMockFetch(async (_url, options) => {
+      calls += 1;
+      requestedRange = options.headers?.Range;
+      return new Response(trackedBody.body, {
+        status: 200,
+        headers: { 'Content-Length': '100' },
+      });
+    }, async () => {
+      await assert.rejects(
+        downloadEngineArchive({
+          name: 'test',
+          url: 'https://example.test/engine.zip',
+          archive,
+          expectedSha256: digest(Buffer.from('never completed')),
+          attempts: 1,
+          retryDelaysMs: [],
+        }),
+        error => {
+          assert.match(error.message, /Failed to download test after 1 attempts/);
+          assert.match(error.message, /simulated archive reset I\/O failure/);
+          assert.equal(error.cause?.code, 'EIO');
+          return true;
+        },
+      );
+      await waitForBodyCancellation(trackedBody.cancelled);
+    });
+
+    assert.equal(requestedRange, `bytes=${retainedBytes.length}-`);
+    assert.equal(calls, 1);
+    assert.equal(removalAttempts, 1);
+    assert.deepEqual(fs.readFileSync(archive), retainedBytes);
+  } finally {
+    fs.rmSync = originalRmSync;
+    originalRmSync(directory, { recursive: true, force: true });
   }
 });
 
