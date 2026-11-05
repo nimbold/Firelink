@@ -447,7 +447,7 @@ function npmUpdateRows(outdated, { cwd = process.cwd(), lockfilePackages = {} } 
     throw new Error('npm outdated response was not a package map');
   }
 
-  const lockfileVersionAtLocation = location => {
+  const lockfileEntryAtLocation = location => {
     if (typeof location !== 'string' || !location.trim()) return undefined;
     let lockfilePath = location.trim().replaceAll('\\', '/');
     if (path.isAbsolute(location)) {
@@ -459,27 +459,39 @@ function npmUpdateRows(outdated, { cwd = process.cwd(), lockfilePackages = {} } 
     }
     lockfilePath = lockfilePath.replace(/^\.\//, '');
     if (lockfilePath === '..' || lockfilePath.startsWith('../')) return undefined;
-    return normalizeVersion(lockfilePackages[lockfilePath]?.version);
+    return lockfilePackages[lockfilePath];
   };
-  const lockfileVersionsForName = name => {
+  const lockfileEntriesForName = name => {
     const suffix = `/node_modules/${name}`;
     return Object.entries(lockfilePackages)
       .filter(([lockfilePath]) => lockfilePath === `node_modules/${name}` || lockfilePath.endsWith(suffix))
-      .map(([, entry]) => normalizeVersion(entry?.version))
-      .filter(Boolean);
+      .map(([, entry]) => ({ version: normalizeVersion(entry?.version), bundled: entry?.inBundle === true }))
+      .filter(entry => entry.version);
   };
 
   const rows = new Map();
   for (const [name, value] of Object.entries(outdated)) {
+    const entriesForName = lockfileEntriesForName(name);
     const records = Array.isArray(value) ? value : [value];
     const normalizedRecords = records.map(info => {
       if (!info || typeof info !== 'object' || Array.isArray(info)) {
         throw new Error(`npm outdated response for ${name} was not a package record`);
       }
+      const locatedEntry = lockfileEntryAtLocation(info.location);
+      const installedVersion = normalizeVersion(info.current);
+      const locatedVersion = normalizeVersion(locatedEntry?.version);
+      const matchingEntries = installedVersion
+        ? entriesForName.filter(entry => entry.version === installedVersion)
+        : entriesForName;
+      // Without a location, mixed bundled and non-bundled copies cannot be
+      // distinguished safely, even if version matching suggests a pairing.
       return {
         info,
-        installedVersion: normalizeVersion(info.current),
-        locatedVersion: lockfileVersionAtLocation(info.location),
+        installedVersion,
+        locatedVersion,
+        bundled: (locatedEntry?.inBundle === true && (!installedVersion || installedVersion === locatedVersion))
+          || (!info.location && matchingEntries.length > 0
+            && matchingEntries.every(entry => entry.bundled)),
         wanted: normalizeVersion(info.wanted),
         latest: normalizeVersion(info.latest),
       };
@@ -493,7 +505,7 @@ function npmUpdateRows(outdated, { cwd = process.cwd(), lockfilePackages = {} } 
     const unresolved = normalizedRecords
       .map((record, index) => ({ record, index }))
       .filter(({ record }) => !record.installedVersion && !record.locatedVersion);
-    const lockVersions = unresolved.length ? lockfileVersionsForName(name) : [];
+    const lockVersions = unresolved.length ? entriesForName.map(entry => entry.version) : [];
     const resolvedLockVersions = new Map();
     if (lockVersions.length === 1) {
       for (const { index } of unresolved) resolvedLockVersions.set(index, lockVersions[0]);
@@ -551,7 +563,7 @@ function npmUpdateRows(outdated, { cwd = process.cwd(), lockfilePackages = {} } 
       for (const current of currentVersions) {
         if (!semver.valid(current) || semver.gte(current, record.wanted)) continue;
 
-        const key = `${name}\0${current}\0${record.wanted}\0${record.latest}`;
+        const key = `${name}\0${current}\0${record.wanted}\0${record.latest}\0${record.bundled}`;
         const row = rows.get(key) || {
           name,
           current,
@@ -560,6 +572,7 @@ function npmUpdateRows(outdated, { cwd = process.cwd(), lockfilePackages = {} } 
           lockfileOnly: !record.installedVersion,
           dependents: new Set(),
         };
+        if (record.bundled) row.bundled = true;
         row.lockfileOnly = row.lockfileOnly && !record.installedVersion;
         if (typeof record.info.dependent === 'string' && record.info.dependent.trim()) {
           row.dependents.add(record.info.dependent.trim());
@@ -603,12 +616,18 @@ function printNpmReport(label, outdated, cwd) {
     console.log(`${label}: current`);
     return 0;
   }
-  console.log(`${label}: ${rows.length} compatible package update(s)`);
+  const actionable = rows.filter(row => !row.bundled);
+  const bundled = rows.filter(row => row.bundled);
+  console.log(`${label}: ${actionable.length} compatible package update(s)`);
   for (const row of rows) {
     const dependents = row.dependents.length ? ` via ${row.dependents.join(', ')}` : '';
     const source = row.lockfileOnly ? ' (from lockfile)' : '';
-    console.log(`  ${row.name}: ${row.current}${source} -> ${row.wanted} (latest ${row.latest})${dependents}`);
+    const bundleNote = row.bundled ? ' [bundled; update via containing package]' : '';
+    console.log(`  ${row.name}: ${row.current}${source} -> ${row.wanted} (latest ${row.latest})${dependents}${bundleNote}`);
   }
+  if (bundled.length) console.log(`  ${bundled.length} bundled dependency update(s) require a new containing package`);
+  // Bundled dependencies cannot be updated independently, but they are still
+  // outdated and must prevent the overall report from claiming everything is current.
   return rows.length;
 }
 
@@ -999,5 +1018,6 @@ export {
   npmExecutable,
   npmOutdated,
   npmUpdateRows,
+  printNpmReport,
   providerAssetHashes,
 };

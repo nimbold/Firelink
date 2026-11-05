@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 
 import {
@@ -12,6 +15,7 @@ import {
   npmExecutable,
   npmOutdated,
   npmUpdateRows,
+  printNpmReport,
   providerAssetHashes,
 } from './check-updates.js';
 
@@ -508,6 +512,78 @@ test('npm update rows find compatible lockfile updates for absent optional packa
     lockfileOnly: true,
     dependents: ['rolldown'],
   }]);
+});
+
+test('npm update rows distinguish bundled copies from independently updatable copies', () => {
+  const rows = npmUpdateRows({
+    helper: [
+      { current: '1.0.0', wanted: '1.1.0', latest: '1.1.0', location: '/workspace/node_modules/container/node_modules/helper' },
+      { current: '1.0.0', wanted: '1.1.0', latest: '1.1.0', location: '/workspace/node_modules/helper' },
+    ],
+  }, {
+    cwd: '/workspace',
+    lockfilePackages: {
+      'node_modules/container/node_modules/helper': { version: '1.0.0', inBundle: true },
+      'node_modules/helper': { version: '1.0.0' },
+    },
+  });
+
+  assert.equal(rows.length, 2);
+  assert.equal(rows.filter(row => row.bundled).length, 1);
+  assert.equal(rows.filter(row => !row.bundled).length, 1);
+});
+
+test('npm update rows recognize absent bundled packages without a location', () => {
+  const rows = npmUpdateRows({ helper: { wanted: '1.1.0', latest: '1.1.0' } }, {
+    lockfilePackages: {
+      'node_modules/container/node_modules/helper': { version: '1.0.0', inBundle: true },
+    },
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].bundled, true);
+  assert.equal(rows[0].lockfileOnly, true);
+});
+
+test('locationless bundled copies are matched by installed version', () => {
+  const rows = npmUpdateRows({ helper: [
+    { current: '1.0.0', wanted: '1.1.0', latest: '2.1.0' },
+    { current: '2.0.0', wanted: '2.1.0', latest: '2.1.0' },
+  ] }, { lockfilePackages: {
+    'node_modules/a/node_modules/helper': { version: '1.0.0', inBundle: true },
+    'node_modules/b/node_modules/helper': { version: '2.0.0', inBundle: true },
+  } });
+  assert.equal(rows.length, 2);
+  assert.ok(rows.every(row => row.bundled));
+});
+
+test('locationless mixed copies remain actionable when their ownership is ambiguous', () => {
+  const rows = npmUpdateRows({ helper: [
+    { wanted: '1.1.0', latest: '2.1.0' },
+    { wanted: '2.1.0', latest: '2.1.0' },
+  ] }, { lockfilePackages: {
+    'node_modules/a/node_modules/helper': { version: '1.0.0', inBundle: true },
+    'node_modules/b/node_modules/helper': { version: '2.0.0' },
+  } });
+  assert.equal(rows.length, 2);
+  assert.ok(rows.every(row => !row.bundled));
+});
+
+test('bundled updates prevent an all-current report', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'firelink-npm-report-'));
+  try {
+    fs.writeFileSync(path.join(cwd, 'package-lock.json'), JSON.stringify({ packages: {
+      'node_modules/container/node_modules/helper': { version: '1.0.0', inBundle: true },
+    } }));
+    const outdatedCount = printNpmReport('test', {
+      helper: { wanted: '1.1.0', latest: '1.1.0' },
+    }, cwd);
+    assert.equal(outdatedCount, 1);
+    assert.equal(hasUpdateCheckFailures({
+      outdatedCount, engineIssueCount: 0, providerFailures: [], providerBehind: [],
+    }), true);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test('npm update rows match duplicate optional records to lockfile wanted versions', () => {

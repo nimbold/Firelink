@@ -13,9 +13,9 @@
         "sha256": "cba84b26e0df5ae7f74fc66b86a95b866872a86292ebd84fa1e959927edd93bf"
       },
       "ffmpeg": {
-        "version": "9.0.2-39-g7adfbe40dc",
-        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n9.0.2-39-g7adfbe40dc-win64-gpl-9.0.zip",
-        "sha256": "693f3e224bc184b40524a62ca47526cfebaf2504414021b92fe75f677ad868b9"
+        "version": "9.0.2-47-gb204e94e90",
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-11-04-12-51/ffmpeg-n9.0.2-47-gb204e94e90-win64-gpl-9.0.zip",
+        "sha256": "db2867364898bf8b68f5404b998165dfd8d31c9bfabc2a35d6e0c941bf33c1ea"
       },
       "aria2c": {
         "version": "1.37.0-firelink-native-dns-v1",
@@ -45,9 +45,9 @@
         "sha256": "e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609"
       },
       "ffmpeg": {
-        "version": "9.0.2-39-g7adfbe40dc",
-        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n9.0.2-39-g7adfbe40dc-linux64-gpl-9.0.tar.xz",
-        "sha256": "73e29a56974ae5a651133a04584c7483b21afe941e17dc91d79814a758b608d3"
+        "version": "9.0.2-47-gb204e94e90",
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-11-04-12-51/ffmpeg-n9.0.2-47-gb204e94e90-linux64-gpl-9.0.tar.xz",
+        "sha256": "7e4d04689554492f579c34de8ef3c849c8d9023f65805341826590f52d413304"
       },
       "aria2c": {
         "version": "1.37.0-firelink-native-dns-v1",
