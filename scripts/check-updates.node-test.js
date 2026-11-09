@@ -32,7 +32,7 @@ async function withMockFetch(mockFetch, callback) {
 function btbnAsset(tag, name, digest) {
   return {
     name,
-    browser_download_url: `https://github.com/BtbN/FFmpeg-Builds/releases/download/${tag}/${name}`,
+    browser_download_url: `https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/${tag}/${name}`,
     digest,
   };
 }
@@ -685,16 +685,39 @@ test('selects a complete BtbN build for the current stable series', async () => 
       btbnAsset(tag, 'ffmpeg-n8.1.2-50-g1a748fe2cd-win64-gpl-8.1.zip', digest('c')),
     ]);
   const result = await withMockFetch(
-    async () => new Response(JSON.stringify([release]), { status: 200 }),
+    async url => {
+      assert.equal(String(url), 'https://api.github.com/repos/FFmpeg-Builds/FFmpeg-Builds/releases?per_page=10');
+      return new Response(JSON.stringify([release]), { status: 200 });
+    },
     () => latestBtbnFfmpegStableBuild('9.0.1'),
   );
 
   assert.equal(result.version, '9.0.1-11-ge47273f4d9');
   assert.equal(
     result.urls.windows,
-    `https://github.com/BtbN/FFmpeg-Builds/releases/download/${tag}/ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-9.0.zip`,
+    `https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/${tag}/ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-9.0.zip`,
   );
   assert.equal(result.hashes.linux, 'b'.repeat(64));
+});
+
+test('rejects BtbN-owner asset URLs after the FFmpeg-Builds repository transfer', async () => {
+  const tag = 'autobuild-test';
+  const windowsName = 'ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-9.0.zip';
+  const linuxName = 'ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0.tar.xz';
+  const wrongOwnerWindows = {
+    ...btbnAsset(tag, windowsName, `sha256:${'a'.repeat(64)}`),
+    browser_download_url: `https://github.com/BtbN/FFmpeg-Builds/releases/download/${tag}/${windowsName}`,
+  };
+  const release = btbnRelease(tag, [
+    wrongOwnerWindows,
+    btbnAsset(tag, linuxName, `sha256:${'b'.repeat(64)}`),
+  ]);
+  const result = await withMockFetch(
+    async () => new Response(JSON.stringify([release]), { status: 200 }),
+    () => latestBtbnFfmpegStableBuild('9.0.1'),
+  );
+
+  assert.equal(result, undefined);
 });
 
 test('selects a complete BtbN build for a two-part stable version and tag-exact assets', async () => {
@@ -712,7 +735,7 @@ test('selects a complete BtbN build for a two-part stable version and tag-exact 
   assert.equal(result.version, '9.0');
   assert.equal(
     result.urls.windows,
-    `https://github.com/BtbN/FFmpeg-Builds/releases/download/${tag}/ffmpeg-n9.0-win64-gpl-9.0.zip`,
+    `https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/${tag}/ffmpeg-n9.0-win64-gpl-9.0.zip`,
   );
   assert.equal(result.hashes.linux, 'f'.repeat(64));
 });

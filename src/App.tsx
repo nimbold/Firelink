@@ -245,10 +245,9 @@ function App() {
     const locale = languagePreference === 'system'
       ? resolveAppLocale(typeof navigator === 'undefined' ? undefined : navigator.language)
       : languagePreference;
-    if (i18n.language !== locale) {
-      void changeAppLocale(locale);
-    }
-  }, [i18n, languagePreference]);
+    // Even the currently displayed locale must supersede a pending change.
+    void changeAppLocale(locale);
+  }, [languagePreference]);
   const autoCheckUpdates = useSettingsStore(state => state.autoCheckUpdates);
   const autoAddClipboardLinks = useSettingsStore(state => state.autoAddClipboardLinks);
   const showNotifications = useSettingsStore(state => state.showNotifications);

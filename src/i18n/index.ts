@@ -74,6 +74,7 @@ export const i18nReady = i18n
       escapeValue: false,
     },
     ns: [defaultNS],
+    returnEmptyString: true,
     resources: {
       [DEFAULT_LOCALE]: { [defaultNS]: englishCommon },
     },

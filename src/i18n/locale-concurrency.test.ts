@@ -20,6 +20,15 @@ const localeGates = vi.hoisted(() => {
     failRussian = reject;
   });
 
+  let signalUkrainianStart!: () => void;
+  let releaseUkrainian!: () => void;
+  const ukrainianStarted = new Promise<void>(resolve => {
+    signalUkrainianStart = resolve;
+  });
+  const ukrainianGate = new Promise<void>(resolve => {
+    releaseUkrainian = resolve;
+  });
+
   return {
     failRussian,
     hebrewGate,
@@ -29,6 +38,10 @@ const localeGates = vi.hoisted(() => {
     releaseHebrew,
     russianGate,
     russianStarted,
+    markUkrainianStarted: signalUkrainianStart,
+    releaseUkrainian,
+    ukrainianGate,
+    ukrainianStarted,
   };
 });
 
@@ -48,12 +61,35 @@ vi.mock('./catalogs/zh-CN', async () => {
   throw new Error('simulated current Chinese catalog failure');
 });
 
+vi.mock('./catalogs/uk', async importOriginal => {
+  localeGates.markUkrainianStarted();
+  await localeGates.ukrainianGate;
+  return importOriginal();
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
 describe('concurrent lazy locale changes', () => {
+  it('cancels a pending locale when the latest preference is the displayed locale', async () => {
+    await i18nReady;
+    await changeAppLocale('en');
+    const documentElement = { lang: '', dir: '' };
+    vi.stubGlobal('document', { documentElement });
+
+    const staleUkrainianChange = changeAppLocale('uk');
+    await localeGates.ukrainianStarted;
+    await changeAppLocale('en');
+    localeGates.releaseUkrainian();
+    await staleUkrainianChange;
+
+    expect(i18n.language).toBe('en');
+    expect(i18n.t($ => $.navigation.library)).toBe('Library');
+    expect(documentElement).toEqual({ lang: 'en', dir: 'ltr' });
+  });
+
   it('keeps the newest RTL locale when an older catalog finishes loading later', async () => {
     await i18nReady;
     const documentElement = { lang: '', dir: '' };

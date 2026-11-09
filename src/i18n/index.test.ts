@@ -1,6 +1,16 @@
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { useTranslation } from 'react-i18next';
 import { describe, expect, it, vi } from 'vitest';
 import i18n, { changeAppLocale, i18nReady, syncDocumentLocale } from './index';
-import { APP_LOCALES, localeDirection, resolveAppLocale } from './locales';
+import { APP_LOCALES, DEFAULT_LOCALE, localeDirection, resolveAppLocale } from './locales';
+
+let observedTranslationI18n: { language: string } | undefined;
+
+const TranslationInstanceProbe = () => {
+  observedTranslationI18n = useTranslation().i18n;
+  return createElement('span', null, observedTranslationI18n.language);
+};
 
 describe('i18n runtime', () => {
   it('selects every bundled catalog instead of falling back to English', async () => {
@@ -41,6 +51,36 @@ describe('i18n runtime', () => {
       expect(documentElement).toEqual({ lang: 'en', dir: 'ltr' });
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+
+  it('preserves empty-string translations under i18next 27', async () => {
+    await i18nReady;
+    const probe = i18n.cloneInstance({ forkResourceStore: true, lng: DEFAULT_LOCALE });
+    const probeKey = '__firelink_empty_translation_contract';
+    probe.addResource(DEFAULT_LOCALE, 'common', probeKey, '');
+
+    expect(probe.options.returnEmptyString).toBe(true);
+    expect((probe.t as (key: string) => string)(probeKey)).toBe('');
+  });
+
+  it('keeps a useTranslation i18n handle live across async locale changes', async () => {
+    await i18nReady;
+    const originalLocale = resolveAppLocale(i18n.language);
+
+    try {
+      await changeAppLocale(DEFAULT_LOCALE);
+      renderToStaticMarkup(createElement(TranslationInstanceProbe));
+      const capturedI18n = observedTranslationI18n;
+
+      expect(capturedI18n?.language).toBe(DEFAULT_LOCALE);
+
+      await changeAppLocale('fa');
+
+      expect(capturedI18n?.language).toBe('fa');
+    } finally {
+      await changeAppLocale(originalLocale);
+      observedTranslationI18n = undefined;
     }
   });
 

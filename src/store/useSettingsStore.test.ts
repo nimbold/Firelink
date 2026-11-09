@@ -828,6 +828,32 @@ describe('useSettingsStore global speed limit persistence', () => {
     });
   });
 
+  it('keeps the newest settings when an older database hydration finishes last', async () => {
+    const reads: Array<(value: string) => void> = [];
+    vi.mocked(ipc.invokeCommand).mockImplementation((command: string) => {
+      if (command === 'db_load_settings') {
+        return new Promise<string>(resolve => reads.push(resolve)) as never;
+      }
+      return Promise.resolve(undefined) as never;
+    });
+
+    const first = useSettingsStore.persist.rehydrate();
+    const second = useSettingsStore.persist.rehydrate();
+    expect(first).toBeInstanceOf(Promise);
+    expect(second).toBeInstanceOf(Promise);
+    expect(reads).toHaveLength(2);
+
+    reads[1](JSON.stringify({ state: { globalSpeedLimit: '4M' }, version: 6 }));
+    await second;
+    expect(useSettingsStore.getState().globalSpeedLimit).toBe('4M');
+    expect(useSettingsStore.persist.hasHydrated()).toBe(true);
+
+    reads[0](JSON.stringify({ state: { globalSpeedLimit: '1M' }, version: 5 }));
+    await first;
+    expect(useSettingsStore.getState().globalSpeedLimit).toBe('4M');
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('db_save_settings', expect.anything());
+  });
+
   it('serializes repeated saves so the latest requested limit wins', async () => {
     let releaseFirstLimit!: () => void;
     const firstLimit = new Promise<void>(resolve => {

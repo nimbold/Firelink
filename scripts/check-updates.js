@@ -275,7 +275,7 @@ async function latestBtbnFfmpegStableBuild(stableVersion) {
   const assetPattern = new RegExp(
     `^ffmpeg-n(${versionPattern}(?:-\\d+-g[0-9a-f]+)?)-(win64|linux64)-gpl-${seriesPattern}\\.(?:zip|tar\\.xz)$`
   );
-  const releases = await fetchJson('https://api.github.com/repos/BtbN/FFmpeg-Builds/releases?per_page=10');
+  const releases = await fetchJson('https://api.github.com/repos/FFmpeg-Builds/FFmpeg-Builds/releases?per_page=10');
   if (!Array.isArray(releases)) throw new Error('BtbN releases response is not an array');
   const candidates = [];
   for (const release of releases) {
@@ -289,7 +289,7 @@ async function latestBtbnFfmpegStableBuild(stableVersion) {
           version: match[1],
           url: asset.browser_download_url,
           sha256: parseSha256Digest(asset.digest),
-          canonical: isCanonicalGithubReleaseAsset(release, asset, 'BtbN/FFmpeg-Builds'),
+          canonical: isCanonicalGithubReleaseAsset(release, asset, 'FFmpeg-Builds/FFmpeg-Builds'),
         };
       })
       .filter(Boolean);
