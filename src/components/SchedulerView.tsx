@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { invokeCommand as invoke } from '../ipc';
 import {
   AlertCircle, CheckCircle2, Clock3, List, Moon, LockKeyhole,
@@ -66,10 +67,19 @@ function nextScheduledRun(settings: SchedulerSettings): Date | 'disabled' | 'non
 
 export default function SchedulerView() {
   const { t, i18n } = useTranslation();
-  const savedSettings = useSettingsStore(state => state.scheduler);
-  const schedulerRunning = useSettingsStore(state => state.schedulerRunning);
-  const calendarPreference = useSettingsStore(state => state.calendarPreference);
-  const setScheduler = useSettingsStore(state => state.setScheduler);
+  const {
+    savedSettings,
+    schedulerRunning,
+    calendarPreference,
+    setScheduler,
+  } = useSettingsStore(
+    useShallow((state) => ({
+      savedSettings: state.scheduler,
+      schedulerRunning: state.schedulerRunning,
+      calendarPreference: state.calendarPreference,
+      setScheduler: state.setScheduler,
+    }))
+  );
   const queues = useDownloadStore(state => state.queues);
   const [draft, setDraft] = useState<SchedulerSettings>(savedSettings);
   const { addToast } = useToast();

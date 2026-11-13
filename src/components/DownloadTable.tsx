@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { useShallow } from 'zustand/react/shallow';
 import { useDownloadStore, DownloadItem, MAIN_QUEUE_ID } from '../store/useDownloadStore';
 import { useDownloadProgressStore } from '../store/downloadProgressStore';
 import { useToast } from '../contexts/ToastContext';
@@ -165,7 +166,21 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     pauseAll,
     startSelected,
     allocationPendingIds
-  } = useDownloadStore();
+  } = useDownloadStore(
+    useShallow((state) => ({
+      downloads: state.downloads,
+      queues: state.queues,
+      assignToQueue: state.assignToQueue,
+      openDeleteModal: state.openDeleteModal,
+      redownload: state.redownload,
+      moveInQueue: state.moveInQueue,
+      moveManyInQueueToPosition: state.moveManyInQueueToPosition,
+      startAll: state.startAll,
+      pauseAll: state.pauseAll,
+      startSelected: state.startSelected,
+      allocationPendingIds: state.allocationPendingIds,
+    }))
+  );
   const progressMap = useDownloadProgressStore(state => state.progressMap);
   const { addToast } = useToast();
   const isMac = navigator.userAgent.includes('Mac');

@@ -97,6 +97,9 @@ fn init_at_path_internal(
     };
     let mut connection = Connection::open(&database_path)
         .map_err(|error| format!("failed to open database: {error}"))?;
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|error| format!("failed to configure database busy timeout: {error}"))?;
 
     let version = connection
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
@@ -2429,7 +2432,7 @@ pub fn load_ownership(connection: &Connection) -> Result<Vec<(String, String, Ve
 }
 
 pub fn set_ownership_paths(
-    connection: &Connection,
+    connection: &mut Connection,
     id: &str,
     primary_path: &str,
     paths: &[String],
@@ -2439,7 +2442,7 @@ pub fn set_ownership_paths(
     // empty registry and claim the same output before either insert becomes
     // visible to the other.
     let transaction = connection
-        .unchecked_transaction()
+        .transaction()
         .map_err(|error| format!("failed to begin download ownership transaction: {error}"))?;
     set_ownership_paths_checked(&transaction, id, primary_path, paths, &[])?;
     transaction
@@ -2532,7 +2535,7 @@ fn set_ownership_paths_checked(
 }
 
 pub fn set_ownership_and_removal_paths(
-    connection: &Connection,
+    connection: &mut Connection,
     id: &str,
     primary_path: &str,
     paths: &[String],
@@ -2542,7 +2545,7 @@ pub fn set_ownership_and_removal_paths(
     // boundary.  Do not leave a partially-written reservation behind if the
     // second table write fails or the process crashes between writes.
     let transaction = connection
-        .unchecked_transaction()
+        .transaction()
         .map_err(|error| format!("failed to begin torrent ownership transaction: {error}"))?;
     set_ownership_paths_checked(&transaction, id, primary_path, paths, removal_paths)?;
     if removal_paths.is_empty() {
@@ -4712,17 +4715,17 @@ mod tests {
     fn rejects_two_download_ids_from_claiming_the_same_primary_path() {
         let temp = TempDir::new().unwrap();
         let state = init_at_path(temp.path()).unwrap();
-        let connection = state.lock().unwrap();
+        let mut connection = state.lock().unwrap();
 
         set_ownership_paths(
-            &connection,
+            &mut connection,
             "first",
             "/downloads/file.bin",
             &["/downloads/file.bin".to_string()],
         )
         .unwrap();
         let error = set_ownership_paths(
-            &connection,
+            &mut connection,
             "second",
             "/downloads/file.bin",
             &["/downloads/file.bin".to_string()],
@@ -4739,7 +4742,7 @@ mod tests {
             )]
         );
         set_ownership_paths(
-            &connection,
+            &mut connection,
             "first",
             "/downloads/renamed.bin",
             &["/downloads/renamed.bin".to_string()],
@@ -4751,10 +4754,10 @@ mod tests {
     fn rejects_overlap_with_any_owned_torrent_path() {
         let temp = TempDir::new().unwrap();
         let state = init_at_path(temp.path()).unwrap();
-        let connection = state.lock().unwrap();
+        let mut connection = state.lock().unwrap();
 
         set_ownership_paths(
-            &connection,
+            &mut connection,
             "first",
             "/downloads/root",
             &[
@@ -4764,7 +4767,7 @@ mod tests {
         )
         .unwrap();
         let error = set_ownership_paths(
-            &connection,
+            &mut connection,
             "second",
             "/downloads/root",
             &["/downloads/root/c.bin".to_string()],
@@ -4777,10 +4780,10 @@ mod tests {
     fn removal_reservations_block_later_download_ownership_claims() {
         let temp = TempDir::new().unwrap();
         let state = init_at_path(temp.path()).unwrap();
-        let connection = state.lock().unwrap();
+        let mut connection = state.lock().unwrap();
 
         set_ownership_and_removal_paths(
-            &connection,
+            &mut connection,
             "torrent",
             "/downloads/selected.bin",
             &["/downloads/selected.bin".to_string()],
@@ -4788,7 +4791,7 @@ mod tests {
         )
         .unwrap();
         let error = set_ownership_paths(
-            &connection,
+            &mut connection,
             "later",
             "/downloads/unselected.bin",
             &["/downloads/unselected.bin".to_string()],
@@ -4798,7 +4801,7 @@ mod tests {
         assert!(error.contains("already owned"));
         remove_torrent_removal_paths(&connection, "torrent").unwrap();
         set_ownership_paths(
-            &connection,
+            &mut connection,
             "later",
             "/downloads/unselected.bin",
             &["/downloads/unselected.bin".to_string()],
@@ -4810,7 +4813,7 @@ mod tests {
     fn malformed_owned_path_json_fails_closed_for_loading_and_new_claims() {
         let temp = TempDir::new().unwrap();
         let state = init_at_path(temp.path()).unwrap();
-        let connection = state.lock().unwrap();
+        let mut connection = state.lock().unwrap();
         connection
             .execute(
                 "INSERT INTO download_ownership (id, primary_path) VALUES (?1, ?2)",
@@ -4829,7 +4832,7 @@ mod tests {
         assert!(error.contains("broken-owned"));
 
         let error = set_ownership_paths(
-            &connection,
+            &mut connection,
             "later",
             "/downloads/later.bin",
             &["/downloads/later.bin".to_string()],
@@ -4852,7 +4855,7 @@ mod tests {
     fn malformed_removal_path_json_fails_closed_for_loading_and_new_claims() {
         let temp = TempDir::new().unwrap();
         let state = init_at_path(temp.path()).unwrap();
-        let connection = state.lock().unwrap();
+        let mut connection = state.lock().unwrap();
         connection
             .execute(
                 "INSERT INTO download_ownership (id, primary_path) VALUES (?1, ?2)",
@@ -4871,7 +4874,7 @@ mod tests {
         assert!(error.contains("broken-removal"));
 
         let error = set_ownership_paths(
-            &connection,
+            &mut connection,
             "later",
             "/downloads/later.bin",
             &["/downloads/later.bin".to_string()],
@@ -4894,7 +4897,7 @@ mod tests {
     fn torrent_ownership_and_removal_reservation_commit_atomically() {
         let temp = TempDir::new().unwrap();
         let state = init_at_path(temp.path()).unwrap();
-        let connection = state.lock().unwrap();
+        let mut connection = state.lock().unwrap();
         connection
             .execute_batch(
                 "CREATE TRIGGER reject_torrent_removal
@@ -4904,7 +4907,7 @@ mod tests {
             .unwrap();
 
         let error = set_ownership_and_removal_paths(
-            &connection,
+            &mut connection,
             "torrent",
             "/downloads/selected.bin",
             &["/downloads/selected.bin".to_string()],
@@ -4923,7 +4926,7 @@ mod tests {
     fn restart_reclaims_only_observed_terminal_torrent_reservations() {
         let temp = TempDir::new().unwrap();
         let state = init_at_path(temp.path()).unwrap();
-        let connection = state.lock().unwrap();
+        let mut connection = state.lock().unwrap();
         let completed_missing = temp.path().join("completed-missing.bin");
         let completed_present = temp.path().join("completed-present.bin");
         let failed_present = temp.path().join("failed-present.bin");
@@ -4939,7 +4942,7 @@ mod tests {
         ] {
             let selected_path = temp.path().join(format!("{id}-selected.bin"));
             set_ownership_and_removal_paths(
-                &connection,
+                &mut connection,
                 id,
                 &selected_path.to_string_lossy(),
                 &[selected_path.to_string_lossy().to_string()],
@@ -4984,7 +4987,7 @@ mod tests {
         );
 
         set_ownership_paths(
-            &connection,
+            &mut connection,
             "replacement",
             &completed_missing.to_string_lossy(),
             &[completed_missing.to_string_lossy().to_string()],
@@ -4992,7 +4995,7 @@ mod tests {
         .unwrap();
 
         let error = set_ownership_paths(
-            &connection,
+            &mut connection,
             "failed-replacement",
             &failed_present.to_string_lossy(),
             &[failed_present.to_string_lossy().to_string()],
@@ -5005,10 +5008,10 @@ mod tests {
     fn restart_keeps_orphaned_torrent_removal_reservations_conservative() {
         let temp = TempDir::new().unwrap();
         let state = init_at_path(temp.path()).unwrap();
-        let connection = state.lock().unwrap();
+        let mut connection = state.lock().unwrap();
         let reserved = temp.path().join("orphaned-unselected.bin");
         set_ownership_and_removal_paths(
-            &connection,
+            &mut connection,
             "orphaned",
             &temp.path().join("orphaned-selected.bin").to_string_lossy(),
             &[temp

@@ -95,9 +95,24 @@ vi.mock('react', async importOriginal => {
   };
 });
 
+vi.mock('zustand/react/shallow', async () => {
+  const { shallow } = await import('zustand/vanilla/shallow');
+  return {
+    useShallow: <S, U>(selector: (state: S) => U) => {
+      const prev = testState.useRef(undefined as U | undefined);
+      return (state: S) => {
+        const next = selector(state);
+        return shallow(prev.current, next) ? (prev.current as U) : (prev.current = next);
+      };
+    },
+  };
+});
+
 vi.mock('../store/useDownloadStore', () => {
   const useDownloadStore = Object.assign(
-    vi.fn(() => testState.storeState),
+    vi.fn((selector?: (state: typeof testState.storeState) => unknown) =>
+      typeof selector === 'function' ? selector(testState.storeState) : testState.storeState
+    ),
     { getState: vi.fn(() => testState.storeState) }
   );
   return {
@@ -109,7 +124,9 @@ vi.mock('../store/useDownloadStore', () => {
 
 vi.mock('../store/useSettingsStore', () => ({
   useSettingsStore: Object.assign(
-    vi.fn(() => testState.settingsState),
+    vi.fn((selector?: (state: typeof testState.settingsState) => unknown) =>
+      typeof selector === 'function' ? selector(testState.settingsState) : testState.settingsState
+    ),
     { getState: vi.fn(() => testState.settingsState) }
   ),
 }));

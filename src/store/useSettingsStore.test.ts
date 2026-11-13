@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { shallow } from 'zustand/shallow';
 import {
   runSettingsPersistenceTransaction,
   flushSettingsPersistence,
@@ -1221,5 +1222,30 @@ describe('scheduled trigger durability', () => {
       schedulerRunning: false,
       schedulerActiveDownloadIds: ['still-active']
     });
+  });
+
+  it('notifies subscribeWithSelector + shallow listeners only when selected settings change', () => {
+    const listener = vi.fn();
+    const initialNotifications = useSettingsStore.getState().showNotifications;
+    const unsubscribe = useSettingsStore.subscribe(
+      (state) => ({
+        theme: state.theme,
+        showNotifications: state.showNotifications
+      }),
+      listener,
+      { equalityFn: shallow }
+    );
+
+    try {
+      useSettingsStore.setState({ autoCheckUpdates: !useSettingsStore.getState().autoCheckUpdates });
+      expect(listener).not.toHaveBeenCalled();
+
+      useSettingsStore.setState({ showNotifications: !initialNotifications });
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener.mock.calls[0][0]).toMatchObject({ showNotifications: !initialNotifications });
+    } finally {
+      useSettingsStore.setState({ showNotifications: initialNotifications });
+      unsubscribe();
+    }
   });
 });

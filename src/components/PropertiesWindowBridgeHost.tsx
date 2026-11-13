@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { shallow } from 'zustand/shallow';
 import { useDownloadStore } from '../store/useDownloadStore';
 import type { DownloadItem } from '../store/useDownloadStore';
 import { useSettingsStore } from '../store/useSettingsStore';
@@ -769,20 +770,23 @@ export const PropertiesWindowBridgeHost = () => {
         }
       }
     });
-    const unsubscribeSettings = useSettingsStore.subscribe((state, previous) => {
-      if (state.theme === previous.theme
-        && state.fontFamily === previous.fontFamily
-        && state.appFontSize === previous.appFontSize
-        && state.listRowDensity === previous.listRowDensity
-        && state.language === previous.language
-        && state.windowControlStyle === previous.windowControlStyle
-        && state.sidebarPosition === previous.sidebarPosition) {
-        return;
-      }
-      for (const windowLabel of windows.keys()) {
-        snapshotCoalescer.schedule(windowLabel);
-      }
-    });
+    const unsubscribeSettings = useSettingsStore.subscribe(
+      state => ({
+        theme: state.theme,
+        fontFamily: state.fontFamily,
+        appFontSize: state.appFontSize,
+        listRowDensity: state.listRowDensity,
+        language: state.language,
+        windowControlStyle: state.windowControlStyle,
+        sidebarPosition: state.sidebarPosition,
+      }),
+      () => {
+        for (const windowLabel of windows.keys()) {
+          snapshotCoalescer.schedule(windowLabel);
+        }
+      },
+      { equalityFn: shallow }
+    );
     const handleLanguageChanged = () => {
       for (const windowLabel of windows.keys()) {
         snapshotCoalescer.schedule(windowLabel);

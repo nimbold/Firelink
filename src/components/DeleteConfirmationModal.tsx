@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useDownloadStore } from '../store/useDownloadStore';
 import { AlertTriangle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -6,7 +7,14 @@ import { isTopmostModal, useModalFocus } from '../hooks/useModalFocus';
 
 export const DeleteConfirmationModal: React.FC = () => {
   const { t } = useTranslation();
-  const { deleteModalState, closeDeleteModal, requestRemovals, downloads } = useDownloadStore();
+  const { deleteModalState, closeDeleteModal, requestRemovals, downloads } = useDownloadStore(
+    useShallow((state) => ({
+      deleteModalState: state.deleteModalState,
+      closeDeleteModal: state.closeDeleteModal,
+      requestRemovals: state.requestRemovals,
+      downloads: state.downloads,
+    }))
+  );
   const modalRef = useModalFocus(deleteModalState.isOpen);
 
   useEffect(() => {

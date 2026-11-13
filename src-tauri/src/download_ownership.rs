@@ -159,9 +159,9 @@ pub fn set_owned_paths_with_primary<R: tauri::Runtime>(
         .map(|path| path.to_string_lossy().to_string())
         .collect::<Vec<_>>();
     let database = app_handle.state::<crate::db::DbState>();
-    let connection = database.lock()?;
+    let mut connection = database.lock()?;
     crate::db::set_ownership_paths(
-        &connection,
+        &mut connection,
         id,
         &canonical_primary.to_string_lossy(),
         &path_strings,
@@ -208,9 +208,9 @@ pub fn set_owned_paths_with_primary_and_removal<R: tauri::Runtime>(
         .map(|path| path.to_string_lossy().to_string())
         .collect::<Vec<_>>();
     let database = app_handle.state::<crate::db::DbState>();
-    let connection = database.lock()?;
+    let mut connection = database.lock()?;
     crate::db::set_ownership_and_removal_paths(
-        &connection,
+        &mut connection,
         id,
         &canonical_primary.to_string_lossy(),
         &path_strings,

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { Gauge, Plus, Save, X, Zap } from 'lucide-react';
 import { SettingsPersistenceError, useSettingsStore } from '../store/useSettingsStore';
 import { WindowDragRegion } from './WindowDragRegion';
@@ -91,12 +92,23 @@ export function formatPresetValue(value: number): string {
 
 export default function SpeedLimiterView() {
   const { t } = useTranslation();
-  const globalSpeedLimit = useSettingsStore(state => state.globalSpeedLimit);
-  const lastCustomSpeedLimitKiB = useSettingsStore(state => state.lastCustomSpeedLimitKiB);
-  const lastCustomSpeedLimitUnit = useSettingsStore(state => state.lastCustomSpeedLimitUnit);
-  const speedLimitPresetValues = useSettingsStore(state => state.speedLimitPresetValues);
-  const saveGlobalSpeedLimitSettings = useSettingsStore(state => state.saveGlobalSpeedLimitSettings);
-  const setSpeedLimitPresetValues = useSettingsStore(state => state.setSpeedLimitPresetValues);
+  const {
+    globalSpeedLimit,
+    lastCustomSpeedLimitKiB,
+    lastCustomSpeedLimitUnit,
+    speedLimitPresetValues,
+    saveGlobalSpeedLimitSettings,
+    setSpeedLimitPresetValues,
+  } = useSettingsStore(
+    useShallow((state) => ({
+      globalSpeedLimit: state.globalSpeedLimit,
+      lastCustomSpeedLimitKiB: state.lastCustomSpeedLimitKiB,
+      lastCustomSpeedLimitUnit: state.lastCustomSpeedLimitUnit,
+      speedLimitPresetValues: state.speedLimitPresetValues,
+      saveGlobalSpeedLimitSettings: state.saveGlobalSpeedLimitSettings,
+      setSpeedLimitPresetValues: state.setSpeedLimitPresetValues,
+    }))
+  );
   const fallbackUnit: SpeedUnit = lastCustomSpeedLimitUnit === 'KB/s' ? 'KB/s' : 'MB/s';
   const initial = parseLimit(globalSpeedLimit, lastCustomSpeedLimitKiB, fallbackUnit);
   const [enabled, setEnabled] = useState(Boolean(globalSpeedLimit));

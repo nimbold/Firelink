@@ -17193,6 +17193,68 @@ async fn inspect_download_target(
     })
 }
 
+fn parse_rotated_log_timestamp(stem: &str) -> Option<(&str, u32)> {
+    // `tauri-plugin-log` 2.10.2 names rotated archives `<name>_YYYY-MM-DD_HH-MM-SS.log`
+    // and same-second collisions `<name>_YYYY-MM-DD_HH-MM-SS_<n>.log` (plus legacy `.log.bak`).
+    const TIMESTAMP_LEN: usize = 19; // YYYY-MM-DD_HH-MM-SS
+    let is_valid_timestamp = |candidate: &str| {
+        let bytes = candidate.as_bytes();
+        if bytes.len() != TIMESTAMP_LEN {
+            return false;
+        }
+        bytes.iter().enumerate().all(|(index, &byte)| match index {
+            4 | 7 | 13 | 16 => byte == b'-',
+            10 => byte == b'_',
+            _ => byte.is_ascii_digit(),
+        })
+    };
+
+    if stem.len() > TIMESTAMP_LEN + 1 {
+        let split_at = stem.len() - TIMESTAMP_LEN;
+        if stem.as_bytes().get(split_at - 1) == Some(&b'_') && is_valid_timestamp(&stem[split_at..])
+        {
+            return Some((&stem[split_at..], 0));
+        }
+    }
+
+    if let Some((prefix, suffix)) = stem.rsplit_once('_') {
+        if !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            if let Ok(collision_index) = suffix.parse::<u32>() {
+                if prefix.len() > TIMESTAMP_LEN + 1 {
+                    let split_at = prefix.len() - TIMESTAMP_LEN;
+                    if prefix.as_bytes().get(split_at - 1) == Some(&b'_')
+                        && is_valid_timestamp(&prefix[split_at..])
+                    {
+                        return Some((&prefix[split_at..], collision_index));
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn log_file_sort_key(path: &std::path::Path) -> (u8, String, u32, String) {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if let Some(stem) = file_name.strip_suffix(".log.bak") {
+        let (timestamp, collision_index) = parse_rotated_log_timestamp(stem)
+            .map(|(ts, idx)| (ts.to_string(), idx))
+            .unwrap_or_default();
+        return (0, timestamp, collision_index, file_name);
+    }
+    if let Some(stem) = file_name.strip_suffix(".log") {
+        if let Some((timestamp, collision_index)) = parse_rotated_log_timestamp(stem) {
+            return (0, timestamp.to_string(), collision_index, file_name);
+        }
+        return (1, String::new(), 0, file_name);
+    }
+    (0, String::new(), 0, file_name)
+}
+
 fn collect_log_files(log_dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>, String> {
     let directory_metadata = match std::fs::symlink_metadata(log_dir) {
         Ok(metadata) => metadata,
@@ -17235,7 +17297,7 @@ fn collect_log_files(log_dir: &std::path::Path) -> Result<Vec<std::path::PathBuf
             files.push(canonical_path);
         }
     }
-    files.sort();
+    files.sort_by_key(|path| log_file_sort_key(path));
     Ok(files)
 }
 
@@ -21157,6 +21219,45 @@ mod tests {
         let redirected_logs = root.path().join("redirected-logs");
         symlink(outside.path(), &redirected_logs).unwrap();
         assert!(collect_log_files(&redirected_logs).unwrap().is_empty());
+    }
+
+    #[test]
+    fn log_collection_orders_rotated_archives_chronologically_before_active_log() {
+        let root = tempfile::tempdir().unwrap();
+        let log_dir = root.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+
+        let names = [
+            "firelink.log",
+            "firelink_2026-10-14_12-38-19_10.log",
+            "firelink_2026-10-14_12-38-19_2.log",
+            "firelink_2026-10-14_12-38-19_1.log",
+            "firelink_2026-10-14_12-38-19.log",
+            "firelink_2026-10-14_12-38-14.log.bak",
+            "firelink.log.bak",
+        ];
+        for name in names {
+            std::fs::write(log_dir.join(name), name).unwrap();
+        }
+
+        let collected_names: Vec<String> = collect_log_files(&log_dir)
+            .unwrap()
+            .into_iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            collected_names,
+            vec![
+                "firelink.log.bak",
+                "firelink_2026-10-14_12-38-14.log.bak",
+                "firelink_2026-10-14_12-38-19.log",
+                "firelink_2026-10-14_12-38-19_1.log",
+                "firelink_2026-10-14_12-38-19_2.log",
+                "firelink_2026-10-14_12-38-19_10.log",
+                "firelink.log",
+            ]
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { persist, createJSONStorage, StateStorage } from 'zustand/middleware';
+import { persist, createJSONStorage, StateStorage, subscribeWithSelector } from 'zustand/middleware';
 import { invokeCommand as invoke } from '../ipc';
 import { info } from '../utils/logger';
 import type { ActiveView } from '../bindings/ActiveView';
@@ -499,8 +499,9 @@ export interface SettingsState {
 }
 
 export const useSettingsStore = create<SettingsState>()(
-  persist(
-    (set, get) => ({
+  subscribeWithSelector(
+    persist(
+      (set, get) => ({
       theme: 'system',
       fontFamily: 'system',
       windowControlStyle: 'auto',
@@ -1414,7 +1415,8 @@ export const useSettingsStore = create<SettingsState>()(
           : currentState.siteLogins
         });
       }
-    }
+      }
+    )
   )
 );
 

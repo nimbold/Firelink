@@ -1,4 +1,5 @@
 import { useCallback, useState, useEffect, useRef } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import {
   useDownloadStore,
   getSiteLogin,
@@ -173,7 +174,26 @@ export const AddDownloadsModal = () => {
     releasePendingAddHandoffs,
     addDownload,
     queues
-  } = useDownloadStore();
+  } = useDownloadStore(
+    useShallow((state) => ({
+      isAddModalOpen: state.isAddModalOpen,
+      pendingAddUrls: state.pendingAddUrls,
+      pendingAddReferer: state.pendingAddReferer,
+      pendingAddFilename: state.pendingAddFilename,
+      pendingAddHeaders: state.pendingAddHeaders,
+      pendingAddCookies: state.pendingAddCookies,
+      pendingAddMediaUrls: state.pendingAddMediaUrls,
+      pendingAddTorrentUrls: state.pendingAddTorrentUrls,
+      pendingAddBatchName: state.pendingAddBatchName,
+      pendingAddRequestContexts: state.pendingAddRequestContexts,
+      pendingAddRequestVersion: state.pendingAddRequestVersion,
+      toggleAddModal: state.toggleAddModal,
+      setPendingAddModalBusy: state.setPendingAddModalBusy,
+      releasePendingAddHandoffs: state.releasePendingAddHandoffs,
+      addDownload: state.addDownload,
+      queues: state.queues,
+    }))
+  );
   const {
     baseDownloadFolder,
     rememberLastUsedDownloadDirectory,
@@ -182,7 +202,17 @@ export const AddDownloadsModal = () => {
     keychainAccessReady,
     keychainPromptDismissed,
     showKeychainModal
-  } = useSettingsStore();
+  } = useSettingsStore(
+    useShallow((state) => ({
+      baseDownloadFolder: state.baseDownloadFolder,
+      rememberLastUsedDownloadDirectory: state.rememberLastUsedDownloadDirectory,
+      lastUsedDownloadDirectory: state.lastUsedDownloadDirectory,
+      perServerConnections: state.perServerConnections,
+      keychainAccessReady: state.keychainAccessReady,
+      keychainPromptDismissed: state.keychainPromptDismissed,
+      showKeychainModal: state.showKeychainModal,
+    }))
+  );
 
   const mediaMetadataErrorLabel = (reason: AddDownloadDraftRow['metadataBlockedReason']): string => {
     switch (reason) {

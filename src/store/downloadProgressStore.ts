@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { subscribeWithSelector } from 'zustand/middleware';
 import type { DownloadProgressEvent } from '../bindings/DownloadProgressEvent';
 
 export interface Aria2ProgressOwner {
@@ -77,7 +78,8 @@ const retainProgressSnapshot = (
   };
 };
 
-export const useDownloadProgressStore = create<DownloadProgressState>((set) => ({
+export const useDownloadProgressStore = create<DownloadProgressState>()(
+  subscribeWithSelector((set) => ({
   progressMap: {},
   retainedProgressMap: {},
   moveProgressMap: {},
@@ -205,4 +207,5 @@ export const useDownloadProgressStore = create<DownloadProgressState>((set) => (
       delete next[id];
       return { moveProgressMap: next };
     }),
-}));
+  }))
+);

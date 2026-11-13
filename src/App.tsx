@@ -1,6 +1,7 @@
 import { initMediaDomains, isActiveDownloadStatus, isTransferActiveStatus } from './utils/downloads';
 import { schedulerCompletionState } from './utils/schedulerCompletion';
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { useShallow } from 'zustand/react/shallow';
 import { Sidebar, SidebarFilter } from "./components/Sidebar";
 import { DownloadTable, type DownloadTableStatusSummary } from "./components/DownloadTable";
 // Keep the primary Add action eager so the modal cannot disappear behind a
@@ -220,16 +221,76 @@ function App() {
   const restoreSidebarFocusRef = useRef(false);
   const restoreRevealFocusRef = useRef(false);
 
-  const theme = useSettingsStore(state => state.theme);
-  const windowControlStylePreference = useSettingsStore(state => state.windowControlStyle);
-  const languagePreference = useSettingsStore(state => state.language);
-  const isSidebarVisible = useSettingsStore(state => state.isSidebarVisible);
-  const sidebarPosition = useSettingsStore(state => state.sidebarPosition);
-  const toggleSidebar = useSettingsStore(state => state.toggleSidebar);
-  const activeView = useSettingsStore(state => state.activeView);
-  const fontFamily = useSettingsStore(state => state.fontFamily);
-  const appFontSize = useSettingsStore(state => state.appFontSize);
-  const listRowDensity = useSettingsStore(state => state.listRowDensity);
+  const {
+    theme,
+    windowControlStyle: windowControlStylePreference,
+    language: languagePreference,
+    isSidebarVisible,
+    sidebarPosition,
+    toggleSidebar,
+    activeView,
+    fontFamily,
+    appFontSize,
+    listRowDensity,
+    autoCheckUpdates,
+    autoAddClipboardLinks,
+    showNotifications,
+    showDockBadge,
+    dockBadgeSyncVersion,
+    showMenuBarIcon,
+    startAtLogin,
+    syncStartAtLogin,
+    extensionPairingToken,
+    showKeychainModal,
+    schedulerRunning,
+    schedulerActiveDownloadIds,
+    maxConcurrentDownloads,
+    startAtLoginSyncState,
+    preventsSleepWhileDownloading,
+    preventsDisplaySleepWhileDownloading,
+  } = useSettingsStore(
+    useShallow((state) => ({
+      theme: state.theme,
+      windowControlStyle: state.windowControlStyle,
+      language: state.language,
+      isSidebarVisible: state.isSidebarVisible,
+      sidebarPosition: state.sidebarPosition,
+      toggleSidebar: state.toggleSidebar,
+      activeView: state.activeView,
+      fontFamily: state.fontFamily,
+      appFontSize: state.appFontSize,
+      listRowDensity: state.listRowDensity,
+      autoCheckUpdates: state.autoCheckUpdates,
+      autoAddClipboardLinks: state.autoAddClipboardLinks,
+      showNotifications: state.showNotifications,
+      showDockBadge: state.showDockBadge,
+      dockBadgeSyncVersion: state.dockBadgeSyncVersion,
+      showMenuBarIcon: state.showMenuBarIcon,
+      startAtLogin: state.startAtLogin,
+      syncStartAtLogin: state.syncStartAtLogin,
+      extensionPairingToken: state.extensionPairingToken,
+      showKeychainModal: state.showKeychainModal,
+      schedulerRunning: state.schedulerRunning,
+      schedulerActiveDownloadIds: state.schedulerActiveDownloadIds,
+      maxConcurrentDownloads: state.maxConcurrentDownloads,
+      startAtLoginSyncState: state.startAtLoginSyncState,
+      preventsSleepWhileDownloading: state.preventsSleepWhileDownloading,
+      preventsDisplaySleepWhileDownloading: state.preventsDisplaySleepWhileDownloading,
+    }))
+  );
+  const {
+    isAddModalOpen,
+    isDeleteModalOpen,
+    downloads,
+    queues,
+  } = useDownloadStore(
+    useShallow((state) => ({
+      isAddModalOpen: state.isAddModalOpen,
+      isDeleteModalOpen: state.deleteModalState.isOpen,
+      downloads: state.downloads,
+      queues: state.queues,
+    }))
+  );
   const pageTransitionKey = activeView === 'downloads'
     ? `${activeView}:${filter}`
     : activeView;
@@ -248,20 +309,6 @@ function App() {
     // Even the currently displayed locale must supersede a pending change.
     void changeAppLocale(locale);
   }, [languagePreference]);
-  const autoCheckUpdates = useSettingsStore(state => state.autoCheckUpdates);
-  const autoAddClipboardLinks = useSettingsStore(state => state.autoAddClipboardLinks);
-  const showNotifications = useSettingsStore(state => state.showNotifications);
-  const showDockBadge = useSettingsStore(state => state.showDockBadge);
-  const dockBadgeSyncVersion = useSettingsStore(state => state.dockBadgeSyncVersion);
-  const showMenuBarIcon = useSettingsStore(state => state.showMenuBarIcon);
-  const startAtLogin = useSettingsStore(state => state.startAtLogin);
-  const syncStartAtLogin = useSettingsStore(state => state.syncStartAtLogin);
-  const extensionPairingToken = useSettingsStore(state => state.extensionPairingToken);
-  const showKeychainModal = useSettingsStore(state => state.showKeychainModal);
-  const isAddModalOpen = useDownloadStore(state => state.isAddModalOpen);
-  const isDeleteModalOpen = useDownloadStore(state => state.deleteModalState.isOpen);
-  const downloads = useDownloadStore(state => state.downloads);
-  const queues = useDownloadStore(state => state.queues);
 
   useEffect(() => {
     const fallback = resolveFallbackFilter(
@@ -292,8 +339,6 @@ function App() {
       ? t($ => $.downloadTable.summary.estimated, { value: formatted })
       : formatted;
   };
-  const schedulerRunning = useSettingsStore(state => state.schedulerRunning);
-  const schedulerActiveDownloadIds = useSettingsStore(state => state.schedulerActiveDownloadIds);
   const pendingPostActionTimer = useRef<number | null>(null);
   const pendingPostActionToastId = useRef<string | null>(null);
   const pendingForceActionToastId = useRef<string | null>(null);
@@ -309,12 +354,6 @@ function App() {
     | { type: 'extension-media-discovery'; payload: ExtensionMediaDiscoveryUpdate }
     | { type: 'deep-link'; payload: string }
   >>([]);
-  const maxConcurrentDownloads = useSettingsStore(state => state.maxConcurrentDownloads);
-  const startAtLoginSyncState = useSettingsStore(state => state.startAtLoginSyncState);
-  const preventsSleepWhileDownloading = useSettingsStore(state => state.preventsSleepWhileDownloading);
-  const preventsDisplaySleepWhileDownloading = useSettingsStore(
-    state => state.preventsDisplaySleepWhileDownloading
-  );
   const { addToast, removeToast } = useToast();
   const showTrayUnavailableNotice = useCallback(() => {
     if (trayUnavailableNoticeShown.current) return;

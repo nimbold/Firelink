@@ -223,14 +223,21 @@ export const drainPendingTrayActionsAfterHydration = async (): Promise<{
 export const flushPendingTrayActionsForExit = async (): Promise<void> => {
   while (!useDownloadStore.getState().isInitialized) {
     await new Promise<void>(resolve => {
-      const unsubscribe = useDownloadStore.subscribe((state) => {
-        if (!state.isInitialized) return;
-        unsubscribe();
+      let settled = false;
+      const finish = (unsubscribe?: () => void) => {
+        if (settled) return;
+        settled = true;
+        unsubscribe?.();
         resolve();
-      });
+      };
+      const unsubscribe = useDownloadStore.subscribe(
+        state => state.isInitialized,
+        (isInitialized) => {
+          if (isInitialized) finish(unsubscribe);
+        }
+      );
       if (useDownloadStore.getState().isInitialized) {
-        unsubscribe();
-        resolve();
+        finish(unsubscribe);
       }
     });
   }
@@ -255,11 +262,14 @@ export const flushPendingTrayActionsForExit = async (): Promise<void> => {
   }
 };
 
-useDownloadStore.subscribe((state, previous) => {
-  if (state.isInitialized && !previous.isInitialized) {
-    void drainPendingTrayActions();
+useDownloadStore.subscribe(
+  state => state.isInitialized,
+  (isInitialized, previousIsInitialized) => {
+    if (isInitialized && !previousIsInitialized) {
+      void drainPendingTrayActions();
+    }
   }
-});
+);
 
 type ProgressFields = {
   fraction?: number;

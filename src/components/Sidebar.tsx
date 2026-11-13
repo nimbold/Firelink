@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { useShallow } from 'zustand/react/shallow';
 import {
   Inbox, Zap, CheckCircle2, CircleDashed,
   Film, Music, FileText, Box, Image as ImageIcon, Archive, FileQuestion, Magnet,
@@ -221,18 +222,40 @@ const ToolItem = React.memo(function ToolItem({ icon: Icon, label, view }: ToolI
 
 export const Sidebar = React.memo(function Sidebar(props: SidebarProps) {
   const { selectedFilter, onToggleSidebar, onSelectFilter, toggleButtonRef } = props;
-  const queues = useDownloadStore(state => state.queues);
-  const addQueue = useDownloadStore(state => state.addQueue);
-  const renameQueue = useDownloadStore(state => state.renameQueue);
-  const removeQueue = useDownloadStore(state => state.removeQueue);
-  const startQueue = useDownloadStore(state => state.startQueue);
-  const pauseQueue = useDownloadStore(state => state.pauseQueue);
-  const setQueueConcurrency = useDownloadStore(state => state.setQueueConcurrency);
-  const activeView = useSettingsStore(state => state.activeView);
-  const setActiveView = useSettingsStore(state => state.setActiveView);
-  const toggleSidebar = useSettingsStore(state => state.toggleSidebar);
-  const foldersCollapsed = useSettingsStore(state => state.isFoldersCollapsed);
-  const toggleFoldersCollapsed = useSettingsStore(state => state.toggleFoldersCollapsed);
+  const {
+    queues,
+    addQueue,
+    renameQueue,
+    removeQueue,
+    startQueue,
+    pauseQueue,
+    setQueueConcurrency,
+  } = useDownloadStore(
+    useShallow((state) => ({
+      queues: state.queues,
+      addQueue: state.addQueue,
+      renameQueue: state.renameQueue,
+      removeQueue: state.removeQueue,
+      startQueue: state.startQueue,
+      pauseQueue: state.pauseQueue,
+      setQueueConcurrency: state.setQueueConcurrency,
+    }))
+  );
+  const {
+    activeView,
+    setActiveView,
+    toggleSidebar,
+    isFoldersCollapsed: foldersCollapsed,
+    toggleFoldersCollapsed,
+  } = useSettingsStore(
+    useShallow((state) => ({
+      activeView: state.activeView,
+      setActiveView: state.setActiveView,
+      toggleSidebar: state.toggleSidebar,
+      isFoldersCollapsed: state.isFoldersCollapsed,
+      toggleFoldersCollapsed: state.toggleFoldersCollapsed,
+    }))
+  );
   const { addToast } = useToast();
   const { t, i18n } = useTranslation();
 

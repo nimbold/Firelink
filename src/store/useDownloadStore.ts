@@ -1,6 +1,7 @@
 import type { DownloadRemovalJob } from "../bindings/DownloadRemovalJob";
 import { listenEvent } from "../ipc";
 import { create } from 'zustand';
+import { subscribeWithSelector } from 'zustand/middleware';
 import { info } from '../utils/logger';
 import { invokeCommand as invoke } from '../ipc';
 
@@ -1365,7 +1366,8 @@ interface DownloadState {
   
 }
 
-export const useDownloadStore = create<DownloadState>((set, get) => {
+export const useDownloadStore = create<DownloadState>()(
+  subscribeWithSelector((set, get) => {
   const applyPropertiesInternal = async (id: string, updates: Partial<DownloadItem>): Promise<void> => {
     await waitForPendingStartupResume();
     const initialItem = get().downloads.find(download => download.id === id);
@@ -3800,7 +3802,8 @@ export const useDownloadStore = create<DownloadState>((set, get) => {
     }
   }
   };
-});
+  })
+);
 
 type PersistenceSnapshot = {
   key: string;

@@ -3,8 +3,9 @@
 `cargo audit` is a required CI gate. Vulnerability advisories must be resolved;
 the gate must not be bypassed with a broad ignore list.
 
-As of 2026-10-23, `cargo audit` reports no vulnerability advisories. It reports
-five allowed warnings, which remain visible in CI output:
+As of 2026-11-14 (652 crate dependencies scanned), `cargo audit` reports no
+vulnerability advisories. It reports five allowed warnings, which remain
+visible in CI output:
 
 - `RUSTSEC-2024-0370` marks `proc-macro-error` 1.0.4 unmaintained.
 - `RUSTSEC-2024-0429` reports unsound iterator implementations in `glib`

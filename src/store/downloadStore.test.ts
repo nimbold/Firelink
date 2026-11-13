@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   drainPendingTrayActionsAfterHydration,
+  flushPendingTrayActionsForExit,
   initDownloadListener,
   resetTrayActionDrainStateForTests,
   useDownloadProgressStore
@@ -2318,5 +2319,26 @@ describe('useDownloadProgressStore', () => {
     });
     expect(downloadControlIntentFor('resume-failure')).toBeUndefined();
     release();
+  });
+
+  it('waits for isInitialized before flushing pending tray actions for exit', async () => {
+    vi.mocked(ipc.invokeCommand).mockResolvedValue(null);
+    useDownloadStore.setState({ isInitialized: false, downloads: [] });
+
+    let settled = false;
+    const exitFlush = flushPendingTrayActionsForExit().then(() => {
+      settled = true;
+    });
+
+    await Promise.resolve();
+    useDownloadStore.setState({ isAddModalOpen: true });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(ipc.invokeCommand).not.toHaveBeenCalledWith('take_pending_tray_action');
+
+    useDownloadStore.setState({ isInitialized: true, isAddModalOpen: false });
+    await exitFlush;
+    expect(settled).toBe(true);
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('take_pending_tray_action');
   });
 });
