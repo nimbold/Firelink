@@ -3,7 +3,7 @@
 `cargo audit` is a required CI gate. Vulnerability advisories must be resolved;
 the gate must not be bypassed with a broad ignore list.
 
-As of 2026-11-14 (652 crate dependencies scanned), `cargo audit` reports no
+As of 2026-11-15 (653 crate dependencies scanned), `cargo audit` reports no
 vulnerability advisories. It reports five allowed warnings, which remain
 visible in CI output:
 

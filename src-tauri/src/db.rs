@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -27,6 +27,71 @@ fn is_database_path(path: &Path) -> bool {
                 .to_string_lossy()
                 .starts_with(&format!("{DATABASE_NAME}.backup-"))
     })
+}
+
+/// Canonicalize only the parent directory so legitimate OS parent symlinks
+/// (such as macOS `/var -> /private/var`) do not trip `SQLITE_OPEN_NOFOLLOW`,
+/// while preserving the uncanonicalized leaf filename so symlinked database
+/// files still fail closed across both our pre-check and `SQLITE_OPEN_NOFOLLOW`.
+fn resolve_database_open_path(path: &Path) -> Result<PathBuf, rusqlite::Error> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| rusqlite::Error::InvalidPath(path.to_path_buf()))?;
+    let canonical_parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => fs::canonicalize(parent),
+        _ => std::env::current_dir().and_then(fs::canonicalize),
+    }
+    .map_err(|error| {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+            Some(format!(
+                "failed to resolve database parent directory '{}': {error}",
+                path.display()
+            )),
+        )
+    })?;
+    let resolved = canonical_parent.join(file_name);
+    if fs::symlink_metadata(&resolved)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN_SYMLINK),
+            Some(format!(
+                "refusing to open symbolic link database '{}'",
+                path.display()
+            )),
+        ));
+    }
+    Ok(resolved)
+}
+
+/// Open Firelink's primary database with symlink rejection (`SQLITE_OPEN_NOFOLLOW`),
+/// extended error codes, and filesystem-path semantics (no URI parsing).
+fn open_primary_database(path: &Path) -> Result<Connection, rusqlite::Error> {
+    let resolved = resolve_database_open_path(path)?;
+    Connection::open_with_flags(
+        resolved,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW
+            | OpenFlags::SQLITE_OPEN_EXRESCODE,
+    )
+}
+
+/// Open an existing backup or legacy database without creating missing files or
+/// following symbolic links. Keeps `SQLITE_OPEN_READ_WRITE` (which falls back
+/// to read-only on write-protected files) so SQLite can recover a hot rollback
+/// journal if needed.
+fn open_existing_database(path: &Path) -> Result<Connection, rusqlite::Error> {
+    let resolved = resolve_database_open_path(path)?;
+    Connection::open_with_flags(
+        resolved,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW
+            | OpenFlags::SQLITE_OPEN_EXRESCODE,
+    )
 }
 
 pub struct DbState {
@@ -95,7 +160,7 @@ fn init_at_path_internal(
             ));
         }
     };
-    let mut connection = Connection::open(&database_path)
+    let mut connection = open_primary_database(&database_path)
         .map_err(|error| format!("failed to open database: {error}"))?;
     connection
         .busy_timeout(std::time::Duration::from_secs(5))
@@ -523,7 +588,7 @@ fn recover_downloads_from_migration_backup(
     let mut processed_valid_candidate = false;
     let mut total_restored_count = 0;
     for candidate in backup_candidates {
-        let Ok(backup_conn) = Connection::open(&candidate) else {
+        let Ok(backup_conn) = open_existing_database(&candidate) else {
             continue;
         };
         if !table_exists(&backup_conn, "downloads").unwrap_or(false) {
@@ -760,7 +825,7 @@ fn sanitize_legacy_source(path: &Path, remove_pairing_token: bool) -> Result<(),
         }
     }
     if is_database_path(path) {
-        let mut connection = Connection::open(path).map_err(|error| {
+        let mut connection = open_existing_database(path).map_err(|error| {
             format!(
                 "failed to open legacy database '{}' for sanitization: {error}",
                 path.display()
@@ -965,7 +1030,7 @@ fn read_legacy_store(path: &Path, force_migrate: bool) -> Result<LegacyData, Str
 }
 
 fn read_legacy_database(path: &Path, force_migrate: bool) -> Result<LegacyData, String> {
-    let connection = Connection::open(path).map_err(|error| {
+    let connection = open_existing_database(path).map_err(|error| {
         format!(
             "failed to open legacy database '{}': {error}",
             path.display()
@@ -1159,10 +1224,16 @@ fn backup_database(connection: &Connection, path: &Path, reason: &str) -> Result
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("invalid database path '{}'", path.display()))?;
-    let backup_path = path.with_file_name(format!(
+    let raw_backup_path = path.with_file_name(format!(
         "{file_name}.backup-{reason}-{timestamp}-{}",
         uuid::Uuid::new_v4().simple()
     ));
+    let backup_path = resolve_database_open_path(&raw_backup_path).map_err(|error| {
+        format!(
+            "failed to resolve backup database path '{}': {error}",
+            raw_backup_path.display()
+        )
+    })?;
     connection
         .execute("VACUUM INTO ?1", params![backup_path.to_string_lossy()])
         .map_err(|error| {
@@ -5518,5 +5589,62 @@ mod tests {
             ).unwrap(),
             "complete"
         );
+    }
+
+    #[test]
+    fn open_existing_database_rejects_missing_file_without_creating_it() {
+        let root = TempDir::new().unwrap();
+        let missing = root.path().join("missing.sqlite");
+        assert!(open_existing_database(&missing).is_err());
+        assert!(!missing.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_helpers_reject_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let target = root.path().join("target.sqlite");
+        {
+            let conn = open_primary_database(&target).unwrap();
+            conn.execute_batch("CREATE TABLE probe (id INTEGER PRIMARY KEY);")
+                .unwrap();
+        }
+        let link = root.path().join("link.sqlite");
+        symlink(&target, &link).unwrap();
+
+        assert!(open_primary_database(&link).is_err());
+        assert!(open_existing_database(&link).is_err());
+
+        let linked_dir = root.path().join("linked-dir");
+        let real_dir = root.path().join("real-dir");
+        fs::create_dir(&real_dir).unwrap();
+        symlink(&real_dir, &linked_dir).unwrap();
+        let nested_db = linked_dir.join("nested.sqlite");
+        let nested_conn = open_primary_database(&nested_db).unwrap();
+        nested_conn
+            .execute_batch("CREATE TABLE probe (id INTEGER PRIMARY KEY);")
+            .unwrap();
+    }
+
+    #[test]
+    fn open_primary_database_handles_hash_and_question_in_filename() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("firelink#profile?v1.sqlite");
+        let conn = open_primary_database(&path).unwrap();
+        conn.execute_batch("CREATE TABLE probe (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn rusqlite_rejects_empty_and_comment_only_prepared_sql() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(matches!(conn.prepare(""), Err(rusqlite::Error::Empty)));
+        assert!(matches!(
+            conn.prepare("-- comment only"),
+            Err(rusqlite::Error::Empty)
+        ));
     }
 }

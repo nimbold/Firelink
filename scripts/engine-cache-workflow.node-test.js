@@ -117,7 +117,7 @@ test('only trusted main pushes save the shared engine cache', () => {
 
 test('CI and release use granular Aria2 build caching and safe timeouts', () => {
   assert.match(ciWorkflow, /timeout-minutes: (?:4[5-9]|[5-9][0-9])/);
-  assert.match(ciWorkflow, /uses: Swatinem\/rust-cache@[0-9a-f]{40} # v2\.9\.2/);
+  assert.match(ciWorkflow, /uses: Swatinem\/rust-cache@[0-9a-f]{40} # v2\.9\.3/);
   assert.match(ciWorkflow, /key: firelink-aria2-build-v1-\$\{\{ matrix\.target \}\}-\$\{\{ steps\.engine-toolchain\.outputs\.aria2-fingerprint \}\}/);
   assert.match(releaseWorkflow, /key: firelink-aria2-build-v1-\$\{\{ matrix\.target \}\}-\$\{\{ steps\.engine-toolchain\.outputs\.aria2-fingerprint \}\}/);
   const saveAria2 = ciWorkflow.slice(ciWorkflow.indexOf('- name: Save verified Aria2 build cache'));
