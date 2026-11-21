@@ -17445,7 +17445,7 @@ async fn export_logs(
         std::env::consts::OS,
         std::env::consts::FAMILY,
         std::env::consts::ARCH,
-        chrono::Utc::now().to_rfc3339(),
+        jiff::Timestamp::now().to_string(),
     );
     let (aria2, ytdlp, ffmpeg, deno) = tokio::join!(
         check_aria2(
@@ -25924,7 +25924,7 @@ pub fn run() {
                     let redacted = redact_log_line_for_output(&message.to_string());
                     out.finish(format_args!(
                         "[{}][{}][{}] {}",
-                        chrono::Local::now().format("%Y-%m-%d][%H:%M:%S"),
+                        jiff::ZonedDateTime::now().strftime("%Y-%m-%d][%H:%M:%S"),
                         record.level(),
                         record.target(),
                         redacted

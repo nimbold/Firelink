@@ -1153,7 +1153,7 @@ fn backup_file(path: &Path, reason: &str) -> Result<PathBuf, String> {
             path.display()
         ));
     }
-    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let timestamp = jiff::Timestamp::now().strftime("%Y%m%dT%H%M%SZ");
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -1219,7 +1219,7 @@ fn backup_file(path: &Path, reason: &str) -> Result<PathBuf, String> {
 }
 
 fn backup_database(connection: &Connection, path: &Path, reason: &str) -> Result<PathBuf, String> {
-    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let timestamp = jiff::Timestamp::now().strftime("%Y%m%dT%H%M%SZ");
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())

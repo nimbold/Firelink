@@ -622,8 +622,9 @@ pub fn torrent_details_from_bytes(bytes: &[u8]) -> Result<crate::ipc::TorrentDet
     let creation_date = root
         .get(b"creation date".as_slice())
         .and_then(|value| match value {
-            BencodeValue::Integer(value) if *value >= 0 => chrono::DateTime::<chrono::Utc>::from_timestamp(*value, 0)
-                .map(|date| date.to_rfc3339()),
+            BencodeValue::Integer(value) if *value >= 0 => jiff::Timestamp::from_second(*value)
+                .ok()
+                .map(|date| date.to_string()),
             _ => None,
         });
     let trackers = collect_torrent_uris(root.get(b"announce".as_slice()), &["http", "https", "udp"])

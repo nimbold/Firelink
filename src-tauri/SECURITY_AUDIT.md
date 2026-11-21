@@ -3,10 +3,13 @@
 `cargo audit` is a required CI gate. Vulnerability advisories must be resolved;
 the gate must not be bypassed with a broad ignore list.
 
-As of 2026-11-15 (653 crate dependencies scanned), `cargo audit` reports no
-vulnerability advisories. It reports five allowed warnings, which remain
+As of 2026-11-21 (658 crate dependencies scanned), `cargo audit` reports no
+vulnerability advisories. It reports six allowed warnings, which remain
 visible in CI output:
 
+- `RUSTSEC-2026-0543` marks `chrono` 0.4.45 unmaintained. Firelink's direct
+  date/time code uses `jiff`; `chrono` remains in the lockfile transitively via
+  `serde_with` 3.25.0.
 - `RUSTSEC-2024-0370` marks `proc-macro-error` 1.0.4 unmaintained.
 - `RUSTSEC-2024-0429` reports unsound iterator implementations in `glib`
   0.18.5. This is in the Linux Tauri/Wry GTK3 graph; Firelink does not directly

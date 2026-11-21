@@ -1,4 +1,3 @@
-use chrono::{Datelike, Local, NaiveDate, Timelike};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -81,9 +80,9 @@ fn scheduler_run_snapshot(
         start_minute.zip(stop_minute).and_then(|(start, stop)| {
             let date = start_key
                 .strip_suffix("-start")
-                .and_then(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())?;
-            let stop_date = if stop < start { date.succ_opt()? } else { date };
-            Some((format!("{}-stop", stop_date.format("%Y-%m-%d")), stop))
+                .and_then(|date| date.parse::<jiff::civil::Date>().ok())?;
+            let stop_date = if stop < start { date.tomorrow().ok()? } else { date };
+            Some((format!("{stop_date}-stop"), stop))
         })
     } else {
         None
@@ -109,10 +108,10 @@ fn snapshot_stop_is_due(
         .is_some_and(|(stop_key, stop_minute)| {
             let scheduled_date = stop_key
                 .strip_suffix("-stop")
-                .and_then(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").ok());
+                .and_then(|date| date.parse::<jiff::civil::Date>().ok());
             let current_date = current_stop_key
                 .strip_suffix("-stop")
-                .and_then(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").ok());
+                .and_then(|date| date.parse::<jiff::civil::Date>().ok());
             scheduled_date
                 .zip(current_date)
                 .is_some_and(|(scheduled, current)| {
@@ -286,13 +285,13 @@ pub fn spawn_scheduler(
                     continue;
                 }
 
-                let now = Local::now();
-                let current_minute = now.hour() * 60 + now.minute();
-                let current_day = now.weekday().num_days_from_sunday();
+                let now = jiff::ZonedDateTime::now();
+                let current_minute = u32::from(now.hour() as u8) * 60 + u32::from(now.minute() as u8);
+                let current_day = u32::from(now.weekday().to_sunday_zero_offset() as u8);
 
                 let allowed_today =
                     scheduler.everyday || scheduler.selected_days.contains(&current_day);
-                let date_key = now.format("%Y-%m-%d").to_string();
+                let date_key = now.date().to_string();
                 let start_key = format!("{date_key}-start");
                 let stop_key = format!("{date_key}-stop");
                 let start_minute = minute_of_day(&scheduler.start_time);
@@ -321,15 +320,15 @@ pub fn spawn_scheduler(
                         &scheduler_last_stop_key,
                         &stop_key,
                     );
-                let previous_day = now.date_naive().pred_opt();
+                let previous_day = now.date().yesterday().ok();
                 let previous_day_allowed = previous_day.is_some_and(|day| {
                     scheduler.everyday
                         || scheduler
                             .selected_days
-                            .contains(&day.weekday().num_days_from_sunday())
+                            .contains(&u32::from(day.weekday().to_sunday_zero_offset() as u8))
                 });
                 let previous_start_key = previous_day
-                    .map(|day| format!("{}-start", day.format("%Y-%m-%d")))
+                    .map(|day| format!("{day}-start"))
                     .unwrap_or_default();
                 let overnight_stop_due = overnight_stop_is_due(OvernightStopCheck {
                     stop_time_enabled: scheduler.stop_time_enabled,
