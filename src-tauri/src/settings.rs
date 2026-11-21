@@ -1102,7 +1102,7 @@ fn default_settings() -> PersistedSettings {
         max_automatic_retries: 3,
         minimum_normal_download_speed_ki_b: 0,
         retry_not_found_errors: false,
-        adaptive_mirror_selection: true,
+        adaptive_mirror_selection: false,
         show_notifications: true,
         play_completion_sound: false,
         auto_add_clipboard_links: false,
@@ -1506,7 +1506,7 @@ mod tests {
 
         assert_eq!(settings.minimum_normal_download_speed_ki_b, 0);
         assert!(!settings.retry_not_found_errors);
-        assert!(settings.adaptive_mirror_selection);
+        assert!(!settings.adaptive_mirror_selection);
     }
 
     #[test]

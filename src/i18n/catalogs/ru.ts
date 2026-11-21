@@ -822,6 +822,8 @@ const ru = {
     cookies: 'Файлы cookie',
     cookiePlaceholder: 'name=value; other=value',
     mirrors: 'Зеркала',
+    mirrorsPlaceholder: 'По одному URL зеркала на строку (https://mirror.example.com/file.zip)',
+    mirrorsDescription: 'Одновременное распределение сегментов между зеркалами с автоматическим переключением при сбоях.',
     cancel: 'Отмена',
     startDownloads: 'Начать загрузку',
     addToQueue: 'Добавить в очередь',

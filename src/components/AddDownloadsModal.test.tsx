@@ -487,4 +487,42 @@ describe('AddDownloadsModal link review and dispatch', () => {
     expect(download.isTorrent).toBe(false);
     expect(action).toEqual({ type: 'start-now' });
   });
+
+  it('shows mirrors for a single normal download and hides them in batch mode', async () => {
+    const primaryUrl = 'https://cdn1.example.test/archive.zip';
+    const mirrorUrl = 'https://cdn2.example.test/archive.zip';
+    await enterLink(primaryUrl);
+    expect(previewRows()).toHaveLength(1);
+
+    const advancedToggle = chooseButton('addDownloads.advancedTransfer');
+    expect(advancedToggle).toBeDefined();
+    advancedToggle.props.onClick();
+    renderUntilStable();
+
+    const mirrorsTextarea = elements(tree).find(element =>
+      element.type === 'textarea' && element.props?.['aria-label'] === 'addDownloads.mirrors'
+    );
+    expect(mirrorsTextarea).toBeDefined();
+    mirrorsTextarea.props.onChange({ target: { value: 'not-a-valid-mirror-url' } });
+    renderUntilStable();
+    expect(startButton().props.disabled).toBe(true);
+
+    mirrorsTextarea.props.onChange({ target: { value: `  ${mirrorUrl}  ` } });
+    renderUntilStable();
+    expect(startButton().props.disabled).toBe(false);
+
+    await startReviewedDownload();
+    expect(testState.addDownload).toHaveBeenCalledTimes(1);
+    expect(testState.addDownload.mock.calls[0][0].mirrors).toBe(mirrorUrl);
+
+    // Switch to batch mode with two URLs: single-file mirrors editor should be hidden.
+    testState.addDownload.mockClear();
+    await enterLink(`${primaryUrl}\nhttps://cdn1.example.test/second.zip`);
+    expect(previewRows()).toHaveLength(2);
+
+    const batchMirrorsTextarea = elements(tree).find(element =>
+      element.type === 'textarea' && element.props?.['aria-label'] === 'addDownloads.mirrors'
+    );
+    expect(batchMirrorsTextarea).toBeUndefined();
+  });
 });

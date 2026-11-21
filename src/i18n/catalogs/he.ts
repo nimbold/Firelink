@@ -822,6 +822,8 @@ const he = {
     cookies: 'עוגיות',
     cookiePlaceholder: 'name=value; other=value',
     mirrors: 'מראות',
+    mirrorsPlaceholder: 'כתובת מראה אחת בכל שורה (https://mirror.example.com/file.zip)',
+    mirrorsDescription: 'חלוקת מקטעים בו-זמנית בין מראות עם גיבוי אוטומטי בעת שגיאות.',
     cancel: 'ביטול',
     startDownloads: 'התחלת הורדות',
     addToQueue: 'הוספה לתור',

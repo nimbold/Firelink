@@ -98,6 +98,9 @@ describe('Properties window bridge', () => {
     expect(snapshot.hasHeaders).toBe(true);
     expect(snapshot.hasUsername).toBe(true);
     expect(snapshot.hasMirrors).toBe(true);
+    expect(applySecretPatch({ kind: 'unchanged' }, 'https://mirror.example/file')).toBe('https://mirror.example/file');
+    expect(applySecretPatch({ kind: 'replace', value: 'https://mirror2.example/file' }, 'https://mirror.example/file')).toBe('https://mirror2.example/file');
+    expect(applySecretPatch({ kind: 'clear' }, 'https://mirror.example/file')).toBeUndefined();
     expect(snapshot.appearance).toEqual({
       theme: 'nord',
       fontFamily: 'inter',

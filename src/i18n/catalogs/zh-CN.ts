@@ -822,6 +822,8 @@ const zhCN = {
     cookies: 'Cookie',
     cookiePlaceholder: 'name=value; other=value',
     mirrors: '镜像源',
+    mirrorsPlaceholder: '每行一个镜像 URL（https://mirror.example.com/file.zip）',
+    mirrorsDescription: '在多个镜像源之间同时分发下载分段，并在出错时自动故障转移。',
     cancel: '取消',
     startDownloads: '开始下载',
     addToQueue: '添加到队列',

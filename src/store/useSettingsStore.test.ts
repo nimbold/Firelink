@@ -440,7 +440,7 @@ describe('normal download reliability preferences', () => {
     useSettingsStore.setState({
       minimumNormalDownloadSpeedKiB: 0,
       retryNotFoundErrors: false,
-      adaptiveMirrorSelection: true,
+      adaptiveMirrorSelection: false,
     });
   });
 
@@ -448,7 +448,7 @@ describe('normal download reliability preferences', () => {
     expect(useSettingsStore.getState()).toMatchObject({
       minimumNormalDownloadSpeedKiB: 0,
       retryNotFoundErrors: false,
-      adaptiveMirrorSelection: true,
+      adaptiveMirrorSelection: false,
     });
 
     useSettingsStore.getState().setMinimumNormalDownloadSpeedKiB(64);

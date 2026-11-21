@@ -8174,6 +8174,8 @@ struct HttpTransferProbe {
     range_support: BoundedRangeSupport,
     credentials_allowed: bool,
     redirect_count: usize,
+    status_ok: bool,
+    total_bytes: Option<u64>,
 }
 
 struct PreparedNormalTransfer {
@@ -8256,149 +8258,283 @@ async fn prepare_normal_transfer(
     epoch: u64,
     payload: &SpawnPayload,
 ) -> Result<PreparedNormalTransfer, String> {
+    prepare_normal_transfer_with_local_override(id, epoch, payload, false).await
+}
+
+struct PreparedUriCandidate {
+    index: usize,
+    uri: String,
+    range_support: BoundedRangeSupport,
+    credentials_allowed: bool,
+}
+
+enum NormalProbeOutcome {
+    NonHttp {
+        index: usize,
+        uri: String,
+        result: Result<bool, String>,
+    },
+    Http {
+        index: usize,
+        uri: String,
+        elapsed_ms: u128,
+        result: Result<HttpTransferProbe, String>,
+    },
+}
+
+async fn prepare_normal_transfer_with_local_override(
+    id: &str,
+    epoch: u64,
+    payload: &SpawnPayload,
+    allow_localhost: bool,
+) -> Result<PreparedNormalTransfer, String> {
     let credential_origin = reqwest::Url::parse(&payload.url)
         .map_err(|_| "normal download has an invalid primary URL".to_string())?;
     let requested =
         clamp_download_connections(payload.connections.unwrap_or(DOWNLOAD_CONNECTIONS_MIN));
-    let mut connections = requested;
-    let mut uris = Vec::new();
-    let mut credentials_allowed = true;
-    for (index, uri) in crate::collect_download_uris(&payload.url, payload.mirrors.as_deref())
-        .into_iter()
-        .enumerate()
-    {
-        if !is_http_uri(&uri) {
-            let parsed =
-                reqwest::Url::parse(&uri).map_err(|_| "SSRF blocked: Invalid URL".to_string())?;
-            crate::network::validate_url(
-                &parsed,
-                &["http", "https", "ftp", "sftp"],
-                crate::network::CredentialPolicy::Allow,
-            )?;
-            let uri_credentials_allowed = can_forward_payload_credentials(&credential_origin, &parsed);
-            if index > 0
-                && payload_has_credential_material(payload)
-                && !uri_credentials_allowed
-            {
-                return Err(
-                    "credentialed mirrors must use the same origin as the primary URL"
-                        .to_string(),
-                );
-            }
-            credentials_allowed &= uri_credentials_allowed;
-            uris.push(uri);
-            continue;
-        }
+    let raw_uris = crate::collect_download_uris(&payload.url, payload.mirrors.as_deref());
+    let has_credentials = payload_has_credential_material(payload);
 
-        let probe_started = Instant::now();
-        match probe_bounded_range_support(&uri, payload, &credential_origin).await {
-            Ok(probe) => {
-                if index > 0
-                    && payload_has_credential_material(payload)
-                    && !probe.credentials_allowed
-                {
-                    return Err(
-                        "credentialed mirrors must use the same origin as the primary URL"
-                            .to_string(),
-                    );
+    let probe_outcomes = futures_util::future::join_all(raw_uris.into_iter().enumerate().map(
+        |(index, uri)| {
+            let credential_origin = &credential_origin;
+            async move {
+                if !is_http_uri(&uri) {
+                    let result = (|| -> Result<bool, String> {
+                        let parsed = reqwest::Url::parse(&uri)
+                            .map_err(|_| "SSRF blocked: Invalid URL".to_string())?;
+                        if !allow_localhost {
+                            crate::network::validate_url(
+                                &parsed,
+                                &["http", "https", "ftp", "sftp"],
+                                crate::network::CredentialPolicy::Allow,
+                            )?;
+                        }
+                        let uri_credentials_allowed =
+                            can_forward_payload_credentials(credential_origin, &parsed);
+                        if index > 0 && has_credentials && !uri_credentials_allowed {
+                            return Err(
+                                "credentialed mirrors must use the same origin as the primary URL"
+                                    .to_string(),
+                            );
+                        }
+                        Ok(uri_credentials_allowed)
+                    })();
+                    return NormalProbeOutcome::NonHttp { index, uri, result };
                 }
-                credentials_allowed &= probe.credentials_allowed;
-                uris.push(probe.final_uri);
-                log::info!(
-                    "aria2 range probe [stage=range_probe id={} epoch={} host={} support={} redirect_count={} credentials_allowed={} requested_connections={} effective_connections={} elapsed_ms={}]",
-                    id,
-                    epoch,
-                    uri_host_for_log(&uri),
-                    probe.range_support.as_str(),
-                    probe.redirect_count,
-                    probe.credentials_allowed,
-                    requested,
-                    if probe.range_support == BoundedRangeSupport::Unsupported && requested > 1 {
-                        1
-                    } else {
-                        connections
-                    },
-                    probe_started.elapsed().as_millis()
-                );
-                match probe.range_support {
-                    BoundedRangeSupport::Unsupported if requested > 1 => {
-                        log::warn!(
-                            "aria2 range probe [stage=range_probe id={} epoch={} host={} result=unsupported action=single_connection]",
-                            id,
-                            epoch,
-                            uri_host_for_log(&uri)
-                        );
-                        connections = effective_connections_for_range_support(
-                            requested,
-                            probe.range_support,
+
+                let probe_started = Instant::now();
+                let result = probe_bounded_range_support_with_local_override(
+                    &uri,
+                    payload,
+                    credential_origin,
+                    allow_localhost,
+                )
+                .await;
+                NormalProbeOutcome::Http {
+                    index,
+                    uri,
+                    elapsed_ms: probe_started.elapsed().as_millis(),
+                    result,
+                }
+            }
+        },
+    ))
+    .await;
+
+    let mut expected_total_bytes: Option<u64> = None;
+    let mut healthy_candidates: Vec<PreparedUriCandidate> = Vec::with_capacity(probe_outcomes.len());
+    let mut fallback_candidates: Vec<PreparedUriCandidate> = Vec::new();
+    let mut first_retryable_transport_error: Option<(String, &'static str)> = None;
+
+    for outcome in probe_outcomes {
+        match outcome {
+            NormalProbeOutcome::NonHttp { index, uri, result } => {
+                let uri_credentials_allowed = result?;
+                healthy_candidates.push(PreparedUriCandidate {
+                    index,
+                    uri,
+                    range_support: BoundedRangeSupport::Unknown,
+                    credentials_allowed: uri_credentials_allowed,
+                });
+            }
+            NormalProbeOutcome::Http {
+                index,
+                uri,
+                elapsed_ms,
+                result,
+            } => match result {
+                Ok(probe) => {
+                    if index > 0 && has_credentials && !probe.credentials_allowed {
+                        return Err(
+                            "credentialed mirrors must use the same origin as the primary URL"
+                                .to_string(),
                         );
                     }
-                    BoundedRangeSupport::Unknown if requested > 1 => {
-                        log::debug!(
-                            "aria2 range probe [stage=range_probe id={} epoch={} host={} result=unknown action=keep_requested connections={}]",
+                    if !probe.status_ok && probe.range_support != BoundedRangeSupport::Unsupported {
+                        log::warn!(
+                            "aria2 range probe [stage=range_probe id={} epoch={} host={} index={} result=http_error action=deprioritize elapsed_ms={}]",
                             id,
                             epoch,
                             uri_host_for_log(&uri),
-                            requested
+                            index,
+                            elapsed_ms
                         );
+                        fallback_candidates.push(PreparedUriCandidate {
+                            index,
+                            uri: probe.final_uri,
+                            range_support: probe.range_support,
+                            credentials_allowed: probe.credentials_allowed,
+                        });
+                        continue;
                     }
-                    _ => {}
+                    if probe.status_ok {
+                        if let (Some(expected), Some(actual)) =
+                            (expected_total_bytes, probe.total_bytes)
+                        {
+                            if expected != actual {
+                                log::warn!(
+                                    "aria2 range probe [stage=range_probe id={} epoch={} host={} index={} result=size_mismatch expected={} actual={} action=exclude_uri elapsed_ms={}]",
+                                    id,
+                                    epoch,
+                                    uri_host_for_log(&uri),
+                                    index,
+                                    expected,
+                                    actual,
+                                    elapsed_ms
+                                );
+                                continue;
+                            }
+                        }
+                        if expected_total_bytes.is_none() {
+                            expected_total_bytes = probe.total_bytes;
+                        }
+                    }
+                    log::info!(
+                        "aria2 range probe [stage=range_probe id={} epoch={} host={} support={} redirect_count={} credentials_allowed={} requested_connections={} elapsed_ms={}]",
+                        id,
+                        epoch,
+                        uri_host_for_log(&uri),
+                        probe.range_support.as_str(),
+                        probe.redirect_count,
+                        probe.credentials_allowed,
+                        requested,
+                        elapsed_ms
+                    );
+                    healthy_candidates.push(PreparedUriCandidate {
+                        index,
+                        uri: probe.final_uri,
+                        range_support: probe.range_support,
+                        credentials_allowed: probe.credentials_allowed,
+                    });
                 }
-            }
-            Err(error) if is_fatal_range_probe_error(&error) => {
+                Err(error) if is_fatal_range_probe_error(&error) => {
                     log::error!(
-                    "aria2 redirect [stage=redirect id={} epoch={} host={} result=rejected error_code={} requested_connections={} effective_connections={} elapsed_ms={}]",
-                    id,
-                    epoch,
-                    uri_host_for_log(&uri),
-                    range_probe_error_code(&error),
-                    requested,
-                    connections,
-                    probe_started.elapsed().as_millis()
-                );
-                return Err(format!(
-                    "normal transfer preflight rejected for {}: {}",
-                    uri_host_for_log(&uri),
-                    range_probe_error_code(&error)
-                ));
-            }
-            Err(error) if payload_has_credential_material(payload) => {
-                log::warn!(
-                    "aria2 range probe [stage=range_probe id={} epoch={} host={} result=retryable error_code={} credentials_verified=false requested_connections={} effective_connections={} elapsed_ms={}]",
-                    id,
-                    epoch,
-                    uri_host_for_log(&uri),
-                    range_probe_error_code(&error),
-                    requested,
-                    connections,
-                    probe_started.elapsed().as_millis()
-                );
-                return Err(format!(
-                    "normal transfer preflight is retryable for {}: {}",
-                    uri_host_for_log(&uri),
-                    range_probe_error_code(&error)
-                ));
-            }
-            Err(error) => {
-                log::warn!(
-                    "aria2 range probe [stage=range_probe id={} epoch={} host={} result=unknown action=use_source_uri error_code={} credentials_verified=false requested_connections={} effective_connections={} elapsed_ms={}]",
-                    id,
-                    epoch,
-                    uri_host_for_log(&uri),
-                    range_probe_error_code(&error),
-                    requested,
-                    connections,
-                    probe_started.elapsed().as_millis()
-                );
-                uris.push(uri);
-            }
+                        "aria2 redirect [stage=redirect id={} epoch={} host={} result=rejected error_code={} requested_connections={} effective_connections=not_established elapsed_ms={}]",
+                        id,
+                        epoch,
+                        uri_host_for_log(&uri),
+                        range_probe_error_code(&error),
+                        requested,
+                        elapsed_ms
+                    );
+                    return Err(format!(
+                        "normal transfer preflight rejected for {}: {}",
+                        uri_host_for_log(&uri),
+                        range_probe_error_code(&error)
+                    ));
+                }
+                Err(error) => {
+                    let error_code = range_probe_error_code(&error);
+                    if first_retryable_transport_error.is_none() {
+                        first_retryable_transport_error =
+                            Some((uri_host_for_log(&uri), error_code));
+                    }
+                    log::warn!(
+                        "aria2 range probe [stage=range_probe id={} epoch={} host={} index={} result=unreachable action=deprioritize error_code={} elapsed_ms={}]",
+                        id,
+                        epoch,
+                        uri_host_for_log(&uri),
+                        index,
+                        error_code,
+                        elapsed_ms
+                    );
+                    fallback_candidates.push(PreparedUriCandidate {
+                        index,
+                        uri,
+                        range_support: BoundedRangeSupport::Unknown,
+                        credentials_allowed: true,
+                    });
+                }
+            },
         }
     }
-    uris.dedup();
+
+    let mut candidates = if !healthy_candidates.is_empty() {
+        healthy_candidates
+    } else if has_credentials {
+        if let Some((host, error_code)) = first_retryable_transport_error {
+            return Err(format!(
+                "normal transfer preflight is retryable for {host}: {error_code}"
+            ));
+        }
+        fallback_candidates
+    } else {
+        fallback_candidates
+    };
+
+    // If requested > 1 and at least one candidate can segment (Supported or Unknown),
+    // exclude any candidate (primary or mirror) that explicitly rejected Range (416)
+    // so it does not force single-connection mode or fail range requests.
+    let any_segmentable = candidates
+        .iter()
+        .any(|candidate| candidate.range_support != BoundedRangeSupport::Unsupported);
+    if requested > 1 && any_segmentable {
+        candidates.retain(|candidate| {
+            if candidate.range_support == BoundedRangeSupport::Unsupported {
+                log::warn!(
+                    "aria2 range probe [stage=range_probe id={} epoch={} host={} index={} result=unsupported action=exclude_uri]",
+                    id,
+                    epoch,
+                    uri_host_for_log(&candidate.uri),
+                    candidate.index
+                );
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    let all_unsupported = !candidates.is_empty()
+        && candidates
+            .iter()
+            .all(|candidate| candidate.range_support == BoundedRangeSupport::Unsupported);
+    let connections = if all_unsupported && requested > 1 {
+        log::warn!(
+            "aria2 range probe [stage=range_probe id={} epoch={} result=unsupported action=single_connection]",
+            id,
+            epoch
+        );
+        effective_connections_for_range_support(requested, BoundedRangeSupport::Unsupported)
+    } else {
+        requested
+    };
+
+    let mut credentials_allowed = true;
+    let mut seen = HashSet::with_capacity(candidates.len());
+    let mut uris = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        credentials_allowed &= candidate.credentials_allowed;
+        if seen.insert(candidate.uri.clone()) {
+            uris.push(candidate.uri);
+        }
+    }
+
     if uris.is_empty() {
         return Err("normal download has no usable URI".to_string());
     }
-    if payload_has_credential_material(payload) && !credentials_allowed {
+    if has_credentials && !credentials_allowed {
         log::warn!(
             "aria2 redirect policy [{}]: stripping credentials after a cross-origin redirect",
             id
@@ -8486,14 +8622,6 @@ pub(crate) fn proxy_route_for_log(proxy: Option<&str>) -> &'static str {
     }
 }
 
-async fn probe_bounded_range_support(
-    uri: &str,
-    payload: &SpawnPayload,
-    credential_origin: &reqwest::Url,
-) -> Result<HttpTransferProbe, String> {
-    probe_bounded_range_support_with_local_override(uri, payload, credential_origin, false).await
-}
-
 #[cfg(test)]
 async fn probe_bounded_range_support_local_test(
     uri: &str,
@@ -8570,11 +8698,25 @@ async fn probe_bounded_range_support_with_local_override(
             .headers()
             .get(reqwest::header::CONTENT_RANGE)
             .and_then(|value| value.to_str().ok());
+        let status_ok = response.status().is_success();
+        let total_bytes = parse_content_range_total(content_range).or_else(|| {
+            if response.status() == reqwest::StatusCode::OK {
+                response
+                    .headers()
+                    .get(reqwest::header::CONTENT_LENGTH)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.trim().parse::<u64>().ok())
+            } else {
+                None
+            }
+        });
         return Ok(HttpTransferProbe {
             final_uri: current.to_string(),
             range_support: classify_bounded_range_response(response.status(), content_range),
             credentials_allowed,
             redirect_count,
+            status_ok,
+            total_bytes,
         });
     }
 
@@ -8783,6 +8925,20 @@ fn parse_content_range_bounds(value: &str) -> Option<(u64, u64)> {
     Some((start.trim().parse().ok()?, end.trim().parse().ok()?))
 }
 
+fn parse_content_range_total(value: Option<&str>) -> Option<u64> {
+    let value = value?.trim();
+    let (unit, range) = value.split_once(' ')?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    let (_, total) = range.split_once('/')?;
+    let total = total.trim();
+    if total == "*" {
+        return None;
+    }
+    total.parse().ok()
+}
+
 /// Production spawner that delegates to the real aria2 RPC and yt-dlp runners.
 pub struct ProductionSpawner {
     app_handle: AppHandle<tauri::Wry>,
@@ -8943,11 +9099,13 @@ fn apply_aria2_normal_reliability_options(
             serde_json::json!(format!("{minimum_speed}K")),
         );
     }
-    if payload.adaptive_mirror_selection && uri_count > 1 {
-        options.insert(
-            "uri-selector".to_string(),
-            serde_json::json!("adaptive"),
-        );
+    if uri_count > 1 {
+        let selector = if payload.adaptive_mirror_selection {
+            "adaptive"
+        } else {
+            "feedback"
+        };
+        options.insert("uri-selector".to_string(), serde_json::json!(selector));
     }
     Ok(())
 }
@@ -10914,7 +11072,7 @@ impl EnqueueItem {
                     .minimum_normal_download_speed_kib
                     .unwrap_or_default(),
                 retry_not_found_errors: item.retry_not_found_errors.unwrap_or(false),
-                adaptive_mirror_selection: item.adaptive_mirror_selection.unwrap_or(true),
+                adaptive_mirror_selection: item.adaptive_mirror_selection.unwrap_or(false),
                 proxy: item.proxy,
                 format_selector: item.format_selector,
                 cookie_source: item.cookie_source,
@@ -12367,6 +12525,22 @@ mod tests {
         assert_eq!(
             options.get("uri-selector"),
             Some(&serde_json::json!("adaptive"))
+        );
+
+        options.clear();
+        apply_aria2_normal_reliability_options(
+            &mut options,
+            &SpawnPayload {
+                minimum_normal_download_speed_kib: 64,
+                adaptive_mirror_selection: false,
+                ..SpawnPayload::default()
+            },
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            options.get("uri-selector"),
+            Some(&serde_json::json!("feedback"))
         );
 
         options.clear();
@@ -14756,6 +14930,158 @@ mod tests {
             effective_connections_for_range_support(1, BoundedRangeSupport::Unsupported),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn prepare_normal_transfer_excludes_broken_or_mismatched_mirrors_without_killing_split() {
+        use axum::{http::StatusCode, response::IntoResponse, routing::get, Router};
+
+        async fn primary_ok() -> impl IntoResponse {
+            (
+                StatusCode::PARTIAL_CONTENT,
+                [("content-range", "bytes 0-0/1024")],
+            )
+        }
+        async fn mirror_ok() -> impl IntoResponse {
+            (
+                StatusCode::PARTIAL_CONTENT,
+                [("content-range", "bytes 0-0/1024")],
+            )
+        }
+        async fn mirror_not_found() -> impl IntoResponse {
+            StatusCode::NOT_FOUND
+        }
+        async fn mirror_no_range() -> impl IntoResponse {
+            StatusCode::RANGE_NOT_SATISFIABLE
+        }
+        async fn mirror_wrong_size() -> impl IntoResponse {
+            (
+                StatusCode::PARTIAL_CONTENT,
+                [("content-range", "bytes 0-0/2048")],
+            )
+        }
+
+        let app = Router::new()
+            .route("/primary", get(primary_ok))
+            .route("/mirror-ok", get(mirror_ok))
+            .route("/mirror-404", get(mirror_not_found))
+            .route("/mirror-416", get(mirror_no_range))
+            .route("/mirror-size", get(mirror_wrong_size));
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("fixture listener");
+        let port = listener.local_addr().expect("fixture address").port();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let base = format!("http://127.0.0.1:{port}");
+        let payload = SpawnPayload {
+            url: format!("{base}/primary"),
+            mirrors: Some(format!(
+                "{base}/mirror-404\n{base}/mirror-416\n{base}/mirror-size\n{base}/mirror-ok"
+            )),
+            connections: Some(8),
+            ..SpawnPayload::default()
+        };
+
+        let prepared = prepare_normal_transfer_with_local_override("dl-1", 1, &payload, true)
+            .await
+            .expect("healthy mirrors should succeed");
+
+        assert_eq!(prepared.effective_connections, 8);
+        assert_eq!(
+            prepared.uris,
+            vec![format!("{base}/primary"), format!("{base}/mirror-ok")]
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn prepare_normal_transfer_clamps_to_one_when_all_uris_reject_ranges() {
+        use axum::{http::StatusCode, response::IntoResponse, routing::get, Router};
+
+        async fn no_range() -> impl IntoResponse {
+            StatusCode::RANGE_NOT_SATISFIABLE
+        }
+
+        let app = Router::new()
+            .route("/primary", get(no_range))
+            .route("/mirror", get(no_range));
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("fixture listener");
+        let port = listener.local_addr().expect("fixture address").port();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let base = format!("http://127.0.0.1:{port}");
+        let payload = SpawnPayload {
+            url: format!("{base}/primary"),
+            mirrors: Some(format!("{base}/mirror")),
+            connections: Some(8),
+            ..SpawnPayload::default()
+        };
+
+        let prepared = prepare_normal_transfer_with_local_override("dl-2", 1, &payload, true)
+            .await
+            .expect("416 fallback should still prepare transfer");
+
+        assert_eq!(prepared.effective_connections, 1);
+        assert_eq!(
+            prepared.uris,
+            vec![format!("{base}/primary"), format!("{base}/mirror")]
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn prepare_normal_transfer_excludes_broken_primary_when_healthy_mirror_exists() {
+        use axum::{http::StatusCode, response::IntoResponse, routing::get, Router};
+
+        async fn primary_not_found() -> impl IntoResponse {
+            (
+                StatusCode::NOT_FOUND,
+                [("content-range", "bytes */0")],
+            )
+        }
+        async fn mirror_ok() -> impl IntoResponse {
+            (
+                StatusCode::PARTIAL_CONTENT,
+                [("content-range", "bytes 0-0/1024")],
+            )
+        }
+
+        let app = Router::new()
+            .route("/primary-404", get(primary_not_found))
+            .route("/mirror-ok", get(mirror_ok));
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("fixture listener");
+        let port = listener.local_addr().expect("fixture address").port();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let base = format!("http://127.0.0.1:{port}");
+        let payload = SpawnPayload {
+            url: format!("{base}/primary-404"),
+            mirrors: Some(format!("{base}/mirror-ok")),
+            connections: Some(8),
+            ..SpawnPayload::default()
+        };
+
+        let prepared = prepare_normal_transfer_with_local_override("dl-3", 1, &payload, true)
+            .await
+            .expect("healthy mirror should rescue broken primary");
+
+        assert_eq!(prepared.effective_connections, 8);
+        assert_eq!(prepared.uris, vec![format!("{base}/mirror-ok")]);
+
+        server.abort();
     }
 
     #[test]

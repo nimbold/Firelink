@@ -236,12 +236,13 @@ type PropertiesPatchClearableValues = {
 };
 
 export type PropertiesPatch = Partial<Omit<DownloadItem,
-  'password' | 'cookies' | 'headers' | 'username' | PropertiesPatchClearableKey
+  'password' | 'cookies' | 'headers' | 'username' | 'mirrors' | PropertiesPatchClearableKey
 >> & PropertiesPatchClearableValues & {
   username?: SecretPatch;
   password?: SecretPatch;
   cookies?: SecretPatch;
   headers?: SecretPatch;
+  mirrors?: SecretPatch;
 };
 
 // Tauri command arguments cross a JSON boundary. `undefined` object members

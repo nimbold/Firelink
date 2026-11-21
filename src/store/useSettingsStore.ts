@@ -548,7 +548,7 @@ export const useSettingsStore = create<SettingsState>()(
       maxAutomaticRetries: 3,
       minimumNormalDownloadSpeedKiB: 0,
       retryNotFoundErrors: false,
-      adaptiveMirrorSelection: true,
+      adaptiveMirrorSelection: false,
       showNotifications: true,
       playCompletionSound: false,
       autoAddClipboardLinks: false,

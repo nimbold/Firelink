@@ -69,9 +69,9 @@ import {
   type TorrentFileAllocation,
 } from '../utils/downloads';
 
-type SecretName = 'username' | 'password' | 'cookies' | 'headers';
+type SecretName = 'username' | 'password' | 'cookies' | 'headers' | 'mirrors';
 type SecretDraft = { value: string; touched: boolean; clear: boolean };
-const SECRET_NAMES: SecretName[] = ['username', 'password', 'cookies', 'headers'];
+const SECRET_NAMES: SecretName[] = ['username', 'password', 'cookies', 'headers', 'mirrors'];
 const isTorrentDiagnosticsStatus = (status: string) =>
   ['downloading', 'verifying', 'seeding', 'waitingToSeed', 'retrying', 'paused', 'completed'].includes(status);
 
@@ -264,6 +264,7 @@ export const PropertiesWindowApp = () => {
     password: { value: '', touched: false, clear: false },
     cookies: { value: '', touched: false, clear: false },
     headers: { value: '', touched: false, clear: false },
+    mirrors: { value: '', touched: false, clear: false },
   });
   const [draftTab, setDraftTab] = useState<PropertiesTab | null>(null);
   const draftTabRef = useRef<PropertiesTab | null>(null);
@@ -452,6 +453,7 @@ export const PropertiesWindowApp = () => {
       password: { value: '', touched: false, clear: false },
       cookies: { value: '', touched: false, clear: false },
       headers: { value: '', touched: false, clear: false },
+      mirrors: { value: '', touched: false, clear: false },
     });
   }, []);
 
@@ -1715,10 +1717,12 @@ export const PropertiesWindowApp = () => {
             <div><span className="text-text-muted">{t($ => $.properties.password)}</span><p className="mt-1">{snapshot.hasPassword ? '✓' : '—'}</p></div>
             <div><span className="text-text-muted">{t($ => $.properties.cookies)}</span><p className="mt-1">{snapshot.hasCookies ? '✓' : '—'}</p></div>
             <div><span className="text-text-muted">{t($ => $.properties.headers)}</span><p className="mt-1">{snapshot.hasHeaders ? '✓' : '—'}</p></div>
+            {!snapshot.isMedia && <div><span className="text-text-muted">{t($ => $.properties.mirrors)}</span><p className="mt-1">{snapshot.hasMirrors ? '✓' : '—'}</p></div>}
           </div>
           <div className="grid max-w-2xl gap-3 text-xs">
             {(['username', 'password'] as const).map(name => <label key={name} className="text-text-muted">{t($ => $.properties[name])}<div className="mt-1 flex gap-2"><input className="app-control min-w-0 flex-1" type={name === 'password' ? 'password' : 'text'} value={secretDrafts[name].value} placeholder={snapshot[name === 'username' ? 'hasUsername' : 'hasPassword'] ? '••••••' : ''} onChange={event => updateSecretDraft(name, event.target.value)} disabled={!editingEnabled} /><button type="button" className="app-button shrink-0 px-2 text-xs" onClick={() => clearSecretDraft(name)} disabled={!editingEnabled}>{t($ => $.properties.clear)}</button></div></label>)}
             {(['cookies', 'headers'] as const).map(name => <label key={name} className="text-text-muted">{t($ => $.properties[name])}<div className="mt-1 flex gap-2"><textarea className="app-control min-w-0 flex-1" value={secretDrafts[name].value} placeholder={snapshot[name === 'cookies' ? 'hasCookies' : 'hasHeaders'] ? '••••••' : ''} onChange={event => updateSecretDraft(name, event.target.value)} disabled={!editingEnabled} /><button type="button" className="app-button h-fit shrink-0 px-2 text-xs" onClick={() => clearSecretDraft(name)} disabled={!editingEnabled}>{t($ => $.properties.clear)}</button></div></label>)}
+            {!snapshot.isMedia && <label className="text-text-muted">{t($ => $.properties.mirrors)}<div className="mt-1 flex gap-2"><textarea className="app-control min-w-0 flex-1 font-mono" value={secretDrafts.mirrors.value} placeholder={snapshot.hasMirrors ? '••••••' : t($ => $.addDownloads.mirrorsPlaceholder)} onChange={event => updateSecretDraft('mirrors', event.target.value)} disabled={!editingEnabled} /><button type="button" className="app-button h-fit shrink-0 px-2 text-xs" onClick={() => clearSecretDraft('mirrors')} disabled={!editingEnabled}>{t($ => $.properties.clear)}</button></div><span className="mt-1 block text-[11px]">{t($ => $.addDownloads.mirrorsDescription)}</span></label>}
           </div>
           <p className="text-xs text-text-muted">{t($ => $.properties.transferSettings)}</p>
         </div>}

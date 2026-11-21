@@ -822,6 +822,8 @@ const fa = {
     cookies: 'کوکی‌ها',
     cookiePlaceholder: 'name=value; other=value',
     mirrors: 'آینه‌ها',
+    mirrorsPlaceholder: 'در هر خط یک نشانی آینه (https://mirror.example.com/file.zip)',
+    mirrorsDescription: 'توزیع هم‌زمان بخش‌ها بین آینه‌ها با جایگزینی خودکار هنگام خطا.',
     cancel: 'لغو',
     startDownloads: 'شروع دانلودها',
     addToQueue: 'افزودن به صف',

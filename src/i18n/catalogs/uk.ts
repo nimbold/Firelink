@@ -822,6 +822,8 @@ const uk = {
     cookies: 'Файли cookie',
     cookiePlaceholder: 'name=value; other=value',
     mirrors: 'Дзеркала',
+    mirrorsPlaceholder: 'По одному URL дзеркала на рядок (https://mirror.example.com/file.zip)',
+    mirrorsDescription: 'Одночасний розподіл сегментів між дзеркалами з автоматичним перемиканням у разі помилок.',
     cancel: 'Скасувати',
     startDownloads: 'Почати завантаження',
     addToQueue: 'Додати до черги',

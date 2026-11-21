@@ -55,7 +55,7 @@ fn default_aria2_disk_cache() -> String {
 }
 
 fn default_adaptive_mirror_selection() -> bool {
-    true
+    false
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, TS)]

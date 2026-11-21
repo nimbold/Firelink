@@ -45,6 +45,7 @@ import {
 } from '../propertiesBridge';
 import { invokeCommand as invoke } from '../ipc';
 import { getPlatformInfo } from '../utils/platform';
+import { normalizeAndValidateMirrors } from '../utils/url';
 import { resolveWindowControlSide, resolveWindowControlStyle } from '../utils/windowControlStyle';
 import i18n, { localeDirection, resolveAppLocale } from '../i18n';
 
@@ -440,6 +441,15 @@ export const PropertiesWindowBridgeHost = () => {
             }
             if ('username' in rawPatch) {
               safePatch.username = applySecretPatch(rawPatch.username, item.username);
+            }
+            if ('mirrors' in rawPatch) {
+              if (item.isTorrent === true || item.isMedia === true) {
+                throw new Error('Mirrors are only supported for normal file downloads');
+              }
+              const nextMirrors = applySecretPatch(rawPatch.mirrors, item.mirrors);
+              safePatch.mirrors = nextMirrors === undefined
+                ? undefined
+                : normalizeAndValidateMirrors(nextMirrors);
             }
             const torrentOptionKeys = [
               'torrentFileIndices',
