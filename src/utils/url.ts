@@ -47,8 +47,8 @@ export function normalizeAndValidateMirrors(raw: string): string | undefined {
     } catch {
       throw new Error('Enter valid mirror URLs.');
     }
-    if (!['http:', 'https:', 'ftp:', 'sftp:'].includes(parsed.protocol)) {
-      throw new Error('Mirror URLs must use http, https, ftp, or sftp.');
+    if (!parsed.hostname || !['http:', 'https:', 'ftp:', 'sftp:'].includes(parsed.protocol)) {
+      throw new Error('Enter valid mirror URLs.');
     }
     if (!seen.has(line)) {
       seen.add(line);

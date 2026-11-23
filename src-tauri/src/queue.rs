@@ -28,6 +28,7 @@ const MAX_PENDING_DOWNLOAD_STARTS: usize = 1024;
 pub const MEDIA_RUN_CANCELLED: &str = "__firelink_media_run_cancelled__";
 pub const DOWNLOAD_CONNECTIONS_MIN: i32 = 1;
 pub const DOWNLOAD_CONNECTIONS_MAX: i32 = 16;
+const MAX_CONCURRENT_MIRROR_PROBES: usize = 8;
 // The frontend refreshes this lease every 20 seconds. A bounded expiry
 // releases a queue if the renderer disappears before its finally cleanup.
 const QUEUE_START_BATCH_HOLD_LEASE: Duration = Duration::from_secs(90);
@@ -8174,7 +8175,7 @@ struct HttpTransferProbe {
     range_support: BoundedRangeSupport,
     credentials_allowed: bool,
     redirect_count: usize,
-    status_ok: bool,
+    successful_response: bool,
     total_bytes: Option<u64>,
 }
 
@@ -8288,6 +8289,8 @@ async fn prepare_normal_transfer_with_local_override(
     payload: &SpawnPayload,
     allow_localhost: bool,
 ) -> Result<PreparedNormalTransfer, String> {
+    use futures_util::StreamExt as _;
+
     let credential_origin = reqwest::Url::parse(&payload.url)
         .map_err(|_| "normal download has an invalid primary URL".to_string())?;
     let requested =
@@ -8295,7 +8298,9 @@ async fn prepare_normal_transfer_with_local_override(
     let raw_uris = crate::collect_download_uris(&payload.url, payload.mirrors.as_deref());
     let has_credentials = payload_has_credential_material(payload);
 
-    let probe_outcomes = futures_util::future::join_all(raw_uris.into_iter().enumerate().map(
+    // Keep primary-first ordering for size comparison and bound the number
+    // of sockets opened when a download has many mirrors.
+    let probes = futures_util::stream::iter(raw_uris.into_iter().enumerate().map(
         |(index, uri)| {
             let credential_origin = &credential_origin;
             async move {
@@ -8339,8 +8344,11 @@ async fn prepare_normal_transfer_with_local_override(
                 }
             }
         },
-    ))
-    .await;
+    ));
+    let probe_outcomes: Vec<_> = probes
+        .buffered(MAX_CONCURRENT_MIRROR_PROBES)
+        .collect()
+        .await;
 
     let mut expected_total_bytes: Option<u64> = None;
     let mut healthy_candidates: Vec<PreparedUriCandidate> = Vec::with_capacity(probe_outcomes.len());
@@ -8371,7 +8379,9 @@ async fn prepare_normal_transfer_with_local_override(
                                 .to_string(),
                         );
                     }
-                    if !probe.status_ok && probe.range_support != BoundedRangeSupport::Unsupported {
+                    if !probe.successful_response
+                        && probe.range_support != BoundedRangeSupport::Unsupported
+                    {
                         log::warn!(
                             "aria2 range probe [stage=range_probe id={} epoch={} host={} index={} result=http_error action=deprioritize elapsed_ms={}]",
                             id,
@@ -8388,7 +8398,7 @@ async fn prepare_normal_transfer_with_local_override(
                         });
                         continue;
                     }
-                    if probe.status_ok {
+                    if probe.successful_response {
                         if let (Some(expected), Some(actual)) =
                             (expected_total_bytes, probe.total_bytes)
                         {
@@ -8484,8 +8494,7 @@ async fn prepare_normal_transfer_with_local_override(
     };
 
     // If requested > 1 and at least one candidate can segment (Supported or Unknown),
-    // exclude any candidate (primary or mirror) that explicitly rejected Range (416)
-    // so it does not force single-connection mode or fail range requests.
+    // exclude candidates that rejected or ignored the Range request.
     let any_segmentable = candidates
         .iter()
         .any(|candidate| candidate.range_support != BoundedRangeSupport::Unsupported);
@@ -8697,25 +8706,26 @@ async fn probe_bounded_range_support_with_local_override(
         let content_range = response
             .headers()
             .get(reqwest::header::CONTENT_RANGE)
-            .and_then(|value| value.to_str().ok());
-        let status_ok = response.status().is_success();
-        let total_bytes = parse_content_range_total(content_range).or_else(|| {
-            if response.status() == reqwest::StatusCode::OK {
-                response
-                    .headers()
-                    .get(reqwest::header::CONTENT_LENGTH)
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(|value| value.trim().parse::<u64>().ok())
-            } else {
-                None
-            }
-        });
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_content_range);
+        let successful_response = response.status().is_success()
+            && (response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+                || matches!(content_range, Some((0, _, _))));
+        let total_bytes = match response.status() {
+            reqwest::StatusCode::PARTIAL_CONTENT => content_range.and_then(|(_, _, total)| total),
+            reqwest::StatusCode::OK => response
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse::<u64>().ok()),
+            _ => None,
+        };
         return Ok(HttpTransferProbe {
             final_uri: current.to_string(),
             range_support: classify_bounded_range_response(response.status(), content_range),
             credentials_allowed,
             redirect_count,
-            status_ok,
+            successful_response,
             total_bytes,
         });
     }
@@ -8889,54 +8899,41 @@ async fn validate_aria2_transfer_network_policy(
 
 fn classify_bounded_range_response(
     status: reqwest::StatusCode,
-    content_range: Option<&str>,
+    content_range: Option<(u64, u64, Option<u64>)>,
 ) -> BoundedRangeSupport {
-    // A 416 for the deliberately tiny `bytes=0-0` request is the one
-    // response we can classify as an explicit range rejection. Successful
-    // 200 responses and larger 206 responses remain ambiguous because
-    // servers and proxies commonly normalize or expand bounded requests.
-    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
-        return BoundedRangeSupport::Unsupported;
-    }
-    if status == reqwest::StatusCode::PARTIAL_CONTENT {
-        return match content_range.and_then(parse_content_range_bounds) {
-            Some((0, 0)) => BoundedRangeSupport::Supported,
-            Some((0, _)) => BoundedRangeSupport::Unknown,
-            Some(_) => BoundedRangeSupport::Unknown,
-            None => BoundedRangeSupport::Unknown,
-        };
-    }
-
-    if status.is_success() {
-        BoundedRangeSupport::Unknown
-    } else {
-        BoundedRangeSupport::Unknown
+    match status {
+        // The server returned the full representation or rejected the range.
+        reqwest::StatusCode::OK | reqwest::StatusCode::RANGE_NOT_SATISFIABLE => {
+            BoundedRangeSupport::Unsupported
+        }
+        reqwest::StatusCode::PARTIAL_CONTENT
+            if matches!(content_range, Some((0, 0, _))) =>
+        {
+            BoundedRangeSupport::Supported
+        }
+        _ => BoundedRangeSupport::Unknown,
     }
 }
 
-fn parse_content_range_bounds(value: &str) -> Option<(u64, u64)> {
+fn parse_content_range(value: &str) -> Option<(u64, u64, Option<u64>)> {
     let value = value.trim();
     let (unit, range) = value.split_once(' ')?;
     if !unit.eq_ignore_ascii_case("bytes") {
         return None;
     }
-    let (bounds, _) = range.split_once('/')?;
+    let (bounds, total) = range.split_once('/')?;
     let (start, end) = bounds.split_once('-')?;
-    Some((start.trim().parse().ok()?, end.trim().parse().ok()?))
-}
-
-fn parse_content_range_total(value: Option<&str>) -> Option<u64> {
-    let value = value?.trim();
-    let (unit, range) = value.split_once(' ')?;
-    if !unit.eq_ignore_ascii_case("bytes") {
+    let start = start.trim().parse().ok()?;
+    let end = end.trim().parse().ok()?;
+    let total = if total.trim() == "*" {
+        None
+    } else {
+        Some(total.trim().parse().ok()?)
+    };
+    if start > end || total.is_some_and(|total| end >= total) {
         return None;
     }
-    let (_, total) = range.split_once('/')?;
-    let total = total.trim();
-    if total == "*" {
-        return None;
-    }
-    total.parse().ok()
+    Some((start, end, total))
 }
 
 /// Production spawner that delegates to the real aria2 RPC and yt-dlp runners.
@@ -14854,7 +14851,7 @@ mod tests {
         assert_eq!(
             classify_bounded_range_response(
                 reqwest::StatusCode::PARTIAL_CONTENT,
-                Some("bytes 0-0/383882118"),
+                parse_content_range("bytes 0-0/383882118"),
             ),
             BoundedRangeSupport::Supported
         );
@@ -14865,7 +14862,7 @@ mod tests {
         assert_eq!(
             classify_bounded_range_response(
                 reqwest::StatusCode::PARTIAL_CONTENT,
-                Some("Bytes 0-0/383882118"),
+                parse_content_range("Bytes 0-0/383882118"),
             ),
             BoundedRangeSupport::Supported
         );
@@ -14890,17 +14887,28 @@ mod tests {
         assert_eq!(
             classify_bounded_range_response(
                 reqwest::StatusCode::PARTIAL_CONTENT,
-                Some("bytes 0-383882117/383882118"),
+                parse_content_range("bytes 0-383882117/383882118"),
             ),
             BoundedRangeSupport::Unknown
         );
     }
 
     #[test]
-    fn bounded_range_probe_treats_ignored_range_request_as_unknown() {
+    fn bounded_range_probe_classifies_ignored_range_request_as_unsupported() {
         assert_eq!(
             classify_bounded_range_response(reqwest::StatusCode::OK, None),
-            BoundedRangeSupport::Unknown
+            BoundedRangeSupport::Unsupported
+        );
+    }
+
+    #[test]
+    fn content_range_rejects_impossible_lengths() {
+        assert_eq!(parse_content_range("bytes 0-0/0"), None);
+        assert_eq!(parse_content_range("bytes 1-0/1024"), None);
+        assert_eq!(parse_content_range("bytes 0-0/*"), Some((0, 0, None)));
+        assert_eq!(
+            parse_content_range("bytes 0-0/1024"),
+            Some((0, 0, Some(1024)))
         );
     }
 
@@ -14954,6 +14962,15 @@ mod tests {
         async fn mirror_no_range() -> impl IntoResponse {
             StatusCode::RANGE_NOT_SATISFIABLE
         }
+        async fn mirror_ignores_range() -> impl IntoResponse {
+            vec![0u8; 1024]
+        }
+        async fn mirror_bad_range() -> impl IntoResponse {
+            (
+                StatusCode::PARTIAL_CONTENT,
+                [("content-range", "bytes 1-1/1024")],
+            )
+        }
         async fn mirror_wrong_size() -> impl IntoResponse {
             (
                 StatusCode::PARTIAL_CONTENT,
@@ -14966,6 +14983,8 @@ mod tests {
             .route("/mirror-ok", get(mirror_ok))
             .route("/mirror-404", get(mirror_not_found))
             .route("/mirror-416", get(mirror_no_range))
+            .route("/mirror-200", get(mirror_ignores_range))
+            .route("/mirror-bad-range", get(mirror_bad_range))
             .route("/mirror-size", get(mirror_wrong_size));
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -14979,7 +14998,8 @@ mod tests {
         let payload = SpawnPayload {
             url: format!("{base}/primary"),
             mirrors: Some(format!(
-                "{base}/mirror-404\n{base}/mirror-416\n{base}/mirror-size\n{base}/mirror-ok"
+                "{base}/mirror-404\n{base}/mirror-416\n{base}/mirror-200\n\
+                 {base}/mirror-bad-range\n{base}/mirror-size\n{base}/mirror-ok"
             )),
             connections: Some(8),
             ..SpawnPayload::default()

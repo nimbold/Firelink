@@ -507,9 +507,21 @@ describe('AddDownloadsModal link review and dispatch', () => {
     renderUntilStable();
     expect(startButton().props.disabled).toBe(true);
 
+    mirrorsTextarea.props.onChange({ target: { value: 'sftp:/missing-host.zip' } });
+    renderUntilStable();
+    expect(startButton().props.disabled).toBe(true);
+
     mirrorsTextarea.props.onChange({ target: { value: `  ${mirrorUrl}  ` } });
     renderUntilStable();
     expect(startButton().props.disabled).toBe(false);
+
+    const mirrorEditor = () => elements(tree).find(element =>
+      element.type === 'textarea' && element.props?.['aria-label'] === 'addDownloads.mirrors'
+    );
+    await enterLink('https://cdn1.example.test/second.zip');
+    expect(mirrorEditor()?.props.value).toBe('');
+    await enterLink(primaryUrl);
+    expect(mirrorEditor()?.props.value.trim()).toBe(mirrorUrl);
 
     await startReviewedDownload();
     expect(testState.addDownload).toHaveBeenCalledTimes(1);

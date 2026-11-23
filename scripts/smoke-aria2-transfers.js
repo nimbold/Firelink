@@ -239,6 +239,8 @@ fs.writeFileSync(serverStatPath, '', { mode: 0o600 });
 let finalRequests = 0;
 let finalCredentials = [];
 let redirectSourceCredentials;
+const activeMirrorRequests = new Map();
+let simultaneousMirrorRequests = false;
 const connectionStats = {
   parallelRange: {
     requests: 0,
@@ -297,7 +299,8 @@ const targetServer = http.createServer((request, response) => {
 });
 const targetPort = await listen(targetServer);
 const fixtureServer = http.createServer((request, response) => {
-  switch (new URL(request.url, 'http://fixture.invalid').pathname) {
+  const pathname = new URL(request.url, 'http://fixture.invalid').pathname;
+  switch (pathname) {
     case '/range':
       serveBuffer(request, response, payload);
       break;
@@ -309,6 +312,18 @@ const fixtureServer = http.createServer((request, response) => {
       observeConnection('parallelRange', request, response);
       serveThrottledBuffer(request, response, parallelPayload);
       break;
+    case '/mirror-a':
+    case '/mirror-b': {
+      activeMirrorRequests.set(pathname, (activeMirrorRequests.get(pathname) ?? 0) + 1);
+      simultaneousMirrorRequests ||= activeMirrorRequests.size > 1;
+      response.once('close', () => {
+        const remaining = activeMirrorRequests.get(pathname) - 1;
+        if (remaining > 0) activeMirrorRequests.set(pathname, remaining);
+        else activeMirrorRequests.delete(pathname);
+      });
+      serveThrottledBuffer(request, response, payload);
+      break;
+    }
     case '/small-range':
       observeConnection('smallRange', request, response);
       serveBuffer(request, response, smallPayload);
@@ -499,12 +514,35 @@ try {
     throw new Error(`normal transfer cancellation did not reach removed: ${JSON.stringify(cancelStatus)}`);
   }
 
-  const mirrorGid = await rpc(rpcPort, secret, 'aria2.addUri', [[
-    `http://127.0.0.1:${fixturePort}/missing`,
-    `http://127.0.0.1:${fixturePort}/range`,
-  ], { ...ARIA2_LOCAL_FIXTURE_OPTIONS, out: 'mirror.bin', split: '1', 'max-tries': '1', 'uri-selector': 'adaptive' }]);
-  const mirrorStatus = await waitForTerminal(rpcPort, secret, mirrorGid);
-  if (mirrorStatus.status !== 'complete') throw new Error(`adaptive mirror failover failed: ${JSON.stringify(mirrorStatus)}`);
+  for (const selector of ['adaptive', 'feedback']) {
+    const out = `mirror-${selector}.bin`;
+    const mirrorGid = await rpc(rpcPort, secret, 'aria2.addUri', [[
+      `http://127.0.0.1:${fixturePort}/missing`,
+      `http://127.0.0.1:${fixturePort}/range`,
+    ], { ...ARIA2_LOCAL_FIXTURE_OPTIONS, out, split: '1', 'max-tries': '1', 'uri-selector': selector }]);
+    const mirrorStatus = await waitForTerminal(rpcPort, secret, mirrorGid);
+    if (mirrorStatus.status !== 'complete' || !fs.readFileSync(path.join(tempRoot, out)).equals(payload)) {
+      throw new Error(`${selector} mirror failover failed: ${JSON.stringify(mirrorStatus)}`);
+    }
+  }
+
+  const segmentedMirrorGid = await rpc(rpcPort, secret, 'aria2.addUri', [[
+    `http://127.0.0.1:${fixturePort}/mirror-a`,
+    `http://127.0.0.1:${fixturePort}/mirror-b`,
+  ], {
+    ...ARIA2_LOCAL_FIXTURE_OPTIONS,
+    out: 'segmented-mirror.bin',
+    split: '4',
+    'max-connection-per-server': '4',
+    'min-split-size': '1M',
+    'uri-selector': 'feedback',
+  }]);
+  const segmentedMirrorStatus = await waitForTerminal(rpcPort, secret, segmentedMirrorGid);
+  if (segmentedMirrorStatus.status !== 'complete'
+    || !simultaneousMirrorRequests
+    || !fs.readFileSync(path.join(tempRoot, 'segmented-mirror.bin')).equals(payload)) {
+    throw new Error(`segmented mirrors did not transfer concurrently to an exact output: ${JSON.stringify(segmentedMirrorStatus)}`);
+  }
 
   const checksumGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/range`], {
     ...ARIA2_LOCAL_FIXTURE_OPTIONS,

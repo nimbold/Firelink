@@ -384,7 +384,7 @@ export const AddDownloadsModal = () => {
   const cookiesManuallyEditedRef = useRef(false);
   const modalSessionRef = useRef(false);
   const observedRequestVersionRef = useRef(0);
-  const [mirrors, setMirrors] = useState('');
+  const [mirrorDraft, setMirrorDraft] = useState<{ sourceUrl: string; text: string }>();
 
   const requestContextForUrl = (url: string) =>
     pendingAddRequestContexts[normalizeComparableUrl(url)];
@@ -574,7 +574,7 @@ export const AddDownloadsModal = () => {
     headersManuallyEditedRef.current = false;
     setCookies(isSingleInitialMedia ? '' : (initialContext?.cookies || pendingAddCookies));
     cookiesManuallyEditedRef.current = false;
-    setMirrors('');
+    setMirrorDraft(undefined);
     setIsQueueMenuOpen(false);
     isSubmittingRef.current = false;
     setIsSubmitting(false);
@@ -1880,7 +1880,7 @@ export const AddDownloadsModal = () => {
              password: useAuth ? password.trim() : undefined,
              headers: headersForRow(item.sourceUrl, item.isMedia, item.mediaMode, contextUrl) || undefined,
              cookies: cookiesForRow(item.sourceUrl, item.downloadUrl, item.isMedia, item.mediaMode, contextUrl) || undefined,
-             mirrors: canConfigureSingleFileMirrors ? normalizedMirrors : undefined,
+             mirrors: item.sourceUrl === mirrorTarget?.sourceUrl ? normalizedMirrors : undefined,
              lastError: undefined
            }, pendingAction);
            if (!replaced) {
@@ -1960,7 +1960,7 @@ export const AddDownloadsModal = () => {
             ? `${checksumAlgo}=${checksumValue.trim()}`
             : undefined,
           cookies: item.isTorrent ? undefined : cookiesForRow(item.sourceUrl, item.downloadUrl, item.isMedia, item.mediaMode, contextUrl) || undefined,
-          mirrors: canConfigureSingleFileMirrors ? normalizedMirrors : undefined,
+          mirrors: item.sourceUrl === mirrorTarget?.sourceUrl ? normalizedMirrors : undefined,
           destination: useSharedDestination || saveInDedicatedFolder || itemOverride
             ? await destinationForFile(
                 finalFile,
@@ -2162,15 +2162,18 @@ export const AddDownloadsModal = () => {
   const selectedItem = selectedItemIndex === null ? undefined : parsedItems[selectedItemIndex];
   const selectedMediaRouteEligible = isHttpMediaRouteUrl(selectedItem?.sourceUrl || '');
   const selectedItemIsTorrent = selectedItem?.isTorrent === true;
-  const canConfigureSingleFileMirrors =
-    selectedItems.length === 1 && !selectedItems[0].isTorrent && !selectedItems[0].isMedia;
+  const mirrorTarget = selectedItems.length === 1
+    && !selectedItems[0].isTorrent && !selectedItems[0].isMedia
+    ? selectedItems[0]
+    : undefined;
+  const mirrors = mirrorDraft?.sourceUrl === mirrorTarget?.sourceUrl ? mirrorDraft?.text ?? '' : '';
   let normalizedMirrors: string | undefined;
   let mirrorsValidationError: string | null = null;
-  if (canConfigureSingleFileMirrors && mirrors.trim()) {
+  if (mirrors.trim()) {
     try {
       normalizedMirrors = normalizeAndValidateMirrors(mirrors);
-    } catch (error) {
-      mirrorsValidationError = error instanceof Error ? error.message : 'Enter valid mirror URLs.';
+    } catch {
+      mirrorsValidationError = t($ => $.addDownloads.mirrorsInvalid);
     }
   }
   const configuredMirrorCount = normalizedMirrors
@@ -3588,19 +3591,21 @@ export const AddDownloadsModal = () => {
                         aria-label={t($ => $.addDownloads.cookies)}
                       />
                     </div>
-                    {canConfigureSingleFileMirrors && (
+                    {mirrorTarget && (
                       <div>
                         <label className="block text-[10px] uppercase font-bold tracking-wider text-text-muted mb-1">{t($ => $.addDownloads.mirrors)}</label>
                         <textarea
                           value={mirrors}
-                          onChange={e => setMirrors(e.target.value)}
+                          onChange={e => setMirrorDraft({ sourceUrl: mirrorTarget.sourceUrl, text: e.target.value })}
                           placeholder={t($ => $.addDownloads.mirrorsPlaceholder)}
                           className="add-download-control w-full h-12 px-3 py-1.5 text-xs font-mono resize-none"
                           aria-label={t($ => $.addDownloads.mirrors)}
+                          aria-invalid={Boolean(mirrorsValidationError)}
+                          aria-describedby={mirrorsValidationError ? 'add-mirrors-error' : 'add-mirrors-description'}
                         />
-                        <p className="mt-1 text-[11px] text-text-muted">{t($ => $.addDownloads.mirrorsDescription)}</p>
+                        <p id="add-mirrors-description" className="mt-1 text-[11px] text-text-muted">{t($ => $.addDownloads.mirrorsDescription)}</p>
                         {mirrorsValidationError && (
-                          <p className="mt-1 text-[11px] text-red-400">{mirrorsValidationError}</p>
+                          <p id="add-mirrors-error" className="mt-1 text-[11px] text-red-400">{mirrorsValidationError}</p>
                         )}
                       </div>
                     )}

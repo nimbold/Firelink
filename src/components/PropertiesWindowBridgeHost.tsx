@@ -447,9 +447,13 @@ export const PropertiesWindowBridgeHost = () => {
                 throw new Error('Mirrors are only supported for normal file downloads');
               }
               const nextMirrors = applySecretPatch(rawPatch.mirrors, item.mirrors);
-              safePatch.mirrors = nextMirrors === undefined
-                ? undefined
-                : normalizeAndValidateMirrors(nextMirrors);
+              try {
+                safePatch.mirrors = nextMirrors === undefined
+                  ? undefined
+                  : normalizeAndValidateMirrors(nextMirrors);
+              } catch {
+                throw new Error(i18n.t($ => $.addDownloads.mirrorsInvalid));
+              }
             }
             const torrentOptionKeys = [
               'torrentFileIndices',
