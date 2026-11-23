@@ -189,9 +189,9 @@ jobs:
       - name: Install pinned appimagetool (Linux only)
         if: runner.os == 'Linux'
         env:
-          # continuous currently targets 854e19e951900cf141245b384d45735942521abe.
+          # continuous currently targets 11d54c9acc7f246df1398050a4b880314ac76862.
           APPIMAGETOOL_URL: https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-          APPIMAGETOOL_SHA256: 95cbe7cce9717fce90c484e34052ee7c7f1d7635b33c12525b4776826a7d29b6
+          APPIMAGETOOL_SHA256: e8c1169c4af66c3184d7ee110713d4be04befe671fa358e2c1591ee840553b03
           # appimagetool otherwise downloads this mutable runtime during packaging.
           # type2-runtime continuous currently targets fedfad51acc2860b2916a1eef32ba4a500ff31ef.
           APPIMAGETOOL_RUNTIME_URL: https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
