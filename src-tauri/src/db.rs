@@ -2973,8 +2973,8 @@ pub fn remove_pairing_token_from_settings(connection: &Connection) -> Result<(),
 /// Migrate any legacy standard-mode token into the OS credential store.
 ///
 /// The settings copy is removed only after the credential-store write succeeds.
-/// If cleanup fails after creating a new credential, the new entry is rolled
-/// back so a later retry can complete the migration without losing the token.
+/// If cleanup fails after writing the credential, restore its previous state
+/// so a later retry can complete the migration.
 pub fn migrate_legacy_pairing_token(connection: &Connection) -> Result<(), String> {
     let Some(legacy_token) = read_pairing_token_from_settings(connection)? else {
         return Ok(());
@@ -2984,18 +2984,21 @@ pub fn migrate_legacy_pairing_token(connection: &Connection) -> Result<(), Strin
     // the complete read/write/cleanup sequence. Otherwise a concurrent grant,
     // regeneration, or delete could invalidate the rollback decision.
     let _keyring_guard = lock_keyring_operations()?;
-    let keychain_has_token = get_keychain_password_unlocked(PAIRING_TOKEN_KEYCHAIN_ID)
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
-    let created_keychain_entry = !keychain_has_token;
-    if created_keychain_entry {
+    let previous_token = get_keychain_password_if_present_unlocked(PAIRING_TOKEN_KEYCHAIN_ID)?;
+    let wrote_legacy_token = previous_token
+        .as_deref()
+        .is_none_or(|token| token.trim().is_empty());
+    if wrote_legacy_token {
         set_keychain_password_unlocked(PAIRING_TOKEN_KEYCHAIN_ID, &legacy_token)?;
     }
 
     if let Err(error) = remove_pairing_token_from_settings(connection) {
-        if created_keychain_entry {
-            if let Err(rollback_error) = delete_keychain_password_unlocked(PAIRING_TOKEN_KEYCHAIN_ID)
-            {
+        if wrote_legacy_token {
+            let rollback = match previous_token {
+                Some(token) => set_keychain_password_unlocked(PAIRING_TOKEN_KEYCHAIN_ID, &token),
+                None => delete_keychain_password_unlocked(PAIRING_TOKEN_KEYCHAIN_ID),
+            };
+            if let Err(rollback_error) = rollback {
                 return Err(format!(
                     "failed to remove the legacy pairing token after credential-store migration: {error}; credential-store rollback also failed: {rollback_error}"
                 ));
@@ -3007,6 +3010,18 @@ pub fn migrate_legacy_pairing_token(connection: &Connection) -> Result<(), Strin
     }
 
     Ok(())
+}
+
+pub fn get_or_create_keychain_pairing_token() -> Result<String, String> {
+    let _guard = lock_keyring_operations()?;
+    if let Some(token) = get_keychain_password_if_present_unlocked(PAIRING_TOKEN_KEYCHAIN_ID)?
+        .filter(|token| !token.trim().is_empty())
+    {
+        return Ok(token);
+    }
+    let token = generate_pairing_token();
+    set_keychain_password_unlocked(PAIRING_TOKEN_KEYCHAIN_ID, &token)?;
+    Ok(token)
 }
 
 fn ensure_keyring_store() -> Result<(), String> {
@@ -4689,6 +4704,100 @@ mod tests {
             .unwrap()
             .unwrap()
             .contains("redacted-legacy-token"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pairing_token_migration_and_initialization_preserve_credentials_on_read_denial() {
+        use keyring_core::{mock, Error};
+
+        struct RestoreDefaultStore(Option<std::sync::Arc<keyring_core::CredentialStore>>);
+        impl Drop for RestoreDefaultStore {
+            fn drop(&mut self) {
+                keyring_core::unset_default_store();
+                if let Some(previous) = self.0.take() {
+                    keyring_core::set_default_store(previous);
+                }
+            }
+        }
+
+        let store = mock::Store::new().unwrap();
+        let _restore = RestoreDefaultStore(keyring_core::get_default_store());
+        keyring_core::set_default_store(store);
+        let credential = keychain_entry(PAIRING_TOKEN_KEYCHAIN_ID).unwrap();
+        let mock = credential.as_any().downcast_ref::<mock::Cred>().unwrap();
+        let deny_next_read = || {
+            mock.set_error(Error::NoStorageAccess(Box::new(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied,
+            ))));
+        };
+        credential.set_password("existing-test-token").unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let db = init_at_path(temp.path()).unwrap();
+        let connection = db.lock().unwrap();
+        save_settings(
+            &connection,
+            &json!({ "state": { "extensionPairingToken": "legacy-test-token" } }).to_string(),
+        )
+        .unwrap();
+
+        deny_next_read();
+        assert!(migrate_legacy_pairing_token(&connection).is_err());
+        assert_eq!(credential.get_password().unwrap(), "existing-test-token");
+        assert_eq!(
+            read_pairing_token_from_settings(&connection)
+                .unwrap()
+                .as_deref(),
+            Some("legacy-test-token")
+        );
+
+        deny_next_read();
+        assert!(get_or_create_keychain_pairing_token().is_err());
+        assert_eq!(credential.get_password().unwrap(), "existing-test-token");
+
+        migrate_legacy_pairing_token(&connection).unwrap();
+        assert!(read_pairing_token_from_settings(&connection)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            get_or_create_keychain_pairing_token().unwrap(),
+            "existing-test-token"
+        );
+
+        credential.set_password(" ").unwrap();
+        save_settings(
+            &connection,
+            &json!({ "state": { "extensionPairingToken": "legacy-test-token" } }).to_string(),
+        )
+        .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER reject_token_cleanup BEFORE UPDATE ON settings
+                 BEGIN SELECT RAISE(ABORT, 'simulated settings write failure'); END;",
+            )
+            .unwrap();
+        assert!(migrate_legacy_pairing_token(&connection).is_err());
+        assert_eq!(credential.get_password().unwrap(), " ");
+        assert_eq!(
+            read_pairing_token_from_settings(&connection)
+                .unwrap()
+                .as_deref(),
+            Some("legacy-test-token")
+        );
+        connection
+            .execute_batch("DROP TRIGGER reject_token_cleanup;")
+            .unwrap();
+        migrate_legacy_pairing_token(&connection).unwrap();
+        assert_eq!(credential.get_password().unwrap(), "legacy-test-token");
+
+        credential.delete_credential().unwrap();
+        std::thread::scope(|scope| {
+            let other = scope.spawn(get_or_create_keychain_pairing_token);
+            let first = get_or_create_keychain_pairing_token().unwrap();
+            assert_eq!(other.join().unwrap().unwrap(), first);
+            assert_eq!(credential.get_password().unwrap(), first);
+        });
     }
 
     #[test]

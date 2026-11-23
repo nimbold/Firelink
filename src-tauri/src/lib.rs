@@ -16507,42 +16507,22 @@ fn grant_keychain_access_blocking(
         });
     }
 
-    if let Err(error) = crate::db::migrate_legacy_pairing_token(&connection) {
-        log::debug!("keychain grant legacy migration did not complete");
-        let token = app_state
-            .extension_pairing_token
-            .read()
-            .map_err(|_| "Extension pairing token lock is unavailable".to_string())?
-            .clone();
-        return Ok(PairingTokenHydration {
-            token,
-            token_changed: false,
-            persistent: false,
-            error: Some(error),
-        });
-    }
-
-    let token = match crate::db::get_keychain_password(crate::db::PAIRING_TOKEN_KEYCHAIN_ID) {
-        Ok(token) if !token.trim().is_empty() => token,
-        _ => {
-            let generated = crate::db::generate_pairing_token();
-            if let Err(error) = crate::db::set_keychain_password(
-                crate::db::PAIRING_TOKEN_KEYCHAIN_ID,
-                &generated,
-            ) {
-                let current = app_state
-                    .extension_pairing_token
-                    .read()
-                    .map_err(|_| "Extension pairing token lock is unavailable".to_string())?
-                    .clone();
-                return Ok(PairingTokenHydration {
-                    token: current,
-                    token_changed: false,
-                    persistent: false,
-                    error: Some(error),
-                });
-            }
-            generated
+    let token = match crate::db::migrate_legacy_pairing_token(&connection)
+        .and_then(|()| crate::db::get_or_create_keychain_pairing_token())
+    {
+        Ok(token) => token,
+        Err(error) => {
+            let current = app_state
+                .extension_pairing_token
+                .read()
+                .map_err(|_| "Extension pairing token lock is unavailable".to_string())?
+                .clone();
+            return Ok(PairingTokenHydration {
+                token: current,
+                token_changed: false,
+                persistent: false,
+                error: Some(error),
+            });
         }
     };
     log::debug!("keychain grant credential operation completed");
