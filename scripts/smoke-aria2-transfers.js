@@ -154,17 +154,30 @@ function serveThrottledBuffer(
     ...(advertiseRange ? { 'accept-ranges': 'bytes' } : {}),
   });
   let offset = 0;
+  let stopped = false;
   const timer = setInterval(() => {
-    if (response.destroyed || offset >= body.length) {
+    if (stopped || response.destroyed || offset >= body.length) {
       clearInterval(timer);
-      if (!response.destroyed) response.end();
+      if (!stopped && !response.destroyed) response.end();
       return;
     }
     const next = Math.min(offset + 32 * 1024, body.length);
-    response.write(body.subarray(offset, next));
+    const chunk = body.subarray(offset, next);
     offset = next;
+    if (next >= body.length) {
+      clearInterval(timer);
+      response.end(chunk);
+      return;
+    }
+    response.write(chunk);
   }, 20);
-  response.once('close', () => clearInterval(timer));
+  const stopWriting = () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+  response.once('close', stopWriting);
+  request.once('aborted', stopWriting);
+  request.socket?.once('close', stopWriting);
 }
 
 function childExited(child) {
@@ -289,6 +302,8 @@ function observeConnection(name, request, response) {
   };
   response.once('finish', release);
   response.once('close', release);
+  request.once('aborted', release);
+  request.socket?.once('close', release);
 }
 
 const targetServer = http.createServer((request, response) => {
