@@ -5,6 +5,42 @@ All notable changes to Firelink will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-11-23
+
+This release adds multi-mirror segmented downloading, updates bundled engines and dependencies, and hardens download startup, recovery, and browser handoffs.
+
+### Additions
+
+- Donate button
+
+### New features
+
+- **Multi-mirror segmented downloads** (addressing [#46](https://github.com/nimbold/Firelink/issues/46))
+  - Distribute file segments across all active mirrors simultaneously instead of converging on a single mirror, while keeping fastest-mirror adaptive mode available as an option.
+  - Check primary and mirror URLs in parallel before starting so unreachable, broken, or non-range mirrors are excluded when healthy sources are available.
+  - Add and validate mirror URLs for single-file downloads in the Add window with a live mirror count indicator.
+  - Edit or clear mirror URLs on existing downloads from the Properties window.
+
+### Improvements
+
+- Improve Add-window review and HTTP metadata fallback while preserving magnet and playlist routing.
+- Refine the About panel layout and localized copy across all supported languages.
+- Update bundled yt-dlp, Deno, FFmpeg, and application dependencies.
+- Strengthen database handling and chronological log ordering.
+
+### Fixes
+
+- Harden queue, scheduler, and Aria2 startup and shutdown recovery, and show measured file allocation progress.
+- Preserve split-track media progress, resume Torrent seeding from verified data, and keep accepted browser media handoffs intact across startup retries.
+- Terminate orphaned yt-dlp process groups cleanly when media jobs are canceled or dropped.
+- Preserve retained archives on cancellation, fix bulk-resume error handling, and protect Windows file-lock retries.
+- Preserve browser pairing credentials if a keychain read is denied or migration cleanup fails.
+- Prevent stale language changes when loading settings.
+
+### Compatibility
+
+- Use the latest [Firelink Companion 2.2.4](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.4) release from the [Firelink-Extension repository](https://github.com/nimbold/Firelink-Extension) with Firelink 1.5.1.
+
 ## [1.5.0] - 2026-10-20
 
 This release adds browser-discovered media downloads, custom browser cookie profiles, and start-at-login, with broader improvements to download recovery and release reliability.

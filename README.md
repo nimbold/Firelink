@@ -28,9 +28,9 @@ It uses a Rust and Tauri backend with a React and TypeScript interface. Required
 
 ## Status
 
-Firelink `1.5.0` is the latest desktop release.
+Firelink `1.5.1` is the latest desktop release.
 
-Use [the latest Firelink Companion release, `2.2.3`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.3) with Firelink. The Companion is maintained in the [Firelink-Extension repository](https://github.com/nimbold/Firelink-Extension).
+Use [the latest Firelink Companion release, `2.2.4`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.4) with Firelink. The Companion is maintained in the [Firelink-Extension repository](https://github.com/nimbold/Firelink-Extension).
 
 The project is actively maintained. See the [changelog](CHANGELOG.md) for release history and current work.
 
@@ -46,7 +46,7 @@ Translations are available for English, Simplified Chinese, Hebrew, Persian, Ukr
   with a different profile location such as Opera GX.
 - BitTorrent downloads from `.torrent` files, magnet links, and browser handoff, with file selection, web seeds, seeding, and live diagnostics.
 - Standalone Download and Torrent Properties windows with live controls, transfer details, and safe Torrent relocation.
-- Adaptive mirror selection for multi-source downloads.
+- Multi-mirror segmented downloads with simultaneous chunk distribution, mirror probing, and mirror editing in Properties.
 - An Add window for metadata, duplicate handling, save locations, and download options.
 - Persistent queues with pause, resume, retry, redownload, and scheduling.
 - Visible allocation and resume status with clearer transfer diagnostics.
@@ -103,16 +103,12 @@ Only use these steps for Firelink downloaded from the [official GitHub release p
 
 ## Browser integration
 
-[Firelink Companion `2.2.3`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.3) connects browser downloads, links, detected media, magnets, and Torrent metadata to Firelink. Use the [latest Companion release](https://github.com/nimbold/Firelink-Extension/releases/latest) with the [latest Firelink release](https://github.com/nimbold/Firelink/releases/latest).
+[Firelink Companion `2.2.4`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.4) connects browser downloads, links, detected media, magnets, and Torrent metadata to Firelink. Use the [latest Companion release](https://github.com/nimbold/Firelink-Extension/releases/latest) with the [latest Firelink release](https://github.com/nimbold/Firelink/releases/latest).
 
 Captured links open Firelink's Add window for review before they are started or queued.
 
-The Add window can recognize direct `.m3u8`, `.mpd`, `.ism`, and
-`.ism/manifest` URLs and lets you review or override their media routing. Media
-format selection remains yt-dlp-owned: subtitle and multiple-audio-track
-selection are not exposed in this phase. Clear or non-DRM encrypted HLS such as
-AES-128 may work when its manifest and key are legitimately accessible; DRM,
-CDM, license-server, and other protected-key workflows are unsupported.
+The Add window recognizes direct `.m3u8`, `.mpd`, `.ism`, and `.ism/manifest` URLs for media routing.
+Clear or non-DRM encrypted HLS (such as AES-128) is supported when accessible; DRM and protected-key workflows are unsupported.
 
 <p>
   <a href="https://microsoftedge.microsoft.com/addons/detail/firelink-companion/kflenjkpdoamjkalhfcllhflgahledbc"><img src="https://img.shields.io/badge/Install%20from-Microsoft%20Edge%20Add--ons-0078D7?style=for-the-badge&logo=microsoftedge&logoColor=white" alt="Install from Microsoft Edge Add-ons" height="24" /></a>&nbsp;&nbsp;
