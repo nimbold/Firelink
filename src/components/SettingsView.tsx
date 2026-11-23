@@ -57,6 +57,7 @@ import { useTranslation } from 'react-i18next';
 import { localeDirection, resolveAppLocale } from '../i18n';
 import { createEngineStatusRequestTracker } from '../utils/engineStatusRequests';
 import { writeClipboardSecret } from '../utils/clipboard';
+import { AboutDonateSection } from './AboutDonateSection';
 
 const settingsTabs: { type: SettingsTab; icon: typeof Download }[] = [
   { type: 'downloads', icon: Download },
@@ -2677,6 +2678,7 @@ className="app-button px-3 py-1.5 text-[12px] flex items-center gap-1.5 disabled
                 <div className="text-text-muted pt-1 border-t border-border-modal/40">
                   {t($ => $.settings.about.copyright)}
                 </div>
+                <AboutDonateSection showToast={showToast} />
               </div>
             </div>
           )}

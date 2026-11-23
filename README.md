@@ -178,3 +178,17 @@ Font licenses, engine versions, source references, and third-party notices are d
 ## License
 
 Firelink is available under the [MIT License](LICENSE). Bundled tools and fonts retain their own licenses.
+
+<details>
+<summary>Donate</summary>
+
+If you’d like to support Firelink, thank you.
+
+- **Ethereum Mainnet (ETH):** `0x35C2985cC1Be1122E20817e87FCa49D8196f89B8`
+- **Bitcoin mainnet (BTC):** `bc1qy7u658csk6ycza5ej5w0m4f3aqg677rtkvv2mx`
+- **TRON (TRX):** `THAHkJXTsZPF9oTrq96khFJPsv6zLhPEb8`
+- **Base (ETH):** `0x35C2985cC1Be1122E20817e87FCa49D8196f89B8`
+
+For Tether (USDT), use the Ethereum address on Ethereum (ERC-20) or the TRON address on TRON (TRC-20).
+
+</details>
