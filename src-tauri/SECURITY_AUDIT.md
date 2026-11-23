@@ -3,8 +3,9 @@
 `cargo audit` is a required CI gate. Vulnerability advisories must be resolved;
 the gate must not be bypassed with a broad ignore list.
 
-As of 2026-11-21 (658 crate dependencies scanned), `cargo audit` reports no
-vulnerability advisories. It reports six allowed warnings, which remain
+As of 2026-11-23 (658 crate dependencies scanned), `cargo audit` reports no
+vulnerability advisories after updating the transitive `cookie` crate to
+0.18.3 for RUSTSEC-2026-0594. It reports six allowed warnings, which remain
 visible in CI output:
 
 - `RUSTSEC-2026-0543` marks `chrono` 0.4.45 unmaintained. Firelink's direct
