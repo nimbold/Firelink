@@ -63,6 +63,9 @@ async-trait = "0.1"
 keyring-core = "1.1.0"
 auto-launch = "0.6.0"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.3", features = ["keychain"] }
 plist = "1.10.4"

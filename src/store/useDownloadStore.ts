@@ -2949,7 +2949,8 @@ export const useDownloadStore = create<DownloadState>()(
         const backendRegistered = get().backendRegisteredIds.has(item.id);
         const backendPending = get().pendingOrder.includes(item.id);
 
-        if (currentItem.status === 'paused') {
+        if (currentItem.status === 'paused'
+          || (currentItem.status === 'queued' && backendRegistered && !backendPending)) {
           const resumed = await get().resumeDownload(item.id, {
             preserveQueuePosition: true
           });
@@ -2966,15 +2967,6 @@ export const useDownloadStore = create<DownloadState>()(
             continue;
           }
           acceptedIds.push(item.id);
-          continue;
-        }
-
-        if (currentItem.status === 'queued' && backendRegistered && !backendPending) {
-          if (await get().resumeDownload(item.id, {
-            preserveQueuePosition: true
-          })) {
-            acceptedIds.push(item.id);
-          }
           continue;
         }
 

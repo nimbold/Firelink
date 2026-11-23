@@ -66,14 +66,13 @@ export const isTransferActiveStatus = (status: DownloadStatus): boolean =>
   status === 'downloading' || status === 'processing' || status === 'verifying' || status === 'seeding' || status === 'retrying';
 
 /**
- * A transient allocation flag must never replace a terminal or user-paused
- * status in the UI. Failed rows remain eligible because retry admission can
- * begin from the failed state before the backend accepts the new lifecycle.
+ * Allocation is visible while a transfer is eligible to start or is active.
+ * Terminal and user-paused statuses take precedence over a late marker.
  */
 export const isAllocationPhaseVisible = (
   allocationPending: boolean,
   status: DownloadStatus,
-): boolean => allocationPending && ['ready', 'staged', 'queued', 'downloading', 'retrying', 'failed'].includes(status);
+): boolean => allocationPending && ['ready', 'staged', 'queued', 'downloading', 'retrying'].includes(status);
 
 /**
  * Allocation is a transient admission phase. Normal downloads retain the

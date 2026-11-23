@@ -732,8 +732,10 @@ async function main() {
         dir: seedParent,
         'seed-time': '60',
         'seed-ratio': '0',
-        'allow-overwrite': 'true',
+        'allow-overwrite': 'false',
         'check-integrity': 'true',
+        'bt-hash-check-seed': 'true',
+        'bt-seed-unverified': 'false',
       },
     ]);
     await waitForDataComplete(seeder, seedGid);

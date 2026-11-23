@@ -1432,6 +1432,7 @@ dependencies = [
  "jiff 1.0.2",
  "keepawake",
  "keyring-core",
+ "libc",
  "log",
  "objc2",
  "objc2-app-kit",

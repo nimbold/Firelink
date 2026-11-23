@@ -167,6 +167,22 @@ fn metadata_response_error(status: reqwest::StatusCode) -> Option<String> {
     })
 }
 
+fn metadata_download_size(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> u64 {
+    if status == reqwest::StatusCode::PARTIAL_CONTENT {
+        return headers
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(crate::queue::parse_content_range)
+            .and_then(|(_, _, total)| total)
+            .unwrap_or_default();
+    }
+    headers
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default()
+}
+
 fn metadata_cookie_header_present(
     headers: Option<&str>,
     cookies: Option<&str>,
@@ -363,6 +379,20 @@ where
         tokio::time::sleep,
     )
     .await
+}
+
+async fn fetch_file_metadata_with_get(
+    retry_strike: &mut usize,
+    build_request: impl Fn(bool) -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let ranged = send_metadata_request_with_retry(retry_strike, || build_request(true).send()).await?;
+    if ranged.status() != reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        return Ok(ranged);
+    }
+    // A server can reject the probe range even when an ordinary GET works.
+    // Only use the response headers and drop the body without reading it.
+    drop(ranged);
+    send_metadata_request_with_retry(retry_strike, || build_request(false).send()).await
 }
 
 fn metadata_transport_error_message(operation: &str, error: &reqwest::Error) -> String {
@@ -1094,6 +1124,7 @@ struct MediaProgress {
     downloaded_bytes: Option<f64>,
     total_bytes: Option<f64>,
     total_is_estimate: bool,
+    track_id: Option<String>,
 }
 
 fn progress_json_number(progress: &serde_json::Value, key: &str) -> Option<f64> {
@@ -1171,23 +1202,32 @@ fn parse_media_progress_line(line: &str) -> Option<MediaProgress> {
     if let Some(prefix_index) = line.find(MEDIA_PROGRESS_PREFIX) {
         let progress: serde_json::Value =
             serde_json::from_str(line[prefix_index + MEDIA_PROGRESS_PREFIX.len()..].trim()).ok()?;
-        let downloaded = progress_json_number(&progress, "downloaded_bytes").unwrap_or(0.0);
+        let status = progress_json_string(&progress, "status");
+        let is_finished = status.as_deref() == Some("finished");
+        // Use the track's output name. The temporary name can change when
+        // yt-dlp renames a .part file, which is still the same track.
+        let track_id = progress_json_string(&progress, "filename");
+        let raw_downloaded = progress_json_number(&progress, "downloaded_bytes");
         let exact_total = progress_json_number(&progress, "total_bytes");
         let estimated_total = progress_json_number(&progress, "total_bytes_estimate");
         let total = exact_total.or(estimated_total).unwrap_or(0.0);
+        let completed_bytes = exact_total.filter(|bytes| is_finished && *bytes > 0.0);
+        let downloaded = raw_downloaded.or(completed_bytes).unwrap_or(0.0);
         let fragment_index = progress_json_number(&progress, "fragment_index");
         let fragment_count = progress_json_number(&progress, "fragment_count");
-        let fraction = if let (Some(fragment_index), Some(fragment_count)) =
+        let fraction = if is_finished {
+            1.0
+        } else if let (Some(fragment_index), Some(fragment_count)) =
             (fragment_index, fragment_count)
         {
             if fragment_count > 1.0 {
                 (fragment_index / fragment_count).clamp(0.0, 1.0)
-            } else if total > 0.0 {
+            } else if total > 0.0 && raw_downloaded.is_some() {
                 downloaded / total
             } else {
                 0.0
             }
-        } else if total > 0.0 {
+        } else if total > 0.0 && raw_downloaded.is_some() {
             downloaded / total
         } else {
             progress_json_number(&progress, "_percent")
@@ -1229,9 +1269,13 @@ fn parse_media_progress_line(line: &str) -> Option<MediaProgress> {
             speed,
             eta,
             size,
-            downloaded_bytes: (total > 0.0 || downloaded > 0.0).then_some(downloaded),
+            downloaded_bytes: (completed_bytes.is_some()
+                || (total > 0.0 && raw_downloaded.is_some())
+                || raw_downloaded.is_some_and(|bytes| bytes > 0.0))
+            .then_some(downloaded),
             total_bytes: exact_total.filter(|total| total.is_finite() && *total > 0.0),
             total_is_estimate,
+            track_id,
         });
     }
 
@@ -1272,6 +1316,7 @@ fn parse_media_progress_line(line: &str) -> Option<MediaProgress> {
             downloaded_bytes,
             total_bytes,
             total_is_estimate: false,
+            track_id: None,
         });
     }
 
@@ -1317,6 +1362,7 @@ fn parse_media_progress_line(line: &str) -> Option<MediaProgress> {
         downloaded_bytes,
         total_bytes,
         total_is_estimate,
+        track_id: None,
     })
 }
 
@@ -1402,15 +1448,52 @@ fn media_progress_speed(
     }
 }
 
+#[cfg(test)]
 fn aggregate_media_fraction(
     total_tracks: f64,
     current_track: &mut f64,
     last_fraction: &mut f64,
     next_fraction: f64,
 ) -> f64 {
+    aggregate_media_fraction_for_track(
+        total_tracks,
+        current_track,
+        last_fraction,
+        &mut None,
+        next_fraction,
+        None,
+    )
+}
+
+fn aggregate_media_fraction_for_track(
+    total_tracks: f64,
+    current_track: &mut f64,
+    last_fraction: &mut f64,
+    current_track_id: &mut Option<String>,
+    next_fraction: f64,
+    next_track_id: Option<&str>,
+) -> f64 {
     let next_fraction = next_fraction.clamp(0.0, 1.0);
     let has_next_track = *current_track + 1.0 < total_tracks;
-    if has_next_track && *last_fraction >= 0.95 && next_fraction <= 0.05 {
+    if let Some(next_id) = next_track_id.filter(|id| !id.is_empty()) {
+        match current_track_id.as_deref() {
+            None => {
+                *current_track_id = Some(next_id.to_string());
+                *last_fraction = (*last_fraction).max(next_fraction);
+            }
+            Some(active_id) if active_id == next_id => {
+                *last_fraction = (*last_fraction).max(next_fraction);
+            }
+            Some(_) if has_next_track => {
+                *current_track += 1.0;
+                *current_track_id = Some(next_id.to_string());
+                *last_fraction = next_fraction;
+            }
+            Some(_) => {
+                *last_fraction = (*last_fraction).max(next_fraction);
+            }
+        }
+    } else if has_next_track && *last_fraction >= 0.95 && next_fraction <= 0.05 {
         *current_track += 1.0;
         *last_fraction = next_fraction;
     } else {
@@ -1423,6 +1506,7 @@ fn aggregate_media_fraction(
 struct MediaProgressEmitterState {
     current_track: f64,
     last_fraction: f64,
+    current_track_id: Option<String>,
     speed_sampler: MediaSpeedSampler,
     last_progress_at: Instant,
     completed_tracks_downloaded_bytes: Option<f64>,
@@ -1438,6 +1522,7 @@ impl MediaProgressEmitterState {
         Self {
             current_track: 0.0,
             last_fraction: 0.0,
+            current_track_id: None,
             speed_sampler: MediaSpeedSampler::default(),
             last_progress_at: Instant::now()
                 .checked_sub(MEDIA_PROGRESS_EMIT_INTERVAL)
@@ -1560,11 +1645,13 @@ fn emit_media_progress(
     state: &mut MediaProgressEmitterState,
 ) {
     let previous_track = state.current_track;
-    let overall_fraction = aggregate_media_fraction(
+    let overall_fraction = aggregate_media_fraction_for_track(
         total_tracks,
         &mut state.current_track,
         &mut state.last_fraction,
+        &mut state.current_track_id,
         progress.fraction,
+        progress.track_id.as_deref(),
     );
     let track_changed = state.current_track != previous_track;
     if track_changed {
@@ -2568,7 +2655,7 @@ async fn fetch_metadata(
         } else {
             scoped_cookie
         };
-        let header_map = if same_origin_credentials {
+        let mut header_map = if same_origin_credentials {
             metadata_headers(headers.as_deref(), cookie_header, send_cookies)
         } else {
             // A cross-origin redirect may receive only the cookie scope that
@@ -2576,6 +2663,9 @@ async fn fetch_metadata(
             // a source-host Cookie header to an unrelated redirect target.
             metadata_headers(None, cookie_header, send_cookies)
         };
+        // The metadata probe owns the Range header, including its omission
+        // when a server requires an ordinary GET.
+        header_map.remove(reqwest::header::RANGE);
         builder = builder.default_headers(header_map);
 
         let client = match builder.build() {
@@ -2592,10 +2682,11 @@ async fn fetch_metadata(
         };
         let request_url = current_url.clone();
 
-        let build_get_range = || {
-            let mut get_req = client
-                .get(&request_url)
-                .header(reqwest::header::RANGE, "bytes=0-0");
+        let build_get = |ranged| {
+            let mut get_req = client.get(&request_url);
+            if ranged {
+                get_req = get_req.header(reqwest::header::RANGE, "bytes=0-0");
+            }
             if same_origin_credentials {
                 if let Some(ref user) = username {
                     if !user.is_empty() {
@@ -2615,7 +2706,7 @@ async fn fetch_metadata(
             }
         }
         let head_started = Instant::now();
-        let mut current_res = match head_req.send().await {
+        let (mut current_res, used_get) = match head_req.send().await {
             Ok(response) => {
                 log::info!(
                     "metadata [stage=metadata operation=head host={} result=ok status={} elapsed_ms={} total_elapsed_ms={}]",
@@ -2624,16 +2715,12 @@ async fn fetch_metadata(
                     head_started.elapsed().as_millis(),
                     metadata_started.elapsed().as_millis()
                 );
-                response
+                (response, false)
             }
             Err(head_error) => {
                 let head_elapsed_ms = head_started.elapsed().as_millis();
                 let get_started = Instant::now();
-                match send_metadata_request_with_retry(&mut network_retry_strike, || {
-                    build_get_range().send()
-                })
-                .await
-                {
+                match fetch_file_metadata_with_get(&mut network_retry_strike, &build_get).await {
                     Ok(response) => {
                         log::warn!(
                             "metadata [stage=metadata operation=head result=fallback host={} error_code={} head_elapsed_ms={} get_status={} get_elapsed_ms={} total_elapsed_ms={}]",
@@ -2644,7 +2731,7 @@ async fn fetch_metadata(
                             get_started.elapsed().as_millis(),
                             metadata_started.elapsed().as_millis()
                         );
-                        response
+                        (response, true)
                     }
                     Err(get_error) => {
                         log::warn!(
@@ -2657,7 +2744,7 @@ async fn fetch_metadata(
                             metadata_started.elapsed().as_millis()
                         );
                         return Err(format!(
-                            "HEAD metadata request failed ({}); ranged GET fallback failed ({})",
+                            "HEAD metadata request failed ({}); GET fallback failed ({})",
                             reqwest_error_code(&head_error),
                             reqwest_error_code(&get_error)
                         ));
@@ -2696,16 +2783,12 @@ async fn fetch_metadata(
             needs_fallback = true;
         }
 
-        if needs_fallback {
+        if !used_get && needs_fallback {
             let get_started = Instant::now();
-            current_res = match send_metadata_request_with_retry(&mut network_retry_strike, || {
-                build_get_range().send()
-            })
-            .await
-            {
+            current_res = match fetch_file_metadata_with_get(&mut network_retry_strike, &build_get).await {
                 Ok(response) => {
                     log::info!(
-                        "metadata [stage=metadata operation=get_range host={} result=ok status={} elapsed_ms={} total_elapsed_ms={}]",
+                        "metadata [stage=metadata operation=get host={} result=ok status={} elapsed_ms={} total_elapsed_ms={}]",
                         metadata_host,
                         response.status().as_u16(),
                         get_started.elapsed().as_millis(),
@@ -2715,13 +2798,13 @@ async fn fetch_metadata(
                 }
                 Err(error) => {
                     log::warn!(
-                        "metadata [stage=metadata operation=get_range host={} result=failed error_code={} elapsed_ms={} total_elapsed_ms={}]",
+                        "metadata [stage=metadata operation=get host={} result=failed error_code={} elapsed_ms={} total_elapsed_ms={}]",
                         metadata_host,
                         reqwest_error_code(&error),
                         get_started.elapsed().as_millis(),
                         metadata_started.elapsed().as_millis()
                     );
-                    return Err(metadata_transport_error_message("Ranged GET", &error));
+                    return Err(metadata_transport_error_message("GET", &error));
                 }
             };
 
@@ -2806,29 +2889,7 @@ async fn fetch_metadata(
     let filename = metadata_filename_from_response(&res, &current_url, &url);
     
     let mut size_str = "Unknown".to_string();
-    let mut size_bytes = 0;
-    
-    if res.status() == reqwest::StatusCode::PARTIAL_CONTENT {
-        if let Some(content_range) = res.headers().get(reqwest::header::CONTENT_RANGE) {
-            if let Ok(cr_str) = content_range.to_str() {
-                if let Some(idx) = cr_str.find('/') {
-                    if let Ok(bytes) = cr_str[idx + 1..].parse::<u64>() {
-                        size_bytes = bytes;
-                    }
-                }
-            }
-        }
-    }
-
-    if size_bytes == 0 {
-        if let Some(len) = res.headers().get(reqwest::header::CONTENT_LENGTH) {
-            if let Ok(len_str) = len.to_str() {
-                if let Ok(bytes) = len_str.parse::<u64>() {
-                    size_bytes = bytes;
-                }
-            }
-        }
-    }
+    let size_bytes = metadata_download_size(res.status(), res.headers());
 
     if size_bytes > 0 {
         let bytes = size_bytes;
@@ -4839,11 +4900,13 @@ mod pending_tray_action_tests {
 struct Aria2DaemonGuard {
     child: Mutex<Option<std::process::Child>>,
     restart_lock: tokio::sync::Mutex<()>,
+    shutdown_changed: tokio::sync::Notify,
     startup_error: Mutex<Option<String>>,
     last_stderr: Mutex<String>,
     config_path: Mutex<Option<tempfile::TempPath>>,
     launch_spec: Mutex<Option<Aria2LaunchSpec>>,
     route_contract_available: AtomicBool,
+    allocation_telemetry_available: AtomicBool,
     shutdown_state: AtomicU8,
     shutdown_generation: AtomicU64,
     enqueue_admission_lock: Mutex<()>,
@@ -4863,11 +4926,13 @@ impl Aria2DaemonGuard {
         Self {
             child: Mutex::new(None),
             restart_lock: tokio::sync::Mutex::new(()),
+            shutdown_changed: tokio::sync::Notify::new(),
             startup_error: Mutex::new(None),
             last_stderr: Mutex::new(String::new()),
             config_path: Mutex::new(None),
             launch_spec: Mutex::new(None),
             route_contract_available: AtomicBool::new(false),
+            allocation_telemetry_available: AtomicBool::new(false),
             shutdown_state: AtomicU8::new(0),
             shutdown_generation: AtomicU64::new(0),
             enqueue_admission_lock: Mutex::new(()),
@@ -4884,6 +4949,17 @@ impl Aria2DaemonGuard {
             .store(available, Ordering::Release);
     }
 
+    fn allocation_telemetry_available(&self) -> bool {
+        self.allocation_telemetry_available.load(Ordering::Acquire)
+    }
+
+    fn set_allocation_telemetry(&self, version: &serde_json::Value) {
+        self.allocation_telemetry_available.store(
+            version.get("firelinkAllocationTelemetry").and_then(serde_json::Value::as_bool) == Some(true),
+            Ordering::Release,
+        );
+    }
+
     fn startup_error_message(&self) -> Option<String> {
         self.startup_error
             .lock()
@@ -4897,6 +4973,23 @@ impl Aria2DaemonGuard {
 
     pub(crate) fn is_shutting_down(&self) -> bool {
         self.shutdown_state.load(Ordering::SeqCst) != 0
+    }
+
+    async fn lock_initial_launch(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        loop {
+            let changed = self.shutdown_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let launch = self.restart_lock.lock().await;
+            if self.exit_allowed() {
+                return None;
+            }
+            if !self.is_shutting_down() {
+                return Some(launch);
+            }
+            drop(launch);
+            changed.await;
+        }
     }
 
     pub(crate) fn lock_enqueue_admission(&self) -> std::sync::MutexGuard<'_, ()> {
@@ -4996,9 +5089,13 @@ impl Aria2DaemonGuard {
         if self.shutdown_generation.load(Ordering::SeqCst) != generation {
             return false;
         }
-        self.shutdown_state
+        let finished = self.shutdown_state
             .compare_exchange(3, 0, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
+            .is_ok();
+        if finished {
+            self.shutdown_changed.notify_waiters();
+        }
+        finished
     }
 
     fn is_shutdown_recovery_current(&self, generation: u64) -> bool {
@@ -5015,11 +5112,15 @@ impl Aria2DaemonGuard {
 
     fn allow_exit(&self, generation: u64) -> bool {
         let _admission = self.lock_enqueue_admission();
-        self.shutdown_generation.load(Ordering::SeqCst) == generation
+        let allowed = self.shutdown_generation.load(Ordering::SeqCst) == generation
             && self
                 .shutdown_state
                 .compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
+                .is_ok();
+        if allowed {
+            self.shutdown_changed.notify_waiters();
+        }
+        allowed
     }
 }
 
@@ -5036,8 +5137,15 @@ async fn shutdown_aria2_daemon(
         return Err("aria2 shutdown deadline expired before daemon shutdown began".to_string());
     }
     if let Some(state) = app_handle.try_state::<AppState>() {
-        let port = state.aria2_port.load(Ordering::Relaxed);
-        if port != 0 {
+        let port = state.aria2_port.load(Ordering::Acquire);
+        // Once RPC readiness has been published, aria2 has installed its
+        // SIGINT handler. It takes the same graceful halt path as shutdown
+        // RPC without waiting out the engine's RPC response timer.
+        #[cfg(unix)]
+        let interrupted = port != 0 && interrupt_owned_aria2_child(&guard);
+        #[cfg(not(unix))]
+        let interrupted = false;
+        if port != 0 && !interrupted {
             let rpc_started = Instant::now();
             let rpc_deadline = (tokio::time::Instant::now() + Duration::from_secs(2)).min(deadline);
             let shutdown = tokio::time::timeout_at(
@@ -5153,6 +5261,35 @@ async fn shutdown_aria2_daemon(
     Ok(())
 }
 
+#[cfg(unix)]
+fn interrupt_owned_aria2_child(guard: &Aria2DaemonGuard) -> bool {
+    let mut slot = guard.child.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(child) = slot.as_mut() else {
+        return false;
+    };
+    match child.try_wait() {
+        Ok(Some(_)) => true,
+        Ok(None) => {
+            let Ok(pid) = libc::pid_t::try_from(child.id()) else {
+                return false;
+            };
+            // The child slot stays locked and the process remains unreaped
+            // between try_wait and kill, so its PID cannot be recycled.
+            if unsafe { libc::kill(pid, libc::SIGINT) } == 0 {
+                log::info!("aria2 graceful shutdown requested by SIGINT");
+                true
+            } else {
+                log::warn!("aria2 graceful SIGINT failed: {}", std::io::Error::last_os_error());
+                false
+            }
+        }
+        Err(error) => {
+            log::warn!("could not check aria2 process before SIGINT: {error}");
+            false
+        }
+    }
+}
+
 fn monitor_aria2_stderr(app: tauri::AppHandle, stderr: std::process::ChildStderr) {
     std::thread::spawn(move || {
         use std::io::BufRead;
@@ -5202,6 +5339,9 @@ async fn restart_aria2_daemon(
 ) -> Result<(), String> {
     let guard = app_handle.state::<Aria2DaemonGuard>();
     let _restart_guard = guard.restart_lock.lock().await;
+    if guard.is_shutting_down() {
+        return Err("aria2 restart was superseded by application shutdown".to_string());
+    }
     if recovery_generation
         .is_some_and(|generation| !guard.is_shutdown_recovery_current(generation))
     {
@@ -5298,6 +5438,7 @@ async fn restart_aria2_daemon(
         while tokio::time::Instant::now() < readiness_deadline {
             match rpc_call(port, &app_handle.state::<AppState>().aria2_secret, "aria2.getVersion", serde_json::json!([])).await {
                 Ok(version) if crate::network::aria2_baseline_error(&version).is_none() => {
+                    guard.set_allocation_telemetry(&version);
                     guard.set_route_contract_available(
                         crate::network::aria2_route_capability_error(&version).is_none(),
                     );
@@ -18030,7 +18171,8 @@ mod tests {
     }
 
     use super::{
-        aggregate_media_byte_progress, aggregate_media_fraction, append_ytdlp_config_option,
+        aggregate_media_byte_progress, aggregate_media_fraction, aggregate_media_fraction_for_track,
+        append_ytdlp_config_option,
         append_bounded_stderr_tail, append_ytdlp_http_headers,
         build_media_format_options,
         collect_download_uris, drain_media_output_lines, filename_from_content_disposition,
@@ -19192,6 +19334,29 @@ mod tests {
         assert!(guard.exit_allowed());
         assert!(guard.is_shutting_down());
         assert!(guard.begin_shutdown().is_none());
+    }
+
+    #[tokio::test]
+    async fn aria2_initial_launch_waits_for_exit_resolution_before_starting() {
+        let guard = Aria2DaemonGuard::new();
+        let first_generation = guard.begin_shutdown().unwrap();
+        let launch = guard.lock_initial_launch();
+        tokio::pin!(launch);
+        assert!(futures_util::poll!(&mut launch).is_pending());
+        assert!(guard.restart_lock.try_lock().is_ok());
+        assert!(guard.begin_shutdown_recovery(first_generation));
+        assert!(guard.finish_shutdown_recovery(first_generation));
+
+        let startup = launch.await.expect("a cancelled exit can recover startup");
+        assert!(guard.restart_lock.try_lock().is_err());
+        drop(startup);
+
+        let second_generation = guard.begin_shutdown().unwrap();
+        let launch = guard.lock_initial_launch();
+        tokio::pin!(launch);
+        assert!(futures_util::poll!(&mut launch).is_pending());
+        assert!(guard.allow_exit(second_generation));
+        assert!(launch.await.is_none());
     }
 
     #[test]
@@ -21139,6 +21304,56 @@ mod tests {
             metadata_response_error(reqwest::StatusCode::NOT_FOUND).as_deref(),
             Some("Metadata request failed with HTTP 404 (Not Found)")
         );
+    }
+
+    #[test]
+    fn metadata_counts_the_whole_resource_instead_of_the_probe_body() {
+        use reqwest::{StatusCode, header};
+        let mut headers = header::HeaderMap::new();
+        headers.insert(header::CONTENT_LENGTH, header::HeaderValue::from_static("1"));
+        for (range, size) in [("bytes 0-0/8192", 8192), ("bytes 0-0/*", 0), ("bytes 2-3/1", 0)] {
+            headers.insert(header::CONTENT_RANGE, header::HeaderValue::from_static(range));
+            assert_eq!(super::metadata_download_size(StatusCode::PARTIAL_CONTENT, &headers), size);
+        }
+        assert_eq!(super::metadata_download_size(StatusCode::OK, &headers), 1);
+    }
+
+    #[tokio::test]
+    async fn file_metadata_retries_a_rejected_range_with_plain_get() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        super::ensure_reqwest_crypto_provider();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let url = format!("http://{}/file", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for (ranged, response) in [
+                (true, "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                (false, "HTTP/1.1 200 OK\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n"),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(stream.read_u8().await.unwrap());
+                }
+                let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                assert!(request.starts_with("get /file "));
+                assert_eq!(request.contains("\r\nrange: bytes=0-0\r\n"), ranged);
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let response = super::fetch_file_metadata_with_get(&mut 0, |ranged| {
+            let request = client.get(&url);
+            if ranged { request.header(reqwest::header::RANGE, "bytes=0-0") } else { request }
+        })
+        .await
+        .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(super::metadata_download_size(response.status(), response.headers()), 4096);
+        server.await.unwrap();
     }
 
     #[test]
@@ -23113,6 +23328,7 @@ mod tests {
                 downloaded_bytes: Some(5242880.0),
                 total_bytes: Some(10485760.0),
                 total_is_estimate: false,
+                track_id: None,
             })
         );
     }
@@ -23133,6 +23349,7 @@ mod tests {
                 downloaded_bytes: Some(5242880.0),
                 total_bytes: None,
                 total_is_estimate: true,
+                track_id: None,
             })
         );
     }
@@ -23277,6 +23494,7 @@ mod tests {
             downloaded_bytes: Some(99.0),
             total_bytes: Some(100.0),
             total_is_estimate: false,
+            track_id: None,
         };
         let second = MediaProgress {
             fraction: 0.01,
@@ -23286,6 +23504,7 @@ mod tests {
             downloaded_bytes: Some(2.0),
             total_bytes: Some(200.0),
             total_is_estimate: true,
+            track_id: None,
         };
 
         aggregate_media_fraction(
@@ -23320,6 +23539,7 @@ mod tests {
             downloaded_bytes: Some(1024.0),
             total_bytes: Some(2048.0),
             total_is_estimate: true,
+            track_id: None,
         };
 
         assert_eq!(
@@ -23347,6 +23567,7 @@ mod tests {
             downloaded_bytes: Some(25.0),
             total_bytes: Some(100.0),
             total_is_estimate: true,
+            track_id: None,
         };
         let later = MediaProgress {
             fraction: 0.75,
@@ -23356,6 +23577,7 @@ mod tests {
             downloaded_bytes: Some(150.0),
             total_bytes: Some(200.0),
             total_is_estimate: true,
+            track_id: None,
         };
 
         assert_eq!(
@@ -23375,6 +23597,7 @@ mod tests {
             downloaded_bytes: Some(180.0),
             total_bytes: Some(200.0),
             total_is_estimate: false,
+            track_id: None,
         };
         assert_eq!(
             aggregate_media_byte_progress(&exact, false, &mut state),
@@ -23393,6 +23616,7 @@ mod tests {
             downloaded_bytes: Some(150.0),
             total_bytes: Some(100.0),
             total_is_estimate: true,
+            track_id: None,
         };
         let second = MediaProgress {
             fraction: 0.01,
@@ -23402,6 +23626,7 @@ mod tests {
             downloaded_bytes: Some(1.0),
             total_bytes: Some(50.0),
             total_is_estimate: false,
+            track_id: None,
         };
 
         assert_eq!(
@@ -23424,6 +23649,7 @@ mod tests {
             downloaded_bytes: Some(1_000_000.0),
             total_bytes: None,
             total_is_estimate: false,
+            track_id: None,
         };
         let second = MediaProgress {
             fraction: 0.5,
@@ -23433,6 +23659,7 @@ mod tests {
             downloaded_bytes: Some(3_097_152.0),
             total_bytes: None,
             total_is_estimate: false,
+            track_id: None,
         };
         let start = Instant::now();
         let mut sampler = MediaSpeedSampler::default();
@@ -23459,6 +23686,7 @@ mod tests {
             downloaded_bytes: Some(1_000_000.0),
             total_bytes: None,
             total_is_estimate: false,
+            track_id: None,
         };
 
         assert_eq!(
@@ -23494,6 +23722,7 @@ mod tests {
                 downloaded_bytes: Some(12.0 * 1024.0 * 1024.0),
                 total_bytes: Some(34.0 * 1024.0 * 1024.0),
                 total_is_estimate: false,
+                track_id: None,
             })
         );
     }
@@ -23512,7 +23741,135 @@ mod tests {
                 downloaded_bytes: Some(4456448.0),
                 total_bytes: Some(10485760.0),
                 total_is_estimate: true,
+                track_id: None,
             })
+        );
+    }
+
+    #[test]
+    fn parses_finished_ytdlp_progress_without_downloaded_bytes() {
+        let line = format!(
+            "{MEDIA_PROGRESS_PREFIX}{{\"filename\":\"/tmp/test.fv137.mp4\",\"status\":\"finished\",\"total_bytes\":65536,\"_total_bytes_str\":\"64.00KiB\",\"_percent\":100.0}}"
+        );
+
+        assert_eq!(
+            parse_media_progress_line(&line),
+            Some(MediaProgress {
+                fraction: 1.0,
+                speed: "-".to_string(),
+                eta: "-".to_string(),
+                size: Some("64.00KiB".to_string()),
+                downloaded_bytes: Some(65536.0),
+                total_bytes: Some(65536.0),
+                total_is_estimate: false,
+                track_id: Some("/tmp/test.fv137.mp4".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn advances_split_tracks_when_second_track_starts_above_five_percent() {
+        let mut state = MediaProgressEmitterState::new();
+        let track1_line = format!(
+            "{MEDIA_PROGRESS_PREFIX}{{\"filename\":\"/tmp/test.fv137.mp4\",\"status\":\"downloading\",\"downloaded_bytes\":800,\"total_bytes\":1000,\"_percent\":80.0}}"
+        );
+        let track2_line = format!(
+            "{MEDIA_PROGRESS_PREFIX}{{\"filename\":\"/tmp/test.fa140.m4a\",\"status\":\"downloading\",\"downloaded_bytes\":120,\"total_bytes\":1000,\"_percent\":12.0}}"
+        );
+
+        let track1 = parse_media_progress_line(&track1_line).expect("track 1 should parse");
+        let previous_track = state.current_track;
+        let first_overall = aggregate_media_fraction_for_track(
+            2.0,
+            &mut state.current_track,
+            &mut state.last_fraction,
+            &mut state.current_track_id,
+            track1.fraction,
+            track1.track_id.as_deref(),
+        );
+        assert_eq!(first_overall, 0.4);
+        assert_eq!(
+            aggregate_media_byte_progress(
+                &track1,
+                state.current_track != previous_track,
+                &mut state,
+            ),
+            Some((800, 1000, false))
+        );
+
+        let track2 = parse_media_progress_line(&track2_line).expect("track 2 should parse");
+        let previous_track = state.current_track;
+        let second_overall = aggregate_media_fraction_for_track(
+            2.0,
+            &mut state.current_track,
+            &mut state.last_fraction,
+            &mut state.current_track_id,
+            track2.fraction,
+            track2.track_id.as_deref(),
+        );
+        assert_eq!(state.current_track, 1.0);
+        assert_eq!(second_overall, 0.56);
+        assert_eq!(
+            aggregate_media_byte_progress(
+                &track2,
+                state.current_track != previous_track,
+                &mut state,
+            ),
+            Some((920, 2000, false))
+        );
+    }
+
+    #[test]
+    fn advances_split_tracks_after_skipped_completed_first_track_on_relaunch() {
+        let mut state = MediaProgressEmitterState::new();
+        let skipped_track1_line = format!(
+            "{MEDIA_PROGRESS_PREFIX}{{\"filename\":\"/tmp/test.fv137.mp4\",\"status\":\"finished\",\"total_bytes\":65536,\"_total_bytes_str\":\"64.00KiB\",\"_percent\":100.0}}"
+        );
+        let resumed_track2_line = format!(
+            "{MEDIA_PROGRESS_PREFIX}{{\"filename\":\"/tmp/test.fa140.m4a\",\"status\":\"downloading\",\"downloaded_bytes\":33792,\"total_bytes\":65536,\"_percent\":51.5625}}"
+        );
+
+        let track1 =
+            parse_media_progress_line(&skipped_track1_line).expect("finished track 1 should parse");
+        let previous_track = state.current_track;
+        let first_overall = aggregate_media_fraction_for_track(
+            2.0,
+            &mut state.current_track,
+            &mut state.last_fraction,
+            &mut state.current_track_id,
+            track1.fraction,
+            track1.track_id.as_deref(),
+        );
+        assert_eq!(first_overall, 0.5);
+        assert_eq!(
+            aggregate_media_byte_progress(
+                &track1,
+                state.current_track != previous_track,
+                &mut state,
+            ),
+            Some((65536, 65536, false))
+        );
+
+        let track2 =
+            parse_media_progress_line(&resumed_track2_line).expect("resumed track 2 should parse");
+        let previous_track = state.current_track;
+        let second_overall = aggregate_media_fraction_for_track(
+            2.0,
+            &mut state.current_track,
+            &mut state.last_fraction,
+            &mut state.current_track_id,
+            track2.fraction,
+            track2.track_id.as_deref(),
+        );
+        assert_eq!(state.current_track, 1.0);
+        assert!((second_overall - 0.7578125).abs() < 1e-6);
+        assert_eq!(
+            aggregate_media_byte_progress(
+                &track2,
+                state.current_track != previous_track,
+                &mut state,
+            ),
+            Some((99328, 131072, false))
         );
     }
 }
@@ -24588,9 +24945,13 @@ pub fn run() {
                             .collect::<Vec<_>>();
                         for attempt_port in candidate_ports.iter().copied() {
                             attempted_rpc_port = true;
-                            app_handle_bg
-                                .state::<Aria2DaemonGuard>()
-                                .set_route_contract_available(false);
+                            let guard = app_handle_bg.state::<Aria2DaemonGuard>();
+                            // Keep child ownership and readiness publication in
+                            // the same critical section as restart and shutdown.
+                            let Some(startup_guard) = guard.lock_initial_launch().await else {
+                                return;
+                            };
+                            guard.set_route_contract_available(false);
                             let mut cmd = std::process::Command::new(&binary_path);
                             crate::platform::hide_child_console(&mut cmd);
                             crate::engines::apply_aria2_environment(&mut cmd, &binary_path);
@@ -24683,8 +25044,31 @@ pub fn run() {
 
                             match cmd.spawn() {
                                 Ok(mut child) => {
-                                    // Give it a moment to fail if port is in use
-                                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                    // Observe early process failures without imposing the
+                                    // full startup grace period on a ready daemon.
+                                    let mut early_version = tokio::time::timeout(Duration::from_millis(200), async {
+                                        loop {
+                                            if child.try_wait().ok().flatten().is_some() {
+                                                break None;
+                                            }
+                                            if let Ok(version) = rpc_call(
+                                                attempt_port,
+                                                &aria2_secret_clone,
+                                                "aria2.getVersion",
+                                                serde_json::json!([]),
+                                            )
+                                            .await
+                                            {
+                                                if crate::network::aria2_baseline_error(&version).is_none() {
+                                                    break Some(version);
+                                                }
+                                            }
+                                            tokio::time::sleep(Duration::from_millis(25)).await;
+                                        }
+                                    })
+                                    .await
+                                    .ok()
+                                    .flatten();
                                     if let Ok(Some(status)) = child.try_wait() {
                                         use std::io::Read;
                                         let mut stderr = String::new();
@@ -24726,7 +25110,6 @@ pub fn run() {
                                         monitor_aria2_stderr(app_handle_bg.clone(), stderr);
                                     }
 
-                                    let guard = app_handle_bg.state::<Aria2DaemonGuard>();
                                     *guard.child.lock().unwrap() = Some(child);
                                     *guard.config_path.lock().unwrap() = Some(config_path);
                                     guard.set_launch_spec(Aria2LaunchSpec {
@@ -24740,7 +25123,11 @@ pub fn run() {
                                     let start = std::time::Instant::now();
                                     let mut ready = false;
                                     while start.elapsed() < std::time::Duration::from_secs(5) {
-                                        match rpc_call(attempt_port, &aria2_secret_clone, "aria2.getVersion", serde_json::json!([])).await {
+                                        let result = match early_version.take() {
+                                            Some(version) => Ok(version),
+                                            None => rpc_call(attempt_port, &aria2_secret_clone, "aria2.getVersion", serde_json::json!([])).await,
+                                        };
+                                        match result {
                                             Ok(ver) => {
                                                 if let Some(error) =
                                                     crate::network::aria2_baseline_error(&ver)
@@ -24767,6 +25154,7 @@ pub fn run() {
                                                         capability_error
                                                     );
                                                 }
+                                                guard.set_allocation_telemetry(&ver);
                                                 aria2_port_clone.store(
                                                     attempt_port,
                                                     std::sync::atomic::Ordering::Release,
@@ -24787,6 +25175,7 @@ pub fn run() {
                                         let err = if last_err.is_empty() { "aria2 daemon did not become ready within 5 seconds".to_string() } else { format!("aria2 did not become ready: {last_err}") };
                                         log::error!("{}", err);
                                         *guard.startup_error.lock().unwrap() = Some(err);
+                                        drop(startup_guard);
                                         if let Err(shutdown_error) = shutdown_aria2_daemon(
                                             app_handle_bg.clone(),
                                             tokio::time::Instant::now() + Duration::from_secs(15),

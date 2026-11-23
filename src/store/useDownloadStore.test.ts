@@ -1981,6 +1981,42 @@ describe('useDownloadStore', () => {
     expect(calls.some(call => call[0] === 'enqueue_download')).toBe(true);
   });
 
+  it('pauses a queued backend-registered row if pauseQueue supersedes its in-flight resume', async () => {
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'queued-reg', url: 'http://test', fileName: 'f', destination: '/tmp', status: 'queued', category: 'Other', dateAdded: '', queueId: 'MAIN', hasBeenDispatched: true },
+      ] as any[],
+      backendRegisteredIds: new Set(['queued-reg']),
+      pendingOrder: [],
+    });
+
+    let resolveResume!: (value: boolean) => void;
+    const resumePromise = new Promise<boolean>(resolve => {
+      resolveResume = resolve;
+    });
+    const pauseCalls: string[] = [];
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'resume_download') return resumePromise;
+      if (cmd === 'pause_download') {
+        pauseCalls.push((args as { id: string }).id);
+        return true;
+      }
+      return undefined;
+    });
+
+    const starting = useDownloadStore.getState().startQueue('MAIN');
+    await vi.waitFor(() => {
+      expect(vi.mocked(ipc.invokeCommand).mock.calls.some(call => call[0] === 'resume_download')).toBe(true);
+    });
+
+    const pausing = useDownloadStore.getState().pauseQueue('MAIN');
+    resolveResume(true);
+
+    await expect(starting).resolves.toEqual([]);
+    await pausing;
+    expect(pauseCalls).toEqual(['queued-reg']);
+  });
+
   it('does not overwrite a downloading event received while starting a queue', async () => {
     useDownloadStore.setState({
       downloads: [

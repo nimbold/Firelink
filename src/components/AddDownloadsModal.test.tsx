@@ -352,6 +352,30 @@ describe('AddDownloadsModal link review and dispatch', () => {
     expect(action).toEqual({ type: 'start-now' });
   });
 
+  it('inspects a magnet even when earlier file links have filled the other metadata lane', async () => {
+    const fileUrls = Array.from({ length: 5 }, (_, index) => `https://example.com/file-${index}.bin`);
+    const magnet = 'magnet:?xt=urn:btih:0123456789abcdef&dn=sample.bin';
+    let finishFileMetadata = () => {};
+    const pendingFileMetadata = new Promise(resolve => {
+      finishFileMetadata = () => resolve(defaultInvoke('fetch_metadata'));
+    });
+    testState.invoke.mockImplementation((command: string) =>
+      command === 'fetch_metadata' ? pendingFileMetadata : defaultInvoke(command)
+    );
+
+    linkInput().props.onChange({ target: { value: [...fileUrls, magnet].join('\n') } });
+    try {
+      await waitForPostcondition(() => draftRows().some(row =>
+        row.sourceUrl === magnet && row.torrentMetadataStatus === 'ready'
+      ));
+      expect(draftRows().filter(row => row.status === 'loading')).toHaveLength(fileUrls.length);
+      expect(testState.invoke.mock.calls.filter(([command]) => command === 'fetch_metadata')).toHaveLength(4);
+    } finally {
+      finishFileMetadata();
+    }
+    await waitForPostcondition(() => draftRows().every(row => row.status === 'ready'));
+  });
+
   it('keeps a magnet Torrent startable when optional metadata inspection fails', async () => {
     const url = 'magnet:?xt=urn:btih:0123456789abcdef&dn=sample.bin';
     testState.invoke.mockImplementation(async (command: string, args?: any) => {
@@ -417,6 +441,38 @@ describe('AddDownloadsModal link review and dispatch', () => {
     expect(download.isTorrent).toBe(false);
     expect(download.mediaFormatSelector).toBeUndefined();
     expect(action).toEqual({ type: 'start-now' });
+  });
+
+  it('requires a playlist to expand into reviewed entries before it can be started', async () => {
+    const url = 'https://www.youtube.com/playlist?list=example';
+    testState.fetchMediaPlaylistMetadata.mockRejectedValue(new Error('Playlist temporarily unavailable'));
+    await enterLink(url);
+    await waitForPostcondition(() => draftRows().some(row =>
+      row.sourceUrl === url && row.status === 'metadata-error'
+    ));
+    previewRows()[0].props.onSelectDetails();
+    renderUntilStable();
+
+    expect(chooseButton('addDownloads.useDefaultMediaFormat')).toBeUndefined();
+    expect(startButton().props.disabled).toBe(true);
+    expect(testState.addDownload).not.toHaveBeenCalled();
+
+    const entryUrl = 'https://www.youtube.com/watch?v=entry123';
+    testState.fetchMediaPlaylistMetadata.mockResolvedValue({
+      title: 'Example playlist',
+      playlist_id: 'example',
+      entry_count: 1,
+      skipped_entries: 0,
+      truncated: false,
+      entries: [{ id: 'entry123', url: entryUrl, title: 'Example video', playlist_index: 1 }]
+    });
+    chooseButton('addDownloads.refreshMetadata').props.onClick();
+    await waitForPostcondition(() => draftRows().some(row =>
+      row.sourceUrl === entryUrl && row.status === 'ready'
+    ));
+    await startReviewedDownload();
+    expect(testState.addDownload).toHaveBeenCalledTimes(1);
+    expect(testState.addDownload.mock.calls[0][0]).toMatchObject({ url: entryUrl, isMedia: true });
   });
 
   it('keeps Treat as File through a later media discovery URL replacement', async () => {

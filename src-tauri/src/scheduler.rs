@@ -140,6 +140,14 @@ fn active_snapshot_stop_is_pending(
         .is_some_and(|stop_key| last_stop_key != stop_key)
 }
 
+fn prior_snapshot_stop_is_pending(
+    snapshot: &crate::ipc::SchedulerRunSnapshot,
+    start_key: &str,
+    last_stop_key: &str,
+) -> bool {
+    snapshot.start_key != start_key && active_snapshot_stop_is_pending(snapshot, last_stop_key)
+}
+
 fn eligible_start_key(
     start_due: bool,
     stop_due: bool,
@@ -400,7 +408,7 @@ pub fn spawn_scheduler(
                         .get("start")
                         .is_none_or(|instant| instant.elapsed() >= Duration::from_secs(5));
                 let active_stop_pending = active_snapshot.is_some_and(|snapshot| {
-                    active_snapshot_stop_is_pending(snapshot, &scheduler_last_stop_key)
+                    prior_snapshot_stop_is_pending(snapshot, &start_key, &scheduler_last_stop_key)
                 });
                 let due_start_key =
                     eligible_start_key(start_due, stop_due, active_stop_pending, &start_key);
@@ -466,9 +474,10 @@ pub fn spawn_scheduler(
 mod tests {
     use super::{
         active_snapshot_stop_is_due, active_snapshot_stop_is_pending, eligible_start_key,
-        minute_of_day, next_scheduler_action, overnight_stop_is_due, scheduler_run_snapshot,
-        scheduler_trigger_matches_state, snapshot_belongs_to_active_scheduler_run,
-        snapshot_stop_is_due, stop_is_due, OvernightStopCheck, SchedulerAction,
+        minute_of_day, next_scheduler_action, overnight_stop_is_due, prior_snapshot_stop_is_pending,
+        scheduler_run_snapshot, scheduler_trigger_matches_state,
+        snapshot_belongs_to_active_scheduler_run, snapshot_stop_is_due, stop_is_due,
+        OvernightStopCheck, SchedulerAction,
     };
     use crate::ipc::{PostQueueAction, SchedulerSettings};
 
@@ -684,6 +693,36 @@ mod tests {
             ),
             Some("2026-06-23-start".to_string())
         );
+    }
+
+    #[test]
+    fn unacknowledged_current_run_snapshot_does_not_block_start_redelivery() {
+        let current_run = scheduler_run_snapshot(
+            "2026-06-23-start",
+            &scheduler_settings("22:00", true, "06:00"),
+        );
+
+        assert!(active_snapshot_stop_is_pending(&current_run, ""));
+        assert!(!prior_snapshot_stop_is_pending(
+            &current_run,
+            "2026-06-23-start",
+            ""
+        ));
+        assert_eq!(
+            eligible_start_key(
+                true,
+                false,
+                prior_snapshot_stop_is_pending(&current_run, "2026-06-23-start", ""),
+                "2026-06-23-start"
+            ),
+            Some("2026-06-23-start".to_string())
+        );
+
+        assert!(prior_snapshot_stop_is_pending(
+            &current_run,
+            "2026-06-24-start",
+            ""
+        ));
     }
 
     #[test]

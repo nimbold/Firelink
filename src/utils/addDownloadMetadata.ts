@@ -178,6 +178,7 @@ export const isMetadataRefreshableRow = (row: AddDownloadDraftRow): boolean =>
 export const canUseYtDlpDefaultMediaFormat = (row: AddDownloadDraftRow): boolean =>
   row.status === 'metadata-error'
   && row.isMedia === true
+  && !row.isPlaylist
   && row.metadataBlockedReason === undefined
   && row.mediaFormatFallback !== 'yt-dlp-default'
   && isHttpMediaRouteUrl(row.sourceUrl);
@@ -189,9 +190,10 @@ export const selectYtDlpDefaultMediaFormat = (
   : row;
 
 export const isYtDlpDefaultMediaFormatSelected = (
-  row: Pick<AddDownloadDraftRow, 'sourceUrl' | 'status' | 'isMedia' | 'mediaFormatFallback' | 'metadataBlockedReason'>
+  row: Pick<AddDownloadDraftRow, 'sourceUrl' | 'status' | 'isMedia' | 'isPlaylist' | 'mediaFormatFallback' | 'metadataBlockedReason'>
 ): boolean => row.status === 'metadata-error'
   && row.isMedia === true
+  && !row.isPlaylist
   && row.mediaFormatFallback === 'yt-dlp-default'
   && row.metadataBlockedReason === undefined
   && isHttpMediaRouteUrl(row.sourceUrl);

@@ -83,25 +83,26 @@ async function waitForRpc(port, secret) {
   throw new Error(`Aria2 RPC did not become ready: ${lastError?.message || 'unknown error'}`);
 }
 
-async function waitForTerminal(port, secret, gid, timeoutMs = 20000) {
+async function waitForTerminal(port, secret, gid, timeoutMs = 20000, observeStatus) {
   const deadline = Date.now() + timeoutMs;
   let latest;
   while (Date.now() < deadline) {
     latest = await rpc(port, secret, 'aria2.tellStatus', [gid, [
-      'status', 'errorCode', 'errorMessage', 'completedLength', 'totalLength',
+      'status', 'errorCode', 'errorMessage', 'completedLength', 'totalLength', 'connections',
     ]]);
+    observeStatus?.(latest);
     if (['complete', 'error', 'removed'].includes(latest.status)) return latest;
     await wait(100);
   }
   throw new Error(`Aria2 gid ${gid} did not become terminal: ${JSON.stringify(latest)}`);
 }
 
-async function waitForProgress(port, secret, gid, timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
+async function waitForProgress(port, secret, gid, minimumBytes = 1) {
+  const deadline = Date.now() + 10000;
   let latest;
   while (Date.now() < deadline) {
     latest = await rpc(port, secret, 'aria2.tellStatus', [gid, ['status', 'completedLength']]);
-    if (latest.status === 'active' && Number(latest.completedLength) > 0) return latest;
+    if (latest.status === 'active' && Number(latest.completedLength) >= minimumBytes) return latest;
     await wait(25);
   }
   throw new Error(`Aria2 gid ${gid} made no observable progress: ${JSON.stringify(latest)}`);
@@ -238,6 +239,8 @@ const serverStatPath = path.join(tempRoot, 'server-stat.txt');
 fs.writeFileSync(serverStatPath, '', { mode: 0o600 });
 let finalRequests = 0;
 let finalCredentials = [];
+let checkingRestart = false;
+let resumedFromOffset = false;
 let redirectSourceCredentials;
 const activeMirrorRequests = new Map();
 let simultaneousMirrorRequests = false;
@@ -311,6 +314,14 @@ const fixtureServer = http.createServer((request, response) => {
     case '/parallel-range':
       observeConnection('parallelRange', request, response);
       serveThrottledBuffer(request, response, parallelPayload);
+      break;
+    case '/restart':
+      if (checkingRestart) {
+        resumedFromOffset ||= /^bytes=[1-9]\d*-/.test(request.headers.range || '');
+        serveBuffer(request, response, parallelPayload);
+      } else {
+        serveThrottledBuffer(request, response, parallelPayload);
+      }
       break;
     case '/mirror-a':
     case '/mirror-b': {
@@ -400,7 +411,7 @@ const environment = fs.existsSync(libraryPath)
         : {}),
     }
   : process.env;
-const child = spawn(binaryPath, [
+const daemonArgs = [
   '--enable-rpc=true',
   `--conf-path=${configPath}`,
   `--rpc-listen-port=${rpcPort}`,
@@ -413,9 +424,14 @@ const child = spawn(binaryPath, [
   ...ARIA2_SYSTEM_RESOLVER_DAEMON_ARGS,
   `--server-stat-if=${serverStatPath}`,
   `--server-stat-of=${serverStatPath}`,
-], { env: environment, stdio: ['ignore', 'ignore', 'pipe'] });
+];
 let stderr = '';
-child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+function launchDaemon() {
+  const daemon = spawn(binaryPath, daemonArgs, { env: environment, stdio: ['ignore', 'ignore', 'pipe'] });
+  daemon.stderr.on('data', chunk => { stderr += chunk.toString(); });
+  return daemon;
+}
+let child = launchDaemon();
 
 try {
   const version = await waitForRpc(rpcPort, secret);
@@ -439,16 +455,24 @@ try {
   const parallelGid = await rpc(rpcPort, secret, 'aria2.addUri', [[`http://127.0.0.1:${fixturePort}/parallel-range`], {
     ...ARIA2_LOCAL_FIXTURE_OPTIONS,
     out: 'parallel-range.bin', split: '16', 'max-connection-per-server': '16', 'min-split-size': '1M',
+    'stream-piece-selector': 'inorder',
   }]);
-  const parallelStatus = await waitForTerminal(rpcPort, secret, parallelGid, 30000);
+  let midTransferConnections = 0;
+  const parallelStatus = await waitForTerminal(rpcPort, secret, parallelGid, 30000, status => {
+    const fraction = Number(status.completedLength) / parallelPayload.length;
+    if (status.status === 'active' && fraction >= 0.25 && fraction <= 0.75) {
+      midTransferConnections = Math.max(midTransferConnections, Number(status.connections));
+    }
+  });
   if (parallelStatus.status !== 'complete'
     || !fs.readFileSync(path.join(tempRoot, 'parallel-range.bin')).equals(parallelPayload)) {
     throw new Error(`parallel bounded-range transfer failed: ${JSON.stringify(parallelStatus)}`);
   }
   if (connectionStats.parallelRange.rangedGets < 12
     || connectionStats.parallelRange.peakRangedGets < 12
-    || connectionStats.parallelRange.peakRangedGets > 16) {
-    throw new Error(`supported byte ranges did not use the configured multi-connection pool: ${JSON.stringify(connectionStats.parallelRange)}`);
+    || connectionStats.parallelRange.peak > 16
+    || midTransferConnections < 12) {
+    throw new Error(`configured range pool was underused or exceeded (mid-transfer: ${midTransferConnections}): ${JSON.stringify(connectionStats.parallelRange)}`);
   }
 
   // Direct Aria2 intentionally bypasses Firelink's bounded range preflight.
@@ -619,6 +643,37 @@ try {
   }]);
   if ((await waitForTerminal(rpcPort, secret, proxyGid)).status !== 'error') {
     throw new Error('unavailable proxy unexpectedly completed');
+  }
+
+  const restartUri = `http://127.0.0.1:${fixturePort}/restart`;
+  const restartOptions = {
+    ...ARIA2_LOCAL_FIXTURE_OPTIONS,
+    out: 'restart.bin', split: '1', continue: 'true', 'always-resume': 'true',
+  };
+  const interruptedGid = await rpc(rpcPort, secret, 'aria2.addUri', [[restartUri], restartOptions]);
+  await waitForProgress(rpcPort, secret, interruptedGid, 2 * 1024 * 1024);
+  const shutdownStarted = Date.now();
+  if (process.platform === 'win32') {
+    await rpc(rpcPort, secret, 'aria2.shutdown');
+  } else if (!child.kill('SIGINT')) {
+    throw new Error('could not send a graceful shutdown signal to Aria2');
+  }
+  if (!await waitForChildExit(child) || child.signalCode
+    || !fs.existsSync(path.join(tempRoot, 'restart.bin.aria2'))) {
+    throw new Error('graceful shutdown did not preserve the unfinished transfer control file');
+  }
+  console.log(`[OK] graceful Aria2 shutdown saved unfinished transfer state in ${Date.now() - shutdownStarted} ms`);
+
+  checkingRestart = true;
+  child = launchDaemon();
+  await waitForRpc(rpcPort, secret);
+  if (hasAria2RouteCapabilities(version)) {
+    await rpc(rpcPort, secret, 'aria2.changeGlobalOption', [{ 'network-target-policy': 'none' }]);
+  }
+  const restartedGid = await rpc(rpcPort, secret, 'aria2.addUri', [[restartUri], restartOptions]);
+  if ((await waitForTerminal(rpcPort, secret, restartedGid)).status !== 'complete'
+    || !resumedFromOffset || !fs.readFileSync(path.join(tempRoot, 'restart.bin')).equals(parallelPayload)) {
+    throw new Error('a fresh Aria2 daemon did not resume the durable range or changed the output');
   }
 
   smokePassed = true;

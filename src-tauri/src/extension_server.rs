@@ -507,9 +507,8 @@ async fn download_handler(
     }
 
     if !wait_for_frontend(&state.frontend_ready).await {
-        if let Some(handoff_id) = media_handoff_id.as_deref() {
-            remove_media_handoff(&state.media_handoffs, handoff_id);
-        }
+        // This request has not registered a handoff. The ID may already
+        // belong to an earlier accepted request waiting for discovery.
         if cached_torrent {
             crate::torrent::remove_managed_torrent(&state.app_handle, &request_id).await;
         }

@@ -759,7 +759,7 @@ export const AddDownloadsModal = () => {
       if (isDirectMagnetEnrichment) {
         if (magnetMetadataRequestsRef.current.size >= maxConcurrentMagnetMetadataRequests) continue;
       } else if (metadataRequestsRef.current.size + playlistRequestsRef.current.size >= maxConcurrentMetadataRequests) {
-        break;
+        continue;
       }
       requestSet.add(requestKey);
       if (row.isPlaylist) {

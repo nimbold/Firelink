@@ -5073,6 +5073,12 @@ impl<R: tauri::Runtime> QueueManager<R> {
         true
     }
 
+    fn aria2_allocation_telemetry_available(&self) -> bool {
+        self.app_handle
+            .try_state::<crate::Aria2DaemonGuard>()
+            .is_some_and(|guard| guard.allocation_telemetry_available())
+    }
+
     async fn begin_aria2_allocation(
         &self,
         id: &str,
@@ -5080,7 +5086,9 @@ impl<R: tauri::Runtime> QueueManager<R> {
         lifecycle_generation: u64,
         payload: &SpawnPayload,
     ) {
-        if !Self::aria2_allocation_phase_eligible(payload) {
+        // Allocation-aware daemons report the actual file-allocation job.
+        // Keep the preallocation hint only for older engines.
+        if self.aria2_allocation_telemetry_available() || !Self::aria2_allocation_phase_eligible(payload) {
             return;
         }
         self.aria2_allocation_pending
@@ -5162,7 +5170,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         // Aria2 reports an active GID with completedLength=0 while it is still
         // creating preallocated files. That observation is not native
         // transfer progress and must not hide the allocation phase.
-        if downloaded_bytes == 0 {
+        if downloaded_bytes == 0 || self.aria2_allocation_telemetry_available() {
             return;
         }
         let mapping = {
@@ -5196,7 +5204,7 @@ impl<R: tauri::Runtime> QueueManager<R> {
         // Aria2 can publish onDownloadStart before it finishes creating
         // preallocated files. A zero-byte start is therefore not native
         // transfer progress and must leave the allocation phase visible.
-        if downloaded_bytes == 0 {
+        if downloaded_bytes == 0 || self.aria2_allocation_telemetry_available() {
             return;
         }
         let mapping = {
@@ -8915,7 +8923,7 @@ fn classify_bounded_range_response(
     }
 }
 
-fn parse_content_range(value: &str) -> Option<(u64, u64, Option<u64>)> {
+pub(crate) fn parse_content_range(value: &str) -> Option<(u64, u64, Option<u64>)> {
     let value = value.trim();
     let (unit, range) = value.split_once(' ')?;
     if !unit.eq_ignore_ascii_case("bytes") {
@@ -10015,14 +10023,18 @@ fn apply_aria2_torrent_options(
     }
     let allocation = normalize_torrent_file_allocation(payload.torrent_file_allocation.as_deref())?;
     options.insert("file-allocation".to_string(), serde_json::json!(allocation));
-    if payload.torrent_check_integrity {
+    // A fresh daemon may be restoring a seeder whose completed files no
+    // longer have an Aria2 control file. Verify existing data so the daemon
+    // can reuse it without allowing overwrite or seeding unchecked bytes.
+    let seeding_requested = torrent_seeding_requested(payload);
+    if payload.torrent_check_integrity || seeding_requested {
         options.insert(
             "check-integrity".to_string(),
             serde_json::json!("true"),
         );
         options.insert(
             "bt-hash-check-seed".to_string(),
-            serde_json::json!(torrent_seeding_requested(payload).to_string()),
+            serde_json::json!(seeding_requested.to_string()),
         );
         // Do not let a daemon-wide bt-seed-unverified setting bypass the
         // explicit per-download integrity request.
@@ -11421,13 +11433,20 @@ mod tests {
     #[tokio::test]
     async fn explicit_allocation_telemetry_ends_without_payload_and_rejects_old_epoch() {
         let app = tauri::test::mock_builder()
+            .manage(crate::Aria2DaemonGuard::new())
             .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        app.state::<crate::Aria2DaemonGuard>()
+            .set_allocation_telemetry(&serde_json::json!({"firelinkAllocationTelemetry": true}));
         let manager = QueueManager::test_new(app.handle().clone(), 1, Arc::new(TestSpawner));
         manager.reserve_enqueue_generation("telemetry", 7).await.unwrap();
-        manager.next_aria2_control_epoch("telemetry").await;
+        let epoch = manager.next_aria2_control_epoch("telemetry").await;
+        manager.begin_aria2_allocation("telemetry", epoch, 7, &SpawnPayload::default()).await;
+        assert_eq!(allocation_pending_epoch(&manager, "telemetry"), None);
         manager.remember_gid("telemetry".into(), "telemetry-gid".into()).await;
         let observed = manager.aria2_gid_mapping("telemetry-gid").unwrap();
         manager.observe_aria2_allocation("telemetry-gid", &observed, true).await;
+        manager.handle_aria2_download_start("telemetry-gid", 4096).await;
+        manager.complete_aria2_allocation_for_gid("telemetry-gid", 4096).await;
         assert_eq!(allocation_pending_epoch(&manager, "telemetry"), Some((observed.epoch, 7)));
         manager.observe_aria2_allocation("telemetry-gid", &observed, false).await;
         assert_eq!(allocation_pending_epoch(&manager, "telemetry"), None);
@@ -13057,11 +13076,10 @@ mod tests {
     }
 
     #[test]
-    fn torrent_integrity_check_preserves_an_explicit_seeding_policy() {
+    fn torrent_seeding_verifies_existing_data_on_fresh_admission() {
         let mut options = serde_json::Map::new();
         let payload = SpawnPayload {
             is_torrent: true,
-            torrent_check_integrity: true,
             torrent_seed_ratio: Some(1.0),
             ..Default::default()
         };
