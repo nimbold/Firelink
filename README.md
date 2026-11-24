@@ -28,9 +28,9 @@ It uses a Rust and Tauri backend with a React and TypeScript interface. Required
 
 ## Status
 
-Firelink `1.5.1` is the latest desktop release.
+Firelink `1.5.2` is the latest desktop release.
 
-Use [the latest Firelink Companion release, `2.2.4`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.4) with Firelink. The Companion is maintained in the [Firelink-Extension repository](https://github.com/nimbold/Firelink-Extension).
+Use [the latest Firelink Companion release, `2.2.5`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.5) with Firelink. The Companion is maintained in the [Firelink-Extension repository](https://github.com/nimbold/Firelink-Extension).
 
 The project is actively maintained. See the [changelog](CHANGELOG.md) for release history and current work.
 
@@ -103,7 +103,7 @@ Only use these steps for Firelink downloaded from the [official GitHub release p
 
 ## Browser integration
 
-[Firelink Companion `2.2.4`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.4) connects browser downloads, links, detected media, magnets, and Torrent metadata to Firelink. Use the [latest Companion release](https://github.com/nimbold/Firelink-Extension/releases/latest) with the [latest Firelink release](https://github.com/nimbold/Firelink/releases/latest).
+[Firelink Companion `2.2.5`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.5) connects browser downloads, links, detected media, magnets, and Torrent metadata to Firelink. Use the [latest Companion release](https://github.com/nimbold/Firelink-Extension/releases/latest) with the [latest Firelink release](https://github.com/nimbold/Firelink/releases/latest).
 
 Captured links open Firelink's Add window for review before they are started or queued.
 

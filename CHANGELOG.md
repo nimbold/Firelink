@@ -5,6 +5,25 @@ All notable changes to Firelink will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-11-24
+
+This patch release fixes stuck download removals, updates bundled media engines and dependencies, and strengthens cross-platform release packaging.
+
+### Improvements
+
+- Update bundled yt-dlp (2026.11.23) and Windows/Linux FFmpeg builds, along with application dependencies.
+- Strengthen cross-platform release packaging, Linux AppImage repacking, and automated checks.
+
+### Fixes
+
+- Fix downloads getting stuck in the list when **Delete file** fails on a pre-existing file, so removing or deleting the entry succeeds once the file is gone from disk, addressing [#47](https://github.com/nimbold/Firelink/issues/47).
+- Allow retrying or switching between **Delete file** and **Remove** from the list after a failed removal, including via the context menu and keyboard, instead of locking the item across restarts.
+- Keep list-only removals from blocking later file deletions, match media filenames case-insensitively on Windows and macOS, and prevent bulk actions from acting on items currently being removed.
+
+### Compatibility
+
+- Use the latest [Firelink Companion 2.2.5](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.5) release from the [Firelink-Extension repository](https://github.com/nimbold/Firelink-Extension) with Firelink 1.5.2.
+
 ## [1.5.1] - 2026-11-23
 
 This release adds multi-mirror segmented downloading, updates bundled engines and dependencies, and hardens download startup, recovery, and browser handoffs.
