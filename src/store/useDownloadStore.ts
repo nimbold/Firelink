@@ -1960,8 +1960,9 @@ export const useDownloadStore = create<DownloadState>()(
       || job.revision < 0 || !['pending', 'running', 'failed', 'completed'].includes(job.phase)) return;
     const currentJob = get().removalJobs[job.id];
     if (currentJob) {
+      if (currentJob.phase === 'completed') return;
       if (currentJob.revision > job.revision) return;
-      if (currentJob.revision === job.revision && currentJob.phase === job.phase && currentJob.error === job.error) return;
+      if (currentJob.revision === job.revision && currentJob.phase === job.phase && currentJob.error === job.error && currentJob.deleteAssets === job.deleteAssets) return;
     }
     set(state => {
       const hasDownload = state.downloads.some(item => item.id === job.id);
@@ -1993,9 +1994,15 @@ export const useDownloadStore = create<DownloadState>()(
     syncSystemIntegrations();
   },
   requestRemovals: async (ids, deleteAssets) => {
-    const selected = [...new Set(ids)].filter(id => !get().removalJobs[id]);
+    const selected = [...new Set(ids)].filter(id => {
+      const existing = get().removalJobs[id];
+      return !existing || existing.phase === 'failed';
+    });
     for (const id of selected) {
-      get().applyRemovalJob({ id, revision: 0, deleteAssets, phase: 'pending', error: null });
+      const existing = get().removalJobs[id];
+      if (!existing || existing.revision === 0) {
+        get().applyRemovalJob({ id, revision: 0, deleteAssets, phase: 'pending', error: null });
+      }
     }
     // Close before any persistence, RPC, or filesystem work is awaited.
     get().closeDeleteModal();
@@ -2004,9 +2011,19 @@ export const useDownloadStore = create<DownloadState>()(
         await waitForPendingStartupResume();
         await invalidateAndWaitForDispatch(id);
         await flushDownloadPersistence();
+        const current = get().removalJobs[id];
+        if (current && current.revision > 0 && current.phase !== 'failed') return;
         await invoke('submit_download_removals', { ids: [id], deleteAssets });
       } catch {
-        get().applyRemovalJob({ id, revision: 0, deleteAssets, phase: 'failed', error: i18n.t($ => $.downloads.removal.failed) });
+        const current = get().removalJobs[id];
+        if (current && current.revision > 0 && current.phase !== 'failed') return;
+        get().applyRemovalJob({
+          id,
+          revision: current?.revision ?? 0,
+          deleteAssets: current && current.revision > 0 ? current.deleteAssets : deleteAssets,
+          phase: 'failed',
+          error: i18n.t($ => $.downloads.removal.failed),
+        });
       }
     })));
   },

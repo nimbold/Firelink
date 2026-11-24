@@ -55,6 +55,57 @@ pub fn list_download_removals(
     jobs(&*app.state::<crate::db::DbState>().lock()?)
 }
 
+fn upsert_removal_job(
+    connection: &Connection,
+    id: &str,
+    delete_assets: bool,
+) -> Result<Option<DownloadRemovalJob>, String> {
+    let existing: Option<String> = connection
+        .query_row(
+            "SELECT data FROM download_removal_jobs WHERE id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some(existing_json) = existing {
+        let mut existing_job: DownloadRemovalJob =
+            serde_json::from_str(&existing_json).map_err(|e| e.to_string())?;
+        if existing_job.phase != Phase::Failed {
+            return Ok(None);
+        }
+        // download_removal_assets is write-once per removal lifecycle and is
+        // only deleted on completion in run(), so toggling delete_assets
+        // across failed attempts can never erase a fenced asset manifest.
+        existing_job.revision = existing_job.revision.saturating_add(1);
+        existing_job.delete_assets = delete_assets;
+        existing_job.phase = Phase::Pending;
+        existing_job.error = None;
+        save(connection, &existing_job)?;
+        return Ok(Some(existing_job));
+    }
+
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM downloads WHERE id=?1)",
+            [id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if !exists {
+        return Err("Download is not durably saved".into());
+    }
+    let job = DownloadRemovalJob {
+        id: id.to_string(),
+        revision: 1,
+        delete_assets,
+        phase: Phase::Pending,
+        error: None,
+    };
+    save(connection, &job)?;
+    Ok(Some(job))
+}
+
 #[tauri::command]
 pub async fn submit_download_removals(
     caller: tauri::WebviewWindow,
@@ -69,39 +120,12 @@ pub async fn submit_download_removals(
         let state = app.state::<crate::AppState>();
         for id in ids {
             let _guard = state.queue_manager.acquire_aria2_control(&id).await;
-            let job = {
+            let Some(job) = ({
                 let db = app.state::<crate::db::DbState>();
                 let connection = db.lock()?;
-                let existing: Option<String> = connection
-                    .query_row(
-                        "SELECT data FROM download_removal_jobs WHERE id=?1",
-                        [&id],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .map_err(|e| e.to_string())?;
-                if existing.is_some() {
-                    continue;
-                }
-                let exists: bool = connection
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM downloads WHERE id=?1)",
-                        [&id],
-                        |r| r.get(0),
-                    )
-                    .map_err(|e| e.to_string())?;
-                if !exists {
-                    return Err("Download is not durably saved".into());
-                }
-                let job = DownloadRemovalJob {
-                    id: id.clone(),
-                    revision: 1,
-                    delete_assets,
-                    phase: Phase::Pending,
-                    error: None,
-                };
-                save(&connection, &job)?;
-                job
+                upsert_removal_job(&connection, &id, delete_assets)?
+            }) else {
+                continue;
             };
             state.queue_manager.remove_from_pending(&id).await;
             state.queue_manager.cancel_aria2_retries(&id).await;
@@ -394,5 +418,134 @@ mod tests {
         let root = directory.path().canonicalize().unwrap();
         std::os::unix::fs::symlink(&root, root.join("link")).unwrap();
         assert!(snapshot_assets(&[root]).is_err());
+    }
+
+    fn setup_removal_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE downloads (id TEXT PRIMARY KEY, status TEXT, queue_id TEXT, data TEXT);
+             CREATE TABLE download_removal_jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+             CREATE TABLE download_removal_assets (id TEXT PRIMARY KEY, data TEXT NOT NULL);",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn upsert_removal_job_creates_new_and_ignores_non_failed_jobs() {
+        let conn = setup_removal_db();
+        conn.execute(
+            "INSERT INTO downloads(id, status, queue_id, data) VALUES (?1, 'failed', 'MAIN', '{}')",
+            ["dl-1"],
+        )
+        .unwrap();
+
+        let created = upsert_removal_job(&conn, "dl-1", true)
+            .unwrap()
+            .expect("new job should be created");
+        assert_eq!(created.revision, 1);
+        assert!(created.delete_assets);
+        assert_eq!(created.phase, Phase::Pending);
+
+        // Pending job must be ignored.
+        assert!(upsert_removal_job(&conn, "dl-1", false).unwrap().is_none());
+
+        // Running job must be ignored.
+        let mut running = created.clone();
+        running.revision = 2;
+        running.phase = Phase::Running;
+        save(&conn, &running).unwrap();
+        assert!(upsert_removal_job(&conn, "dl-1", false).unwrap().is_none());
+
+        // Completed tombstone must be ignored.
+        let mut completed = running.clone();
+        completed.revision = 3;
+        completed.phase = Phase::Completed;
+        save(&conn, &completed).unwrap();
+        assert!(upsert_removal_job(&conn, "dl-1", false).unwrap().is_none());
+    }
+
+    #[test]
+    fn upsert_removal_job_resubmits_failed_jobs_and_manages_asset_manifest() {
+        let conn = setup_removal_db();
+        conn.execute(
+            "INSERT INTO downloads(id, status, queue_id, data) VALUES (?1, 'failed', 'MAIN', '{}')",
+            ["dl-failed"],
+        )
+        .unwrap();
+        let failed_delete = DownloadRemovalJob {
+            id: "dl-failed".into(),
+            revision: 1,
+            delete_assets: true,
+            phase: Phase::Failed,
+            error: Some("Removal failed".into()),
+        };
+        save(&conn, &failed_delete).unwrap();
+        conn.execute(
+            "INSERT INTO download_removal_assets(id, data) VALUES (?1, '{\"a\":\"sig\"}')",
+            ["dl-failed"],
+        )
+        .unwrap();
+
+        // Retrying with delete_assets: true increments revision and keeps the manifest.
+        let retried = upsert_removal_job(&conn, "dl-failed", true)
+            .unwrap()
+            .expect("failed job should be re-queued");
+        assert_eq!(retried.revision, 2);
+        assert!(retried.delete_assets);
+        assert_eq!(retried.phase, Phase::Pending);
+        assert!(retried.error.is_none());
+        let assets_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM download_removal_assets WHERE id=?1",
+                ["dl-failed"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(assets_count, 1);
+
+        // Downgrading failed delete_assets: true -> false switches mode and preserves manifest.
+        let mut failed_again = retried;
+        failed_again.revision = 3;
+        failed_again.phase = Phase::Failed;
+        failed_again.error = Some("Still locked".into());
+        save(&conn, &failed_again).unwrap();
+
+        let downgraded = upsert_removal_job(&conn, "dl-failed", false)
+            .unwrap()
+            .expect("failed job should allow switching to list-only removal");
+        assert_eq!(downgraded.revision, 4);
+        assert!(!downgraded.delete_assets);
+        assert_eq!(downgraded.phase, Phase::Pending);
+        assert!(downgraded.error.is_none());
+        let assets_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM download_removal_assets WHERE id=?1",
+                ["dl-failed"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(assets_count, 1);
+
+        // Upgrading failed delete_assets: false -> true preserves any prior manifest.
+        let mut failed_list_only = downgraded;
+        failed_list_only.revision = 5;
+        failed_list_only.phase = Phase::Failed;
+        save(&conn, &failed_list_only).unwrap();
+
+        let upgraded = upsert_removal_job(&conn, "dl-failed", true)
+            .unwrap()
+            .expect("failed list-only job should allow upgrading to delete_assets");
+        assert_eq!(upgraded.revision, 6);
+        assert!(upgraded.delete_assets);
+        assert_eq!(upgraded.phase, Phase::Pending);
+        let assets_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM download_removal_assets WHERE id=?1",
+                ["dl-failed"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(assets_count, 1);
     }
 }

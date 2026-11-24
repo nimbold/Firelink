@@ -147,16 +147,61 @@ describe('useDownloadStore', () => {
     const completed = { id: 'revision-test', revision: 3, deleteAssets: true, phase: 'completed' as const, error: null };
     useDownloadStore.getState().applyRemovalJob(completed);
     useDownloadStore.getState().applyRemovalJob({ ...completed, revision: 2, phase: 'running' });
+    useDownloadStore.getState().applyRemovalJob({ ...completed, revision: 3, phase: 'failed', error: 'Late failure' });
     expect(useDownloadStore.getState().removalJobs[completed.id]).toEqual(completed);
   });
 
-  it('keeps partial removal failures visible and does not repeat successful jobs', async () => {
+  it('keeps partial removal failures visible, does not repeat active or completed jobs, and allows re-submitting failed jobs', async () => {
     vi.mocked(ipc.invokeCommand).mockResolvedValue(undefined as never);
+    const pending = { id: 'pending-removal', revision: 1, deleteAssets: true, phase: 'pending' as const, error: null };
+    const running = { id: 'running-removal', revision: 2, deleteAssets: true, phase: 'running' as const, error: null };
+    const completedJob = { id: 'completed-removal', revision: 3, deleteAssets: true, phase: 'completed' as const, error: null };
     const failed = { id: 'failed-removal', revision: 1, deleteAssets: true, phase: 'failed' as const, error: 'Drive unavailable' };
+
+    useDownloadStore.getState().applyRemovalJob(pending);
+    useDownloadStore.getState().applyRemovalJob(running);
+    useDownloadStore.getState().applyRemovalJob(completedJob);
     useDownloadStore.getState().applyRemovalJob(failed);
-    await useDownloadStore.getState().requestRemovals([failed.id], true);
+
+    await useDownloadStore.getState().requestRemovals([pending.id, running.id, completedJob.id], true);
     expect(ipc.invokeCommand).not.toHaveBeenCalledWith('submit_download_removals', expect.anything());
+
+    // Re-submitting a failed delete_assets job as list-only removal (deleteAssets: false)
+    // must invoke submit_download_removals without clobbering the durable revision with 0.
+    await useDownloadStore.getState().requestRemovals([failed.id], false);
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('submit_download_removals', {
+      ids: [failed.id],
+      deleteAssets: false,
+    });
     expect(useDownloadStore.getState().removalJobs[failed.id]).toEqual(failed);
+
+    // If re-submission fails, the durable failed job retains its revision and deleteAssets mode.
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
+      if (command === 'submit_download_removals') throw new Error('Backend error');
+      return undefined as never;
+    });
+    await useDownloadStore.getState().requestRemovals([failed.id], false);
+    expect(useDownloadStore.getState().removalJobs[failed.id].phase).toBe('failed');
+    expect(useDownloadStore.getState().removalJobs[failed.id].revision).toBe(1);
+    expect(useDownloadStore.getState().removalJobs[failed.id].deleteAssets).toBe(true);
+
+    // A failing requestRemovals must not overwrite a concurrent durable running/completed job.
+    let rejectSubmit: (() => void) | undefined;
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
+      if (command === 'submit_download_removals') {
+        return new Promise((_, reject) => {
+          rejectSubmit = () => reject(new Error('IPC failure'));
+        });
+      }
+      return undefined as never;
+    });
+    const concurrentRemoval = useDownloadStore.getState().requestRemovals([failed.id], false);
+    await vi.waitFor(() => expect(rejectSubmit).toBeDefined());
+    const concurrentRunning = { id: failed.id, revision: 2, deleteAssets: false, phase: 'running' as const, error: null };
+    useDownloadStore.getState().applyRemovalJob(concurrentRunning);
+    rejectSubmit!();
+    await concurrentRemoval;
+    expect(useDownloadStore.getState().removalJobs[failed.id]).toEqual(concurrentRunning);
   });
 
   it('does not resurrect a row when completion races startup hydration', async () => {

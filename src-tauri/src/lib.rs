@@ -9486,11 +9486,11 @@ fn has_resumable_download_assets(primary: &std::path::Path) -> bool {
     })
 }
 
-/// A ready/staged/paused row can be removed before native admission has established
-/// an ownership record.  Treat Delete file as a no-op only when the row is
-/// still pre-admission and no exact output artifact can be found.  Never use
-/// this path for an admitted lifecycle: a missing ownership record there is
-/// an integrity failure and must remain fail-closed.
+/// A ready/staged/queued/paused/failed row can be removed before native admission
+/// has established an ownership record.  Treat Delete file as a no-op only when
+/// the row is still pre-admission and no exact output artifact can be found.
+/// Never use this path for an admitted lifecycle: a missing ownership record
+/// there is an integrity failure and must remain fail-closed.
 fn should_skip_unowned_asset_cleanup(
     status: crate::ipc::DownloadStatus,
     has_been_dispatched: bool,
@@ -9501,6 +9501,8 @@ fn should_skip_unowned_asset_cleanup(
         status,
         crate::ipc::DownloadStatus::Ready
             | crate::ipc::DownloadStatus::Staged
+            | crate::ipc::DownloadStatus::Queued
+            | crate::ipc::DownloadStatus::Failed
             // pause_download can intentionally park a staged row without
             // ever creating a native lifecycle. Treat that representation as
             // pre-admission only when the durable dispatch marker is false;
@@ -18440,6 +18442,42 @@ mod tests {
             false,
             false
         ));
+        assert!(should_skip_unowned_asset_cleanup(
+            crate::ipc::DownloadStatus::Failed,
+            false,
+            false,
+            false
+        ));
+        assert!(should_skip_unowned_asset_cleanup(
+            crate::ipc::DownloadStatus::Queued,
+            false,
+            false,
+            false
+        ));
+        assert!(!should_skip_unowned_asset_cleanup(
+            crate::ipc::DownloadStatus::Failed,
+            true,
+            false,
+            false
+        ));
+        assert!(!should_skip_unowned_asset_cleanup(
+            crate::ipc::DownloadStatus::Failed,
+            false,
+            true,
+            false
+        ));
+        assert!(!should_skip_unowned_asset_cleanup(
+            crate::ipc::DownloadStatus::Failed,
+            false,
+            false,
+            true
+        ));
+        assert!(!should_skip_unowned_asset_cleanup(
+            crate::ipc::DownloadStatus::Queued,
+            true,
+            false,
+            false
+        ));
         assert!(!should_skip_unowned_asset_cleanup(
             crate::ipc::DownloadStatus::Staged,
             true,
@@ -18515,6 +18553,61 @@ mod tests {
         std::fs::write(download_root.join("file.bin.aria2"), b"partial").unwrap();
         assert!(expected_unadmitted_download_assets_present(app.handle(), &item).unwrap());
         std::fs::remove_file(download_root.join("file.bin.aria2")).unwrap();
+
+        // Issue #47: pre-admission failure when an unmanaged file already exists on disk.
+        let unmanaged_target = download_root.join("already-on-disk.bin");
+        std::fs::write(&unmanaged_target, b"existing-unmanaged-file").unwrap();
+        let failed_unadmitted_item: crate::ipc::DownloadItem = serde_json::from_value(json!({
+            "id": "failed-unadmitted",
+            "url": "https://example.com/already-on-disk.bin",
+            "fileName": "already-on-disk.bin",
+            "status": "failed",
+            "category": "Other",
+            "dateAdded": "",
+            "destination": download_root.to_string_lossy(),
+            "hasBeenDispatched": false
+        }))
+        .unwrap();
+        let database = app.handle().state::<crate::db::DbState>();
+        {
+            let mut connection = database.lock().unwrap();
+            crate::db::replace_downloads(
+                &mut connection,
+                &serde_json::to_string(&[failed_unadmitted_item.clone()]).unwrap(),
+                false,
+            )
+            .unwrap();
+        }
+        assert!(crate::download_ownership::owned_paths_for_id(app.handle(), &failed_unadmitted_item.id)
+            .unwrap()
+            .is_empty());
+        assert!(crate::download_ownership::primary_path_for_id(app.handle(), &failed_unadmitted_item.id)
+            .unwrap()
+            .is_none());
+        let assets_present =
+            expected_unadmitted_download_assets_present(app.handle(), &failed_unadmitted_item)
+                .unwrap();
+        assert!(assets_present);
+        assert!(!should_skip_unowned_asset_cleanup(
+            failed_unadmitted_item.status,
+            failed_unadmitted_item.has_been_dispatched.unwrap_or(false),
+            false,
+            assets_present,
+        ));
+
+        // After the user manually deletes the unmanaged file from disk, cleanup
+        // is safe to skip as a no-op so the failed row can be removed.
+        std::fs::remove_file(&unmanaged_target).unwrap();
+        let assets_present_after_delete =
+            expected_unadmitted_download_assets_present(app.handle(), &failed_unadmitted_item)
+                .unwrap();
+        assert!(!assets_present_after_delete);
+        assert!(should_skip_unowned_asset_cleanup(
+            failed_unadmitted_item.status,
+            failed_unadmitted_item.has_been_dispatched.unwrap_or(false),
+            false,
+            assets_present_after_delete,
+        ));
 
         let media_item: crate::ipc::DownloadItem = serde_json::from_value(json!({
             "id": "staged-media",
