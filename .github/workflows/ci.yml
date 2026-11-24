@@ -8,16 +8,28 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   rust-security:
     name: Rust advisory audit
+    timeout-minutes: 15
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable action branch (2026-10-16)
         with:
           toolchain: stable
+      - name: Cache locked cargo-audit binary
+        id: cargo-audit-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-0.23.0-ubuntu-22.04-${{ runner.arch }}
       - name: Install locked cargo-audit
+        if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-audit --version 0.23.0 --locked
       - name: Reject vulnerable resolved dependencies
         working-directory: src-tauri
@@ -25,6 +37,7 @@ jobs:
 
   frontend:
     name: Frontend checks (Node ${{ matrix.node }})
+    timeout-minutes: 15
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -104,7 +117,19 @@ jobs:
             librsvg2-dev \
             patchelf \
             libdbus-1-dev \
-            pkg-config
+            pkg-config \
+            autoconf \
+            automake \
+            libtool \
+            gettext \
+            autopoint \
+            libssl-dev \
+            libssh2-1-dev \
+            libgcrypt20-dev \
+            libc-ares-dev \
+            libexpat1-dev \
+            libsqlite3-dev \
+            zlib1g-dev
       - run: npm ci
       - name: Test Rust backend
         if: runner.os != 'Windows'
@@ -142,9 +167,6 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: src-tauri
         run: cargo test --test torrent_web_seed --target ${{ matrix.target }} -- --nocapture
-      - name: Install Aria2 source build dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get install -y autoconf automake libtool gettext autopoint libssl-dev libssh2-1-dev libgcrypt20-dev libc-ares-dev libexpat1-dev libsqlite3-dev zlib1g-dev
       - name: Install Aria2 source build dependencies (Windows)
         id: aria2-msys
         if: runner.os == 'Windows'
@@ -173,9 +195,10 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: src-tauri/provisioned-engines/${{ matrix.target }}
-          # The target, toolchain fingerprint, lockfiles, provisioning code,
-          # payload validators, and runner package lists all invalidate the key.
-          key: firelink-engine-payload-v1-${{ matrix.target }}-${{ steps.engine-toolchain.outputs.fingerprint }}-${{ hashFiles('engine-sources.lock.json', 'engines.lock.json', 'scripts/aria2/**', 'scripts/engine-*.js', 'scripts/provision-engines.js', 'scripts/stage-engines.js', 'scripts/verify-binaries.js', 'scripts/aria2-route-contract.js', '.github/workflows/ci.yml', '.github/workflows/release.yml') }}
+          # The target, toolchain fingerprint (installed packages/compilers),
+          # lockfiles, provisioning code, and payload validators all invalidate
+          # the key without churning on unrelated workflow edits.
+          key: firelink-engine-payload-v1-${{ matrix.target }}-${{ steps.engine-toolchain.outputs.fingerprint }}-${{ hashFiles('engine-sources.lock.json', 'engines.lock.json', 'scripts/aria2/**', 'scripts/engine-*.js', 'scripts/provision-engines.js', 'scripts/stage-engines.js', 'scripts/verify-binaries.js', 'scripts/aria2-route-contract.js') }}
       - name: Validate restored engine payload
         id: engine-cache-validation
         if: runner.os != 'macOS' && steps.engine-cache.outputs.cache-hit == 'true'
@@ -232,6 +255,7 @@ jobs:
           runner.os != 'macOS' &&
           github.event_name == 'push' &&
           github.ref == 'refs/heads/main' &&
+          steps.aria2-cache.outcome == 'success' &&
           steps.aria2-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -246,4 +270,4 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: src-tauri/provisioned-engines/${{ matrix.target }}
-          key: firelink-engine-payload-v1-${{ matrix.target }}-${{ steps.engine-toolchain.outputs.fingerprint }}-${{ hashFiles('engine-sources.lock.json', 'engines.lock.json', 'scripts/aria2/**', 'scripts/engine-*.js', 'scripts/provision-engines.js', 'scripts/stage-engines.js', 'scripts/verify-binaries.js', 'scripts/aria2-route-contract.js', '.github/workflows/ci.yml', '.github/workflows/release.yml') }}
+          key: firelink-engine-payload-v1-${{ matrix.target }}-${{ steps.engine-toolchain.outputs.fingerprint }}-${{ hashFiles('engine-sources.lock.json', 'engines.lock.json', 'scripts/aria2/**', 'scripts/engine-*.js', 'scripts/provision-engines.js', 'scripts/stage-engines.js', 'scripts/verify-binaries.js', 'scripts/aria2-route-contract.js') }}

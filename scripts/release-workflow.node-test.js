@@ -15,11 +15,13 @@ const ciWorkflow = fs.readFileSync(
 const readme = fs.readFileSync(path.join(repositoryRoot, 'README.md'), 'utf8');
 const releaseGuide = fs.readFileSync(path.join(repositoryRoot, 'RELEASE.md'), 'utf8');
 
-test('release Linux dependency installation is mirror-normalized and bounded', () => {
-  assert.match(releaseWorkflow, /azure\\\.archive\\\.ubuntu\\\.com/);
-  assert.equal((releaseWorkflow.match(/Acquire::Retries=3/g) || []).length, 2);
-  assert.equal((releaseWorkflow.match(/timeout --foreground --signal=TERM --kill-after=30s 10m apt-get/g) || []).length, 2);
-  assert.doesNotMatch(releaseWorkflow, /^\s*sudo apt-get (update|install)/m);
+test('CI and release Linux dependency installation are mirror-normalized and bounded', () => {
+  for (const [name, workflow] of [['release', releaseWorkflow], ['CI', ciWorkflow]]) {
+    assert.match(workflow, /azure\\\.archive\\\.ubuntu\\\.com/, `${name} must normalize Azure Ubuntu mirrors`);
+    assert.equal((workflow.match(/Acquire::Retries=3/g) || []).length, 2, `${name} must bound both apt-get update and install`);
+    assert.equal((workflow.match(/timeout --foreground --signal=TERM --kill-after=30s 10m apt-get/g) || []).length, 2, `${name} must timeout both apt-get update and install`);
+    assert.doesNotMatch(workflow, /(?:^|\s)sudo apt-get (?:update|install)\b/m, `${name} must not run unbounded sudo apt-get`);
+  }
 });
 
 test('macOS release verification uses the app mounted from the final DMG', () => {
@@ -39,11 +41,30 @@ test('release workflow normalizes all 6 distribution target artifacts', () => {
   assert.match(releaseWorkflow, /rename_asset '\*\.zip' "Firelink_\$\{VERSION\}_Windows-x64-portable\.zip"/);
 });
 
-test('Linux release pins and verifies appimagetool and its runtime inputs', () => {
-  assert.match(releaseWorkflow, /APPIMAGETOOL_SHA256: e8c1169c4af66c3184d7ee110713d4be04befe671fa358e2c1591ee840553b03/);
-  assert.match(releaseWorkflow, /APPIMAGETOOL_RUNTIME_SHA256: 617aa77314d57c8b8e4fae9c3f0b35af7b30d5529cb69e98f64f92510ed98a46/);
+test('Linux release pins immutable appimagetool and runtime releases with retries', () => {
+  assert.doesNotMatch(releaseWorkflow, /releases\/download\/continuous\//);
+  assert.match(releaseWorkflow, /APPIMAGETOOL_URL: https:\/\/github\.com\/AppImage\/appimagetool\/releases\/download\/1\.9\.1\/appimagetool-x86_64\.AppImage/);
+  assert.match(releaseWorkflow, /APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0/);
+  assert.match(releaseWorkflow, /APPIMAGETOOL_RUNTIME_URL: https:\/\/github\.com\/AppImage\/type2-runtime\/releases\/download\/20251108\/runtime-x86_64/);
+  assert.match(releaseWorkflow, /APPIMAGETOOL_RUNTIME_SHA256: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d/);
+  assert.match(releaseWorkflow, /curl -fsSL --retry 3 --retry-all-errors --connect-timeout 30 --max-time 120/);
   assert.match(releaseWorkflow, /echo "\$APPIMAGETOOL_RUNTIME_SHA256  \$RUNNER_TEMP\/appimage-runtime" \| sha256sum -c -/);
-  assert.match(releaseWorkflow, /APPIMAGETOOL_RUNTIME_FILE: \$\{\{ runner\.temp \}\}\/appimage-runtime/);
+  assert.match(releaseWorkflow, /LDAI_RUNTIME_FILE: \$\{\{ runner\.temp \}\}\/appimage-runtime/);
+  assert.match(releaseWorkflow, /--runtime-file "\$RUNNER_TEMP\/appimage-runtime"/);
+  assert.ok(
+    releaseWorkflow.indexOf('- name: Install pinned appimagetool (Linux only)')
+      < releaseWorkflow.indexOf('- name: Build Linux AppImage from existing binary'),
+    'pinned appimagetool and runtime must be installed before AppImage bundling',
+  );
+});
+
+test('release workflow scopes write permissions to publish and bounds all jobs', () => {
+  const beforeJobs = releaseWorkflow.slice(0, releaseWorkflow.indexOf('\njobs:'));
+  const publishJob = releaseWorkflow.slice(releaseWorkflow.indexOf('\n  publish:'));
+  assert.match(beforeJobs, /permissions:\s*\n\s+contents: read/);
+  assert.doesNotMatch(beforeJobs, /contents: write/);
+  assert.match(publishJob, /permissions:\s*\n\s+contents: write/);
+  assert.equal((releaseWorkflow.match(/timeout-minutes:/g) || []).length, 3);
 });
 
 test('CI covers the declared Node floor and current runtimes while native jobs use Node 24 LTS', () => {
@@ -69,4 +90,5 @@ test('Windows release job packages portable ZIP with portable.flag and data clea
   assert.match(releaseWorkflow, /node scripts\/smoke-packaged-app\.js --executable \$portableExe --assert-no-visible-child-windows --assert-portable-data/);
   assert.match(releaseWorkflow, /Remove-Item -Recurse -Force \$portableDataDir/);
   assert.match(releaseWorkflow, /refusing to package a ZIP containing runtime data/);
+  assert.match(releaseWorkflow, /& 7z a -tzip \$portableZip "\$portableRoot\\\*" -y\s*\n\s*if \(\$LASTEXITCODE -ne 0\)/);
 });

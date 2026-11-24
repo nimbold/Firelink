@@ -122,6 +122,8 @@ function main() {
   const appDir = path.resolve(argValue('--appdir') || path.join(bundleDirectory, 'Firelink.AppDir'));
   const appImage = path.resolve(argValue('--appimage') || findSingleAppImage(bundleDirectory));
   const appImageTool = path.resolve(argValue('--appimagetool') || process.env.APPIMAGETOOL || 'appimagetool');
+  const runtimeFileArg = argValue('--runtime-file') || process.env.APPIMAGETOOL_RUNTIME_FILE;
+  const runtimeFile = runtimeFileArg ? path.resolve(runtimeFileArg) : null;
   const source = path.join(repoRoot, 'src-tauri', 'provisioned-engines', target);
   const destination = path.join(appDir, 'usr', 'lib', 'Firelink', 'engine-dist', target);
 
@@ -129,6 +131,9 @@ function main() {
   mustBeDirectory(source, 'Provisioned engine payload');
   mustBeFile(appImage, 'AppImage');
   mustBeFile(appImageTool, 'appimagetool');
+  if (runtimeFile) {
+    mustBeFile(runtimeFile, 'AppImage runtime');
+  }
 
   validatePayloadManifest(source, target, 'Provisioned engine');
 
@@ -147,7 +152,10 @@ function main() {
   normalizeAppRunPermissions(appDir, 'AppDir');
 
   fs.chmodSync(appImageTool, 0o755);
-  run(appImageTool, [appDir, appImage], {
+  const appImageToolArgs = runtimeFile
+    ? ['--runtime-file', runtimeFile, appDir, appImage]
+    : [appDir, appImage];
+  run(appImageTool, appImageToolArgs, {
     env: {
       APPIMAGE_EXTRACT_AND_RUN: '1',
       ARCH: 'x86_64',

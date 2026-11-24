@@ -94,17 +94,27 @@ function assertSafeEngineCacheWorkflow(workflow) {
   assert.match(workflow, /scripts\/verify-binaries\.js/);
   assert.doesNotMatch(workflow, /restore-keys:/);
 
+  const engineCacheKeyMatch = workflow.match(/key: (firelink-engine-payload-v1-[^\n]+)/);
+  assert.ok(engineCacheKeyMatch, 'engine payload cache key must be defined');
+  assert.doesNotMatch(
+    engineCacheKeyMatch[1],
+    /\.github\/workflows\/(?:ci|release)\.yml/,
+    'engine payload cache key must not invalidate on unrelated workflow edits',
+  );
+
   const restore = workflow.indexOf('actions/cache/restore@');
   const validation = workflow.indexOf('id: engine-cache-validation');
   const provision = workflow.indexOf('node scripts/provision-engines.js');
   assert.ok(restore >= 0 && restore < validation && validation < provision);
   assert.match(workflow, /continue-on-error: true/);
   assert.match(workflow, /FIRELINK_TARGET_TRIPLE: \$\{\{ matrix\.target \}\}/);
+  return engineCacheKeyMatch[1];
 }
 
-test('CI and release restore only exact, validated engine payload caches', () => {
-  assertSafeEngineCacheWorkflow(ciWorkflow);
-  assertSafeEngineCacheWorkflow(releaseWorkflow);
+test('CI and release restore only exact, validated engine payload caches with identical keys', () => {
+  const ciKey = assertSafeEngineCacheWorkflow(ciWorkflow);
+  const releaseKey = assertSafeEngineCacheWorkflow(releaseWorkflow);
+  assert.equal(ciKey, releaseKey, 'CI and release must compute identical engine payload cache keys');
 });
 
 test('only trusted main pushes save the shared engine cache', () => {
@@ -115,12 +125,20 @@ test('only trusted main pushes save the shared engine cache', () => {
   assert.doesNotMatch(releaseWorkflow, /actions\/cache\/save@/);
 });
 
-test('CI and release use granular Aria2 build caching and safe timeouts', () => {
+test('CI and release use granular Aria2 build caching, Rust caching, and safe timeouts', () => {
+  assert.match(ciWorkflow, /concurrency:\s*\n\s+group:[^\n]+\n\s+cancel-in-progress: \$\{\{ github\.ref != 'refs\/heads\/main' \}\}/);
   assert.match(ciWorkflow, /timeout-minutes: (?:4[5-9]|[5-9][0-9])/);
+  assert.match(releaseWorkflow, /timeout-minutes: (?:4[5-9]|[5-9][0-9])/);
   assert.match(ciWorkflow, /uses: Swatinem\/rust-cache@[0-9a-f]{40} # v2\.9\.3/);
+  assert.match(releaseWorkflow, /uses: Swatinem\/rust-cache@[0-9a-f]{40} # v2\.9\.3/);
   assert.match(ciWorkflow, /key: firelink-aria2-build-v1-\$\{\{ matrix\.target \}\}-\$\{\{ steps\.engine-toolchain\.outputs\.aria2-fingerprint \}\}/);
   assert.match(releaseWorkflow, /key: firelink-aria2-build-v1-\$\{\{ matrix\.target \}\}-\$\{\{ steps\.engine-toolchain\.outputs\.aria2-fingerprint \}\}/);
-  const saveAria2 = ciWorkflow.slice(ciWorkflow.indexOf('- name: Save verified Aria2 build cache'));
+  const saveAria2 = ciWorkflow.slice(
+    ciWorkflow.indexOf('- name: Save verified Aria2 build cache'),
+    ciWorkflow.indexOf('- name: Save verified engine payload cache'),
+  );
   assert.match(saveAria2, /github\.event_name == 'push'/);
   assert.match(saveAria2, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(saveAria2, /steps\.aria2-cache\.outcome == 'success'/);
+  assert.match(saveAria2, /steps\.aria2-cache\.outputs\.cache-hit != 'true'/);
 });
