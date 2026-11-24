@@ -92,10 +92,10 @@ type CommandMap = {
   /** True when the pause won; false when a terminal/inactive lifecycle won. */
   pause_download: { args: { id: string }; result: boolean };
   resume_download: { args: { id: string; queueId: string }; result: boolean };
-  submit_download_removals: { args: { ids: string[]; deleteAssets: boolean }; result: void };
+  submit_download_removals: { args: { ids: string[]; deleteAssets: boolean }; result: DownloadRemovalJob[] };
   list_download_removals: { args: undefined; result: DownloadRemovalJob[] };
   resume_download_removals: { args: undefined; result: void };
-  retry_download_removal: { args: { id: string }; result: void };
+  retry_download_removal: { args: { id: string }; result: DownloadRemovalJob };
   remove_download: {
     args: {
       id: string;

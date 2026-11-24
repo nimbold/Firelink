@@ -59,7 +59,7 @@ fn upsert_removal_job(
     connection: &Connection,
     id: &str,
     delete_assets: bool,
-) -> Result<Option<DownloadRemovalJob>, String> {
+) -> Result<(DownloadRemovalJob, bool), String> {
     let existing: Option<String> = connection
         .query_row(
             "SELECT data FROM download_removal_jobs WHERE id=?1",
@@ -72,7 +72,7 @@ fn upsert_removal_job(
         let mut existing_job: DownloadRemovalJob =
             serde_json::from_str(&existing_json).map_err(|e| e.to_string())?;
         if existing_job.phase != Phase::Failed {
-            return Ok(None);
+            return Ok((existing_job, false));
         }
         // download_removal_assets is write-once per removal lifecycle and is
         // only deleted on completion in run(), so toggling delete_assets
@@ -82,7 +82,7 @@ fn upsert_removal_job(
         existing_job.phase = Phase::Pending;
         existing_job.error = None;
         save(connection, &existing_job)?;
-        return Ok(Some(existing_job));
+        return Ok((existing_job, true));
     }
 
     let exists: bool = connection
@@ -103,7 +103,7 @@ fn upsert_removal_job(
         error: None,
     };
     save(connection, &job)?;
-    Ok(Some(job))
+    Ok((job, true))
 }
 
 #[tauri::command]
@@ -112,29 +112,31 @@ pub async fn submit_download_removals(
     app: tauri::AppHandle,
     ids: Vec<String>,
     delete_assets: bool,
-) -> Result<(), String> {
+) -> Result<Vec<DownloadRemovalJob>, String> {
     crate::properties_window::ensure_main_window(&caller)?;
     // Fence each admission before recording intent, retaining all existing rows
     // and ownership records until physical cleanup has actually succeeded.
     let result = async {
         let state = app.state::<crate::AppState>();
+        let mut submitted_jobs = Vec::with_capacity(ids.len());
         for id in ids {
             let _guard = state.queue_manager.acquire_aria2_control(&id).await;
-            let Some(job) = ({
+            let (job, changed) = {
                 let db = app.state::<crate::db::DbState>();
                 let connection = db.lock()?;
                 upsert_removal_job(&connection, &id, delete_assets)?
-            }) else {
-                continue;
             };
-            state.queue_manager.remove_from_pending(&id).await;
-            state.queue_manager.cancel_aria2_retries(&id).await;
-            if state.queue_manager.is_waiting_to_seed(&id) {
-                state.queue_manager.release_seed_tracking(&id);
+            if changed {
+                state.queue_manager.remove_from_pending(&id).await;
+                state.queue_manager.cancel_aria2_retries(&id).await;
+                if state.queue_manager.is_waiting_to_seed(&id) {
+                    state.queue_manager.release_seed_tracking(&id);
+                }
+                let _ = app.emit("download-removal", &job);
             }
-            let _ = app.emit("download-removal", &job);
+            submitted_jobs.push(job);
         }
-        Ok(())
+        Ok(submitted_jobs)
     }
     .await;
     kick(&app);
@@ -156,9 +158,9 @@ pub fn retry_download_removal(
     caller: tauri::WebviewWindow,
     app: tauri::AppHandle,
     id: String,
-) -> Result<(), String> {
+) -> Result<DownloadRemovalJob, String> {
     crate::properties_window::ensure_main_window(&caller)?;
-    {
+    let job = {
         let db = app.state::<crate::db::DbState>();
         let connection = db.lock()?;
         let mut job = jobs(&connection)?
@@ -166,16 +168,17 @@ pub fn retry_download_removal(
             .find(|job| job.id == id)
             .ok_or("Removal job not found")?;
         if job.phase != Phase::Failed {
-            return Ok(());
+            return Ok(job);
         }
         job.revision = job.revision.saturating_add(1);
         job.phase = Phase::Pending;
         job.error = None;
         save(&connection, &job)?;
         let _ = app.emit("download-removal", &job);
-    }
+        job
+    };
     kick(&app);
-    Ok(())
+    Ok(job)
 }
 
 fn kick(app: &tauri::AppHandle) {
@@ -204,16 +207,18 @@ async fn run(app: tauri::AppHandle) -> Result<(), String> {
         let Some(mut job) = next else {
             return Ok(());
         };
-        job.revision = job.revision.saturating_add(1);
-        job.phase = Phase::Running;
+        let mut running_job = job.clone();
+        running_job.revision = running_job.revision.saturating_add(1);
+        running_job.phase = Phase::Running;
         let saved = app
             .state::<crate::db::DbState>()
             .lock()
-            .and_then(|connection| save(&connection, &job));
+            .and_then(|connection| save(&connection, &running_job));
         if let Err(error) = saved {
-            emit_persistence_failure(&app, &mut job);
+            emit_persistence_failure(&app, &job);
             return Err(error);
         }
+        job = running_job;
         let _ = app.emit("download-removal", &job);
         let started = std::time::Instant::now();
         let result = crate::remove_download_inner(
@@ -227,37 +232,39 @@ async fn run(app: tauri::AppHandle) -> Result<(), String> {
             true,
         )
         .await;
-        job.revision = job.revision.saturating_add(1);
+        let mut finished_job = job.clone();
+        finished_job.revision = finished_job.revision.saturating_add(1);
         let committed = (|| -> Result<(), String> {
             let db = app.state::<crate::db::DbState>();
             let mut connection = db.lock()?;
             let tx = connection.transaction().map_err(|e| e.to_string())?;
             if result.is_ok() {
-                tx.execute("DELETE FROM download_ownership WHERE id=?1", [&job.id])
+                tx.execute("DELETE FROM download_ownership WHERE id=?1", [&finished_job.id])
                     .map_err(|e| e.to_string())?;
-                tx.execute("DELETE FROM download_owned_paths WHERE id=?1", [&job.id])
+                tx.execute("DELETE FROM download_owned_paths WHERE id=?1", [&finished_job.id])
                     .map_err(|e| e.to_string())?;
-                tx.execute("DELETE FROM download_removal_paths WHERE id=?1", [&job.id])
+                tx.execute("DELETE FROM download_removal_paths WHERE id=?1", [&finished_job.id])
                     .map_err(|e| e.to_string())?;
-                tx.execute("DELETE FROM download_removal_assets WHERE id=?1", [&job.id])
+                tx.execute("DELETE FROM download_removal_assets WHERE id=?1", [&finished_job.id])
                     .map_err(|e| e.to_string())?;
-                tx.execute("DELETE FROM downloads WHERE id=?1", [&job.id])
+                tx.execute("DELETE FROM downloads WHERE id=?1", [&finished_job.id])
                     .map_err(|e| e.to_string())?;
-                job.phase = Phase::Completed;
-                job.error = None;
+                finished_job.phase = Phase::Completed;
+                finished_job.error = None;
             } else {
-                job.phase = Phase::Failed;
+                finished_job.phase = Phase::Failed;
                 // Native errors can contain private paths. Keep only actionable,
                 // safe UI guidance in the durable record and public event.
-                job.error = Some("Removal could not finish. Close programs using the files, check drive access and permissions, then retry removal.".into());
+                finished_job.error = Some("Removal could not finish. Close programs using the files, check drive access and permissions, then retry removal.".into());
             }
-            save(&tx, &job)?;
+            save(&tx, &finished_job)?;
             tx.commit().map_err(|e| e.to_string())
         })();
         if let Err(error) = committed {
-            emit_persistence_failure(&app, &mut job);
+            emit_persistence_failure(&app, &job);
             return Err(error);
         }
+        job = finished_job;
         log::info!(
             "download removal [id={} phase={:?} elapsed_ms={}]",
             job.id,
@@ -268,12 +275,13 @@ async fn run(app: tauri::AppHandle) -> Result<(), String> {
     }
 }
 
-fn emit_persistence_failure(app: &tauri::AppHandle, job: &mut DownloadRemovalJob) {
-    job.phase = Phase::Failed;
-    job.error = Some(
+fn emit_persistence_failure(app: &tauri::AppHandle, committed_job: &DownloadRemovalJob) {
+    let mut failed_job = committed_job.clone();
+    failed_job.phase = Phase::Failed;
+    failed_job.error = Some(
         "Removal could not be saved. Check disk space and drive access, then retry removal.".into(),
     );
-    let _ = app.emit("download-removal", &*job);
+    let _ = app.emit("download-removal", &failed_job);
 }
 
 // Kept in a private table, never in shared IPC job data: paths and filesystem
@@ -440,29 +448,34 @@ mod tests {
         )
         .unwrap();
 
-        let created = upsert_removal_job(&conn, "dl-1", true)
-            .unwrap()
-            .expect("new job should be created");
+        let (created, changed) = upsert_removal_job(&conn, "dl-1", true).unwrap();
+        assert!(changed);
         assert_eq!(created.revision, 1);
         assert!(created.delete_assets);
         assert_eq!(created.phase, Phase::Pending);
 
         // Pending job must be ignored.
-        assert!(upsert_removal_job(&conn, "dl-1", false).unwrap().is_none());
+        let (ignored, changed) = upsert_removal_job(&conn, "dl-1", false).unwrap();
+        assert!(!changed);
+        assert_eq!(ignored.phase, Phase::Pending);
 
         // Running job must be ignored.
         let mut running = created.clone();
         running.revision = 2;
         running.phase = Phase::Running;
         save(&conn, &running).unwrap();
-        assert!(upsert_removal_job(&conn, "dl-1", false).unwrap().is_none());
+        let (ignored, changed) = upsert_removal_job(&conn, "dl-1", false).unwrap();
+        assert!(!changed);
+        assert_eq!(ignored.phase, Phase::Running);
 
         // Completed tombstone must be ignored.
         let mut completed = running.clone();
         completed.revision = 3;
         completed.phase = Phase::Completed;
         save(&conn, &completed).unwrap();
-        assert!(upsert_removal_job(&conn, "dl-1", false).unwrap().is_none());
+        let (ignored, changed) = upsert_removal_job(&conn, "dl-1", false).unwrap();
+        assert!(!changed);
+        assert_eq!(ignored.phase, Phase::Completed);
     }
 
     #[test]
@@ -488,9 +501,8 @@ mod tests {
         .unwrap();
 
         // Retrying with delete_assets: true increments revision and keeps the manifest.
-        let retried = upsert_removal_job(&conn, "dl-failed", true)
-            .unwrap()
-            .expect("failed job should be re-queued");
+        let (retried, changed) = upsert_removal_job(&conn, "dl-failed", true).unwrap();
+        assert!(changed);
         assert_eq!(retried.revision, 2);
         assert!(retried.delete_assets);
         assert_eq!(retried.phase, Phase::Pending);
@@ -511,9 +523,8 @@ mod tests {
         failed_again.error = Some("Still locked".into());
         save(&conn, &failed_again).unwrap();
 
-        let downgraded = upsert_removal_job(&conn, "dl-failed", false)
-            .unwrap()
-            .expect("failed job should allow switching to list-only removal");
+        let (downgraded, changed) = upsert_removal_job(&conn, "dl-failed", false).unwrap();
+        assert!(changed);
         assert_eq!(downgraded.revision, 4);
         assert!(!downgraded.delete_assets);
         assert_eq!(downgraded.phase, Phase::Pending);
@@ -533,9 +544,8 @@ mod tests {
         failed_list_only.phase = Phase::Failed;
         save(&conn, &failed_list_only).unwrap();
 
-        let upgraded = upsert_removal_job(&conn, "dl-failed", true)
-            .unwrap()
-            .expect("failed list-only job should allow upgrading to delete_assets");
+        let (upgraded, changed) = upsert_removal_job(&conn, "dl-failed", true).unwrap();
+        assert!(changed);
         assert_eq!(upgraded.revision, 6);
         assert!(upgraded.delete_assets);
         assert_eq!(upgraded.phase, Phase::Pending);

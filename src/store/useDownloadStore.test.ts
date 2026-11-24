@@ -202,6 +202,63 @@ describe('useDownloadStore', () => {
     rejectSubmit!();
     await concurrentRemoval;
     expect(useDownloadStore.getState().removalJobs[failed.id]).toEqual(concurrentRunning);
+    expect(useDownloadStore.getState().submittingRemovalIds.has(failed.id)).toBe(false);
+  });
+
+  it('enforces same-revision phase ordering, applies returned jobs, preserves backend errors, and filters mixed batches', async () => {
+    const failedJob = { id: 'failed-1', revision: 2, deleteAssets: true, phase: 'failed' as const, error: 'Drive unavailable' };
+    useDownloadStore.getState().applyRemovalJob(failedJob);
+    // Same-revision phase downgrade must be rejected for durable revisions (> 0).
+    useDownloadStore.getState().applyRemovalJob({ id: 'failed-1', revision: 2, deleteAssets: true, phase: 'running', error: null });
+    expect(useDownloadStore.getState().removalJobs['failed-1']).toEqual(failedJob);
+
+    // Pre-durable revision 0 allows failed -> pending retry.
+    useDownloadStore.getState().applyRemovalJob({ id: 'zero-1', revision: 0, deleteAssets: true, phase: 'failed', error: 'Error' });
+    useDownloadStore.getState().applyRemovalJob({ id: 'zero-1', revision: 0, deleteAssets: true, phase: 'pending', error: null });
+    expect(useDownloadStore.getState().removalJobs['zero-1'].phase).toBe('pending');
+
+    // Re-submission failure preserves the durable backend error message.
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
+      if (command === 'submit_download_removals') throw new Error('IPC error');
+      return undefined as never;
+    });
+    await useDownloadStore.getState().requestRemovals(['failed-1'], false);
+    expect(useDownloadStore.getState().removalJobs['failed-1'].error).toBe('Drive unavailable');
+
+    // Returned durable jobs from submit_download_removals are applied synchronously.
+    const submittedJob = { id: 'failed-1', revision: 3, deleteAssets: false, phase: 'pending' as const, error: null };
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
+      if (command === 'submit_download_removals') return [submittedJob] as never;
+      return undefined as never;
+    });
+    await useDownloadStore.getState().requestRemovals(['failed-1'], false);
+    expect(useDownloadStore.getState().removalJobs['failed-1']).toEqual(submittedJob);
+
+    // openDeleteModal filters out active (pending/running) removals and allows failed removals.
+    useDownloadStore.getState().applyRemovalJob({ id: 'running-1', revision: 1, deleteAssets: true, phase: 'running', error: null });
+    useDownloadStore.getState().openDeleteModal(['running-1']);
+    expect(useDownloadStore.getState().deleteModalState.isOpen).toBe(false);
+
+    useDownloadStore.getState().applyRemovalJob({ id: 'failed-2', revision: 1, deleteAssets: true, phase: 'failed', error: 'Locked' });
+    useDownloadStore.getState().openDeleteModal(['running-1', 'failed-2']);
+    expect(useDownloadStore.getState().deleteModalState).toEqual({ isOpen: true, downloadIds: ['failed-2'] });
+    useDownloadStore.getState().closeDeleteModal();
+
+    // startSelected and assignToQueue skip IDs with removalJobs instead of failing the batch.
+    useDownloadStore.setState({
+      downloads: [
+        { id: 'paused-1', url: 'https://example.com/a.bin', fileName: 'a.bin', status: 'paused', category: 'Other', dateAdded: '', queueId: MAIN_QUEUE_ID } as never,
+        { id: 'running-1', url: 'https://example.com/b.bin', fileName: 'b.bin', status: 'paused', category: 'Other', dateAdded: '', queueId: MAIN_QUEUE_ID } as never,
+      ],
+    });
+    vi.mocked(ipc.invokeCommand).mockImplementation(async command => {
+      if (command === 'get_pending_order' || command === 'remove_from_queue') return [] as never;
+      if (command === 'begin_queue_dispatch_hold') return 'hold-1' as never;
+      if (command === 'renew_queue_dispatch_hold' || command === 'resume_download') return true as never;
+      return undefined as never;
+    });
+    await expect(useDownloadStore.getState().startSelected(['paused-1', 'running-1'])).resolves.toBe(1);
+    await expect(useDownloadStore.getState().assignToQueue(['paused-1', 'running-1'], MAIN_QUEUE_ID)).resolves.toBeUndefined();
   });
 
   it('does not resurrect a row when completion races startup hydration', async () => {

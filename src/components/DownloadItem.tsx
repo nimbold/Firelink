@@ -82,7 +82,9 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
   const { t, i18n } = useTranslation();
   const calendarPreference = useSettingsStore(state => state.calendarPreference);
   const removal = useDownloadStore(state => state.removalJobs[download.id]);
-  const removing = !!removal && removal.phase !== "failed" && removal.phase !== "completed";
+  const isSubmittingRemoval = useDownloadStore(state => state.submittingRemovalIds.has(download.id));
+  const removing = isSubmittingRemoval || (!!removal && removal.phase !== "failed" && removal.phase !== "completed");
+  const removalFailed = !!removal && removal.phase === "failed" && !isSubmittingRemoval;
   const liveProgress = useDownloadProgressStore(state => state.progressMap[download.id]);
   const moveProgress = useDownloadProgressStore(state => state.moveProgressMap[download.id]);
   const rowRef = React.useRef<HTMLDivElement>(null);
@@ -251,8 +253,8 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
     const value = download.status === 'completed' ? formatDownloadTotal(sizeDisplay) : sizeDisplay.fallback;
     return value === 'Unknown' ? t($ => $.addDownloads.unknown) : value;
   })();
-  const downloadStatusLabel = removal
-    ? t($ => removal.phase === 'failed' ? $.downloads.removal.error : $.downloads.removal.removing)
+  const downloadStatusLabel = (removing || removalFailed)
+    ? t($ => removalFailed ? $.downloads.removal.error : $.downloads.removal.removing)
     : allocationVisible
     ? t($ => $.downloads.status.allocatingFiles)
     : waitingForPeers
@@ -392,7 +394,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                   : downloadStatusLabel
               }
               className={`download-status flex items-center gap-1.5 ${
-                removal?.phase === 'failed' ? 'download-status-failed' :
+                removalFailed ? 'download-status-failed' :
                 removing || allocationVisible ? 'download-status-downloading' :
                 download.status === 'paused' ? 'download-status-paused' :
                 download.status === 'seeding' ? 'download-status-seeding' :
@@ -405,11 +407,11 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
                 download.status === 'retrying' ? 'download-status-retrying' : ''
               }`}
             >
-              {removal ? (
+              {(removing || removalFailed) ? (
                 <>
                   {removing && <RefreshCw size={12} className="animate-spin motion-reduce:animate-none shrink-0" aria-hidden="true" />}
-                  <span role="status" className="truncate" title={removal.phase === 'failed' ? t($ => $.downloads.removal.failed) : undefined}>{downloadStatusLabel}</span>
-                  {removal.phase === 'failed' && <button className="app-button shrink-0" onClick={event => { event.stopPropagation(); void useDownloadStore.getState().retryRemoval(download.id); }}>{t($ => $.downloads.removal.retry)}</button>}
+                  <span role="status" className="truncate" title={removalFailed ? (removal?.error || t($ => $.downloads.removal.failed)) : undefined}>{downloadStatusLabel}</span>
+                  {removalFailed && <button className="app-button shrink-0" onClick={event => { event.stopPropagation(); void useDownloadStore.getState().retryRemoval(download.id); }}>{t($ => $.downloads.removal.retry)}</button>}
                 </>
               ) : allocationVisible ? (
                 <>
@@ -610,7 +612,7 @@ export const DownloadItem = React.memo<DownloadItemProps>(({
       }}
       onContextMenu={(e) => {
         e.preventDefault();
-        if (removal) return;
+        if (removing) return;
         const isKeyboard = (e.clientX === 0 && e.clientY === 0) || (e.button === 0 && e.detail === 0);
         let x = e.clientX;
         let y = e.clientY;

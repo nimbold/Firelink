@@ -32,6 +32,31 @@ import i18n from '../i18n';
 export type { DownloadCategory } from '../utils/downloads';
 
 let removalListener: (() => void) | undefined;
+const REMOVAL_PHASE_RANK: Record<DownloadRemovalJob['phase'], number> = {
+  pending: 0,
+  running: 1,
+  failed: 2,
+  completed: 3,
+};
+const shouldAcceptRemovalJob = (
+  current: DownloadRemovalJob | undefined,
+  incoming: DownloadRemovalJob
+): boolean => {
+  if (!current) return true;
+  if (current.phase === 'completed') return false;
+  if (current.revision > incoming.revision) return false;
+  if (current.revision === incoming.revision) {
+    if (incoming.revision > 0 && REMOVAL_PHASE_RANK[incoming.phase] < REMOVAL_PHASE_RANK[current.phase]) return false;
+    if (
+      current.phase === incoming.phase &&
+      current.error === incoming.error &&
+      current.deleteAssets === incoming.deleteAssets
+    ) {
+      return false;
+    }
+  }
+  return true;
+};
 const backendDispatchPromises = new Map<string, Promise<boolean>>();
 const downloadLifecycleGenerations = new Map<string, bigint>();
 const queueReorderPromises = new Map<string, Promise<void>>();
@@ -1260,6 +1285,7 @@ export type DeleteModalState = {
 interface DownloadState {
   isInitialized: boolean;
   removalJobs: Record<string, DownloadRemovalJob>;
+  submittingRemovalIds: Set<string>;
   requestRemovals: (ids: string[], deleteAssets: boolean) => Promise<void>;
   applyRemovalJob: (job: DownloadRemovalJob) => void;
   retryRemoval: (id: string) => Promise<void>;
@@ -1955,15 +1981,12 @@ export const useDownloadStore = create<DownloadState>()(
     }
   },
   removalJobs: {},
+  submittingRemovalIds: new Set(),
   applyRemovalJob: (job) => {
     if (!job || typeof job.id !== 'string' || !Number.isSafeInteger(job.revision)
       || job.revision < 0 || !['pending', 'running', 'failed', 'completed'].includes(job.phase)) return;
     const currentJob = get().removalJobs[job.id];
-    if (currentJob) {
-      if (currentJob.phase === 'completed') return;
-      if (currentJob.revision > job.revision) return;
-      if (currentJob.revision === job.revision && currentJob.phase === job.phase && currentJob.error === job.error && currentJob.deleteAssets === job.deleteAssets) return;
-    }
+    if (!shouldAcceptRemovalJob(currentJob, job)) return;
     set(state => {
       const hasDownload = state.downloads.some(item => item.id === job.id);
       const nextDownloads = job.phase === 'completed'
@@ -1995,17 +2018,27 @@ export const useDownloadStore = create<DownloadState>()(
   },
   requestRemovals: async (ids, deleteAssets) => {
     const selected = [...new Set(ids)].filter(id => {
+      if (get().submittingRemovalIds.has(id)) return false;
       const existing = get().removalJobs[id];
       return !existing || existing.phase === 'failed';
     });
+    // Close before any persistence, RPC, or filesystem work is awaited.
+    get().closeDeleteModal();
+    if (selected.length === 0) return;
+
+    set(state => {
+      const nextSubmitting = new Set(state.submittingRemovalIds);
+      for (const id of selected) nextSubmitting.add(id);
+      return { submittingRemovalIds: nextSubmitting };
+    });
+
     for (const id of selected) {
       const existing = get().removalJobs[id];
       if (!existing || existing.revision === 0) {
         get().applyRemovalJob({ id, revision: 0, deleteAssets, phase: 'pending', error: null });
       }
     }
-    // Close before any persistence, RPC, or filesystem work is awaited.
-    get().closeDeleteModal();
+
     await Promise.all(selected.map(id => runDownloadLifecycleOperation(id, 'background-remove', async () => {
       try {
         await waitForPendingStartupResume();
@@ -2013,7 +2046,10 @@ export const useDownloadStore = create<DownloadState>()(
         await flushDownloadPersistence();
         const current = get().removalJobs[id];
         if (current && current.revision > 0 && current.phase !== 'failed') return;
-        await invoke('submit_download_removals', { ids: [id], deleteAssets });
+        const jobs = await invoke('submit_download_removals', { ids: [id], deleteAssets });
+        if (Array.isArray(jobs)) {
+          for (const job of jobs) get().applyRemovalJob(job);
+        }
       } catch {
         const current = get().removalJobs[id];
         if (current && current.revision > 0 && current.phase !== 'failed') return;
@@ -2022,28 +2058,68 @@ export const useDownloadStore = create<DownloadState>()(
           revision: current?.revision ?? 0,
           deleteAssets: current && current.revision > 0 ? current.deleteAssets : deleteAssets,
           phase: 'failed',
-          error: i18n.t($ => $.downloads.removal.failed),
+          error: (current && current.revision > 0 && current.error)
+            ? current.error
+            : i18n.t($ => $.downloads.removal.failed),
+        });
+      } finally {
+        set(state => {
+          if (!state.submittingRemovalIds.has(id)) return state;
+          const nextSubmitting = new Set(state.submittingRemovalIds);
+          nextSubmitting.delete(id);
+          return { submittingRemovalIds: nextSubmitting };
         });
       }
-    })));
+    }, false)));
   },
   retryRemoval: async (id) => {
     const job = get().removalJobs[id];
-    if (!job || job.phase !== 'failed') return;
-    try {
-      const durable = await invoke('list_download_removals');
-      const current = durable.find(entry => entry.id === id);
-      if (current) {
-        get().applyRemovalJob(current);
-        if (current.phase === 'failed') await invoke('retry_download_removal', { id });
-        else if (current.phase !== 'completed') await invoke('resume_download_removals');
-      } else {
-        await flushDownloadPersistence();
-        await invoke('submit_download_removals', { ids: [id], deleteAssets: job.deleteAssets });
+    if (!job || job.phase !== 'failed' || get().submittingRemovalIds.has(id)) return;
+    set(state => {
+      const nextSubmitting = new Set(state.submittingRemovalIds);
+      nextSubmitting.add(id);
+      return { submittingRemovalIds: nextSubmitting };
+    });
+    await runDownloadLifecycleOperation(id, 'background-remove', async () => {
+      try {
+        const durable = await invoke('list_download_removals');
+        const current = durable.find(entry => entry.id === id);
+        if (current) {
+          get().applyRemovalJob(current);
+          if (current.phase === 'failed') {
+            const updated = await invoke('retry_download_removal', { id });
+            if (updated) get().applyRemovalJob(updated);
+          } else if (current.phase !== 'completed') {
+            await invoke('resume_download_removals');
+          }
+        } else {
+          await waitForPendingStartupResume();
+          await invalidateAndWaitForDispatch(id);
+          await flushDownloadPersistence();
+          const jobs = await invoke('submit_download_removals', { ids: [id], deleteAssets: job.deleteAssets });
+          if (Array.isArray(jobs)) {
+            for (const updated of jobs) get().applyRemovalJob(updated);
+          }
+        }
+      } catch {
+        const latest = get().removalJobs[id] ?? job;
+        if (latest.revision > 0 && latest.phase !== 'failed') return;
+        get().applyRemovalJob({
+          ...latest,
+          phase: 'failed',
+          error: (latest.revision > 0 && latest.error)
+            ? latest.error
+            : i18n.t($ => $.downloads.removal.failed),
+        });
+      } finally {
+        set(state => {
+          if (!state.submittingRemovalIds.has(id)) return state;
+          const nextSubmitting = new Set(state.submittingRemovalIds);
+          nextSubmitting.delete(id);
+          return { submittingRemovalIds: nextSubmitting };
+        });
       }
-    } catch {
-      get().applyRemovalJob({ ...job, phase: 'failed', error: i18n.t($ => $.downloads.removal.failed) });
-    }
+    }, false);
   },
   backendRegisteredIds: new Set(),
   allocationPendingIds: new Set(),
@@ -2090,11 +2166,23 @@ export const useDownloadStore = create<DownloadState>()(
   pendingAddModalBusy: false,
   selectedPropertiesDownloadId: null,
   deleteModalState: { isOpen: false },
-  openDeleteModal: (downloadIds) => set({ 
-    deleteModalState: { 
-      isOpen: true, 
-      downloadIds: Array.isArray(downloadIds) ? downloadIds : (downloadIds ? [downloadIds] : undefined) 
-    } 
+  openDeleteModal: (downloadIds) => set((state) => {
+    if (downloadIds === undefined) {
+      return { deleteModalState: { isOpen: true, downloadIds: undefined } };
+    }
+    const rawIds = Array.isArray(downloadIds) ? downloadIds : [downloadIds];
+    const filteredIds = [...new Set(rawIds)].filter(id => {
+      if (state.submittingRemovalIds.has(id)) return false;
+      const job = state.removalJobs[id];
+      return !job || job.phase === 'failed';
+    });
+    if (filteredIds.length === 0) return state;
+    return {
+      deleteModalState: {
+        isOpen: true,
+        downloadIds: filteredIds,
+      }
+    };
   }),
   closeDeleteModal: () => set({ deleteModalState: { isOpen: false } }),
   toggleAddModal: (isOpen) => set((state) => ({
@@ -2741,7 +2829,7 @@ export const useDownloadStore = create<DownloadState>()(
     preemptDispatch
   ),
   startSelected: (ids) => {
-    const orderedIds = [...new Set(ids)];
+    const orderedIds = [...new Set(ids)].filter(id => !get().removalJobs[id]);
     if (orderedIds.length === 0) return Promise.resolve(0);
 
     return runDownloadLifecycleOperations(orderedIds, 'start-selected', async () => {
@@ -3090,9 +3178,12 @@ export const useDownloadStore = create<DownloadState>()(
   },
   assignToQueue: async (ids, queueId) => {
     await waitForPendingStartupResume();
-    const lockedIds = ids.filter(id => get().downloads.some(item => item.id === id));
+    const lockedIds = [...new Set(ids)].filter(id =>
+      !get().removalJobs[id] && get().downloads.some(item => item.id === id)
+    );
+    if (lockedIds.length === 0) return;
     return runDownloadLifecycleOperations(lockedIds, 'assign-to-queue', async () => {
-      const selectedIds = new Set(ids);
+      const selectedIds = new Set(lockedIds);
       const selected = get().downloads.filter(item => selectedIds.has(item.id));
       const locked = selected.find(item => isActiveDownloadStatus(item.status) && item.status !== 'queued');
       if (locked) {
@@ -3733,7 +3824,7 @@ export const useDownloadStore = create<DownloadState>()(
         const merged: Record<string, DownloadRemovalJob> = { ...state.removalJobs };
         for (const job of removalJobs) {
           const existing = merged[job.id];
-          if (!existing || job.revision >= existing.revision) {
+          if (shouldAcceptRemovalJob(existing, job)) {
             merged[job.id] = job;
           }
         }
@@ -4145,7 +4236,7 @@ let downloadPersistenceDisposer: (() => void) | null = null;
 export const resetDownloadStoreModuleStateForTests = (): void => {
   removalListener?.();
   removalListener = undefined;
-  useDownloadStore.setState({ removalJobs: {} });
+  useDownloadStore.setState({ removalJobs: {}, submittingRemovalIds: new Set() });
   downloadPersistenceUnsubscribe?.();
   downloadPersistenceUnsubscribe = null;
   downloadPersistenceDisposer = null;

@@ -2018,10 +2018,29 @@ async fn validate_media_artifact_targets<R: tauri::Runtime>(
     Ok(artifacts)
 }
 
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn strip_filename_prefix<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
+    name.strip_prefix(prefix)
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn strip_filename_prefix<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
+    let mut name_chars = name.char_indices();
+    let mut end_byte = 0;
+    for expected in prefix.chars() {
+        let (idx, actual) = name_chars.next()?;
+        if !actual.to_lowercase().eq(expected.to_lowercase()) {
+            return None;
+        }
+        end_byte = idx + actual.len_utf8();
+    }
+    Some(&name[end_byte..])
+}
+
 fn is_media_artifact_name(name: &str, base_name: &str, base_stem: &str) -> bool {
-    let suffix = name.strip_prefix(base_name).or_else(|| {
+    let suffix = strip_filename_prefix(name, base_name).or_else(|| {
         (base_stem != base_name)
-            .then(|| name.strip_prefix(base_stem))
+            .then(|| strip_filename_prefix(name, base_stem))
             .flatten()
     });
     let Some(suffix) = suffix else {
@@ -9297,7 +9316,7 @@ async fn remove_download_inner(
             (
                 should_skip_unowned_asset_cleanup(
                     persisted.status,
-                    persisted.has_been_dispatched.unwrap_or(false),
+                    persisted.has_been_dispatched,
                     native_lifecycle_was_admitted,
                     expected_assets_present,
                 ),
@@ -9388,20 +9407,18 @@ async fn remove_download_inner(
         cleanup_target_paths = cleanup_targets;
     }
 
-    if durable_removal_job {
+    if durable_removal_job && should_delete_assets {
         let mut roots = Vec::new();
-        if should_delete_assets {
-            roots.extend(owned_paths.iter().cloned());
-            roots.extend(primary_path.iter().cloned());
-            roots.extend(unowned_replacement_target.iter().map(|target| target.target.clone()));
-            for path in roots.clone() {
-                for suffix in [".aria2", ".part", ".ytdl"] {
-                    let mut sidecar = path.as_os_str().to_os_string();
-                    sidecar.push(suffix);
-                    roots.push(sidecar.into());
-                }
-                roots.extend(collect_media_processing_artifacts_for_permanent_removal(&path, &app_handle).await?);
+        roots.extend(owned_paths.iter().cloned());
+        roots.extend(primary_path.iter().cloned());
+        roots.extend(unowned_replacement_target.iter().map(|target| target.target.clone()));
+        for path in roots.clone() {
+            for suffix in [".aria2", ".part", ".ytdl"] {
+                let mut sidecar = path.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                roots.push(sidecar.into());
             }
+            roots.extend(collect_media_processing_artifacts_for_permanent_removal(&path, &app_handle).await?);
         }
         roots.push(crate::torrent::managed_torrent_path(&app_handle, &id)?);
         removal_jobs::fence_assets(&app_handle, &id, &roots)?;
@@ -9493,7 +9510,7 @@ fn has_resumable_download_assets(primary: &std::path::Path) -> bool {
 /// there is an integrity failure and must remain fail-closed.
 fn should_skip_unowned_asset_cleanup(
     status: crate::ipc::DownloadStatus,
-    has_been_dispatched: bool,
+    has_been_dispatched: Option<bool>,
     native_lifecycle_was_admitted: bool,
     expected_assets_present: bool,
 ) -> bool {
@@ -9508,7 +9525,7 @@ fn should_skip_unowned_asset_cleanup(
             // pre-admission only when the durable dispatch marker is false;
             // admitted paused Torrents still require ownership.
             | crate::ipc::DownloadStatus::Paused
-    ) && !has_been_dispatched
+    ) && has_been_dispatched == Some(false)
         && !native_lifecycle_was_admitted
         && !expected_assets_present
 }
@@ -10163,11 +10180,12 @@ fn expected_unadmitted_torrent_assets_present<R: tauri::Runtime>(
         return Ok(false);
     };
 
+    let canonical_name = crate::download_ownership::canonical_download_filename(&persisted.file_name);
     let Some(expected) = expected_torrent_output_paths(
         app_handle,
         &persisted.id,
         destination,
-        &persisted.file_name,
+        &canonical_name,
         Some(torrent_path),
         persisted.torrent_file_indices.as_deref(),
         persisted.torrent_remove_unselected_file.unwrap_or(false),
@@ -18426,82 +18444,100 @@ mod tests {
     fn unowned_asset_cleanup_only_skips_a_missing_pre_admission_lifecycle() {
         assert!(should_skip_unowned_asset_cleanup(
             crate::ipc::DownloadStatus::Ready,
-            false,
+            Some(false),
             false,
             false
         ));
         assert!(should_skip_unowned_asset_cleanup(
             crate::ipc::DownloadStatus::Staged,
-            false,
+            Some(false),
             false,
             false
         ));
         assert!(should_skip_unowned_asset_cleanup(
             crate::ipc::DownloadStatus::Paused,
-            false,
+            Some(false),
             false,
             false
         ));
         assert!(should_skip_unowned_asset_cleanup(
             crate::ipc::DownloadStatus::Failed,
-            false,
+            Some(false),
             false,
             false
         ));
         assert!(should_skip_unowned_asset_cleanup(
             crate::ipc::DownloadStatus::Queued,
+            Some(false),
             false,
+            false
+        ));
+        // Legacy/ambiguous rows (has_been_dispatched == None) must fail closed.
+        for status in [
+            crate::ipc::DownloadStatus::Ready,
+            crate::ipc::DownloadStatus::Staged,
+            crate::ipc::DownloadStatus::Paused,
+            crate::ipc::DownloadStatus::Failed,
+            crate::ipc::DownloadStatus::Queued,
+        ] {
+            assert!(!should_skip_unowned_asset_cleanup(status, None, false, false));
+        }
+        assert!(!should_skip_unowned_asset_cleanup(
+            crate::ipc::DownloadStatus::Failed,
+            Some(true),
             false,
             false
         ));
         assert!(!should_skip_unowned_asset_cleanup(
             crate::ipc::DownloadStatus::Failed,
+            Some(false),
             true,
-            false,
             false
         ));
         assert!(!should_skip_unowned_asset_cleanup(
             crate::ipc::DownloadStatus::Failed,
-            false,
-            true,
-            false
-        ));
-        assert!(!should_skip_unowned_asset_cleanup(
-            crate::ipc::DownloadStatus::Failed,
-            false,
+            Some(false),
             false,
             true
         ));
         assert!(!should_skip_unowned_asset_cleanup(
             crate::ipc::DownloadStatus::Queued,
-            true,
+            Some(true),
             false,
             false
         ));
         assert!(!should_skip_unowned_asset_cleanup(
             crate::ipc::DownloadStatus::Staged,
-            true,
+            Some(true),
             false,
             false
         ));
         assert!(!should_skip_unowned_asset_cleanup(
             crate::ipc::DownloadStatus::Staged,
-            false,
+            Some(false),
             true,
             false
         ));
         assert!(!should_skip_unowned_asset_cleanup(
             crate::ipc::DownloadStatus::Staged,
-            false,
+            Some(false),
             false,
             true
         ));
         assert!(!should_skip_unowned_asset_cleanup(
             crate::ipc::DownloadStatus::Completed,
-            false,
+            Some(false),
             false,
             false
         ));
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn is_media_artifact_name_matches_case_insensitively_on_windows_and_macos() {
+        assert!(is_media_artifact_name("Clip.f137.mp4", "clip.mp4", "clip"));
+        assert!(is_media_artifact_name("CLIP.MP4.part", "clip.mp4", "clip"));
+        assert!(!is_media_artifact_name("other.f137.mp4", "clip.mp4", "clip"));
     }
 
     #[test]
@@ -18590,7 +18626,7 @@ mod tests {
         assert!(assets_present);
         assert!(!should_skip_unowned_asset_cleanup(
             failed_unadmitted_item.status,
-            failed_unadmitted_item.has_been_dispatched.unwrap_or(false),
+            failed_unadmitted_item.has_been_dispatched,
             false,
             assets_present,
         ));
@@ -18604,7 +18640,7 @@ mod tests {
         assert!(!assets_present_after_delete);
         assert!(should_skip_unowned_asset_cleanup(
             failed_unadmitted_item.status,
-            failed_unadmitted_item.has_been_dispatched.unwrap_or(false),
+            failed_unadmitted_item.has_been_dispatched,
             false,
             assets_present_after_delete,
         ));

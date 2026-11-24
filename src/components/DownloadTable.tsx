@@ -1688,6 +1688,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
   }, [queueReorderableDownloads, queueReorderingEnabled]);
 
   const removalJobs = useDownloadStore(state => state.removalJobs);
+  const submittingRemovalIds = useDownloadStore(state => state.submittingRemovalIds);
   const selectedDownloads = useMemo(
     () => filteredDownloads.filter(download => selectedIds.has(download.id)),
     [filteredDownloads, selectedIds]
@@ -1830,6 +1831,10 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
     if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
       e.preventDefault();
       e.stopPropagation();
+      const job = removalJobs[item.id];
+      if (submittingRemovalIds.has(item.id) || (job && job.phase !== 'failed')) {
+        return;
+      }
       const row = queueRowForId(item.id);
       const rect = row?.getBoundingClientRect();
       const x = rect ? rect.left + 40 : 100;
@@ -2550,10 +2555,16 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
             const selectedDownloads = Array.from(selectedIds)
               .map(id => downloads.find(d => d.id === id))
               .filter((item): item is DownloadItem => !!item);
+            const actionableDownloads = selectedDownloads.filter(d => !removalJobs[d.id]);
+            const removableDownloads = selectedDownloads.filter(d => {
+              if (submittingRemovalIds.has(d.id)) return false;
+              const job = removalJobs[d.id];
+              return !job || job.phase === 'failed';
+            });
             
-            const itemsToResume = selectedDownloads.filter(d => canStartDownload(d.status));
-            const itemsToPause = selectedDownloads.filter(d => canPauseDownload(d.status));
-            const itemsToQueue = selectedDownloads.filter(d => d.status !== 'completed');
+            const itemsToResume = actionableDownloads.filter(d => canStartDownload(d.status));
+            const itemsToPause = actionableDownloads.filter(d => canPauseDownload(d.status));
+            const itemsToQueue = actionableDownloads.filter(d => d.status !== 'completed');
 
             return (
             <>
@@ -2617,23 +2628,30 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
                 {t($ => $.downloadTable.copyAddress)}
               </button>
 
-              <div className="h-[1px] bg-border-modal/60 my-1.5 mx-2"></div>
+              {removableDownloads.length > 0 && (
+                <>
+                  <div className="h-[1px] bg-border-modal/60 my-1.5 mx-2"></div>
 
-              <button
-                onClick={() => {
-                  setContextMenu(null);
-                  handleDelete(Array.from(selectedIds));
-                }}
-                className="w-full text-left px-3 py-2 text-red-400 hover:bg-red-500/10 transition-colors"
-              >
-                {t($ => $.downloadTable.remove)}
-              </button>
+                  <button
+                    onClick={() => {
+                      setContextMenu(null);
+                      handleDelete(removableDownloads.map(item => item.id));
+                    }}
+                    className="w-full text-left px-3 py-2 text-red-400 hover:bg-red-500/10 transition-colors"
+                  >
+                    {t($ => $.downloadTable.remove)}
+                  </button>
+                </>
+              )}
             </>
             );
-          })() : (
+          })() : (() => {
+            const contextRemoval = removalJobs[contextItem.id];
+            const isFailedRemoval = contextRemoval?.phase === 'failed';
+            return (
             <>
               {/* Single-Select Context Menu */}
-              {contextItem.status === 'completed' && (
+              {!isFailedRemoval && contextItem.status === 'completed' && (
                 <button
                   onClick={async () => {
                     setContextMenu(null);
@@ -2657,7 +2675,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
 
               <div className="h-[1px] bg-border-modal/60 my-1.5 mx-2"></div>
 
-              {canPauseDownload(contextItem.status) && (
+              {!isFailedRemoval && canPauseDownload(contextItem.status) && (
                 <button
                   onClick={() => {
                     setContextMenu(null);
@@ -2669,7 +2687,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
                 </button>
               )}
 
-              {canStartDownload(contextItem.status) && (
+              {!isFailedRemoval && canStartDownload(contextItem.status) && (
                 <button
                   onClick={() => {
                     setContextMenu(null);
@@ -2681,7 +2699,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
                 </button>
               )}
 
-              {canRedownload(contextItem.status) && (
+              {!isFailedRemoval && canRedownload(contextItem.status) && (
                 <button
                   onClick={async () => {
                     setContextMenu(null);
@@ -2697,7 +2715,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
                 </button>
               )}
 
-              {contextItem.status !== 'completed' && (
+              {!isFailedRemoval && contextItem.status !== 'completed' && (
                 <FloatingQueueSubmenu
                   label={t($ => $.downloadTable.addToQueue)}
                   queues={queues}
@@ -2710,7 +2728,9 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
                 />
               )}
 
-              <div className="h-[1px] bg-border-modal/60 my-1.5 mx-2"></div>
+              {!isFailedRemoval && (
+                <div className="h-[1px] bg-border-modal/60 my-1.5 mx-2"></div>
+              )}
 
               <button
                 onClick={() => {
@@ -2741,7 +2761,7 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
                 </button>
               )}
 
-              {contextItem.status === 'completed' && (
+              {!isFailedRemoval && contextItem.status === 'completed' && (
                 <button
                   onClick={async () => {
                     setContextMenu(null);
@@ -2786,7 +2806,8 @@ export const DownloadTable: React.FC<DownloadTableProps> = ({ filter, onSummaryC
                 {t($ => $.downloadTable.properties)}
               </button>
             </>
-          )}
+            );
+          })()}
         </div>,
         document.body
       )}
