@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable action branch (2026-10-16)
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable action branch (2026-11-15)
         with:
           toolchain: stable
       - name: Cache locked cargo-audit binary
@@ -42,7 +42,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [22.23.3, 24.22.0, 26.12.0]
+        node: [22.23.5, 24.22.3, 26.13.1]
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -77,9 +77,9 @@ jobs:
           submodules: recursive
       - uses: actions/setup-node@v7.1.0
         with:
-          node-version: 24.22.0
+          node-version: 24.22.3
           cache: npm
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable action branch (2026-10-16)
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable action branch (2026-11-15)
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
@@ -170,7 +170,7 @@ jobs:
       - name: Install Aria2 source build dependencies (Windows)
         id: aria2-msys
         if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        uses: msys2/setup-msys2@3c51bf698df1e37b2261f53cb67797b97761185c # v2.34.0
         with:
           msystem: UCRT64
           install: >-

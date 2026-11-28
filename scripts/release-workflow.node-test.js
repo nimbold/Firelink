@@ -68,17 +68,17 @@ test('release workflow scopes write permissions to publish and bounds all jobs',
 });
 
 test('CI covers the declared Node floor and current runtimes while native jobs use Node 24 LTS', () => {
-  assert.match(ciWorkflow, /node: \[22\.23\.3, 24\.22\.0, 26\.12\.0\]/);
-  assert.equal((ciWorkflow.match(/node-version: 24\.22\.0/g) || []).length, 1);
-  assert.equal((releaseWorkflow.match(/node-version: 24\.22\.0/g) || []).length, 1);
-  assert.doesNotMatch(`${ciWorkflow}\n${releaseWorkflow}`, /node-version: 24\.21\.0/);
+  assert.match(ciWorkflow, /node: \[22\.23\.5, 24\.22\.3, 26\.13\.1\]/);
+  assert.equal((ciWorkflow.match(/node-version: 24\.22\.3/g) || []).length, 1);
+  assert.equal((releaseWorkflow.match(/node-version: 24\.22\.3/g) || []).length, 1);
+  assert.doesNotMatch(`${ciWorkflow}\n${releaseWorkflow}`, /node-version: 24\.22\.0/);
 });
 
 test('Tauri CI and release workflows pin stable explicitly and Windows support floor is consistent', () => {
   const workflows = `${ciWorkflow}\n${releaseWorkflow}`;
-  assert.equal((workflows.match(/dtolnay\/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec/g) || []).length, 3);
+  assert.equal((workflows.match(/dtolnay\/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca/g) || []).length, 3);
   assert.equal((workflows.match(/toolchain: stable/g) || []).length, 3);
-  assert.doesNotMatch(workflows, /dtolnay\/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249/);
+  assert.doesNotMatch(workflows, /dtolnay\/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec/);
   assert.match(readme, /Windows 10 22H2 or newer/);
   assert.match(releaseGuide, /Windows 10 22H2\+ target/);
   assert.match(releaseGuide, /clean Windows 10 22H2\s+client \(OS build 19045\.x\)/);

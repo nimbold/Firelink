@@ -8,17 +8,30 @@ const repositoryRoot = path.resolve(scriptDirectory, '..');
 
 function argValue(name) {
   const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : undefined;
+  if (index < 0) return undefined;
+  const value = process.argv[index + 1];
+  if (!value || value.startsWith('--')) {
+    throw new Error(`Flag ${name} requires a value.`);
+  }
+  return value;
 }
 
 function readPackageVersion(root) {
-  return JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
+  const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
+  if (typeof version !== 'string' || !version.trim()) {
+    throw new Error('Could not read a valid version from package.json.');
+  }
+  return version;
 }
 
 function readTauriVersion(root) {
-  return JSON.parse(
+  const version = JSON.parse(
     fs.readFileSync(path.join(root, 'src-tauri', 'tauri.conf.json'), 'utf8')
   ).version;
+  if (typeof version !== 'string' || !version.trim()) {
+    throw new Error('Could not read a valid version from src-tauri/tauri.conf.json.');
+  }
+  return version;
 }
 
 function readCargoVersion(root) {
@@ -29,6 +42,33 @@ function readCargoVersion(root) {
     throw new Error('Could not read the [package] version from src-tauri/Cargo.toml.');
   }
   return version;
+}
+
+function readPackageLockVersions(root) {
+  const lock = JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8'));
+  const topVersion = lock?.version;
+  const rootPackageVersion = lock?.packages?.['']?.version;
+  if (typeof topVersion !== 'string' || !topVersion.trim()
+    || typeof rootPackageVersion !== 'string' || !rootPackageVersion.trim()) {
+    throw new Error('Could not read root versions from package-lock.json.');
+  }
+  return { topVersion, rootPackageVersion };
+}
+
+function readCargoLockVersion(root) {
+  const cargoLock = fs.readFileSync(path.join(root, 'src-tauri', 'Cargo.lock'), 'utf8');
+  const blocks = cargoLock.split(/^\[\[package\]\]\r?\n/m).slice(1);
+  const rootBlocks = blocks.filter(block =>
+    /^name = "firelink"$/m.test(block) && !/^source = /m.test(block)
+  );
+  if (rootBlocks.length !== 1) {
+    throw new Error(`Expected exactly one workspace firelink [[package]] block in src-tauri/Cargo.lock, found ${rootBlocks.length}.`);
+  }
+  const match = rootBlocks[0].match(/^version = "([^"]+)"$/m);
+  if (!match) {
+    throw new Error('Could not read the firelink [[package]] version from src-tauri/Cargo.lock.');
+  }
+  return match[1];
 }
 
 function versionFromRef(ref) {
@@ -42,10 +82,15 @@ function versionFromRef(ref) {
   return version;
 }
 
+const targetRoot = path.resolve(argValue('--root') || repositoryRoot);
+const packageLock = readPackageLockVersions(targetRoot);
 const versions = {
-  'package.json': readPackageVersion(repositoryRoot),
-  'src-tauri/Cargo.toml': readCargoVersion(repositoryRoot),
-  'src-tauri/tauri.conf.json': readTauriVersion(repositoryRoot),
+  'package.json': readPackageVersion(targetRoot),
+  'package-lock.json': packageLock.topVersion,
+  'package-lock.json (packages[""])': packageLock.rootPackageVersion,
+  'src-tauri/Cargo.toml': readCargoVersion(targetRoot),
+  'src-tauri/Cargo.lock': readCargoLockVersion(targetRoot),
+  'src-tauri/tauri.conf.json': readTauriVersion(targetRoot),
 };
 const uniqueVersions = new Set(Object.values(versions));
 if (uniqueVersions.size !== 1) {

@@ -32,6 +32,12 @@ Firelink `1.5.2` is the latest desktop release.
 
 Use [the latest Firelink Companion release, `2.2.5`](https://github.com/nimbold/Firelink-Extension/releases/tag/v2.2.5) with Firelink. The Companion is maintained in the [Firelink-Extension repository](https://github.com/nimbold/Firelink-Extension).
 
+Current stack and engine baseline:
+
+- **Desktop**: Tauri 2, Rust, React 19, TypeScript, Zustand, and SQLite.
+- **Bundled engines**: `aria2 1.37.0` (Firelink native-async DNS and network target policy patch set), `yt-dlp 2026.11.23`, `Deno 2.9.8`, and `FFmpeg` (`9.1` on macOS Apple silicon; `9.0.x` on Windows x64 and Linux x64).
+- **Platforms & CI**: Maintained for macOS Apple silicon, Windows 10 22H2+ x64, and Linux x64, with frontend checks verified across Node 22, 24, and 26 LTS lines.
+
 The project is actively maintained. See the [changelog](CHANGELOG.md) for release history and current work.
 
 Translations are available for English, Simplified Chinese, Hebrew, Persian, Ukrainian, and Russian. Translation corrections are welcome.
@@ -122,7 +128,7 @@ See the [Companion README](https://github.com/nimbold/Firelink-Extension#readme)
 
 ### Requirements
 
-- Node.js 22 or newer
+- Node.js 22.12 or newer (CI tests Node 22, 24, and 26 LTS)
 - npm
 - Rust and Cargo
 - [Tauri 2 platform prerequisites](https://v2.tauri.app/start/prerequisites/)
@@ -142,6 +148,7 @@ Run the main checks with:
 node --test scripts/*.node-test.js
 npm test -- --run
 npm run build
+npm run check:i18n
 cd src-tauri && cargo test --all-targets
 ```
 

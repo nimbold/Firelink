@@ -212,31 +212,38 @@ function serveThrottledBuffer(
     ...(match ? { 'content-range': `bytes ${start}-${end}/${buffer.length}` } : {}),
     ...(advertiseRange ? { 'accept-ranges': 'bytes' } : {}),
   });
+  const socket = request.socket;
   let offset = 0;
   let stopped = false;
+  const stopWriting = () => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(timer);
+    response.off('finish', stopWriting);
+    response.off('close', stopWriting);
+    request.off('aborted', stopWriting);
+    socket?.off('close', stopWriting);
+  };
   const timer = setInterval(() => {
-    if (stopped || response.destroyed || offset >= body.length) {
-      clearInterval(timer);
-      if (!stopped && !response.destroyed) response.end();
+    if (stopped || response.destroyed || response.writableEnded || socket?.destroyed || offset >= body.length) {
+      if (!stopped && !response.destroyed && !response.writableEnded && !socket?.destroyed) response.end();
+      stopWriting();
       return;
     }
     const next = Math.min(offset + 32 * 1024, body.length);
     const chunk = body.subarray(offset, next);
     offset = next;
     if (next >= body.length) {
-      clearInterval(timer);
       response.end(chunk);
+      stopWriting();
       return;
     }
     response.write(chunk);
   }, 20);
-  const stopWriting = () => {
-    stopped = true;
-    clearInterval(timer);
-  };
+  response.once('finish', stopWriting);
   response.once('close', stopWriting);
   request.once('aborted', stopWriting);
-  request.socket?.once('close', stopWriting);
+  socket?.once('close', stopWriting);
 }
 
 function childExited(child) {
@@ -369,6 +376,7 @@ function observeConnection(name, request, response) {
     stats.activeRangedGets += 1;
     stats.peakRangedGets = Math.max(stats.peakRangedGets, stats.activeRangedGets);
   }
+  const socket = request.socket;
   let released = false;
   const release = () => {
     if (released) return;
@@ -376,13 +384,20 @@ function observeConnection(name, request, response) {
     handles.delete(handle);
     stats.active = Math.max(0, stats.active - 1);
     if (isRangedGet) stats.activeRangedGets = Math.max(0, stats.activeRangedGets - 1);
+    response.off('finish', release);
+    response.off('close', release);
+    request.off('aborted', release);
+    socket?.off('close', release);
   };
   const handle = { request, response, release };
   handles.add(handle);
   response.once('finish', release);
   response.once('close', release);
   request.once('aborted', release);
-  request.socket?.once('close', release);
+  socket?.once('close', release);
+  if (response.writableEnded || response.destroyed || request.destroyed || socket?.destroyed) {
+    release();
+  }
 }
 
 const targetServer = http.createServer((request, response) => {
@@ -421,11 +436,26 @@ const fixtureServer = http.createServer((request, response) => {
     case '/mirror-b': {
       activeMirrorRequests.set(pathname, (activeMirrorRequests.get(pathname) ?? 0) + 1);
       simultaneousMirrorRequests ||= activeMirrorRequests.size > 1;
-      response.once('close', () => {
-        const remaining = activeMirrorRequests.get(pathname) - 1;
+      const socket = request.socket;
+      let released = false;
+      const releaseMirror = () => {
+        if (released) return;
+        released = true;
+        const remaining = (activeMirrorRequests.get(pathname) ?? 0) - 1;
         if (remaining > 0) activeMirrorRequests.set(pathname, remaining);
         else activeMirrorRequests.delete(pathname);
-      });
+        response.off('finish', releaseMirror);
+        response.off('close', releaseMirror);
+        request.off('aborted', releaseMirror);
+        socket?.off('close', releaseMirror);
+      };
+      response.once('finish', releaseMirror);
+      response.once('close', releaseMirror);
+      request.once('aborted', releaseMirror);
+      socket?.once('close', releaseMirror);
+      if (response.writableEnded || response.destroyed || request.destroyed || socket?.destroyed) {
+        releaseMirror();
+      }
       serveThrottledBuffer(request, response, payload);
       break;
     }
@@ -469,17 +499,31 @@ const fixtureServer = http.createServer((request, response) => {
     case '/slow': {
       const slowLength = 64 * 1024;
       let written = 0;
+      let stopped = false;
+      const socket = request.socket;
       response.writeHead(200, { 'content-length': String(slowLength) });
+      const stopSlow = () => {
+        if (stopped) return;
+        stopped = true;
+        clearInterval(timer);
+        response.off('finish', stopSlow);
+        response.off('close', stopSlow);
+        request.off('aborted', stopSlow);
+        socket?.off('close', stopSlow);
+      };
       const timer = setInterval(() => {
-        if (response.destroyed || written >= slowLength) {
-          clearInterval(timer);
-          if (!response.destroyed) response.end();
+        if (stopped || response.destroyed || response.writableEnded || socket?.destroyed || written >= slowLength) {
+          if (!stopped && !response.destroyed && !response.writableEnded && !socket?.destroyed) response.end();
+          stopSlow();
           return;
         }
         response.write(Buffer.alloc(1024, 0x73));
         written += 1024;
       }, 500);
-      response.once('close', () => clearInterval(timer));
+      response.once('finish', stopSlow);
+      response.once('close', stopSlow);
+      request.once('aborted', stopSlow);
+      socket?.once('close', stopSlow);
       break;
     }
     default:
@@ -816,10 +860,11 @@ try {
     if (!smokeFailure) smokeFailure = error;
   } finally {
     try {
-      await Promise.all([
-        new Promise(resolve => fixtureServer.close(resolve)),
-        new Promise(resolve => targetServer.close(resolve)),
-      ]);
+      const closeServer = server => new Promise(resolve => {
+        server.close(resolve);
+        server.closeAllConnections?.();
+      });
+      await Promise.all([closeServer(fixtureServer), closeServer(targetServer)]);
       await removeTempRoot(tempRoot);
     } catch (error) {
       if (!smokeFailure) smokeFailure = error;
